@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-chore: remove accidentally-committed commit message scratch file
+fix(cost): gate GLM exclusively behind Second Brain; remove from general router, vision fallback, and chat dropdown
 
 ## Last Activity
 
