@@ -235,8 +235,8 @@ export function FounderOnboardingAiStack({
 
       <p className="text-[11px] text-zinc-600">
         More providers (OpenRouter, Jatevo, Ollama) in{' '}
-        <Link href="/settings/builder" className="text-zinc-400 underline hover:text-white">
-          Settings → Builder
+        <Link href="/founder-ide/byok" className="text-zinc-400 underline hover:text-white">
+          Founder IDE → BYOK
         </Link>
         .
       </p>

@@ -79,9 +79,6 @@ function navActive(pathname: string, href: string) {
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
   if (href === '/downloads' || href.startsWith('/downloads#')) return pathname.startsWith('/downloads');
-  if (href.startsWith('/settings/builder')) {
-    return pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations');
-  }
   if (href === '/mobile') return pathname.startsWith('/downloads');
   if (href === '/founder-node') return pathname.startsWith('/downloads');
   if (href === '/builder-rewards') return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
@@ -89,13 +86,6 @@ function navActive(pathname: string, href: string) {
     // Active-link detection accepts both the new /founder-ide slug and the
     // legacy /founder-os slug (which 301-redirects here). See next.config.ts.
     return pathname.startsWith('/founder-ide') || pathname.startsWith('/founder-os');
-  }
-  if (href === '/founder-den') {
-    return (
-      pathname.startsWith('/founder-den') ||
-      pathname.startsWith('/settings/builder') ||
-      pathname.startsWith('/developers')
-    );
   }
   if (href === '/raise-room') return pathname.startsWith('/raise-room');
   if (href === '/trust-center') return pathname.startsWith('/trust-center') || pathname.startsWith('/scout-votes');
@@ -630,7 +620,7 @@ function SiteNavInner() {
 
   const profileActive =
     pathname.startsWith('/account') ||
-    (pathname.startsWith('/settings') && !pathname.startsWith('/settings/builder'));
+    (pathname.startsWith('/settings') && !pathname.startsWith('/settings/integrations'));
 
   const fallbackRole = resolveGamifiedRole({
     platformRole: session?.user?.role,

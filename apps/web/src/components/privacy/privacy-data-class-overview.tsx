@@ -43,10 +43,10 @@ export function PrivacyDataClassOverview() {
         </p>
       )}
       <div className="mt-4 flex flex-wrap gap-3 text-xs font-semibold">
-        <Link href="/founder-den?tab=analytics" className="text-violet-300 hover:text-violet-200">
+        <Link href="/founder-ide" className="text-violet-300 hover:text-violet-200">
           Your boundaries (signed in) →
         </Link>
-        <Link href="/settings/builder#founder-attestation" className="text-zinc-400 hover:text-white">
+        <Link href="/account?tab=security" className="text-zinc-400 hover:text-white">
           Attestation dashboard →
         </Link>
       </div>

@@ -31,7 +31,7 @@ const WAYS_TO_EARN = [
   { label: 'Confirmed scam report', amount: POINTS.SCAM_CONFIRMED, href: '/trust-center?tab=investigations' },
   { label: 'Daily login', amount: POINTS.DAILY_LOGIN, href: '/feed' },
   { label: 'Paper trade', amount: POINTS.PAPER_TRADE, href: '/paper-trading' },
-  { label: 'Build update', amount: POINTS.FOUNDER_BUILD_POST, href: '/founder-den' },
+  { label: 'Build update', amount: POINTS.FOUNDER_BUILD_POST, href: '/founder-ide' },
   { label: 'Project listed (scout)', amount: POINTS.LISTING_SCOUT_APPROVED, href: '/list-your-project' },
 ] as const;
 

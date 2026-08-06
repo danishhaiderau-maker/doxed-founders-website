@@ -69,10 +69,10 @@ export function ProjectsFounderClaimBanner() {
           DDollar rewards →
         </Link>
         <Link
-          href="/founder-den"
+          href="/founder-ide"
           className="rounded-lg border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-violet-500/40 hover:text-white"
         >
-          Founder OS →
+          Founder IDE →
         </Link>
       </div>
     </section>

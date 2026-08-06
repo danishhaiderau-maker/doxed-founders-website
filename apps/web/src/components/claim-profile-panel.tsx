@@ -30,10 +30,10 @@ export function ClaimProfilePanel({ slug, projectName, claimProfile, onClaimed }
   if (claimProfile.claimed) {
     return (
       <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-4 py-3 text-sm text-emerald-100">
-        Verified owner profile — founder controls updates, build logs, and Founder OS tools.
+        Verified owner profile — founder controls updates, build logs, and Founder IDE tools.
         {session?.accessToken && (
-          <Link href="/founder-den" className="ml-2 font-semibold underline">
-            Open Founder OS →
+          <Link href="/founder-ide" className="ml-2 font-semibold underline">
+            Open Founder IDE →
           </Link>
         )}
       </div>
@@ -50,7 +50,7 @@ export function ClaimProfilePanel({ slug, projectName, claimProfile, onClaimed }
       onClaimed();
       if (res.founderSlug) {
         setTimeout(() => {
-          window.location.href = '/founder-den';
+          window.location.href = '/founder-ide';
         }, 1200);
       }
     } catch (err) {

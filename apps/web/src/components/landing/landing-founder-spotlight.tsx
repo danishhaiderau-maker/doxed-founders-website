@@ -4,11 +4,11 @@ import Link from 'next/link';
 import { ONBOARDING_PATHS } from '@dcf/utils';
 
 const PATH_LINKS: Record<string, string> = {
-  SOVEREIGN: '/founder-den?onboard=sovereign',
-  BYO_CLOUD: '/founder-den?onboard=byo',
-  MIGRATE_PRIVATE: '/founder-den?onboard=migrate',
-  FREE_STARTER: '/founder-den?onboard=starter',
-  FOUNDER_CLOUD: '/founder-den?onboard=founder',
+  SOVEREIGN: '/founder-ide',
+  BYO_CLOUD: '/founder-ide',
+  MIGRATE_PRIVATE: '/founder-ide',
+  FREE_STARTER: '/founder-ide',
+  FOUNDER_CLOUD: '/founder-ide',
 };
 
 function computeBadge(mode: string) {
@@ -33,7 +33,7 @@ export function LandingFounderSpotlight() {
           return (
             <Link
               key={path.id}
-              href={PATH_LINKS[path.id] ?? '/founder-den'}
+              href={PATH_LINKS[path.id] ?? '/founder-ide'}
               className="group rounded-xl border border-zinc-800/80 bg-black/30 p-3 transition hover:border-violet-500/35 hover:bg-violet-950/15"
             >
               <div className="flex items-start justify-between gap-2">

@@ -31,8 +31,8 @@ export function ProjectOwnerFlashBanner({ projectName, slug, claimProfile }: Pro
           Use Founder OS for community, agents, and build-in-public. Lock your profile (button beside
           Share on X) so no one can hijack this page with a fake X after you leave DexScreener.
         </p>
-        <Link href="/founder-den" className="mt-2 inline-block text-xs font-semibold underline">
-          Open Founder OS →
+        <Link href="/founder-ide" className="mt-2 inline-block text-xs font-semibold underline">
+          Open Founder IDE →
         </Link>
       </div>
     );

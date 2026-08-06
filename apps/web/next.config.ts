@@ -53,6 +53,23 @@ const apiRewrites = [
 const permanentRedirects = [
   { source: '/founder-os', destination: '/founder-ide', permanent: true },
   { source: '/founder-os/:path*', destination: '/founder-ide/:path*', permanent: true },
+  // Legacy chat-dispatch surface — ported to /founder-ide. Keep deep links working.
+  { source: '/founder-den', destination: '/founder-ide', permanent: true },
+  { source: '/founder-den/:path*', destination: '/founder-ide', permanent: true },
+  // Old developer docs redirect used to point at founder-den; bounce to IDE.
+  { source: '/developers', destination: '/founder-ide', permanent: true },
+  // 2FA / security now canonical on /account?tab=security. /settings/builder
+  // page was retired (downloads/pairing moved into Founder IDE).
+  {
+    source: '/settings/builder',
+    destination: '/account?tab=security',
+    permanent: true,
+  },
+  {
+    source: '/settings/builder/:path*',
+    destination: '/account?tab=security',
+    permanent: true,
+  },
 ];
 
 const securityHeaders = [

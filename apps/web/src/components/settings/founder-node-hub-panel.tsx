@@ -115,12 +115,6 @@ export function FounderNodeHubPanel({
       ) : (
         <div className="mt-6 flex flex-wrap gap-3">
           <a
-            href="/downloads#mobile"
-            className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 px-4 py-3 text-sm font-semibold text-emerald-100 hover:border-emerald-400/50"
-          >
-            Mobile installs →
-          </a>
-          <a
             href="/downloads#founder-node"
             className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 px-4 py-3 text-sm font-semibold text-cyan-100 hover:border-cyan-400/50"
           >

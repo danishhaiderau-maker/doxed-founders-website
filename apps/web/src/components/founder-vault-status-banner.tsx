@@ -26,7 +26,7 @@ export function FounderVaultStatusBanner({ relay, memoryStorageMode, compact }: 
     return (
       <div className="rounded-lg border border-amber-500/40 bg-amber-950/25 px-3 py-2 text-xs text-amber-100">
         Founder Vault selected —{' '}
-        <Link href="/settings/builder" className="underline">
+        <Link href="/founder-ide" className="underline">
           pair Founder Node
         </Link>{' '}
         to sync encrypted memory from your machine.

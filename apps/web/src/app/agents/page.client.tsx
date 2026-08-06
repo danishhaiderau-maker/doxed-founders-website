@@ -90,13 +90,13 @@ export default function AgentsPageClient() {
             {signedIn ? (
               <>
                 <Link
-                  href="/founder-den?tab=activity"
+                  href="/founder-ide"
                   className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-500"
                 >
-                  Open Founder Copilot →
+                  Open Founder IDE →
                 </Link>
                 <Link
-                  href="/founder-den?tab=agents"
+                  href="/founder-ide"
                   className="rounded-lg border border-zinc-700 px-4 py-2.5 text-sm text-zinc-300 hover:border-violet-500/40 hover:text-white"
                 >
                   Manage my agents
@@ -104,10 +104,10 @@ export default function AgentsPageClient() {
               </>
             ) : (
               <Link
-                href="/login?callbackUrl=/founder-den?tab=activity"
+                href="/login?callbackUrl=/founder-ide"
                 className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white"
               >
-                Sign in to open Copilot
+                Sign in to open Founder IDE
               </Link>
             )}
           </div>
@@ -179,7 +179,7 @@ export default function AgentsPageClient() {
                     <div className="flex flex-wrap items-center gap-2">
                       {item.source === 'copilot' ? (
                         <Link
-                          href="/founder-den?tab=build"
+                          href="/founder-ide"
                           className="text-sm font-medium text-violet-300 hover:text-violet-200"
                         >
                           {item.agentName}

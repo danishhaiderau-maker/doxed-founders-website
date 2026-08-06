@@ -4,7 +4,7 @@ import { DownloadsHub } from '@/components/downloads-hub';
 export const metadata = {
   title: 'Downloads — Founder Stack (IDE + Node)',
   description:
-    'Install Founder Stack — one desktop kit (Founder IDE + Founder Node). Founder Node standalone and mobile apps also available.',
+    'Install Founder Stack — one desktop kit (Founder IDE + Founder Node) for sovereign AI coding and encrypted vault sync.',
 };
 
 export default function DownloadsPage() {

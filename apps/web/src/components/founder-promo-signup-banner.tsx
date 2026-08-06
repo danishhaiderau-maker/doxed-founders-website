@@ -26,10 +26,10 @@ export function FounderPromoSignupBanner({ className = '' }: Props) {
       <p className="text-xs font-semibold text-amber-200">Founder OS — 3 months free AI for all new accounts</p>
       <p className="mt-1 text-xs text-amber-100/90">{promo.message}</p>
       <Link
-        href="/founder-den?onboard=byo"
+        href="/founder-ide"
         className="mt-2 inline-flex text-xs font-semibold text-violet-200 underline hover:text-white"
       >
-        Start Founder OS setup →
+        Start Founder IDE setup →
       </Link>
     </div>
   );

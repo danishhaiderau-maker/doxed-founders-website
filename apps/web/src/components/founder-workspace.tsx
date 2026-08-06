@@ -288,7 +288,7 @@ export function FounderWorkspace(props: FounderWorkspaceProps) {
 
       {!session && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
-          <Link href="/login?callbackUrl=/founder-den" className="font-semibold underline">
+          <Link href="/login?callbackUrl=/founder-ide" className="font-semibold underline">
             Sign in
           </Link>{' '}
           to open Founder OS.

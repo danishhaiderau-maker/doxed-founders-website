@@ -7,7 +7,7 @@ import {
   type BrainConnectionSnapshot,
 } from '@dcf/utils';
 
-export const AI_STACK_HREF = '/settings/builder';
+export const AI_STACK_HREF = '/founder-ide/byok';
 export const CONNECT_ACCOUNTS_HREF = '/account?tab=connected';
 
 export function infraConnectHref(providerKey: string): string {

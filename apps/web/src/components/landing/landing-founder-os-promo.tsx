@@ -38,19 +38,19 @@ const PATHS = [
     id: 'sovereign',
     name: 'Sovereign',
     blurb: 'Everything runs locally. Maximum privacy. Lowest cost.',
-    href: '/founder-den?onboard=sovereign',
+    href: '/founder-ide',
   },
   {
     id: 'byo',
     name: 'Hybrid',
     blurb: 'Local compute with optional cloud models when needed.',
-    href: '/founder-den?onboard=byo',
+    href: '/founder-ide',
   },
   {
     id: 'founder_cloud',
     name: 'Founder Cloud',
     blurb: 'Scale to cloud infrastructure once your idea has traction.',
-    href: '/founder-den?onboard=founder_cloud',
+    href: '/founder-ide',
   },
 ];
 
@@ -153,7 +153,7 @@ export function LandingFounderOsPromo() {
                 'Every new account receives three months of complimentary access to GLM 5.2. Experiment, build, and validate your ideas before deciding what AI stack to invest in.'}
             </p>
             <Link
-              href="/founder-den?onboard=sovereign"
+              href="/founder-ide"
               className="mt-3 inline-flex rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-1.5 text-xs font-bold text-amber-200 transition hover:bg-amber-500/20"
             >
               Start Founder IDE →
@@ -170,7 +170,7 @@ export function LandingFounderOsPromo() {
               your ideas before deciding what AI stack to invest in.
             </p>
             <Link
-              href="/founder-den?onboard=sovereign"
+              href="/founder-ide"
               className="mt-3 inline-flex rounded-lg border border-violet-500/40 bg-violet-500/10 px-3 py-1.5 text-xs font-bold text-violet-200 transition hover:bg-violet-500/20"
             >
               Start Founder IDE →
