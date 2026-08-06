@@ -182,10 +182,10 @@ export default function FounderIdePage() {
           </h3>
           <div className='mt-5 grid gap-4 sm:grid-cols-2'>
             <div className='rounded-xl border border-zinc-800 bg-zinc-950/40 p-5'>
-              <h4 className='text-sm font-semibold text-white'>10 BYOK models</h4>
+              <h4 className='text-sm font-semibold text-white'>5 BYOK models on Free · 10 on paid</h4>
               <p className='mt-1.5 text-sm text-zinc-400'>
-                Bring keys from OpenAI, Anthropic, Google, DeepSeek, Mistral, Groq, xAI, Cohere, Together (GLM is BYOK-only) —
-                all work on the Free plan.
+                Bring keys from OpenAI, Anthropic, Google, DeepSeek, Mistral, Groq, xAI, Cohere, Together (GLM is BYOK-only).
+                Free includes up to 5; Pro, Max, and Team unlock all 10.
               </p>
             </div>
             <div className='rounded-xl border border-zinc-800 bg-zinc-950/40 p-5'>

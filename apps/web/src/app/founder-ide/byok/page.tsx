@@ -54,7 +54,7 @@ export default function FounderIdeByokPage() {
             <SiteBrand className='text-sm' />
             <h1 className='mt-1 text-2xl font-semibold tracking-tight text-white'>Bring your own keys</h1>
             <p className='text-sm text-zinc-400'>
-              Connect 10 cloud providers. All of them work on the Free plan.
+              Connect up to 5 cloud providers on Free (10 on Pro, Max, and Team).
             </p>
           </div>
           <SiteNav />

@@ -45,7 +45,7 @@ export default function PricingPage() {
               <p className='mt-1 text-xs text-zinc-500'>forever</p>
               <ul className='mt-5 space-y-2 text-sm text-zinc-300'>
                 <li>Founder IDE app</li>
-                <li><strong className='text-white'>10 BYOK cloud models</strong> (OpenAI, Anthropic, DeepSeek, +7)</li>
+                <li><strong className='text-white'>5 BYOK cloud models</strong> (OpenAI, Anthropic, DeepSeek, +2)</li>
                 <li><strong className='text-white'>Unlimited local models</strong> (Qwen, Llama, GGUF)</li>
                 <li>Tab autocomplete (always works)</li>
                 <li>Limited daily cloud quota</li>
@@ -153,7 +153,7 @@ export default function PricingPage() {
                 <tbody className='divide-y divide-zinc-900 text-zinc-300'>
                   <tr>
                     <td className='px-5 py-2.5'>BYOK models on Free</td>
-                    <td className='px-5 py-2.5 font-semibold text-white'>10</td>
+                    <td className='px-5 py-2.5 font-semibold text-white'>5</td>
                     <td className='px-5 py-2.5 text-zinc-400'>1</td>
                   </tr>
                   <tr>
