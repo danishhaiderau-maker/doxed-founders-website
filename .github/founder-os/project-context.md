@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-Merge: UI cleanup + founder-ide bug fixes + redesign
+feat(scripts): add hidden launcher for fly-data-sync loop
 
 ## Last Activity
 
