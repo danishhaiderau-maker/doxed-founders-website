@@ -3287,6 +3287,64 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
             pass
 
 
+
+def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
+    """Rebuild per-lane PnL ledger from a session trades list.
+
+    Safety net for the incremental `update_lane_pnl_ledger` path: any close
+    that fails to call the increment (e.g. exception path, race, restart
+    forgetting to replay) would otherwise leave the dashboard tile frozen
+    under-counting real PnL. The dashboard snapshot now overlays the
+    authoritative `trades` list each refresh, so deriving the ledger from
+    that same list guarantees the tile matches the trades table.
+
+    Shape matches `state["lane_pnl_ledger"]` produced by
+    `update_lane_pnl_ledger`. Input rows are the in-memory trade dicts.
+    """
+    ledger: dict = {}
+    for row in session_trades or []:
+        if not isinstance(row, dict):
+            continue
+        lane = _normalize_lane_key(row.get("research_lane") or "")
+        if not lane:
+            continue
+        try:
+            pnl = float(row.get("net_pnl_usd") or row.get("pnl") or 0.0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        bucket = ledger.setdefault(lane, {
+            "lane": lane,
+            "net_pnl_usd": 0.0,
+            "gross_wins_usd": 0.0,
+            "gross_losses_usd": 0.0,
+            "wins": 0,
+            "losses": 0,
+            "closes": 0,
+            "long_closes": 0,
+            "short_closes": 0,
+            "long_pnl_usd": 0.0,
+            "short_pnl_usd": 0.0,
+            "equity_usd": float(STARTING_BALANCE),
+        })
+        bucket["closes"] = int(bucket.get("closes", 0)) + 1
+        bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + pnl, 2)
+        bucket["equity_usd"] = round(float(STARTING_BALANCE) + bucket["net_pnl_usd"], 2)
+        if pnl > 0:
+            bucket["wins"] = int(bucket.get("wins", 0)) + 1
+            bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + pnl, 2)
+        elif pnl < 0:
+            bucket["losses"] = int(bucket.get("losses", 0)) + 1
+            bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + pnl, 2)
+        d = str(row.get("final_direction") or row.get("dir") or "").upper()
+        if d == "LONG":
+            bucket["long_closes"] = int(bucket.get("long_closes", 0)) + 1
+            bucket["long_pnl_usd"] = round(float(bucket.get("long_pnl_usd", 0)) + pnl, 2)
+        elif d == "SHORT":
+            bucket["short_closes"] = int(bucket.get("short_closes", 0)) + 1
+            bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + pnl, 2)
+    return ledger
+
+
 def update_lane_lab_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, direction: str = None):
     """Parallel ledger for LAB (OFF-combo) simulated trades — never feeds live decisions.
 
@@ -29898,6 +29956,47 @@ def _build_relay_execution_state_snapshot() -> dict:
         "signals": active_list,
     }
     snapshot["trades_map"] = trades_map_lite
+    # Money-path PnL / counters / lane ledger: these feed the dashboard
+    # tiles via the ACTIVE_EXECUTION_OVERLAY path (see
+    # _api_state_cache_refresher_loop). Computing them here from the same
+    # `recent_trades` slice already shipped as snapshot["trades"] keeps the
+    # tile numbers identical to the trades table. Previously these keys
+    # were only emitted by the heavy _build_api_state_snapshot and the
+    # overlay did not include them, so under live trading the tile froze
+    # at the first heavy build and under-counted every trade that closed
+    # afterwards.
+    session_trade_count = sum(1 for _r in recent_trades if isinstance(_r, dict))
+    session_realized_pnl = 0.0
+    for _r in recent_trades:
+        if not isinstance(_r, dict):
+            continue
+        try:
+            session_realized_pnl += float(_r.get("net_pnl_usd") or _r.get("net") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    session_realized_pnl = round(session_realized_pnl, 2)
+    snapshot["trade_count_session"] = session_trade_count
+    snapshot["trade_count"] = session_trade_count
+    snapshot["session_pnl_usd"] = session_realized_pnl
+    snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
+    snapshot["lane_pnl_ledger"] = _derive_lane_pnl_ledger_from_trades(recent_trades)
+    _display_balance = get_display_balance()
+    snapshot["account_balance"] = _display_balance
+    # Best-effort equity: account_balance + unrealized PnL of open positions.
+    # The heavy path computes this with full funding/mark enrichment; for the
+    # overlay we accept the already-computed position rows so the tile stays
+    # within ~1 tick of the authoritative number and never freezes again.
+    try:
+        _overlay_unreal = 0.0
+        for _p in positions_copy:
+            if isinstance(_p, dict) and _p.get("unreal_usd") is not None:
+                try:
+                    _overlay_unreal += float(_p.get("unreal_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+        snapshot["equity"] = round(float(_display_balance) + _overlay_unreal, 4)
+    except Exception:
+        snapshot["equity"] = _display_balance
     snapshot["snapshot_age_sec"] = 0
     snapshot["relay_cache"] = {"mode": "EXECUTION_DIRECT", "age_sec": 0}
     # Surface relay-push health and DDollar gate state on this lightweight
@@ -30762,6 +30861,17 @@ def _api_state_cache_refresher_loop():
                     "state_integrity",
                     "server_ts",
                     "bot_version",
+                    # PnL / counters / lane ledger must overlay each cycle --
+                    # otherwise the tile freezes at the first heavy build
+                    # and under-counts any trade that closed afterwards
+                    # (regression detected 2026-08-06 after wipe + restart).
+                    "trade_count_session",
+                    "trade_count",
+                    "session_pnl_usd",
+                    "trades_display_limit",
+                    "lane_pnl_ledger",
+                    "account_balance",
+                    "equity",
                     "source_git_rev",
                     "dashboard_pid",
                     "dashboard_port",
