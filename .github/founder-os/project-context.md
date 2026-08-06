@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Merge branch 'founder-ide-pricing-v2': research-backed pricing with borrow-forward + degraded mode + BYOK launch promo
 
 ## Last Activity
 
