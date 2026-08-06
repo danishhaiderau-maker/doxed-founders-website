@@ -47,7 +47,12 @@ function KeyStatusRow({
   );
 }
 
-/** Admin panel for Founder Brain 4-model routing (DeepSeek Flash/Pro + GLM Flash/5.2). */
+/** Admin panel for Founder Brain provider config. DeepSeek powers general
+ * Founder Brain chat (fast + coding tiers). GLM is reserved exclusively for the
+ * Second Brain critical-review surface — it is never routed from general chat
+ * (enforced by the hard guard in ai-invoker.service.ts). GLM model fields below
+ * configure which model SecondBrainService.critique() calls.
+ */
 export function AdminFounderBrainProvidersPanel({ token }: Props) {
   const [settings, setSettings] = useState<FounderBrainProvidersSettings | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -119,9 +124,12 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
       <div>
         <h3 className="text-lg font-semibold text-white">Founder Brain Providers</h3>
         <p className="mt-1 text-sm text-zinc-400">
-          4-model routing: fast tier (DeepSeek Flash / GLM Flash) for Q&A and social drafts;
-          coding tier (DeepSeek Pro / GLM 5.2) for implementation and reasoning.
-          Keys stay in env / encrypted columns — this panel toggles policy only.
+          DeepSeek powers general Founder Brain chat: fast tier for Q&A and social
+          drafts, coding tier for implementation and reasoning. GLM is reserved
+          exclusively for the Second Brain critical-review surface — it is never
+          a general chat target (the backend hard guard in ai-invoker.service.ts
+          force-redirects any GLM general-section call to DeepSeek). Keys stay in env
+          / encrypted columns; this panel toggles policy only.
         </p>
         <p className="mt-1 text-[11px] text-zinc-500">
           GLM base: <code className="text-zinc-300">{settings.glmApiBase}</code>
@@ -171,7 +179,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
 
       <div className="grid gap-4 md:grid-cols-2">
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Fast Model</p>
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Fast Model <span className="text-amber-400/80">(Second Brain only)</span></p>
           <input
             value={settings.glmFastModel}
             disabled={busy != null}
@@ -181,7 +189,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
           />
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Coding Model</p>
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Coding Model <span className="text-amber-400/80">(Second Brain only)</span></p>
           <input
             value={settings.glmCodingModel}
             disabled={busy != null}
@@ -193,7 +201,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
       </div>
 
       <div>
-        <p className="text-[11px] uppercase tracking-wider text-zinc-500">Default Founder Den mode</p>
+        <p className="text-[11px] uppercase tracking-wider text-zinc-500">Default Founder IDE chat mode</p>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {FOUNDER_BRAIN_MODES.map((mode) => (
             <button

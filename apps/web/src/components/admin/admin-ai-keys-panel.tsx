@@ -75,20 +75,19 @@ const KEY_META: Record<
     ],
   },
   glm: {
-    label: 'GLM 5.2 (ZhipuAI) — promo',
+    label: 'GLM 5.2 (ZhipuAI) — Second Brain only',
     placeholder: 'xxx.xxx',
     whereUsed: [
-      'WallService.runSummarizerLlm — the Chat Summarizer agent that summarizes + sentiment-analyzes each project wall (getDecryptedPlatformGlmKey).',
-      'BuilderService copilot_forced_promo path + Quick Build — GLM is the default promo provider for eligible founders (resolvePromoApiKey).',
-      'Streaming Copilot promo path (completionWithProviderStream for glm).',
-      'Only served to eligible users inside their 1-month promo window; billed as platform_promo.',
+      'SecondBrainService.critique() — the critical-review surface that challenges a founder’s idea before it ships. This is the ONLY place GLM tokens are spent.',
+      'Resolved via getDecryptedPlatformGlmKey; never routed from the general chat dropdown or Founder Brain picker.',
+      'Stored here so one platform GLM credential powers Second Brain; billed as platform_second_brain.',
     ],
   },
   gemini: {
     label: 'Google Gemini — promo',
     placeholder: 'AIza…',
     whereUsed: [
-      'BuilderService copilot_forced_promo fallback + Quick Build — Gemini is tried after GLM/DeepSeek in the promo provider order (resolvePromoApiKey for gemini).',
+      'BuilderService copilot_forced_promo fallback + Quick Build — Gemini is tried after DeepSeek in the promo provider order (resolvePromoApiKey for gemini).',
       'Streaming Copilot promo path (completionWithProviderStream for gemini).',
       'Only served to eligible users inside their 1-month promo window; billed as platform_promo.',
     ],

@@ -17,7 +17,7 @@ type Props = {
 };
 
 const PROMO_KEY_FIELDS = [
-  { key: 'glm' as const, label: 'GLM 5.2 API key (ZhipuAI)', placeholder: 'xxx.xxx' },
+  { key: 'glm' as const, label: 'GLM 5.2 API key (ZhipuAI) — Second Brain only', placeholder: 'xxx.xxx' },
   { key: 'gemini' as const, label: 'Google Gemini API key', placeholder: 'AIza…' },
   { key: 'deepseek' as const, label: 'DeepSeek API key', placeholder: 'sk-…' },
 ];
@@ -95,7 +95,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
           <p className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Admin only</p>
           <h3 className="mt-1 text-lg font-semibold text-white">Founder AI promo</h3>
           <p className="mt-1 max-w-xl text-xs text-zinc-400">
-            Offer all signed-up users 3 months of platform-billed AI (GLM 5.2, Gemini, DeepSeek — cheap &amp; best). Timer
+            Offer all signed-up users 3 months of platform-billed AI (DeepSeek &amp; Gemini — cheap &amp; best). GLM is not part of the promo pool; its key here powers the Second Brain critical-review surface only. Timer
             starts at signup. Hard stop after {settings.windowDays} days or {(settings.tokenCap / 1_000_000).toFixed(0)}M
             tokens — users must connect their own keys to continue.
           </p>
@@ -158,7 +158,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
           }}
           rows={2}
           className="mt-1 w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-sm text-white"
-          placeholder="Join now — 1 month free GLM 5.2, Gemini & DeepSeek on Founder OS"
+          placeholder="Join now — 1 month free DeepSeek & Gemini on Founder OS"
         />
       </label>
 
@@ -206,7 +206,7 @@ export function AdminFounderPromoPanel({ accessToken, hideKeyCards = false }: Pr
                         <a href="https://z.ai" target="_blank" rel="noreferrer" className="text-violet-300 underline hover:text-violet-200">z.ai</a>
                         {' '}— GLM 5.2 is accessed through Z.ai&apos;s OpenAI-compatible API at{' '}
                         <code className="text-zinc-300">https://api.z.ai/api/coding/paas/v4</code>. A Cursor subscription does
-                        <span className="text-zinc-200"> not</span> provide external API access; you need a separate Z.ai key.
+                        <span className="text-zinc-200"> not</span> provide external API access; you need a separate Z.ai key. This GLM key is spent only by SecondBrainService.critique() (the critical-review surface) — it is never routed from general Founder Brain chat.
                       </p>
                     )}
                     <div className="mt-2 flex flex-wrap gap-2">
