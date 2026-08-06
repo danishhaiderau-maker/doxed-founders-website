@@ -60,7 +60,7 @@ export function LandingSinglePage({
             <p className="text-[10px] text-zinc-500">10% airdrop · 70% over 10 years · Ollama + Founder Stack — you own the inference bill</p>
           </div>
           <div className="flex flex-wrap gap-3 text-[10px] text-zinc-500">
-            <Link href="/downloads#founder-node" className="font-semibold text-violet-300 hover:text-violet-200">
+            <Link href="/founder-ide" className="font-semibold text-violet-300 hover:text-violet-200">
               Founder Stack →
             </Link>
             <Link href="/founder-ide" className="font-semibold text-emerald-300 hover:text-emerald-200">

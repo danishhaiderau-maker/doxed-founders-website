@@ -60,7 +60,7 @@ import { cleanTranscriptText, useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 import { formatMessageProviderLabel } from '@/lib/copilot-ai-stack';
 
-const FOUNDER_NODE_DOWNLOAD_URL = '/downloads#founder-node';
+const FOUNDER_NODE_DOWNLOAD_URL = '/founder-ide';
 const FOUNDER_BRAIN_MODE_STORAGE_KEY = 'dcf.founder-brain.mode';
 
 type IdeOption = { key: string; label: string };

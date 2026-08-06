@@ -15,7 +15,6 @@ const HUB_PREFIXES = [
   '/portfolio',
   '/founder-ide',
   '/settings/integrations',
-  '/downloads',
   '/raise-room',
   '/list-your-project',
   '/founder-economics',
@@ -58,7 +57,6 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/founder-ide') || pathname.startsWith('/founder-os')) return 'Founder IDE';
   if (pathname.startsWith('/settings/integrations'))
     return 'Integrations';
-  if (pathname.startsWith('/downloads')) return 'Downloads';
   if (pathname.startsWith('/raise-room')) return 'Raise Room';
   if (pathname.startsWith('/founder-economics')) return 'Founder Economics';
   if (pathname.startsWith('/list-your-project')) return 'List Project';
@@ -131,7 +129,7 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
     id: 'build',
     rowNumber: 'Row 3',
     label: 'Build',
-    subtitle: 'Founder IDE · Downloads · Ship',
+    subtitle: 'Founder IDE · Raise · Ship',
     sidebarDescription: 'Development Workspace, install apps, connect AI and infra, raise capital, list your project.',
     borderClass: 'border-violet-500/25',
     labelClass: 'text-violet-200',
@@ -141,7 +139,6 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
       { href: '/founder-economics', label: 'Founder Economics', icon: '🪙' },
       { href: '/list-your-project', label: 'List Project', icon: '📋' },
-      { href: '/downloads', label: 'Downloads', icon: '⬇️' },
     ],
   },
 ];

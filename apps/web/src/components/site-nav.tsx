@@ -78,9 +78,6 @@ function navActive(pathname: string, href: string) {
   if (href.startsWith('/portfolio/')) return pathname.startsWith('/portfolio/');
   if (href === '/leaderboard') return pathname.startsWith('/leaderboard');
   if (href === '/agent-hub') return pathname.startsWith('/agent-hub') || pathname.startsWith('/agents');
-  if (href === '/downloads' || href.startsWith('/downloads#')) return pathname.startsWith('/downloads');
-  if (href === '/mobile') return pathname.startsWith('/downloads');
-  if (href === '/founder-node') return pathname.startsWith('/downloads');
   if (href === '/builder-rewards') return pathname.startsWith('/builder-rewards') || pathname.startsWith('/airdrop');
   if (href === '/founder-ide') {
     // Active-link detection accepts both the new /founder-ide slug and the

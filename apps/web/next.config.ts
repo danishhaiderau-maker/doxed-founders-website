@@ -56,6 +56,9 @@ const permanentRedirects = [
   // Legacy chat-dispatch surface â€” ported to /founder-ide. Keep deep links working.
   { source: '/founder-den', destination: '/founder-ide', permanent: true },
   { source: '/founder-den/:path*', destination: '/founder-ide', permanent: true },
+  // Legacy Founder OS era downloads hub — replaced by /founder-ide (canonical download + pair surface).
+  { source: '/downloads', destination: '/founder-ide', permanent: true },
+  { source: '/downloads/:path*', destination: '/founder-ide', permanent: true },
   // Old developer docs redirect used to point at founder-den; bounce to IDE.
   { source: '/developers', destination: '/founder-ide', permanent: true },
   // 2FA / security now canonical on /account?tab=security. /settings/builder

@@ -52,7 +52,7 @@ type Props = {
    * providers in their own hub.
    */
   showAiSection?: boolean;
-  /** When false, inline download cards are replaced with links to /downloads. */
+  /** When false, inline download cards are replaced with links to /founder-ide. */
   showDownloads?: boolean;
 };
 
@@ -104,7 +104,7 @@ export function FounderNodeHubPanel({
             pairing. After pair, Founder IDE loads{' '}
             <code className="text-zinc-400">~/FounderVault/node-config.json</code> — chat uses the AI Gateway with the
             Node token (no IDE OAuth).{' '}
-            <a href="/downloads#founder-node" className="text-cyan-400 underline hover:text-cyan-300">
+            <a href="/founder-ide" className="text-cyan-400 underline hover:text-cyan-300">
               All downloads hub →
             </a>
           </p>
@@ -115,7 +115,7 @@ export function FounderNodeHubPanel({
       ) : (
         <div className="mt-6 flex flex-wrap gap-3">
           <a
-            href="/downloads#founder-node"
+            href="/founder-ide"
             className="rounded-xl border border-cyan-500/30 bg-cyan-950/15 px-4 py-3 text-sm font-semibold text-cyan-100 hover:border-cyan-400/50"
           >
             Founder Node desktop →
