@@ -1,4 +1,4 @@
-﻿import {
+import {
   app,
   BrowserWindow,
   Tray,
@@ -60,7 +60,7 @@ import {
 import {
   discoverFounderIdeAgents,
   discoverFounderIdeSessions,
-  discoverFounderIdeWorkspaces,
+  discoverFounderIdeWorkspacesWithElectronFallback,
 } from './founder-ide-discovery';
 import {
   connectAllIdes,
@@ -114,7 +114,7 @@ const INFERENCE_POLL_MS = 3_000;
 const SYNC_JOB_POLL_MS = 1_500;
 const STARTUP_SYNC_DELAYS_MS = [0, 5_000, 15_000, 45_000];
 
-// ─── File logging bootstrap ────────────────────────────────────────────────
+// --- File logging bootstrap ------------------------------------------------
 // Founder Node has exited silently several times (no Event Log, no crash dump,
 // no console capture). Redirect console + install unhandledRejection /
 // uncaughtException handlers so the next crash leaves a trail at
@@ -135,7 +135,7 @@ try {
         .join(' ');
       fs.appendFileSync(LOG_FILE, `[${ts()}] [${level}] ${line}\n`);
     } catch {
-      /* disk full / locked — ignore */
+      /* disk full / locked � ignore */
     }
   };
   console.log = (...args: unknown[]): void => {
@@ -158,7 +158,7 @@ try {
   });
   fs.appendFileSync(LOG_FILE, `\n[${ts()}] === Founder Node starting, pid=${process.pid} ===\n`);
 } catch {
-  /* logging setup failed — continue without logs */
+  /* logging setup failed � continue without logs */
 }
 
 configureSharedElectronUserData();
@@ -181,7 +181,7 @@ const loops: BackgroundLoopHandles = createLoopHandles();
 let syncJobInFlight = false;
 let syncCycleInFlight = false;
 let sessionSyncInFlight = false;
-/** Phase 7 — Private-mode runtime-status HTTP server handle. */
+/** Phase 7 � Private-mode runtime-status HTTP server handle. */
 let deploymentStatusServer: { close: () => void } | null = null;
 let lastCachedHeartbeat: FounderNodeHeartbeatExt | null = null;
 let lastSyncOkAt: Date | null = null;
@@ -215,7 +215,7 @@ function formatLastSyncLine(): string {
     const mins = Math.max(0, Math.floor((Date.now() - lastSyncOkAt.getTime()) / 60_000));
     return mins < 1 ? 'Last sync: just now' : `Last sync: ${mins}m ago`;
   }
-  return 'Last sync: waiting…';
+  return 'Last sync: waiting�';
 }
 
 function loadAppIcon() {
@@ -287,8 +287,8 @@ function handleAuthFailure(vaultRoot: string): void {
       const { response } = await dialog.showMessageBox({
         type: 'warning',
         title: 'Desktop link expired',
-        message: 'Not a firewall issue — you need a new pairing code',
-        detail: `${lastSyncError}\n\nYour cloud account still shows as linked. Use the pairing window (not extra browser tabs) — generate one code in Founder OS → Settings → Builder, paste it here.`,
+        message: 'Not a firewall issue � you need a new pairing code',
+        detail: `${lastSyncError}\n\nYour cloud account still shows as linked. Use the pairing window (not extra browser tabs) � generate one code in Founder OS ? Settings ? Builder, paste it here.`,
         buttons: ['OK', 'Open pairing in browser'],
         defaultId: 0,
         cancelId: 0,
@@ -324,7 +324,7 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
       notifyDesktop(
         'Founder Node sync failed',
         isConnError && isWindows()
-          ? 'Open the tray menu → Allow through Windows Firewall, then Sync now.'
+          ? 'Open the tray menu ? Allow through Windows Firewall, then Sync now.'
           : `Check your network or try again. ${lastSyncError ? `(${lastSyncError.slice(0, 80)})` : ''}`,
       );
       void promptFirewallBlocked({
@@ -346,7 +346,7 @@ function handleSyncCycleError(vaultRoot: string, err: unknown): void {
     notifyDesktop(
       'Founder Node sync failed',
       isConnError && isWindows()
-        ? 'Tray → Allow through Windows Firewall, then Sync now.'
+        ? 'Tray ? Allow through Windows Firewall, then Sync now.'
         : `Check network or try again. ${lastSyncError ? `(${lastSyncError.slice(0, 80)})` : ''}`,
     );
     void promptFirewallBlocked({
@@ -472,7 +472,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
   try {
     const hb = defaultHeartbeat(config.label, vaultRoot);
 
-    // Phase A — discover real Cursor + Claude Code workspaces/agents/sessions.
+    // Phase A � discover real Cursor + Claude Code workspaces/agents/sessions.
     const cursorWorkspaces = discoverCursorWorkspaces();
     const cursorAgents = discoverCursorAgents();
     const cursorSessions = discoverCursorSessions();
@@ -480,7 +480,9 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
     const claudeAgents = discoverClaudeCodeAgents();
     const claudeSessions = discoverClaudeCodeSessions();
     // Phase A - discover real Founder IDE workspaces/agents/sessions.
-    const founderIdeWorkspaces = discoverFounderIdeWorkspaces();
+    // Prefer the combined scan: VS Code-fork workspaceStorage + the Founder IDE Next
+  // Electron-shell renderer snapshot, so the sidebar reflects whichever build is installed.
+  const founderIdeWorkspaces = discoverFounderIdeWorkspacesWithElectronFallback();
     const founderIdeAgents = discoverFounderIdeAgents();
     const founderIdeSessions = discoverFounderIdeSessions();
     const workspaces = [...cursorWorkspaces, ...claudeWorkspaces, ...founderIdeWorkspaces];
@@ -543,7 +545,7 @@ async function runSyncCycle(vaultRoot: string): Promise<void> {
       notifyDesktop('Founder Vault synced', `Applied ${merged} update(s) from your other device.`);
     }
 
-    // Session sync (every 3s) claims pending IDE dispatches — no duplicate poll here.
+    // Session sync (every 3s) claims pending IDE dispatches � no duplicate poll here.
     lastSyncOkAt = new Date();
     lastSyncError = null;
     consecutiveTransientFailures = 0;
@@ -646,7 +648,7 @@ function buildTrayMenu(vaultRoot: string) {
 
   if (pending) {
     template.push({
-      label: `Install update v${pending.version}…`,
+      label: `Install update v${pending.version}�`,
       click: () => {
         downloadAndInstallUpdate(pending).catch(console.error);
       },
@@ -656,7 +658,7 @@ function buildTrayMenu(vaultRoot: string) {
   template.push(
     { type: 'separator' },
     {
-      label: 'Check for updates…',
+      label: 'Check for updates�',
       click: () => {
         checkForUpdates({ silent: false }).catch(console.error);
       },
@@ -664,7 +666,7 @@ function buildTrayMenu(vaultRoot: string) {
     ...(isWindows() && config
       ? [
           {
-            label: 'Allow through Windows Firewall…',
+            label: 'Allow through Windows Firewall�',
             click: () => {
               void (async () => {
                 const result = await tryAddWindowsFirewallRules();
@@ -674,7 +676,7 @@ function buildTrayMenu(vaultRoot: string) {
             },
           },
           {
-            label: 'Open Windows Firewall settings…',
+            label: 'Open Windows Firewall settings�',
             click: () => {
               void openWindowsFirewallSettings();
             },
@@ -682,14 +684,14 @@ function buildTrayMenu(vaultRoot: string) {
         ]
       : []),
     {
-      label: 'Repair connection (new pairing code)…',
+      label: 'Repair connection (new pairing code)�',
       click: () => {
         void shell.openExternal(SETTINGS_BUILDER_URL);
         openPairWindow();
       },
     },
     {
-      label: 'Open Founder OS Settings…',
+      label: 'Open Founder OS Settings�',
       click: () => {
         void shell.openExternal(SETTINGS_BUILDER_URL);
       },
@@ -822,7 +824,7 @@ app.whenReady().then(() => {
   startAutoUpdateChecks();
   setInterval(() => refreshTrayMenu(vaultRoot), 60_000);
 
-  // Phase 7 — start the Private-mode runtime-status endpoint on 127.0.0.1.
+  // Phase 7 � start the Private-mode runtime-status endpoint on 127.0.0.1.
   // Best-effort: if the port is busy (default :7012) it logs a
   // warning and continues; the cloud API degrades to "unknown" for the panel.
   if (!deploymentStatusServer) {
@@ -843,7 +845,7 @@ app.whenReady().then(() => {
     label: `${os.hostname()} Founder Node`,
   }));
 
-  // ─── Founder OS AI Proxy — IDE connect/disconnect ────────────────────────
+  // --- Founder OS AI Proxy � IDE connect/disconnect ------------------------
   // One click in the UI writes Founder OS proxy credentials into the IDE
   // config (Founder IDE + Cursor settings.json, or shell env for OpenAI-compat).
   ipcMain.handle(
@@ -938,7 +940,7 @@ app.whenReady().then(() => {
         ollama: defaultOllamaConfig(),
       };
 
-      // Prove credentials before saving — avoids "paired" UI with immediate 401 sync.
+      // Prove credentials before saving � avoids "paired" UI with immediate 401 sync.
       await sendHeartbeat(apiBaseUrl, result.nodeId, result.nodeToken, {
         ...defaultHeartbeat(label, vaultRoot),
         nodeId: result.nodeId,
@@ -951,7 +953,7 @@ app.whenReady().then(() => {
       try {
         const ideResult = connectAllIdes(draftConfig);
         if (ideResult.ok) {
-          console.log(`[pair] IDE credentials written → ${ideResult.target}`);
+          console.log(`[pair] IDE credentials written ? ${ideResult.target}`);
         } else {
           console.warn(`[pair] IDE connect skipped: ${ideResult.error}`);
         }
@@ -964,7 +966,7 @@ app.whenReady().then(() => {
       startSyncLoop(vaultRoot);
       notifyDesktop(
         'Founder Node connected',
-        'Vault paired. Keep one tray app open — do not launch Founder Node again from the Start Menu.',
+        'Vault paired. Keep one tray app open � do not launch Founder Node again from the Start Menu.',
       );
       if (isWindows() && app.isPackaged) {
         void tryAddWindowsFirewallRules().catch(console.warn);
@@ -974,7 +976,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  // Tray app — keep running in background
+  // Tray app � keep running in background
 });
 
 app.on('before-quit', () => {

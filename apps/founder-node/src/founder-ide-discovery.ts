@@ -17,6 +17,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import type {
   BridgeAgent,
@@ -804,4 +805,126 @@ export function discoverFounderIdeAgents(): BridgeAgent[] {
       startedAt: undefined,
     },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Founder IDE Next (Electron-shell build) snapshot reader.
+//
+// The shipped "Founder IDE Next QA" Electron app is NOT the VS Code-fork build
+// the workspaceStorage/state.vscdb logic above targets. It is a standalone
+// Electron shell that keeps its open-projects list in the renderer
+// (IndexedDB/localStorage) and mirrors it to <userData>/founder-projects.json
+// via an IPC handler so the embedded Founder Node heartbeat can surface it
+// (see founder-next server/gateway.mjs readFounderNextProjectsWorkspaces).
+//
+// When the standalone apps/founder-node runs alongside that Electron shell on
+// the same machine, this function lets it pick up the same snapshot so the
+// heartbeat includes real projects even before the Electron app's own
+// heartbeat reaches the cloud. Returns [] when the snapshot is absent.
+// ---------------------------------------------------------------------------
+
+/** Resolve the Founder IDE Next Electron userData directory for this platform. */
+export function getFounderNextElectronUserDataDirs(): string[] {
+  const home = os.homedir();
+  const platform = process.platform;
+  const dirs: string[] = [];
+  if (platform === 'win32') {
+    const roaming = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    dirs.push(
+      path.join(roaming, 'Founder IDE Next QA'),
+      path.join(roaming, 'Founder IDE Next'),
+      path.join(roaming, 'Founder IDE'),
+    );
+  } else if (platform === 'darwin') {
+    dirs.push(
+      path.join(home, 'Library', 'Application Support', 'Founder IDE Next QA'),
+      path.join(home, 'Library', 'Application Support', 'Founder IDE Next'),
+    );
+  } else {
+    const xdg = process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+    dirs.push(
+      path.join(xdg, 'Founder IDE Next QA'),
+      path.join(xdg, 'Founder IDE Next'),
+    );
+  }
+  return dirs;
+}
+
+/** Path to the founder-next projects snapshot, if the userData dir exists. */
+export function getFounderNextProjectsSnapshotPath(): string | null {
+  for (const dir of getFounderNextElectronUserDataDirs()) {
+    if (fs.existsSync(dir)) return path.join(dir, 'founder-projects.json');
+  }
+  return null;
+}
+
+type FounderNextSnapshotProject = {
+  id: string;
+  name: string;
+  description?: string;
+  stage?: string;
+  updatedAt?: string;
+};
+
+type FounderNextSnapshot = {
+  schema?: string;
+  writtenAt?: string;
+  activeProjectId?: string | null;
+  projects?: FounderNextSnapshotProject[];
+};
+
+/**
+ * Discover workspaces from the installed Founder IDE Next Electron app by
+ * reading its renderer-pushed projects snapshot. Returns [] when the app is
+ * not installed or has not yet written a snapshot. ideProvider is set to
+ * "founder-ide-next" so the website can distinguish it from the VS Code-fork
+ * "founder-ide" provider.
+ */
+export function discoverFounderNextElectronWorkspaces(): BridgeWorkspace[] {
+  const snapshotPath = getFounderNextProjectsSnapshotPath();
+  if (!snapshotPath || !fs.existsSync(snapshotPath)) return [];
+  let parsed: FounderNextSnapshot;
+  try {
+    parsed = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')) as FounderNextSnapshot;
+  } catch {
+    return [];
+  }
+  if (!parsed || !Array.isArray(parsed.projects)) return [];
+  const writtenAt =
+    typeof parsed.writtenAt === 'string' ? parsed.writtenAt : new Date().toISOString();
+  return parsed.projects
+    .filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string')
+    .slice(0, MAX_WORKSPACES)
+    .map((p) => ({
+      id: `founder-next:${p.id}`,
+      title: String(p.name).slice(0, 200),
+      ideProvider: 'founder-ide-next',
+      lastActiveAt:
+        typeof p.updatedAt === 'string' && p.updatedAt ? writtenAt : writtenAt,
+      hasActiveAgent: false,
+      messageCount: undefined,
+    }));
+}
+
+/**
+ * Combined discovery: VS Code-fork workspaceStorage scan PLUS the Electron-shell
+ * snapshot, de-duplicated by title so a machine running both builds does not
+ * double-list the same project. Workspaces with real folder paths (the VS
+ * Code-fork scan) win over the in-app Electron entries when titles collide.
+ */
+export function discoverFounderIdeWorkspacesWithElectronFallback(): BridgeWorkspace[] {
+  const vsCodeFork = discoverFounderIdeWorkspaces();
+  const electron = discoverFounderNextElectronWorkspaces();
+  const seenTitles = new Set(
+    vsCodeFork.map((w) => w.title.toLowerCase()),
+  );
+  const merged = [...vsCodeFork];
+  for (const w of electron) {
+    const key = w.title.toLowerCase();
+    if (!seenTitles.has(key)) {
+      seenTitles.add(key);
+      merged.push(w);
+    }
+  }
+  return merged;
 }
