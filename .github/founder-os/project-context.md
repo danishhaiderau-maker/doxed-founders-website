@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-Merge fix/voice-flicker-silent-retry: silent-retry voice network errors to stop mic flicker
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
