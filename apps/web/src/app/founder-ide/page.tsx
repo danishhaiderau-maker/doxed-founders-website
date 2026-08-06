@@ -1,14 +1,49 @@
 'use client';
 
-import { Suspense, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useSession } from 'next-auth/react';
 import Link from 'next/link';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { FounderIdePair } from '@/components/founder-ide-pair';
+import { FounderIdeChat } from '@/components/founder-ide-chat';
+import { fetchFounderNodeStatus } from '@/lib/api';
 
 export default function FounderIdePage() {
   const { data: session } = useSession();
   const [showPair, setShowPair] = useState(false);
+  // Post-pairing chat dispatch UX — non-null when a paired node exists.
+  // On mount we check the user's node status so page reloads land in the chat
+  // state instead of the pairing block.
+  const [pairedNodeId, setPairedNodeId] = useState<string | null>(null);
+  const [checkedPair, setCheckedPair] = useState(false);
+
+  const checkPair = useCallback(async () => {
+    if (!session?.accessToken) {
+      setCheckedPair(true);
+      return;
+    }
+    try {
+      const status = await fetchFounderNodeStatus(session.accessToken);
+      const first = status.nodes?.[0];
+      if (first) setPairedNodeId(first.nodeId);
+    } catch {
+      // ignore — user may not be signed in or backend down; show landing.
+    } finally {
+      setCheckedPair(true);
+    }
+  }, [session?.accessToken]);
+
+  useEffect(() => {
+    void checkPair();
+  }, [checkPair]);
+
+  const handlePaired = useCallback((nodeId: string) => {
+    setPairedNodeId(nodeId);
+    // Smooth-scroll the chat dispatch panel into view after the transition.
+    setTimeout(() => {
+      document.getElementById('founder-ide-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 100);
+  }, []);
 
   return (
     <main className="min-h-screen bg-[#050508] text-zinc-100">
@@ -81,7 +116,7 @@ export default function FounderIdePage() {
         </section>
 
         {/* PAIR SECTION */}
-        {showPair && (
+        {showPair && !pairedNodeId && (
           <section className="mb-16" id="pair">
             <div className="rounded-2xl border border-emerald-900/40 bg-emerald-950/10 p-8">
               <h3 className="text-xl font-semibold text-white">Pair your device</h3>
@@ -91,7 +126,7 @@ export default function FounderIdePage() {
               <div className="mt-6">
                 {session?.accessToken ? (
                   <Suspense fallback={<p className="text-sm text-zinc-500">Loading…</p>}>
-                    <FounderIdePair accessToken={session.accessToken} />
+                    <FounderIdePair accessToken={session.accessToken} onPaired={handlePaired} />
                   </Suspense>
                 ) : (
                   <div className="rounded-lg border border-amber-500/30 bg-amber-950/15 p-4 text-sm text-amber-100">
@@ -103,6 +138,43 @@ export default function FounderIdePage() {
                 )}
               </div>
             </div>
+          </section>
+        )}
+
+        {/* POST-PAIR CHAT DISPATCH — replaces the pair block once a node is paired.
+            This is the remote-control surface: messages typed here are dispatched
+            to the user's paired Founder IDE (NOT Cursor) via /ide-bridge dispatch. */}
+        {session?.accessToken && pairedNodeId && (
+          <section className="mb-16" id="founder-ide-chat">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <h3 className="text-xl font-semibold text-white">Drive your Founder IDE</h3>
+                <p className="mt-1 text-sm text-zinc-400">
+                  Pick an open project, type a message, and it lands in your Founder IDE chat box on your laptop — ready for the agent to act on.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPairedNodeId(null)}
+                className="shrink-0 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:border-zinc-500"
+                title="Hide chat dispatch and show the download / pair section again"
+              >
+                Hide chat
+              </button>
+            </div>
+            <FounderIdeChat accessToken={session.accessToken} nodeId={pairedNodeId} />
+          </section>
+        )}
+
+        {/* If not signed in / no paired node yet, keep the original landing flow visible. */}
+        {!session?.accessToken && checkedPair && (
+          <section className="mb-16 rounded-2xl border border-zinc-800 bg-zinc-950/40 p-6 text-center">
+            <p className="text-sm text-zinc-400">
+              <Link href="/login?callbackUrl=/founder-ide" className="font-semibold text-violet-400 underline">
+                Sign in
+              </Link>{' '}
+              to pair your Founder IDE and unlock the remote-control chat.
+            </p>
           </section>
         )}
 
@@ -199,19 +271,34 @@ export default function FounderIdePage() {
               </p>
             </div>
 
-            {/* TEAM */}
+            {/*
+              TEAM — strategic pricing decision: every Free-tier feature is
+              included PER SEAT on Team. This intentionally habituates users on
+              the Free feature set inside their org (10 BYOK models, unlimited
+              local models + Tab, pair with doxxedcrypto.digital). We are
+              earning mindshare first; pricing power comes later once teams are
+              locked in on the workflow. Do NOT strip these per-seat benefits
+              without a deliberate go-to-market review.
+            */}
             <div className="rounded-xl border border-zinc-800 p-6">
               <h4 className="font-semibold text-white">Team</h4>
               <p className="mt-1 text-3xl font-bold text-white">$40<span className="text-base font-normal text-zinc-400">/seat/mo</span></p>
               <p className="mt-1 text-xs text-zinc-500">for orgs</p>
               <ul className="mt-4 space-y-2 text-sm text-zinc-300">
+                {/* Per-seat: every Free-tier benefit applies to each seat. */}
+                <li><strong className="text-white">10 BYOK models</strong> (per seat)</li>
+                <li><strong className="text-white">Unlimited local models + Tab</strong> (per seat)</li>
+                <li><strong className="text-white">Pair with doxxedcrypto.digital</strong> (per seat)</li>
                 <li>Per-seat Pro quota</li>
                 <li>Org-wide credit pool</li>
                 <li>Admin controls</li>
                 <li>Spend caps &amp; alerts</li>
                 <li>SSO + audit log</li>
               </ul>
-              <p className="mt-4 text-xs text-zinc-500">
+              <p className="mt-3 text-xs text-emerald-300/80">
+                Same Free-tier features, per seat. We&apos;re earning mindshare first.
+              </p>
+              <p className="mt-2 text-xs text-zinc-500">
                 Admin-set org cap, per-seat overrides.
               </p>
             </div>
