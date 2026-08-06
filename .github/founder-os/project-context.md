@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (18 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-fix(web): retire legacy /downloads page; redirect to /founder-ide
+﻿fix(cost): close remaining GLM cost leaks; GLM now Second-Brain-only repo-wide in apps/api
 
 ## Last Activity
 
