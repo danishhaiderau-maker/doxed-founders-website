@@ -18,7 +18,6 @@ const HUB_PREFIXES = [
   '/settings/builder',
   '/settings/integrations',
   '/downloads',
-  '/phone',
   '/raise-room',
   '/list-your-project',
   '/founder-economics',
@@ -60,7 +59,6 @@ export function hubPageTitle(pathname: string): string {
   if (pathname.startsWith('/portfolio')) return 'Portfolio';
   if (pathname.startsWith('/founder-ide') || pathname.startsWith('/founder-os')) return 'Founder IDE';
   if (pathname.startsWith('/founder-den')) return 'Founder Den';
-  if (pathname.startsWith('/phone')) return 'Phone Remote';
   if (pathname.startsWith('/settings/builder') || pathname.startsWith('/settings/integrations'))
     return 'Integrations';
   if (pathname.startsWith('/downloads')) return 'Downloads';
@@ -145,15 +143,11 @@ export const HUB_NAV_ROWS: HubNavRow[] = [
       { href: '/founder-ide', label: 'Founder IDE', icon: '⚡', auth: true },
       { href: '/founder-den', label: 'Founder Den', icon: '🛠', auth: true },
       { href: '/settings/builder?tab=downloads', label: 'Founder Stack', icon: '🖥', auth: true },
-      { href: '/settings/builder?tab=downloads', label: 'Pair Node', icon: '🔗', auth: true },
-      { href: '/phone', label: 'Phone Remote', icon: '📱', auth: true },
       { href: '/raise-room', label: 'Raise Room', icon: '🚀' },
       { href: '/founder-economics', label: 'Founder Economics', icon: '🪙' },
       { href: '/list-your-project', label: 'List Project', icon: '📋' },
       { href: '/downloads', label: 'Downloads', icon: '⬇️' },
       { href: '/downloads#mobile', label: 'Android app', icon: '📱' },
-      { href: '/settings/builder?tab=ai', label: 'AI Providers', icon: '🧠', auth: true },
-      { href: '/settings/builder?tab=infra', label: 'Infrastructure', icon: '☁️', auth: true },
     ],
   },
 ];

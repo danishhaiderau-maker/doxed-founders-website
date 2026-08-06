@@ -255,10 +255,10 @@ export function AiProxyDashboard({ accessToken }: Props) {
         <p className="mt-4 text-[11px] text-zinc-500">
           Don&rsquo;t have a Founder Node token? Pair a node from{' '}
           <a
-            href="/settings/builder?tab=founder-node"
+            href="/founder-ide"
             className="text-violet-300 underline hover:text-violet-200"
           >
-            Founder Stack settings
+            Founder IDE
           </a>
           .
         </p>

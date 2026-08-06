@@ -53,6 +53,9 @@ type Props = {
 const DISPATCH_POLL_INTERVAL_MS = 4000;
 const DISPATCH_POLL_TIMEOUT_MS = 120_000;
 const REFRESH_INTERVAL_MS = 15_000;
+/** Debounce: minimum ms between two mic toggle clicks. Prevents flicker from
+ *  rapid toggling that re-initializes SpeechRecognition. */
+const MIC_DEBOUNCE_MS = 600;
 
 export function FounderIdeChat({ accessToken, nodeId }: Props) {
   const router = useRouter();
@@ -71,8 +74,14 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
   const [micDenied, setMicDenied] = useState(false);
 
   const aiDropdownRef = useRef<HTMLDivElement>(null);
-  const dispatchPollRef = useRef<ReturnType<typeof setTimeout> | null>( null);
+  const dispatchPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dispatchStartedAtRef = useRef(0);
+  /** Guard against re-entrant mic clicks while SpeechRecognition is spinning
+   *  up — the previous toggle handler would otherwise race against the new
+   *  one and the underlying Web Speech API repeatedly re-initializes, which
+   *  surfaces as the "waiting for internet connection" flicker. */
+  const micToggleInFlightRef = useRef(false);
+  const micLastToggleAtRef = useRef(0);
 
   // ── Voice input ──────────────────────────────────────────────────────────
   const onTranscript = useCallback((text: string, isFinal: boolean) => {
@@ -243,8 +252,18 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
   const handleSend = useCallback(async () => {
     const text = input.trim();
     if (!text) return;
+
+    // Always a clear, actionable error — never a silently-disabled send.
+    if (!isOnline) {
+      setError('No Founder Node connected — open the app on your computer and pair it.');
+      return;
+    }
     if (!selectedSession) {
-      setError('Pick a project on the left to dispatch to your Founder IDE.');
+      setError(
+        projects.length === 0
+          ? 'No project is open in your Founder IDE yet — open a workspace on your laptop, then try again.'
+          : 'Pick a project on the left to dispatch to your Founder IDE.',
+      );
       return;
     }
     if (voice.phase !== 'idle') voice.stop();
@@ -291,16 +310,33 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [accessToken, input, pollDispatch, selectedSession, voice]);
+  }, [accessToken, input, isOnline, pollDispatch, projects.length, selectedSession, voice]);
 
-  // ── Mic toggle ───────────────────────────────────────────────────────────
+  // ── Mic toggle (debounced) ───────────────────────────────────────────────
   const handleMicToggle = useCallback(() => {
+    // Debounce: ignore rapid double-clicks that re-init SpeechRecognition.
+    const now = Date.now();
+    if (now - micLastToggleAtRef.current < MIC_DEBOUNCE_MS) return;
+    if (micToggleInFlightRef.current) return;
+    micLastToggleAtRef.current = now;
+    micToggleInFlightRef.current = true;
+    // Release the gate on the next tick — by then the SpeechRecognition
+    // start() call has either fired or thrown synchronously.
+    window.setTimeout(() => {
+      micToggleInFlightRef.current = false;
+    }, MIC_DEBOUNCE_MS);
+
     voice.clearVoiceError();
     setError(null);
 
+    // If we are already listening, just stop — single, deterministic path.
+    if (voice.phase !== 'idle') {
+      voice.stop();
+      return;
+    }
+
     // If we already know the user denied the mic, surface a friendly prompt
-    // instead of silently re-requesting (which browsers will block until the
-    // user re-allows it in site settings).
+    // instead of silently re-requesting.
     if (micDenied) {
       setNotice('Microphone blocked. Click here to allow in browser settings.');
       return;
@@ -319,7 +355,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
         .then((stream) => {
           // Chrome Web Speech opens its own mic handle — release this probe.
           stream.getTracks().forEach((t) => t.stop());
-          voice.toggle(input);
+          voice.start(input);
         })
         .catch((e: DOMException) => {
           if (e.name === 'NotAllowedError' || e.name === 'SecurityError') {
@@ -330,7 +366,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
           }
         });
     } else {
-      voice.toggle(input);
+      voice.start(input);
     }
   }, [input, micDenied, voice]);
 
@@ -344,40 +380,55 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
 
   // ───────────────────────────────────────────────────────────────────────
   return (
-    <div className='rounded-2xl border border-zinc-800 bg-zinc-950/40 overflow-hidden'>
+    <div className='overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/40'>
       {/* Connected header */}
-      <div className='flex items-center justify-between border-b border-zinc-800 bg-zinc-950/60 px-4 py-3'>
+      <div className='flex items-center justify-between gap-4 border-b border-zinc-800 bg-zinc-950/60 px-5 py-3.5'>
         <div className='flex items-center gap-2'>
-          <span className={'h-2.5 w-2.5 rounded-full ' + (isOnline ? 'bg-emerald-400' : 'bg-amber-400')} />
-          <span className='text-sm font-semibold text-white'>Connected</span>
-          <code className='rounded bg-zinc-900 px-2 py-0.5 font-mono text-xs text-emerald-300'>
+          <span
+            className={
+              'h-2 w-2 rounded-full ' +
+              (isOnline ? 'bg-emerald-400' : 'bg-amber-400') +
+              (isOnline ? '' : ' animate-pulse')
+            }
+          />
+          <span className='text-sm font-semibold text-white'>
+            {isOnline ? 'Connected' : 'Offline'}
+          </span>
+          <code className='rounded-md bg-zinc-900 px-2 py-0.5 font-mono text-xs text-emerald-300'>
             {onlineNode?.nodeId?.slice(0, 12) ?? nodeId.slice(0, 12)}
           </code>
-          <span className='text-xs text-zinc-500'>
-            {onlineNode?.label || 'Founder IDE'}{onlineNode?.platform ? ` · ${onlineNode.platform}` : ''}
+          <span className='hidden text-xs text-zinc-500 sm:inline'>
+            {onlineNode?.label || 'Founder IDE'}
+            {onlineNode?.platform ? ` · ${onlineNode.platform}` : ''}
           </span>
         </div>
-        {/* Upgrade to Pro CTA — visible in the chat panel header */}
+        {/* Plan info lives on /pricing now — this is just a thin CTA. */}
         <Link
-          href='/founder-ide#pricing'
-          className='rounded-lg border border-violet-500/50 bg-violet-600/20 px-3 py-1.5 text-xs font-semibold text-violet-200 transition hover:bg-violet-600/40'
+          href='/pricing'
+          className='shrink-0 rounded-xl border border-zinc-700 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:border-violet-500/50 hover:text-white'
         >
-          ⚡ Upgrade to Pro
+          Plans
         </Link>
       </div>
 
+      {!isOnline && (
+        <div className='border-b border-amber-500/20 bg-amber-950/15 px-5 py-2.5 text-xs text-amber-200'>
+          No Founder Node connected. Open the app on your computer and pair it, then this chat will deliver prompts
+          to your IDE.
+        </div>
+      )}
+
       <div className='grid grid-cols-1 md:grid-cols-[280px_1fr]'>
         {/* Projects sidebar */}
-        <aside className='border-b border-zinc-800 bg-zinc-950/40 p-3 md:border-b-0 md:border-r'>
-          <h3 className='mb-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500'>
+        <aside className='border-b border-zinc-800 bg-zinc-950/40 p-4 md:border-b-0 md:border-r'>
+          <h3 className='mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500'>
             Open projects
           </h3>
-          {loading && (
-            <p className='text-xs text-zinc-600'>Loading…</p>
-          )}
+          {loading && <p className='text-xs text-zinc-600'>Loading…</p>}
           {!loading && projects.length === 0 && (
-            <div className='rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-4 text-xs text-zinc-500'>
-              No open projects yet. Open a workspace in Founder IDE on your laptop and it will appear here automatically.
+            <div className='rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-4 text-xs text-zinc-500'>
+              No open projects yet. Open a workspace in Founder IDE on your laptop and it will appear here
+              automatically.
             </div>
           )}
           <div className='space-y-1'>
@@ -391,18 +442,23 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                   type='button'
                   onClick={() => setSelectedSessionId(group.sessions[0]?.id ?? null)}
                   className={
-                    'block w-full rounded-lg px-3 py-2 text-left transition ' +
+                    'block w-full rounded-xl px-3 py-2 text-left transition ' +
                     (selectedSessionId && group.sessions.some((s) => s.id === selectedSessionId)
-                      ? 'bg-violet-500/15 ring-1 ring-violet-400/30'
+                      ? 'bg-violet-500/10 ring-1 ring-violet-400/30'
                       : 'hover:bg-white/5')
                   }
                 >
                   <div className='flex items-center gap-2'>
-                    <span className={'h-1.5 w-1.5 shrink-0 rounded-full ' + (group.workspace?.hasActiveAgent ? 'bg-emerald-400' : 'bg-zinc-600')} />
+                    <span
+                      className={
+                        'h-1.5 w-1.5 shrink-0 rounded-full ' +
+                        (group.workspace?.hasActiveAgent ? 'bg-emerald-400' : 'bg-zinc-600')
+                      }
+                    />
                     <span className='truncate text-sm font-medium text-zinc-100'>{label}</span>
                   </div>
                   <div className='mt-0.5 truncate pl-3.5 text-[0.65rem] text-zinc-500'>
-                    {branch ?? group.workspace?.repository ?? group.sessions.length + ' chat(s)'}
+                    {branch ?? group.workspace?.repository ?? `${group.sessions.length} chat(s)`}
                   </div>
                 </button>
               );
@@ -413,7 +469,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
         {/* Chat panel */}
         <section className='flex min-h-[420px] flex-col'>
           {/* Active session label */}
-          <div className='flex items-center justify-between border-b border-zinc-800 px-4 py-2.5'>
+          <div className='flex items-center justify-between gap-4 border-b border-zinc-800 px-5 py-3'>
             <div className='min-w-0'>
               <p className='truncate text-sm font-semibold text-white'>
                 {selectedSession?.title ?? (projects.length ? 'Select a project' : 'No project selected')}
@@ -427,15 +483,28 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
               <button
                 type='button'
                 onClick={() => setAiOpen((v) => !v)}
-                className='inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:border-violet-500/50'
+                className='inline-flex items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:border-violet-500/50'
                 aria-haspopup='listbox'
                 aria-expanded={aiOpen}
                 aria-label='Choose AI provider'
               >
                 <span className='text-violet-300'>AI:</span>
                 <span>{aiChoice.label}</span>
-                <svg width='10' height='10' viewBox='0 0 10 10' className={'transition ' + (aiOpen ? 'rotate-180' : '')} aria-hidden='true'>
-                  <path d='M2 3.5L5 6.5L8 3.5' stroke='currentColor' strokeWidth='1.4' fill='none' strokeLinecap='round' strokeLinejoin='round' />
+                <svg
+                  width='10'
+                  height='10'
+                  viewBox='0 0 10 10'
+                  className={'transition ' + (aiOpen ? 'rotate-180' : '')}
+                  aria-hidden='true'
+                >
+                  <path
+                    d='M2 3.5L5 6.5L8 3.5'
+                    stroke='currentColor'
+                    strokeWidth='1.4'
+                    fill='none'
+                    strokeLinecap='round'
+                    strokeLinejoin='round'
+                  />
                 </svg>
               </button>
               {aiOpen && (
@@ -443,7 +512,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                   role='listbox'
                   className='absolute right-0 top-full z-50 mt-1 w-72 overflow-hidden rounded-xl border border-zinc-700 bg-[#0B0B0B] shadow-2xl'
                 >
-                  <div className='border-b border-zinc-800 px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-zinc-500'>
+                  <div className='border-b border-zinc-800 px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500'>
                     Route this chat to…
                   </div>
                   <div className='max-h-80 overflow-y-auto py-1'>
@@ -459,9 +528,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                           (aiChoice.key === opt.key ? 'bg-violet-500/10' : '')
                         }
                       >
-                        <span className='mt-0.5 text-violet-300'>
-                          {opt.kind === 'nav' ? '→' : '•'}
-                        </span>
+                        <span className='mt-0.5 text-violet-300'>{opt.kind === 'nav' ? '→' : '•'}</span>
                         <span className='min-w-0 flex-1'>
                           <span className='block text-sm font-medium text-zinc-100'>
                             {opt.label}
@@ -485,25 +552,22 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
           </div>
 
           {/* Messages */}
-          <div className='flex-1 space-y-3 overflow-y-auto px-4 py-4'>
+          <div className='flex-1 space-y-3 overflow-y-auto px-5 py-4'>
             {messages.length === 0 && (
-              <div className='flex h-full flex-col items-center justify-center gap-2 text-center text-sm text-zinc-600'>
+              <div className='flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-zinc-600'>
                 <p>Send a message — it lands in your Founder IDE chat box and activates the agent.</p>
-                <p className='text-xs text-zinc-700'>This is remote control: drive work from your phone without sitting at the computer.</p>
+                <p className='text-xs text-zinc-700'>
+                  This is remote control: drive work from your phone without sitting at the computer.
+                </p>
               </div>
             )}
             {messages.map((m) => (
-              <div
-                key={m.id}
-                className={
-                  'flex ' + (m.role === 'user' ? 'justify-end' : 'justify-start')
-                }
-              >
+              <div key={m.id} className={'flex ' + (m.role === 'user' ? 'justify-end' : 'justify-start')}>
                 <div
                   className={
-                    'max-w-[80%] rounded-2xl border px-3 py-2 text-sm ' +
+                    'max-w-[80%] rounded-2xl border px-3.5 py-2 text-sm ' +
                     (m.role === 'user'
-                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-50'
+                      ? 'border-violet-500/30 bg-violet-500/10 text-violet-50'
                       : m.status?.startsWith('Failed') || m.status?.startsWith('error')
                         ? 'border-red-500/30 bg-red-950/20 text-red-200'
                         : 'border-zinc-700/70 bg-zinc-900/70 text-zinc-100')
@@ -512,7 +576,9 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                   <p className='whitespace-pre-wrap break-words'>{m.text}</p>
                   {m.status && (
                     <p className='mt-1 text-[10px] text-zinc-500'>
-                      {m.pending && <span className='mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400 align-middle' />}
+                      {m.pending && (
+                        <span className='mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400 align-middle' />
+                      )}
                       {m.status}
                     </p>
                   )}
@@ -522,7 +588,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
           </div>
 
           {/* Composer */}
-          <div className='border-t border-zinc-800 px-3 py-2.5 sm:px-4 sm:py-3'>
+          <div className='border-t border-zinc-800 px-4 py-3 sm:px-5'>
             {error && <div className='mb-2 text-xs text-rose-400'>{error}</div>}
             {notice && (
               <div className='mb-2 text-xs text-amber-300/90'>
@@ -539,9 +605,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                 )}
               </div>
             )}
-            {voice.voiceError && (
-              <div className='mb-2 text-xs text-rose-400'>{voice.voiceError}</div>
-            )}
+            {voice.voiceError && <div className='mb-2 text-xs text-rose-400'>{voice.voiceError}</div>}
             <div className='flex items-end gap-2'>
               <button
                 type='button'
@@ -582,20 +646,16 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                   }
                 }}
                 rows={1}
-                placeholder={
-                  selectedSession
-                    ? `Message ${selectedSession.title} — delivered to your Founder IDE`
-                    : 'Select a project to start dispatching'
-                }
-                className='min-h-[40px] flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/40'
+                placeholder='Message your Founder IDE — dispatched to the open project'
+                className='min-h-[40px] flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-900 px-3.5 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-1 focus:ring-violet-500/40'
               />
               <button
                 type='button'
                 onClick={() => void handleSend()}
-                disabled={busy || !input.trim() || !selectedSession}
-                className='min-h-[40px] rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-40'
+                disabled={busy || !input.trim()}
+                className='min-h-[40px] rounded-xl bg-violet-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-violet-500 disabled:opacity-40 disabled:hover:bg-violet-600'
               >
-                {busy ? '…' : 'Send'}
+                {busy ? 'Sending…' : 'Send'}
               </button>
             </div>
             {(voice.listening || voice.starting || voice.waitingNetwork) && (
@@ -605,7 +665,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                   {voice.listening
                     ? 'Listening — speak now'
                     : voice.waitingNetwork
-                      ? 'Waiting for network…'
+                      ? 'Waiting for network — your typed text is safe.'
                       : 'Starting microphone…'}
                 </span>
                 <button

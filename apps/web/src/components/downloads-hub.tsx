@@ -18,16 +18,9 @@ export function DownloadsHub() {
         <h1 className="mt-2 text-3xl font-bold tracking-tight">All downloads</h1>
         <p className="mt-3 text-sm leading-relaxed text-zinc-400">
           Everything you install lives here — mobile apps, desktop Founder Stack, and pairing steps. Connect AI
-          brains and deployment stack separately in{' '}
-          <Link href="/settings/builder?tab=ai" className="font-semibold text-violet-300 underline hover:text-violet-200">
-            AI Providers
-          </Link>{' '}
-          and{' '}
-          <Link
-            href="/settings/builder?tab=infra"
-            className="font-semibold text-cyan-300 underline hover:text-cyan-200"
-          >
-            Infrastructure
+          brains and infrastructure inside{' '}
+          <Link href="/founder-ide" className="font-semibold text-violet-300 underline hover:text-violet-200">
+            Founder IDE
           </Link>
           .
         </p>
@@ -107,11 +100,7 @@ export function DownloadsHub() {
         <p className="text-xs text-zinc-500">
           After install, pair your phone vault in{' '}
           <Link href="/settings/builder?tab=downloads" className="text-violet-300 underline">
-            Settings → Downloads &amp; pairing
-          </Link>
-          . AI brains:{' '}
-          <Link href="/settings/builder?tab=ai" className="text-violet-300 underline">
-            AI Providers
+            Settings → Founder Stack
           </Link>
           .
         </p>
@@ -184,13 +173,9 @@ export function DownloadsHub() {
             <a href={FOUNDER_NODE_GITHUB_RELEASES} className="text-cyan-400 underline" target="_blank" rel="noreferrer">
               GitHub releases
             </a>
-            . Local Ollama setup:{' '}
-            <Link href="/settings/builder?tab=ai" className="text-violet-300 underline">
-              AI Providers
-            </Link>
-            . Deploy stack:{' '}
-            <Link href="/settings/builder?tab=infra" className="text-cyan-300 underline">
-              Infrastructure
+            . Connect AI keys and deployment infrastructure inside{' '}
+            <Link href="/founder-ide" className="text-violet-300 underline">
+              Founder IDE
             </Link>
             .
           </p>
