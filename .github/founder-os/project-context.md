@@ -12,7 +12,7 @@ Product & platform (18 recent commits)
 
 ## Last Commit
 
-feat(scripts): add hidden launcher for fly-data-sync loop
+Merge fix/voice-flicker-silent-retry: silent-retry voice network errors to stop mic flicker
 
 ## Last Activity
 
