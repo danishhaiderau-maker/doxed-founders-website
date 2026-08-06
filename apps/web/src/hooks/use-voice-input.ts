@@ -31,8 +31,16 @@ export type VoiceInputPhase = 'idle' | 'starting' | 'listening' | 'waiting_netwo
 
 const MAX_RECOGNITION_RESTARTS = 24;
 const RESTART_DELAY_MS = 350;
-const NETWORK_RETRY_BASE_MS = 1200;
-const MAX_NETWORK_RETRIES = 12;
+/** Initial backoff floor for silent retries (errors 1 and 2). */
+const NETWORK_RETRY_SILENT_MS = 1200;
+/** Backoff floor once we surface "waiting for internet" (errors 3+). */
+const NETWORK_RETRY_VISIBLE_MS = 5000;
+/** Absolute minimum spacing between two recognition restart attempts. */
+const MIN_RETRY_GAP_MS = 800;
+/** Suppress the "waiting for internet" UI until this many consecutive
+ *  network errors have fired without a successful onstart/onspeechstart/onresult. */
+const SILENT_NETWORK_ERROR_THRESHOLD = 3;
+const MAX_NETWORK_RETRIES = 6;
 /** Guard against runaway interim/final duplication in the textarea. */
 export const MAX_VOICE_TRANSCRIPT_LENGTH = 12_000;
 
@@ -92,12 +100,22 @@ function voiceErrorMessage(code: string): string {
     case 'audio-capture':
       return 'No microphone found — plug in a mic or check Windows sound settings.';
     case 'network':
-      return 'Waiting for internet — your words are kept; transcription resumes when connection returns.';
+      return 'Reconnecting voice… your words are kept; keep talking.';
     case 'aborted':
       return '';
     default:
       return `Voice error (${code}) — try Chrome or Edge, or type your message.`;
   }
+}
+
+/** navigator.onLine is the only authoritative signal of "the internet is
+ *  actually down" we have. Chrome's Web Speech API fires spurious `network`
+ *  errors on DNS refresh / idle socket / server throttle even when the user's
+ *  connection is healthy — so we never surface a "waiting for internet"
+ *  message while the browser itself reports online. */
+function browserIsOnline(): boolean {
+  if (typeof navigator === 'undefined') return true;
+  return navigator.onLine === true;
 }
 
 /**
@@ -115,8 +133,19 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   const transcriptBaseRef = useRef('');
   const restartCountRef = useRef(0);
   const networkRetryRef = useRef(0);
+  /** Consecutive network errors with no successful onstart/onspeechstart/onresult
+   *  in between. Reset to 0 the moment recognition comes back healthy. Drives
+   *  the silent-retry threshold so a single flaky `network` error doesn't
+   *  disrupt the UI. */
+  const consecutiveNetworkErrorsRef = useRef(0);
+  /** When true, `onend` is the tail of a network-error retry path (silent OR
+   *  visible) and must NOT trigger the generic session-restart path — that
+   *  would race with our own scheduled retry and double-restart recognition. */
   const waitingNetworkRef = useRef(false);
   const networkRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Timestamp (ms) of the last recognition start attempt — used to enforce
+   *  MIN_RETRY_GAP_MS so retries can't cluster. */
+  const lastRetryAtRef = useRef(0);
   const pulseRafRef = useRef<number | null>(null);
   const onTranscriptRef = useRef(onTranscript);
 
@@ -169,9 +198,14 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   }, [clearNetworkRetryTimer, stopPulse]);
 
   const markListening = useCallback(() => {
+    // Any sign of life from the recognition engine means the previous network
+    // errors were spurious — clear the streak so the next one starts fresh.
+    consecutiveNetworkErrorsRef.current = 0;
+    networkRetryRef.current = 0;
+    restartCountRef.current = 0;
+    waitingNetworkRef.current = false;
     setPhase('listening');
     setVoiceError(null);
-    networkRetryRef.current = 0;
     startPulse();
   }, [startPulse]);
 
@@ -179,6 +213,9 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     wantListeningRef.current = false;
     restartCountRef.current = 0;
     networkRetryRef.current = 0;
+    consecutiveNetworkErrorsRef.current = 0;
+    waitingNetworkRef.current = false;
+    lastRetryAtRef.current = 0;
     clearNetworkRetryTimer();
     recRef.current?.stop();
     recRef.current?.abort();
@@ -190,24 +227,63 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
   const scheduleNetworkRetry = useCallback(
     (startRecognitionFn: () => void) => {
       if (!wantListeningRef.current) return;
-      if (networkRetryRef.current >= MAX_NETWORK_RETRIES) {
-        setVoiceError(
-          'Still offline — your typed text is safe. Tap Stop, then retry the mic when Wi‑Fi is back.',
-        );
+
+      consecutiveNetworkErrorsRef.current += 1;
+      const streak = consecutiveNetworkErrorsRef.current;
+
+      // Hard cap: too many consecutive failures — give up gracefully. The user
+      // can still type & send; voice resumes on the next explicit mic tap.
+      if (streak > MAX_NETWORK_RETRIES) {
+        setVoiceError('Voice paused — tap the mic to retry.');
         wantListeningRef.current = false;
+        waitingNetworkRef.current = false;
         setPhase('idle');
         stopPulse();
         return;
       }
-      networkRetryRef.current += 1;
+
+      // Determine which tier we're in. If the browser reports online, we treat
+      // ALL network errors as silent — Chrome's Web Speech API is just flaky.
+      const online = browserIsOnline();
+      const surfaceUi = !online && streak >= SILENT_NETWORK_ERROR_THRESHOLD;
+
+      // Suppress the generic onend-restart path for BOTH tiers so it doesn't
+      // race with our scheduled retry (would double-start recognition).
       waitingNetworkRef.current = true;
-      setPhase('waiting_network');
-      setVoiceError(voiceErrorMessage('network'));
-      startPulse();
-      const delay = NETWORK_RETRY_BASE_MS * Math.min(networkRetryRef.current, 6);
+
+      if (surfaceUi) {
+        // Tier 2: visible "waiting for internet". Slower backoff (5s base).
+        setPhase('waiting_network');
+        setVoiceError(voiceErrorMessage('network'));
+        startPulse();
+      } else {
+        // Tier 1 (or online): silent retry. Do NOT flip phase away from
+        // 'listening'/'starting' — UI shows no disruption, user keeps talking.
+        setVoiceError(null);
+      }
+
+      networkRetryRef.current = streak;
+      const baseDelay = surfaceUi ? NETWORK_RETRY_VISIBLE_MS : NETWORK_RETRY_SILENT_MS;
+      const elapsedSinceLast = Date.now() - lastRetryAtRef.current;
+      const delay = Math.max(baseDelay, MIN_RETRY_GAP_MS - elapsedSinceLast);
+
       clearNetworkRetryTimer();
       networkRetryTimerRef.current = setTimeout(() => {
-        if (wantListeningRef.current) startRecognitionFn();
+        if (!wantListeningRef.current) return;
+        const now = Date.now();
+        const since = now - lastRetryAtRef.current;
+        if (since < MIN_RETRY_GAP_MS) {
+          // Reschedule for the remaining gap rather than firing immediately.
+          const wait = MIN_RETRY_GAP_MS - since;
+          networkRetryTimerRef.current = setTimeout(() => {
+            if (!wantListeningRef.current) return;
+            lastRetryAtRef.current = Date.now();
+            startRecognitionFn();
+          }, wait);
+          return;
+        }
+        lastRetryAtRef.current = now;
+        startRecognitionFn();
       }, delay);
     },
     [clearNetworkRetryTimer, startPulse, stopPulse],
@@ -238,9 +314,8 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
     rec.lang = 'en-US';
 
     rec.onstart = () => {
-      restartCountRef.current = 0;
-      networkRetryRef.current = 0;
-      waitingNetworkRef.current = false;
+      // markListening resets consecutiveNetworkErrorsRef, networkRetryRef, and
+      // waitingNetworkRef — a single source of truth for "recognition is healthy".
       markListening();
     };
     rec.onspeechstart = () => markListening();
@@ -301,6 +376,7 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
 
     recRef.current = rec;
     try {
+      lastRetryAtRef.current = Date.now();
       rec.start();
     } catch {
       setVoiceError('Could not start voice recognition — wait a moment and tap the mic again.');
@@ -317,6 +393,8 @@ export function useVoiceInput(onTranscript: (text: string, isFinal: boolean) => 
       wantListeningRef.current = true;
       restartCountRef.current = 0;
       networkRetryRef.current = 0;
+      consecutiveNetworkErrorsRef.current = 0;
+      waitingNetworkRef.current = false;
       setPhase('starting');
       startRecognition();
     },
