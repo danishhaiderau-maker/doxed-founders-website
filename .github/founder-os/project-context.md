@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(web): silence unused showcaseActivity after trade-journey removal
+fix(relay): fill-race grace, live desk session, ops status
 
 ## Last Activity
 
