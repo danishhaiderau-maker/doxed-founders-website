@@ -6696,7 +6696,11 @@ RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
 HEDGE_MODE = False
 SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
-REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
+# Counterfactual replay fill window. Must match MAX_POSITION_AGE_SEC so the
+# simulate_replay_outcome engine (analytics-only, never touches the trading
+# path) waits the same 2h a real position would. The old 30min default
+# systematically undercounted fills in counterfactual.jsonl.
+REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(MAX_POSITION_AGE_SEC)))
 # OFF-tile LAB shadows keep receiving ticks (last_update never idles). Finalize on
 # wall-clock age so Pathway Lab tiles get closes without waiting for idle TTL.
 # Default 30m (was 5m) so Scenario C ladder can complete instead of MARK_TO_MARKET.
@@ -33995,11 +33999,22 @@ def run_offline_research_sim():
 
 
 def analytics_loop():
+    global _cf_catchup_tick_counter
     try:
         while not shutdown_event.is_set():
             try:
                 compute_analytics()
                 run_offline_research_sim()
+                # Change 5: periodic catch-up for APPROVE signals whose replay
+                # rotated into a .N shard before the active-file pass saw them.
+                # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks.
+                _cf_catchup_tick_counter += 1
+                if _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
+                    _cf_catchup_tick_counter = 0
+                    try:
+                        _run_counterfactual_catchup()
+                    except Exception as ce:
+                        logger.error(f"[CF_CATCHUP] analytics loop error: {ce}")
                 try:
                     from execution_funnel import refresh_all_execution_reports
                     rep = refresh_all_execution_reports(os.getcwd())
@@ -34118,6 +34133,183 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             logger.error(f"Counterfactual log failed: {e}")
     if written:
         logger.info(f"[RESEARCH_SIM] counterfactual rows written={written} [PIPELINE ENFORCEMENT]")
+
+# --- counterfactual catch-up (Change 5) -------------------------------------
+# Coverage bug: signal_replay.jsonl rotates into .1/.2/... shards every ~20MB.
+# offline_simulator() only reads the active shard, so any APPROVE signal whose
+# replay buffer rotated before the analytics loop processed it never receives a
+# counterfactual.jsonl row. This catch-up scans ALL shards for APPROVE signals
+# that have replay data but no cf + no shadow_outcome row, then forces a
+# simulate_replay_outcome pass for each. Analytics-only — never touches the
+# trading path. Called from analytics_loop every CF_CATCHUP_EVERY_N_TICKS ticks.
+CF_CATCHUP_EVERY_N_TICKS = 10
+_cf_catchup_tick_counter = 0
+
+def _scan_replay_shard_trade_ids(path):
+    """Stream a replay shard and yield (trade_id, line_offset) pairs. Keeps
+    only the trade_id — the row body (with its large ticks array) is read on
+    demand by _find_replay_row_for_trade_id to stay memory-safe on 20MB shards."""
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            offset = 0
+            for line in f:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    offset += len(line)
+                    continue
+                try:
+                    row = json.loads(line_stripped)
+                    tid = row.get("trade_id")
+                    if tid:
+                        out.append((tid, offset))
+                except Exception:
+                    pass
+                offset += len(line)
+    except OSError as e:
+        logger.debug(f"[CF_CATCHUP] shard scan failed {path}: {e}")
+    return out
+
+def _find_replay_row_for_trade_id(path, target_tid, max_bytes_hint=None):
+    """Read a single replay row by byte-offset lookup. Falls back to a full
+    linear scan if the offset index was built from a different shard state."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                try:
+                    row = json.loads(line_stripped)
+                    if row.get("trade_id") == target_tid:
+                        return row
+                except Exception:
+                    pass
+    except OSError as e:
+        logger.debug(f"[CF_CATCHUP] row lookup failed {path} tid={target_tid}: {e}")
+    return None
+
+def _run_counterfactual_catchup():
+    """Force-simulate APPROVE signals that have replay data (in any shard) but
+    no counterfactual.jsonl and no shadow_outcome.jsonl row. Idempotent: every
+    successfully simulated trade_id is added to _sim_processed_trade_ids."""
+    global _sim_processed_trade_ids, write_counter
+    try:
+        if not os.path.exists(SIGNAL_SNAPSHOT_FILE):
+            return 0
+        # 1) APPROVE snapshots (active file only — snapshots are not rotated).
+        approve_snaps = {}
+        try:
+            with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        tid = row.get("trade_id")
+                        if tid and row.get("ai", {}).get("approved", False):
+                            approve_snaps[tid] = row
+                    except Exception:
+                        pass
+        except OSError:
+            return 0
+        if not approve_snaps:
+            return 0
+
+        # 2) Drop anything already processed in-memory.
+        candidate_tids = [t for t in approve_snaps if t not in _sim_processed_trade_ids]
+        if not candidate_tids:
+            return 0
+
+        # 3) Index every replay shard by trade_id. Only offsets are kept so a
+        # 20MB shard with thousands of ticks never fully resides in memory.
+        import glob as _glob
+        shard_paths = sorted(_glob.glob(SIGNAL_REPLAY_FILE + "*"))
+        # shard_trade_ids[tid] = list of (path, offset)
+        shard_trade_ids = {}
+        for sp in shard_paths:
+            for tid, off in _scan_replay_shard_trade_ids(sp):
+                shard_trade_ids.setdefault(tid, []).append((sp, off))
+
+        # 4) Final missing set: APPROVE + has-replay + not-already-processed.
+        missing = [t for t in candidate_tids if t in shard_trade_ids]
+        if not missing:
+            return 0
+
+        written = 0
+        for tid in missing:
+            snapshot = approve_snaps.get(tid)
+            if not snapshot:
+                continue
+            # Pick the earliest shard entry for this trade_id (deterministic).
+            locations = sorted(shard_trade_ids.get(tid, []))
+            replay = None
+            for sp, _off in locations:
+                replay = _find_replay_row_for_trade_id(sp, tid)
+                if replay:
+                    break
+            if not replay:
+                # Shard rotated between index and lookup — mark processed so we
+                # don't repeatedly re-scan for an unrecoverable row.
+                _sim_processed_trade_ids.add(tid)
+                continue
+            cfg = snapshot.get("config", {})
+            buf = {
+                "start_price": replay.get("start_price"),
+                "ticks": replay.get("ticks", []),
+                "direction": snapshot.get("direction") or replay.get("direction"),
+                "leverage": cfg.get("leverage", _state_leverage()),
+                "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
+                "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
+                "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
+                "exit_config": {**get_exit_config_snapshot(), **{k: v for k, v in cfg.items() if k in (
+                    "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
+                )}},
+                "virtual_entry": replay.get("virtual_entry"),
+                "virtual_fill_t": replay.get("virtual_fill_t"),
+            }
+            outcome = simulate_replay_outcome(buf)
+            counterfactual = {
+                "schema": "counterfactual_v2",
+                "trade_id": tid,
+                "scenario": buf["direction"],
+                "executed": bool(snapshot.get("executed")),
+                "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
+                "lane": replay.get("lane"),
+                "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+                "edge_score": snapshot.get("edge_score"),
+                "fill_price": outcome.get("fill_price"),
+                "fill_delay_sec": outcome.get("fill_delay_sec"),
+                "filled": outcome.get("filled"),
+                "exit_reason": outcome.get("exit_reason"),
+                "net_pnl_usd": outcome.get("net_pnl_usd"),
+                "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
+                "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
+                "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+                "catchup": True,
+            }
+            try:
+                rotate_log(COUNTERFACTUAL_FILE)
+                with open(COUNTERFACTUAL_FILE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(counterfactual) + "\n")
+                    f.flush()
+                    write_counter += 1
+                    if write_counter % 10 == 0:
+                        os.fsync(f.fileno())
+                _sim_processed_trade_ids.add(tid)
+                written += 1
+            except Exception as e:
+                logger.error(f"[CF_CATCHUP] counterfactual log failed tid={tid}: {e}")
+        if written:
+            logger.info(
+                f"[CF_CATCHUP] backfilled {written} missing counterfactual rows "
+                f"(of {len(missing)} candidates) [PIPELINE ENFORCEMENT]"
+            )
+        return written
+    except Exception as e:
+        logger.error(f"[CF_CATCHUP] failed: {e}")
+        return 0
 
 def preload_candles():
     global latest_candles, last_candle_ts
