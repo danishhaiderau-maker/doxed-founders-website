@@ -34007,10 +34007,14 @@ def analytics_loop():
                 run_offline_research_sim()
                 # Change 5: periodic catch-up for APPROVE signals whose replay
                 # rotated into a .N shard before the active-file pass saw them.
-                # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks.
+                # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
+                # EXCEPT the first tick after boot which fires immediately so a
+                # fresh deploy backfills the historical coverage gap without
+                # waiting ~100min for the first window.
                 _cf_catchup_tick_counter += 1
-                if _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
-                    _cf_catchup_tick_counter = 0
+                if _cf_catchup_tick_counter == 1 or _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
+                    if _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
+                        _cf_catchup_tick_counter = 0
                     try:
                         _run_counterfactual_catchup()
                     except Exception as ce:
