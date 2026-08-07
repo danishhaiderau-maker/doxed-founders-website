@@ -89,6 +89,22 @@ export class TradingAgentsController {
     return this.tradingAgents.getBotHealth(slug);
   }
 
+  /**
+   * Ops-only relay visibility without a user cookie.
+   * Auth: `X-Bot-Admin-Token: $BOT_ADMIN_TOKEN` (or Bearer).
+   * Requires `userId` so responses never dump other users' instances.
+   */
+  @Public()
+  @Get(':slug/ops/relay-status')
+  opsRelayStatus(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.tradingAgents.getOpsRelayStatus(slug, userId, adminHeader, authorization);
+  }
+
   @Public()
   @Get(':slug/analyzer-genome')
   analyzerGenome(@Param('slug') slug: string) {

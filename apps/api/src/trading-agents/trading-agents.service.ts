@@ -1,4 +1,13 @@
-import { Injectable, Logger, NotFoundException, ForbiddenException, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  ForbiddenException,
+  UnauthorizedException,
+  BadRequestException,
+  OnModuleInit,
+} from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
 import {
   NotificationType,
   Prisma,
@@ -542,6 +551,85 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
+  /**
+   * Cookie-free ops status for a single hired instance.
+   * Requires BOT_ADMIN_TOKEN via `X-Bot-Admin-Token` or `Authorization: Bearer …`.
+   * Always scoped to one `userId` — never enumerates other users.
+   */
+  async getOpsRelayStatus(
+    slug: string,
+    userId: string | undefined,
+    adminHeader?: string,
+    authorization?: string,
+  ) {
+    const expected = (process.env.BOT_ADMIN_TOKEN ?? '').trim();
+    if (!expected) {
+      throw new UnauthorizedException('BOT_ADMIN_TOKEN is not configured');
+    }
+    const bearer =
+      typeof authorization === 'string' && authorization.toLowerCase().startsWith('bearer ')
+        ? authorization.slice(7).trim()
+        : '';
+    const supplied = (adminHeader?.trim() || bearer).trim();
+    const a = Buffer.from(supplied, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length === 0 || a.length !== b.length || !timingSafeEqual(a, b)) {
+      throw new UnauthorizedException('Invalid BOT_ADMIN_TOKEN');
+    }
+    if (!userId?.trim()) {
+      throw new BadRequestException('userId query param is required');
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId: userId.trim() } },
+      select: {
+        status: true,
+        lastError: true,
+        exchangeProvider: true,
+        dashboardState: true,
+        updatedAt: true,
+      },
+    });
+    if (!instance) {
+      return {
+        slug,
+        found: false,
+        hired: false,
+        status: null,
+        relayExecutionMode: null,
+        relayArmedAt: null,
+        liveDeskSessionStartedAt: null,
+        lastError: null,
+        positionMismatchDetectedAt: null,
+        updatedAt: null,
+      };
+    }
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    return {
+      slug,
+      found: true,
+      hired: instance.status === 'ACTIVE' || instance.status === 'PAUSED',
+      status: instance.status,
+      relayExecutionMode:
+        typeof dash.relayExecutionMode === 'string' ? dash.relayExecutionMode : null,
+      relayArmedAt: typeof dash.relayArmedAt === 'string' ? dash.relayArmedAt : null,
+      liveDeskSessionStartedAt:
+        typeof dash.liveDeskSessionStartedAt === 'string'
+          ? dash.liveDeskSessionStartedAt
+          : null,
+      lastError: instance.lastError,
+      positionMismatchDetectedAt:
+        typeof dash.positionMismatchDetectedAt === 'string'
+          ? dash.positionMismatchDetectedAt
+          : null,
+      positionMismatchAlert:
+        typeof dash.positionMismatchAlert === 'string' ? dash.positionMismatchAlert : null,
+      exchangeProvider: instance.exchangeProvider,
+      updatedAt: instance.updatedAt.toISOString(),
+    };
+  }
+
   /** Full-session analytics from the research analyzer (:9001), proxied through the bot tunnel.
    *  Returns a normalized envelope the Agent Hub Conservative BTC block renders. */
   async getAnalyzerSummary(slug: string): Promise<{
@@ -1010,9 +1098,9 @@ export class TradingAgentsService implements OnModuleInit {
       instance.exchangeProvider === 'bitfinex'
         ? await this.exchanges.getUserBitfinexExchangeSnapshot(userId)
         : null;
-    if (instance.exchangeProvider === 'bitfinex' && !snapshot) {
-      return null;
-    }
+    // Snapshot fetch can flap independently of ledger/metrics. Still build the
+    // Completed trades table from Neon closes + Bitfinex close-ledger so Session
+    // P&L and the trades table stay consistent when order/position REST fails.
     const metrics =
       instance.exchangeProvider === 'bitfinex'
         ? await this.exchanges.getUserBitfinexLiveMetrics(userId, {

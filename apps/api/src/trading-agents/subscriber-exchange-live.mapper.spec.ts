@@ -338,6 +338,43 @@ test('renders one exchange-proven participant close when Bitfinex close ledger i
   assert.equal(book.trades[0]?.netUsd, -1.6);
 });
 
+test('renders Neon CLOSED live-copy rows when Bitfinex close ledger is empty', () => {
+  const createdAt = new Date('2026-08-07T16:53:00.000Z');
+  const closedAt = new Date('2026-08-07T16:58:00.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.CLOSED,
+        fillPrice: 64_100,
+        exitPrice: 64_050,
+        pnlUsd: -1.42,
+        pnlMarginPct: -7.1,
+        limitPrice: 64_100,
+        qty: 0.0308,
+        terminalReason: 'SHOWCASE_MIRROR',
+        exchangeProven: false,
+        createdAt,
+        updatedAt: closedAt,
+        cycle: {
+          tradeId: 'cont-211f46765b49',
+          status: SignalCycleStatus.CLOSED,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt,
+        },
+      },
+    ],
+    ledgerCloses: [],
+  });
+
+  assert.equal(book.trades.length, 1);
+  assert.equal(book.trades[0]?.tradeId, 'cont-211f46765b49');
+  assert.equal(book.trades[0]?.netUsd, -1.42);
+  assert.equal(book.trades[0]?.aiBand, 'NEON_CLOSED');
+});
+
 test('does not render a virtual-only participant close as a Bitfinex completed trade', () => {
   const now = new Date('2026-07-25T09:36:18.000Z');
   const book = mapSubscriberExchangeLiveBook({

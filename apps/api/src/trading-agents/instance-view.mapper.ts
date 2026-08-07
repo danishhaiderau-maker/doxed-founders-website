@@ -43,7 +43,17 @@ export function readInstanceScope(instance: {
   const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
   const mode: 'copy' | 'live' =
     dash.instanceMode === 'copy' || instance.exchangeProvider === 'paper' ? 'copy' : 'live';
+  // Live desk P&L / completed trades must scope to this Start (arm), not the
+  // long-lived collection sessionStartedAt (often days old). Prefer the live
+  // arm timestamps; liveDeskSessionStartedAt survives mismatch auto-pause.
+  const liveArmIso =
+    mode === 'live'
+      ? ([dash.relayArmedAt, dash.realTradingConfirmedAt, dash.liveDeskSessionStartedAt].find(
+          (value) => typeof value === 'string' && value.trim(),
+        ) as string | undefined)
+      : undefined;
   const sessionIso =
+    liveArmIso ||
     (typeof dash.sessionStartedAt === 'string' && dash.sessionStartedAt) ||
     instance.activatedAt?.toISOString() ||
     instance.hiredAt.toISOString();

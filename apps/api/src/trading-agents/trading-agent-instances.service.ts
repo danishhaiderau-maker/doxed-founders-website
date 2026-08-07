@@ -456,6 +456,13 @@ export class TradingAgentInstancesService {
       relayMirrorLanes: [...CONSERVATIVE_BTC_LIVE_RELAY_LANES],
       realTradingConfirmedAt,
       relayArmedAt: realTradingConfirmedAt,
+      // Durable desk window for Session P&L / completed trades. Cleared only on
+      // explicit user Stop — mismatch auto-pause must not reset the window.
+      liveDeskSessionStartedAt: paused
+        ? null
+        : realTradingConfirmedAt ?? dash.liveDeskSessionStartedAt ?? null,
+      positionMismatchAlert: paused ? dash.positionMismatchAlert ?? null : null,
+      positionMismatchAlertAcked: paused ? dash.positionMismatchAlertAcked ?? false : true,
       relayEntryPolicy: 'NEXT_FRESH_ONLY',
       relayExecutorAtArm:
         executorHealthAtArm ?? readPersistedRelayExecutorHealth(instance.dashboardState),

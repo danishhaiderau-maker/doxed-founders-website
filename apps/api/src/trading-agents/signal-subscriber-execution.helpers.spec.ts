@@ -638,7 +638,7 @@ test('showcase position absence needs both repeated misses and a 60-second conve
   );
 });
 
-test('pending fill grace accepts only exchange-proven filled quantity from an active managed order', () => {
+test('pending fill grace treats resting managed entry + exchange qty as fill-in-flight', () => {
   const unchanged = pendingFillReconcileDecision({
     nowMs: 1_000,
     signedDeltaBtc: 0.01,
@@ -653,9 +653,8 @@ test('pending fill grace accepts only exchange-proven filled quantity from an ac
     managedOrderIds: [123],
     activeOrders: [{ id: 123, amount: 0.03, amountOrig: 0.03 }],
   });
-  assert.equal(unchanged.defer, false);
-  assert.equal(unchanged.reason, 'NO_MANAGED_PENDING_OWNER');
-  assert.equal(unchanged.direction, 'LONG');
+  assert.equal(unchanged.defer, true);
+  assert.equal(unchanged.reason, 'DEFER_PENDING_FILL');
 
   const partial = pendingFillReconcileDecision({
     nowMs: 1_000,
@@ -674,7 +673,24 @@ test('pending fill grace accepts only exchange-proven filled quantity from an ac
   assert.equal(partial.defer, true);
   assert.equal(partial.reason, 'DEFER_PENDING_FILL');
 
-  const unexplainedExcess = pendingFillReconcileDecision({
+  const tinyRoundingGap = pendingFillReconcileDecision({
+    nowMs: 1_000,
+    signedDeltaBtc: -0.0308,
+    pending: [
+      {
+        participantId: 'participant-1',
+        direction: 'SHORT',
+        qty: 0.0307,
+        bitfinexOrderId: 123,
+      },
+    ],
+    managedOrderIds: [123],
+    activeOrders: [],
+  });
+  assert.equal(tinyRoundingGap.defer, true);
+  assert.equal(tinyRoundingGap.reason, 'DEFER_PENDING_FILL');
+
+  const wrongDirection = pendingFillReconcileDecision({
     nowMs: 1_000,
     signedDeltaBtc: 0.02,
     pending: [
@@ -686,10 +702,10 @@ test('pending fill grace accepts only exchange-proven filled quantity from an ac
       },
     ],
     managedOrderIds: [123],
-    activeOrders: [{ id: 123, amount: 0.02, amountOrig: 0.03 }],
+    activeOrders: [{ id: 123, amount: -0.02, amountOrig: -0.03 }],
   });
-  assert.equal(unexplainedExcess.defer, false);
-  assert.equal(unexplainedExcess.reason, 'NO_MANAGED_PENDING_OWNER');
+  assert.equal(wrongDirection.defer, false);
+  assert.equal(wrongDirection.reason, 'NO_MANAGED_PENDING_OWNER');
 });
 
 test('pending fill grace fails closed for foreign orders, wrong ownership, and expiry', () => {

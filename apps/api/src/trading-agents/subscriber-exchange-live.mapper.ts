@@ -279,18 +279,22 @@ export function mapSubscriberExchangeLiveBook(input: {
     }
 
     // Prefer Bitfinex close-ledger rows below. Some derivative closes do not
-    // appear in that endpoint, though, so retain an exchange-proven fallback.
-    // It is emitted only when the exchange returned no close-ledger rows,
-    // preventing the participant and ledger representations from appearing
-    // as two completed trades.
+    // appear in that endpoint, though, so retain Neon CLOSED rows with real
+    // fill/exit/pnl as the Completed trades source when the ledger is empty.
+    // Exchange-proven rows always qualify; non-paper terminal closes also
+    // qualify so Session P&L and the table cannot diverge when the ledger
+    // endpoint is empty or flaky.
+    const paperTerminal =
+      typeof row.terminalReason === 'string' &&
+      /^PAPER_|VIRTUAL_|SIM_/i.test(row.terminalReason);
     if (
       row.status === 'CLOSED' &&
-      row.exchangeProven === true &&
       row.fillPrice != null &&
       row.exitPrice != null &&
       qty > 0 &&
       row.pnlUsd != null &&
-      Number.isFinite(row.pnlUsd)
+      Number.isFinite(row.pnlUsd) &&
+      (row.exchangeProven === true || !paperTerminal)
     ) {
       const entry = Number(row.fillPrice);
       const exit = Number(row.exitPrice);
@@ -310,7 +314,7 @@ export function mapSubscriberExchangeLiveBook(input: {
         grossUsd: Number(row.pnlUsd),
         tradeFeesUsd: 0,
         fundingUsd: 0,
-        aiBand: 'EXCHANGE_VERIFIED',
+        aiBand: row.exchangeProven === true ? 'EXCHANGE_VERIFIED' : 'NEON_CLOSED',
       });
     }
   }
@@ -333,6 +337,9 @@ export function mapSubscriberExchangeLiveBook(input: {
       aiBand: 'EXCHANGE',
     });
   }
+  // Ledger rows are authoritative for cash P&L when present. Neon closes only
+  // backfill when the ledger is empty so Completed trades can match Session P&L
+  // without double-counting the same close in the metrics bar sum.
   if ((input.ledgerCloses?.length ?? 0) === 0) {
     trades.push(...participantCloseFallbacks);
   }

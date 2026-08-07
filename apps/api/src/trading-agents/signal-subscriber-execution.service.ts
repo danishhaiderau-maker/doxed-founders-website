@@ -503,12 +503,11 @@ export type PendingFillReconcileDecision = {
  * OPEN. During that bounded exchange-consistency window, defer the current
  * tick without allowing new entries instead of permanently pausing the relay.
  *
- * The grace applies only when the entire raw exchange delta can be owned by
- * a same-direction participant whose exchange-proven managed entry has
- * either disappeared from the active book or reports enough filled quantity
- * to explain the delta, and there are no foreign active orders.
- * Any other mismatch pauses immediately, and an unattributed managed fill
- * fails closed after the bounded grace.
+ * Treat PENDING_ENTRY + same-direction exchange qty as fill-in-flight when a
+ * single managed pending owner can cover the delta (order gone, partial fill
+ * visible, or resting order still showing unfilled while the position already
+ * moved — the classic active-order / position race). Foreign active orders
+ * still fail closed immediately; unattributed fills fail closed after grace.
  */
 export function pendingFillReconcileDecision(input: {
   nowMs: number;
@@ -544,6 +543,10 @@ export function pendingFillReconcileDecision(input: {
   }
 
   const direction: 'LONG' | 'SHORT' = deltaSats > 0 ? 'LONG' : 'SHORT';
+  const absDeltaSats = Math.abs(deltaSats);
+  // Bitfinex rounds submitted qty; allow ~1% or 5e-5 BTC so 0.0308 vs 0.0307
+  // still counts as the same managed fill-in-flight.
+  const qtyToleranceSats = Math.max(btcToSats(0.00005), Math.floor(absDeltaSats * 0.01));
   const managed = new Set(input.managedOrderIds);
   const active = new Map(
     [...input.activeOrders].map((order) => [order.id, order]),
@@ -571,23 +574,28 @@ export function pendingFillReconcileDecision(input: {
           return false;
         }
 
+        const pendingQtySats = Math.abs(btcToSats(row.qty ?? 0));
+        const qtyCoversDelta = pendingQtySats + qtyToleranceSats >= absDeltaSats;
+        if (!qtyCoversDelta) return false;
+
         const order = active.get(row.bitfinexOrderId);
         if (!order) {
-          return Math.abs(btcToSats(row.qty ?? 0)) >= Math.abs(deltaSats);
+          // Order left the book — fill-in-flight / filled; qty already covers.
+          return true;
         }
 
         const originalSats = btcToSats(order.amountOrig);
         const remainingSats = btcToSats(order.amount);
         const orderDirection: 'LONG' | 'SHORT' =
           originalSats > 0 ? 'LONG' : 'SHORT';
+        if (orderDirection !== direction) return false;
         const filledSats = Math.max(
           0,
           Math.abs(originalSats) - Math.abs(remainingSats),
         );
-        return (
-          orderDirection === direction &&
-          filledSats >= Math.abs(deltaSats)
-        );
+        // Proven partial/full fill OR resting managed entry while exchange
+        // already shows the position (stale active-order snapshot race).
+        return filledSats + qtyToleranceSats >= absDeltaSats || qtyCoversDelta;
       },
     )
     .sort((a, b) => a.participantId.localeCompare(b.participantId));
@@ -3080,6 +3088,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
     }
 
+    // Refresh the active-order book before ledger reconcile. The early-tick
+    // snapshot can still show a fully resting entry while Bitfinex already
+    // reports the fill as a position — that race used to trip an immediate
+    // mismatch pause (PENDING_ENTRY + exchange qty) before EXCHANGE_FILL_RECONCILE
+    // could promote the lot.
+    if (instance.exchangeProvider === 'bitfinex') {
+      try {
+        activeOrdersSnapshot = await this.activeTrading.listActiveOrders(creds);
+        activeOrderIdSet = new Set(activeOrdersSnapshot.map((o) => o.id));
+      } catch (err) {
+        this.logger.warn(
+          `Bitfinex active-order refresh before ledger reconcile ${instance.userId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
     this.currentStage = 'RECONCILE_LOT_LEDGER';
     const ledgerReconciled = await this.reconcileLotLedger(
       agentId,
@@ -3418,12 +3444,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         undefined,
         instance,
       );
+      const preserveMismatchAlert =
+        instance.status === TradingAgentInstanceStatus.PAUSED &&
+        Boolean(instance.lastError);
       if (!eligibility.canEnter) {
         await this.prisma.tradingAgentInstance.update({
           where: { id: instance.id },
           data: { lastError: eligibility.reason },
         });
-      } else {
+      } else if (!preserveMismatchAlert) {
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: { lastError: null },
@@ -5994,22 +6023,45 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): Promise<void> {
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instance.id },
-      select: { dashboardState: true },
+      select: { dashboardState: true, status: true },
     });
     const dash = (fresh?.dashboardState ?? instance.dashboardState ?? {}) as Record<string, unknown>;
+    const alreadyPaused =
+      fresh?.status === TradingAgentInstanceStatus.PAUSED ||
+      dash.relayExecutionMode === 'PAUSED';
+    const truncated = message.slice(0, 500);
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
         status: TradingAgentInstanceStatus.PAUSED,
-        lastError: message.slice(0, 500),
+        lastError: truncated,
         dashboardState: applyDashboardPatch(dash, {
           relayExecutionMode: 'PAUSED',
+          // Keep liveDeskSessionStartedAt so Session P&L / completed trades
+          // stay scoped to this Start even after a mismatch pause clears the arm.
           relayArmedAt: null,
           realTradingConfirmedAt: null,
           positionMismatchDetectedAt: new Date().toISOString(),
+          positionMismatchAlert: truncated,
+          positionMismatchAlertAcked: false,
         }) as unknown as Prisma.InputJsonValue,
       },
     });
+    if (!alreadyPaused) {
+      await this.notifications
+        .notifyUser(instance.userId, {
+          type: NotificationType.TRADING_AGENT_UPDATE,
+          title: 'Live copy paused — position mismatch',
+          body: truncated,
+          link: '/agent-hub/conservative-btc',
+        })
+        .catch(() => {
+          /* best-effort alert — pause itself already persisted */
+        });
+      this.logger.error(
+        `[POSITION-MISMATCH] relay paused user=${instance.userId}: ${truncated}`,
+      );
+    }
   }
 
   private async monitorEntry(

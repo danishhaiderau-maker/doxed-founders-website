@@ -7576,66 +7576,77 @@ def _push_showcase_relay_event(
 
     def _post() -> bool:
         started = time.perf_counter()
-        try:
-            headers = {"Content-Type": "application/json", "Accept": "application/json"}
-            if secret:
-                headers["X-Bot-Control-Secret"] = secret
-            if webhook_secret:
-                signature = hmac.new(
-                    webhook_secret.encode("utf-8"),
-                    body,
-                    hashlib.sha256,
-                ).hexdigest()
-                headers["X-Showcase-Signature"] = f"sha256={signature}"
-            response = _relay_http_session.post(
-                url, data=body, headers=headers, timeout=2.5
-            )
-            response.raise_for_status()
-            response_payload = response.json() if response.content else {}
-            if wait_for_durable_receipt and not _relay_response_has_durable_receipt(
-                response_payload, payload
-            ):
-                raise RuntimeError("relay event was not durably acknowledged")
-            _relay_push_state["seq"] += 1
-            _relay_push_state["last_ts"] = time.time()
-            _relay_push_state["last_event"] = event
-            _relay_push_state["last_ok"] = True
-            _relay_push_state["last_error"] = None
-            _relay_push_state["last_latency_ms"] = round(
-                (time.perf_counter() - started) * 1000, 1
-            )
-            _relay_push_state["last_platform_received_at"] = (
-                response_payload.get("platform_received_at")
-                if isinstance(response_payload, dict)
-                else None
-            )
-            _record_relay_delivery(
-                event,
-                trade_id,
-                payload.get("ts"),
-                ok=True,
-                http_latency_ms=_relay_push_state["last_latency_ms"],
-                platform_received_at=_relay_push_state["last_platform_received_at"],
-            )
-            return True
-        except Exception as exc:
-            _relay_push_state["last_ts"] = time.time()
-            _relay_push_state["last_event"] = event
-            _relay_push_state["last_ok"] = False
-            _relay_push_state["last_error"] = str(exc)[:240]
-            _relay_push_state["last_latency_ms"] = round(
-                (time.perf_counter() - started) * 1000, 1
-            )
-            _record_relay_delivery(
-                event,
-                trade_id,
-                payload.get("ts"),
-                ok=False,
-                http_latency_ms=_relay_push_state["last_latency_ms"],
-                error=exc,
-            )
-            logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {exc}")
-            return False
+        # POSITION_CLOSED must not drop on a 2.5s Railway blip — exits are
+        # latency-critical and the poll backstop is slower. Allow a longer
+        # client timeout plus a couple of tight retries for that event only.
+        post_timeout = 8.0 if event == "POSITION_CLOSED" else 2.5
+        attempts = 3 if event == "POSITION_CLOSED" else 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                headers = {"Content-Type": "application/json", "Accept": "application/json"}
+                if secret:
+                    headers["X-Bot-Control-Secret"] = secret
+                if webhook_secret:
+                    signature = hmac.new(
+                        webhook_secret.encode("utf-8"),
+                        body,
+                        hashlib.sha256,
+                    ).hexdigest()
+                    headers["X-Showcase-Signature"] = f"sha256={signature}"
+                response = _relay_http_session.post(
+                    url, data=body, headers=headers, timeout=post_timeout
+                )
+                response.raise_for_status()
+                response_payload = response.json() if response.content else {}
+                if wait_for_durable_receipt and not _relay_response_has_durable_receipt(
+                    response_payload, payload
+                ):
+                    raise RuntimeError("relay event was not durably acknowledged")
+                _relay_push_state["seq"] += 1
+                _relay_push_state["last_ts"] = time.time()
+                _relay_push_state["last_event"] = event
+                _relay_push_state["last_ok"] = True
+                _relay_push_state["last_error"] = None
+                _relay_push_state["last_latency_ms"] = round(
+                    (time.perf_counter() - started) * 1000, 1
+                )
+                _relay_push_state["last_platform_received_at"] = (
+                    response_payload.get("platform_received_at")
+                    if isinstance(response_payload, dict)
+                    else None
+                )
+                _record_relay_delivery(
+                    event,
+                    trade_id,
+                    payload.get("ts"),
+                    ok=True,
+                    http_latency_ms=_relay_push_state["last_latency_ms"],
+                    platform_received_at=_relay_push_state["last_platform_received_at"],
+                )
+                return True
+            except Exception as exc:
+                last_exc = exc
+                if attempt + 1 < attempts:
+                    time.sleep(0.35 * (attempt + 1))
+                    continue
+        _relay_push_state["last_ts"] = time.time()
+        _relay_push_state["last_event"] = event
+        _relay_push_state["last_ok"] = False
+        _relay_push_state["last_error"] = str(last_exc)[:240] if last_exc else "unknown"
+        _relay_push_state["last_latency_ms"] = round(
+            (time.perf_counter() - started) * 1000, 1
+        )
+        _record_relay_delivery(
+            event,
+            trade_id,
+            payload.get("ts"),
+            ok=False,
+            http_latency_ms=_relay_push_state["last_latency_ms"],
+            error=last_exc,
+        )
+        logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {last_exc}")
+        return False
 
     if wait_for_durable_receipt:
         return _post()
