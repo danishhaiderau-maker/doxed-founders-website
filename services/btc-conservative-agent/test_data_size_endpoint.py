@@ -86,10 +86,31 @@ class DataSizeEndpointTests(unittest.TestCase):
 
     def test_authenticated_response_shape(self):
         # Strict auth passes so the endpoint runs the (stubbed) du/wc probes.
+        # Top files now come from os.walk (not `du path/*`, which never expands).
+        walk_files = [
+            ("ai_reason_research.jsonl", 320.5 * 1024 * 1024),
+            ("signal_replay.jsonl", 110.0 * 1024 * 1024),
+            ("trades_3factor.csv", 30.2 * 1024 * 1024),
+            ("bot.log", 10.0 * 1024 * 1024),
+            ("debug.log", 5.0 * 1024 * 1024),
+        ]
+
+        def fake_walk(_root):
+            yield ("/app/data/runtime", [], [name for name, _ in walk_files])
+
+        def fake_getsize(path):
+            name = os.path.basename(path)
+            for fname, size in walk_files:
+                if fname == name:
+                    return int(size)
+            raise OSError("missing")
+
         with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
             with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess()):
-                with bot.app.test_client() as client:
-                    resp = client.get("/api/data_size")
+                with mock.patch.object(bot.os, "walk", side_effect=fake_walk):
+                    with mock.patch.object(bot.os.path, "getsize", side_effect=fake_getsize):
+                        with bot.app.test_client() as client:
+                            resp = client.get("/api/data_size")
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
         self.assertEqual(body["status"], "ok")
@@ -103,7 +124,7 @@ class DataSizeEndpointTests(unittest.TestCase):
         top = body["top_files"]
         self.assertEqual(len(top), 5)
         self.assertEqual(top[0]["name"], "ai_reason_research.jsonl")
-        self.assertEqual(top[0]["size_mb"], 320.5)
+        self.assertAlmostEqual(top[0]["size_mb"], 320.5, delta=0.05)
         # Sorted: 320.5, 110.0, 30.2, 10.0, 5.0
         self.assertGreaterEqual(top[0]["size_mb"], top[1]["size_mb"])
 

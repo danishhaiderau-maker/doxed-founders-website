@@ -4328,6 +4328,15 @@ export type ServerBotHealth = {
   botConnected: boolean;
   source?: string;
   error?: string;
+  analyzerMirror?: {
+    available: boolean;
+    fresh: boolean;
+    status: 'online' | 'stale' | 'unreachable';
+    uploadedAt?: string | null;
+    ageSec?: number | null;
+    size?: number | null;
+    source?: string;
+  };
 };
 
 /** Server-side canonical Fly reachability (proxied through the API to avoid

@@ -57,11 +57,12 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
 
 
 def test_retention_never_removes_active_or_unacknowledged_files():
-    assert "acknowledged rotations older than 24h are pruned except the two newest generations" in BOT
-    assert "newest_two = frozenset(sorted(generations)[-2:])" in BOT
-    assert "if rotation_index in newest_two" in BOT
+    assert "active/unacked files retained" in BOT
+    assert "newest_kept = frozenset(sorted(generations)[-keep_newest:])" in BOT
+    assert "if rotation_index in newest_kept" in BOT
     assert "int(ack.get(\"size\") or -1) == int(stat.st_size)" in BOT
     assert "int(ack.get(\"mtime_ns\") or -1) == int(stat.st_mtime_ns)" in BOT
+    assert "volume_used_pct" in BOT
 
 
 def test_numbered_rotations_are_supported_and_highest_two_are_retained():

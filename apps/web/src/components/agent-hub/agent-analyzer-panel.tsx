@@ -133,9 +133,9 @@ export function AgentAnalyzerPanel({
             Analyzer session unavailable
             {summary?.error ? ` — ${summary.error}` : ''}
             <p className="mt-1 text-amber-200/70">
-              Fly.io is the sole AI, strategy, and trading owner. This research card is produced by the desktop
-              analyzer on <span className="font-mono">:9001</span> from synchronized Fly data. If this PC or analyzer
-              is off, Fly trading continues; the research card will repopulate after the desktop mirror catches up.
+              Fly.io is the sole AI, strategy, and trading owner. Session analytics come from the Fly
+              analyzer mirror (or cumulative Fly state fallback). If the mirror is empty, publish a fresh
+              report from the desktop analyzer; Fly trading continues regardless.
             </p>
           </div>
         )}

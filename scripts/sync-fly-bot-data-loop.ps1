@@ -25,6 +25,18 @@ $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 $freshSignalFile = Join-Path $repoRoot ".fly-data-sync-loop.last-fresh.json"
 $mirrorDir = Join-Path $agentDir "fly-data-mirror"
 $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
+$growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
+
+# Growth trigger (default 50 MB). Override with FLY_VOLUME_SYNC_THRESHOLD_MB.
+# Poll cadence is faster than the force-sync interval so large jsonl growth is
+# mirrored for the analyzer without waiting a full IntervalSec cycle.
+$thresholdMb = 50.0
+if ($env:FLY_VOLUME_SYNC_THRESHOLD_MB) {
+  try { $thresholdMb = [double]$env:FLY_VOLUME_SYNC_THRESHOLD_MB } catch { $thresholdMb = 50.0 }
+}
+if ($thresholdMb -lt 5) { $thresholdMb = 5.0 }
+$thresholdBytes = [int64]($thresholdMb * 1MB)
+$pollSec = [Math]::Max(30, [Math]::Min(60, [int]($IntervalSec / 3)))
 
 # Compute local mirror size + merge Fly /api/data_size numbers into one report.
 # Written after every sync cycle so the dashboard always has fresh local info.
@@ -53,6 +65,7 @@ function Write-SizeReport {
       local_size_mb        = $localSizeMb
       local_file_count     = $localFileCount
       sync_interval_seconds = $IntervalSec
+      sync_threshold_mb    = $thresholdMb
       computed_at          = (Get-Date).ToUniversalTime().ToString("o")
       fly_size_mb          = $null
       fly_volume_pct       = $null
@@ -124,9 +137,31 @@ if (-not $env:BOT_ADMIN_TOKEN) {
   throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }
 
+$lastSyncedTotalBytes = [int64]0
+$lastSyncAt = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
+if (Test-Path -LiteralPath $growthStateFile) {
+  try {
+    $growthState = Get-Content -LiteralPath $growthStateFile -Raw | ConvertFrom-Json
+    if ($growthState.PSObject.Properties.Name -contains "lastSyncedTotalBytes") {
+      $lastSyncedTotalBytes = [int64]$growthState.lastSyncedTotalBytes
+    }
+    if ($growthState.PSObject.Properties.Name -contains "lastSyncAt") {
+      $parsed = [datetime]::MinValue
+      if ([datetime]::TryParse($growthState.lastSyncAt, [ref]$parsed)) {
+        $lastSyncAt = $parsed.ToUniversalTime()
+      }
+    }
+  } catch {
+    Add-Content -LiteralPath $logFile -Value (
+      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tunreadable growth state: $($_.Exception.Message)"
+    )
+  }
+}
+
 try {
   while ($true) {
     $started = Get-Date
+    $didSync = $false
     try {
       $headers = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
       $manifest = Invoke-RestMethod `
@@ -174,21 +209,49 @@ try {
         }
         @{$signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
           ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8
+        $lastSyncedTotalBytes = 0
       }
 
-      # Keep the live analyzer current quickly. The very large lifecycle genome
-      # is archival and is intentionally excluded from the minute-by-minute
-      # loop; all trading, fills, exits, AI calls, replays, and compact genome
-      # files remain included.
-      $selected = @(
-        $manifest.files |
-          Where-Object { [int64]$_.size -le 50MB } |
-          ForEach-Object { [string]$_.path }
-      )
-      $excluded = @($manifest.files | Where-Object { [int64]$_.size -gt 50MB })
+      $currentTotalBytes = [int64]0
+      if ($manifest.PSObject.Properties.Name -contains "total_bytes") {
+        $currentTotalBytes = [int64]$manifest.total_bytes
+      } else {
+        $currentTotalBytes = [int64](($manifest.files | Measure-Object -Property size -Sum).Sum)
+      }
+      $growthBytes = [Math]::Max([int64]0, $currentTotalBytes - $lastSyncedTotalBytes)
+      $elapsedSec = ([datetime]::UtcNow - $lastSyncAt).TotalSeconds
+      $forceByTime = $elapsedSec -ge [Math]::Max(15, $IntervalSec)
+      $forceByGrowth = $growthBytes -ge $thresholdBytes
+      $forceFresh = $currentSignal -gt $lastSeenSignal
+
+      if (-not ($forceByTime -or $forceByGrowth -or $forceFresh)) {
+        $heartbeat = [ordered]@{
+          ok = $true
+          syncedAt = (Get-Date).ToUniversalTime().ToString("o")
+          source = $SourceUrl
+          skipped = $true
+          reason = "below_threshold"
+          growthBytes = $growthBytes
+          thresholdBytes = $thresholdBytes
+          thresholdMb = $thresholdMb
+          currentTotalBytes = $currentTotalBytes
+          lastSyncedTotalBytes = $lastSyncedTotalBytes
+          elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
+        }
+        $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
+        Add-Content -LiteralPath $logFile -Value (
+          "$($heartbeat.syncedAt)`tSKIP`tgrowth=$([Math]::Round($growthBytes/1MB,2))MB < threshold=${thresholdMb}MB"
+        )
+        Start-Sleep -Seconds $pollSec
+        continue
+      }
+
+      # Sync ALL manifest files. A prior filter excluded files >50MB, which
+      # blocked the exact append-only research logs that fill the Fly volume
+      # (signal_replay / ai_reason_research). Incremental chunk sync already
+      # downloads only new bytes for those files.
       $syncArgs = @{
         SourceUrl = $SourceUrl
-        IncludePath = $selected
       }
       # Publish the latest deterministic analyzer HTML back to Fly so admins
       # have an anywhere-access /analysis route. The local :9001 dashboard
@@ -197,6 +260,15 @@ try {
         $syncArgs.PublishAnalyzerReport = $analyzerReport
       }
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
+      $didSync = $true
+      $lastSyncedTotalBytes = $currentTotalBytes
+      $lastSyncAt = [datetime]::UtcNow
+      @{
+        lastSyncedTotalBytes = $lastSyncedTotalBytes
+        lastSyncAt = $lastSyncAt.ToString("o")
+        thresholdMb = $thresholdMb
+      } | ConvertTo-Json | Set-Content -LiteralPath $growthStateFile -Encoding UTF8
+
       $heartbeat = [ordered]@{
         ok = $true
         syncedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -205,12 +277,14 @@ try {
         bytes = $result.Bytes
         sourceRevision = $result.SourceRevision
         analyzerPublished = $result.AnalyzerPublished
-        excludedArchiveFiles = $excluded.Count
-        excludedArchiveBytes = [int64](($excluded | Measure-Object size -Sum).Sum)
+        prunedRotations = $result.PrunedRotations
+        growthBytes = $growthBytes
+        thresholdMb = $thresholdMb
+        trigger = $(if ($forceByGrowth) { "growth" } elseif ($forceFresh) { "fresh" } else { "interval" })
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
       }
       Add-Content -LiteralPath $logFile -Value (
-        "$($heartbeat.syncedAt)`tOK`trev=$($heartbeat.sourceRevision)`tfiles=$($heartbeat.files)`telapsed=$($heartbeat.elapsedSec)s"
+        "$($heartbeat.syncedAt)`tOK`ttrigger=$($heartbeat.trigger)`trev=$($heartbeat.sourceRevision)`tfiles=$($heartbeat.files)`tpruned=$($heartbeat.prunedRotations)`telapsed=$($heartbeat.elapsedSec)s"
       )
     } catch {
       $heartbeat = [ordered]@{
@@ -230,7 +304,11 @@ try {
     } catch {
       Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report wrapper failed: $($_.Exception.Message)"
     }
-    Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))
+    if ($didSync) {
+      Start-Sleep -Seconds $pollSec
+    } else {
+      Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))
+    }
   }
 } finally {
   Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue

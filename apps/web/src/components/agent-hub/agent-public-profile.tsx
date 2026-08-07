@@ -17,7 +17,6 @@ import {
 import { AgentRentalCountdown, LiveCopyRentalBadge } from '@/components/agent-hub/agent-rental-countdown';
 import { AgentAdminShowcaseControl } from '@/components/agent-hub/agent-admin-showcase-control';
 import { AgentHubBottomBanner } from '@/components/agent-hub/agent-hub-bottom-banner';
-import { AgentPerformanceChart } from '@/components/agent-hub/agent-performance-chart';
 import { AgentDeskView } from '@/components/agent-hub/agent-dual-desk-panels';
 import { EMPTY_LIVE_BOOK } from '@/components/agent-hub/agent-transparency-tables';
 import { AgentAnalyzerPanel } from '@/components/agent-hub/agent-analyzer-panel';
@@ -25,7 +24,6 @@ import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-tr
 import { AgentShowcaseFlashBanner } from '@/components/agent-hub/agent-showcase-flash';
 import type { AgentDeskId } from '@/components/agent-hub/agent-desk-switcher';
 import { directionGap } from '@/components/agent-hub/agent-direction-gap';
-import { AgentDecisionPipelineStatus } from '@/components/agent-hub/agent-decision-pipeline-status';
 import { CopyTradeDetailsStrip, CopyTradeHub } from '@/components/agent-hub/copy-trade-hub';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 import { ExchangeHirePanel } from '@/components/agent-hub/exchange-hire-panel';
@@ -70,17 +68,6 @@ import {
 } from '@/lib/api';
 
 const STRATEGY_TAGS = ['BTC Markets', 'Low Risk', 'Trend Following', 'Long Bias'];
-
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
 
 function PublicReasoningPanel({
   dashboard,
@@ -356,83 +343,6 @@ function HireSidebar({
         />
       )}
     </aside>
-  );
-}
-
-function AiHistoryDetail({ activity }: { activity: TradingAgentActivityEntry[] }) {
-  const aiItems = (activity ?? [])
-    .filter((a) => a.type === 'AI_APPROVED' || a.type === 'AI_REJECTED')
-    .slice(0, 5);
-
-  return (
-    <section className="rounded-2xl border border-zinc-800 bg-zinc-950/50 p-5">
-      <div className="flex items-center justify-between">
-        <h3 className="text-xs font-bold uppercase tracking-widest text-violet-300">
-          Last 5 AI decisions in detail
-        </h3>
-        <span className="text-[10px] text-zinc-600">showcase pipeline</span>
-      </div>
-      <p className="mt-1 text-[11px] text-zinc-500">
-        How the AI thinks: decision, direction, edge vs required, regime band, and the AI comment that
-        drove the call.
-      </p>
-      {aiItems.length === 0 ? (
-        <p className="mt-4 text-xs text-zinc-600">No AI decisions yet this session.</p>
-      ) : (
-        <ul className="mt-4 space-y-2">
-          {aiItems.map((a, i) => {
-            const approved = a.type === 'AI_APPROVED';
-            return (
-              <li
-                key={a.id ?? i}
-                className="rounded-xl border border-zinc-800/70 bg-black/25 px-3 py-2.5 text-xs"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="flex items-center gap-2">
-                    <span
-                      className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                        approved
-                          ? 'bg-emerald-500/15 text-emerald-300'
-                          : 'bg-zinc-700 text-zinc-300'
-                      }`}
-                    >
-                      {approved ? 'APPROVE' : 'REJECT'}
-                    </span>
-                    <span className="text-zinc-200">{a.outcome ?? '—'}</span>
-                  </span>
-                  <span className="text-[10px] text-zinc-600">{timeAgo(a.createdAt)}</span>
-                </div>
-                <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-zinc-500">
-                  <span>
-                    edge{' '}
-                    <span className="text-zinc-300">
-                      {a.edgeScore ?? '—'}/{a.edgeRequired ?? '—'}
-                    </span>
-                  </span>
-                  <span>
-                    band/regime <span className="text-zinc-300">{a.marketRegime ?? '—'}</span>
-                  </span>
-                  {a.profitPct != null && (
-                    <span>
-                      outcome{' '}
-                      <span className={a.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                        {a.profitPct >= 0 ? '+' : ''}
-                        {a.profitPct.toFixed(2)}%
-                      </span>
-                    </span>
-                  )}
-                </div>
-                {a.reason && (
-                  <p className="mt-1.5 line-clamp-3 text-[11px] leading-relaxed text-zinc-400">
-                    {a.reason}
-                  </p>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
   );
 }
 
@@ -978,9 +888,6 @@ export function AgentPublicProfile({
 
           <div className="space-y-4">
             <AgentDeskView {...deskViewProps} executionOnly={false} />
-            {resolvedDesk === 'showcase' && isAdmin ? (
-              <AgentDecisionPipelineStatus dashboard={dashboard} />
-            ) : null}
             {copyDetailsMode ? (
               <CopyTradeDetailsStrip
                 agent={agent}
@@ -1000,18 +907,11 @@ export function AgentPublicProfile({
                 <PublicReasoningPanel dashboard={dashboard} agentName={agent.name} slug={slug} />
               ) : null
             ) : null}
-            {resolvedDesk === 'showcase' ? <AiHistoryDetail activity={deskActivity} /> : null}
             {resolvedDesk === 'showcase' && (
-              <div className="grid gap-6 lg:grid-cols-2">
-                <AgentActivityFeed
-                  items={deskActivity.slice(0, 12)}
-                  title="Showcase bot feed"
-                />
-                <AgentPerformanceChart
-                  agentReturnPct={deskShowcaseAgent.netReturnPct ?? agent.netReturnPct}
-                  label="Showcase bot"
-                />
-              </div>
+              <AgentActivityFeed
+                items={deskActivity.slice(0, 12)}
+                title="Showcase bot feed"
+              />
             )}
           </div>
 

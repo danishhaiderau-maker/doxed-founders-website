@@ -25625,10 +25625,6 @@ HTML = """<!DOCTYPE html>
 <h3>Ultimate execution control</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
-<h3>Directional gap analytics</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">The AI returns scores on a 0–100 scale. The checkbox uses the normalized bucket: <strong>raw LONG/SHORT difference ÷10, rounded down</strong>. Example: LONG 65 / SHORT 35 → raw gap 30 → execution bucket 3. These are analyzer results across exact chase-count cells.</p>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;"><strong>Terminology:</strong> the older “conviction spread” is this same normalized AI gap—not a third independent signal. Exchange bid–ask spread is different; it remains visible in Market Data and is now recorded in USD and basis points at every new fill for future analysis. It is not an entry gate until enough outcomes accumulate.</p>
-<table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Gap</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="spreadBucketStats"></tbody></table>
 <h3>Chase entry selector — exact virtual counts</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may exist at that exact chase count. Before the first checked count the bot counts virtually without placing a limit. If a later count is unchecked, it removes the pending limit and waits for the next checked count; if none remains, the signal expires. Example: select 3 and 4 only → virtual 0–2, submit at 3, chase at 4, cancel before 5.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
@@ -25636,7 +25632,7 @@ HTML = """<!DOCTYPE html>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
 <h3>Directional gap hard-gate</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Global normalized-gap allowlist. <strong>Checked</strong> = signals in that raw-score range MAY enter the chase workflow. <strong>Unchecked</strong> = hard block before any limit or virtual chase; the signal is still logged. Example: raw gap 30 uses bucket 3 (30–39). Persists across restarts.</p>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Global normalized-gap allowlist (<strong>raw LONG/SHORT difference ÷10, rounded down</strong>). Example: LONG 65 / SHORT 35 → raw gap 30 → execution bucket 3. <strong>Checked</strong> = signals in that raw-score range MAY enter the chase workflow. <strong>Unchecked</strong> = hard block before any limit or virtual chase; the signal is still logged. Persists across restarts.</p>
 <p id="spreadGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="spreadGateControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
@@ -25767,7 +25763,8 @@ HTML = """<!DOCTYPE html>
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
-    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> is synced every 3 min by the desktop sync loop.
+    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> syncs on growth
+    (≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code>, default 50 MB) or every 3 min — then ACK-prunes rotated shards only.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
@@ -25795,7 +25792,7 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
-    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync interval: <strong>3 min</strong> &middot; last checked <span id="dataSizeLastCheck">-</span>
+    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
 
@@ -25869,27 +25866,6 @@ HTML = """<!DOCTYPE html>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
-
-<h2 id="pathwayAnalytics">Pathway Analytics</h2>
-<div id="pathwayAnalyticsTabs" style="margin:8px 0;">
-  <button type="button" onclick="showPathwayTab('scorecard')" id="pathTabScorecard" style="margin-right:6px;font-weight:bold;">Scorecard</button>
-  <button type="button" onclick="showPathwayTab('funnel')" id="pathTabFunnel" style="margin-right:6px;">Funnel</button>
-  <button type="button" onclick="showPathwayTab('session')" id="pathTabSession" style="margin-right:6px;">Session</button>
-  <button type="button" onclick="showPathwayTab('kpis')" id="pathTabKpis">KPIs</button>
-</div>
-<div id="pathwayTabScorecard" class="pathway-tab-panel">
-  <div id="pathwayScorecardGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px;"></div>
-</div>
-<div id="pathwayTabFunnel" class="pathway-tab-panel" style="display:none;">
-  <p id="pathwayFunnelSummary" style="color:#8b949e;line-height:1.6;"></p>
-</div>
-<div id="pathwayTabSession" class="pathway-tab-panel" style="display:none;">
-  <p id="pathwaySessionSummary" style="color:#8b949e;margin-bottom:10px;"></p>
-  <h3>Exit Reasons</h3><table id="exitReasonsAnalytics"></table>
-</div>
-<div id="pathwayTabKpis" class="pathway-tab-panel" style="display:none;">
-  <p id="pathwayKpisPanel" style="color:#8b949e;font-size:0.86em;line-height:1.5;"></p>
-</div>
 
 <script src="/static/dashboard.js?v=__BOT_VERSION__"></script>
 <script>
@@ -32043,47 +32019,28 @@ def api_data_size():
             logger.warning("[DATA SIZE] os.walk size failed: %s", exc)
             total_mb = None
 
-    # Top-5 largest files via du -sm <dir>/* | sort -rn | head -5. The shell
-    # pipeline is avoided per repo convention — do it in Python instead.
+    # Top-5 largest files via Python walk (reliable). Avoid `du path/*` — without
+    # shell expansion that argv is a literal `*` and silently returns nothing,
+    # which left the dashboard "Top files" table looking frozen.
     top_files = []
-    du_files = _run(["du", "-sm", runtime_path + "/*"])
-    if du_files:
-        rows = []
-        for line in du_files.splitlines():
-            parts = line.split("	", 1)
-            if len(parts) != 2:
-                continue
-            try:
-                rows.append((float(parts[0].strip()), parts[1].strip()))
-            except ValueError:
-                continue
-        rows.sort(key=lambda r: r[0], reverse=True)
-        for size_mb, fpath in rows[:5]:
+    try:
+        sized = []
+        for dirpath, _dirs, files in os.walk(runtime_root):
+            for name in files:
+                fp = os.path.join(dirpath, name)
+                try:
+                    sized.append((os.path.getsize(fp), fp))
+                except OSError:
+                    continue
+        sized.sort(key=lambda r: r[0], reverse=True)
+        for bytes_size, fp in sized[:5]:
             top_files.append({
-                "name": os.path.basename(fpath),
-                "path": fpath,
-                "size_mb": round(size_mb, 2),
+                "name": os.path.basename(fp),
+                "path": fp,
+                "size_mb": round(bytes_size / (1024.0 * 1024.0), 2),
             })
-    if not top_files:
-        # Fallback: walk + sort in Python (works when du is unavailable).
-        try:
-            sized = []
-            for dirpath, _dirs, files in os.walk(runtime_root):
-                for name in files:
-                    fp = os.path.join(dirpath, name)
-                    try:
-                        sized.append((os.path.getsize(fp), fp))
-                    except OSError:
-                        continue
-            sized.sort(key=lambda r: r[0], reverse=True)
-            for bytes_size, fp in sized[:5]:
-                top_files.append({
-                    "name": os.path.basename(fp),
-                    "path": fp,
-                    "size_mb": round(bytes_size / (1024.0 * 1024.0), 2),
-                })
-        except Exception as exc:
-            logger.warning("[DATA SIZE] os.walk top-files failed: %s", exc)
+    except Exception as exc:
+        logger.warning("[DATA SIZE] os.walk top-files failed: %s", exc)
 
     # Line counts for the key research evidence files. Use wc -l when present,
     # fall back to Python counting so the endpoint still works on hosts
@@ -32637,16 +32594,22 @@ def _write_data_sync_ack(payload: dict) -> None:
     os.replace(tmp, target)
 
 
-def _prune_acknowledged_rotations(acks: dict) -> list:
+def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = None) -> list:
     """Delete only fully acknowledged, old closed rotation files.
 
-    Active files and the two highest/newest numeric rotations are never
-    touched. Unacknowledged evidence is never deleted, even under disk
-    pressure. Rotation generations increase monotonically and may contain
-    gaps after retention, so ``.1``/``.2`` are not necessarily the newest.
+    Active files and the newest numeric rotations are never touched.
+    Unacknowledged evidence is never deleted, even under disk pressure.
+    Rotation generations increase monotonically and may contain gaps after
+    retention, so ``.1``/``.2`` are not necessarily the newest.
+
+    Under volume pressure (used_pct ≥ 70), keep only the single newest
+    acknowledged rotation per family and shorten the age cutoff so Fly stays
+    below the 1 GB hard limit — still never deletes active/open files.
     """
     removed = []
-    cutoff = time.time() - (24 * 3600)
+    keep_newest = 1 if (volume_used_pct is not None and volume_used_pct >= 70.0) else 2
+    age_hours = 1 if (volume_used_pct is not None and volume_used_pct >= 70.0) else 24
+    cutoff = time.time() - (age_hours * 3600)
     newest_by_family = {}
     for rel, ack in list((acks or {}).items()):
         rotation = _data_sync_rotation_parts(rel)
@@ -32656,8 +32619,8 @@ def _prune_acknowledged_rotations(acks: dict) -> list:
             path = _data_sync_resolve_relpath(rel)
             base_name, rotation_index = rotation
             family_key = (path.parent, base_name)
-            newest_two = newest_by_family.get(family_key)
-            if newest_two is None:
+            newest_kept = newest_by_family.get(family_key)
+            if newest_kept is None:
                 generations = []
                 for sibling in path.parent.iterdir():
                     sibling_rotation = _data_sync_rotation_parts(sibling.name)
@@ -32667,9 +32630,9 @@ def _prune_acknowledged_rotations(acks: dict) -> list:
                         and _data_sync_path_allowed(sibling)
                     ):
                         generations.append(sibling_rotation[1])
-                newest_two = frozenset(sorted(generations)[-2:])
-                newest_by_family[family_key] = newest_two
-            if rotation_index in newest_two:
+                newest_kept = frozenset(sorted(generations)[-keep_newest:])
+                newest_by_family[family_key] = newest_kept
+            if rotation_index in newest_kept:
                 continue
             stat = path.stat()
             if (
@@ -32769,12 +32732,21 @@ def api_data_sync_ack():
             }
             accepted += 1
     _write_data_sync_ack(acks)
-    removed = _prune_acknowledged_rotations(acks)
+    try:
+        usage = shutil.disk_usage(_data_sync_volume_root())
+        volume_used_pct = round((usage.used / usage.total) * 100, 2) if usage.total else None
+    except OSError:
+        volume_used_pct = None
+    removed = _prune_acknowledged_rotations(acks, volume_used_pct=volume_used_pct)
     return jsonify({
         "ok": True,
         "accepted": accepted,
         "removed_acknowledged_rotations": removed,
-        "policy": "acknowledged rotations older than 24h are pruned except the two newest generations; active/unacked files retained",
+        "volume_used_pct": volume_used_pct,
+        "policy": (
+            "acknowledged rotations older than the age cutoff are pruned except the newest "
+            "kept generations (2 normally, 1 when volume ≥70%); active/unacked files retained"
+        ),
     })
 
 

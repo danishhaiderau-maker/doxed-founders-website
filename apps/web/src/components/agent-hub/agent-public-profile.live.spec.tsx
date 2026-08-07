@@ -395,12 +395,12 @@ test('showcase reports a healthy REST fallback and renders canonical AI decision
   assert.match(html, /Fly bot online · REST price fallback/);
   assert.match(html, /AI Approved/);
   assert.match(html, /Shared direction approved LONG/);
-  assert.match(html, /Approved candidate · waiting in virtual chase/);
-  assert.match(html, /Raw AI gap 30\/100 · execution bucket 3/);
-  assert.match(html, /Entry buckets selected: 3, 4/);
-  assert.match(html, /not yet a resting Bitfinex order/);
-  assert.match(html, /Fly.io is the sole AI, strategy, and trading owner/);
+  assert.match(html, /Latest reasoning/);
+  assert.match(html, /Fly\.io is the sole AI, strategy, and trading owner/);
   assert.equal(html.includes('Home PC command center'), false);
   assert.equal(html.includes('30% confidence'), false);
-  assert.equal(html.includes('No AI decisions yet this session.'), false);
+  assert.equal(html.includes('Last 5 AI decisions in detail'), false);
+  assert.equal(html.includes('Latest direction evaluation'), false);
+  assert.equal(html.includes('Performance · 30D'), false);
+  assert.equal(html.includes('Trade journey'), false);
 });

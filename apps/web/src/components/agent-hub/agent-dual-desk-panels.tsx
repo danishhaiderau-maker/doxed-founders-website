@@ -2,7 +2,6 @@
 
 import Link from 'next/link';
 import type { TradingAgentDashboardState } from '@dcf/utils';
-import { AgentTradeJourney } from '@/components/agent-hub/agent-trade-journey';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import {
   AgentTransparencyTables,
@@ -176,12 +175,6 @@ export function AgentDeskView({
           </div>
         ) : null}
         <AgentTransparencyTables liveBook={book} maxRows={5} executionOnly={executionOnly} />
-        <AgentTradeJourney
-          activity={showcaseActivity}
-          liveBook={book}
-          layout="horizontal"
-          windowMinutes={30}
-        />
       </DeskPanel>
     );
   }

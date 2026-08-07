@@ -249,12 +249,13 @@ export function AgentAdminShowcaseControl({
   const [execBusy, setExecBusy] = useState(false);
   const [flatBusy, setFlatBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
-  const [launcherOnline, setLauncherOnline] = useState<boolean | null>(null);
   const [status, setStatus] = useState<HomeStatus | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [startSteps, setStartSteps] = useState<string | null>(null);
   const [serverUplinkOnline, setServerUplinkOnline] = useState<boolean | null>(null);
   const [flyDirectProbe, setFlyDirectProbe] = useState<boolean | null>(null);
+  const [analyzerMirrorStatus, setAnalyzerMirrorStatus] = useState<FlyStatus>('unreachable');
+  const [analyzerMirrorSub, setAnalyzerMirrorSub] = useState('Fly uploaded research mirror');
 
   const flyStatus = resolveFlyStatus(flyReachable, flyDirectProbe);
   const feedStatus = resolveFeedStatus(botConnected, serverUplinkOnline, flyReachable);
@@ -266,15 +267,6 @@ export function AgentAdminShowcaseControl({
   const analyzerDash = status?.analyzer?.dashboard ?? `http://127.0.0.1:${analyzerPort}/`;
 
   const refreshStatus = useCallback(async () => {
-    let bridgeOk = false;
-    try {
-      const healthRes = await fetch(`${LAUNCHER}/health`, { signal: AbortSignal.timeout(8000) });
-      bridgeOk = healthRes.ok;
-    } catch {
-      bridgeOk = false;
-    }
-    setLauncherOnline(bridgeOk);
-
     try {
       const res = await fetch(`${LAUNCHER}/status`, { signal: AbortSignal.timeout(15000) });
       if (!res.ok) {
@@ -295,8 +287,8 @@ export function AgentAdminShowcaseControl({
     return () => clearInterval(t);
   }, [refreshStatus]);
 
-  // Server-side signed-feed reachability. `botConnected` proves the platform has
-  // a canonical snapshot; it does not by itself prove a direct Fly probe.
+  // Server-side signed-feed reachability + Fly analyzer-mirror freshness.
+  // Desktop :9001/:7002/:7810 are optional local tools and no longer drive status chips.
   useEffect(() => {
     let cancelled = false;
     const probe = async () => {
@@ -311,6 +303,23 @@ export function AgentAdminShowcaseControl({
           // resolveFlyStatus() treat a lone false as "stale" rather than
           // "unreachable" — the exact flap Danish reported.
           setFlyDirectProbe(json.fly === true ? true : json.fly === false ? false : null);
+          const mirror = json.analyzerMirror;
+          if (mirror?.status === 'online' || mirror?.status === 'stale' || mirror?.status === 'unreachable') {
+            setAnalyzerMirrorStatus(mirror.status);
+          } else {
+            setAnalyzerMirrorStatus('unreachable');
+          }
+          if (mirror?.available && mirror.uploadedAt) {
+            const age =
+              typeof mirror.ageSec === 'number'
+                ? mirror.ageSec < 3600
+                  ? `${Math.round(mirror.ageSec / 60)}m ago`
+                  : `${(mirror.ageSec / 3600).toFixed(1)}h ago`
+                : 'uploaded';
+            setAnalyzerMirrorSub(`Fly mirror · ${age}`);
+          } else {
+            setAnalyzerMirrorSub('Fly uploaded research mirror');
+          }
         }
       } catch {
         // leave as-is; client-side probe remains a secondary fallback
@@ -374,7 +383,6 @@ export function AgentAdminShowcaseControl({
           ? 'Browser blocked localhost — run RESTART-LAUNCHER.cmd on this PC, then hard-refresh this page.'
           : 'Bridge offline — double-click RESTART-LAUNCHER.cmd or RECOVER-GLOBAL-STACK.cmd in the repo folder.';
       setMsg(hint);
-      setLauncherOnline(bridgeAlive);
     } finally {
       setBusy(null);
     }
@@ -445,14 +453,9 @@ export function AgentAdminShowcaseControl({
       </p>
       <p className="mt-1 text-xs text-zinc-400">
         <strong className="text-sky-300">Fly.io is the sole AI, strategy, and trading owner.</strong>{' '}
-        This PC is observability only: <strong>:{botPort}</strong> proxies the Fly dashboard,{' '}
-        <strong>:{analyzerPort}</strong> analyzes synchronized Fly research data, and <strong>:7810</strong>{' '}
-        controls those desktop tools. The Agent Hub and Bitfinex relay receive signed Fly lifecycle events
-        through the platform API; the desktop mirror cannot place an independent trade. Open{' '}
-        <a href="https://doxxedcrypto.digital/agent-hub/conservative-btc" className="text-violet-300 hover:underline">
-          Agent Hub
-        </a>{' '}
-        on this PC to use the local controls. Platform feed:{' '}
+        The Agent Hub and Bitfinex relay receive signed Fly lifecycle events through the platform API.
+        Research analytics come from the Fly analyzer mirror (uploaded from the desktop analyzer when this
+        PC is online). Platform feed:{' '}
         {botConnected ? (
           <span className="text-emerald-400">online</span>
         ) : (
@@ -461,44 +464,22 @@ export function AgentAdminShowcaseControl({
         .
       </p>
 
-      {launcherOnline === false && (
-        <p className="mt-2 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2 text-xs text-zinc-400">
-          Optional local control bridge :7810 is offline. This affects only the PC analyzer/mirror controls;
-          Fly trading and its server-side risk manager continue independently. Start{' '}
-          <code className="text-zinc-300">RESTART-LAUNCHER.cmd</code> only when local research tools are needed.
-        </p>
-      )}
-
       <div className="mt-3 rounded-lg border border-zinc-700/80 bg-zinc-950/50 px-3 py-2.5 text-xs text-zinc-300">
         <p className="font-semibold text-zinc-200">Desktop observability (optional)</p>
         <p className="mt-1.5 text-zinc-400">
-          <strong className="text-zinc-300">Start local analyzer &amp; mirror</strong> starts the Fly dashboard proxy, bounded data
-          synchronization, and analyzer. <strong className="text-zinc-300">Stop local analyzer &amp; mirror</strong> stops only
-          those local viewers. The production bot keeps running on Fly when this PC is off.
-        </p>
-        <p className="mt-2 text-[10px] text-zinc-500">
-          Desktop :7002 and :9001 being offline does not mean the Fly bot is offline. Use the Fly/Agent Hub feed
-          indicators below for production health.
+          <strong className="text-zinc-300">Start local analyzer &amp; mirror</strong> syncs Fly research
+          data and publishes the analyzer report to Fly. <strong className="text-zinc-300">Stop local analyzer &amp; mirror</strong>{' '}
+          stops only those local tools. Production trading continues on Fly when this PC is off.
         </p>
       </div>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
         <FlyStatusChip label="Fly strategy/trading owner" status={flyStatus} sub={FLY_BOT_URL} />
         <FlyStatusChip label="Agent Hub signed feed" status={feedStatus} sub="Fly → platform API" />
-        <StatusChip
-          label={`Desktop Fly proxy :${botPort}`}
-          ok={Boolean(status?.bot?.online)}
-          sub="Viewer only · no AI or execution"
-        />
-        <StatusChip
-          label={`Desktop analyzer :${analyzerPort}`}
-          ok={Boolean(status?.analyzer?.online)}
-          sub="Reads synchronized Fly data"
-        />
-        <StatusChip
-          label="Optional local control :7810"
-          ok={launcherOnline === true}
-          sub="Offline is safe; Fly remains active"
+        <FlyStatusChip
+          label="Analyzer mirror"
+          status={analyzerMirrorStatus}
+          sub={analyzerMirrorSub}
         />
       </div>
 
@@ -612,7 +593,7 @@ export function AgentAdminShowcaseControl({
 
       <p className="mt-2 text-[10px] text-zinc-600">
         Production path: Fly strategy owner → signed lifecycle events/snapshots → platform relay → Bitfinex.
-        Desktop :7002/:9001 are optional monitoring tools and never health evidence for production.
+        Analyzer mirror status reflects Fly&apos;s uploaded research report freshness (not localhost :9001).
       </p>
 
       {status?.analyzer?.note && (
@@ -620,43 +601,6 @@ export function AgentAdminShowcaseControl({
       )}
 
       {msg && <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-amber-200/90">{msg}</pre>}
-    </div>
-  );
-}
-
-function StatusChip({
-  label,
-  ok,
-  hidden,
-  sub,
-  inactiveLabel,
-}: {
-  label: string;
-  ok: boolean;
-  hidden?: boolean;
-  sub?: string;
-  inactiveLabel?: string;
-}) {
-  if (hidden) return null;
-  return (
-    <div
-      className={`flex flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-[11px] ${
-        ok ? 'border-emerald-500/40 text-emerald-300' : 'border-zinc-700 text-zinc-500'
-      }`}
-    >
-      <div className="flex items-center gap-2">
-        <span
-          className={`inline-block h-2.5 w-2.5 shrink-0 rounded-full ${
-            ok ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 'bg-zinc-600'
-          }`}
-          title={ok ? 'online' : 'offline'}
-          aria-hidden
-        />
-        <span>
-          {label}: <strong>{ok ? 'online' : (inactiveLabel ?? 'offline')}</strong>
-        </span>
-      </div>
-      {sub && <span className="truncate pl-4 text-[9px] text-zinc-600">{sub}</span>}
     </div>
   );
 }

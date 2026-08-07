@@ -68,6 +68,10 @@ sync_loop = text("sync-fly-bot-data-loop.ps1")
 assert "Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl" in sync_loop
 assert "$env:BOT_ADMIN_TOKEN" in sync_loop
 assert 'Set-Item -Path ("env:" + $matches[1].Trim())' not in sync_loop
+assert "FLY_VOLUME_SYNC_THRESHOLD_MB" in sync_loop
+assert "below_threshold" in sync_loop
+assert "size -le 50MB" not in sync_loop
+assert "Incremental chunk sync already" in sync_loop
 assert "AI" not in text("fly-dashboard-proxy.py").replace(
     "contains no strategy, exchange, or AI code", ""
 )

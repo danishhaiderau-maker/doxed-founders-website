@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   isFreshBotSnapshot,
   probePublicBotHealth,
+  summarizeAnalyzerMirrorHealth,
   summarizeCanonicalBotHealth,
   type ProbeFetch,
 } from './public-bot-health-probe';
@@ -89,4 +90,42 @@ test('canonical health accepts only the exact Fly probe or a fresh authenticated
   assert.equal(fly.ok, true);
   assert.equal(fly.fly, true);
   assert.equal(fly.source, 'fly-direct');
+});
+
+test('analyzer mirror online only when Fly mirror is present and fresh', () => {
+  const now = Date.parse('2026-08-07T16:50:00.000Z');
+  const online = summarizeAnalyzerMirrorHealth(
+    {
+      ok: false,
+      mirror_available: true,
+      mirror_status: {
+        uploaded_at: '2026-08-07T12:57:45.423Z',
+        size: 5774,
+      },
+      source: 'Fly trading owner + uploaded desktop analyzer mirror',
+    },
+    now,
+  );
+  assert.equal(online.status, 'online');
+  assert.equal(online.available, true);
+  assert.equal(online.fresh, true);
+
+  const stale = summarizeAnalyzerMirrorHealth(
+    {
+      mirror_available: true,
+      mirror_status: { uploaded_at: '2026-08-01T12:00:00.000Z', size: 100 },
+    },
+    now,
+  );
+  assert.equal(stale.status, 'stale');
+  assert.equal(stale.fresh, false);
+
+  const missing = summarizeAnalyzerMirrorHealth(
+    { ok: false, mirror_available: false, mode: 'external_desktop_analyzer' },
+    now,
+  );
+  assert.equal(missing.status, 'unreachable');
+  assert.equal(missing.available, false);
+
+  assert.equal(summarizeAnalyzerMirrorHealth(null, now).status, 'unreachable');
 });

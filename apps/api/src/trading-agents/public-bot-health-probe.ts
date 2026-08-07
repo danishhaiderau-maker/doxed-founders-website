@@ -14,7 +14,90 @@ export type CanonicalBotHealth = {
   botConnected: boolean;
   source: 'fly-direct' | 'signed-snapshot-cache' | 'stale-signed-snapshot' | 'unreachable';
   error?: string;
+  /** Fly-hosted analyzer report mirror (uploaded via /api/data-sync/analyzer-report). */
+  analyzerMirror?: AnalyzerMirrorHealth;
 };
+
+/** Freshness window for the uploaded Fly analyzer mirror (research, not live trading). */
+export const ANALYZER_MIRROR_FRESH_MAX_AGE_SEC = 24 * 60 * 60;
+
+export type AnalyzerMirrorHealth = {
+  available: boolean;
+  fresh: boolean;
+  /** online = mirror present and within freshness window; stale = present but old; unreachable = no mirror. */
+  status: 'online' | 'stale' | 'unreachable';
+  uploadedAt?: string | null;
+  ageSec?: number | null;
+  size?: number | null;
+  source?: string;
+};
+
+/**
+ * Derive analyzer-mirror chip state from Fly `/api/analyzer/summary` external payload.
+ * Never invents online without a real uploaded mirror (mirror_available + uploaded_at).
+ */
+export function summarizeAnalyzerMirrorHealth(
+  summary: Record<string, unknown> | null,
+  nowMs = Date.now(),
+  maxAgeSec = ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
+): AnalyzerMirrorHealth {
+  if (!summary) {
+    return { available: false, fresh: false, status: 'unreachable' };
+  }
+
+  const mirrorStatus =
+    summary.mirror_status &&
+    typeof summary.mirror_status === 'object' &&
+    !Array.isArray(summary.mirror_status)
+      ? (summary.mirror_status as Record<string, unknown>)
+      : null;
+  const uploadedAt =
+    typeof mirrorStatus?.uploaded_at === 'string'
+      ? mirrorStatus.uploaded_at
+      : typeof summary.uploaded_at === 'string'
+        ? summary.uploaded_at
+        : null;
+  const sizeRaw = mirrorStatus?.size ?? summary.size;
+  const size = typeof sizeRaw === 'number' && Number.isFinite(sizeRaw) ? sizeRaw : null;
+  const available =
+    summary.mirror_available === true ||
+    (typeof size === 'number' && size > 0) ||
+    Boolean(uploadedAt);
+
+  if (!available) {
+    return {
+      available: false,
+      fresh: false,
+      status: 'unreachable',
+      uploadedAt,
+      ageSec: null,
+      size,
+      source:
+        typeof summary.source === 'string'
+          ? summary.source
+          : 'Fly trading owner + uploaded desktop analyzer mirror',
+    };
+  }
+
+  const uploadedMs = uploadedAt ? Date.parse(uploadedAt) : Number.NaN;
+  const ageSec = Number.isFinite(uploadedMs)
+    ? Math.max(0, (nowMs - uploadedMs) / 1_000)
+    : null;
+  const fresh = ageSec != null && ageSec < maxAgeSec;
+
+  return {
+    available: true,
+    fresh,
+    status: fresh ? 'online' : ageSec != null ? 'stale' : 'unreachable',
+    uploadedAt,
+    ageSec: ageSec != null ? Math.round(ageSec) : null,
+    size,
+    source:
+      typeof summary.source === 'string'
+        ? summary.source
+        : 'Fly trading owner + uploaded desktop analyzer mirror',
+  };
+}
 
 type ProbeResponse = {
   ok: boolean;

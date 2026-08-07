@@ -159,7 +159,10 @@ def test_specific_gate_failure_is_not_overwritten_by_order_failed():
 def test_obsolete_confidence_controls_are_not_rendered():
     assert '<div id="aiBandControls"' not in BOT_SOURCE
     assert "<strong>AI execution bands:</strong>" not in BOT_SOURCE
-    assert "<h3>Directional gap analytics</h3>" in BOT_SOURCE
+    # Analytics matrix table removed from dashboard; hard-gate controls remain.
+    assert "<h3>Directional gap analytics</h3>" not in BOT_SOURCE
+    assert "<h3>Directional gap hard-gate</h3>" in BOT_SOURCE
+    assert 'id="pathwayAnalytics"' not in BOT_SOURCE
 
 
 def test_gap_analytics_matches_analyzer_matrix_schema():

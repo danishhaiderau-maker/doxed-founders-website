@@ -45,6 +45,7 @@ import {
 import { normalizeAnalyzerGenomeStatus } from './analyzer-genome-status';
 import {
   probePublicBotHealth,
+  summarizeAnalyzerMirrorHealth,
   summarizeCanonicalBotHealth,
   type CanonicalBotHealth,
 } from './public-bot-health-probe';
@@ -709,13 +710,18 @@ export class TradingAgentsService implements OnModuleInit {
         botConnected: false,
         source: 'unreachable',
         error: 'only conservative-btc',
+        analyzerMirror: { available: false, fresh: false, status: 'unreachable' },
       };
     }
-    const [flyProbe, canonical] = await Promise.all([
+    const [flyProbe, canonical, analyzerSummary] = await Promise.all([
       probePublicBotHealth(CANONICAL_SHOWCASE_BOT_URL),
       this.botBridge.fetchPublicShowcaseState(true).catch(() => null),
+      this.botBridge.fetchAnalyzerSummary().catch(() => null),
     ]);
-    return summarizeCanonicalBotHealth(flyProbe, canonical);
+    return {
+      ...summarizeCanonicalBotHealth(flyProbe, canonical),
+      analyzerMirror: summarizeAnalyzerMirrorHealth(analyzerSummary),
+    };
   }
 
   /** Decision genome from the analyzer (:9001) via bot proxy. */

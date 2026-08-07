@@ -10,10 +10,12 @@ test('Agent Hub describes Fly as sole strategy owner and desktop as mirror/analy
   const api = read('../../lib/api.ts');
 
   assert.match(control, /Fly\.io is the sole AI, strategy, and trading owner/);
-  assert.match(control, /Desktop Fly proxy/);
-  assert.match(control, /Viewer only · no AI or execution/);
+  assert.match(control, /Analyzer mirror/);
+  assert.match(control, /Fly uploaded research mirror/);
   assert.match(control, /path: '\/cmd\/start-mirror'/);
   assert.match(control, /path: '\/cmd\/reset-mirror'/);
+  assert.doesNotMatch(control, /Optional local control :7810/);
+  assert.doesNotMatch(control, /Desktop Fly proxy/);
   assert.match(analyzer, /Fly\.io is the sole AI, strategy, and trading owner/);
   assert.doesNotMatch(control, /Cloudflare|bot\.doxxedcrypto\.digital/);
   assert.doesNotMatch(api, /trading-agents\/conservative-btc\/fly-control/);
