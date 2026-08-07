@@ -4,6 +4,7 @@ import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards';
@@ -74,6 +75,16 @@ import { DeploymentModesModule } from './deployment-modes/deployment-modes.modul
 import { FounderEconomicsModule } from './founder-economics/founder-economics.module';
 import { IntentEngineModule } from './intent-engine/intent-engine.module';
 import { SecondBrainModule } from './second-brain/second-brain.module';
+// Shared rate-limit store so every Railway replica sees the same counter.
+// Without this, @nestjs/throttler keeps an in-memory counter per replica and
+// the effective limit becomes ~N*config (e.g. @Throttle(5/min) -> ~5*N). With
+// Redis backing, increments are atomic across all replicas via a Lua EVAL
+// (see ThrottlerStorageRedisService.getScriptSrc). If REDIS_URL is unset
+// (local dev), fall through to the default in-memory ThrottlerStorage.
+const throttlerRedisUrl = process.env.REDIS_URL;
+const throttlerStorage = throttlerRedisUrl
+  ? new ThrottlerStorageRedisService(throttlerRedisUrl)
+  : undefined;
 
 @Module({
   imports: [
@@ -81,7 +92,10 @@ import { SecondBrainModule } from './second-brain/second-brain.module';
       isGlobal: true,
       envFilePath: ['.env.local', '.env'],
     }),
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
+    ThrottlerModule.forRoot({
+      throttlers: [{ ttl: 60000, limit: 100 }],
+      storage: throttlerStorage,
+    }),
     PrismaModule,
     CredentialsModule,
     PrivacyModule,
