@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-merge: relay executor cure + safety net (QA approved)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
