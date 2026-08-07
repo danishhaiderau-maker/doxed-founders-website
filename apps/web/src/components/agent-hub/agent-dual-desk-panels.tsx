@@ -70,7 +70,7 @@ export function AgentDeskView({
   flyReachable,
   instanceLastError,
   userActivity,
-  showcaseActivity,
+  showcaseActivity: _showcaseActivity,
   slug,
   accessToken,
   signedIn,
