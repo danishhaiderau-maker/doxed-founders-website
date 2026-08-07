@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-feat(security): throttle POST /api/founder-node/pair to 5/min
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
