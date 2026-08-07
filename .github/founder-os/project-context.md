@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(web): make BYOK model counts consistent (5 Free / 10 paid)
+feat(security): throttle POST /api/founder-node/pair to 5/min
 
 ## Last Activity
 
