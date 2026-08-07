@@ -31113,6 +31113,312 @@ def api_close_showcase_position():
     })
 
 
+# ---------------------------------------------------------------------------
+# Cure 2 — Phantom paper position cancellation (Railway-initiated).
+#
+# When Railway's real Bitfinex limit MISSES but Fly paper "filled", Fly is
+# left holding a phantom paper position that corrupts its strategy state:
+#   - It consumes capacity (MAX_ACTIVE_SIGNALS / CLUSTER_ENTRY) and can
+#     block fresh entries.
+#   - It skews session PnL / win-rate / analytics.
+#   - Fly keeps emitting exits for the phantom; Railway's real account has
+#     nothing to mirror.
+#
+# This admin-only endpoint lets Railway cancel the phantom cleanly without
+# touching real Bitfinex money. It is the symmetric counterpart of
+# /api/positions/close but with two important differences:
+#   1. Zero-PnL accounting — the paper fill never corresponded to a real
+#      fill, so we record a synthetic $0 outcome tagged
+#      PHANTOM_CANCEL_BY_RELAY (not the close_position fee/PnL math).
+#   2. No Bitfinex reduce-only attempt — there is no real position to close.
+#
+# Auth: the global _emergency_api_guard before_request hook already rejects
+# any unauthenticated POST with 401, so this endpoint inherits the
+# X-Bot-Admin-Token gate (same pattern as /api/pause, /api/positions/close,
+# /api/reset). No extra in-handler auth is needed.
+# ---------------------------------------------------------------------------
+
+PHANTOM_CANCEL_REASON = "PHANTOM_CANCEL_BY_RELAY"
+PHANTOM_CANCEL_MAX_BODY_LEN = 4096
+
+
+@app.route('/api/reconcile/phantom-cancel', methods=['POST'])
+def api_reconcile_phantom_cancel():
+    """Cancel a phantom paper position left behind by a MISSED_SHOWCASE_FILL.
+
+    Body:
+      {
+        "trade_id": "<cont-...>",          # required
+        "reason":   "<human-readable>"      # optional, audited
+      }
+
+    Idempotent: a second call for a trade_id that is already CLOSED returns
+    200 with ``already_cancelled=true`` and does NOT double-write the trade
+    outcome or re-emit the relay event.
+    """
+    raw_body = request.get_data(as_text=True) or ""
+    if len(raw_body) > PHANTOM_CANCEL_MAX_BODY_LEN:
+        return (
+            jsonify({"error": "request body too large", "max_len": PHANTOM_CANCEL_MAX_BODY_LEN}),
+            413,
+        )
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    caller_reason = str(body.get("reason") or "").strip()[:200]
+
+    # Snapshot search under state_lock (consistent read of open_positions).
+    with state_lock:
+        matches = [
+            pos for pos in open_positions
+            if str(pos.get("trade_id") or "") == trade_id
+        ]
+        already_closed = [
+            pos for pos in matches
+            if pos.get("status") == "CLOSED"
+            or pos.get("exit_reason") == PHANTOM_CANCEL_REASON
+        ]
+        live_matches = [
+            pos for pos in matches
+            if pos.get("status") != "CLOSED"
+            and pos.get("exit_reason") != PHANTOM_CANCEL_REASON
+        ]
+        # Idempotency case 1 — the position exists but is already cancelled
+        # by a prior phantom-cancel call. Return ok without re-writing.
+        if not live_matches and already_closed:
+            logger.info(
+                "[ADMIN] Phantom-cancel idempotent skip trade_id=%s (already cancelled)",
+                trade_id,
+            )
+            return jsonify({
+                "ok": True,
+                "already_cancelled": True,
+                "cancelled_trade_id": trade_id,
+                "timestamp": utc_iso(),
+            })
+
+    if not live_matches:
+        # Idempotency case 2 — trade_id is not in open_positions at all.
+        # Could be: (a) already rotated out of the in-memory list, or
+        # (b) never existed. Either way, return ok so Railway's caller is
+        # not blocked by a stale state on Fly. Audit the not-found.
+        logger.warning(
+            "[ADMIN] Phantom-cancel no-op trade_id=%s not in open_positions "
+            "(caller_reason=%s) — returning ok for idempotency",
+            trade_id,
+            caller_reason or "<none>",
+        )
+        return jsonify({
+            "ok": True,
+            "already_cancelled": True,
+            "cancelled_trade_id": trade_id,
+            "note": "trade_id not currently open; treated as already cancelled",
+            "timestamp": utc_iso(),
+        })
+
+    if len(live_matches) > 1:
+        # Defensive — should never happen (trade_id is unique), but refuse
+        # to operate on an ambiguous state rather than risk double-accounting.
+        logger.error(
+            "[ADMIN] Phantom-cancel refused ambiguous trade_id=%s matches=%s",
+            trade_id,
+            len(live_matches),
+        )
+        return (
+            jsonify({
+                "error": "ambiguous open position",
+                "trade_id": trade_id,
+                "matches": len(live_matches),
+            }),
+            409,
+        )
+
+    pos = live_matches[0]
+
+    # Validation guard: refuse to cancel a position that has any marker of a
+    # real Bitfinex fill against it. The paper bot does not currently track
+    # real fills per position (no bitfinex_real_fill flag), so we use the
+    # best-available proxies: explicit bitfinex_position_id / bitfinex_live_entry
+    # markers (set when /api/bitfinex_live arms live mode for this trade).
+    # If real-fill tracking is added later, this guard should consult it.
+    has_real_marker = bool(
+        pos.get("bitfinex_position_id")
+        or pos.get("bitfinex_live_entry")
+        or pos.get("real_fill_recorded")
+    )
+    if has_real_marker:
+        logger.error(
+            "[ADMIN] Phantom-cancel REFUSED trade_id=%s — position has a real "
+            "Bitfinex marker (bitfinex_position_id=%s, bitfinex_live_entry=%s, "
+            "real_fill_recorded=%s); cancelling would orphan real money",
+            trade_id,
+            pos.get("bitfinex_position_id"),
+            pos.get("bitfinex_live_entry"),
+            pos.get("real_fill_recorded"),
+        )
+        return (
+            jsonify({
+                "error": "refused: position has a real Bitfinex fill marker",
+                "trade_id": trade_id,
+                "bitfinex_position_id": pos.get("bitfinex_position_id"),
+                "bitfinex_live_entry": pos.get("bitfinex_live_entry"),
+                "real_fill_recorded": pos.get("real_fill_recorded"),
+            }),
+            409,
+        )
+
+    # ---- Perform the cancellation --------------------------------------
+    # Use position_close_lock (same as close_position) so we cannot race a
+    # simultaneous strategy-driven close on the same dict. The dict mutation
+    # itself is tiny; the lock serializes concurrent claimants.
+    cancel_ts = time.time()
+    cancel_iso = utc_iso()
+    cancel_mel = _format_melbourne_hm(cancel_iso)
+    entry_price = float(pos.get("entry") or 0.0)
+    direction = str(pos.get("dir") or "UNKNOWN")
+    qty = float(pos.get("qty") or 0.0)
+    margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
+    research_lane = pos.get("research_lane")
+
+    with position_close_lock:
+        # Re-validate under the close lock — a concurrent close_position may
+        # have already terminalized this pos while we were waiting.
+        if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+            logger.info(
+                "[ADMIN] Phantom-cancel late skip trade_id=%s (closed under lock)",
+                trade_id,
+            )
+            return jsonify({
+                "ok": True,
+                "already_cancelled": True,
+                "cancelled_trade_id": trade_id,
+                "timestamp": cancel_iso,
+            })
+        pos["_close_in_progress"] = True
+
+        # Zero-PnL synthetic outcome row. We deliberately do NOT call the
+        # full close_position() path because that path accrues funding, fees,
+        # and attempts a Bitfinex reduce-only close — none of which apply to
+        # a phantom paper position.
+        trade_row = {
+            "ts": cancel_iso,
+            "close_ts": cancel_iso,
+            "ts_melbourne": cancel_mel,
+            "close_ts_melbourne": cancel_mel,
+            "trade_id": trade_id,
+            "dir": direction,
+            "entry": entry_price,
+            "exit": entry_price,  # $0 PnL → exit == entry
+            "dur_min": (cancel_ts - float(pos.get("entry_ts") or cancel_ts)) / 60,
+            "pnl": 0.0,
+            "margin_usdt": margin_usdt,
+            "net_pnl_usd": 0.0,
+            "gross_pnl_usd": 0.0,
+            "trading_fees_usd": 0.0,
+            "fees_usd": 0.0,
+            "funding_fees_usd": 0.0,
+            "total_cost_usd": 0.0,
+            "exit_reason": PHANTOM_CANCEL_REASON,
+            "phantom_cancel": True,
+            "phantom_cancel_caller_reason": caller_reason or None,
+            "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
+            "r_multiple": 0.0,
+            "outcome_exit_reason": PHANTOM_CANCEL_REASON,
+            "outcome_net_pnl_usd": 0.0,
+            "outcome_pnl_pct": 0.0,
+            "execution_qty": qty,
+            "final_direction": direction,
+            "strategy": pos.get("strategy_birth", "PHANTOM"),
+            "regime": pos.get("signal_regime", state.get("regime", "UNKNOWN")),
+        }
+
+        # Mark the position CLOSED and release lane capacity.
+        pos["status"] = "CLOSED"
+        pos["exit_reason"] = PHANTOM_CANCEL_REASON
+        pos["phantom_cancelled"] = True
+        pos["phantom_cancel_ts"] = cancel_iso
+        lane_unregister_open_position(pos)
+
+        # Append to trades list + persist.
+        trades.append(trade_row)
+        try:
+            log_trade_outcome_jsonl(trade_row, pos)
+        except Exception as exc:  # pragma: no cover — best-effort audit
+            logger.warning("[ADMIN] Phantom-cancel outcome jsonl failed trade_id=%s: %s", trade_id, exc)
+
+        # Update the master signal_ref so reconcile_stale_signals sees it as
+        # terminal (mirrors close_position's master.update block).
+        master_entry = trades_map.get(trade_id)
+        if master_entry:
+            master = master_entry.get("signal_ref")
+            if isinstance(master, dict):
+                master.update({
+                    "status": "CLOSED",
+                    "exit_reason": PHANTOM_CANCEL_REASON,
+                    "outcome": "PHANTOM",
+                    "closed_ts": cancel_ts,
+                    "expires_ts": cancel_ts - 1,
+                })
+
+    # ---- Outside the close lock: persistence + relay + audit -----------
+    persist_signal_close(trade_id, "CLOSED")
+    save_positions()
+    save_persistent_config()
+
+    # Refresh the cached /api/state snapshot so Railway's next /api/state
+    # poll reflects the cancellation immediately (otherwise the stale cache
+    # can show the phantom OPEN for up to API_STATE_REFRESH_INTERVAL_SEC).
+    with trade_lock:
+        paper_orders = copy.deepcopy(pending_orders)
+        paper_positions = copy.deepcopy(open_positions)
+        paper_trades = copy.deepcopy(trades[-50:])
+    _patch_api_state_cache_fields(
+        orders=paper_orders,
+        positions=paper_positions,
+        trades=paper_trades,
+    )
+
+    # Emit a POSITION_CLOSED relay event so any downstream subscriber that
+    # mirrors Fly's paper state (the dashboard, type-b research) learns the
+    # trade is no longer open. Use the same channel as close_position.
+    _push_showcase_relay_event(
+        "POSITION_CLOSED",
+        trade_id,
+        {
+            "exit_reason": PHANTOM_CANCEL_REASON,
+            "direction": direction,
+            "exit_price": entry_price,
+            "research_lane": research_lane,
+            "phantom_cancel": True,
+            "caller_reason": caller_reason or None,
+        },
+    )
+
+    # Clear pending_trade_id if the phantom happened to be the active one.
+    with state_lock:
+        if state.get("pending_trade_id") == trade_id:
+            state["pending_trade_id"] = None
+
+    logger.warning(
+        "[ADMIN] Phantom paper position cancelled trade_id=%s dir=%s entry=%s "
+        "qty=%s caller_reason=%s [PAPER ONLY — no Bitfinex action]",
+        trade_id,
+        direction,
+        entry_price,
+        qty,
+        caller_reason or "<none>",
+    )
+
+    return jsonify({
+        "ok": True,
+        "cancelled_trade_id": trade_id,
+        "exit_reason": PHANTOM_CANCEL_REASON,
+        "timestamp": cancel_iso,
+        "scope": "showcase_paper_only",
+    })
+
+
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
     with state_lock:

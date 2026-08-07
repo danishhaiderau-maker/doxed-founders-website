@@ -49,6 +49,10 @@ import {
   isFreshExactFidelityReconcile,
   liveRelayFidelityObservation,
   LIVE_FIDELITY_GUARD_THRESHOLD_PCT,
+  resolveShowcaseRelinkForRealFill,
+  SHOWCASE_RELINK_PRICE_BAND_PCT,
+  SHOWCASE_RELINK_TIME_WINDOW_MS,
+  resolveShowcaseMirrorTradeIdFromInputs,
 } from './signal-subscriber-execution.service';
 
 test('live fidelity guard needs three fresh low observations spanning at least 90 seconds', () => {
@@ -1869,6 +1873,321 @@ test('reads a signed showcase close without another canonical-state fetch', () =
         showcase_event: 'POSITION_CLOSED',
       },
     }),
+    null,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cure 1 — cycle.tradeId desync re-link helper (pure function tests).
+// Mirrors the cont-de8f316fd3c0 production incident: a real fill that landed
+// on a different showcase signal than the cycle was tracking.
+// ---------------------------------------------------------------------------
+
+test('resolveShowcaseRelinkForRealFill: normal case (fill matches own cycle) returns null — no orphan', () => {
+  // Cycle A tracks cont-A. Real fill price matches cont-A's showcase entry
+  // exactly. No re-link should occur.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-7805cc21c534',
+        entry: 65_016,
+        dir: 'LONG',
+        entry_ts: now / 1000,
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.equal(res, null);
+});
+
+test('resolveShowcaseRelinkForRealFill: tonight\'s case (fill matches a DIFFERENT signal) returns the new trade', () => {
+  // Cycle A tracks cont-7805cc21c534. Real fill landed at 65_016 which
+  // matches cont-de8f316fd3c0's showcase entry. Must re-link to cont-de8f316fd3c0.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-7805cc21c534',
+        entry: 64_500, // different price — does NOT match the real fill
+        dir: 'LONG',
+        entry_ts: now / 1000 - 60,
+      },
+      {
+        trade_id: 'cont-de8f316fd3c0',
+        entry: 65_016, // matches real fill exactly
+        dir: 'LONG',
+        entry_ts: now / 1000,
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.ok(res, 'expected a re-link candidate');
+  assert.equal(res!.tradeId, 'cont-de8f316fd3c0');
+  assert.equal(res!.direction, 'LONG');
+  assert.equal(res!.entryPrice, 65_016);
+  assert.ok(res!.priceBandPct < SHOWCASE_RELINK_PRICE_BAND_PCT);
+});
+
+test('resolveShowcaseRelinkForRealFill: true orphan (no showcase position matches) returns null', () => {
+  // Real fill at a price no showcase position has — manual trade, or
+  // showcase already wiped. Must NOT re-link to anything.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-7805cc21c534',
+        entry: 64_500,
+        dir: 'LONG',
+        entry_ts: now / 1000,
+      },
+    ],
+    realFill: { price: 70_000, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.equal(res, null);
+});
+
+test('resolveShowcaseRelinkForRealFill: direction mismatch is rejected', () => {
+  // Showcase has a SHORT position at the fill price; real fill is LONG.
+  // Cannot re-link — opposite sides.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-short',
+        entry: 65_016,
+        dir: 'SHORT',
+        entry_ts: now / 1000,
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.equal(res, null);
+});
+
+test('resolveShowcaseRelinkForRealFill: outside the time window is rejected', () => {
+  // A stale showcase position from hours ago at the same price must not
+  // steal a real fill that just happened.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-stale',
+        entry: 65_016,
+        dir: 'LONG',
+        // 30 minutes ago — outside the 10-minute window.
+        entry_ts: now / 1000 - 30 * 60,
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.equal(res, null);
+});
+
+test('resolveShowcaseRelinkForRealFill: does not steal a trade already claimed by another OPEN participant', () => {
+  // Two real fills, both could match the same showcase trade. The first to
+  // re-link claims it; the second must not double-claim.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-de8f316fd3c0',
+        entry: 65_016,
+        dir: 'LONG',
+        entry_ts: now / 1000,
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+    alreadyRelinkedTo: new Set(['cont-de8f316fd3c0']),
+  });
+  assert.equal(res, null);
+});
+
+test('resolveShowcaseRelinkForRealFill: picks the closest match when multiple candidates are in band', () => {
+  // Two showcase positions at slightly different prices both within the
+  // 0.15% band. The closest one (smallest price band pct) wins.
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-far',
+        entry: 65_080, // ~0.098% off 65_016
+        dir: 'LONG',
+        entry_ts: now / 1000,
+      },
+      {
+        trade_id: 'cont-near',
+        entry: 65_020, // ~0.006% off 65_016
+        dir: 'LONG',
+        entry_ts: now / 1000,
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.ok(res);
+  assert.equal(res!.tradeId, 'cont-near');
+  assert.ok(res!.priceBandPct < 0.01);
+});
+
+test('resolveShowcaseRelinkForRealFill: handles entry_ts in milliseconds too', () => {
+  const now = Date.parse('2026-08-07T22:00:00.000Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [
+      {
+        trade_id: 'cont-ms',
+        entry: 65_016,
+        dir: 'LONG',
+        entry_ts: now, // ms (not seconds)
+      },
+    ],
+    realFill: { price: 65_016, direction: 'LONG' },
+    currentTradeId: 'cont-other',
+    nowMs: now,
+  });
+  assert.ok(res);
+  assert.equal(res!.tradeId, 'cont-ms');
+  assert.ok(res!.timeDeltaMs != null && Math.abs(res!.timeDeltaMs!) < 1000);
+});
+
+test('SHOWCASE_RELINK constants are conservative', () => {
+  // 0.15% band = ~$98 at $65k BTC. Tight enough to avoid cross-matching
+  // nearby signals on normal days, loose enough to absorb maker slippage.
+  assert.ok(SHOWCASE_RELINK_PRICE_BAND_PCT > 0 && SHOWCASE_RELINK_PRICE_BAND_PCT <= 0.5);
+  // 10 minutes — longer than the longest maker fill race (~60s) but shorter
+  // than the cycle TTL (30m) so a stale signal can't claim a fresh fill.
+  assert.ok(SHOWCASE_RELINK_TIME_WINDOW_MS >= 5 * 60 * 1000);
+  assert.ok(SHOWCASE_RELINK_TIME_WINDOW_MS <= 30 * 60 * 1000);
+});
+
+// ---------------------------------------------------------------------------
+// resolveShowcaseMirrorTradeIdFromInputs — regression tests for the
+// cont-de8f316fd3c0 case. A bug here silently orphans real money: the mirror
+// exit machinery keys off this id and never fires if it points at the wrong
+// (stale) showcase signal.
+// ---------------------------------------------------------------------------
+
+test('resolveShowcaseMirrorTradeIdFromInputs: plain tradeId returns as-is', () => {
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('cont-abc123', null),
+    'cont-abc123',
+  );
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('cont-abc123', 'cont-other'),
+    'cont-abc123',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: null tradeId returns null', () => {
+  assert.equal(resolveShowcaseMirrorTradeIdFromInputs(null, 'x'), null);
+  assert.equal(resolveShowcaseMirrorTradeIdFromInputs(undefined, 'x'), null);
+  assert.equal(resolveShowcaseMirrorTradeIdFromInputs('', 'x'), null);
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: adopt: with no originTradeId parses from string', () => {
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('adopt:cont-origin:1700000000000', null),
+    'cont-origin',
+  );
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('adopt:cont-origin:1700000000000', undefined),
+    'cont-origin',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: adopt: with originTradeId prefers it (Cure 1 re-link target)', () => {
+  // After a Cure 1 re-link on an adopted cycle, originTradeId is the matched
+  // showcase id, NOT the prior origin embedded in the adopt string.
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('adopt:cont-origin:1700000000000', 'cont-matched'),
+    'cont-matched',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: adopt: ignores originTradeId that equals the embedded prior origin (stale)', () => {
+  // Defensive guard — if originTradeId is the same as the embedded prior
+  // origin (i.e. no actual re-link happened), it's stale; fall back to the
+  // string's embedded origin.
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('adopt:cont-origin:1700000000000', 'cont-origin'),
+    'cont-origin',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: relink: parses NEW id from index 2 when originTradeId is missing', () => {
+  // relink:<origin>:<new>:<ts> — the NEW showcase id is at index 2.
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs(
+      'relink:cont-stale:cont-new:1700000000000',
+      null,
+    ),
+    'cont-new',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: CRITICAL regression — stale originTradeId pointing at the PRE-relink origin does NOT win', () => {
+  // This is the cont-de8f316fd3c0 bug. Without the defensive guard, the
+  // stale originTradeId (still pointing at cont-stale) would win and the
+  // mirror exit would watch cont-stale forever — re-creating the orphan.
+  // With the guard, we fall through to the NEW id encoded in the string.
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs(
+      'relink:cont-stale:cont-new:1700000000000',
+      'cont-stale',
+    ),
+    'cont-new',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: relink: with non-stale originTradeId prefers it', () => {
+  // The post-relink originTradeId (loaded from the CYCLE_TRADE_ID_RELINK
+  // event) should be the NEW showcase id; trust it.
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs(
+      'relink:cont-stale:cont-new:1700000000000',
+      'cont-new',
+    ),
+    'cont-new',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: relink: ignores "unknown" placeholder', () => {
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs(
+      'relink:unknown:cont-new:1700000000000',
+      'unknown',
+    ),
+    'cont-new',
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: adopt: malformed returns null safely', () => {
+  assert.equal(resolveShowcaseMirrorTradeIdFromInputs('adopt:', null), null);
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('adopt:unknown', null),
+    null,
+  );
+});
+
+test('resolveShowcaseMirrorTradeIdFromInputs: relink: malformed falls back gracefully', () => {
+  // relink: with no segments — return null.
+  assert.equal(resolveShowcaseMirrorTradeIdFromInputs('relink:', null), null);
+  // relink: with only "unknown" segments — return null.
+  assert.equal(
+    resolveShowcaseMirrorTradeIdFromInputs('relink:unknown:unknown:0', null),
     null,
   );
 });

@@ -31,15 +31,21 @@ export const BITFINEX_COPY_DEFAULT_MARGIN_USD = 20;
 /** Default derivative leverage on Bitfinex orders (lev param required). */
 export const BITFINEX_COPY_DEFAULT_LEVERAGE = 100;
 
-/** Scenario C exits — must match subscriber-exit.ts ladder / thesis / hard stop. */
+/** Scenario C exits — must match subscriber-exit.ts ladder / thesis / hard stop.
+ * Synced 2026-08-08 to bot.py THESIS_MFE_PROTECT_PCT=5.0 and scenario_c_config.py
+ * TRAIL_LADDER_SCENARIO_C (8 rungs, first rung 8→5). */
 export const BITFINEX_COPY_EXIT_RULES = {
   thesisFastCutMarginPct: -12,
-  thesisMfeProtectMarginPct: 2,
+  thesisMfeProtectMarginPct: 5,
   hardStopMarginPct: -18,
   profitLockLadder: [
-    [12, 8],
-    [15, 10],
-    [25, 18],
+    [8, 5],
+    [12, 10],
+    [19, 17],
     [40, 28],
+    [60, 45],
+    [80, 60],
+    [100, 75],
+    [150, 120],
   ] as const,
 } as const;

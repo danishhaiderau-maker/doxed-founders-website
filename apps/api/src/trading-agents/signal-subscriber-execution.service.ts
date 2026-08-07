@@ -35,6 +35,7 @@ import {
   computeLimitChaseTarget,
   computeUnrealizedMarginPct,
   evaluateSubscriberLotExit,
+  evaluateRealSideSafetyNetExit,
   isShowcaseMirrorOnlyMode,
   isNearChaseFillZone,
   sanitizeLimitPrice,
@@ -1502,6 +1503,179 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
   return input.exchangeActiveOrderIds.every((orderId) => ownedOrderIds.has(orderId));
 }
 
+// ---------------------------------------------------------------------------
+// Cure 1 — cycle.tradeId desync repair.
+//
+// Background: a copy limit is placed against showcase signal A. Showcase
+// reports A as MISSED_SHOWCASE_FILL, but the real Bitfinex order either
+// (a) was the dedup mirror-owner for a later/different signal B that reused
+// the same limit price, or (b) raced a fill before cancel. Either way the
+// REAL fill on Bitfinex corresponds to showcase signal B, while the
+// participant's cycle.tradeId still names A. Every mirror-exit path
+// (tryImmediateShowcaseMirrorExit / enforceShowcaseFlatOpenFailsafe /
+// trackShowcaseVanished) keys off cycle.tradeId and never fires for B, so
+// the real position becomes an orphan — exactly the cont-de8f316fd3c0 case.
+//
+// The fix: when a real fill is recorded, look up the active showcase
+// position whose entry price+direction matches the real fill (excluding the
+// cycle's own stale tradeId). If a DIFFERENT showcase trade matches, re-link
+// the cycle to it via a unique `relink:<original>:<new>:<ts>` tradeId and
+// persist `meta.originTradeId = <new>` so resolveShowcaseMirrorTradeId
+// returns the right id. The protective stop / Scenario C math are unchanged.
+// ---------------------------------------------------------------------------
+
+/** Allowed slippage between the real fill and a showcase position's entry
+ *  to consider them the same fill. Same value the showcase bot itself uses
+ *  for book-slippage tolerance. */
+export const SHOWCASE_RELINK_PRICE_BAND_PCT = 0.15;
+/** Real fill must be within this window of the showcase position's entry. */
+export const SHOWCASE_RELINK_TIME_WINDOW_MS = 10 * 60 * 1000;
+
+export type ShowcaseRelinkCandidate = {
+  tradeId: string;
+  entryPrice: number;
+  direction: 'LONG' | 'SHORT';
+  entryMs: number | null;
+  /** How close the showcase entry was to the real fill (percent of price). */
+  priceBandPct: number;
+  /** How close in time (ms). Negative = showcase entered before the real fill. */
+  timeDeltaMs: number | null;
+};
+
+/**
+ * Pure helper. Given the showcase book + a verified real fill, returns the
+ * best matching showcase position — or null if none matches (the cycle is
+ * already correctly attributed, or no showcase position exists for this
+ * fill — the true-orphan case).
+ *
+ * Excludes `currentTradeId` (the cycle's existing stale id) so a re-link
+ * only fires when the real fill maps to a DIFFERENT signal. Also excludes
+ * any tradeId in `alreadyRelinkedTo` (cycles that other OPEN participants
+ * have already claimed via re-link) so two real fills can't both re-link to
+ * the same showcase position.
+ */
+export function resolveShowcaseRelinkForRealFill(input: {
+  showcasePositions: Array<{
+    trade_id?: string;
+    entry?: number;
+    dir?: string;
+    side?: string;
+    entry_ts?: number | string;
+    created_ts?: number | string;
+  }>;
+  realFill: { price: number; direction: 'LONG' | 'SHORT' };
+  currentTradeId: string | null | undefined;
+  nowMs: number;
+  alreadyRelinkedTo?: ReadonlySet<string>;
+  priceBandPct?: number;
+  timeWindowMs?: number;
+}): ShowcaseRelinkCandidate | null {
+  if (!input.realFill.price || input.realFill.price <= 0) return null;
+  const bandPct = input.priceBandPct ?? SHOWCASE_RELINK_PRICE_BAND_PCT;
+  const windowMs = input.timeWindowMs ?? SHOWCASE_RELINK_TIME_WINDOW_MS;
+  const excluded = new Set<string>();
+  if (input.currentTradeId) excluded.add(input.currentTradeId);
+  if (input.alreadyRelinkedTo) for (const t of input.alreadyRelinkedTo) excluded.add(t);
+
+  let best: ShowcaseRelinkCandidate | null = null;
+  for (const pos of input.showcasePositions) {
+    const tid = String(pos.trade_id ?? '').trim();
+    if (!tid || excluded.has(tid)) continue;
+    const entry = Number(pos.entry ?? 0);
+    if (!Number.isFinite(entry) || entry <= 0) continue;
+    const dirRaw = String(pos.dir ?? pos.side ?? '').toUpperCase();
+    const direction: 'LONG' | 'SHORT' | null =
+      dirRaw === 'LONG' || dirRaw === 'BUY'
+        ? 'LONG'
+        : dirRaw === 'SHORT' || dirRaw === 'SELL'
+          ? 'SHORT'
+          : null;
+    if (!direction || direction !== input.realFill.direction) continue;
+
+    const priceBandPct = (Math.abs(entry - input.realFill.price) / entry) * 100;
+    if (priceBandPct > bandPct) continue;
+
+    const rawTs = pos.entry_ts ?? pos.created_ts;
+    const entryMs = rawTs == null ? null : Number(rawTs) > 1e12 ? Number(rawTs) : Number(rawTs) * 1000;
+    let timeDeltaMs: number | null = null;
+    if (entryMs != null && Number.isFinite(entryMs)) {
+      timeDeltaMs = entryMs - input.nowMs;
+      if (Math.abs(timeDeltaMs) > windowMs) continue;
+    }
+
+    const candidate: ShowcaseRelinkCandidate = {
+      tradeId: tid,
+      entryPrice: entry,
+      direction,
+      entryMs,
+      priceBandPct,
+      timeDeltaMs,
+    };
+    if (!best || candidate.priceBandPct < best.priceBandPct) {
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/**
+ * Pure helper — resolve which showcase trade_id a copy cycle should mirror for
+ * exit convergence, given the cycle's (possibly `adopt:`/`relink:`-prefixed)
+ * tradeId and the participant's execution meta.
+ *
+ * Exported so the contract can be unit-tested: a regression here silently
+ * orphans real money (the cont-de8f316fd3c0 case).
+ *
+ * Rules:
+ *   - `adopt:<origin>:<ts>` → watch meta.originTradeId if it is set and NOT
+ *     the embedded prior origin; otherwise parse the prior origin from the
+ *     string. (Adopt cycles are seeded with originTradeId = origin cycle's
+ *     showcase id; a later Cure 1 re-link will overwrite originTradeId with
+ *     the matched showcase id, which is what we want to watch.)
+ *   - `relink:<origin>:<new>:<ts>` → watch meta.originTradeId if it is set
+ *     and NOT equal to the embedded prior origin (otherwise a stale
+ *     originTradeId pointing at the PRE-relink origin would silently defeat
+ *     the re-link — this was a real bug). Otherwise parse the NEW id from
+ *     the string's index 2.
+ *   - Otherwise → return the tradeId as-is.
+ */
+export function resolveShowcaseMirrorTradeIdFromInputs(
+  cycleTradeId: string | null | undefined,
+  originTradeId: string | null | undefined,
+): string | null {
+  const tid = cycleTradeId ?? null;
+  if (!tid) return null;
+  if (tid.startsWith('adopt:')) {
+    const parts = tid.split(':');
+    const embeddedOrigin = parts.length >= 2 ? parts[1] : undefined;
+    if (
+      originTradeId &&
+      originTradeId !== 'unknown' &&
+      originTradeId !== embeddedOrigin
+    ) {
+      return originTradeId;
+    }
+    if (embeddedOrigin && embeddedOrigin !== 'unknown') return embeddedOrigin;
+    return null;
+  }
+  if (tid.startsWith('relink:')) {
+    const parts = tid.split(':');
+    const priorOrigin = parts.length >= 2 ? parts[1] : undefined;
+    const newTrade = parts.length >= 3 ? parts[2] : undefined;
+    if (
+      originTradeId &&
+      originTradeId !== 'unknown' &&
+      originTradeId !== priorOrigin
+    ) {
+      return originTradeId;
+    }
+    if (newTrade && newTrade !== 'unknown') return newTrade;
+    if (priorOrigin && priorOrigin !== 'unknown') return priorOrigin;
+    return null;
+  }
+  return tid;
+}
+
 /**
  * Phase 2 — exit convergence master switch. Default ON (same pattern as
  * MIRROR_CONVERGENCE_ENABLED). When ON in showcase-mirror mode: wide disaster
@@ -1542,6 +1716,50 @@ function exchangeDynamicStopsEnabled(): boolean {
  *  the relay stops attempting replacements for a participant. Reset to 0 on
  *  any successful replace or on the next FILLED event. */
 const STOP_MANAGER_CIRCUIT_THRESHOLD = 3;
+
+/**
+ * Real-side protective safety net (independent of showcase mirror exits).
+ *
+ * Default ON. When ON, every OPEN real Bitfinex lot is re-evaluated each tick
+ * against the SAME Scenario C math the showcase bot uses (THESIS_FAST_CUT /
+ * PROFIT_LOCK ladder / HARD_STOP), computed from the REAL fill price and REAL
+ * mark. If a threshold is breached, the relay market-closes the lot directly —
+ * even when no showcase POSITION_CLOSED ever arrives (the paper/real desync
+ * case that orphaned cont-de8f316fd3c0 on 2026-08-07).
+ *
+ * This does NOT replace the showcase mirror exit path. Profitable showcase
+ * exits still propagate via tryImmediateShowcaseMirrorExit. The safety net is
+ * strictly the last line of defense for real money: it only fires on adverse
+ * moves the showcase mirror path missed.
+ *
+ * Set REAL_SIDE_SAFETY_NET_ENABLED=0 to disable (rollback lever — the relay
+ * reverts to showcase-mirror-only behaviour + the wide MIRROR_DISASTER_STOP).
+ */
+function realSideSafetyNetEnabled(): boolean {
+  const v = (process.env.REAL_SIDE_SAFETY_NET_ENABLED ?? '').trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
+}
+
+/**
+ * The hard-stop margin % used by the real-side safety net. Defaults to the
+ * intent's own stop_loss_margin_pct ceiling (-18), independent of the wider
+ * MIRROR_DISASTER_STOP_MARGIN_PCT. Override per deployment via env if a
+ * tighter floor is required. Negative number.
+ */
+function realSideSafetyNetHardStopMarginPct(intentStopLoss?: number): number {
+  const env = process.env.REAL_SIDE_SAFETY_NET_HARD_STOP_MARGIN_PCT;
+  if (env != null && env.trim() !== '') {
+    const n = Number(env);
+    if (Number.isFinite(n) && n < 0) return n;
+  }
+  // Honour a tighter intent stop if the strategy specified one; -18 is the
+  // canonical showcase default and the historical relay fallback.
+  if (intentStopLoss != null && Number.isFinite(intentStopLoss) && intentStopLoss < 0) {
+    return intentStopLoss;
+  }
+  return -18;
+}
 
 /** Exact-copy entries never use the legacy market catch-up path. */
 function mirrorCatchupEnabled(): boolean {
@@ -5577,7 +5795,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private async recordCancelRaceFill(
     agentId: string,
     userId: string,
-    cycle: { id: string; status: SignalCycleStatus },
+    cycle: { id: string; status: SignalCycleStatus; tradeId?: string | null },
     participantId: string,
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
@@ -5717,6 +5935,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       consecutiveStopFailures: 0,
     });
     this.stopManagerCircuitOpen.delete(participantId);
+
+    // Cure 1 — a real fill that landed on a different showcase signal than
+    // the cycle's own tradeId (mirror-owner-of-duplicate-limit race, or a
+    // chase that crossed at a later signal's price) would orphan the real
+    // position. Re-link the cycle to the showcase signal whose entry
+    // price+direction actually matches the real fill. Best-effort — never
+    // blocks the FILLED recording; safety nets still cover the lot if the
+    // showcase is unreachable or no candidate matches.
+    if (fillPrice > 0 && meta.direction) {
+      try {
+        await this.relinkCycleToShowcaseSignalIfDrifted({
+          agentId,
+          userId,
+          cycle: { id: cycle.id, tradeId: cycle.tradeId ?? null },
+          participantId,
+          realFill: { price: fillPrice, direction: meta.direction },
+          reason: `CANCEL_RACE_FILL/${cancelContext}`,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[CURE-1] relink threw ${userId} cycle=${cycle.id}: ${msg} — safety nets remain active`,
+        );
+      }
+    }
 
     this.cycleAudit.stage('FILLED', {
       userId,
@@ -5997,6 +6240,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
               cancel_attempts: resolution.cancelAttempts,
               cancel_reason: resolution.cancelReason ?? 'unknown',
             },
+          );
+          // Cure 3 — the real Bitfinex limit was confirmed UNFILLED, but Fly
+          // paper may have "filled" the same signal. If so, Fly now holds a
+          // phantom paper position that will corrupt its strategy state
+          // (capacity, PnL, signal generation) and keep emitting exits for a
+          // trade Railway can never mirror. Tell Fly to cancel the phantom.
+          // Best-effort: never blocks the executor; failures are audited.
+          await this.cancelPhantomShowcasePosition(
+            userId,
+            agentId,
+            cycle.id,
+            cycle.tradeId,
+            'MISSED_SHOWCASE_FILL_REAL_UNFILLED',
           );
           return;
         }
@@ -6279,6 +6535,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       filledRecorded: true,
     });
 
+    // Cure 1 — re-link if the real fill maps to a different showcase signal
+    // than the cycle's own tradeId. Best-effort, never blocks FILLED.
+    if (fillPrice > 0 && meta.direction) {
+      try {
+        await this.relinkCycleToShowcaseSignalIfDrifted({
+          agentId,
+          userId,
+          cycle: { id: cycle.id, tradeId: cycle.tradeId ?? null },
+          participantId: participant.id,
+          realFill: { price: fillPrice, direction: meta.direction },
+          reason: 'MONITOR_ENTRY_FILL',
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `[CURE-1] relink threw ${userId} cycle=${cycle.id}: ${msg} — safety nets remain active`,
+        );
+      }
+    }
+
     this.logger.log(
       `Hire fill ${userId} cycle=${cycle.id} @ ${fillPrice.toFixed(2)} qty=${qty} stop=${stopPrice.toFixed(2)} armed=${stopOrderId != null}`,
     );
@@ -6400,6 +6676,32 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       await this.healStuckPendingFill(row.id, row.cycleId, fillPrice);
       gap -= qty;
+
+      // Vigilance / Cure 1 extension — exchange-fill gap reconciliation
+      // attributes a real Bitfinex position slice to an existing
+      // PENDING_ENTRY participant by side+direction, WITHOUT consulting the
+      // showcase book. If the participant's cycle.tradeId points at a stale
+      // showcase signal (mirror-owner-of-duplicate-limit race, like the
+      // cont-de8f316fd3c0 case), the now-OPEN real lot would mirror-exit
+      // against the wrong showcase id. Re-link it to the showcase signal
+      // whose entry price+direction actually matches the real fill.
+      if (fillPrice > 0 && meta.direction) {
+        try {
+          await this.relinkCycleToShowcaseSignalIfDrifted({
+            agentId,
+            userId,
+            cycle: { id: row.cycleId, tradeId: row.cycle.tradeId ?? null },
+            participantId: row.id,
+            realFill: { price: fillPrice, direction: meta.direction },
+            reason: 'EXCHANGE_FILL_RECONCILE',
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.warn(
+            `[CURE-1] exchange-fill-reconcile relink threw ${userId} cycle=${row.cycleId}: ${msg} — safety nets remain active`,
+          );
+        }
+      }
 
       this.logger.log(
         `Reconciled fill ${userId} cycle=${row.cycleId} ${meta.direction} @ ${fillPrice.toFixed(2)} qty=${qty}`,
@@ -7377,14 +7679,227 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     cycle: { tradeId?: string | null },
     meta: ExecutionPayload,
   ): string | null {
-    const tid = cycle.tradeId ?? null;
-    if (tid?.startsWith('adopt:')) {
-      if (meta.originTradeId) return meta.originTradeId;
-      const parts = tid.split(':');
-      if (parts.length >= 2 && parts[1] && parts[1] !== 'unknown') return parts[1];
+    return resolveShowcaseMirrorTradeIdFromInputs(
+      cycle.tradeId ?? null,
+      meta.originTradeId,
+    );
+  }
+
+  /**
+   * Cure 3 — best-effort call to Fly's /api/reconcile/phantom-cancel to
+   * cancel a phantom paper position left behind when Railway's real limit
+   * was confirmed UNFILLED but Fly paper "filled".
+   *
+   * Uses botBridge.proxyBotPost (already adds X-Bot-Admin-Token, retries
+   * across endpoints, 8s timeout). Never throws — Fly being unreachable
+   * must NOT block the executor or stall the tick. Every call (success or
+   * failure) is audit-logged via SignalCycleEvent so ops has a paper trail.
+   *
+   * Idempotency rests on the Fly endpoint (which no-ops an already-cancelled
+   * trade_id), so a retry on the next tick for the same trade is safe.
+   */
+  private async cancelPhantomShowcasePosition(
+    userId: string,
+    agentId: string,
+    cycleId: string,
+    showcaseTradeId: string,
+    reason: string,
+  ): Promise<void> {
+    if (!showcaseTradeId) return;
+    const startedAt = Date.now();
+    let outcome: 'OK' | 'NO_CONTENT' | 'ERROR' = 'ERROR';
+    let httpStatus: number | null = null;
+    let flyMsg: string | undefined;
+    let alreadyCancelled = false;
+    try {
+      const result = await this.botBridge.proxyBotPost('/api/reconcile/phantom-cancel', {
+        trade_id: showcaseTradeId,
+        reason,
+      });
+      httpStatus = typeof result.status === 'number' ? result.status : null;
+      const data = (result.data ?? {}) as Record<string, unknown>;
+      alreadyCancelled = Boolean(data.already_cancelled);
+      if (result.ok) {
+        outcome = alreadyCancelled ? 'NO_CONTENT' : 'OK';
+      } else {
+        flyMsg =
+          typeof data.error === 'string'
+            ? data.error
+            : typeof result.error === 'string'
+              ? result.error
+              : 'unknown fly error';
+      }
+    } catch (err) {
+      flyMsg = err instanceof Error ? err.message : String(err);
+      outcome = 'ERROR';
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    const eventPayload: Record<string, unknown> = {
+      venue: 'bitfinex',
+      source: 'hire',
+      event: 'PHANTOM_CANCEL_RELAY',
+      reason,
+      showcase_trade_id: showcaseTradeId,
+      outcome,
+      http_status: httpStatus,
+      elapsed_ms: elapsedMs,
+      already_cancelled: alreadyCancelled || undefined,
+    };
+    if (flyMsg) eventPayload.fly_error = flyMsg;
+
+    // Audit log — fire-and-forget so a DB blip never blocks the executor.
+    this.cycles
+      .recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', eventPayload)
+      .catch(() => {
+        /* audit-best-effort */
+      });
+
+    if (outcome === 'OK') {
+      this.logger.warn(
+        `[CURE-3] Phantom paper position cancelled on Fly ${userId} trade=${showcaseTradeId} reason=${reason} (http=${httpStatus}, ${elapsedMs}ms)`,
+      );
+    } else if (outcome === 'NO_CONTENT') {
+      this.logger.log(
+        `[CURE-3] Phantom paper position already cancelled on Fly ${userId} trade=${showcaseTradeId} (idempotent no-op, ${elapsedMs}ms)`,
+      );
+    } else {
+      this.logger.warn(
+        `[CURE-3] Phantom paper position cancel FAILED ${userId} trade=${showcaseTradeId} reason=${reason} http=${httpStatus} err=${flyMsg ?? 'n/a'} —Fly may still hold the phantom; next tick will retry (idempotent)`,
+      );
+    }
+  }
+
+  /**
+   * Cure 1 — relink a real-filled cycle to the showcase signal that
+   * actually corresponds to the real fill, when they differ.
+   *
+   * Why this exists: the cycle.tradeId is fixed at creation time from the
+   * showcase signal_id. When a real Bitfinex limit lands on a price that
+   * corresponds to a DIFFERENT signal than the cycle's own (the
+   * mirror-owner-of-duplicate-limit race, or a chase order that crossed at
+   * the new signal's price), the participant's cycle.tradeId is stale. Every
+   * mirror-exit path keys off cycle.tradeId and never fires for the real
+   * fill's signal; the real position rots unmanaged.
+   *
+   * This method is idempotent: if cycle.tradeId already starts with `relink:`
+   * and meta.originTradeId matches the resolved candidate, it returns the
+   * already-relinked tradeId without writing. If the candidate differs from
+   * the existing re-link target, it re-links again to the new candidate
+   * (rare; only if multiple signals shared the fill price band).
+   *
+   * Returns the showcase tradeId the cycle now mirrors (existing, new, or
+   * null when no re-link occurred — e.g. showcase unreachable, sim mode, or
+   * no candidate matched).
+   */
+  private async relinkCycleToShowcaseSignalIfDrifted(input: {
+    agentId: string;
+    userId: string;
+    cycle: { id: string; tradeId?: string | null };
+    participantId: string;
+    realFill: { price: number; direction: 'LONG' | 'SHORT' };
+    reason: string;
+  }): Promise<string | null> {
+    const bot = await this.fetchExecutionBotState().catch(() => null);
+    if (!bot) return null;
+
+    // Build the set of showcase tradeIds already claimed by other OPEN
+    // participants via re-link, so two real fills can't both point at the
+    // same showcase position.
+    const claimedByOthers = new Set<string>();
+    try {
+      const openRows = await this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId: input.userId,
+          status: SignalCycleStatus.OPEN,
+          cycle: { agentId: input.agentId },
+          id: { not: input.participantId },
+        },
+        select: { id: true },
+      });
+      for (const row of openRows) {
+        const m = await this.loadExecutionMeta(row.id);
+        if (m.originTradeId) claimedByOthers.add(m.originTradeId);
+      }
+    } catch {
+      /* best-effort — fail-open (no exclusions) */
+    }
+
+    const candidate = resolveShowcaseRelinkForRealFill({
+      showcasePositions: bot.positions ?? [],
+      realFill: input.realFill,
+      currentTradeId: input.cycle.tradeId ?? null,
+      nowMs: Date.now(),
+      alreadyRelinkedTo: claimedByOthers,
+    });
+    if (!candidate) return null;
+
+    // Already re-linked to this exact signal — nothing to do.
+    const existingMeta = await this.loadExecutionMeta(input.participantId);
+    if (
+      (input.cycle.tradeId ?? '').startsWith('relink:') &&
+      existingMeta.originTradeId === candidate.tradeId
+    ) {
+      return candidate.tradeId;
+    }
+
+    const originTradeId = input.cycle.tradeId ?? 'unknown';
+    const relinkedTradeId = `relink:${originTradeId}:${candidate.tradeId}:${Date.now()}`;
+
+    try {
+      await this.prisma.signalCycle.update({
+        where: { id: input.cycle.id },
+        data: { tradeId: relinkedTradeId },
+      });
+    } catch (err) {
+      // Unique constraint collision (extremely unlikely — Date.now() is in
+      // the id) or cycle gone. Log and bail; mirror-exit safety nets still
+      // cover the lot.
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[CURE-1] relink failed ${input.userId} cycle=${input.cycle.id}: ${msg}`,
+      );
       return null;
     }
-    return tid;
+
+    // Persist the new showcase trade id on the participant via a META event
+    // so loadExecutionMeta folds originTradeId into every later tick. The
+    // event payload also carries the relink audit context.
+    await this.cycles.recordHireExecutionEvent(
+      input.userId,
+      input.agentId,
+      input.cycle.id,
+      'UPDATE_STOPS',
+      {
+        venue: 'bitfinex',
+        source: 'hire',
+        event: 'CYCLE_TRADE_ID_RELINK',
+        reason: input.reason,
+        // CRITICAL — origin_trade_id is the field loadExecutionMeta folds into
+        // meta.originTradeId, which resolveShowcaseMirrorTradeId returns for
+        // any `relink:`/`adopt:` cycle. It MUST be the NEW showcase trade id
+        // (the one the real fill actually corresponds to), NOT the stale
+        // original. The pre-relink origin is preserved in prior_origin_trade_id
+        // for audit only.
+        origin_trade_id: candidate.tradeId,
+        origin_trade_id_key: 'origin_trade_id',
+        prior_origin_trade_id: originTradeId,
+        new_showcase_trade_id: candidate.tradeId,
+        relinked_cycle_trade_id: relinkedTradeId,
+        real_fill_price: input.realFill.price,
+        real_fill_direction: input.realFill.direction,
+        showcase_entry_price: candidate.entryPrice,
+        showcase_price_band_pct: Math.round(candidate.priceBandPct * 10000) / 10000,
+        showcase_time_delta_ms: candidate.timeDeltaMs,
+        participant_id: input.participantId,
+      },
+    );
+
+    this.logger.warn(
+      `[CURE-1] Relinked orphan real fill ${input.userId} cycle=${input.cycle.id} ${input.realFill.direction} @ ${input.realFill.price.toFixed(2)} from stale trade=${originTradeId} to live showcase trade=${candidate.tradeId} (entry=${candidate.entryPrice.toFixed(2)}, band=${candidate.priceBandPct.toFixed(4)}%, dt=${candidate.timeDeltaMs ?? 'n/a'}ms) — reason=${input.reason}`,
+    );
+
+    return candidate.tradeId;
   }
 
   /** Detect showcase trade closure from bot state (trades / trades_map / positions). */
@@ -9233,6 +9748,68 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    // Real-side protective safety net — independent of showcase mirror exits.
+    // Fires on adverse moves the showcase mirror path missed (paper/real desync,
+    // missed maker fill that left a real position, or a fill on a different
+    // signal than the one tracked by this cycle). Uses the REAL fill price +
+    // REAL mark, runs the SAME Scenario C math the showcase bot uses. This is
+    // the last line of defense for real money; it never replaces the showcase
+    // mirror exit for profitable exits, only catches adverse ones.
+    if (!simActive && realSideSafetyNetEnabled()) {
+      const intentStopLoss =
+        intent?.risk?.stop_loss_margin_pct != null
+          ? Number(intent.risk.stop_loss_margin_pct)
+          : undefined;
+      const safetyNet = evaluateRealSideSafetyNetExit({
+        unrealMarginPct,
+        peakMarginPct: runtime.peakMarginPct,
+        hardStopMarginPct: realSideSafetyNetHardStopMarginPct(intentStopLoss),
+      });
+      if (safetyNet.reason) {
+        const closed = await this.closeVirtualLot(
+          agentId,
+          userId,
+          cycle.id,
+          participant.id,
+          meta,
+          creds,
+          {
+            reason: safetyNet.reason,
+            mark,
+            fillPrice,
+            leverage,
+            lockFloor: safetyNet.lockFloor,
+            peakMarginPct: runtime.peakMarginPct,
+            unrealMarginPct,
+            stopLossMarginPct,
+          },
+        );
+        if (closed) {
+          this.logger.warn(
+            `Real-side safety net ${userId} cycle=${cycle.id} closed lot: reason=${safetyNet.reason} unreal=${unrealMarginPct.toFixed(2)}% peak=${runtime.peakMarginPct.toFixed(2)}% mark=${mark.toFixed(2)} fill=${fillPrice.toFixed(2)}`,
+          );
+          await this.cycles
+            .recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+              venue: 'bitfinex',
+              source: 'hire',
+              event: 'REAL_SIDE_SAFETY_NET',
+              reason: safetyNet.reason,
+              unreal_margin_pct: Math.round(unrealMarginPct * 100) / 100,
+              peak_margin_pct: Math.round(runtime.peakMarginPct * 100) / 100,
+              lock_floor_margin_pct: safetyNet.lockFloor,
+              mark,
+              fill_price: fillPrice,
+              showcase_trade_id: cycle.tradeId ?? null,
+            })
+            .catch(() => {
+              /* audit is best-effort; the close itself already recorded EXIT */
+            });
+          this.positionRuntime.delete(participant.id);
+          return;
+        }
+      }
+    }
+
     if (!meta.stopOrderId && fillPrice > 0) {
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
       const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
@@ -11030,6 +11607,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       stopReason,
       at: new Date().toISOString(),
     }).catch(() => {});
+
+    // Vigilance / Cure 1 extension — S6b adopts a real Bitfinex orphan slice,
+    // but synthesizeAdoptedCycle stamps the new cycle's tradeId as
+    // `adopt:<ORIGIN_cycle.tradeId>:<ts>` and meta.originTradeId to the same
+    // ORIGIN showcase id. If the ORIGIN cycle was the stale side of a
+    // mirror-owner-of-duplicate-limit race (tonight's cont-de8f316fd3c0 case:
+    // the real position corresponds to a LATER showcase signal than the cycle
+    // that placed the order), every mirror-exit path would key off the wrong
+    // showcase id and the adopted real slice would rot unmanaged a second
+    // time. Re-link the freshly-adopted cycle to whichever showcase signal
+    // actually matches the verified real fill. Best-effort — never blocks the
+    // adoption (safety nets still cover the lot if no candidate matches).
+    try {
+      await this.relinkCycleToShowcaseSignalIfDrifted({
+        agentId,
+        userId: instance.userId,
+        cycle: { id: cycleId, tradeId: `adopt:${match.cycle.tradeId ?? 'unknown'}` },
+        participantId,
+        realFill: { price: fillPrice, direction },
+        reason: 'RECONCILE_ADOPT_S6b',
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `[CURE-1] S6b relink threw ${instance.userId} cycle=${cycleId}: ${msg} — safety nets remain active`,
+      );
+    }
 
     this.logger.warn(
       `[RECONCILE-ADOPT] S6b adopted orphan position ${instance.userId} cycle=${cycleId} ${direction} qty=${adoptQty.toFixed(5)} @ ${fillPrice.toFixed(2)} (${fillPriceSource}) stop=${conservativeStop.toFixed(2)} (${stopReason}) peak=${carriedPeak} floor=${effectiveFloor}`,
