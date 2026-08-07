@@ -2,17 +2,18 @@
  * Scenario C profit-lock ladder — canonical source of truth for the relay.
  * Mirrors live showcase bot `TRAIL_LADDER_SCENARIO_C`
  * (services/btc-conservative-agent/scenario_c_config.py — SCENARIO_C_PROFILE_ID
- * "SCENARIO_C_RUNNER_10_v4", updated 2026-06-25: wider first rung 10→6 to
- * reduce runner cuts vs the legacy 12→8). Re-synced 2026-07-08: the previous
- * TS ladder ([12,8],[15,10],[25,18],...) had drifted from the Python source
- * during the June 20→25 ladder widening.
+ * "SCENARIO_C_RUNNER_8_v6_20260806"). Synced 2026-08-08 to the live bot:
+ * 8 rungs, first rung (8, 5) added 2026-08-06 (Danish decision) to capture
+ * 0-10% MFE winners earlier; (12, 10) restored as rung 1. The previous TS
+ * ladder (7 rungs, [10,6] first) had drifted from the Python source.
  *
  * Each tuple is `[peak_margin_pct_trigger, protected_margin_pct_floor]`. When
  * peak unrealized margin % crosses `trigger`, the protective stop advances
  * so that ~`protected`% of peak margin is locked in.
  */
 export const SCENARIO_C_LADDER: ReadonlyArray<readonly [number, number]> = [
-  [10, 6],
+  [8, 5],
+  [12, 10],
   [19, 17],
   [40, 28],
   [60, 45],
@@ -36,12 +37,12 @@ export const SUBSCRIBER_TRAIL_LADDER: ReadonlyArray<readonly [number, number]> =
  * unit-tested without touching the exchange.
  *
  *   solveScenarioCRung(0)    → null
- *   solveScenarioCRung(9.99) → null
- *   solveScenarioCRung(10)   → 0
- *   solveScenarioCRung(15)   → 0  (only crossed first trigger)
- *   solveScenarioCRung(19)   → 1
- *   solveScenarioCRung(150)  → 6
- *   solveScenarioCRung(200)  → 6  (highest)
+ *   solveScenarioCRung(7.99) → null
+ *   solveScenarioCRung(8)    → 0
+ *   solveScenarioCRung(11)   → 0  (only crossed first trigger)
+ *   solveScenarioCRung(12)   → 1
+ *   solveScenarioCRung(150)  → 7
+ *   solveScenarioCRung(200)  → 7  (highest)
  */
 export function solveScenarioCRung(
   peakMarginPct: number,
@@ -211,8 +212,11 @@ export const SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS = 250;
 export const SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS = 250;
 /** Scenario C thesis fast-cut (margin %) — bot THESIS_FAST_EXIT_UNREAL_PCT. */
 export const SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT = -12;
-/** Skip thesis fast-cut when peak ever reached this margin % — bot THESIS_MFE_PROTECT_PCT. */
-export const SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT = 2;
+/** Skip thesis fast-cut when peak ever reached this margin % — bot THESIS_MFE_PROTECT_PCT.
+ * Synced 2026-08-08 to bot.py:6348 THESIS_MFE_PROTECT_PCT = 5.0 (Stage 1 Fix #5,
+ * 2026-08-06). A +2% MFE spike is chop noise (3 recent losers spiked +2% early as
+ * fakeouts then bled to -$6); +5% is a real move so the fast-cut fires on real losers. */
+export const SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT = 5;
 /** Default hard stop margin % — bot stop_loss path. */
 export const SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT = -18;
 
@@ -264,6 +268,90 @@ export function evaluateSubscriberLotExit(opts: {
   const mirrorOnly = opts.showcaseMirrorOnly ?? true;
   if (!mirrorOnly) return evaluateScenarioCLotExit(opts);
   // Mirror mode: showcase closure + exchange disaster stop only — no local thesis/profit-lock/hard-stop.
+  return { reason: null };
+}
+
+/**
+ * Real-side protective safety net for an OPEN Bitfinex copy lot.
+ *
+ * Context: in showcase-mirror-only mode (the default, controlled by
+ * SUBSCRIBER_SHOWCASE_MIRROR_ONLY), {@link evaluateSubscriberLotExit} returns
+ * `null` and the relay relies entirely on showcase closure events + the wide
+ * MIRROR_DISASTER_STOP_MARGIN_PCT exchange stop to manage exits. That design
+ * assumes paper and real stay in sync. When they desync (a missed maker fill
+ * on the copy that nonetheless left a real position, or a fill on a different
+ * signal than the one tracked by the copy's cycle), the showcase never emits
+ * the matching POSITION_CLOSED and the real position rots unmanaged.
+ *
+ * This helper is the independent safety net. It runs the SAME Scenario C
+ * math the showcase bot uses (THESIS_FAST_CUT / PROFIT_LOCK ladder / HARD_STOP)
+ * against the REAL fill price + REAL mark, independent of mirror mode. When it
+ * returns a non-null reason, the executor market-closes the real lot through
+ * the existing closeVirtualLot machinery — even if no showcase exit ever
+ * arrives. It is the last line of defense for real money.
+ *
+ * The helper is pure / deterministic so it can be unit-tested without touching
+ * the exchange. It never reads env vars directly — the executor resolves all
+ * policy inputs (stop-loss margin %, MFE-protect threshold) and passes them in,
+ * so the safety net is testable and its behaviour is fully captured by the
+ * call-site arguments.
+ *
+ * Default policy mirrors the showcase bot constants
+ * (THESIS_FAST_EXIT_UNREAL_PCT=-12, THESIS_MFE_PROTECT_PCT=+5 margin,
+ * SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT=-18, SCENARIO_C_LADDER). Callers can
+ * override any of these (e.g. a tighter hard stop for a conservative cap)
+ * without changing the showcase strategy itself.
+ */
+export function evaluateRealSideSafetyNetExit(opts: {
+  unrealMarginPct: number;
+  peakMarginPct: number;
+  /** Hard stop margin % (negative). Default -18 (SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT). */
+  hardStopMarginPct?: number;
+  /** Thesis fast-cut trigger (negative margin %). Default -12. */
+  thesisFastCutMarginPct?: number;
+  /** MFE protect threshold (positive margin %). Skip fast-cut once peak exceeded this. Default +5. */
+  thesisMfeProtectMarginPct?: number;
+  /** Profit-lock ladder. Default SCENARIO_C_LADDER. */
+  ladder?: ReadonlyArray<readonly [number, number]>;
+}): { reason: VirtualLotExitReason; lockFloor?: number } {
+  const ladder = opts.ladder ?? SCENARIO_C_LADDER;
+  const hardStopMarginPct = opts.hardStopMarginPct ?? SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
+  const thesisFastCutMarginPct =
+    opts.thesisFastCutMarginPct ?? SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT;
+  const thesisMfeProtectMarginPct =
+    opts.thesisMfeProtectMarginPct ?? SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT;
+
+  const { unrealMarginPct, peakMarginPct } = opts;
+
+  // 1. Profit-lock rung — once peak crossed a ladder trigger, the protective
+  //    stop advances so the protected % of peak is locked in. The executor
+  //    keeps the exchange stop synced (Option A dynamic stops) AND, if price
+  //    reverses through the rung floor, this branch fires the market close.
+  const lockFloor = getProfitLockFloor(peakMarginPct, ladder);
+  if (
+    lockFloor != null &&
+    peakMarginPct >= ladder[0][0] &&
+    unrealMarginPct <= lockFloor
+  ) {
+    return { reason: 'PROFIT_LOCK', lockFloor };
+  }
+
+  // 2. Thesis fast-cut — deep adverse move before any meaningful MFE. The
+  //    showcase bot's THESIS_FAST_EXIT_UNREAL_PCT path. Skip once peak ever
+  //    reached the MFE protect threshold (the trade "proved" itself; let the
+  //    hard stop / profit-lock rungs own the exit instead).
+  if (
+    unrealMarginPct <= thesisFastCutMarginPct &&
+    peakMarginPct < thesisMfeProtectMarginPct
+  ) {
+    return { reason: 'THESIS_FAST_CUT' };
+  }
+
+  // 3. Hard stop — the absolute floor, independent of MFE / ladder.
+  if (unrealMarginPct <= hardStopMarginPct) {
+    return { reason: 'HARD_STOP' };
+  }
+
   return { reason: null };
 }
 

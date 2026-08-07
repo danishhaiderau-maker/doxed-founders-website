@@ -6754,7 +6754,11 @@ RESEARCH_MAX_CONCURRENT_CAP = 20
 AI_TIMEOUT_SEC = 60
 HEDGE_MODE = False
 SIGNAL_TTL_SEC = int(os.getenv("SIGNAL_TTL_SEC", str(30 * 60)))
-REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(30 * 60)))
+# Counterfactual replay fill window. Must match MAX_POSITION_AGE_SEC so the
+# simulate_replay_outcome engine (analytics-only, never touches the trading
+# path) waits the same 2h a real position would. The old 30min default
+# systematically undercounted fills in counterfactual.jsonl.
+REPLAY_TTL_SEC = int(os.getenv("REPLAY_TTL_SEC", str(MAX_POSITION_AGE_SEC)))
 # OFF-tile LAB shadows keep receiving ticks (last_update never idles). Finalize on
 # wall-clock age so Pathway Lab tiles get closes without waiting for idle TTL.
 # Default 30m (was 5m) so Scenario C ladder can complete instead of MARK_TO_MARKET.
@@ -31398,6 +31402,312 @@ def api_close_showcase_position():
     })
 
 
+# ---------------------------------------------------------------------------
+# Cure 2 — Phantom paper position cancellation (Railway-initiated).
+#
+# When Railway's real Bitfinex limit MISSES but Fly paper "filled", Fly is
+# left holding a phantom paper position that corrupts its strategy state:
+#   - It consumes capacity (MAX_ACTIVE_SIGNALS / CLUSTER_ENTRY) and can
+#     block fresh entries.
+#   - It skews session PnL / win-rate / analytics.
+#   - Fly keeps emitting exits for the phantom; Railway's real account has
+#     nothing to mirror.
+#
+# This admin-only endpoint lets Railway cancel the phantom cleanly without
+# touching real Bitfinex money. It is the symmetric counterpart of
+# /api/positions/close but with two important differences:
+#   1. Zero-PnL accounting — the paper fill never corresponded to a real
+#      fill, so we record a synthetic $0 outcome tagged
+#      PHANTOM_CANCEL_BY_RELAY (not the close_position fee/PnL math).
+#   2. No Bitfinex reduce-only attempt — there is no real position to close.
+#
+# Auth: the global _emergency_api_guard before_request hook already rejects
+# any unauthenticated POST with 401, so this endpoint inherits the
+# X-Bot-Admin-Token gate (same pattern as /api/pause, /api/positions/close,
+# /api/reset). No extra in-handler auth is needed.
+# ---------------------------------------------------------------------------
+
+PHANTOM_CANCEL_REASON = "PHANTOM_CANCEL_BY_RELAY"
+PHANTOM_CANCEL_MAX_BODY_LEN = 4096
+
+
+@app.route('/api/reconcile/phantom-cancel', methods=['POST'])
+def api_reconcile_phantom_cancel():
+    """Cancel a phantom paper position left behind by a MISSED_SHOWCASE_FILL.
+
+    Body:
+      {
+        "trade_id": "<cont-...>",          # required
+        "reason":   "<human-readable>"      # optional, audited
+      }
+
+    Idempotent: a second call for a trade_id that is already CLOSED returns
+    200 with ``already_cancelled=true`` and does NOT double-write the trade
+    outcome or re-emit the relay event.
+    """
+    raw_body = request.get_data(as_text=True) or ""
+    if len(raw_body) > PHANTOM_CANCEL_MAX_BODY_LEN:
+        return (
+            jsonify({"error": "request body too large", "max_len": PHANTOM_CANCEL_MAX_BODY_LEN}),
+            413,
+        )
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    caller_reason = str(body.get("reason") or "").strip()[:200]
+
+    # Snapshot search under state_lock (consistent read of open_positions).
+    with state_lock:
+        matches = [
+            pos for pos in open_positions
+            if str(pos.get("trade_id") or "") == trade_id
+        ]
+        already_closed = [
+            pos for pos in matches
+            if pos.get("status") == "CLOSED"
+            or pos.get("exit_reason") == PHANTOM_CANCEL_REASON
+        ]
+        live_matches = [
+            pos for pos in matches
+            if pos.get("status") != "CLOSED"
+            and pos.get("exit_reason") != PHANTOM_CANCEL_REASON
+        ]
+        # Idempotency case 1 — the position exists but is already cancelled
+        # by a prior phantom-cancel call. Return ok without re-writing.
+        if not live_matches and already_closed:
+            logger.info(
+                "[ADMIN] Phantom-cancel idempotent skip trade_id=%s (already cancelled)",
+                trade_id,
+            )
+            return jsonify({
+                "ok": True,
+                "already_cancelled": True,
+                "cancelled_trade_id": trade_id,
+                "timestamp": utc_iso(),
+            })
+
+    if not live_matches:
+        # Idempotency case 2 — trade_id is not in open_positions at all.
+        # Could be: (a) already rotated out of the in-memory list, or
+        # (b) never existed. Either way, return ok so Railway's caller is
+        # not blocked by a stale state on Fly. Audit the not-found.
+        logger.warning(
+            "[ADMIN] Phantom-cancel no-op trade_id=%s not in open_positions "
+            "(caller_reason=%s) — returning ok for idempotency",
+            trade_id,
+            caller_reason or "<none>",
+        )
+        return jsonify({
+            "ok": True,
+            "already_cancelled": True,
+            "cancelled_trade_id": trade_id,
+            "note": "trade_id not currently open; treated as already cancelled",
+            "timestamp": utc_iso(),
+        })
+
+    if len(live_matches) > 1:
+        # Defensive — should never happen (trade_id is unique), but refuse
+        # to operate on an ambiguous state rather than risk double-accounting.
+        logger.error(
+            "[ADMIN] Phantom-cancel refused ambiguous trade_id=%s matches=%s",
+            trade_id,
+            len(live_matches),
+        )
+        return (
+            jsonify({
+                "error": "ambiguous open position",
+                "trade_id": trade_id,
+                "matches": len(live_matches),
+            }),
+            409,
+        )
+
+    pos = live_matches[0]
+
+    # Validation guard: refuse to cancel a position that has any marker of a
+    # real Bitfinex fill against it. The paper bot does not currently track
+    # real fills per position (no bitfinex_real_fill flag), so we use the
+    # best-available proxies: explicit bitfinex_position_id / bitfinex_live_entry
+    # markers (set when /api/bitfinex_live arms live mode for this trade).
+    # If real-fill tracking is added later, this guard should consult it.
+    has_real_marker = bool(
+        pos.get("bitfinex_position_id")
+        or pos.get("bitfinex_live_entry")
+        or pos.get("real_fill_recorded")
+    )
+    if has_real_marker:
+        logger.error(
+            "[ADMIN] Phantom-cancel REFUSED trade_id=%s — position has a real "
+            "Bitfinex marker (bitfinex_position_id=%s, bitfinex_live_entry=%s, "
+            "real_fill_recorded=%s); cancelling would orphan real money",
+            trade_id,
+            pos.get("bitfinex_position_id"),
+            pos.get("bitfinex_live_entry"),
+            pos.get("real_fill_recorded"),
+        )
+        return (
+            jsonify({
+                "error": "refused: position has a real Bitfinex fill marker",
+                "trade_id": trade_id,
+                "bitfinex_position_id": pos.get("bitfinex_position_id"),
+                "bitfinex_live_entry": pos.get("bitfinex_live_entry"),
+                "real_fill_recorded": pos.get("real_fill_recorded"),
+            }),
+            409,
+        )
+
+    # ---- Perform the cancellation --------------------------------------
+    # Use position_close_lock (same as close_position) so we cannot race a
+    # simultaneous strategy-driven close on the same dict. The dict mutation
+    # itself is tiny; the lock serializes concurrent claimants.
+    cancel_ts = time.time()
+    cancel_iso = utc_iso()
+    cancel_mel = _format_melbourne_hm(cancel_iso)
+    entry_price = float(pos.get("entry") or 0.0)
+    direction = str(pos.get("dir") or "UNKNOWN")
+    qty = float(pos.get("qty") or 0.0)
+    margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
+    research_lane = pos.get("research_lane")
+
+    with position_close_lock:
+        # Re-validate under the close lock — a concurrent close_position may
+        # have already terminalized this pos while we were waiting.
+        if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+            logger.info(
+                "[ADMIN] Phantom-cancel late skip trade_id=%s (closed under lock)",
+                trade_id,
+            )
+            return jsonify({
+                "ok": True,
+                "already_cancelled": True,
+                "cancelled_trade_id": trade_id,
+                "timestamp": cancel_iso,
+            })
+        pos["_close_in_progress"] = True
+
+        # Zero-PnL synthetic outcome row. We deliberately do NOT call the
+        # full close_position() path because that path accrues funding, fees,
+        # and attempts a Bitfinex reduce-only close — none of which apply to
+        # a phantom paper position.
+        trade_row = {
+            "ts": cancel_iso,
+            "close_ts": cancel_iso,
+            "ts_melbourne": cancel_mel,
+            "close_ts_melbourne": cancel_mel,
+            "trade_id": trade_id,
+            "dir": direction,
+            "entry": entry_price,
+            "exit": entry_price,  # $0 PnL → exit == entry
+            "dur_min": (cancel_ts - float(pos.get("entry_ts") or cancel_ts)) / 60,
+            "pnl": 0.0,
+            "margin_usdt": margin_usdt,
+            "net_pnl_usd": 0.0,
+            "gross_pnl_usd": 0.0,
+            "trading_fees_usd": 0.0,
+            "fees_usd": 0.0,
+            "funding_fees_usd": 0.0,
+            "total_cost_usd": 0.0,
+            "exit_reason": PHANTOM_CANCEL_REASON,
+            "phantom_cancel": True,
+            "phantom_cancel_caller_reason": caller_reason or None,
+            "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
+            "r_multiple": 0.0,
+            "outcome_exit_reason": PHANTOM_CANCEL_REASON,
+            "outcome_net_pnl_usd": 0.0,
+            "outcome_pnl_pct": 0.0,
+            "execution_qty": qty,
+            "final_direction": direction,
+            "strategy": pos.get("strategy_birth", "PHANTOM"),
+            "regime": pos.get("signal_regime", state.get("regime", "UNKNOWN")),
+        }
+
+        # Mark the position CLOSED and release lane capacity.
+        pos["status"] = "CLOSED"
+        pos["exit_reason"] = PHANTOM_CANCEL_REASON
+        pos["phantom_cancelled"] = True
+        pos["phantom_cancel_ts"] = cancel_iso
+        lane_unregister_open_position(pos)
+
+        # Append to trades list + persist.
+        trades.append(trade_row)
+        try:
+            log_trade_outcome_jsonl(trade_row, pos)
+        except Exception as exc:  # pragma: no cover — best-effort audit
+            logger.warning("[ADMIN] Phantom-cancel outcome jsonl failed trade_id=%s: %s", trade_id, exc)
+
+        # Update the master signal_ref so reconcile_stale_signals sees it as
+        # terminal (mirrors close_position's master.update block).
+        master_entry = trades_map.get(trade_id)
+        if master_entry:
+            master = master_entry.get("signal_ref")
+            if isinstance(master, dict):
+                master.update({
+                    "status": "CLOSED",
+                    "exit_reason": PHANTOM_CANCEL_REASON,
+                    "outcome": "PHANTOM",
+                    "closed_ts": cancel_ts,
+                    "expires_ts": cancel_ts - 1,
+                })
+
+    # ---- Outside the close lock: persistence + relay + audit -----------
+    persist_signal_close(trade_id, "CLOSED")
+    save_positions()
+    save_persistent_config()
+
+    # Refresh the cached /api/state snapshot so Railway's next /api/state
+    # poll reflects the cancellation immediately (otherwise the stale cache
+    # can show the phantom OPEN for up to API_STATE_REFRESH_INTERVAL_SEC).
+    with trade_lock:
+        paper_orders = copy.deepcopy(pending_orders)
+        paper_positions = copy.deepcopy(open_positions)
+        paper_trades = copy.deepcopy(trades[-50:])
+    _patch_api_state_cache_fields(
+        orders=paper_orders,
+        positions=paper_positions,
+        trades=paper_trades,
+    )
+
+    # Emit a POSITION_CLOSED relay event so any downstream subscriber that
+    # mirrors Fly's paper state (the dashboard, type-b research) learns the
+    # trade is no longer open. Use the same channel as close_position.
+    _push_showcase_relay_event(
+        "POSITION_CLOSED",
+        trade_id,
+        {
+            "exit_reason": PHANTOM_CANCEL_REASON,
+            "direction": direction,
+            "exit_price": entry_price,
+            "research_lane": research_lane,
+            "phantom_cancel": True,
+            "caller_reason": caller_reason or None,
+        },
+    )
+
+    # Clear pending_trade_id if the phantom happened to be the active one.
+    with state_lock:
+        if state.get("pending_trade_id") == trade_id:
+            state["pending_trade_id"] = None
+
+    logger.warning(
+        "[ADMIN] Phantom paper position cancelled trade_id=%s dir=%s entry=%s "
+        "qty=%s caller_reason=%s [PAPER ONLY — no Bitfinex action]",
+        trade_id,
+        direction,
+        entry_price,
+        qty,
+        caller_reason or "<none>",
+    )
+
+    return jsonify({
+        "ok": True,
+        "cancelled_trade_id": trade_id,
+        "exit_reason": PHANTOM_CANCEL_REASON,
+        "timestamp": cancel_iso,
+        "scope": "showcase_paper_only",
+    })
+
+
 @app.route('/api/toggle_early_fail', methods=['POST'])
 def toggle_early_fail():
     with state_lock:
@@ -34465,11 +34775,26 @@ def run_offline_research_sim():
 
 
 def analytics_loop():
+    global _cf_catchup_tick_counter
     try:
         while not shutdown_event.is_set():
             try:
                 compute_analytics()
                 run_offline_research_sim()
+                # Change 5: periodic catch-up for APPROVE signals whose replay
+                # rotated into a .N shard before the active-file pass saw them.
+                # Heavy shard scan — only every CF_CATCHUP_EVERY_N_TICKS ticks,
+                # EXCEPT the first tick after boot which fires immediately so a
+                # fresh deploy backfills the historical coverage gap without
+                # waiting ~100min for the first window.
+                _cf_catchup_tick_counter += 1
+                if _cf_catchup_tick_counter == 1 or _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
+                    if _cf_catchup_tick_counter >= CF_CATCHUP_EVERY_N_TICKS:
+                        _cf_catchup_tick_counter = 0
+                    try:
+                        _run_counterfactual_catchup()
+                    except Exception as ce:
+                        logger.error(f"[CF_CATCHUP] analytics loop error: {ce}")
                 try:
                     from execution_funnel import refresh_all_execution_reports
                     rep = refresh_all_execution_reports(os.getcwd())
@@ -34588,6 +34913,183 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             logger.error(f"Counterfactual log failed: {e}")
     if written:
         logger.info(f"[RESEARCH_SIM] counterfactual rows written={written} [PIPELINE ENFORCEMENT]")
+
+# --- counterfactual catch-up (Change 5) -------------------------------------
+# Coverage bug: signal_replay.jsonl rotates into .1/.2/... shards every ~20MB.
+# offline_simulator() only reads the active shard, so any APPROVE signal whose
+# replay buffer rotated before the analytics loop processed it never receives a
+# counterfactual.jsonl row. This catch-up scans ALL shards for APPROVE signals
+# that have replay data but no cf + no shadow_outcome row, then forces a
+# simulate_replay_outcome pass for each. Analytics-only — never touches the
+# trading path. Called from analytics_loop every CF_CATCHUP_EVERY_N_TICKS ticks.
+CF_CATCHUP_EVERY_N_TICKS = 10
+_cf_catchup_tick_counter = 0
+
+def _scan_replay_shard_trade_ids(path):
+    """Stream a replay shard and yield (trade_id, line_offset) pairs. Keeps
+    only the trade_id — the row body (with its large ticks array) is read on
+    demand by _find_replay_row_for_trade_id to stay memory-safe on 20MB shards."""
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            offset = 0
+            for line in f:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    offset += len(line)
+                    continue
+                try:
+                    row = json.loads(line_stripped)
+                    tid = row.get("trade_id")
+                    if tid:
+                        out.append((tid, offset))
+                except Exception:
+                    pass
+                offset += len(line)
+    except OSError as e:
+        logger.debug(f"[CF_CATCHUP] shard scan failed {path}: {e}")
+    return out
+
+def _find_replay_row_for_trade_id(path, target_tid, max_bytes_hint=None):
+    """Read a single replay row by byte-offset lookup. Falls back to a full
+    linear scan if the offset index was built from a different shard state."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                try:
+                    row = json.loads(line_stripped)
+                    if row.get("trade_id") == target_tid:
+                        return row
+                except Exception:
+                    pass
+    except OSError as e:
+        logger.debug(f"[CF_CATCHUP] row lookup failed {path} tid={target_tid}: {e}")
+    return None
+
+def _run_counterfactual_catchup():
+    """Force-simulate APPROVE signals that have replay data (in any shard) but
+    no counterfactual.jsonl and no shadow_outcome.jsonl row. Idempotent: every
+    successfully simulated trade_id is added to _sim_processed_trade_ids."""
+    global _sim_processed_trade_ids, write_counter
+    try:
+        if not os.path.exists(SIGNAL_SNAPSHOT_FILE):
+            return 0
+        # 1) APPROVE snapshots (active file only — snapshots are not rotated).
+        approve_snaps = {}
+        try:
+            with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        tid = row.get("trade_id")
+                        if tid and row.get("ai", {}).get("approved", False):
+                            approve_snaps[tid] = row
+                    except Exception:
+                        pass
+        except OSError:
+            return 0
+        if not approve_snaps:
+            return 0
+
+        # 2) Drop anything already processed in-memory.
+        candidate_tids = [t for t in approve_snaps if t not in _sim_processed_trade_ids]
+        if not candidate_tids:
+            return 0
+
+        # 3) Index every replay shard by trade_id. Only offsets are kept so a
+        # 20MB shard with thousands of ticks never fully resides in memory.
+        import glob as _glob
+        shard_paths = sorted(_glob.glob(SIGNAL_REPLAY_FILE + "*"))
+        # shard_trade_ids[tid] = list of (path, offset)
+        shard_trade_ids = {}
+        for sp in shard_paths:
+            for tid, off in _scan_replay_shard_trade_ids(sp):
+                shard_trade_ids.setdefault(tid, []).append((sp, off))
+
+        # 4) Final missing set: APPROVE + has-replay + not-already-processed.
+        missing = [t for t in candidate_tids if t in shard_trade_ids]
+        if not missing:
+            return 0
+
+        written = 0
+        for tid in missing:
+            snapshot = approve_snaps.get(tid)
+            if not snapshot:
+                continue
+            # Pick the earliest shard entry for this trade_id (deterministic).
+            locations = sorted(shard_trade_ids.get(tid, []))
+            replay = None
+            for sp, _off in locations:
+                replay = _find_replay_row_for_trade_id(sp, tid)
+                if replay:
+                    break
+            if not replay:
+                # Shard rotated between index and lookup — mark processed so we
+                # don't repeatedly re-scan for an unrecoverable row.
+                _sim_processed_trade_ids.add(tid)
+                continue
+            cfg = snapshot.get("config", {})
+            buf = {
+                "start_price": replay.get("start_price"),
+                "ticks": replay.get("ticks", []),
+                "direction": snapshot.get("direction") or replay.get("direction"),
+                "leverage": cfg.get("leverage", _state_leverage()),
+                "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
+                "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
+                "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
+                "exit_config": {**get_exit_config_snapshot(), **{k: v for k, v in cfg.items() if k in (
+                    "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
+                )}},
+                "virtual_entry": replay.get("virtual_entry"),
+                "virtual_fill_t": replay.get("virtual_fill_t"),
+            }
+            outcome = simulate_replay_outcome(buf)
+            counterfactual = {
+                "schema": "counterfactual_v2",
+                "trade_id": tid,
+                "scenario": buf["direction"],
+                "executed": bool(snapshot.get("executed")),
+                "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
+                "lane": replay.get("lane"),
+                "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+                "edge_score": snapshot.get("edge_score"),
+                "fill_price": outcome.get("fill_price"),
+                "fill_delay_sec": outcome.get("fill_delay_sec"),
+                "filled": outcome.get("filled"),
+                "exit_reason": outcome.get("exit_reason"),
+                "net_pnl_usd": outcome.get("net_pnl_usd"),
+                "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
+                "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
+                "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+                "catchup": True,
+            }
+            try:
+                rotate_log(COUNTERFACTUAL_FILE)
+                with open(COUNTERFACTUAL_FILE, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(counterfactual) + "\n")
+                    f.flush()
+                    write_counter += 1
+                    if write_counter % 10 == 0:
+                        os.fsync(f.fileno())
+                _sim_processed_trade_ids.add(tid)
+                written += 1
+            except Exception as e:
+                logger.error(f"[CF_CATCHUP] counterfactual log failed tid={tid}: {e}")
+        if written:
+            logger.info(
+                f"[CF_CATCHUP] backfilled {written} missing counterfactual rows "
+                f"(of {len(missing)} candidates) [PIPELINE ENFORCEMENT]"
+            )
+        return written
+    except Exception as e:
+        logger.error(f"[CF_CATCHUP] failed: {e}")
+        return 0
 
 def preload_candles():
     global latest_candles, last_candle_ts
