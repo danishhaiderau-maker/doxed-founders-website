@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(security): back pair-endpoint throttler with Redis for multi-replica correctness
 
 ## Last Activity
 
