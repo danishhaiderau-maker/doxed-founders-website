@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(agent-hub): tidy Conservative BTC UI and restore Fly volume sync
+fix(web): silence unused showcaseActivity after trade-journey removal
 
 ## Last Activity
 
