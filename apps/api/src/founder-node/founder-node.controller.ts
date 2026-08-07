@@ -11,6 +11,7 @@ import {
   Res,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { DeviceMemoryPayload } from '@dcf/utils';
 import type { FounderNodeHeartbeat } from '@dcf/founder-vault';
 import { CurrentUser } from '../auth/current-user.decorator';
@@ -149,6 +150,7 @@ export class FounderNodeController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post('pair')
   pair(
     @Body()
