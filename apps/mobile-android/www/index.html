@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Doxxed Crypto</title>
+    <style>
+      :root {
+        --bg: #050508; --panel: #0e0e14; --border: #2a2a35; --text: #f4f4f5;
+        --muted: #a1a1aa; --accent: #10b981; --accent-dim: #059669; --cyan: #22d3ee;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+      body { padding: max(20px, env(safe-area-inset-top)) 18px max(28px, env(safe-area-inset-bottom)); line-height: 1.45; }
+      .shell { max-width: 440px; margin: 0 auto; }
+      .brand { font-size: 0.72rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin: 0 0 6px; }
+      h1 { font-size: 1.55rem; margin: 0 0 8px; letter-spacing: -0.02em; }
+      .lede { margin: 0 0 18px; color: var(--muted); font-size: 0.95rem; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      a.tile { display: flex; flex-direction: column; gap: 6px; min-height: 108px; padding: 14px; border-radius: 16px;
+        border: 1px solid var(--border); background: linear-gradient(160deg, #14141c 0%, var(--panel) 100%);
+        color: inherit; text-decoration: none; }
+      a.tile.wide { grid-column: 1 / -1; min-height: 88px; }
+      a.tile .icon { font-size: 1.25rem; } a.tile .label { font-size: 0.98rem; font-weight: 650; }
+      a.tile .hint { font-size: 0.78rem; color: var(--muted); }
+      a.tile.chat { border-color: #10b98155; } a.tile.agents { border-color: #f59e0b55; }
+      a.tile.ide { border-color: #8b5cf655; } a.tile.account { border-color: #22d3ee44; } a.tile.home { border-color: #3f3f4688; }
+      .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+      button.btn, a.btn { appearance: none; border: 0; border-radius: 12px; padding: 12px 16px; font-weight: 650;
+        font-size: 0.92rem; text-decoration: none; color: #fff; background: var(--accent-dim); cursor: pointer; }
+      button.btn.ghost, a.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+      .card { margin-top: 18px; border: 1px solid var(--border); border-radius: 16px; padding: 16px; background: var(--panel); }
+      .card.warn { border-color: #f59e0b55; background: #451a0333; } .card.ok { border-color: #10b98144; }
+      .spinner { width: 26px; height: 26px; border: 3px solid #3f3f46; border-top-color: var(--accent); border-radius: 50%;
+        animation: spin 0.8s linear infinite; margin: 12px 0; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .meta { margin-top: 12px; font-size: 0.72rem; color: #71717a; word-break: break-all; }
+      ol { margin: 10px 0 0; padding-left: 18px; color: #d4d4d8; font-size: 0.88rem; }
+      li { margin-bottom: 6px; } a.link { color: var(--cyan); }
+      #panel-hub, #panel-unsupported { display: none; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card ok" id="panel-loading">
+        <p class="brand">Doxxed Crypto</p>
+        <h1>Opening app…</h1>
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="lede">Checking WebView compatibility, then loading your hub.</p>
+      </div>
+      <div id="panel-hub">
+        <p class="brand">Doxxed Crypto</p>
+        <h1>Complete package</h1>
+        <p class="lede">Landing, chat, agents, account, and Founder IDE — one shell around the live product. Desktop Node stays separate.</p>
+        <div class="grid">
+          <a class="tile chat" data-path="/chat" href="#"><span class="icon" aria-hidden="true">💬</span><span class="label">Chat</span><span class="hint">Messages &amp; walls</span></a>
+          <a class="tile agents" data-path="/agent-hub" href="#"><span class="icon" aria-hidden="true">🤖</span><span class="label">Agent Hub</span><span class="hint">Showcase agents</span></a>
+          <a class="tile ide wide" data-path="/founder-ide" href="#"><span class="icon" aria-hidden="true">⚡</span><span class="label">Founder IDE</span><span class="hint">Web IDE + desktop Node pairing (not in APK)</span></a>
+          <a class="tile account" data-path="/account" href="#"><span class="icon" aria-hidden="true">👤</span><span class="label">Account</span><span class="hint">Profile &amp; security</span></a>
+          <a class="tile home" data-path="/" href="#"><span class="icon" aria-hidden="true">🏠</span><span class="label">Home</span><span class="hint">Full site landing</span></a>
+        </div>
+        <div class="actions">
+          <button type="button" class="btn" id="btn-continue">Continue where I left off</button>
+          <a class="btn ghost" data-path="/discover" href="#">Discover</a>
+        </div>
+        <p class="meta" id="hub-meta"></p>
+      </div>
+      <div class="card warn" id="panel-unsupported">
+        <h1>This phone needs an update</h1>
+        <p class="lede">Your <strong>Android System WebView</strong> is too old.</p>
+        <ol>
+          <li>Play Store → update <strong>Android System WebView</strong> and <strong>Chrome</strong>.</li>
+          <li>Reboot, then reopen this app.</li>
+          <li>Or open <a class="link" href="https://doxxedcrypto.digital/mobile">doxxedcrypto.digital/mobile</a> in Chrome.</li>
+        </ol>
+        <a class="btn" href="https://doxxedcrypto.digital/mobile">Help &amp; download page</a>
+        <p class="meta" id="device-meta"></p>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var ORIGIN = 'https://doxxedcrypto.digital';
+        var QS = 'app=android';
+        var MIN_CHROME = 80;
+        var LAST_KEY = 'dcf.mobile.lastPath';
+        var AUTO_MS = 900;
+        function withApp(path) {
+          var p = path || '/';
+          if (p.charAt(0) !== '/') p = '/' + p;
+          return ORIGIN + p + (p.indexOf('?') >= 0 ? '&' : '?') + QS;
+        }
+        function chromeMajor() {
+          var ua = navigator.userAgent || '';
+          var m = ua.match(/Chrome\/(\d+)/) || ua.match(/Version\/(\d+).*Safari/);
+          return m ? parseInt(m[1], 10) : 0;
+        }
+        function androidApi() {
+          var m = (navigator.userAgent || '').match(/Android\s([\d.]+)/);
+          if (!m) return 0;
+          var major = parseInt(m[1].split('.')[0], 10) || 0;
+          if (major <= 6) return 23; if (major === 7) return 24; if (major === 8) return 26;
+          if (major === 9) return 28; if (major >= 10) return 29; return major;
+        }
+        function showUnsupported(reason) {
+          document.getElementById('panel-loading').style.display = 'none';
+          document.getElementById('panel-hub').style.display = 'none';
+          document.getElementById('panel-unsupported').style.display = 'block';
+          document.getElementById('device-meta').textContent = reason + ' · ' + (navigator.userAgent || 'unknown');
+        }
+        function showHub() {
+          document.getElementById('panel-loading').style.display = 'none';
+          document.getElementById('panel-unsupported').style.display = 'none';
+          document.getElementById('panel-hub').style.display = 'block';
+          document.getElementById('hub-meta').textContent = 'Last open: ' + (localStorage.getItem(LAST_KEY) || '/chat');
+        }
+        function go(path) {
+          try { localStorage.setItem(LAST_KEY, path); } catch (e) {}
+          window.location.replace(withApp(path));
+        }
+        function deepLinkPath() {
+          try {
+            var hash = (location.hash || '').replace(/^#/, '');
+            if (hash.indexOf('/') === 0) return hash.split('?')[0];
+            var q = new URLSearchParams(location.search || '');
+            var p = q.get('path') || q.get('to');
+            if (p && p.charAt(0) === '/') return p.split('?')[0];
+          } catch (e) {}
+          return null;
+        }
+        function wireHub() {
+          document.querySelectorAll('[data-path]').forEach(function (el) {
+            el.addEventListener('click', function (ev) { ev.preventDefault(); go(el.getAttribute('data-path') || '/'); });
+          });
+          document.getElementById('btn-continue').addEventListener('click', function () {
+            go(localStorage.getItem(LAST_KEY) || '/chat');
+          });
+        }
+        var chrome = chromeMajor(), api = androidApi();
+        if (chrome > 0 && chrome < MIN_CHROME) { showUnsupported('WebView Chrome ' + chrome + ' (need ' + MIN_CHROME + '+)'); return; }
+        if (api > 0 && api < 26 && chrome > 0 && chrome < 90) { showUnsupported('Android ' + api + ' with older WebView'); return; }
+        if (chrome === 0) { showUnsupported('Could not detect a modern WebView'); return; }
+        var forced = deepLinkPath();
+        if (forced) { setTimeout(function () { go(forced); }, 250); return; }
+        setTimeout(function () {
+          showHub(); wireHub();
+          var last = null; try { last = localStorage.getItem(LAST_KEY); } catch (e) {}
+          if (last && last !== '/') setTimeout(function () { go(last); }, AUTO_MS + 400);
+        }, AUTO_MS);
+      })();
+    </script>
+  </body>
+</html>

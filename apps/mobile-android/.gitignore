@@ -1,0 +1,8 @@
+node_modules/
+android/.gradle/
+android/app/build/
+android/build/
+android/capacitor-cordova-android-plugins/build/
+release/
+assets/icon.png
+assets/splash.png

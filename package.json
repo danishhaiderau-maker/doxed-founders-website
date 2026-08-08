@@ -14,7 +14,8 @@
     "pack:founder-node:win": "node scripts/pack-founder-node.mjs --win",
     "pack:founder-node:mac": "node scripts/pack-founder-node.mjs --mac",
     "pack:founder-node:linux": "node scripts/pack-founder-node.mjs --linux",
-    "pack:founder-node:all": "node scripts/pack-founder-node.mjs --all",    "diagnose:founder-node": "node scripts/diagnose-founder-node.mjs",
+    "pack:founder-node:all": "node scripts/pack-founder-node.mjs --all",
+    "diagnose:founder-node": "node scripts/diagnose-founder-node.mjs",
     "build:founder-vault": "npm run build --workspace=@dcf/founder-vault",
     "dev:web": "turbo run dev --filter=@dcf/web",
     "dev:api": "turbo run dev --filter=@dcf/api",
@@ -165,7 +166,9 @@
     "prepare:bitfinex-relay-test": "node scripts/prepare-bitfinex-relay-test.mjs",
     "audit:data-classes": "npm run build:utils && node scripts/audit-data-classes.mjs",
     "audit:export": "node scripts/prepare-audit-export.mjs",
-    "audit:gpt-bundle": "python services/btc-conservative-agent/build_gpt_audit_bundle.py"
+    "audit:gpt-bundle": "python services/btc-conservative-agent/build_gpt_audit_bundle.py",
+    "pack:android": "node scripts/pack-android-app.mjs",
+    "print:android-signing": "node scripts/print-android-signing-secrets.mjs"
   },
   "devDependencies": {
     "@openserv-labs/client": "^2.5.3",

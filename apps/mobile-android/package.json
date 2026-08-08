@@ -1,0 +1,22 @@
+{
+  "name": "@dcf/mobile-android",
+  "version": "0.5.0",
+  "private": true,
+  "description": "Doxxed Crypto unified mobile shell — Capacitor WebView for landing, chat, agent hub, account, and Founder IDE web",
+  "scripts": {
+    "sync": "npx cap sync android",
+    "open": "npx cap open android",
+    "pack": "node ../../scripts/pack-android-app.mjs"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.2.0",
+    "@capacitor/app": "^7.0.1",
+    "@capacitor/core": "^7.2.0",
+    "@capacitor/device": "^7.0.1",
+    "@capacitor/filesystem": "^7.0.0",
+    "@capacitor/preferences": "^7.0.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.2.0"
+  }
+}

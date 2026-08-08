@@ -15,7 +15,7 @@ if (lanOrigin) {
   allowedDevOrigins.push(lanOrigin);
 }
 
-// Exact hostname required ù *.trycloudflare.com wildcards are not reliably matched.
+// Exact hostname required ÔøΩ *.trycloudflare.com wildcards are not reliably matched.
 const tunnelHost =
   hostnameFromUrl(process.env.TUNNEL_WEB_URL ?? '') ??
   hostnameFromUrl(process.env.NEXTAUTH_URL ?? '');
@@ -47,23 +47,18 @@ const apiRewrites = [
 
 // 301 permanent redirects for renamed user-visible URL slugs.
 // Internal API slugs (/api/founder-os/*, /api/founder-node/*) are intentionally
-// NOT redirected ù they are wire-protocol contracts. Only the user-facing
+// NOT redirected ÔøΩ they are wire-protocol contracts. Only the user-facing
 // /founder-os page route moved to /founder-ide. See docs/PRODUCTION-AI-KEYS.md
-// ù"URL changes" for the rationale.
+// ÔøΩ"URL changes" for the rationale.
 const permanentRedirects = [
   { source: '/founder-os', destination: '/founder-ide', permanent: true },
   { source: '/founder-os/:path*', destination: '/founder-ide/:path*', permanent: true },
-  // Legacy chat-dispatch surface ù ported to /founder-ide. Keep deep links working.
+  // Legacy chat-dispatch surface ÔøΩ ported to /founder-ide. Keep deep links working.
   { source: '/founder-den', destination: '/founder-ide', permanent: true },
   { source: '/founder-den/:path*', destination: '/founder-ide', permanent: true },
-  // Legacy /downloads hub ? mobile coming-soon page. Also bounce the retired APK
-  // URL so bookmarks do not 404 after the public binary was removed.
+  // Legacy /downloads hub page ? mobile install hub.
+  // Do NOT redirect /downloads/*.apk ÔøΩ static files under public/downloads must serve.
   { source: '/downloads', destination: '/mobile', permanent: true },
-  {
-    source: '/downloads/doxxedcrypto-android.apk',
-    destination: '/mobile#android',
-    permanent: true,
-  },
   // Old developer docs redirect used to point at founder-den; bounce to IDE.
   { source: '/developers', destination: '/founder-ide', permanent: true },
   // 2FA / security now canonical on /account?tab=security. /settings/builder
@@ -94,7 +89,7 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   transpilePackages: ['@dcf/ui', '@dcf/types', '@dcf/config', '@dcf/utils', '@dcf/founder-vault'],
   serverExternalPackages: ['@capacitor/core', '@capacitor/filesystem', '@capacitor/preferences'],
-  // Default static stale time is 300s ù edge can serve old HTML while new JS hydrates (flash on hard refresh).
+  // Default static stale time is 300s ÔøΩ edge can serve old HTML while new JS hydrates (flash on hard refresh).
   experimental: {
     staleTimes: {
       dynamic: 0,
