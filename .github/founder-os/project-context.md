@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(relay): mock requestExecutorWake in showcase webhook tests
+chore(relay): refresh Bitfinex policy lock after exit-path fixes
 
 ## Last Activity
 
