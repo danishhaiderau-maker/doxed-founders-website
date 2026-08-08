@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(relay): disable fidelity auto-pause; resolve relink for vanish checks
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
