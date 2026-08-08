@@ -1,10 +1,10 @@
 {
   "policyVersion": 4,
-  "updatedAt": "2026-08-02T15:30:41.534Z",
+  "updatedAt": "2026-08-08T07:53:58.296Z",
   "files": {
-    "packages/utils/src/bitfinex-copy-policy.ts": "f9ebaae73aa1dd9d9d94e0714ee7ec27883b18d6dac76746ef4b8590de0ba986",
-    "packages/utils/src/subscriber-exit.ts": "a0201175d02448b9c68b0811a72678870342d25005259d737a7bf276521fc7e1",
+    "packages/utils/src/bitfinex-copy-policy.ts": "47c51127b0e42c5e25f557883e8caf4f9c4d0db6e9d0de47c58fd07a0e814fe7",
+    "packages/utils/src/subscriber-exit.ts": "ad40b99c343707578a7fad970b0eb55d8878da4f78c89b4ec15aca86f4e1e939",
     "apps/api/src/trading-agents/bot-bridge.service.ts": "d6eae1682fd82c6d8a21557e6e23e66c6f3f015856af8461bc4fb2621119718c",
-    "apps/api/src/trading-agents/signal-subscriber-execution.service.ts": "9a9b78dd1b90d47b8399babeee1e97e19a5bfb54dd67fb303c72dd4bb4db2644"
+    "apps/api/src/trading-agents/signal-subscriber-execution.service.ts": "3b1a662566721d1be6d7952be3dbd7d54a6fb4317ab050c4e07ed35b9921bac5"
   }
 }
