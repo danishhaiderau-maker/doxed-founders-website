@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { SignalCycleStatus } from '@prisma/client';
+import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
 import {
   btcToSats,
   effectiveExchangeQtyBtc,
@@ -54,6 +54,10 @@ import {
   SHOWCASE_RELINK_PRICE_BAND_PCT,
   SHOWCASE_RELINK_TIME_WINDOW_MS,
   resolveShowcaseMirrorTradeIdFromInputs,
+  hireExpiryBlocksNewLiveEntries,
+  hireExpiryRequiresExitOnlyProcessing,
+  expiredHireShouldRunExitOnly,
+  readRelayExecutorWakeRequest,
 } from './signal-subscriber-execution.service';
 
 test('live fidelity guard kill-switch defaults on and accepts explicit off values', () => {
@@ -2218,4 +2222,68 @@ test('resolveShowcaseMirrorTradeIdFromInputs: relink: malformed falls back grace
     resolveShowcaseMirrorTradeIdFromInputs('relink:unknown:unknown:0', null),
     null,
   );
+});
+
+
+test('hire expiry blocks new entries but requires exit-only processing for open risk', () => {
+  const expired = '2026-08-08T06:10:39.733Z';
+  const now = Date.parse('2026-08-08T06:51:34.000Z');
+  assert.equal(hireExpiryBlocksNewLiveEntries(expired, now), true);
+  assert.equal(hireExpiryRequiresExitOnlyProcessing(expired, false, now), true);
+  assert.equal(hireExpiryRequiresExitOnlyProcessing(expired, true, now), false);
+  assert.equal(hireExpiryBlocksNewLiveEntries(null, now), false);
+  assert.equal(hireExpiryBlocksNewLiveEntries('2026-08-08T08:00:00.000Z', now), false);
+  // cont-ffe6d1689ec2: expired hire + OPEN participant must keep exit ticks alive
+  assert.equal(
+    expiredHireShouldRunExitOnly({
+      simActive: false,
+      hireExpired: true,
+      openOrPendingParticipantCount: 1,
+    }),
+    true,
+  );
+  assert.equal(
+    expiredHireShouldRunExitOnly({
+      simActive: false,
+      hireExpired: true,
+      openOrPendingParticipantCount: 0,
+    }),
+    false,
+  );
+  assert.equal(
+    expiredHireShouldRunExitOnly({
+      simActive: true,
+      hireExpired: true,
+      openOrPendingParticipantCount: 1,
+    }),
+    false,
+  );
+});
+
+test('flat signed fast path refuses entries when hire expired', () => {
+  assert.equal(
+    flatSignedFastPathPreflight({
+      status: TradingAgentInstanceStatus.ACTIVE,
+      simActive: false,
+      hireExpired: true,
+      relayArmed: true,
+      virtualOpenOrPending: 0,
+      exchangeActiveOrders: 0,
+      exchangePositionQty: 0,
+    }),
+    false,
+  );
+});
+
+test('relay executor wake request reads POSITION_CLOSED payload', () => {
+  const wake = readRelayExecutorWakeRequest({
+    relayExecutorWake: {
+      trigger: 'POSITION_CLOSED',
+      at: '2026-08-08T06:51:34.000Z',
+      tradeId: 'cont-ffe6d1689ec2',
+    },
+  });
+  assert.equal(wake?.trigger, 'POSITION_CLOSED');
+  assert.equal(wake?.tradeId, 'cont-ffe6d1689ec2');
+  assert.equal(readRelayExecutorWakeRequest({}), null);
 });

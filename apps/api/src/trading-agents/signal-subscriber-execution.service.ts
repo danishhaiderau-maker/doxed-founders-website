@@ -1449,6 +1449,48 @@ function sourceTimestampMs(raw: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/** Hire expiry must block NEW live entries but never abandon OPEN exchange risk. */
+export function hireExpiryBlocksNewLiveEntries(expiresAt: Date | string | null | undefined, nowMs = Date.now()): boolean {
+  if (expiresAt == null) return false;
+  const ms = expiresAt instanceof Date ? expiresAt.getTime() : Date.parse(String(expiresAt));
+  return Number.isFinite(ms) && ms <= nowMs;
+}
+
+/** Expired hires still need processInstance for mirror exits / pending cancels. */
+export function hireExpiryRequiresExitOnlyProcessing(
+  expiresAt: Date | string | null | undefined,
+  simActive: boolean,
+  nowMs = Date.now(),
+): boolean {
+  return !simActive && hireExpiryBlocksNewLiveEntries(expiresAt, nowMs);
+}
+
+const RELAY_EXECUTOR_WAKE_KEY = 'relayExecutorWake';
+
+export type RelayExecutorWakeRequest = {
+  trigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
+  at: string;
+  tradeId?: string | null;
+};
+
+export function readRelayExecutorWakeRequest(dashboardState: unknown): RelayExecutorWakeRequest | null {
+  const dash =
+    dashboardState && typeof dashboardState === 'object' && !Array.isArray(dashboardState)
+      ? (dashboardState as Record<string, unknown>)
+      : {};
+  const raw = dash[RELAY_EXECUTOR_WAKE_KEY];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const rec = raw as Record<string, unknown>;
+  const trigger = typeof rec.trigger === 'string' ? rec.trigger : '';
+  const at = typeof rec.at === 'string' ? rec.at : '';
+  if (!trigger || !at) return null;
+  return {
+    trigger: trigger as RelayExecutorWakeRequest['trigger'],
+    at,
+    tradeId: typeof rec.tradeId === 'string' ? rec.tradeId : null,
+  };
+}
+
 export function flatSignedFastPathPreflight(input: {
   status: TradingAgentInstanceStatus;
   simActive: boolean;
@@ -1467,6 +1509,21 @@ export function flatSignedFastPathPreflight(input: {
     input.exchangeActiveOrders === 0 &&
     Math.abs(input.exchangePositionQty) === 0
   );
+}
+
+/**
+ * Expired live hires must not place new entries, but MUST keep running
+ * exit-only ticks while open BF risk remains. Skipping the instance entirely
+ * orphans exchange lots after showcase close (cont-ffe6d1689ec2: hire expired
+ * 06:10 UTC, POSITION_CLOSED persisted 06:51, Bitfinex stayed LONG).
+ */
+export function expiredHireShouldRunExitOnly(input: {
+  simActive: boolean;
+  hireExpired: boolean;
+  openOrPendingParticipantCount: number;
+}): boolean {
+  if (input.simActive || !input.hireExpired) return false;
+  return input.openOrPendingParticipantCount > 0;
 }
 
 /**
@@ -2395,6 +2452,90 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     return cancelledCount;
   }
 
+
+  /**
+   * Public API cannot run money ticks (executionEnabled=false). Persist a wake
+   * so the isolated relay-executor worker picks it up on the next poll / tick.
+   */
+  async requestExecutorWake(
+    trigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
+    tradeId?: string | null,
+  ): Promise<void> {
+    if (executionEnabled()) {
+      await this.wakeNow(trigger);
+      return;
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
+    if (!agent) return;
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
+      },
+      select: { id: true, dashboardState: true },
+      take: 50,
+    });
+    const payload: RelayExecutorWakeRequest = {
+      trigger,
+      at: new Date().toISOString(),
+      tradeId: tradeId ?? null,
+    };
+    for (const inst of instances) {
+      const next = applyDashboardPatch(
+        (inst.dashboardState ?? {}) as Record<string, unknown>,
+        { [RELAY_EXECUTOR_WAKE_KEY]: payload },
+      );
+      await this.prisma.tradingAgentInstance
+        .update({ where: { id: inst.id }, data: { dashboardState: next as object } })
+        .catch(() => {});
+    }
+  }
+
+  private async consumePersistedExecutorWakes(): Promise<void> {
+    if (!executionEnabled()) return;
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
+    if (!agent) return;
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
+      },
+      select: { id: true, dashboardState: true },
+      take: 50,
+    });
+    let best: RelayExecutorWakeRequest | null = null;
+    for (const inst of instances) {
+      const wake = readRelayExecutorWakeRequest(inst.dashboardState);
+      if (!wake) continue;
+      const wakeMs = Date.parse(wake.at);
+      if (!Number.isFinite(wakeMs) || Date.now() - wakeMs > 120_000) {
+        const cleared = applyDashboardPatch(
+          (inst.dashboardState ?? {}) as Record<string, unknown>,
+          { [RELAY_EXECUTOR_WAKE_KEY]: null },
+        );
+        await this.prisma.tradingAgentInstance
+          .update({ where: { id: inst.id }, data: { dashboardState: cleared as object } })
+          .catch(() => {});
+        continue;
+      }
+      if (!best || Date.parse(wake.at) >= Date.parse(best.at)) best = wake;
+      const cleared = applyDashboardPatch(
+        (inst.dashboardState ?? {}) as Record<string, unknown>,
+        { [RELAY_EXECUTOR_WAKE_KEY]: null },
+      );
+      await this.prisma.tradingAgentInstance
+        .update({ where: { id: inst.id }, data: { dashboardState: cleared as object } })
+        .catch(() => {});
+    }
+    if (best) {
+      this.lastShowcaseWakeAt = Date.parse(best.at) || Date.now();
+      this.lastShowcaseWakeTrigger =
+        best.trigger === 'POSITION_CLOSED' ? 'POSITION_CLOSED' : null;
+    }
+  }
+
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
   async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
     if (!executionEnabled()) return;
@@ -2430,6 +2571,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   private async tick() {
     if (!executionEnabled() || this.running) return;
+    await this.consumePersistedExecutorWakes().catch(() => {});
     this.running = true;
     this.tickStartedAtMs = Date.now();
     this.currentStage = 'LOAD_AGENT';
@@ -2462,8 +2604,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         if (instance.exchangeProvider !== 'bitfinex') continue;
         const simActive = isCopyRelaySimActive(instance.dashboardState);
 
-        // Live copy requires an active (non-expired) hire. Sim runs without one.
-        if (!simActive && instance.expiresAt && instance.expiresAt.getTime() < now) {
+        // Live copy hire expiry blocks NEW entries only. OPEN / PENDING risk must
+        // still run exit-only processInstance or Bitfinex orphans after showcase close
+        // (cont-ffe6d1689ec2: hire expired 06:10 UTC, POSITION_CLOSED 06:51, BF stayed open).
+        if (hireExpiryRequiresExitOnlyProcessing(instance.expiresAt, simActive, now)) {
           // Fix E — do not skip silently: the user's live copy is halted and
           // they should see why. Throttled to once per hour per instance.
           await this.surfaceExpiredHire(instance).catch(() => {
@@ -2473,8 +2617,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             instance,
             'HIRE_EXPIRED',
           ).catch(() => {
-            /* reset is best-effort; an expired hire cannot execute */
+            /* reset is best-effort; entry path remains blocked */
           });
+          try {
+            this.activeTrading = this.bitfinex;
+            this.currentStage = 'PROCESS_EXPIRED_HIRE_EXIT_ONLY';
+            await this.processInstance(agent.id, instance, false, { forceExitOnly: true });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this.logger.error(`Expired-hire exit-only ${instance.userId}: ${msg}`);
+            await this.prisma.tradingAgentInstance.update({
+              where: { id: instance.id },
+              data: { lastError: msg.slice(0, 500) },
+            });
+          }
           continue;
         }
 
@@ -2753,8 +2909,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     agentId: string,
     instance: TradingAgentInstance,
     simActive = false,
+    opts?: { forceExitOnly?: boolean },
   ) {
-    let exitOnly = instance.status === TradingAgentInstanceStatus.PAUSED && !simActive;
+    const forceExitOnly = opts?.forceExitOnly === true;
+    let exitOnly =
+      forceExitOnly ||
+      (instance.status === TradingAgentInstanceStatus.PAUSED && !simActive) ||
+      hireExpiryRequiresExitOnlyProcessing(instance.expiresAt, simActive);
     const venue = simActive ? 'bitfinex_sim' : 'bitfinex';
     const simState = simActive ? readCopyRelaySimState(instance.dashboardState) : null;
     const participantSince =
@@ -2884,10 +3045,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (!simActive) {
       const currentStatus = await this.prisma.tradingAgentInstance.findUnique({
         where: { id: instance.id },
-        select: { status: true },
+        select: { status: true, expiresAt: true },
       });
       if (!currentStatus) return;
-      exitOnly = currentStatus.status !== TradingAgentInstanceStatus.ACTIVE;
+      exitOnly =
+        forceExitOnly ||
+        currentStatus.status !== TradingAgentInstanceStatus.ACTIVE ||
+        hireExpiryRequiresExitOnlyProcessing(currentStatus.expiresAt, simActive);
     }
 
     const MIN_INTENT_TTL_MS = 90_000;
@@ -3245,8 +3409,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       select: { status: true },
     });
     if (!currentInstanceState) return;
+    const freshForExitGate = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { expiresAt: true },
+    });
     const exitOnlyNow =
-      !simActive && currentInstanceState.status !== TradingAgentInstanceStatus.ACTIVE;
+      forceExitOnly ||
+      (!simActive &&
+        (currentInstanceState.status !== TradingAgentInstanceStatus.ACTIVE ||
+          hireExpiryRequiresExitOnlyProcessing(freshForExitGate?.expiresAt, simActive)));
 
     // Phase 0 — shadow-diff observability. Compares the showcase book (from
     // the state already fetched above) against the copy's ledger. Pure

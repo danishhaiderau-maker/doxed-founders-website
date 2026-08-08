@@ -433,9 +433,9 @@ export class ShowcaseRelayEventsService {
     return true;
   }
 
-  private queueExecutionWake(event: ShowcaseRelayEventType): void {
+  private queueExecutionWake(event: ShowcaseRelayEventType, tradeId?: string | null): void {
     setImmediate(() => {
-      void this.execution.wakeNow(event).catch((err) => {
+      void this.execution.requestExecutorWake(event, tradeId).catch((err) => {
         this.logger.error(
           `Showcase execution wake ${event} failed: ${err instanceof Error ? err.message : err}`,
         );
@@ -605,7 +605,7 @@ export class ShowcaseRelayEventsService {
     // Return the webhook response without waiting for exchange reconciliation.
     // The durable cycle plus the normal 2s runner remain the crash backstop.
     if (event !== 'APPROVE_PENDING') {
-      this.queueExecutionWake(event);
+      this.queueExecutionWake(event, body.trade_id ?? null);
     }
     if (signedLifecycleEvent) {
       this.queueCanonicalReconcile(event);
