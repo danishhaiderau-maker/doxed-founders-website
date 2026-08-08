@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-feat(web): replace /mobile redirect with app download hub
+feat(mobile): recreate unified Capacitor shell v0.5 with APK download hub
 
 ## Last Activity
 
