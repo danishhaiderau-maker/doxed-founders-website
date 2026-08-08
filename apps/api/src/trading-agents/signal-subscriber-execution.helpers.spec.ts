@@ -45,6 +45,7 @@ import {
   shouldClearShowcaseStatusError,
   sourceEntityCreatedAtMs,
   advanceLiveFidelityGuard,
+  isLiveFidelityGuardEnabled,
   isFreshCanonicalFidelityBotState,
   isFreshExactFidelityReconcile,
   liveRelayFidelityObservation,
@@ -54,6 +55,17 @@ import {
   SHOWCASE_RELINK_TIME_WINDOW_MS,
   resolveShowcaseMirrorTradeIdFromInputs,
 } from './signal-subscriber-execution.service';
+
+test('live fidelity guard kill-switch defaults on and accepts explicit off values', () => {
+  assert.equal(isLiveFidelityGuardEnabled(undefined), true);
+  assert.equal(isLiveFidelityGuardEnabled(''), true);
+  assert.equal(isLiveFidelityGuardEnabled('true'), true);
+  assert.equal(isLiveFidelityGuardEnabled('1'), true);
+  assert.equal(isLiveFidelityGuardEnabled('false'), false);
+  assert.equal(isLiveFidelityGuardEnabled('0'), false);
+  assert.equal(isLiveFidelityGuardEnabled('OFF'), false);
+  assert.equal(isLiveFidelityGuardEnabled(' no '), false);
+});
 
 test('live fidelity guard needs three fresh low observations spanning at least 90 seconds', () => {
   const relayArmedAt = '2026-07-31T00:00:00.000Z';

@@ -103,9 +103,22 @@ export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
 export const LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS = 30_000;
 const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
 
+/**
+ * Ops kill-switch for sustained live-fidelity auto-pause.
+ * Default ON (unset). Set LIVE_FIDELITY_GUARD_ENABLED=0|false|off|no to skip
+ * pause-on-fidelity; only the operator should pause the relay.
+ */
+export function isLiveFidelityGuardEnabled(
+  envValue: string | undefined = process.env.LIVE_FIDELITY_GUARD_ENABLED,
+): boolean {
+  const v = (envValue ?? '').trim().toLowerCase();
+  if (v === '0' || v === 'false' || v === 'off' || v === 'no') return false;
+  return true;
+}
+
 export type LiveFidelityGuardState = {
   schema: 'live_fidelity_guard_v1';
-  enabled: true;
+  enabled: boolean;
   thresholdPct: number;
   requiredLowObservations: number;
   minBreachDurationMs: number;
@@ -146,7 +159,7 @@ function liveFidelityGuardBase(
 ): LiveFidelityGuardState {
   return {
     schema: 'live_fidelity_guard_v1',
-    enabled: true,
+    enabled: isLiveFidelityGuardEnabled(),
     thresholdPct: LIVE_FIDELITY_GUARD_THRESHOLD_PCT,
     requiredLowObservations: LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS,
     minBreachDurationMs: LIVE_FIDELITY_GUARD_MIN_BREACH_MS,
@@ -4034,6 +4047,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       dash.relayExecutionMode === 'LIVE' &&
       relayArmedAt != null;
     const previous = readLiveFidelityGuardState(dash.liveFidelityGuard);
+
+    if (!isLiveFidelityGuardEnabled()) {
+      const disabledState: LiveFidelityGuardState = {
+        ...liveFidelityGuardBase(previous, relayArmedAt),
+        enabled: false,
+        status: 'IDLE',
+        lastObservedAt: new Date(nowMs).toISOString(),
+        lastResetReason: 'LIVE_FIDELITY_GUARD_DISABLED',
+        action: previous?.action ?? null,
+        lastTrippedAt: previous?.lastTrippedAt ?? null,
+      };
+      if (
+        previous?.relayArmedAt !== relayArmedAt ||
+        previous.enabled !== false ||
+        previous.lastResetReason !== 'LIVE_FIDELITY_GUARD_DISABLED'
+      ) {
+        await this.persistLiveFidelityGuardState(instance.id, disabledState);
+        this.logger.log(
+          `[LIVE-FIDELITY-GUARD] skipped ${instance.userId}: LIVE_FIDELITY_GUARD_ENABLED kill-switch off`,
+        );
+      }
+      return false;
+    }
 
     const sourceFresh =
       isFreshCanonicalFidelityBotState(botState, nowMs) &&
@@ -9672,15 +9708,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const bot = await this.fetchExecutionBotState();
     if (!bot) return false; // canonical unreachable — do not count failed fetches
 
-    const inPositions = (bot.positions ?? []).some((p) => p.trade_id === tradeId);
-    const inTrades = (bot.trades ?? []).some((t) => t.trade_id === tradeId);
+    const inPositions = (bot.positions ?? []).some(
+      (p) => p.trade_id != null && tradeIdsMatch(p.trade_id, tradeId),
+    );
+    const inTrades = (bot.trades ?? []).some(
+      (t) => t.trade_id != null && tradeIdsMatch(t.trade_id, tradeId),
+    );
     const inTradesMap =
       bot.trades_map != null &&
-      Object.prototype.hasOwnProperty.call(bot.trades_map, tradeId);
+      Object.keys(bot.trades_map).some((key) => tradeIdsMatch(key, tradeId));
     // Defensive: a trade still pending/known as a signal is NOT vanished.
-    const inOrders = (bot.orders ?? []).some((o) => o.trade_id === tradeId);
+    const inOrders = (bot.orders ?? []).some(
+      (o) => o.trade_id != null && tradeIdsMatch(o.trade_id, tradeId),
+    );
     const inSignals = (bot.signal_info?.signals ?? []).some(
-      (s) => String(s.trade_id ?? '') === tradeId,
+      (s) => tradeIdsMatch(String(s.trade_id ?? ''), tradeId),
     );
 
     if (inPositions || inTrades || inTradesMap || inOrders || inSignals) {
@@ -9760,9 +9802,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // nothing else ever closes the copy position (the mirror-exit path needs
     // the cycle to transition CLOSED, which never happens for a wiped trade).
     // Market-close it through the same machinery as the Scenario C exits.
-    if (await this.trackShowcaseVanished(participant.id, cycle.tradeId ?? null)) {
+    // CRITICAL: use resolveShowcaseMirrorTradeId — cycle.tradeId may be
+    // `relink:…` / `adopt:…` after Cure 1. Exact === against the raw string
+    // false-vanished cont-e549 at noon 2026-08-08 (COPY_POSITION_NO_SHOWCASE
+    // → SHOWCASE_VANISHED $0 while Fly still held the short until +$1.18).
+    const showcaseTradeIdForVanish = this.resolveShowcaseMirrorTradeId(cycle, meta);
+    if (await this.trackShowcaseVanished(participant.id, showcaseTradeIdForVanish)) {
       this.logger.warn(
-        `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${cycle.tradeId} — absent from canonical positions/trades for ${SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive fresh states; market-closing copy lot`,
+        `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${showcaseTradeIdForVanish} (cycle.tradeId=${cycle.tradeId}) — absent from canonical positions/trades for ${SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive fresh states; market-closing copy lot`,
       );
       const closed = await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
         reason: 'SHOWCASE_VANISHED',
