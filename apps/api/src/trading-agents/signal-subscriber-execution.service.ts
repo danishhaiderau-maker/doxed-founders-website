@@ -6620,7 +6620,64 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? activeOrderIdSet.has(orderId)
         : !!(await this.activeTrading.findOrder(creds, orderId).catch(() => null));
     if (active) {
-      if (exitOnly) return;
+      if (exitOnly) {
+        // PAUSED / hire-expired exit-only must CANCEL resting entries, not
+        // early-return. Returning here left cont-3d3cd2524783 live on Bitfinex
+        // after showcase went flat while the hire was PAUSED.
+        {
+          const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+          if (fill) {
+            const recorded = await this.recordCancelRaceFill(
+              agentId,
+              userId,
+              cycle,
+              participant.id,
+              meta,
+              creds,
+              intent,
+              fill,
+              'EXIT_ONLY_PENDING_CANCEL',
+            );
+            if (recorded) return;
+          }
+        }
+        const cancel = await this.cancelManagedOrderGone(
+          creds,
+          orderId,
+          `Exit-only ${userId} cycle=${cycle.id} cancel relay limit ${orderId}`,
+        );
+        if (!cancel.gone) {
+          this.logger.error(
+            `Exit-only ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY`,
+          );
+          await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
+          await this.cycles.recordHireExecutionEvent(
+            userId,
+            agentId,
+            cycle.id,
+            'RECONCILE_CANCEL_FAILED',
+            {
+              venue: 'bitfinex',
+              source: 'hire',
+              event: 'EXIT_ONLY_PENDING_CANCEL',
+              bitfinex_order_id: orderId,
+              cancel_attempts: cancel.attempts,
+              cancel_reason: cancel.reason ?? 'unknown',
+            },
+          );
+          return;
+        }
+        this.logger.log(
+          `Exit-only ${userId} cycle=${cycle.id}: cancelled resting relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
+        );
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
+          venue: 'bitfinex',
+          pnl_usd: 0,
+          source: 'hire',
+          event: 'EXIT_ONLY_PENDING_CANCEL',
+        });
+        return;
+      }
       await this.applyLimitChase(
         agentId,
         userId,
