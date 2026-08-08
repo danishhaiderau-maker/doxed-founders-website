@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-feat(web): wire Day Desk into pricing page (S7)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
