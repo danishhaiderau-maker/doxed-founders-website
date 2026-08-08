@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(relay): refresh Bitfinex policy lock after exit-path fixes
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
