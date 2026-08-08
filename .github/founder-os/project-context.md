@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(relay): exit OPEN lots after hire expiry; durable POSITION_CLOSED wake
+fix(relay): mock requestExecutorWake in showcase webhook tests
 
 ## Last Activity
 
