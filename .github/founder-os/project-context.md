@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(adoption): restore showcase token feed and purge demo leftovers
 
 ## Last Activity
 
