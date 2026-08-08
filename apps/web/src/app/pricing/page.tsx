@@ -31,7 +31,7 @@ export default function PricingPage() {
             Code with your own AI. Locally.
           </h2>
           <p className='mt-4 text-lg text-zinc-400'>
-            Bring your own keys or run local models. Pay only for what you actually use.
+            Bring your own keys or run local models. Day Desk (email, calendar, bills) is included on Pro and Max.
           </p>
         </section>
 
@@ -50,6 +50,7 @@ export default function PricingPage() {
                 <li>Tab autocomplete (always works)</li>
                 <li>Limited daily cloud quota</li>
                 <li>Pair with doxxedcrypto.digital</li>
+                <li><strong className='text-white'>Day Desk</strong> — 14-day read-only trial; 200 email classifications/month</li>
               </ul>
               <p className='mt-4 text-xs text-zinc-500'>
                 At limit: cloud pauses, <strong className='text-zinc-300'>local mode keeps working</strong>.
@@ -68,6 +69,7 @@ export default function PricingPage() {
                 <li><strong className='text-white'>Auto Router</strong> (cost-optimized model routing)</li>
                 <li><strong className='text-white'>Borrow next week</strong> (50%, max 2 wks, auto)</li>
                 <li>Signed update channel</li>
+                <li><strong className='text-white'>Day Desk included</strong> — unlimited classification; 200 actions/month soft cap</li>
               </ul>
               <p className='mt-4 text-xs text-zinc-500'>
                 At limit: auto-borrow → degraded mode → upgrade nudge.
@@ -91,6 +93,7 @@ export default function PricingPage() {
                 <li>Priority routing</li>
                 <li>Signed update channel</li>
                 <li>Early access to new models</li>
+                <li><strong className='text-white'>Day Desk</strong> — 1,000 actions/month; early access to Phase 4 actions</li>
               </ul>
               <p className='mt-4 text-xs text-zinc-500'>
                 Same borrow rules, 3× headroom.
@@ -175,6 +178,11 @@ export default function PricingPage() {
                     <td className='px-5 py-2.5'>Auto Router (cost-optimized)</td>
                     <td className='px-5 py-2.5 font-semibold text-white'>Yes</td>
                     <td className='px-5 py-2.5 text-zinc-400'>Yes</td>
+                  </tr>
+                  <tr>
+                    <td className='px-5 py-2.5'>Day Desk (email/calendar/bills)</td>
+                    <td className='px-5 py-2.5 font-semibold text-white'>Yes (Pro/Max)</td>
+                    <td className='px-5 py-2.5 text-zinc-400'>No</td>
                   </tr>
                 </tbody>
               </table>
