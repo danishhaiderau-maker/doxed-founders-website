@@ -3365,6 +3365,7 @@ export interface WallAuthor {
   platformHandle: string | null;
   avatarUrl: string | null;
   isVerifiedFounder: boolean;
+  isAdmin?: boolean;
   founderSlug?: string | null;
 }
 
@@ -3382,6 +3383,14 @@ export interface WallMessage {
   sourceRefId: string | null;
   createdAt: string;
   pin: { kind: string; userId: string; cost: number; createdAt: string } | null;
+  replyTo?: { id: string; body: string; authorLabel: string } | null;
+  reactions?: { emoji: string; count: number; mine: boolean }[];
+  hidden?: boolean;
+  links?: {
+    project: string;
+    raiseRoom: string;
+    founderSpotlight: string | null;
+  };
 }
 
 export interface WallGroupEntry {
@@ -3399,6 +3408,10 @@ export interface WallGroupEntry {
   };
   messageCount: number;
   unreadCount: number;
+  pinned?: boolean;
+  muted?: boolean;
+  archived?: boolean;
+  pinnedAt?: string | null;
   lastMessage: {
     projectId: string;
     body: string;
@@ -3437,6 +3450,10 @@ export interface WallMembership {
   founderVerified: boolean;
   liveTrading: boolean;
   summarizerEligible: boolean;
+  postingMode?: 'OPEN' | 'ANNOUNCEMENTS';
+  slowModeSeconds?: number;
+  canPost?: boolean;
+  mutedUntil?: string | null;
 }
 
 export interface WallSummary {
@@ -3496,6 +3513,14 @@ export function markWallRead(slug: string, token: string) {
   );
 }
 
+export function markAllWallsRead(token: string) {
+  return apiFetch<{ success: true; updated: number }>(
+    '/wall/me/read-all',
+    { method: 'POST' },
+    token,
+  );
+}
+
 export function fetchAggregatedWall(token: string, limit = 60) {
   return apiFetch<WallMessage[]>(`/wall/me/aggregated?limit=${limit}`, undefined, token);
 }
@@ -3508,10 +3533,65 @@ export function joinProjectWall(slug: string, token: string) {
   );
 }
 
-export function postProjectWallMessage(slug: string, body: string, token: string) {
+export function postProjectWallMessage(
+  slug: string,
+  body: string,
+  token: string,
+  replyToId?: string,
+) {
   return apiFetch<WallMessage>(
     `/wall/projects/${encodeURIComponent(slug)}/messages`,
-    { method: 'POST', body: JSON.stringify({ body }) },
+    { method: 'POST', body: JSON.stringify({ body, replyToId }) },
+    token,
+  );
+}
+
+export function reactToWallMessage(messageId: string, emoji: string, token: string) {
+  return apiFetch<{ messageId: string; reactions: { emoji: string; count: number; mine: boolean }[] }>(
+    `/wall/messages/${messageId}/react`,
+    { method: 'POST', body: JSON.stringify({ emoji }) },
+    token,
+  );
+}
+
+export function reportWallMessage(messageId: string, reason: string, token: string) {
+  return apiFetch<{ success: true; hiddenForYou: true }>(
+    `/wall/messages/${messageId}/report`,
+    { method: 'POST', body: JSON.stringify({ reason }) },
+    token,
+  );
+}
+
+export function hideWallMessage(messageId: string, token: string) {
+  return apiFetch<{ success: true }>(
+    `/wall/messages/${messageId}/hide`,
+    { method: 'POST' },
+    token,
+  );
+}
+
+export function updateWallSettings(
+  slug: string,
+  patch: { postingMode?: 'OPEN' | 'ANNOUNCEMENTS'; slowModeSeconds?: number },
+  token: string,
+) {
+  return apiFetch<{ postingMode: 'OPEN' | 'ANNOUNCEMENTS'; slowModeSeconds: number }>(
+    `/wall/projects/${encodeURIComponent(slug)}/settings`,
+    { method: 'PUT', body: JSON.stringify(patch) },
+    token,
+  );
+}
+
+export function muteWallUser(
+  slug: string,
+  userId: string,
+  token: string,
+  hours = 24,
+  reason?: string,
+) {
+  return apiFetch<{ success: true; userId: string; mutedUntil: string }>(
+    `/wall/projects/${encodeURIComponent(slug)}/mute`,
+    { method: 'POST', body: JSON.stringify({ userId, hours, reason }) },
     token,
   );
 }
@@ -3693,11 +3773,21 @@ export function disconnectWallet(token: string, chain = 'SOLANA') {
 export interface MessageThread {
   otherUserId: string;
   otherUserLabel: string;
+  otherUserRole?: string;
+  isAdmin?: boolean;
+  isVerifiedFounder?: boolean;
+  founderSlug?: string | null;
+  lastSeenAt?: string | null;
+  online?: boolean;
   lastBody: string;
   lastAt: string;
   unreadCount: number;
   applicationId: string | null;
   applicationLabel: string | null;
+  pinned?: boolean;
+  muted?: boolean;
+  archived?: boolean;
+  pinnedAt?: string | null;
 }
 
 export interface PlatformMessageItem {
@@ -3709,8 +3799,29 @@ export interface PlatformMessageItem {
   readAt: string | null;
   mine: boolean;
   fromLabel: string;
+  fromRole?: string;
+  isAdmin?: boolean;
+  isVerifiedFounder?: boolean;
+  founderSlug?: string | null;
   applicationId: string | null;
+  replyTo?: { id: string; body: string; fromLabel: string } | null;
+  reactions?: { emoji: string; count: number; mine: boolean }[];
 }
+
+export interface ConversationPayload {
+  messages: PlatformMessageItem[];
+  peer: {
+    userId: string;
+    lastSeenAt: string | null;
+    online: boolean;
+    isAdmin: boolean;
+    isVerifiedFounder: boolean;
+    founderSlug: string | null;
+  } | null;
+}
+
+export const CHAT_REACTION_EMOJIS = ['👍', '❤️', '😂', '🔥', '👀', '✅'] as const;
+export const MAX_PINNED_CHATS = 20;
 
 export function fetchMessageThreads(token: string) {
   return apiFetch<MessageThread[]>('/messages/threads', undefined, token);
@@ -3720,10 +3831,20 @@ export function fetchUnreadMessageCount(token: string) {
   return apiFetch<{ count: number }>('/messages/unread-count', undefined, token);
 }
 
+export function markAllMessagesRead(token: string) {
+  return apiFetch<{ success: true; updated: number }>(
+    '/messages/mark-all-read',
+    { method: 'POST' },
+    token,
+  );
+}
+
 export type MessageRecipientLookup = {
   userId: string;
   label: string;
   platformHandle: string | null;
+  isAdmin?: boolean;
+  isVerifiedFounder?: boolean;
 };
 
 export function resolveMessageRecipient(query: string, token: string) {
@@ -3732,7 +3853,7 @@ export function resolveMessageRecipient(query: string, token: string) {
 }
 
 export function fetchMessageConversation(otherUserId: string, token: string) {
-  return apiFetch<PlatformMessageItem[]>(`/messages/with/${otherUserId}`, undefined, token);
+  return apiFetch<ConversationPayload>(`/messages/with/${otherUserId}`, undefined, token);
 }
 
 export function sendPlatformMessage(
@@ -3740,11 +3861,52 @@ export function sendPlatformMessage(
   message: string,
   token: string,
   applicationId?: string,
+  replyToId?: string,
 ) {
   return apiFetch('/messages/send', {
     method: 'POST',
-    body: JSON.stringify({ toUserId, message, applicationId }),
+    body: JSON.stringify({ toUserId, message, applicationId, replyToId }),
   }, token);
+}
+
+export function reactToDmMessage(messageId: string, emoji: string, token: string) {
+  return apiFetch<{ messageId: string; reactions: { emoji: string; count: number; mine: boolean }[] }>(
+    `/messages/reactions/${messageId}`,
+    { method: 'POST', body: JSON.stringify({ emoji }) },
+    token,
+  );
+}
+
+export function setChatThreadPref(
+  token: string,
+  body: {
+    scope: 'dm' | 'wall';
+    targetId: string;
+    pinned?: boolean;
+    muted?: boolean;
+    archived?: boolean;
+  },
+) {
+  return apiFetch<{
+    scope: string;
+    targetId: string;
+    pinned: boolean;
+    muted: boolean;
+    archived: boolean;
+    pinnedAt: string | null;
+    maxPins: number;
+  }>('/messages/prefs', { method: 'POST', body: JSON.stringify(body) }, token);
+}
+
+export function chatPresenceHeartbeat(token: string) {
+  return apiFetch<{ lastSeenAt: string }>('/messages/presence', { method: 'POST' }, token);
+}
+
+/** Absolute URL for chat SSE stream (EventSource cannot use relative auth headers — token in query). */
+export function chatEventsStreamUrl(token: string): string {
+  const base = apiUrl('/messages/stream');
+  const sep = base.includes('?') ? '&' : '?';
+  return `${base}${sep}access_token=${encodeURIComponent(token)}`;
 }
 
 export function updatePlatformHandle(handle: string, token: string) {

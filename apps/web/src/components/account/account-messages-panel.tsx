@@ -46,7 +46,7 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId }: Props)
     async (otherUserId: string) => {
       try {
         const data = await fetchMessageConversation(otherUserId, accessToken);
-        setMessages(data);
+        setMessages(data.messages);
         setErr(null);
         await loadThreads();
         dispatchInboxRefresh();

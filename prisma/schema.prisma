@@ -493,6 +493,8 @@ model User {
   /// keeps showing the consent pop-up. See apps/api/src/debug-squasher/.
   debugSquasherConsent       String?          @default("unset")
   debugSquasherConsentAt     DateTime?
+  /// Coarse last-seen for chat presence (updated by chat heartbeat).
+  lastSeenAt                 DateTime?
   createdAt                  DateTime         @default(now())
   updatedAt                  DateTime         @updatedAt
 
@@ -568,10 +570,16 @@ model User {
   aiTokenUsageLogs         AiTokenUsageLog[]
   messagesSent             PlatformMessage[]            @relation("MessageFrom")
   messagesReceived         PlatformMessage[]            @relation("MessageTo")
+  messageReactions         PlatformMessageReaction[]
   wallMessages             ProjectWallMessage[]
   wallPins                 ProjectWallPin[]
   wallSummaryActivations   ProjectWallSummary[]
   wallReadCursors          ProjectWallReadCursor[]
+  wallReactions            ProjectWallReaction[]
+  wallMutesIssued          ProjectWallMute[]            @relation("WallMuteIssuer")
+  wallMutesReceived        ProjectWallMute[]            @relation("WallMuteTarget")
+  wallReports              ProjectWallReport[]
+  chatThreadPrefs          ChatThreadPreference[]
   referredBy               User?                        @relation("UserReferrals", fields: [referredByUserId], references: [id], onDelete: SetNull)
   referrals                User[]                       @relation("UserReferrals")
   tokenPledges             TokenPledge[]
@@ -800,6 +808,8 @@ model Project {
   wallPins                ProjectWallPin[]
   wallSummary             ProjectWallSummary?
   wallReadCursors         ProjectWallReadCursor[]
+  wallSettings            ProjectWallSettings?
+  wallMutes               ProjectWallMute[]
   regulatoryQuestionnaire RegulatoryQuestionnaire?
   deploymentConfig        ProjectDeploymentConfig?
   publishJobs             DeploymentPublishJob[]
@@ -1227,6 +1237,7 @@ enum NotificationType {
   FOUNDER_EVENT
   TRADING_AGENT_UPDATE
   PLATFORM_MESSAGE
+  WALL_MENTION
   SYSTEM
 }
 
@@ -1272,16 +1283,60 @@ model PlatformMessage {
   toUserId      String
   applicationId String?
   body          String    @db.Text
+  /// Optional quote/reply target within the same DM thread.
+  replyToId     String?
   readAt        DateTime?
   createdAt     DateTime  @default(now())
 
-  from        User                @relation("MessageFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
-  to          User                @relation("MessageTo", fields: [toUserId], references: [id], onDelete: Cascade)
-  application ListingApplication? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  from        User                       @relation("MessageFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  to          User                       @relation("MessageTo", fields: [toUserId], references: [id], onDelete: Cascade)
+  application ListingApplication?        @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  replyTo     PlatformMessage?           @relation("DmReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies     PlatformMessage[]          @relation("DmReplies")
+  reactions   PlatformMessageReaction[]
 
   @@index([toUserId, readAt, createdAt])
   @@index([fromUserId, toUserId, createdAt])
   @@index([applicationId])
+  @@index([replyToId])
+}
+
+/// Lightweight emoji reaction on a direct message (no media).
+model PlatformMessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message PlatformMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
+}
+
+/// Per-user mute / pin / archive prefs for DM threads and project walls.
+/// Pin is free up to 20 chats total across scopes.
+model ChatThreadPreference {
+  id        String    @id @default(cuid())
+  userId    String
+  /// "dm" (targetId = other userId) | "wall" (targetId = projectId)
+  scope     String
+  targetId  String
+  pinned    Boolean   @default(false)
+  muted     Boolean   @default(false)
+  archived  Boolean   @default(false)
+  pinnedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope, targetId])
+  @@index([userId, pinned])
+  @@index([userId, archived])
 }
 
 model FounderUpdate {
@@ -2802,23 +2857,34 @@ model FounderVaultItem {
 /// Telegram-style wall message on a project's community chat hub.
 /// Founders and investors who have joined (followed) the project can post.
 model ProjectWallMessage {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   projectId   String
   authorId    String
-  body        String   @db.Text
+  body        String    @db.Text
   /// Origin of the message — direct chat or cross-posted from the social hub / build feed.
-  source      String   @default("chat")
+  source      String    @default("chat")
   /// When cross-posted, references the originating entity (e.g. build post id).
   sourceRefId String?
-  createdAt   DateTime @default(now())
+  /// Optional quote/reply target on the same wall.
+  replyToId   String?
+  /// Soft-hide by founder/admin after a report (still visible to author + mods).
+  hiddenAt    DateTime?
+  hiddenById  String?
+  createdAt   DateTime  @default(now())
 
-  project Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  author  User            @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  pin     ProjectWallPin?
+  project   Project               @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author    User                  @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  pin       ProjectWallPin?
+  replyTo   ProjectWallMessage?   @relation("WallReplies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies   ProjectWallMessage[]  @relation("WallReplies")
+  reactions ProjectWallReaction[]
+  reports   ProjectWallReport[]
 
   @@index([projectId, createdAt])
   @@index([authorId])
   @@index([source])
+  @@index([replyToId])
+  @@index([hiddenAt])
 }
 
 /// A DDollar-funded subtopic upgrade (pin / highlight / promote) on a wall message.
@@ -2837,6 +2903,73 @@ model ProjectWallPin {
 
   @@index([projectId])
   @@index([userId])
+}
+
+/// Lightweight emoji reaction on a wall message.
+model ProjectWallReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message ProjectWallMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
+}
+
+/// Founder/admin governance for a project wall (FUD control).
+/// postingMode: OPEN (joined members) | ANNOUNCEMENTS (founder/admin only).
+model ProjectWallSettings {
+  id              String   @id @default(cuid())
+  projectId       String   @unique
+  postingMode     String   @default("OPEN")
+  /// Min seconds between posts for non-founders; 0 = off.
+  slowModeSeconds Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+/// Temporary mute of a user on a specific project wall.
+model ProjectWallMute {
+  id         String   @id @default(cuid())
+  projectId  String
+  userId     String
+  mutedById  String
+  reason     String?
+  mutedUntil DateTime
+  createdAt  DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation("WallMuteTarget", fields: [userId], references: [id], onDelete: Cascade)
+  mutedBy User    @relation("WallMuteIssuer", fields: [mutedById], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@index([mutedUntil])
+}
+
+/// Report a wall message — hidden for the reporter immediately; founder/admin can act.
+model ProjectWallReport {
+  id         String   @id @default(cuid())
+  messageId  String
+  reporterId String
+  reason     String   @db.Text
+  /// OPEN | RESOLVED | DISMISSED
+  status     String   @default("OPEN")
+  createdAt  DateTime @default(now())
+
+  message  ProjectWallMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  reporter User               @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, reporterId])
+  @@index([status, createdAt])
+  @@index([reporterId])
 }
 
 /// Latest Chat Summarizer agent output + the recurring monthly DDollar subscription

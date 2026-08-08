@@ -4,14 +4,17 @@ import Link from 'next/link';
 
 type Props = {
   userId: string;
+  label?: string;
   className?: string;
   compact?: boolean;
 };
 
-export function MessageTraderButton({ userId, className = '', compact = false }: Props) {
+export function MessageTraderButton({ userId, label, className = '', compact = false }: Props) {
+  const q = new URLSearchParams({ dm: userId });
+  if (label) q.set('label', label);
   return (
     <Link
-      href={`/chat?dm=${encodeURIComponent(userId)}`}
+      href={`/chat?${q.toString()}`}
       className={
         className ||
         `inline-flex items-center justify-center rounded-lg border border-cyan-500/40 bg-cyan-950/30 font-medium text-cyan-100 transition hover:bg-cyan-950/50 ${
