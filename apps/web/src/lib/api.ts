@@ -3960,6 +3960,51 @@ export function testFounderBrainProviders(token: string, provider?: 'deepseek' |
   ).then((res) => (Array.isArray(res) ? res : [res]));
 }
 
+export type SecondBrainKeyStatus = {
+  gemini: boolean;
+  openai: boolean;
+  glm: boolean;
+  cheapPathReady: boolean;
+  primaryModel: string;
+  fallbackModel: string;
+};
+
+export type SecondBrainCritiqueResult = {
+  text: string | null;
+  provider: 'gemini-flash' | 'openai-mini' | 'glm-last-resort' | null;
+};
+
+export type SecondBrainTestResult = {
+  ok: boolean;
+  provider: SecondBrainCritiqueResult['provider'];
+  message: string;
+  keys: SecondBrainKeyStatus;
+  latencyMs: number;
+};
+
+export function fetchSecondBrainStatus(token: string) {
+  return apiFetch<SecondBrainKeyStatus>('/second-brain/status', undefined, token);
+}
+
+export function testSecondBrainCascade(token: string, allowGlmSpend = false) {
+  return apiFetch<SecondBrainTestResult>(
+    '/second-brain/test',
+    { method: 'POST', body: JSON.stringify({ allowGlmSpend }) },
+    token,
+  );
+}
+
+export function critiqueWithSecondBrain(
+  token: string,
+  body: { agentOutput: string; context?: string; allowGlmSpend?: boolean },
+) {
+  return apiFetch<SecondBrainCritiqueResult>(
+    '/second-brain/critique',
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export type BuilderTierBreakdown = {
   poolRemaining: number;
   poolCap: number;

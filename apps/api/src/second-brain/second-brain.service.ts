@@ -1,7 +1,24 @@
-﻿import { Injectable, Logger } from '@nestjs/common';
+﻿import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { FounderBrainProvidersService } from '../founder-ai-runtime/founder-brain-providers.service';
 import { FounderPromoService } from '../founder-os/founder-promo.service';
 import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
+
+export type SecondBrainProviderLabel = 'gemini-flash' | 'openai-mini' | 'glm-last-resort';
+
+export type SecondBrainCritiqueResult = {
+  text: string | null;
+  provider: SecondBrainProviderLabel | null;
+};
+
+export type SecondBrainKeyStatus = {
+  gemini: boolean;
+  openai: boolean;
+  glm: boolean;
+  /** True when at least one cheap path (Gemini or OpenAI) is available. */
+  cheapPathReady: boolean;
+  primaryModel: string;
+  fallbackModel: string;
+};
 
 /**
  * Second Brain — expert consult for Founder IDE.
@@ -23,6 +40,25 @@ export class SecondBrainService {
     private readonly founderPromo: FounderPromoService,
   ) {}
 
+  async getKeyStatus(): Promise<SecondBrainKeyStatus> {
+    const gemini =
+      Boolean(process.env.GEMINI_API_KEY?.trim()) ||
+      Boolean(await this.founderPromo.getDecryptedPlatformGeminiKey());
+    const openai = Boolean(process.env.OPENAI_API_KEY?.trim());
+    const glm =
+      Boolean(process.env.GLM_API_KEY?.trim()) ||
+      Boolean(await this.brainProviders.resolveApiKey('glm')) ||
+      Boolean(await this.founderPromo.getDecryptedPlatformGlmKey());
+    return {
+      gemini,
+      openai,
+      glm,
+      cheapPathReady: gemini || openai,
+      primaryModel: process.env.SECOND_BRAIN_PRIMARY_MODEL?.trim() || 'gemini-2.0-flash',
+      fallbackModel: process.env.SECOND_BRAIN_FALLBACK_MODEL?.trim() || 'gpt-4o-mini',
+    };
+  }
+
   /**
    * Critique an agent's output via the cheap expert cascade.
    *
@@ -32,7 +68,12 @@ export class SecondBrainService {
     agentOutput: string;
     context?: string;
     allowGlmSpend?: boolean;
-  }): Promise<string | null> {
+  }): Promise<SecondBrainCritiqueResult> {
+    const agentOutput = input.agentOutput?.trim() ?? '';
+    if (!agentOutput) {
+      throw new BadRequestException('agentOutput is required');
+    }
+
     const system = [
       "You are the Second Brain — a critical reviewer of an AI agent's output.",
       'Be concise, specific, and skeptical. Flag anything wrong, risky, or missing.',
@@ -43,7 +84,7 @@ export class SecondBrainService {
       input.context?.trim() ?? '(none)',
       '',
       'Agent output to critique:',
-      input.agentOutput,
+      agentOutput,
     ].join('\n');
 
     const geminiKey =
@@ -57,7 +98,7 @@ export class SecondBrainService {
       system,
       user,
     });
-    if (gemini) return gemini;
+    if (gemini) return { text: gemini, provider: 'gemini-flash' };
 
     const openaiKey = process.env.OPENAI_API_KEY?.trim() || null;
     if (openaiKey) {
@@ -69,14 +110,14 @@ export class SecondBrainService {
         system,
         user,
       });
-      if (openai) return openai;
+      if (openai) return { text: openai, provider: 'openai-mini' };
     }
 
     if (!input.allowGlmSpend) {
       this.logger.warn(
         'second_brain.critique: cheap cascade exhausted; GLM skipped (allowGlmSpend=false).',
       );
-      return null;
+      return { text: null, provider: null };
     }
 
     const glmKey =
@@ -84,10 +125,10 @@ export class SecondBrainService {
       (await this.founderPromo.getDecryptedPlatformGlmKey());
     if (!glmKey) {
       this.logger.warn('second_brain.critique skipped — no cheap path and no GLM key');
-      return null;
+      return { text: null, provider: null };
     }
 
-    return this.tryOpenAiCompat({
+    const glm = await this.tryOpenAiCompat({
       label: 'glm-last-resort',
       apiKey: glmKey,
       baseUrl: getGlmApiBaseUrl(),
@@ -95,10 +136,67 @@ export class SecondBrainService {
       system,
       user,
     });
+    return { text: glm, provider: glm ? 'glm-last-resort' : null };
+  }
+
+  /** Admin / health smoke: tiny critique proving cascade (never DeepSeek). */
+  async testCascade(opts?: { allowGlmSpend?: boolean }): Promise<{
+    ok: boolean;
+    provider: SecondBrainProviderLabel | null;
+    message: string;
+    keys: SecondBrainKeyStatus;
+    latencyMs: number;
+  }> {
+    const started = Date.now();
+    const keys = await this.getKeyStatus();
+    if (!keys.cheapPathReady && !(opts?.allowGlmSpend && keys.glm)) {
+      return {
+        ok: false,
+        provider: null,
+        message: 'No Second Brain path ready (need Gemini and/or OPENAI_API_KEY; GLM optional last resort)',
+        keys,
+        latencyMs: Date.now() - started,
+      };
+    }
+
+    const result = await this.critique({
+      agentOutput: 'Ping: 2+2=4. Reply with one short confirmation line.',
+      context: 'admin second-brain cascade smoke test',
+      allowGlmSpend: Boolean(opts?.allowGlmSpend),
+    });
+
+    if (result.provider === null || !result.text) {
+      return {
+        ok: false,
+        provider: null,
+        message: 'Cascade returned empty — check Gemini / OpenAI / GLM keys',
+        keys,
+        latencyMs: Date.now() - started,
+      };
+    }
+
+    // Hard assert: DeepSeek must never appear as the Second Brain provider.
+    if (String(result.provider).toLowerCase().includes('deepseek')) {
+      return {
+        ok: false,
+        provider: result.provider,
+        message: 'FAIL: DeepSeek used for Second Brain (forbidden)',
+        keys,
+        latencyMs: Date.now() - started,
+      };
+    }
+
+    return {
+      ok: true,
+      provider: result.provider,
+      message: `Second Brain OK via ${result.provider}`,
+      keys,
+      latencyMs: Date.now() - started,
+    };
   }
 
   private async tryOpenAiCompat(opts: {
-    label: string;
+    label: SecondBrainProviderLabel;
     apiKey: string | null;
     baseUrl: string;
     model: string;
@@ -106,6 +204,10 @@ export class SecondBrainService {
     user: string;
   }): Promise<string | null> {
     if (!opts.apiKey) return null;
+    if (opts.baseUrl.toLowerCase().includes('deepseek')) {
+      this.logger.error('second_brain refused DeepSeek path — Builder/Platform Brain only');
+      return null;
+    }
     try {
       const res = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
         method: 'POST',

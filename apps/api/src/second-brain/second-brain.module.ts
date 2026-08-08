@@ -1,5 +1,6 @@
 ﻿import { Module } from '@nestjs/common';
 import { FounderOsModule } from '../founder-os/founder-os.module';
+import { SecondBrainController } from './second-brain.controller';
 import { SecondBrainService } from './second-brain.service';
 
 /**
@@ -9,6 +10,7 @@ import { SecondBrainService } from './second-brain.service';
  */
 @Module({
   imports: [FounderOsModule],
+  controllers: [SecondBrainController],
   providers: [SecondBrainService],
   exports: [SecondBrainService],
 })

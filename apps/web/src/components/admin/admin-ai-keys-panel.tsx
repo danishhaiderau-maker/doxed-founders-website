@@ -14,9 +14,11 @@ import {
   savePlatformBrainKey,
   saveShowcaseCredentials,
   updateShowcaseConfig,
+  testSecondBrainCascade,
   type AdminControlOverview,
   type FounderPromoPlatformSettings,
   type PlatformBrainStatus,
+  type SecondBrainTestResult,
 } from '@/lib/api';
 import { AdminAiRoutingPanel } from './admin-ai-routing-panel';
 import { AdminFounderBrainProvidersPanel } from './admin-founder-brain-providers-panel';
@@ -74,9 +76,10 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
   const [brain, setBrain] = useState<PlatformBrainStatus | null>(null);
   const [promo, setPromo] = useState<FounderPromoPlatformSettings | null>(null);
   const [drafts, setDrafts] = useState<Partial<Record<KeyId, string>>>({});
-  const [busy, setBusy] = useState<KeyId | null>(null);
+  const [busy, setBusy] = useState<KeyId | 'sb-test' | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [sbTest, setSbTest] = useState<SecondBrainTestResult | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -206,6 +209,26 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
       flash('ok', `${label} cleared.`);
     } catch (e) {
       flash('err', e instanceof Error ? e.message : 'Clear failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function runSecondBrainTest() {
+    setBusy('sb-test');
+    setSbTest(null);
+    setErr(null);
+    setMsg(null);
+    try {
+      const result = await testSecondBrainCascade(token, false);
+      setSbTest(result);
+      if (result.ok) {
+        flash('ok', result.message);
+      } else {
+        flash('err', result.message);
+      }
+    } catch (e) {
+      flash('err', e instanceof Error ? e.message : 'Second Brain test failed');
     } finally {
       setBusy(null);
     }
@@ -363,6 +386,24 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
             <code className="text-zinc-400">OPENAI_API_KEY</code> gpt-4o-mini / Luna-class if set in Railway.
             GLM is optional last-resort only — not the default. DeepSeek is never used for Second Brain.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy != null}
+              onClick={() => void runSecondBrainTest()}
+              className="rounded-lg border border-sky-500/40 bg-sky-950/40 px-3 py-1.5 text-xs font-semibold text-sky-100 hover:bg-sky-900/50 disabled:opacity-40"
+            >
+              {busy === 'sb-test' ? 'Testing cascade…' : 'Test Second Brain cascade'}
+            </button>
+            {sbTest && (
+              <span className={`text-[11px] ${sbTest.ok ? 'text-emerald-300' : 'text-red-300'}`}>
+                {sbTest.message}
+                {sbTest.provider ? ` · ${sbTest.provider}` : ''}
+                {` · ${sbTest.latencyMs}ms`}
+                {` · gemini=${sbTest.keys.gemini ? 'yes' : 'no'} openai=${sbTest.keys.openai ? 'yes' : 'no'} glm=${sbTest.keys.glm ? 'yes' : 'no'}`}
+              </span>
+            )}
+          </div>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">
           <div className="rounded-xl border border-sky-500/25 bg-sky-950/10 p-4">

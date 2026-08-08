@@ -9,6 +9,7 @@ import {
   fetchIdeBridgeWorkspaces,
   dispatchToIdeSession,
   fetchIdeDispatchStatus,
+  critiqueWithSecondBrain,
   type BridgeSession,
   type BridgeWorkspace,
   type FounderNodeStatusRow,
@@ -316,6 +317,69 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     }
   }, [accessToken, input, isOnline, pollDispatch, projects.length, selectedSession, voice]);
 
+  /** Second Brain: cheap expert critique of the latest assistant reply (never DeepSeek). */
+  const handleSecondBrainReview = useCallback(async () => {
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant' && !m.pending && m.text.trim());
+    if (!lastAssistant) {
+      setError('No assistant reply to review yet — dispatch a prompt first.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    const pendingId = `sb:${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: pendingId,
+        role: 'assistant',
+        text: 'Second Brain reviewing…',
+        at: new Date().toISOString(),
+        pending: true,
+        status: 'second_brain',
+      },
+    ]);
+    try {
+      const result = await critiqueWithSecondBrain(accessToken, {
+        agentOutput: lastAssistant.text,
+        context: 'Founder IDE chat — Second Brain expert consult',
+        allowGlmSpend: false,
+      });
+      const body =
+        result.text?.trim() ||
+        'Second Brain had no response (need Gemini Flash or OPENAI_API_KEY; GLM is last-resort only).';
+      const via = result.provider ? `via ${result.provider}` : 'no provider';
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === pendingId
+            ? {
+                ...m,
+                pending: false,
+                text: body,
+                status: `Second Brain · ${via}`,
+              }
+            : m,
+        ),
+      );
+    } catch (e) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === pendingId
+            ? {
+                ...m,
+                pending: false,
+                status: `error: ${e instanceof Error ? e.message : 'Second Brain failed'}`,
+                text: 'Second Brain review failed.',
+              }
+            : m,
+        ),
+      );
+      setError(e instanceof Error ? e.message : 'Second Brain review failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [accessToken, messages]);
+
   // ── Mic toggle (debounced) ───────────────────────────────────────────────
   const handleMicToggle = useCallback(() => {
     // Debounce: ignore rapid double-clicks that re-init SpeechRecognition.
@@ -611,6 +675,15 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
             )}
             {voice.voiceError && <div className='mb-2 text-xs text-rose-400'>{voice.voiceError}</div>}
             <div className='flex items-end gap-2'>
+              <button
+                type='button'
+                onClick={() => void handleSecondBrainReview()}
+                disabled={busy}
+                title='Critique the latest assistant reply via Gemini Flash (never DeepSeek)'
+                className='shrink-0 rounded-xl border border-sky-500/40 bg-sky-950/30 px-2.5 py-2 text-[11px] font-semibold text-sky-100 transition hover:bg-sky-900/40 disabled:opacity-40'
+              >
+                Second Brain
+              </button>
               <button
                 type='button'
                 onClick={handleMicToggle}
