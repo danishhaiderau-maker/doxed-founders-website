@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+chore(admin): remove Demo Mode control panel from production
 
 ## Last Activity
 
