@@ -10,7 +10,6 @@ import {
   connectGitHubRepo,
   connectIntegration,
   disconnectIntegration,
-  fetchAccountOverview,
   fetchBuilderSettings,
   fetchCopilotMemory,
   fetchFounderOsDashboard,
@@ -22,7 +21,6 @@ import {
   IntegrationProviderConfig,
 } from '@/lib/api';
 import { AI_PROVIDERS } from '@dcf/utils';
-import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
 
 type Props = {
   accessToken: string;
@@ -48,7 +46,6 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [promo, setPromo] = useState<FounderPromoUserStatus | null>(null);
   const [aiProviders, setAiProviders] = useState<
     { key: string; label: string; connected: boolean; billTip: string; defaultModel: string | null }[]
@@ -87,7 +84,7 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
   const load = useCallback(async () => {
     setErr(null);
     try {
-    const [dashResult, memory, provResult, x, overview, builder, promoStatus] = await Promise.all([
+    const [dashResult, memory, provResult, x, builder, promoStatus] = await Promise.all([
       fetchFounderOsDashboard(accessToken)
         .then((value) => ({ ok: true as const, value }))
         .catch((e: unknown) => ({ ok: false as const, error: e })),
@@ -96,7 +93,6 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
         .then((value) => ({ ok: true as const, value }))
         .catch(() => ({ ok: false as const, value: INTEGRATION_PROVIDERS })),
       fetchXConnectionStatus(accessToken).catch(() => null),
-      fetchAccountOverview(accessToken).catch(() => null),
       fetchBuilderSettings(accessToken).catch(() => null),
       fetchFounderPromoStatus(accessToken).catch(() => null),
     ]);
@@ -104,7 +100,6 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
     const prov = provResult.value;
     setProviders(prov);
     setXStatus(x);
-    setIsAdmin(overview?.isAdmin ?? false);
     setPromo(promoStatus);
     const repo = memory?.repoFullName ?? null;
     setLinkedRepo(repo);
@@ -264,8 +259,6 @@ export function ConnectedAccountsPanel({ accessToken }: Props) {
 
   return (
     <section className="space-y-6">
-      {isAdmin && <AdminFounderPromoPanel accessToken={accessToken} />}
-
       {promo?.enabled && promo.message && (
         <div
           className={`rounded-xl border px-4 py-3 text-sm ${

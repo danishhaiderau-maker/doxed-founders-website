@@ -2,11 +2,6 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
-  FOUNDER_BRAIN_MODE_LABELS,
-  FOUNDER_BRAIN_MODES,
-  type FounderBrainMode,
-} from '@dcf/utils';
-import {
   fetchFounderBrainProviders,
   testFounderBrainProviders,
   updateFounderBrainProviders,
@@ -16,11 +11,6 @@ import {
 
 type Props = {
   token: string;
-};
-
-const PROVIDER_LABELS: Record<'deepseek' | 'glm', string> = {
-  deepseek: 'DeepSeek',
-  glm: 'GLM z.ai',
 };
 
 function KeyStatusRow({
@@ -47,12 +37,7 @@ function KeyStatusRow({
   );
 }
 
-/** Admin panel for Founder Brain provider config. DeepSeek powers general
- * Founder Brain chat (fast + coding tiers). GLM is reserved exclusively for the
- * Second Brain critical-review surface — it is never routed from general chat
- * (enforced by the hard guard in ai-invoker.service.ts). GLM model fields below
- * configure which model SecondBrainService.critique() calls.
- */
+/** Admin hardwire for Founder IDE Builder chat: DeepSeek V4 Flash + Pro only. */
 export function AdminFounderBrainProvidersPanel({ token }: Props) {
   const [settings, setSettings] = useState<FounderBrainProvidersSettings | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -66,7 +51,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
       setSettings(row);
       setErr(null);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Failed to load Founder Brain settings');
+      setErr(e instanceof Error ? e.message : 'Failed to load Founder IDE settings');
     }
   }, [token]);
 
@@ -89,7 +74,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
     try {
       const next = await updateFounderBrainProviders(token, patch);
       setSettings(next);
-      flash('ok', 'Founder Brain routing saved.');
+      flash('ok', 'Founder IDE routing saved.');
     } catch (e) {
       flash('err', e instanceof Error ? e.message : 'Save failed');
     } finally {
@@ -103,7 +88,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
     try {
       const results = await testFounderBrainProviders(token, provider);
       setTestResults(results);
-      flash('ok', provider ? `Tested ${provider}` : 'Tested both providers');
+      flash('ok', provider ? `Tested ${provider}` : 'Tested DeepSeek');
     } catch (e) {
       flash('err', e instanceof Error ? e.message : 'Test failed');
     } finally {
@@ -114,7 +99,7 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
   if (!settings) {
     return (
       <div className="rounded-xl border border-zinc-800 p-5 text-sm text-zinc-500">
-        Loading Founder Brain providers…
+        Loading Founder IDE providers…
       </div>
     );
   }
@@ -122,27 +107,17 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
   return (
     <section className="rounded-xl border border-cyan-500/25 bg-cyan-950/10 p-5 space-y-4">
       <div>
-        <h3 className="text-lg font-semibold text-white">Founder Brain Providers</h3>
+        <h3 className="text-lg font-semibold text-white">Founder IDE — DeepSeek Flash + Pro</h3>
         <p className="mt-1 text-sm text-zinc-400">
-          DeepSeek powers general Founder Brain chat: fast tier for Q&A and social
-          drafts, coding tier for implementation and reasoning. GLM is reserved
-          exclusively for the Second Brain critical-review surface — it is never
-          a general chat target (the backend hard guard in ai-invoker.service.ts
-          force-redirects any GLM general-section call to DeepSeek). Keys stay in env
-          / encrypted columns; this panel toggles policy only.
-        </p>
-        <p className="mt-1 text-[11px] text-zinc-500">
-          GLM base: <code className="text-zinc-300">{settings.glmApiBase}</code>
+          Main IDE Builder chat hardwire. Flash for everyday turns; Pro for coding/reasoning. This is not Platform
+          Brain (community messaging) and not Second Brain (expert consult cascade).
         </p>
       </div>
 
       {msg && <p className="text-sm text-emerald-300">{msg}</p>}
       {err && <p className="text-sm text-red-300">{err}</p>}
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        <KeyStatusRow label={PROVIDER_LABELS.deepseek} status={settings.keys.deepseek} />
-        <KeyStatusRow label={PROVIDER_LABELS.glm} status={settings.keys.glm} />
-      </div>
+      <KeyStatusRow label="DeepSeek (Founder IDE)" status={settings.keys.deepseek} />
 
       <label className="flex items-center gap-2 text-sm text-zinc-300">
         <input
@@ -151,73 +126,31 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
           disabled={busy != null}
           onChange={(e) => void save({ twoModelRoutingEnabled: e.target.checked })}
         />
-        Enable two-model routing
+        Enable Flash / Pro two-model routing
       </label>
 
       <div className="grid gap-4 md:grid-cols-2">
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">DeepSeek Fast Model</p>
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">DeepSeek V4 Flash (fast)</p>
           <input
             value={settings.deepseekFastModel}
             disabled={busy != null}
             onChange={(e) => setSettings({ ...settings, deepseekFastModel: e.target.value })}
             onBlur={() => void save({ deepseekFastModel: settings.deepseekFastModel })}
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
+            placeholder="deepseek-v4-flash"
           />
         </div>
         <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">DeepSeek Coding Model</p>
+          <p className="text-[11px] uppercase tracking-wider text-zinc-500">DeepSeek V4 Pro (coding)</p>
           <input
             value={settings.deepseekCodingModel}
             disabled={busy != null}
             onChange={(e) => setSettings({ ...settings, deepseekCodingModel: e.target.value })}
             onBlur={() => void save({ deepseekCodingModel: settings.deepseekCodingModel })}
             className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
+            placeholder="deepseek-v4-pro"
           />
-        </div>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Fast Model <span className="text-amber-400/80">(Second Brain only)</span></p>
-          <input
-            value={settings.glmFastModel}
-            disabled={busy != null}
-            onChange={(e) => setSettings({ ...settings, glmFastModel: e.target.value })}
-            onBlur={() => void save({ glmFastModel: settings.glmFastModel })}
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
-          />
-        </div>
-        <div>
-          <p className="text-[11px] uppercase tracking-wider text-zinc-500">GLM Coding Model <span className="text-amber-400/80">(Second Brain only)</span></p>
-          <input
-            value={settings.glmCodingModel}
-            disabled={busy != null}
-            onChange={(e) => setSettings({ ...settings, glmCodingModel: e.target.value })}
-            onBlur={() => void save({ glmCodingModel: settings.glmCodingModel })}
-            className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-white"
-          />
-        </div>
-      </div>
-
-      <div>
-        <p className="text-[11px] uppercase tracking-wider text-zinc-500">Default Founder IDE chat mode</p>
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {FOUNDER_BRAIN_MODES.map((mode) => (
-            <button
-              key={mode}
-              type="button"
-              disabled={busy != null}
-              onClick={() => void save({ defaultMode: mode as FounderBrainMode })}
-              className={`rounded-full px-3 py-1 text-[11px] font-semibold ${
-                settings.defaultMode === mode
-                  ? 'bg-cyan-500/20 text-cyan-100 ring-1 ring-cyan-500/40'
-                  : 'border border-zinc-700 text-zinc-400 hover:text-white'
-              }`}
-            >
-              {FOUNDER_BRAIN_MODE_LABELS[mode]}
-            </button>
-          ))}
         </div>
       </div>
 
@@ -225,26 +158,10 @@ export function AdminFounderBrainProvidersPanel({ token }: Props) {
         <button
           type="button"
           disabled={busy != null}
-          onClick={() => void runTests()}
+          onClick={() => void runTests('deepseek')}
           className="rounded-lg bg-cyan-700 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-600 disabled:opacity-40"
         >
-          Test both providers
-        </button>
-        <button
-          type="button"
-          disabled={busy != null}
-          onClick={() => void runTests('deepseek')}
-          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white disabled:opacity-40"
-        >
           Test DeepSeek
-        </button>
-        <button
-          type="button"
-          disabled={busy != null}
-          onClick={() => void runTests('glm')}
-          className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white disabled:opacity-40"
-        >
-          Test GLM
         </button>
       </div>
 

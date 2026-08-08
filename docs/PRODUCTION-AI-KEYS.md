@@ -1,10 +1,9 @@
 # Production AI Keys — env vars Danish must set in Railway / Vercel
 
-**Last updated:** 4 August 2026 (post Founder IDE rename + GLM-4V vision wiring)
+**Last updated:** 9 August 2026 (Admin AI simplification + Second Brain cheap cascade)
 
 This is the single source of truth for every AI-related env var that the
-platform needs in production after the Founder IDE rename and the GLM-4V
-vision preprocessor ship. Set these in **Railway** (API + workers) and
+platform needs in production. Set these in **Railway** (API + workers) and
 **Vercel** (web) before merging the next deploy.
 
 > **Why both Railway and Vercel?** The API (NestJS) is on Railway and reads
@@ -14,182 +13,70 @@ vision preprocessor ship. Set these in **Railway** (API + workers) and
 
 ---
 
-## 1. DeepSeek (platform brain fallback)
+## Roles (Admin → AI Keys)
 
-Default path for `founder-os-auto`/`founder-os-reasoning` routing. Used by the
-AI Proxy when GLM is unavailable or the routing engine selects DeepSeek.
+| Role | Purpose | Provider |
+|------|---------|----------|
+| **Showcase AI** | Fly showcase bot only | Admin-selectable |
+| **Platform Brain** | Community / in-app messaging (walls, paraphrase, platform fallbacks) | DeepSeek |
+| **Founder IDE** | Builder chat | DeepSeek V4 Flash + V4 Pro |
+| **Second Brain** | Expert IDE consult | **Gemini Flash → OpenAI mini / DeepSeek → optional GLM** |
+
+Promo pool UI is removed from Admin. Keys previously under "promo" for Gemini/GLM
+are still stored in the same encrypted columns — they now power Second Brain.
+
+---
+
+## 1. DeepSeek (Platform Brain + Founder IDE)
 
 ```bash
 DEEPSEEK_API_KEY=sk-…                                    # platform DeepSeek key
-DEEPSEEK_PRO_MODEL=deepseek-chat                         # coding-tier default
-DEEPSEEK_CODING_MODEL=deepseek-chat                      # alias for the above
-DEEPSEEK_FLASH_MODEL=deepseek-chat                       # fast-tier default
-DEEPSEEK_FAST_MODEL=deepseek-chat                        # alias for the above
+DEEPSEEK_PRO_MODEL=deepseek-v4-pro                       # coding-tier default
+DEEPSEEK_CODING_MODEL=deepseek-v4-pro                    # alias for the above
+DEEPSEEK_FLASH_MODEL=deepseek-v4-flash                   # fast-tier default
+DEEPSEEK_FAST_MODEL=deepseek-v4-flash                    # alias for the above
 ```
 
-**Where it's read:**
-- `apps/api/src/founder-ai-runtime/founder-brain-providers.types.ts`
-- `apps/api/src/founder-ai-runtime/founder-brain-providers.service.ts` →
-  `resolveApiKey('deepseek')`
-- `apps/api/src/ai-proxy/ai-proxy-runtime.service.ts` → upstream invoke
-
-**Admin UI toggle:** `/admin/control` → **AI Keys** tab →
-*Platform Brain — DeepSeek fallback*. If you set the env var, the admin UI
-shows `source: env` and the textarea becomes optional.
+**Admin UI:** `/admin/control` → **AI Keys** → Platform Brain + Founder IDE panels.
 
 ---
 
-## 2. GLM 5.2 (ZhipuAI coding plan)
-
-Founder Brain coding tier. Routes through the z.ai **Coding Plan** endpoint,
-NOT the general z.ai API. Defaults to `glm-5.2`.
+## 2. Second Brain cascade (NOT GLM-default)
 
 ```bash
-GLM_API_KEY=your_z_ai_coding_plan_key                    # ZhipuAI key
-GLM_API_BASE=https://api.z.ai/api/coding/paas/v4          # Coding Plan endpoint
-AI_RUNTIME_CODE_MODEL=glm-5.2                             # default coding model
-GLM_CODING_MODEL=glm-5.2                                  # alias
-GLM_FAST_MODEL=glm-4-flash                                # fast-tier GLM model
-FOUNDER_BRAIN_TWO_MODEL_ROUTING=true                      # enable two-model routing
-FOUNDER_BRAIN_FAST_PROVIDER=deepseek                      # fast lane
-FOUNDER_BRAIN_CODING_PROVIDER=glm                         # coding lane
+GEMINI_API_KEY=AIza…                                     # primary Second Brain (gemini-2.0-flash)
+# Optional overrides:
+SECOND_BRAIN_PRIMARY_MODEL=gemini-2.0-flash
+SECOND_BRAIN_FALLBACK_MODEL=gpt-4o-mini                  # or deepseek-v4-flash if no OpenAI
+
+# Fallback #2a — if set, used before DeepSeek:
+OPENAI_API_KEY=sk-…                                      # gpt-4o-mini (Luna-class cheap consult)
+
+# Optional last resort only (allowGlmSpend=true):
+GLM_API_KEY=your_z_ai_coding_plan_key
+GLM_API_BASE=https://api.z.ai/api/coding/paas/v4
 ```
 
-> **ZHIPUAI_API_KEY is NOT read by the API.** The codebase only reads
-> `GLM_API_KEY`. If your provider portal shows `ZHIPUAI_API_KEY`, copy the
-> same value into `GLM_API_KEY` for the deploy.
+> There is no separate "Luna" provider slug in this repo. Wire Luna-class traffic
+> via `OPENAI_API_KEY` + `gpt-4o-mini` (or Gemini Flash as the default primary).
 
-**Where it's read:**
-- `apps/api/src/founder-os/glm-config.ts` → `getGlmApiBaseUrl()`,
-  `getGlmDefaultModel()`
-- `apps/api/src/founder-ai-runtime/founder-brain-providers.service.ts` →
-  `resolveApiKey('glm')`
-
-**Admin UI toggle:** `/admin/control` → **AI Keys** tab →
-*GLM 5.2 (ZhipuAI) — promo*. Then scroll to **Founder Brain Providers** →
-enable two-model routing → run **Test both providers**.
-
-Reference: `docs/GLM-ZAI-PROVIDER-SETUP.md`.
+**Admin UI:** `/admin/control` → **AI Keys** → Second Brain cards (Gemini primary, GLM optional).
 
 ---
 
-## 3. Vision preprocessing (Gemini-only)
-
-Multimodal preprocessor. When a request includes an image attachment and the
-selected coding model has no vision capability (DeepSeek text), the AI Proxy
-first routes the image through **Gemini** (the only sanctioned vision
-provider for general traffic), then injects the resulting text description
-into the coding model's prompt.
-
-> **Cost rule (hard):** GLM vision (`glm-4v`) is NOT used. GLM tokens are
-> reserved exclusively for the Second Brain surface. See
-> `apps/api/src/ai-proxy/vision-preprocessor.service.ts` and
-> `apps/api/src/founder-os/glm-config.ts:getVisionApiKey()`.
+## 3. Vision preprocessing (Gemini)
 
 ```bash
-# Optional — defaults shown. Gemini is the only vision provider.
 FOUNDER_VISION_MODEL=gemini-2.0-flash
-FOUNDER_VISION_BASE_URL=https://generativelanguage.googleapis.com/v1beta
-FOUNDER_VISION_API_KEY=                              # Gemini API key (required for vision)
+FOUNDER_VISION_API_KEY=                              # or reuse GEMINI_API_KEY
 ```
-
-**Where it's read:**
-- `apps/api/src/founder-os/glm-config.ts` → `getVisionApiBaseUrl()`,
-  `getVisionModel()`
-- `apps/api/src/ai-proxy/vision-preprocessor.service.ts` →
-  `describeImage()` (new file)
-- `apps/api/src/ai-proxy/ai-proxy-runtime.service.ts` →
-  `maybePreprocessImages()` (new step in the invoke path)
-
-**Cost attribution:** Vision preprocessing is logged in `AiTokenUsageLog`
-with the Gemini provider. DDollar spend uses the `fast` tier rate.
-
-**Trigger:** Activated automatically when a `ChatCompletionRequestDto` message
-`content` is an array containing an `image_url` part AND the resolved route's
-model has `vision: false` in the Capability Registry. Models with
-`vision: true` (e.g. future GPT-4o wiring) bypass the preprocessor.
 
 ---
 
-## 4. Routing engine + intent classifier flags
-
-These are not keys but behavior switches. Defaults are correct for production.
+## 4. Routing engine flags
 
 ```bash
-USE_ROUTING_ENGINE_V2=true          # Capability Registry + Flight Recorder (default)
-USE_SMART_INTENT_CLASSIFIER=true    # heuristic intent classifier (GLM Layer-2 removed for cost)
-RATE_LIMIT_FAIL_OPEN=false          # fail closed if DB unreachable (default)
-TWITTER_VERIFIED_FREE_TOKEN_GATE=true # require Twitter for free credits (default)
+USE_ROUTING_ENGINE_V2=true
+USE_SMART_INTENT_CLASSIFIER=true
+FOUNDER_BRAIN_TWO_MODEL_ROUTING=true
 ```
-
-Reference: `docs/ENV-VARS.md`.
-
----
-
-## 5. Cursor / OpenHands — BYOK only, NOT platform defaults
-
-```bash
-# OPTIONAL — only if you want the platform to relay to Cursor Cloud Agents.
-# Most users bring their own key in /settings/builder; this env is the
-# platform-side fallback for the showcase bot only.
-CURSOR_API_KEY=                     # usually leave unset
-```
-
-The `CURSOR` provider entry in `packages/utils/src/ai-providers.ts` is kept as
-a BYOK option for users who already have Cursor Cloud accounts. It is no
-longer referenced in user-facing marketing copy.
-
----
-
-## URL changes (Founder OS → Founder IDE)
-
-| Before | After | Status |
-|---|---|---|
-| `/founder-os` (page) | `/founder-ide` | 301 redirect in `next.config.ts` |
-| `/founder-os/decisions` | `/founder-ide/decisions` | 301 redirect in `next.config.ts` |
-| `/api/founder-os/*` (API) | **unchanged** | wire-protocol contract |
-| `founder-os-auto`, `founder-os-code`, `founder-os-reasoning`, `founder-os-fast` (model aliases) | **unchanged** | wire-protocol contract |
-| `FOUNDER_OS_*` env vars (legacy) | **unchanged** | wire-protocol contract |
-| `.github/founder-os/` directory in user repos | **unchanged** | user-data contract |
-| `WorkspaceSession.conversation` Prisma field | **unchanged** | DB schema |
-
-The 301 redirect preserves every inbound link, Google index entry, and
-bookmarked URL. No SEO loss.
-
----
-
-## IDE ↔ website chat sync (NEW — ships with this commit)
-
-Two new surfaces close the loop between the Founder IDE desktop client and the
-website's per-user `WorkspaceSession.conversation`:
-
-1. **API:** `PATCH /api/founder-node/workspace-session/conversation`
-   - Auth: `FounderNode {nodeId}:{nodeToken}` (node credentials, not JWT)
-   - Body: `{ conversation: WorkspaceConversationMessage[] }`
-   - Effect: upserts the calling node's owner's `WorkspaceSession.conversation`
-     row.
-2. **IDE side:** `founder-next/server/founder-node-remote.mjs` gained a
-   `pushConversation(conversation)` method on `FounderNodeRemoteClient`. It
-   POSTs the conversation to the endpoint above on each turn. Fire-and-forget
-   — never blocks the local build.
-
-The JWT-authenticated `PUT /api/workspace-session` route is unchanged (still
-used by the web UI for the in-page chat panel).
-
----
-
-## Verification checklist (run after deploy)
-
-1. `GET /v1/models` returns the `founder-os-*` aliases (unchanged).
-2. `/founder-os` returns 308 with `Location: /founder-ide`.
-3. `/founder-ide` renders the workspace shell.
-4. `/admin/control` → AI Keys shows both DeepSeek and GLM as `configured: true,
-   source: env`.
-5. Send a chat turn with an image attachment to `/v1/chat/completions` with
-   `model: founder-os-auto` and watch the API logs for
-   `vision_preprocessor.describeImage ok` before the upstream DeepSeek call.
-6. From the Founder IDE desktop, send a chat message and confirm the website's
-   `/founder-ide` chat panel reflects the new turn within ~5s.
-
-If any of the above fail, see `docs/ENV-VARS.md` for the full env reference
-and `docs/GLM-ZAI-PROVIDER-SETUP.md` for GLM-specific debugging.

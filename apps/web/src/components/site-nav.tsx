@@ -171,7 +171,7 @@ function ProfileMenu({
         <span className="md:hidden">Profile</span>
       </button>
       {profileOpen && (
-        <div className="absolute right-0 top-full z-[60] mt-1.5 min-w-[220px] rounded-xl border border-zinc-700/80 bg-zinc-950/95 py-1 shadow-2xl backdrop-blur-md">
+        <div className="absolute right-0 top-full z-[110] mt-1.5 min-w-[220px] rounded-xl border border-zinc-700/80 bg-zinc-950/95 py-1 shadow-2xl backdrop-blur-md">
           {accountPreview && (
             <div className="border-b border-zinc-800 px-3 py-2">
               <p className="truncate text-sm font-medium text-white">{accountPreview.username}</p>
@@ -248,7 +248,7 @@ function NavDropdown({
       {isOpen && (
         <div
           className={cn(
-            'absolute left-0 top-full z-50 mt-1.5 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/95 shadow-2xl backdrop-blur-md',
+            'absolute left-0 top-full z-[110] mt-1.5 w-[min(22rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/95 shadow-2xl backdrop-blur-md',
             accent.panel,
           )}
         >
@@ -357,7 +357,7 @@ function MobileNavDrawer({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] md:hidden">
+    <div className="fixed inset-0 z-[120] md:hidden">
       <button
         type="button"
         aria-label="Close menu"
@@ -510,7 +510,7 @@ function MobileSectionDropdown({
   return (
     <div
       className={cn(
-        'absolute right-0 top-full z-[65] mt-1.5 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/97 shadow-2xl backdrop-blur-md md:hidden',
+        'absolute right-0 top-full z-[110] mt-1.5 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/97 shadow-2xl backdrop-blur-md md:hidden',
         accent.panel,
       )}
       role="menu"

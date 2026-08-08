@@ -117,7 +117,7 @@ export function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 w-[min(100vw-2rem,360px)] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
+        <div className="absolute right-0 top-full z-[110] mt-1 w-[min(100vw-2rem,360px)] rounded-xl border border-zinc-700 bg-zinc-950 py-1 shadow-xl">
           <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
             <p className="text-sm font-semibold text-white">Notifications</p>
             {unread > 0 && (

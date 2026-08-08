@@ -1,17 +1,13 @@
 ﻿import { Module } from '@nestjs/common';
+import { FounderOsModule } from '../founder-os/founder-os.module';
 import { SecondBrainService } from './second-brain.service';
 
 /**
- * Second Brain module.
- *
- * Houses the SOLE sanctioned GLM call site in the codebase
- * (SecondBrainService). See second-brain.service.ts for the hard cost rule.
- *
- * Note: SecondBrainService depends on FounderBrainProvidersService, which is
- * exported globally by FounderAiRuntimeModule, so this module does not need
- * to import it explicitly.
+ * Second Brain — cheap expert cascade for Founder IDE consults.
+ * Gemini Flash primary, OpenAI mini / DeepSeek fallback, GLM last-resort only.
  */
 @Module({
+  imports: [FounderOsModule],
   providers: [SecondBrainService],
   exports: [SecondBrainService],
 })

@@ -111,7 +111,7 @@ export default function ProjectDetailPage() {
 
   return (
     <div className="min-h-screen bg-[#0B0B0B]">
-      <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#0B0B0B]/90 backdrop-blur-xl">
+      <header className="sticky top-0 z-[100] border-b border-zinc-800/80 bg-[#0B0B0B]/90 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 md:px-6">
           <div className="flex items-center gap-2">
             <Link href="/projects" className="text-xs text-zinc-500 hover:text-white">

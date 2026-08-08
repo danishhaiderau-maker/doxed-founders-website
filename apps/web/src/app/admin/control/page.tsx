@@ -6,16 +6,12 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
-import { ResearchBotDetailDashboard } from '@/components/agent-hub/research-bot-detail-dashboard';
 import { useShareFooterActions } from '@/components/share-footer-provider';
-import { AdminFounderPromoPanel } from '@/components/account/admin-founder-promo-panel';
 import { AdminAiKeysPanel } from '@/components/admin/admin-ai-keys-panel';
-import { AdminBuilderBreakdownPanel } from '@/components/admin/admin-builder-breakdown-panel';
 import {
   AdminControlOverview,
   fetchAccountOverview,
   fetchAdminControlOverview,
-  fetchAdminResearchDashboard,
   fetchGlobalShareFooter,
   updateShowcaseConfig,
   updateGlobalShareFooter,
@@ -23,8 +19,6 @@ import {
 
 const SECTIONS = [
   { id: 'ai-keys', label: 'AI Keys' },
-  { id: 'builders', label: 'Builders' },
-  { id: 'research', label: 'Research Dashboard' },
   { id: 'social', label: 'Social Messaging' },
   { id: 'platform', label: 'Platform & Treasury' },
   { id: 'moderation', label: 'Moderation' },
@@ -49,10 +43,6 @@ export default function AdminControlPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [defaultSettings, setDefaultSettings] = useState('');
   const [subscriberMaxMarginUsd, setSubscriberMaxMarginUsd] = useState(20);
-  const [researchRaw, setResearchRaw] = useState<Record<string, unknown> | null>(null);
-  const [researchVersion, setResearchVersion] = useState<string | null>(null);
-  const [researchUpdated, setResearchUpdated] = useState<string>('');
-  const [researchAutoRefresh, setResearchAutoRefresh] = useState(false);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -68,14 +58,6 @@ export default function AdminControlPage() {
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load admin control');
-    }
-    try {
-      const research = await fetchAdminResearchDashboard(token);
-      setResearchRaw(research.rawBotState);
-      setResearchVersion(research.botVersion);
-      setResearchUpdated(research.updatedAt);
-    } catch {
-      setResearchRaw(null);
     }
   }, [token]);
 
@@ -141,30 +123,12 @@ export default function AdminControlPage() {
     }
   }
 
-  const refreshResearch = useCallback(async () => {
-    if (!token) return;
-    try {
-      const research = await fetchAdminResearchDashboard(token);
-      setResearchRaw(research.rawBotState);
-      setResearchVersion(research.botVersion ? String(research.botVersion) : null);
-      setResearchUpdated(research.updatedAt);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Research dashboard unavailable');
-    }
-  }, [token]);
-
   useEffect(() => {
     const msg = overview?.showcase?.agentShowcaseDefaultSettings;
     if (msg != null) setDefaultSettings(msg);
     const margin = overview?.showcase?.subscriberMaxMarginUsd;
     if (margin != null && margin > 0) setSubscriberMaxMarginUsd(margin);
   }, [overview?.showcase?.agentShowcaseDefaultSettings, overview?.showcase?.subscriberMaxMarginUsd]);
-
-  useEffect(() => {
-    if (section !== 'research' || !researchAutoRefresh || !token) return;
-    const id = setInterval(() => void refreshResearch(), 5000);
-    return () => clearInterval(id);
-  }, [section, researchAutoRefresh, token, refreshResearch]);
 
   if (status === 'loading') {
     return (
@@ -176,11 +140,9 @@ export default function AdminControlPage() {
 
   if (!isAdmin) return null;
 
-  const runtime = overview?.runtime;
-
   return (
     <div className="min-h-screen bg-[#050508] text-white">
-      <header className="border-b border-zinc-800">
+      <header className="sticky top-0 z-[100] border-b border-zinc-800 bg-[#050508]/95 backdrop-blur-md">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div>
             <Link href="/account" className="text-xs text-zinc-500 hover:text-white">
@@ -193,7 +155,7 @@ export default function AdminControlPage() {
         </div>
       </header>
 
-      <main className={`mx-auto flex flex-col gap-6 px-6 py-8 lg:flex-row ${section === 'research' ? 'max-w-[90rem]' : 'max-w-5xl'}`}>
+      <main className="mx-auto flex max-w-5xl flex-col gap-6 px-6 py-8 lg:flex-row">
         <aside className="lg:w-48 lg:shrink-0">
           <nav className="flex flex-wrap gap-1 lg:flex-col">
             {SECTIONS.map((item) => (
@@ -236,6 +198,9 @@ export default function AdminControlPage() {
             <Link href="/agent-hub/conservative-btc" className="font-semibold text-violet-50 hover:underline">
               Showcase + live copy control → Agent Hub
             </Link>
+            <p className="mt-1 text-xs text-violet-200/80">
+              Research / Bitfinex / relay controls live on Agent Hub — not duplicated here.
+            </p>
           </div>
 
           {msg && (
@@ -247,65 +212,6 @@ export default function AdminControlPage() {
             <p className="rounded-lg border border-red-500/30 bg-red-950/20 px-4 py-3 text-sm text-red-300">
               {error}
             </p>
-          )}
-
-          {section === 'research' && (
-            <section className="space-y-6">
-              <div className="rounded-xl border border-red-500/30 bg-red-950/15 p-5">
-                <h2 className="text-lg font-semibold text-red-100">Research dashboard (admin only)</h2>
-                <p className="mt-1 text-sm text-zinc-400">
-                  Full pipeline state, AI inputs, and debug data. Never exposed on public agent pages.
-                </p>
-                <div className="mt-4 flex flex-wrap items-center gap-3 text-sm">
-                  <span className="rounded-full border border-zinc-700 px-3 py-1">
-                    Bot script:{' '}
-                    <strong className="text-white">
-                      {researchVersion ??
-                        (runtime?.deployVersion != null ? String(runtime.deployVersion) : '—')}
-                    </strong>
-                  </span>
-                  <span className="rounded-full border border-zinc-700 px-3 py-1 capitalize">
-                    Status: {runtime?.publicStatus ?? '—'}
-                  </span>
-                  {runtime?.executionPaused && (
-                    <span className="rounded-full border border-amber-500/40 bg-amber-950/30 px-3 py-1 text-amber-200">
-                      Paused ({runtime.executionReason ?? 'unknown'})
-                    </span>
-                  )}
-                </div>
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void refreshResearch()}
-                    className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:text-white"
-                  >
-                    Refresh snapshot
-                  </button>
-                  <label className="flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400">
-                    <input
-                      type="checkbox"
-                      checked={researchAutoRefresh}
-                      onChange={(e) => setResearchAutoRefresh(e.target.checked)}
-                    />
-                    Auto-refresh (5s)
-                  </label>
-                </div>
-              </div>
-
-              {researchRaw ? (
-                <ResearchBotDetailDashboard
-                  raw={researchRaw}
-                  updatedAt={researchUpdated || new Date().toISOString()}
-                  onRefresh={() => void refreshResearch()}
-                  autoRefresh={researchAutoRefresh}
-                  onAutoRefreshChange={setResearchAutoRefresh}
-                />
-              ) : (
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-8 text-center text-sm text-zinc-500">
-                  Bot not connected — configure TRADING_AGENT_BOT_URL and ensure Railway runtime is online.
-                </div>
-              )}
-            </section>
           )}
 
           {section === 'social' && (
@@ -343,7 +249,6 @@ export default function AdminControlPage() {
 
           {section === 'platform' && (
             <section className="space-y-4">
-              {token && <AdminFounderPromoPanel accessToken={token} hideKeyCards />}
               <form onSubmit={handleSaveDefaultSettings} className="rounded-xl border border-amber-500/25 bg-amber-950/10 p-6">
                 <h2 className="font-semibold text-amber-200">Hire rules & public message</h2>
                 <p className="mt-1 text-sm text-zinc-500">
@@ -439,7 +344,6 @@ export default function AdminControlPage() {
               onOverviewChange={setOverview}
             />
           )}
-          {section === 'builders' && token && <AdminBuilderBreakdownPanel accessToken={token} />}
         </div>
       </main>
     </div>

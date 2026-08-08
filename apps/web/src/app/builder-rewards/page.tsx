@@ -5,7 +5,7 @@ import { SiteNav } from '@/components/site-nav';
 export default function BuilderRewardsRoute() {
   return (
     <div className="min-h-screen bg-black text-zinc-100">
-      <header className="sticky top-0 z-20 border-b border-zinc-800 bg-black/95 backdrop-blur">
+      <header className="sticky top-0 z-[100] border-b border-zinc-800 bg-black/95 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
           <div className="min-w-0">
             <Link href="/" className="text-xs text-zinc-500 hover:text-white">

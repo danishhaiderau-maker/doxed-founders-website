@@ -424,6 +424,12 @@ export class FounderPromoService {
     return map.glm ?? null;
   }
 
+  /** Decrypted platform Gemini key (Second Brain primary / vision). */
+  async getDecryptedPlatformGeminiKey(): Promise<string | null> {
+    const map = await this.loadDecryptedCredentials();
+    return map.gemini ?? null;
+  }
+
   /**
    * Voice transcription is a separate capability from managed chat routing.
    * The GLM credential remains server-side and is used only by the authenticated

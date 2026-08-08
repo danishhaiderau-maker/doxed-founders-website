@@ -51,7 +51,7 @@ export default function ProjectsPage() {
 
   return (
     <div className="min-h-screen bg-[#050508]">
-      <header className="sticky top-0 z-20 border-b border-[var(--color-border)] bg-[#050508]/95 backdrop-blur">
+      <header className="sticky top-0 z-[100] border-b border-[var(--color-border)] bg-[#050508]/95 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 md:px-6">
           <div>
             <Link href="/" className="text-xs uppercase tracking-widest text-[var(--color-muted)]">

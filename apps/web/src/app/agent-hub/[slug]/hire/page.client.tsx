@@ -137,7 +137,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
 
   return (
     <main className="min-h-screen bg-[#050508] text-white">
-      <header className="border-b border-zinc-800">
+      <header className="sticky top-0 z-[100] border-b border-zinc-800 bg-[#050508]/95 backdrop-blur-md">
         <div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div>
             <SiteBrand className="text-sm" />

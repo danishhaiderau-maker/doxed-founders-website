@@ -155,7 +155,7 @@ function FeedHubPage() {
   return (
     <div className="min-h-screen bg-[#050508]">
       <PushNotificationPrompt />
-      <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
+      <header className="sticky top-0 z-[100] border-b border-zinc-800/80 bg-[#050508]/95 backdrop-blur-md">
         <div className="mx-auto flex w-full max-w-[90rem] flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-10">
           <div>
             <SiteBrand className="text-sm" />

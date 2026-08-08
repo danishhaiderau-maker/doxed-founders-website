@@ -350,7 +350,7 @@ export function FounderChatLauncher() {
         </button>
 
         {jumpOpen && (
-          <div className="absolute right-0 top-full z-[80] mt-1 w-64 overflow-hidden rounded-xl border border-zinc-700 bg-[#0B0B0B] shadow-2xl">
+          <div className="absolute right-0 top-full z-[110] mt-1 w-64 overflow-hidden rounded-xl border border-zinc-700 bg-[#0B0B0B] shadow-2xl">
             <div className="border-b border-zinc-800 px-3 py-2 text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
               Jump to project wall
             </div>
@@ -395,7 +395,7 @@ export function FounderChatLauncher() {
       </div>
 
       {open && (
-        <div className="fixed inset-0 z-[75] flex">
+        <div className="fixed inset-0 z-[120] flex">
           <button
             type="button"
             aria-label="Close Founder Chat"
