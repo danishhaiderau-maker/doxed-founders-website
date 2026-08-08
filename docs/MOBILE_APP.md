@@ -1,63 +1,18 @@
-# Android app — phone-first scope
+# Mobile app
 
-The APK is a **WebView shell** around [doxxedcrypto.digital](https://doxxedcrypto.digital). It opens **Discover** with `?app=android` so navigation emphasizes what works well on a phone.
+**Status (Aug 2026):** The previous Capacitor Android shell and public APK were removed from the repo. `/mobile` is a **coming soon** download hub (no APK link). Pair desktop tools from [/founder-ide](https://doxxedcrypto.digital/founder-ide). Old APK URL `/downloads/doxxedcrypto-android.apk` redirects to `/mobile#android`.
 
-**File size (~5–8 MB debug)** is expected: WebView shell + Capacitor plugins (filesystem, preferences). It still does **not** bundle the website or your notes — vault files appear **after pairing** under app-private storage. Website features ship on **Vercel**; reinstall the APK when native plugins change (v0.2 → v0.3).
+## Removed from the repo
 
-## Download (Phase 1)
+- `apps/mobile-android/` — Capacitor 7 WebView shell (`@dcf/mobile-android` v0.4.x)
+- `apps/web/public/downloads/doxxedcrypto-android.apk`
+- `scripts/pack-android-app.mjs`, `scripts/print-android-signing-secrets.mjs`
+- `.github/workflows/android-app-release.yml`
+- npm scripts `pack:android` / `print:android-signing`
 
-| Channel | URL |
-|---------|-----|
-| **Website (primary)** | [doxxedcrypto.digital/mobile](https://doxxedcrypto.digital/mobile) |
-| **Direct APK** | [doxxedcrypto.digital/downloads/doxxedcrypto-android.apk](https://doxxedcrypto.digital/downloads/doxxedcrypto-android.apk) |
-| **GitHub release** | Tag `android-app-v*` → [Releases](https://github.com/danishhaiderau-maker/doxed-founders-website/releases) |
+Web-side mobile vault helpers under `apps/web/src/lib/mobile-vault/` remain for a future native shell.
 
-Build locally: `npm run pack:android` (writes `apps/web/public/downloads/doxxedcrypto-android.apk`).
+## Related docs (historical)
 
-**v0.4.2+:** **Release-signed APK** (Play Protect friendly). **Supported:** min Android 7.0 (API 23), recommended **Android 8+**, best on **Android 10+** (Pixel 8). If Play Protect blocks install → **More details → Install anyway**. **Advanced Protection** accounts may block all sideloads — use Chrome until Play Store testing.
-
-### Install on Pixel / Samsung (Play Protect)
-
-1. Download from [/mobile](https://doxxedcrypto.digital/mobile).
-2. Open the APK → if Play Protect warns, tap **More details** → **Install anyway** (release-signed build).
-3. Allow **Install unknown apps** for Chrome or Files if prompted.
-4. **Advanced Protection:** Google may refuse any sideload — use [doxxedcrypto.digital](https://doxxedcrypto.digital) in Chrome (same account, no install).
-
-Build signing for CI: `npm run pack:android` once locally, then `npm run print:android-signing` → add GitHub Actions secrets so every release uses the **same** signing key.
-
-**v0.4.1+:** Local **compat gate** on launch — old WebView (common on **Android 6**) gets setup steps instead of a white screen.
-
-**v0.4.0+:** On-device `FounderVault/` + **bidirectional merge** with desktop (LWW patches for goals/tasks/roadmap). Pair with **Code for Android** in Settings. APK stays ~4 MB; full site + vault sync after login.
-
-**Roadmap (PC↔phone merge):** [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)
-
-## In scope (default mobile experience)
-
-| Area | Routes |
-|------|--------|
-| **Discover & explore** | `/discover`, `/projects` |
-| **Project rankings** | Discover table, `/leaderboard` |
-| **Trust Center** | `/trust-center`, scout voting |
-| **Agents** | `/agent-hub`, `/agents` |
-| **Builder reviews / rewards** | `/builder-rewards`, `/airdrop` |
-| **Community trading** | `/paper-trading`, `/predict`, `/watchlist`, `/portfolio`, `/ddollar` |
-| **Feed & social** | `/feed`, notifications |
-
-## Optional on phone (same app, not hidden)
-
-Founder OS, Founder Node, Raise Room, and List Project stay available via **Build & Founder OS →** in the nav. Heavy build workflows are easier on desktop; founders can still open them in the app WebView if they choose.
-
-## Out of scope for the APK shell
-
-- **Founder Node** desktop vault (Windows / macOS / Linux installer)
-- **Local Ollama** (runs on the paired PC, not the phone)
-
-Cloud AI and Cursor Cloud still work through the API when keys are configured in Builder settings.
-
-## Rebuild APK after URL change
-
-```bash
-npm run pack:android
-```
-
-Entry URL is set in `apps/mobile-android/capacitor.config.ts` (`server.url`).
+- [MOBILE_UNIFIED_APP.md](./MOBILE_UNIFIED_APP.md)
+- [MOBILE_VAULT_ROADMAP.md](./MOBILE_VAULT_ROADMAP.md)

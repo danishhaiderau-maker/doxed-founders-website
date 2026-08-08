@@ -22,4 +22,4 @@ The tray menu checks for updates hourly. You can also download v0.7.8 manually f
 
 ## Related mobile release
 
-Android app remains **v0.4.2** (separate semver). See `/mobile` for the unified Founder OS + mobile vault APK.
+Android app (legacy Capacitor shell) was removed Aug 2026; use `/founder-ide` / web until the unified mobile app ships. See `docs/MOBILE_APP.md`.

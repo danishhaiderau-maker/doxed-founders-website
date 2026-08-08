@@ -1,5 +1,5 @@
 // Prunes the monorepo manifests so a Docker image that only contains apps/api
-// (not apps/web, apps/founder-node, apps/mobile-android) can install cleanly.
+// (not apps/web, apps/founder-node) can install cleanly.
 //
 // npm fails if the root workspaces glob references absent package dirs, and also
 // fails (EMISSINGTARGET) if the lockfile has node_modules/@dcf/* link entries
@@ -7,15 +7,15 @@
 //   1. Setting root workspaces to ["apps/api","packages/*"] in package.json AND
 //      the lockfile root entry.
 //   2. Deleting lockfile `packages` keys for the absent apps and anything under
-//      them (apps/web/**, apps/founder-node/**, apps/mobile-android/**).
-//   3. Deleting lockfile node_modules/@dcf/{web,founder-node,mobile-android} link
+//      them (apps/web/**, apps/founder-node/**).
+//   3. Deleting lockfile node_modules/@dcf/{web,founder-node} link
 //      entries that resolved to those absent targets.
 import fs from 'node:fs';
 
 const WORKSPACES = ['apps/api', 'packages/*'];
 // Workspace app dirs that are NOT copied into this image.
-const ABSENT = ['apps/web', 'apps/founder-node', 'apps/mobile-android'];
-const ABSENT_NAMES = new Set(['@dcf/web', '@dcf/founder-node', '@dcf/mobile-android']);
+const ABSENT = ['apps/web', 'apps/founder-node'];
+const ABSENT_NAMES = new Set(['@dcf/web', '@dcf/founder-node']);
 
 function prune() {
   const pkgPath = './package.json';

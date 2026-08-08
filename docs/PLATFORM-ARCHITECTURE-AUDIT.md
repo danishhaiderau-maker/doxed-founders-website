@@ -2,9 +2,11 @@
 
 **Document purpose:** Sanitized architecture reference for external reviewers (e.g. ChatGPT, security consultants, product auditors).  
 **Safe to share:** This document contains **no secrets**, API keys, database URLs, production tokens, or private vault contents.  
-**Last updated:** July 2026  
+**Last updated:** August 2026  
 **Production site:** https://doxxedcrypto.digital  
 **Showcase trading bot (public):** https://bot.doxxedcrypto.digital  
+
+> **Note (Aug 2026):** Capacitor `apps/mobile-android` and the public APK were removed. `/mobile` redirects to `/founder-ide`. See `docs/MOBILE_APP.md`.
 
 **Related internal specs (names only — do not paste secret-bearing ops docs):**  
 `ARCHITECTURE.md`, `AUDIT_FOR_CHATGPT.md`, `FOUNDER_OS_PRODUCT_SPECIFICATION.md`, `MISSION.md`, `RAISE-ROOM-P0-INSPIRED-PLAN.md`, `DDOLLAR-LAUNCH-ALLOCATION-PROPOSAL.md`, `TOKEN-LAUNCH-TRADING-ECOSYSTEM-PROPOSAL.md`, `API-ABUSE-AUDIT.md`, `SIGNAL_AGENT_SECURITY_AND_LEGAL.md`, `DATA_CLASSIFICATION.md`, `PRIVACY_STACK.md`, `bot-architecture.lock.json`

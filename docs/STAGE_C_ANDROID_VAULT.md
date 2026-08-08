@@ -1,10 +1,12 @@
 # Stage C — Android vault validation
 
+> **Aug 2026:** Capacitor Android package + public APK removed from the repo. This stage doc is historical. See [MOBILE_APP.md](./MOBILE_APP.md).
+
 **Prerequisite:** Stages A (ship) and B (publish) complete.
 
 **Goal:** Prove the mobile vault path works on a **physical Android device** — pair, pull, merge — without leaking private note bodies to Neon.
 
-Current app version in repo: **0.4.0** (`apps/mobile-android/package.json`). Download: https://doxxedcrypto.digital/mobile
+Current app version in repo: **removed** (was 0.4.x). `/mobile` → `/founder-ide`.
 
 ---
 

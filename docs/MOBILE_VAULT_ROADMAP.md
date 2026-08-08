@@ -1,5 +1,7 @@
 # Mobile app & vault sync — roadmap
 
+> **Aug 2026:** Legacy Capacitor Android package + public APK removed. See [MOBILE_APP.md](./MOBILE_APP.md). Roadmap below is historical until a new unified app lands.
+
 **Status (June 2026):** Android **v0.4.0** ships on-device vault + **Phase 4 bidirectional merge** (LWW patches for goals/tasks/roadmap; desktop pull jobs + mobile auto-pull). Encrypted blobs remain per-device; merge patches sync cross-device without sharing keys.
 
 **Privacy context:** [PRIVACY.md](../PRIVACY.md) · **Current APK scope:** [MOBILE_APP.md](./MOBILE_APP.md)

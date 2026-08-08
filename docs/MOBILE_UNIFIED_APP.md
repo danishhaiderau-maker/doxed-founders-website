@@ -1,5 +1,7 @@
 # Unified mobile app — Founder OS + Founder Node
 
+> **Aug 2026:** The Capacitor Android package (`apps/mobile-android`) and public APK were removed from the repo. `/mobile` redirects to `/founder-ide`. See [MOBILE_APP.md](./MOBILE_APP.md). Content below is historical.
+
 **Status:** Android v0.4.2 ships today as one Capacitor app. Desktop Founder Node v0.7.11 remains the primary vault + Ollama runtime. iOS is Safari-first until TestFlight.
 
 ## Product direction
