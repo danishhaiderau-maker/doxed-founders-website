@@ -229,7 +229,8 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
           </li>
           <li>
             <span className="font-semibold text-zinc-200">Second Brain</span> — expert consult for the IDE. Cheap
-            cascade: Gemini Flash → next-cheapest (DeepSeek / OpenAI env) → optional GLM last resort.
+            cascade: Gemini Flash → OpenAI gpt-4o-mini / Luna-class if keyed → optional GLM last resort.
+            Never DeepSeek (Builder only).
           </li>
         </ul>
       </div>
@@ -358,9 +359,9 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
         <div>
           <h3 className="text-sm font-semibold text-zinc-200">Second Brain — cheap expert cascade</h3>
           <p className="mt-0.5 text-[11px] text-zinc-500">
-            Primary: Gemini Flash. Fallback: DeepSeek (platform brain / stored key) or{' '}
-            <code className="text-zinc-400">OPENAI_API_KEY</code> gpt-4o-mini if set in Railway. GLM is optional
-            last-resort only — not the default.
+            Primary: Gemini Flash. Cheap fallback:{' '}
+            <code className="text-zinc-400">OPENAI_API_KEY</code> gpt-4o-mini / Luna-class if set in Railway.
+            GLM is optional last-resort only — not the default. DeepSeek is never used for Second Brain.
           </p>
         </div>
         <div className="grid gap-4 lg:grid-cols-2">

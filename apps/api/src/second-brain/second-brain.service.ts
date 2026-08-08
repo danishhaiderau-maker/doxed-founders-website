@@ -8,9 +8,10 @@ import { getGlmApiBaseUrl, getGlmDefaultModel } from '../founder-os/glm-config';
  *
  * Cheap cascade (primary → fallback → optional last resort):
  *   1. Gemini Flash  (admin-stored gemini key or GEMINI_API_KEY)
- *   2. OpenAI gpt-4o-mini if OPENAI_API_KEY is set, else DeepSeek (platform brain / promo)
+ *   2. OpenAI gpt-4o-mini / Luna-class if OPENAI_API_KEY is set
  *   3. GLM only when allowGlmSpend=true AND cheaper paths failed
  *
+ * Never DeepSeek here — DeepSeek is Builder / Platform Brain only.
  * GLM must NEVER be the default Second Brain path (cost rule).
  */
 @Injectable()
@@ -69,20 +70,6 @@ export class SecondBrainService {
         user,
       });
       if (openai) return openai;
-    } else {
-      const deepseekKey =
-        (await this.brainProviders.resolveApiKey('deepseek')) ||
-        (await this.founderPromo.getDecryptedPlatformDeepseekKey()) ||
-        (await this.founderPromo.getDecryptedPlatformPromoDeepseekKey());
-      const deepseek = await this.tryOpenAiCompat({
-        label: 'deepseek-fallback',
-        apiKey: deepseekKey,
-        baseUrl: 'https://api.deepseek.com/v1',
-        model: process.env.SECOND_BRAIN_FALLBACK_MODEL?.trim() || 'deepseek-v4-flash',
-        system,
-        user,
-      });
-      if (deepseek) return deepseek;
     }
 
     if (!input.allowGlmSpend) {

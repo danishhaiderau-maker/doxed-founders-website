@@ -20,7 +20,7 @@ platform needs in production. Set these in **Railway** (API + workers) and
 | **Showcase AI** | Fly showcase bot only | Admin-selectable |
 | **Platform Brain** | Community / in-app messaging (walls, paraphrase, platform fallbacks) | DeepSeek |
 | **Founder IDE** | Builder chat | DeepSeek V4 Flash + V4 Pro |
-| **Second Brain** | Expert IDE consult | **Gemini Flash → OpenAI mini / DeepSeek → optional GLM** |
+| **Second Brain** | Expert IDE consult | **Gemini Flash → OpenAI mini / Luna-class → optional GLM** (never DeepSeek) |
 
 Promo pool UI is removed from Admin. Keys previously under "promo" for Gemini/GLM
 are still stored in the same encrypted columns — they now power Second Brain.
@@ -47,9 +47,9 @@ DEEPSEEK_FAST_MODEL=deepseek-v4-flash                    # alias for the above
 GEMINI_API_KEY=AIza…                                     # primary Second Brain (gemini-2.0-flash)
 # Optional overrides:
 SECOND_BRAIN_PRIMARY_MODEL=gemini-2.0-flash
-SECOND_BRAIN_FALLBACK_MODEL=gpt-4o-mini                  # or deepseek-v4-flash if no OpenAI
+SECOND_BRAIN_FALLBACK_MODEL=gpt-4o-mini                  # Luna-class cheap consult (requires OPENAI_API_KEY)
 
-# Fallback #2a — if set, used before DeepSeek:
+# Fallback #2 — if set, used after Gemini and before GLM:
 OPENAI_API_KEY=sk-…                                      # gpt-4o-mini (Luna-class cheap consult)
 
 # Optional last resort only (allowGlmSpend=true):
@@ -57,8 +57,9 @@ GLM_API_KEY=your_z_ai_coding_plan_key
 GLM_API_BASE=https://api.z.ai/api/coding/paas/v4
 ```
 
+> **Never DeepSeek for Second Brain.** DeepSeek stays Builder / Platform Brain only.
 > There is no separate "Luna" provider slug in this repo. Wire Luna-class traffic
-> via `OPENAI_API_KEY` + `gpt-4o-mini` (or Gemini Flash as the default primary).
+> via `OPENAI_API_KEY` + `gpt-4o-mini` (Gemini Flash remains the default primary).
 
 **Admin UI:** `/admin/control` → **AI Keys** → Second Brain cards (Gemini primary, GLM optional).
 

@@ -4,7 +4,8 @@ import { SecondBrainService } from './second-brain.service';
 
 /**
  * Second Brain — cheap expert cascade for Founder IDE consults.
- * Gemini Flash primary, OpenAI mini / DeepSeek fallback, GLM last-resort only.
+ * Gemini Flash primary → OpenAI gpt-4o-mini / Luna-class if keyed → GLM last-resort.
+ * Never DeepSeek (Builder / Platform Brain only).
  */
 @Module({
   imports: [FounderOsModule],
