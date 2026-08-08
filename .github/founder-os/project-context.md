@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(second-brain): drop DeepSeek from cheap consult cascade
 
 ## Last Activity
 
