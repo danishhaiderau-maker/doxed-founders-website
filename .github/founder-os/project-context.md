@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(chat): align wall settings jump links with raise-room id route
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
