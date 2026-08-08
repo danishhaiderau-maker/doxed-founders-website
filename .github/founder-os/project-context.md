@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(second-brain): wire critique API, admin test, and Founder IDE trigger
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
