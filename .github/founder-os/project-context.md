@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(web): drop founder-vault prepare tsc
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
