@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
@@ -65,9 +64,6 @@ export default function AdminObservatoryPage() {
             <h1 className="text-2xl font-bold">Observatory</h1>
             <p className="text-sm text-zinc-400">Internal control room — subsystem health, version, last smoke test.</p>
           </div>
-          <Link href="/admin/demo" className="text-sm text-emerald-400 hover:underline">
-            Demo Mode →
-          </Link>
         </div>
 
         {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
@@ -94,7 +90,7 @@ export default function AdminObservatoryPage() {
                 <p className="text-sm">
                   {overview.lastSmoke
                     ? `${overview.lastSmoke.passed}/${overview.lastSmoke.total} passed · ${new Date(overview.lastSmoke.ranAt).toLocaleString()}`
-                    : 'Not run yet — use /admin/demo smoke'}
+                    : 'Not run yet — run npm run demo:full (API smoke/harness)'}
                 </p>
               </div>
             </div>

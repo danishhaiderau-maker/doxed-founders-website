@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import {
   fetchRaiseRoomDashboard,
   fetchRaiseRoomProjects,
@@ -84,11 +83,8 @@ export function RaiseRoomDiscoveryHub() {
           <p className="text-zinc-300">Demo ecosystem not seeded yet.</p>
           {dashboard?.demoMode ? (
             <p className="mt-2 text-sm text-zinc-500">
-              Run demo seed from{' '}
-              <Link href="/admin/demo" className="text-amber-400 hover:underline">
-                Admin → Demo
-              </Link>{' '}
-              (xlarge recommended) then refresh.
+              Seed via API (`POST /api/admin/demo/seed`) or `npm run demo:full` when{' '}
+              <code className="text-zinc-400">DEMO_MODE_ENABLED=true</code>, then refresh.
             </p>
           ) : (
             <p className="mt-2 text-sm text-zinc-500">

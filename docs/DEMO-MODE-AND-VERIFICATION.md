@@ -16,17 +16,26 @@ DEMO_SEED_SCALE=medium   # optional: small | medium | large | xlarge
 Redeploy the API service after setting vars. Demo seed/reset/smoke **fail closed**
 when `DEMO_MODE_ENABLED` is not exactly `true`.
 
-### 2. Open admin UI
+### 2. Run harness / API (admin UI removed)
 
-- **Web:** [https://doxxedcrypto.digital/admin/demo](https://doxxedcrypto.digital/admin/demo)
-- **From:** Admin Control → Platform & Treasury → Demo Mode
+The `/admin/demo` web panel was **removed from production admin** (2026-08-09).
+Use the CLI harness or admin-JWT API instead:
 
-Requires **ADMIN** role (same as `/admin/control`).
+```bash
+npm run demo:full          # scripts/demo-harness.mjs — seed + smoke + scorecard
+# or
+POST /api/admin/demo/seed
+POST /api/admin/demo/smoke
+POST /api/admin/demo/reset
+```
+
+Requires **ADMIN** JWT (or `DEMO_HARNESS_TOKEN` for `/harness/internal`) and
+`DEMO_MODE_ENABLED=true` on the API.
 
 ### 3. Seed → Smoke → Browse
 
-1. Click **Generate Demo Ecosystem**
-2. Click **Run Smoke Checks** (target: 25+ passed on medium scale)
+1. Run `npm run demo:full` (or `POST /api/admin/demo/seed`)
+2. Run smoke (`POST /api/admin/demo/smoke` — target: 25+ passed on medium scale)
 3. Visit sample links: `/projects/demo-payflow`, `/raise-room`, Founder OS dashboards
 
 ### 4. Reset when done
@@ -211,7 +220,7 @@ From platform verification framework — **not built in MVP**:
 
 | Route | Purpose | Status |
 |-------|---------|--------|
-| `/admin/demo` | Seed, reset, smoke | **Shipped (MVP)** |
+| `/admin/demo` | Seed, reset, smoke UI | **Removed** (2026-08-09) — use API / `npm run demo:full` |
 | `/testing` | Test run dashboard | Planned |
 | `/simulator` | Time Machine / market sim | Planned |
 | `/verification` | Full golden journey suite (Playwright) | Planned |
