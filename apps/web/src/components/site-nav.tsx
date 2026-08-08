@@ -12,6 +12,7 @@ import { EngagementFlashLayer } from '@/components/engagement-flash-layer';
 import { NotificationBell } from '@/components/notification-bell';
 import { PlatformMessagesBell } from '@/components/platform-messages-bell';
 import { FounderChatLauncher } from '@/components/founder-chat-launcher';
+import { DownloadAppLauncher } from '@/components/download-app-launcher';
 import { HUB_NAV_ROWS, type HubNavItem, type HubNavRow } from '@/components/hub-nav-config';
 import { useFeedNewCount } from '@/hooks/use-feed-new-count';
 
@@ -463,6 +464,7 @@ function MobileNavDrawer({
 
         <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
           <FounderChatLauncher />
+          <DownloadAppLauncher />
           <PlatformMessagesBell />
           <NotificationBell />
           {session ? (
@@ -646,8 +648,9 @@ function SiteNavInner() {
     <>
       <div ref={navRef} className="relative flex min-w-0 flex-1 flex-col items-end gap-1">
         <nav className="flex min-w-0 max-w-full items-center gap-1 text-sm">
-        {/* Founder Chat launcher — placed before nav dropdowns (between brand and section links) */}
+        {/* Founder Chat + App download — placed before nav dropdowns (between brand and section links) */}
         <FounderChatLauncher />
+        <DownloadAppLauncher />
 
         {/* Desktop dropdowns — visible on md+ so tablets and smaller laptops see them */}
         <div className="hidden items-center gap-0.5 md:flex">
