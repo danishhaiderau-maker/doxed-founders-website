@@ -1,0 +1,24 @@
+# Gitleaks config for HEAD / working-tree scans.
+# Full-history scrub of commit e5312ec0 (Aug 2026 handoff BOT_ADMIN_TOKEN)
+# remains a follow-up (BFG / git filter-repo).
+
+title = "doxedcryptofounder"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local build artifacts, templates, fixtures, and audit helpers"
+paths = [
+  '''(?i)\.next/''',
+  '''(?i)node_modules/''',
+  '''(?i)^logs/''',
+  '''(?i)\.env\.local$''',
+  '''(?i)\.env\.production\.example$''',
+  '''(?i)railway-x-vars\.template\.env$''',
+  '''(?i)scripts/audit-secrets\.ps1$''',
+  '''(?i)cassettes/''',
+  '''(?i)packages/founder-ide/scripts/smoke-pairing-and-gateway\.mjs$''',
+  '''(?i)apps/.*/src/.*/listing-application-review\.util\.ts$''',
+  '''(?i)apps/web/src/lib/prisma\.ts$''',
+]
