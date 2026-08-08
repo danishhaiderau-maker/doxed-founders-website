@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(admin): remove Demo Mode control panel from production
+fix(web): drop founder-vault prepare tsc
 
 ## Last Activity
 
