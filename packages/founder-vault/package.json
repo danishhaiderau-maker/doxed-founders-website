@@ -28,6 +28,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {

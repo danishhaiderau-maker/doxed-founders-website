@@ -75,7 +75,7 @@ export class MessagesService {
       type: NotificationType.PLATFORM_MESSAGE,
       title: `Message from ${senderLabel}`,
       body: trimmed.slice(0, 280),
-      link: `/account?tab=messages&with=${fromUserId}`,
+      link: `/chat?dm=${fromUserId}`,
       metadata: {
         fromUserId,
         messageId: message.id,

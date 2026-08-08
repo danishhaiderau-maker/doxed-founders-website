@@ -151,12 +151,12 @@ export function PlatformMessagesBell() {
     const signedIn = status === 'authenticated';
     return (
       <Link
-        href={signedIn ? '/account?tab=messages' : '/login?callbackUrl=/account?tab=messages'}
+        href={signedIn ? '/chat' : '/login?callbackUrl=/chat'}
         className="relative inline-flex overflow-visible rounded-lg px-2.5 py-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
         title={
           signedIn
-            ? 'Open messages (refresh sign-in if counts do not appear)'
-            : 'Sign in for messages'
+            ? 'Open chat (refresh sign-in if counts do not appear)'
+            : 'Sign in for chat'
         }
       >
         ✉️
@@ -278,7 +278,7 @@ export function PlatformMessagesBell() {
               {threads.map((t) => (
                 <li key={t.otherUserId} className="border-b border-zinc-900/80 last:border-0">
                   <Link
-                    href={`/account?tab=messages&with=${encodeURIComponent(t.otherUserId)}`}
+                    href={`/chat?dm=${encodeURIComponent(t.otherUserId)}&label=${encodeURIComponent(t.otherUserLabel)}`}
                     onClick={() => setOpen(false)}
                     className="block px-3 py-2 hover:bg-zinc-900"
                   >
@@ -301,11 +301,11 @@ export function PlatformMessagesBell() {
           )}
 
           <Link
-            href="/account?tab=messages"
+            href="/chat"
             onClick={() => setOpen(false)}
             className="block border-t border-zinc-800 px-3 py-2 text-center text-xs font-medium text-cyan-400 hover:bg-zinc-900"
           >
-            Open full inbox →
+            Open full chat →
           </Link>
         </div>
       )}

@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
   fetchMessageConversation,
   fetchMessageThreads,
@@ -10,6 +11,7 @@ import {
   type PlatformMessageItem,
 } from '@/lib/api';
 import { dispatchInboxRefresh } from '@/lib/inbox-refresh';
+
 type Props = {
   accessToken: string;
   initialOtherUserId?: string | null;
@@ -123,6 +125,15 @@ export function AccountMessagesPanel({ accessToken, initialOtherUserId }: Props)
 
   return (
     <section className="space-y-4">
+      <Link
+        href={initialOtherUserId ? `/chat?dm=${encodeURIComponent(initialOtherUserId)}` : '/chat'}
+        className="flex items-center justify-between gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-100 transition hover:bg-emerald-500/10"
+      >
+        <span>
+          Prefer the full WhatsApp-style chat?{' '}
+          <span className="font-semibold text-emerald-300">Open Chat →</span>
+        </span>
+      </Link>
 
       <div className="rounded-xl border border-zinc-800 bg-zinc-950/60">
         <div className="border-b border-zinc-800 px-4 py-3">
