@@ -146,7 +146,7 @@ function createService(
     },
   };
   const execution = overrides?.execution ?? {
-    wakeNow: async () => {
+    requestExecutorWake: async () => {
       overrides?.trace?.push('execution');
     },
   };
@@ -629,7 +629,7 @@ test('signed APPROVE_PENDING stays visibility-only and does not wake subscriber 
     },
   };
   const execution = {
-    wakeNow: async () => {
+    requestExecutorWake: async () => {
       trace.push('execution');
     },
   };
@@ -700,7 +700,7 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     },
   };
   const execution = {
-    wakeNow: async () => {
+    requestExecutorWake: async () => {
       trace.push('execution');
       const entry = storedEnvelope.entry as {
         exact_limit_price?: number;
@@ -800,7 +800,7 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
     },
   };
   const execution = {
-    wakeNow: async () => {
+    requestExecutorWake: async () => {
       trace.push('execution');
       const context = storedEnvelope.context as {
         showcase_event?: string;
