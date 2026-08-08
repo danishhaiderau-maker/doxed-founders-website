@@ -1186,7 +1186,7 @@ export class WallService {
       hidden: Boolean(m.hiddenAt),
       links: {
         project: `/project/${project.slug}`,
-        raiseRoom: `/raise-room?project=${encodeURIComponent(project.slug)}`,
+        raiseRoom: `/raise-room/${project.id}`,
         founderSpotlight: founderSlug ? `/founder/${founderSlug}` : null,
       },
     };
