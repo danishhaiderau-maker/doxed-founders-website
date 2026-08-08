@@ -1417,6 +1417,7 @@ export class WallService {
       where: { slug },
       select: {
         id: true,
+        slug: true,
         wallSettings: true,
         founder: { select: { slug: true } },
       },
@@ -1428,8 +1429,8 @@ export class WallService {
         : 'OPEN') as 'OPEN' | 'ANNOUNCEMENTS',
       slowModeSeconds: project.wallSettings?.slowModeSeconds ?? 0,
       links: {
-        project: `/project/${slug}`,
-        raiseRoom: `/raise-room?project=${encodeURIComponent(slug)}`,
+        project: `/project/${project.slug}`,
+        raiseRoom: `/raise-room/${project.id}`,
         founderSpotlight: project.founder?.slug ? `/founder/${project.founder.slug}` : null,
       },
     };
