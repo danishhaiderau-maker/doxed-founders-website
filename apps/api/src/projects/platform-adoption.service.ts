@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { FounderEventType } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { DEMO_SLUG_PREFIX } from '../demo/demo.constants';
 
 export type AdoptionDayPoint = {
   date: string;
@@ -122,7 +123,10 @@ export class PlatformAdoptionService {
         select: { publishedAt: true, projectId: true },
       }),
       this.prisma.project.findMany({
-        where: { approved: true },
+        where: {
+          approved: true,
+          NOT: { slug: { startsWith: DEMO_SLUG_PREFIX } },
+        },
         select: {
           id: true,
           slug: true,

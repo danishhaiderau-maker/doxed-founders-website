@@ -136,6 +136,13 @@ if (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() not in (
     raise SystemExit(78)
 
 os.environ.setdefault("SHOWCASE_AGENT", "1")
+# Adoption chart feed — DeepSeek usage POSTs here after each trading inference.
+# Restored after the Jul 31 Fly-only rewrite dropped the previous setdefault and
+# left Fly without SHOWCASE_INFERENCE_USAGE_URL, which zeroed the landing chart.
+os.environ.setdefault(
+    "SHOWCASE_INFERENCE_USAGE_URL",
+    "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
+)
 # Fly is the canonical strategy/trading owner. It must never inherit the old
 # desktop/full-warehouse identity merely because this shared entry module was
 # historically used in multiple environments.

@@ -52,6 +52,12 @@ def test_fly_refuses_missing_control_secrets_or_direct_live_mode():
     assert "Railway is the isolated Bitfinex live executor" in WRAPPER
     assert "return _is_direct_local_control(_client_ip())" in BOT
     assert "return True  # gate disabled" not in BOT
+    assert 'os.environ.setdefault(' in WRAPPER
+    assert '"SHOWCASE_INFERENCE_USAGE_URL"' in WRAPPER
+    assert (
+        '"https://doxxedcrypto.digital/api/internal/showcase-inference-usage"'
+        in WRAPPER
+    )
 
 
 def test_fly_image_does_not_bake_laptop_runtime_json():

@@ -18,6 +18,10 @@ import { HotBuyService } from '../feed/hot-buy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { MetricsSyncService } from './metrics-sync.service';
 import { hashProfileLockPassword, verifyProfileLockPassword } from './profile-lock.util';
+import { DEMO_EMAIL_DOMAIN, DEMO_SLUG_PREFIX } from '../demo/demo.constants';
+
+/** Public Discover / landing must never surface demo harness leftovers. */
+const notDemoSlug: Prisma.StringFilter = { not: { startsWith: DEMO_SLUG_PREFIX } };
 
 const projectInclude = {
   chain: { select: { slug: true, name: true } },
@@ -56,6 +60,7 @@ export class ProjectsService {
       approved: true,
       source: ProjectSource.CURATED,
       founderId: { not: null },
+      slug: notDemoSlug,
     };
 
     if (params?.featured) {
@@ -136,6 +141,7 @@ export class ProjectsService {
       approved: true,
       source: ProjectSource.CURATED,
       founderId: { not: null },
+      slug: notDemoSlug,
     } as const;
 
     const now = new Date();
@@ -155,7 +161,12 @@ export class ProjectsService {
         where: { projects: { some: curatedWhere } },
       }),
       this.prisma.project.count({ where: curatedWhere }),
-      this.prisma.user.count({ where: { banned: false } }),
+      this.prisma.user.count({
+        where: {
+          banned: false,
+          NOT: { email: { endsWith: DEMO_EMAIL_DOMAIN } },
+        },
+      }),
       this.prisma.paperPortfolio.aggregate({
         _sum: { totalValue: true },
         _count: true,
@@ -284,6 +295,10 @@ export class ProjectsService {
 
   async findBySlug(slug: string) {
     await this.metricsSync.syncBySlug(slug, true);
+
+    if (slug.startsWith(DEMO_SLUG_PREFIX)) {
+      throw new NotFoundException('Project not found');
+    }
 
     const project = await this.prisma.project.findFirst({
       where: {
@@ -607,11 +622,18 @@ export class ProjectsService {
 
   async findFounders() {
     const founders = await this.prisma.founder.findMany({
+      where: { slug: notDemoSlug },
       include: {
         verifications: { where: { verified: true }, select: { type: true } },
         _count: {
           select: {
-            projects: { where: { approved: true, source: ProjectSource.CURATED } },
+            projects: {
+              where: {
+                approved: true,
+                source: ProjectSource.CURATED,
+                slug: notDemoSlug,
+              },
+            },
           },
         },
       },
@@ -633,12 +655,20 @@ export class ProjectsService {
   }
 
   async findFounderBySlug(slug: string) {
+    if (slug.startsWith(DEMO_SLUG_PREFIX)) {
+      throw new NotFoundException('Founder not found');
+    }
+
     const founder = await this.prisma.founder.findUnique({
       where: { slug },
       include: {
         verifications: { where: { verified: true }, select: { type: true } },
         projects: {
-          where: { approved: true, source: ProjectSource.CURATED },
+          where: {
+            approved: true,
+            source: ProjectSource.CURATED,
+            slug: notDemoSlug,
+          },
           include: projectInclude,
           orderBy: [{ featured: 'desc' }, { name: 'asc' }],
         },

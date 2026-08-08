@@ -25,6 +25,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { FeedService } from './feed.service';
 import { FeedShareService } from './feed-share.service';
 import { HotBuyService } from './hot-buy.service';
+import { DEMO_SLUG_PREFIX } from '../demo/demo.constants';
+
+const notDemoProject = { NOT: { slug: { startsWith: DEMO_SLUG_PREFIX } } } as const;
 
 @Injectable()
 export class UnifiedFeedService {
@@ -106,6 +109,7 @@ export class UnifiedFeedService {
         approved: true,
         source: ProjectSource.CURATED,
         createdAt: { gte: weekAgo },
+        ...notDemoProject,
       },
       orderBy: { createdAt: 'desc' },
       take: 1,
@@ -255,6 +259,7 @@ export class UnifiedFeedService {
           approved: true,
           source: ProjectSource.CURATED,
           createdAt: { gte: sinceDate },
+          ...notDemoProject,
         },
         orderBy: { createdAt: 'desc' },
         take: 3,
@@ -649,6 +654,7 @@ export class UnifiedFeedService {
         approved: true,
         source: ProjectSource.CURATED,
         createdAt: { gte: weekAgo },
+        ...notDemoProject,
       },
       orderBy: { createdAt: 'desc' },
       take: 5,

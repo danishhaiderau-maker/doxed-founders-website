@@ -7472,7 +7472,17 @@ def _relay_delivery_history_snapshot(limit=10):
     with _relay_push_history_lock:
         return list(_relay_push_history)[-max(1, int(limit)):]
 
+# Prefer explicit env; when SHOWCASE_AGENT is on, fall back to the production
+# adoption endpoint so Fly deploys cannot silently drop the landing chart feed.
+_SHOWCASE_INFERENCE_USAGE_DEFAULT = (
+    "https://doxxedcrypto.digital/api/internal/showcase-inference-usage"
+)
 SHOWCASE_INFERENCE_USAGE_URL = (os.getenv("SHOWCASE_INFERENCE_USAGE_URL") or "").strip()
+if not SHOWCASE_INFERENCE_USAGE_URL and (
+    (os.getenv("SHOWCASE_AGENT") or "").strip().lower() in ("1", "true", "yes", "on")
+    or (os.getenv("FLY_APP_NAME") or "").strip() == "doxed-btc-bot"
+):
+    SHOWCASE_INFERENCE_USAGE_URL = _SHOWCASE_INFERENCE_USAGE_DEFAULT
 
 
 def _dashboard_owner_metadata() -> dict:

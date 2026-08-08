@@ -47,6 +47,7 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:capabilities": "tsx scripts/seed-capabilities.ts",
     "db:clear-samples": "node scripts/clear-sample-data.mjs",
+    "db:purge-demo": "node scripts/purge-demo-data.mjs",
     "setup:google": "powershell -ExecutionPolicy Bypass -File scripts/setup-google-oauth.ps1",
     "setup:google:open": "powershell -ExecutionPolicy Bypass -File scripts/setup-google-oauth.ps1 -OpenConsole",
     "setup:google:easy": "powershell -ExecutionPolicy Bypass -File scripts/apply-google-keys-auto.ps1",
