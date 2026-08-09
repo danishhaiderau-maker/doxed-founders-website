@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(ci): restore deterministic workspace installs
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
