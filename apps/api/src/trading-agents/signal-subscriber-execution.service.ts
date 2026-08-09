@@ -11110,27 +11110,39 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (orders.length === 0) return;
 
     // Phase 6 fix 4 — build the cid → participant map for this user/agent by
-    // reading every participant's merged ExecutionPayload (which surfaces
-    // `clientOrderId` from ORDER_PLACED / UPDATE_STOPS events). A foreign
+    // reading one bounded set of recent ORDER_PLACED / UPDATE_STOPS payloads.
+    // This avoids the historical participant N+1 scan that can exceed the
+    // executor watchdog. A foreign
     // active order whose `cid` matches one of these is, by construction, the
     // bot's own orphaned limit (the participant is now terminal so its
     // bitfinexOrderId left `managedOrderIds`, but the exchange order is still
     // on the book). Auto-cancel those with retry + loud-fail + audit. cid-less
     // / unknown-cid foreign orders are left for manual review (current
     // behavior, gated by the aggressive flag).
-    const allParticipants = await this.prisma.signalCycleParticipant.findMany({
-      where: { userId, cycle: { agentId } },
-      select: { id: true, cycleId: true, status: true },
+    const ownershipEvents = await this.prisma.signalCycleEvent.findMany({
+      where: {
+        participantId: { not: null },
+        eventType: { in: ['ORDER_PLACED', 'UPDATE_STOPS'] },
+        createdAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000) },
+        participant: { userId, cycle: { agentId } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 2_000,
+      select: { participantId: true, cycleId: true, payload: true },
     });
     const cidToParticipant = new Map<number, { participantId: string; cycleId: string }>();
-    for (const p of allParticipants) {
-      const meta = await this.loadExecutionMeta(p.id);
-      if (meta.clientOrderId == null) continue;
+    for (const event of ownershipEvents) {
+      if (!event.participantId || !event.payload || typeof event.payload !== 'object') continue;
+      const cid = Number((event.payload as { clientOrderId?: unknown }).clientOrderId);
+      if (!Number.isInteger(cid) || cid <= 0) continue;
       // First-seen wins — a re-placement (applyLimitChase) reuses the same cid
       // hash for the same (cycle, participant, tradeId) triple, so duplicates
       // map to the same participant anyway.
-      if (!cidToParticipant.has(meta.clientOrderId)) {
-        cidToParticipant.set(meta.clientOrderId, { participantId: p.id, cycleId: p.cycleId });
+      if (!cidToParticipant.has(cid)) {
+        cidToParticipant.set(cid, {
+          participantId: event.participantId,
+          cycleId: event.cycleId,
+        });
       }
     }
 
