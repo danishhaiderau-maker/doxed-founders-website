@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-feat(mobile): recreate unified Capacitor shell v0.5 with APK download hub
+fix(second-brain): require Founder Node or JWT for hosted critique
 
 ## Last Activity
 
