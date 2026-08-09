@@ -829,7 +829,7 @@ class ConfirmedCancelBehaviorTest(unittest.TestCase):
 
 
 class WsLiveReadinessSourceContractTest(unittest.TestCase):
-    def test_only_ws_trade_handler_writes_ws_tick_and_ready_true(self):
+    def test_only_exact_symbol_ws_market_handlers_authorize_readiness(self):
         tick_writers = set()
         ready_true_writers = set()
         for fn_name, fn in FUNCTIONS.items():
@@ -849,8 +849,9 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
                         and node.value.value is True
                     ):
                         ready_true_writers.add(fn_name)
-        self.assertEqual(tick_writers, {"_process_ws_trade_tick"})
-        self.assertEqual(ready_true_writers, {"_process_ws_trade_tick"})
+        expected = {"_process_ws_trade_tick", "_process_ws_ticker_update"}
+        self.assertEqual(tick_writers, expected)
+        self.assertEqual(ready_true_writers, expected)
         self.assertNotIn("update_price", FUNCTIONS)
 
     def test_watchdog_and_validation_never_use_rest_as_ws(self):
@@ -1125,11 +1126,18 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
             "state": self.state,
             "state_lock": threading.RLock(),
             "last_ws_message_time": 0.0,
+            "ws_channel_types": {},
             # Trade-handling path must never run for an hb-only message. The
             # handler returns before reaching _bitfinex_ws_trades_from_message
             # for an hb frame, so these helpers should never be called.
             "_bitfinex_ws_trades_from_message": lambda data: self.trades_seen.append(data) or [],
             "_process_ws_trade_tick": lambda *a, **k: self.trades_seen.append((a, k)),
+            "_process_ws_ticker_update": lambda payload: self.state.update({
+                "ws_last_tick": time.time(),
+                "ws_ready": True,
+                "ws_transport_connected": True,
+                "ticker_payload": payload,
+            }) or True,
             "_ws_trade_timestamp_sec": lambda t: 0.0,
             "_agent_dbg": lambda *a, **k: self.diag_calls.append((a, k)),
             "_mark_ws_transport_disconnected": lambda *a, **k: None,
@@ -1176,6 +1184,18 @@ class WsHeartbeatTransportLivenessTest(unittest.TestCase):
         self.assertTrue(self.state["ws_transport_connected"])
         self.assertIsNone(self.state["ws_last_tick"])
         self.assertFalse(self.state["ws_ready"])
+        self.assertEqual(self.trades_seen, [])
+
+    def test_exact_symbol_ticker_update_authorizes_market_readiness(self):
+        self.namespace["safe_ws_handler"](json.dumps({
+            "event": "subscribed", "channel": "ticker", "chanId": 12,
+            "symbol": "tBTCF0:USTF0",
+        }))
+        payload = [64990.0, 2.0, 65000.0, 3.0, 10.0, 0.01, 64995.0, 100.0, 65500.0, 64000.0]
+        self.namespace["safe_ws_handler"](json.dumps([12, payload]))
+        self.assertTrue(self.state["ws_ready"])
+        self.assertTrue(self.state["ws_transport_connected"])
+        self.assertEqual(self.state["ticker_payload"], payload)
         self.assertEqual(self.trades_seen, [])
 
     def test_watchdog_accepts_recent_heartbeat_as_liveness(self):

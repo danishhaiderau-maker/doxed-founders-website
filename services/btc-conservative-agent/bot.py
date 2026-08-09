@@ -16922,7 +16922,7 @@ def _force_paper_mode_active() -> bool:
 
 
 def _genuine_ws_transport_ready(now: float = None) -> bool:
-    """True only after this process has a connected WS and a fresh trade tick."""
+    """True only after a connected WS and fresh exact-symbol market update."""
     now = float(now or time.time())
     with state_lock:
         ws_tick = float(state.get("ws_last_tick") or 0)
@@ -20442,6 +20442,45 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     if has_open:
         _tick_driven_position_exits(price)
 
+def _process_ws_ticker_update(payload) -> bool:
+    """Use a live exact-symbol ticker update as fresh WS market data.
+
+    The derivatives trades channel can be silent for minutes. A ticker update
+    still proves the same instrument's bid/ask/last stream is live. Heartbeats
+    and pongs remain transport-only and never call this function.
+    """
+    if not isinstance(payload, list) or len(payload) < 7:
+        return False
+    try:
+        bid = float(payload[0] or 0)
+        ask = float(payload[2] or 0)
+        last = float(payload[6] or 0)
+    except (TypeError, ValueError):
+        return False
+    if bid <= 0 or ask <= 0 or last <= 0 or ask < bid:
+        return False
+    tick_now = time.time()
+    with state_lock:
+        state["bid"] = bid
+        state["ask"] = ask
+        state["price"] = last
+        state["price_ts"] = tick_now
+        state["ws_last_tick"] = tick_now
+        state["last_data_ts"] = tick_now
+        state["price_source"] = "WS_TICKER"
+        state["data_source"] = "ws_ticker"
+        state["ws_transport_connected"] = True
+        first_ready_tick = not bool(state.get("ws_ready"))
+        state["ws_ready"] = True
+    if first_ready_tick:
+        logger.info(
+            f"[WS] FIRST TICKER RECEIVED - Bid: {bid} Ask: {ask} Last: {last} "
+            "| ws_ready=True [PIPELINE ENFORCEMENT]"
+        )
+    _recompute_system_readiness(tick_now)
+    return True
+
+
 def _tick_driven_position_exits(price: float):
     """WS tick path — immediate exit/ladder enforcement (not only 1s poll)."""
     if price is None or price <= 0:
@@ -20464,10 +20503,14 @@ def safe_ws_handler(message):
         if isinstance(data, dict):
             ev = data.get("event")
             if ev in ("info", "subscribed", "pong"):
-                if ev == "subscribed" and data.get("channel") == "trades":
+                if ev == "subscribed" and data.get("channel") in ("trades", "ticker"):
+                    ws_channel_types[int(data.get("chanId"))] = str(data.get("channel"))
                     with state_lock:
                         state["ws_connected_ts"] = time.time()
-                    logger.info(f"[WS] Subscribed trades chanId={data.get('chanId')} symbol={data.get('symbol')}")
+                    logger.info(
+                        f"[WS] Subscribed {data.get('channel')} "
+                        f"chanId={data.get('chanId')} symbol={data.get('symbol')}"
+                    )
                 elif ev == "pong":
                     # A server pong proves the socket is live when the quiet
                     # derivatives trade channel emits no hb frame. It must not
@@ -20499,6 +20542,13 @@ def safe_ws_handler(message):
                 state["data_source"] = "ws_alive_hb"
                 state.setdefault("diag", {})["ws_status"] = "HB"
             _agent_dbg("H2", "safe_ws_handler", "hb", {"chan_id": data[0]})
+            return
+        if (
+            isinstance(data, list)
+            and len(data) >= 2
+            and ws_channel_types.get(int(data[0])) == "ticker"
+        ):
+            _process_ws_ticker_update(data[1])
             return
         trades = _bitfinex_ws_trades_from_message(data)
         if not trades:
@@ -20549,13 +20599,15 @@ def on_open(ws):
     global ws_alive, ws_app
     if not _is_current_ws_app(ws):
         return
-    logger.info(f"WS: Connected - subscribing Bitfinex trades {BITFINEX_WS_SYMBOL}")
+    logger.info(f"WS: Connected - subscribing Bitfinex trades+ticker {BITFINEX_WS_SYMBOL}")
+    ws_channel_types.clear()
     ws.send(json.dumps({"event": "subscribe", "channel": "trades", "symbol": BITFINEX_WS_SYMBOL}))
+    ws.send(json.dumps({"event": "subscribe", "channel": "ticker", "symbol": BITFINEX_WS_SYMBOL}))
     with state_lock:
         state["ws_connected_ts"] = time.time()
         state["ws_transport_connected"] = True
         # A connected socket is not trading-ready until this new session emits
-        # a fresh trade tick. Never inherit ws_ready from a prior session.
+        # a fresh trade or ticker update. Never inherit prior readiness.
         state["ws_ready"] = False
         state["ws_last_hb_ts"] = None
         state["last_ready_ts"] = 0
@@ -25420,6 +25472,7 @@ ws_reconnecting = False
 last_ws_reconnect = 0.0
 ws_app = None
 ws_alive = True
+ws_channel_types = {}
 last_no_signal_candle = -1
 last_block_log = 0.0
 first_ai_done = False
