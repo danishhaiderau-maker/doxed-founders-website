@@ -259,6 +259,15 @@ export function isStrictExchangeOrderAuditFlat(audit, nowMs = Date.now()) {
   );
 }
 
+export function isRelayPausedAndDisarmed(row) {
+  return (
+    row?.status === 'PAUSED'
+    && (row.relayExecutionMode == null || row.relayExecutionMode === 'PAUSED')
+    && row.relayArmedAt == null
+    && row.realTradingConfirmedAt == null
+  );
+}
+
 async function main() {
   const { bot, baseUrl: botUrl } = await fetchOwnerState();
   const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
@@ -336,13 +345,7 @@ async function main() {
   const cheetahRows = rows
     .filter((row) => String(row.user).toLowerCase().includes('cheetah'));
   const relayPausedAndDisarmed = cheetahRows.length > 0
-    && cheetahRows.every(
-      (row) =>
-        row.status === 'PAUSED'
-        && row.relayExecutionMode === 'PAUSED'
-        && row.relayArmedAt == null
-        && row.realTradingConfirmedAt == null,
-    );
+    && cheetahRows.every(isRelayPausedAndDisarmed);
   const reconciledFlat = cheetahRows.length > 0
     && cheetahRows.every((row) => {
       return (

@@ -5,8 +5,21 @@ import {
   hasFullOwnerOrderState,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
+  isRelayPausedAndDisarmed,
   ownerFetchErrorChain,
 } from './check-relay-flat.mjs';
+
+test('paused relay accepts legacy null mode only when arming timestamps are clear', () => {
+  assert.equal(isRelayPausedAndDisarmed({
+    status: 'PAUSED', relayExecutionMode: null, relayArmedAt: null, realTradingConfirmedAt: null,
+  }), true);
+  assert.equal(isRelayPausedAndDisarmed({
+    status: 'PAUSED', relayExecutionMode: 'LIVE', relayArmedAt: null, realTradingConfirmedAt: null,
+  }), false);
+  assert.equal(isRelayPausedAndDisarmed({
+    status: 'PAUSED', relayExecutionMode: null, relayArmedAt: '2026-08-09T00:00:00Z', realTradingConfirmedAt: null,
+  }), false);
+});
 
 const now = Date.parse('2026-07-24T05:45:00.000Z');
 
