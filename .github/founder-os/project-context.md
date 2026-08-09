@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-feat(relay): persist fast-wake SLA telemetry
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
