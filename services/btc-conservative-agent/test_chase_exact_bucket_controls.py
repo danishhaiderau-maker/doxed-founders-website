@@ -920,7 +920,7 @@ def test_only_continuous_can_emit_platform_live_relay_lifecycle():
 def test_market_bid_ask_spread_is_collected_separately():
     assert '"market_bid_ask_spread_usd_at_entry"' in BOT_SOURCE
     assert '"market_bid_ask_spread_bps_at_entry"' in BOT_SOURCE
-    assert "the older “conviction spread” is this same normalized AI gap" in BOT_SOURCE
+    # Keep the contract tied to executable behavior rather than prose that can\n    # be reworded without changing how the legacy conviction spread is derived.\n    assert "def compute_directional_spread(direction: str, ai: dict) -> int:" in BOT_SOURCE\n    assert "return sign * (abs(raw_gap) // 10)" in BOT_SOURCE
 
 
 def test_decision5_virtual_touch_before_selected_entry_state_exists():
