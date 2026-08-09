@@ -2568,6 +2568,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private async executePersistedFastWake(wake: RelayExecutorWakeRequest): Promise<void> {
+    const startedAtMs = Date.now();
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
     if (!agent) return;
     const instances = await this.prisma.tradingAgentInstance.findMany({
@@ -2585,7 +2586,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           instance.userId,
           instance.exchangeProvider,
         );
-        if (!creds) continue;
+        if (!creds) {
+          await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'CREDENTIALS_MISSING');
+          continue;
+        }
         const openLots = await this.prisma.signalCycleParticipant.findMany({
           where: {
             userId: instance.userId,
@@ -2594,6 +2598,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           },
           include: { cycle: true },
         });
+        let exitAttempts = 0;
         for (const participant of openLots) {
           if (
             wake.tradeId &&
@@ -2603,6 +2608,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             continue;
           }
           const meta = await this.loadExecutionMeta(participant.id);
+          exitAttempts += 1;
           await this.tryImmediateShowcaseMirrorExit(
             agent.id,
             instance.userId,
@@ -2613,12 +2619,63 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             false,
           );
         }
+        await this.persistFastWakeTelemetry(
+          instance.id,
+          wake,
+          startedAtMs,
+          exitAttempts > 0 ? 'EXIT_DISPATCHED' : 'NO_MATCHING_OPEN_LOT',
+        );
         continue;
       }
       if (wake.trigger === 'ORDER_PLACED' && instance.status === TradingAgentInstanceStatus.ACTIVE) {
-        await this.tryFreshSignedFlatEntry(agent.id, instance);
+        const placed = await this.tryFreshSignedFlatEntry(agent.id, instance);
+        await this.persistFastWakeTelemetry(
+          instance.id,
+          wake,
+          startedAtMs,
+          placed ? 'ENTRY_PLACED' : 'ENTRY_NOT_ELIGIBLE',
+        );
+      } else if (wake.trigger === 'ORDER_PLACED') {
+        await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'ENTRY_SKIPPED_PAUSED');
       }
     }
+  }
+
+  private async persistFastWakeTelemetry(
+    instanceId: string,
+    wake: RelayExecutorWakeRequest,
+    startedAtMs: number,
+    outcome: string,
+  ): Promise<void> {
+    const fresh = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instanceId },
+      select: { dashboardState: true },
+    });
+    if (!fresh) return;
+    const completedAt = new Date();
+    const persistedAtMs = Date.parse(wake.at);
+    const latencyMs = Number.isFinite(persistedAtMs)
+      ? Math.max(0, completedAt.getTime() - persistedAtMs)
+      : null;
+    await this.prisma.tradingAgentInstance.update({
+      where: { id: instanceId },
+      data: {
+        dashboardState: applyDashboardPatch(
+          (fresh.dashboardState ?? {}) as Record<string, unknown>,
+          {
+            relayExecutorFastWake: {
+              trigger: wake.trigger,
+              tradeId: wake.tradeId ?? null,
+              persistedAt: wake.at,
+              startedAt: new Date(startedAtMs).toISOString(),
+              completedAt: completedAt.toISOString(),
+              latencyMs,
+              outcome,
+            },
+          },
+        ) as unknown as Prisma.InputJsonValue,
+      },
+    });
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
