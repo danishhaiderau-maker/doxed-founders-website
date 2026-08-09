@@ -63,6 +63,14 @@ GLM_API_BASE=https://api.z.ai/api/coding/paas/v4
 
 **Admin UI:** `/admin/control` → **AI Keys** → Second Brain cards (Gemini primary, GLM optional).
 
+### Admin → desktop (safe pattern)
+
+1. Save Gemini (and optional Railway `OPENAI_API_KEY`) in Admin / Railway only.
+2. Desktop Team users pair a Founder Node or sign in — they never receive the raw key.
+3. Founder Next gateway calls `POST /api/second-brain/critique` with Node/JWT auth.
+4. Platform cascade runs server-side; desktop shows the answer (or an honest “no Gemini configured” error).
+5. Do **not** paste production keys into desktop `.env`, git, or installer configs.
+
 ---
 
 ## 3. Vision preprocessing (Gemini)

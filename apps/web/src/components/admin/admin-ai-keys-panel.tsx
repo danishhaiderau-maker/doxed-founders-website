@@ -382,9 +382,10 @@ export function AdminAiKeysPanel({ token, overview, onOverviewChange }: Props) {
         <div>
           <h3 className="text-sm font-semibold text-zinc-200">Second Brain — cheap expert cascade</h3>
           <p className="mt-0.5 text-[11px] text-zinc-500">
-            Primary: Gemini Flash. Cheap fallback:{' '}
-            <code className="text-zinc-400">OPENAI_API_KEY</code> gpt-4o-mini / Luna-class if set in Railway.
-            GLM is optional last-resort only — not the default. DeepSeek is never used for Second Brain.
+            Primary: Gemini Flash (Admin key or Railway <code className="text-zinc-400">GEMINI_API_KEY</code>).
+            Cheap fallback: Railway <code className="text-zinc-400">OPENAI_API_KEY</code> gpt-4o-mini / Luna-class.
+            Desktop Team users reach this cascade via hosted <code className="text-zinc-400">/api/second-brain/critique</code>
+            — keys stay on the server. GLM is optional last-resort only. DeepSeek is never used for Second Brain.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button
