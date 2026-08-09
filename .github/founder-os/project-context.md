@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(relay): approve fast-wake policy lock
+feat(relay): persist fast-wake SLA telemetry
 
 ## Last Activity
 
