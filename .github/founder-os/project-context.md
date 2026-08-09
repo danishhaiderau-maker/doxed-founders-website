@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(fly): accept legacy disarmed paused relay state
+fix(relay): execute signed lifecycle wakes immediately
 
 ## Last Activity
 
