@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(second-brain): require Founder Node or JWT for hosted critique
+fix(ci): restore deterministic workspace installs
 
 ## Last Activity
 
