@@ -247,6 +247,7 @@ type_b_signal = {
 }
 original_maybe_bitfinex_limit_entry = bot._maybe_bitfinex_limit_entry
 original_relay_mirror = bot._relay_mirror
+original_can_progress_new_entry = bot.can_progress_new_entry
 readiness_missing = object()
 readiness_state_keys = (
     "ws_transport_connected",
@@ -272,6 +273,9 @@ original_delta_buffer = list(bot.delta_buffer)
 try:
     bot._maybe_bitfinex_limit_entry = lambda *args, **kwargs: None
     bot._relay_mirror = lambda *args, **kwargs: None
+    # This test owns execution-mode routing, not the independently covered WS
+    # transport state machine. Keep that boundary deterministic here.
+    bot.can_progress_new_entry = lambda *args, **kwargs: (True, "READY", {})
     ready_now = bot.time.time()
     with bot.state_lock:
         bot.state["strategy_mode"] = "RESEARCH"
@@ -335,6 +339,7 @@ try:
 finally:
     bot._maybe_bitfinex_limit_entry = original_maybe_bitfinex_limit_entry
     bot._relay_mirror = original_relay_mirror
+    bot.can_progress_new_entry = original_can_progress_new_entry
     bot.last_ohlcv_fetch = original_last_ohlcv_fetch
     bot.latest_candles[:] = original_latest_candles
     bot.volume_buffer.clear()
