@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(relay): execute signed lifecycle wakes immediately
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
