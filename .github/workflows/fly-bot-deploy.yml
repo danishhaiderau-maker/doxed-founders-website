@@ -61,7 +61,11 @@ jobs:
       - name: Install production boundary checker
         working-directory: ${{ github.workspace }}
         run: |
-          npm ci
+          # The monorepo lock can temporarily lag newly-added non-production
+          # workspaces. This gate only needs the root checker and Prisma client,
+          # so allow npm to reconcile the runner's ephemeral install instead of
+          # blocking the independent Fly bot deployment on unrelated lock drift.
+          npm install --ignore-scripts --no-audit --no-fund
           npx prisma generate
 
       - name: Prove the current Fly owner and every relay account are flat
