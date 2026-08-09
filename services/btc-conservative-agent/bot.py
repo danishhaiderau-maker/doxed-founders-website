@@ -27892,6 +27892,51 @@ def dashboard_js():
 def dashboard_favicon():
     return '', 204
 
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def dashboard_admin_login():
+    """Phone-friendly admin login that never puts the token in the URL."""
+    if request.method == 'GET':
+        return render_template_string("""
+<!doctype html>
+<html lang="en"><head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BTC Bot Admin Login</title>
+  <style>
+    body{background:#0b0f14;color:#e5e7eb;font-family:system-ui;margin:0;padding:32px 18px}
+    main{max-width:420px;margin:12vh auto;background:#111827;padding:24px;border-radius:14px}
+    input,button{box-sizing:border-box;width:100%;padding:13px;margin-top:12px;border-radius:8px}
+    input{background:#030712;color:#fff;border:1px solid #374151}
+    button{background:#16a34a;color:#fff;border:0;font-weight:700}
+    p{color:#9ca3af;line-height:1.45}
+  </style>
+</head><body><main>
+  <h2>Bot admin access</h2>
+  <p>Enter the current owner token. It is stored only as a secure HttpOnly cookie and is not added to the address bar.</p>
+  <form method="post" autocomplete="off">
+    <input name="token" type="password" required autofocus placeholder="Admin token" autocomplete="current-password">
+    <button type="submit">Open dashboard</button>
+  </form>
+</main></body></html>
+        """), 200, {'Cache-Control': 'no-store'}
+
+    token = request.form.get('token', '')
+    if not _BOT_ADMIN_TOKEN or not hmac.compare_digest(token, _BOT_ADMIN_TOKEN):
+        return 'Invalid admin token', 401, {'Cache-Control': 'no-store'}
+
+    resp = make_response('', 303)
+    resp.headers['Location'] = '/'
+    forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    secure = bool(request.is_secure or forwarded_proto == 'https')
+    resp.set_cookie(
+        'bot_admin_token', _BOT_ADMIN_TOKEN,
+        httponly=True, samesite='Lax', path='/', max_age=60 * 60 * 24 * 30,
+        secure=secure,
+    )
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
 @app.route('/')
 def dashboard():
     page = (
