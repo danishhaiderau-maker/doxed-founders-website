@@ -2102,6 +2102,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly exitingLots = new Set<string>();
   private running = false;
   private wakeQueued = false;
+  private fastWakeRunning = false;
   private tickStartedAtMs = 0;
   private lastTickCompletedAtMs = 0;
   private lastTickDurationMs = 0;
@@ -2222,6 +2223,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
     setInterval(() => void this.tick(), POLL_MS);
     setTimeout(() => void this.tick(), POLL_MS);
+    // Signed showcase lifecycle events must not wait for the full reconciliation
+    // pass. A healthy full pass can take several seconds because Bitfinex auth
+    // calls are deliberately serialized on one nonce lane. Poll the durable
+    // cross-process wake independently and run only the idempotent atomic-claim
+    // entry / exitingLots-guarded close path. The normal tick remains the crash
+    // recovery and reconciliation backstop.
+    setInterval(() => void this.pollPersistedFastWake(), 250).unref();
     setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
   }
 
@@ -2492,10 +2500,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
-  private async consumePersistedExecutorWakes(): Promise<void> {
-    if (!executionEnabled()) return;
+  private async consumePersistedExecutorWakes(): Promise<RelayExecutorWakeRequest | null> {
+    if (!executionEnabled()) return null;
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
-    if (!agent) return;
+    if (!agent) return null;
     const instances = await this.prisma.tradingAgentInstance.findMany({
       where: {
         agentId: agent.id,
@@ -2534,6 +2542,83 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.lastShowcaseWakeTrigger =
         best.trigger === 'POSITION_CLOSED' ? 'POSITION_CLOSED' : null;
     }
+    return best;
+  }
+
+  /** Cross-process signed-webhook fast lane; safe to overlap the reconciliation tick. */
+  private async pollPersistedFastWake(): Promise<void> {
+    if (!executionEnabled() || this.fastWakeRunning) return;
+    this.fastWakeRunning = true;
+    try {
+      const wake = await this.consumePersistedExecutorWakes();
+      if (!wake) return;
+      await this.executePersistedFastWake(wake);
+      // Always queue the complete pass afterwards so fills, stops, dashboards,
+      // and any non-fast-path ambiguity are reconciled authoritatively.
+      if (this.running) this.wakeQueued = true;
+      else setImmediate(() => void this.tick());
+    } catch (err) {
+      this.logger.warn(
+        `Persisted relay fast wake failed closed: ${err instanceof Error ? err.message : err}`,
+      );
+      if (this.running) this.wakeQueued = true;
+    } finally {
+      this.fastWakeRunning = false;
+    }
+  }
+
+  private async executePersistedFastWake(wake: RelayExecutorWakeRequest): Promise<void> {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
+    if (!agent) return;
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
+      },
+    });
+    for (const instance of instances) {
+      if (isCopyRelaySimActive(instance.dashboardState)) continue;
+      this.activeTrading = this.bitfinex;
+      if (wake.trigger === 'POSITION_CLOSED') {
+        const creds = await this.exchanges.getUserCredentials(
+          instance.userId,
+          instance.exchangeProvider,
+        );
+        if (!creds) continue;
+        const openLots = await this.prisma.signalCycleParticipant.findMany({
+          where: {
+            userId: instance.userId,
+            status: SignalCycleStatus.OPEN,
+            cycle: { agentId: agent.id },
+          },
+          include: { cycle: true },
+        });
+        for (const participant of openLots) {
+          if (
+            wake.tradeId &&
+            participant.cycle.tradeId &&
+            !tradeIdsMatch(wake.tradeId, participant.cycle.tradeId)
+          ) {
+            continue;
+          }
+          const meta = await this.loadExecutionMeta(participant.id);
+          await this.tryImmediateShowcaseMirrorExit(
+            agent.id,
+            instance.userId,
+            participant.cycle,
+            participant,
+            meta,
+            creds,
+            false,
+          );
+        }
+        continue;
+      }
+      if (wake.trigger === 'ORDER_PLACED' && instance.status === TradingAgentInstanceStatus.ACTIVE) {
+        await this.tryFreshSignedFlatEntry(agent.id, instance);
+      }
+    }
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
@@ -2571,7 +2656,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   private async tick() {
     if (!executionEnabled() || this.running) return;
-    await this.consumePersistedExecutorWakes().catch(() => {});
     this.running = true;
     this.tickStartedAtMs = Date.now();
     this.currentStage = 'LOAD_AGENT';
