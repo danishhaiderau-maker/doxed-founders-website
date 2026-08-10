@@ -44,9 +44,9 @@ DEEPSEEK_FAST_MODEL=deepseek-v4-flash                    # alias for the above
 ## 2. Second Brain cascade (NOT GLM-default)
 
 ```bash
-GEMINI_API_KEY=AIza…                                     # primary Second Brain (gemini-2.0-flash)
+GEMINI_API_KEY=AIza…                                     # primary Second Brain (gemini-3.5-flash)
 # Optional overrides:
-SECOND_BRAIN_PRIMARY_MODEL=gemini-2.0-flash
+SECOND_BRAIN_PRIMARY_MODEL=gemini-3.5-flash
 SECOND_BRAIN_FALLBACK_MODEL=gpt-4o-mini                  # Luna-class cheap consult (requires OPENAI_API_KEY)
 
 # Fallback #2 — if set, used after Gemini and before GLM:

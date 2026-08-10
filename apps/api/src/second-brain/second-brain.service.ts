@@ -54,7 +54,7 @@ export class SecondBrainService {
       openai,
       glm,
       cheapPathReady: gemini || openai,
-      primaryModel: process.env.SECOND_BRAIN_PRIMARY_MODEL?.trim() || 'gemini-2.0-flash',
+      primaryModel: process.env.SECOND_BRAIN_PRIMARY_MODEL?.trim() || 'gemini-3.5-flash',
       fallbackModel: process.env.SECOND_BRAIN_FALLBACK_MODEL?.trim() || 'gpt-4o-mini',
     };
   }
@@ -94,7 +94,9 @@ export class SecondBrainService {
       label: 'gemini-flash',
       apiKey: geminiKey,
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-      model: process.env.SECOND_BRAIN_PRIMARY_MODEL?.trim() || 'gemini-2.0-flash',
+      // Gemini 2.0 Flash was shut down on 2026-06-01. Keep this default on a
+      // supported multimodal Flash model; operators can still pin an override.
+      model: process.env.SECOND_BRAIN_PRIMARY_MODEL?.trim() || 'gemini-3.5-flash',
       system,
       user,
     });
