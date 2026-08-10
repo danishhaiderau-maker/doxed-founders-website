@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-perf(relay): dispatch isolated worker wake directly
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
