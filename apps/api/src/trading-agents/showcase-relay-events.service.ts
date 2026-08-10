@@ -571,6 +571,19 @@ export class ShowcaseRelayEventsService {
       );
     }
 
+    // Start the private worker's read-only safety preflight as soon as the
+    // signed owner event is authenticated. The worker waits for this exact
+    // cycle to become durable before it can claim or submit, so Neon remains
+    // the canonical gate while network delivery and exchange reads overlap
+    // the canonical transaction below.
+    if (directExecutableIntent && event === 'ORDER_PLACED') {
+      this.execution.requestExecutorPreWake?.(
+        event,
+        body.trade_id ?? null,
+        persistBody.platform_received_at ?? undefined,
+      );
+    }
+
     if (!signedLifecycleEvent) {
       if (event === 'ORDER_PLACED') {
         intentCreated = await this.cycles.wakeFromShowcase({

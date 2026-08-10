@@ -2559,6 +2559,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
   }
 
+  /**
+   * Latency-only direct hint sent after HMAC + owner verification but before
+   * the API's canonical Neon transaction completes. It is deliberately not a
+   * durable wake: the executor may perform only read-only preflight until the
+   * exact signed cycle is visible in Neon. The ordinary post-commit wake above
+   * remains the crash/restart backstop.
+   */
+  requestExecutorPreWake(
+    trigger: 'ORDER_PLACED',
+    tradeId?: string | null,
+    receivedAt?: string,
+  ): void {
+    if (executionEnabled()) return;
+    const payload: RelayExecutorWakeRequest = {
+      trigger,
+      at: receivedAt && Number.isFinite(Date.parse(receivedAt))
+        ? receivedAt
+        : new Date().toISOString(),
+      tradeId: tradeId ?? null,
+    };
+    void this.dispatchDirectExecutorWake(payload);
+  }
+
   private async dispatchDirectExecutorWake(payload: RelayExecutorWakeRequest): Promise<void> {
     const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
     const secret = process.env.BOT_CONTROL_SECRET?.trim();
@@ -3035,34 +3058,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (armedAt == null) return false;
     if (intentMirrorKillSwitchActive() || intentMirrorDryRunActive(instance)) return false;
 
-    const [cycles, creds, marginCap] = await Promise.all([
-      this.prisma.signalCycle.findMany({
-        where: {
-          agentId,
-          status: SignalCycleStatus.INTENT,
-          createdAt: { gt: new Date(armedAt) },
-          ...(preferredTradeId ? { tradeId: preferredTradeId } : {}),
-        },
-        orderBy: { createdAt: 'desc' },
-        take: preferredTradeId ? 1 : 5,
-      }),
-      this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider),
-      loadSubscriberMaxMarginUsd(this.prisma),
-    ]);
-    const cycle = cycles.find((candidate) => {
-      if (!isMirrorableLaneTradeId(candidate.tradeId)) return false;
-      if (isPaperLaneTradeId(candidate.tradeId)) return false;
-      if (candidate.expiresAt && candidate.expiresAt.getTime() <= Date.now()) return false;
-      return readFreshSignedShowcaseExactLimit(
-        candidate.tradeId,
-        candidate.intentEnvelope,
-      ) != null;
+    const cycleQuery = async () => this.prisma.signalCycle.findMany({
+      where: {
+        agentId,
+        status: SignalCycleStatus.INTENT,
+        createdAt: { gt: new Date(armedAt) },
+        ...(preferredTradeId ? { tradeId: preferredTradeId } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: preferredTradeId ? 1 : 5,
     });
-    if (!cycle) return false;
-
+    const cyclesPromise = (async () => {
+      const deadline = Date.now() + (preferredTradeId ? 1_500 : 0);
+      do {
+        const rows = await cycleQuery();
+        if (rows.length > 0 || !preferredTradeId || Date.now() >= deadline) return rows;
+        await new Promise<void>((resolve) => setTimeout(resolve, 75));
+      } while (true);
+    })();
+    const credsPromise = this.exchanges.getUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    const marginCapPromise = loadSubscriberMaxMarginUsd(this.prisma);
+    const creds = await credsPromise;
     if (!creds) return false;
 
-    const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd, markPrice] = await Promise.all([
+    // Pre-wake can reach the worker while the API is still committing the
+    // exact cycle. Overlap every read-only account proof with that wait; no
+    // claim or exchange write can occur until cyclesPromise returns the exact
+    // durable signed envelope below.
+    const preflightPromise = Promise.all([
       this.activeTrading.listActiveOrders(creds),
       this.activeTrading.getOpenPositionDetail(creds),
       this.prisma.signalCycleParticipant.findMany({
@@ -3077,6 +3103,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.activeTrading.getDerivativesAvailableUsd(creds).catch(() => null),
       this.activeTrading.getMarkPrice().catch(() => null),
     ]);
+    const [cycles, marginCap, preflight] = await Promise.all([
+      cyclesPromise,
+      marginCapPromise,
+      preflightPromise,
+    ]);
+    const cycle = cycles.find((candidate) => {
+      if (!isMirrorableLaneTradeId(candidate.tradeId)) return false;
+      if (isPaperLaneTradeId(candidate.tradeId)) return false;
+      if (candidate.expiresAt && candidate.expiresAt.getTime() <= Date.now()) return false;
+      return readFreshSignedShowcaseExactLimit(
+        candidate.tradeId,
+        candidate.intentEnvelope,
+      ) != null;
+    });
+    if (!cycle) return false;
+
+    const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd, markPrice] = preflight;
     if (!freshInstance || availableUsd == null || markPrice == null) return false;
     if (!isCycleFreshForRelayArm(freshInstance.dashboardState, cycle.createdAt)) {
       return false;

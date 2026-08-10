@@ -704,6 +704,9 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     },
   };
   const execution = {
+    requestExecutorPreWake: () => {
+      trace.push('prewake');
+    },
     requestExecutorWake: async () => {
       trace.push('execution');
       const entry = storedEnvelope.entry as {
@@ -756,9 +759,9 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
 
   assert.equal(result.ok, true);
   assert.equal(result.persisted, true);
-  assert.deepEqual(trace, ['persist']);
+  assert.deepEqual(trace, ['prewake', 'persist']);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(trace, ['persist', 'execution', 'canonical']);
+  assert.deepEqual(trace, ['prewake', 'persist', 'execution', 'canonical']);
 });
 
 test('signed POSITION_CLOSED durably carries exit evidence into the immediate wake', async () => {
