@@ -2157,6 +2157,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /** Exact direct wakes completed by this process. Prevent the durable
    * crash-fallback copy from executing the same wake a second time. */
   private readonly completedDirectWakeAt = new Map<string, number>();
+  /** Recently discovered Bitfinex relay instances. Direct signed wakes start
+   * these known subscribers immediately while a fresh discovery query runs in
+   * parallel for newly activated subscribers. Every cached row is revalidated
+   * inside the signed fast path before any claim or exchange write. */
+  private readonly relayInstanceCache = new Map<string, TradingAgentInstance>();
   private tickStartedAtMs = 0;
   private lastTickCompletedAtMs = 0;
   private lastTickDurationMs = 0;
@@ -2716,78 +2721,94 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   private async executePersistedFastWake(wake: RelayExecutorWakeRequest): Promise<void> {
     const startedAtMs = Date.now();
-    const instances = await this.prisma.tradingAgentInstance.findMany({
+    const discoveredInstancesPromise = this.prisma.tradingAgentInstance.findMany({
       where: {
         agent: { slug: AGENT_SLUG },
         exchangeProvider: 'bitfinex',
         status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
       },
     });
-    for (const instance of instances) {
-      if (isCopyRelaySimActive(instance.dashboardState)) continue;
-      this.activeTrading = this.bitfinex;
-      if (wake.trigger === 'POSITION_CLOSED') {
-        const creds = await this.exchanges.getUserCredentials(
-          instance.userId,
-          instance.exchangeProvider,
-        );
-        if (!creds) {
-          await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'CREDENTIALS_MISSING');
+    const processedInstanceIds = new Set<string>();
+    const processInstances = async (instances: TradingAgentInstance[]): Promise<void> => {
+      for (const instance of instances) {
+        if (processedInstanceIds.has(instance.id)) continue;
+        if (isCopyRelaySimActive(instance.dashboardState)) continue;
+        this.activeTrading = this.bitfinex;
+        if (wake.trigger === 'POSITION_CLOSED') {
+          const creds = await this.exchanges.getUserCredentials(
+            instance.userId,
+            instance.exchangeProvider,
+          );
+          if (!creds) {
+            await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'CREDENTIALS_MISSING');
+            continue;
+          }
+          const openLots = await this.prisma.signalCycleParticipant.findMany({
+            where: {
+              userId: instance.userId,
+              status: SignalCycleStatus.OPEN,
+              cycle: { agentId: instance.agentId },
+            },
+            include: { cycle: true },
+          });
+          let exitAttempts = 0;
+          for (const participant of openLots) {
+            const meta = await this.loadExecutionMeta(participant.id);
+            if (
+              !persistedCloseWakeMatchesParticipant(
+                wake.tradeId,
+                participant.cycle.tradeId,
+                meta.originTradeId,
+              )
+            ) continue;
+            exitAttempts += 1;
+            await this.tryImmediateShowcaseMirrorExit(
+              instance.agentId,
+              instance.userId,
+              participant.cycle,
+              participant,
+              meta,
+              creds,
+              false,
+            );
+          }
+          await this.persistFastWakeTelemetry(
+            instance.id,
+            wake,
+            startedAtMs,
+            exitAttempts > 0 ? 'EXIT_DISPATCHED' : 'NO_MATCHING_OPEN_LOT',
+          );
+          processedInstanceIds.add(instance.id);
           continue;
         }
-        const openLots = await this.prisma.signalCycleParticipant.findMany({
-          where: {
-            userId: instance.userId,
-            status: SignalCycleStatus.OPEN,
-            cycle: { agentId: instance.agentId },
-          },
-          include: { cycle: true },
-        });
-        let exitAttempts = 0;
-        for (const participant of openLots) {
-          const meta = await this.loadExecutionMeta(participant.id);
-          if (
-            !persistedCloseWakeMatchesParticipant(
-              wake.tradeId,
-              participant.cycle.tradeId,
-              meta.originTradeId,
-            )
-          ) continue;
-          exitAttempts += 1;
-          await this.tryImmediateShowcaseMirrorExit(
+        if (wake.trigger === 'ORDER_PLACED' && instance.status === TradingAgentInstanceStatus.ACTIVE) {
+          const placed = await this.tryFreshSignedFlatEntry(
             instance.agentId,
-            instance.userId,
-            participant.cycle,
-            participant,
-            meta,
-            creds,
-            false,
+            instance,
+            wake.tradeId ?? undefined,
           );
+          await this.persistFastWakeTelemetry(
+            instance.id,
+            wake,
+            startedAtMs,
+            placed ? 'ENTRY_PLACED' : 'ENTRY_NOT_ELIGIBLE',
+          );
+          if (placed) processedInstanceIds.add(instance.id);
+        } else if (wake.trigger === 'ORDER_PLACED') {
+          await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'ENTRY_SKIPPED_PAUSED');
         }
-        await this.persistFastWakeTelemetry(
-          instance.id,
-          wake,
-          startedAtMs,
-          exitAttempts > 0 ? 'EXIT_DISPATCHED' : 'NO_MATCHING_OPEN_LOT',
-        );
-        continue;
       }
-      if (wake.trigger === 'ORDER_PLACED' && instance.status === TradingAgentInstanceStatus.ACTIVE) {
-        const placed = await this.tryFreshSignedFlatEntry(
-          instance.agentId,
-          instance,
-          wake.tradeId ?? undefined,
-        );
-        await this.persistFastWakeTelemetry(
-          instance.id,
-          wake,
-          startedAtMs,
-          placed ? 'ENTRY_PLACED' : 'ENTRY_NOT_ELIGIBLE',
-        );
-      } else if (wake.trigger === 'ORDER_PLACED') {
-        await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'ENTRY_SKIPPED_PAUSED');
-      }
+    };
+
+    const cachedInstances = Array.from(this.relayInstanceCache.values());
+    if (cachedInstances.length > 0) {
+      await processInstances(cachedInstances);
     }
+    const discoveredInstances = await discoveredInstancesPromise;
+    for (const instance of discoveredInstances) {
+      this.relayInstanceCache.set(instance.id, instance);
+    }
+    await processInstances(discoveredInstances);
   }
 
   private async persistFastWakeTelemetry(
@@ -2885,6 +2906,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           exchangeProvider: { not: 'paper' },
         },
       });
+      const discoveredIds = new Set(instances.map((instance) => instance.id));
+      for (const cachedId of this.relayInstanceCache.keys()) {
+        if (!discoveredIds.has(cachedId)) this.relayInstanceCache.delete(cachedId);
+      }
+      for (const instance of instances) {
+        if (instance.exchangeProvider === 'bitfinex') {
+          this.relayInstanceCache.set(instance.id, instance);
+        }
+      }
 
       for (const row of instances) {
         this.currentInstanceId = row.id;
@@ -2892,6 +2922,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         const instance =
           (await this.prisma.tradingAgentInstance.findUnique({ where: { id: row.id } })) ?? row;
         if (instance.exchangeProvider !== 'bitfinex') continue;
+        this.relayInstanceCache.set(instance.id, instance);
         const simActive = isCopyRelaySimActive(instance.dashboardState);
 
         // Live copy hire expiry blocks NEW entries only. OPEN / PENDING risk must
