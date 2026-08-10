@@ -46,6 +46,7 @@ import {
   sourceEntityCreatedAtMs,
   advanceLiveFidelityGuard,
   isLiveFidelityGuardEnabled,
+  participantCanOwnOrphanOrder,
   isFreshCanonicalFidelityBotState,
   isFreshExactFidelityReconcile,
   liveRelayFidelityObservation,
@@ -59,6 +60,14 @@ import {
   expiredHireShouldRunExitOnly,
   readRelayExecutorWakeRequest,
 } from './signal-subscriber-execution.service';
+
+test('orphan cleanup never cancels orders owned by active participants', () => {
+  assert.equal(participantCanOwnOrphanOrder(SignalCycleStatus.INTENT), false);
+  assert.equal(participantCanOwnOrphanOrder(SignalCycleStatus.PENDING_ENTRY), false);
+  assert.equal(participantCanOwnOrphanOrder(SignalCycleStatus.OPEN), false);
+  assert.equal(participantCanOwnOrphanOrder(SignalCycleStatus.CLOSED), true);
+  assert.equal(participantCanOwnOrphanOrder(SignalCycleStatus.EXPIRED), true);
+});
 
 test('live fidelity guard kill-switch defaults on and accepts explicit off values', () => {
   assert.equal(isLiveFidelityGuardEnabled(undefined), true);

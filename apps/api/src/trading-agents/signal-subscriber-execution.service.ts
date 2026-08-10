@@ -116,6 +116,10 @@ export function isLiveFidelityGuardEnabled(
   return true;
 }
 
+export function participantCanOwnOrphanOrder(status: SignalCycleStatus): boolean {
+  return status === SignalCycleStatus.CLOSED || status === SignalCycleStatus.EXPIRED;
+}
+
 export type LiveFidelityGuardState = {
   schema: 'live_fidelity_guard_v1';
   enabled: boolean;
@@ -11128,11 +11132,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       },
       orderBy: { createdAt: 'desc' },
       take: 2_000,
-      select: { participantId: true, cycleId: true, payload: true },
+      select: {
+        participantId: true,
+        cycleId: true,
+        payload: true,
+        participant: { select: { status: true } },
+      },
     });
     const cidToParticipant = new Map<number, { participantId: string; cycleId: string }>();
     for (const event of ownershipEvents) {
       if (!event.participantId || !event.payload || typeof event.payload !== 'object') continue;
+      // A freshly placed order can appear in Bitfinex's active-order snapshot
+      // before the same tick's execution metadata is visible to the bounded
+      // managedOrderIds read.  Its cid is already present in ORDER_PLACED, so
+      // treating every cid match as an orphan creates a placement/cleanup race
+      // and cancels a legitimate live relay order one second after submission.
+      // Only terminal participants can own a genuinely orphaned resting order.
+      if (!event.participant || !participantCanOwnOrphanOrder(event.participant.status)) {
+        continue;
+      }
       const cid = Number((event.payload as { clientOrderId?: unknown }).clientOrderId);
       if (!Number.isInteger(cid) || cid <= 0) continue;
       // First-seen wins — a re-placement (applyLimitChase) reuses the same cid
