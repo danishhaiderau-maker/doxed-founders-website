@@ -2956,7 +2956,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     );
     if (!creds) return false;
 
-    const [activeOrders, exchangePosition, virtualLots, freshInstance] = await Promise.all([
+    const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd] = await Promise.all([
       this.activeTrading.listActiveOrders(creds),
       this.activeTrading.getOpenPositionDetail(creds),
       this.prisma.signalCycleParticipant.findMany({
@@ -2968,6 +2968,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         select: { id: true, status: true },
       }),
       this.prisma.tradingAgentInstance.findUnique({ where: { id: instance.id } }),
+      this.activeTrading.getDerivativesAvailableUsd(creds).catch(() => null),
     ]);
     if (!freshInstance) return false;
     if (!isCycleFreshForRelayArm(freshInstance.dashboardState, cycle.createdAt)) {
@@ -3047,6 +3048,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       flatPreflight ? 1 : maxConcurrent,
       intentDirection,
       cleanInstance,
+      availableUsd ?? undefined,
     );
     if (!eligibility.canEnter) return false;
 
@@ -5386,9 +5388,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     maxConcurrent: number,
     newDirection?: 'LONG' | 'SHORT',
     instance?: { id: string; dashboardState?: unknown },
+    availableUsdOverride?: number,
   ): Promise<EntryEligibility> {
-    let available = 0;
-    try {
+    let available = availableUsdOverride;
+    if (available == null) try {
       available = await this.activeTrading.getDerivativesAvailableUsd(creds);
     } catch (err) {
       this.logger.warn(
