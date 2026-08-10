@@ -100,6 +100,15 @@ function fmtPrice(n: number): string {
   return n >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 1 }) : n.toFixed(2);
 }
 
+/** Display the canonical Showcase id for internally adopted/relinked fills. */
+export function canonicalTradeIdForDisplay(tradeId: string | null | undefined): string {
+  if (!tradeId) return '\u2014';
+  const parts = tradeId.split(':');
+  if (parts[0] === 'relink' && parts[2]) return parts[2];
+  if (parts[0] === 'adopt' && parts[1]) return parts[1];
+  return tradeId;
+}
+
 export const EMPTY_LIVE_BOOK: TradingAgentDashboardState['liveBook'] = {
   activeSignals: [],
   positions: [],
@@ -167,7 +176,9 @@ export function AgentTransparencyTables({
   const pendingRows = book.pendingOrders.slice(0, cap).map((o) =>
     executionOnly
       ? [
-          o.tradeId ?? 'Exchange order',
+          canonicalTradeIdForDisplay(o.tradeId) === '\u2014'
+            ? 'Exchange order'
+            : canonicalTradeIdForDisplay(o.tradeId),
           o.side,
           o.status === 'ACTIVE' ? 'RESTING' : o.status,
           o.qty.toFixed(5),
@@ -278,7 +289,7 @@ export function AgentTransparencyTables({
         : `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%`;
     return [
       displayMelbourneTime(t.time),
-      t.tradeId,
+      canonicalTradeIdForDisplay(t.tradeId),
       t.direction,
       fmtPrice(t.entry),
       fmtPrice(t.exit),
@@ -366,7 +377,7 @@ export function AgentTransparencyTables({
         />
         <MiniTable
           title="Completed trades & P/L"
-          subtitle="Realized Bitfinex results — one row per completed trade"
+          subtitle="Realized Bitfinex results — canonical Trade ID matches Showcase; only exchange-filled trades appear here"
           headers={[
             'Time (Melbourne)',
             'Trade ID',

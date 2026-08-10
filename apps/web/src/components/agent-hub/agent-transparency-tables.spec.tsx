@@ -2,9 +2,24 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { AgentTransparencyTables } from './agent-transparency-tables';
+import {
+  AgentTransparencyTables,
+  canonicalTradeIdForDisplay,
+} from './agent-transparency-tables';
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
+
+test('dashboard displays canonical showcase ids for adopted and relinked exchange trades', () => {
+  assert.equal(
+    canonicalTradeIdForDisplay('relink:unknown:cont-fa8ce196a716:1786346662320'),
+    'cont-fa8ce196a716',
+  );
+  assert.equal(
+    canonicalTradeIdForDisplay('adopt:cont-61251a7811df:1786349393891'),
+    'cont-61251a7811df',
+  );
+  assert.equal(canonicalTradeIdForDisplay('cont-42d2923c0cae'), 'cont-42d2923c0cae');
+});
 
 test('active signal table separates raw gap, execution bucket, and virtual chase from real orders', () => {
   const html = renderToStaticMarkup(
