@@ -50,8 +50,9 @@ apps/founder-node/.env*
 scripts/*
 !scripts/vercel-ignore-build.sh
 
-# Docs
-docs/
+# Root documentation artifacts are not needed by the web bundle. Anchor this
+# pattern so it cannot exclude the Next.js route at apps/web/src/app/docs/.
+/docs/
 
 # Local / debug artifacts
 .tools/
