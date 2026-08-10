@@ -25619,6 +25619,10 @@ HTML = """<!DOCTYPE html>
         .admin-access { display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:10px 0 14px;padding:11px 14px;background:#111827;border:1px solid #374151;border-radius:8px; }
         .admin-access a,.admin-access button { display:inline-flex;align-items:center;min-height:34px;margin:0;padding:7px 13px;border-radius:7px;text-decoration:none;font-weight:700; }
         .admin-access form { margin:0; }
+        .admin-inline-login { display:grid;grid-template-columns:minmax(180px,280px) auto;align-items:end;gap:8px;width:100%;max-width:520px; }
+        .admin-inline-login label { display:grid;gap:5px;color:#b7c2cf;font-size:.82rem;font-weight:700; }
+        .admin-inline-login input { width:100%;min-height:44px;margin:0;padding:10px 12px;background:#030712;color:#fff;border:1px solid #4b5563;border-radius:7px;font:inherit; }
+        .admin-inline-login button { min-height:44px;margin:0;justify-content:center; }
         @media (max-width:900px) {
           body { padding:12px 12px 36px; }
           #pathwayLaneTiles { grid-template-columns:1fr !important; }
@@ -25632,6 +25636,12 @@ HTML = """<!DOCTYPE html>
           .section-nav { margin-inline:-4px; }
           input, select { width:100%; margin:4px 0 10px; }
           label { display:block; }
+          .admin-access { align-items:stretch;padding:12px; }
+          .admin-access > span { width:100%; }
+          .admin-inline-login { grid-template-columns:1fr;max-width:none; }
+          .admin-inline-login label { display:grid; }
+          .admin-inline-login input { margin:0; }
+          .admin-inline-login button { width:100%;margin:0; }
         }
         @media (prefers-reduced-motion:reduce) {
           html { scroll-behavior:auto; }
@@ -27969,8 +27979,15 @@ def dashboard():
     else:
         admin_controls = """
 <div class="admin-access" id="adminAccessPanel">
-  <span><strong style="color:#f59e0b;">Read-only</strong> - sign in before changing controls.</span>
-  <a href="/admin/login" style="background:#238636;color:white;">Admin login</a>
+  <span><strong style="color:#f59e0b;">Read-only</strong> - enter the owner token once on this browser to unlock settings.</span>
+  <form class="admin-inline-login" method="post" action="/admin/login" autocomplete="on">
+    <input name="username" type="hidden" value="bot-admin" autocomplete="username">
+    <label for="dashboardAdminToken">Admin token
+      <input id="dashboardAdminToken" name="token" type="password" required placeholder="Enter admin token" autocomplete="current-password">
+    </label>
+    <button type="submit">Unlock dashboard</button>
+  </form>
+  <a href="/admin/login" style="color:#8b98a7;font-size:.82rem;">Open the dedicated login page</a>
 </div>"""
     page = (
         HTML.replace("__DASHBOARD_URL__", dashboard_public_url())

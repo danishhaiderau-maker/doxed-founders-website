@@ -36,3 +36,13 @@ def test_dashboard_exposes_login_status_and_secure_logout():
     assert "resp.delete_cookie(" in logout
     assert "httponly=True" in logout
     assert "samesite='Lax'" in logout
+
+
+def test_read_only_dashboard_has_inline_mobile_password_login():
+    route = SOURCE.split("def dashboard():", 1)[1].split("def _relay_mirror", 1)[0]
+    assert 'class="admin-inline-login"' in route
+    assert 'action="/admin/login"' in route
+    assert 'type="password"' in route
+    assert 'autocomplete="current-password"' in route
+    assert 'Unlock dashboard' in route
+    assert '.admin-inline-login { grid-template-columns:1fr;max-width:none; }' in SOURCE
