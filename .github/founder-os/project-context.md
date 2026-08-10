@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix: keep Founder IDE pairing available for offline nodes
+fix(dashboard): expose mobile admin login
 
 ## Last Activity
 
