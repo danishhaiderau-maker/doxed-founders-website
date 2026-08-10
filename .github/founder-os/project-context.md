@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+ops(relay): add guarded fresh-only rearm
 
 ## Last Activity
 
