@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {
+  executorWakeAuthorized,
+  parseExecutorWakeRequest,
+} from '../relay-executor-wake-http';
 import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
 import {
   btcToSats,
@@ -61,6 +65,30 @@ import {
   expiredHireShouldRunExitOnly,
   readRelayExecutorWakeRequest,
 } from './signal-subscriber-execution.service';
+
+test('executor direct wake requires the exact shared control secret', () => {
+  assert.equal(executorWakeAuthorized('secret', 'secret'), true);
+  assert.equal(executorWakeAuthorized('wrong', 'secret'), false);
+  assert.equal(executorWakeAuthorized(undefined, 'secret'), false);
+});
+
+test('executor direct wake accepts only fresh bounded relay events', () => {
+  assert.equal(parseExecutorWakeRequest({
+    trigger: 'ORDER_PLACED',
+    at: new Date().toISOString(),
+    tradeId: 'cont-test',
+  })?.tradeId, 'cont-test');
+  assert.equal(parseExecutorWakeRequest({
+    trigger: 'ORDER_PLACED',
+    at: new Date(Date.now() - 121_000).toISOString(),
+    tradeId: 'cont-stale',
+  }), null);
+  assert.equal(parseExecutorWakeRequest({
+    trigger: 'DELETE_EVERYTHING',
+    at: new Date().toISOString(),
+    tradeId: 'cont-bad',
+  }), null);
+});
 
 test('persisted close wake matches a cancel-race relink by canonical showcase id', () => {
   assert.equal(

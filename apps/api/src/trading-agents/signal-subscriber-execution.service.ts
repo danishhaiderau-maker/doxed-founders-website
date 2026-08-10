@@ -2520,6 +2520,44 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         .update({ where: { id: inst.id }, data: { dashboardState: next as object } })
         .catch(() => {});
     }
+    void this.dispatchDirectExecutorWake(payload);
+  }
+
+  private async dispatchDirectExecutorWake(payload: RelayExecutorWakeRequest): Promise<void> {
+    const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
+    const secret = process.env.BOT_CONTROL_SECRET?.trim();
+    if (!base || !secret) return;
+    try {
+      const response = await fetch(`${base}/api/wake`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-bot-control-secret': secret,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(1_500),
+      });
+      if (response.status !== 202 && response.status !== 409) {
+        this.logger.warn(`Direct relay executor wake returned HTTP ${response.status}; durable wake retained`);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Direct relay executor wake unavailable; durable wake retained: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  async acceptDirectExecutorWake(wake: RelayExecutorWakeRequest): Promise<boolean> {
+    if (!executionEnabled() || this.fastWakeRunning) return false;
+    this.fastWakeRunning = true;
+    try {
+      await this.executePersistedFastWake(wake);
+      if (this.running) this.wakeQueued = true;
+      else setImmediate(() => void this.tick());
+      return true;
+    } finally {
+      this.fastWakeRunning = false;
+    }
   }
 
   private async consumePersistedExecutorWakes(): Promise<RelayExecutorWakeRequest | null> {
