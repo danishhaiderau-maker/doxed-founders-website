@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Refresh Bitfinex policy lock
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
