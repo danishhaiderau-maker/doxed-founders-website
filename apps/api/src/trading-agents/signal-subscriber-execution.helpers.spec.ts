@@ -64,6 +64,7 @@ import {
   hireExpiryRequiresExitOnlyProcessing,
   expiredHireShouldRunExitOnly,
   readRelayExecutorWakeRequest,
+  shouldRunLocalRealSideSafetyNet,
 } from './signal-subscriber-execution.service';
 
 test('executor direct wake requires the exact shared control secret', () => {
@@ -114,6 +115,41 @@ test('persisted close wake matches a cancel-race relink by canonical showcase id
       null,
     ),
     true,
+  );
+});
+
+test('canonical showcase mirror convergence suppresses local thesis exits', () => {
+  assert.equal(
+    shouldRunLocalRealSideSafetyNet({
+      simActive: false,
+      showcaseMirrorOnly: true,
+      mirrorExitConvergence: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRunLocalRealSideSafetyNet({
+      simActive: false,
+      showcaseMirrorOnly: true,
+      mirrorExitConvergence: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRunLocalRealSideSafetyNet({
+      simActive: false,
+      showcaseMirrorOnly: false,
+      mirrorExitConvergence: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRunLocalRealSideSafetyNet({
+      simActive: true,
+      showcaseMirrorOnly: false,
+      mirrorExitConvergence: false,
+    }),
+    false,
   );
 });
 

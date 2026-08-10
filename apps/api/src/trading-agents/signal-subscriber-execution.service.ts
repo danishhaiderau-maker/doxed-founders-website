@@ -1790,6 +1790,21 @@ function mirrorExitConvergenceEnabled(): boolean {
 }
 
 /**
+ * In canonical mirror-convergence mode the showcase owns every thesis exit.
+ * Running the local Scenario-C safety evaluator as well can front-run a
+ * showcase recovery (real loss while paper later closes profitably). The
+ * exchange-side disaster stop remains armed for crash/disconnect insurance.
+ */
+export function shouldRunLocalRealSideSafetyNet(input: {
+  simActive: boolean;
+  showcaseMirrorOnly: boolean;
+  mirrorExitConvergence: boolean;
+}): boolean {
+  if (input.simActive) return false;
+  return !(input.showcaseMirrorOnly && input.mirrorExitConvergence);
+}
+
+/**
  * Option A — Exchange-side protective stops (mirror + safety net). SHIPS DARK.
  *
  * Default OFF (must be enabled explicitly per account via Railway env). When
@@ -10350,7 +10365,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // REAL mark, runs the SAME Scenario C math the showcase bot uses. This is
     // the last line of defense for real money; it never replaces the showcase
     // mirror exit for profitable exits, only catches adverse ones.
-    if (!simActive && realSideSafetyNetEnabled()) {
+    if (
+      realSideSafetyNetEnabled() &&
+      shouldRunLocalRealSideSafetyNet({
+        simActive,
+        showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
+        mirrorExitConvergence: mirrorExitConvergenceEnabled(),
+      })
+    ) {
       const intentStopLoss =
         intent?.risk?.stop_loss_margin_pct != null
           ? Number(intent.risk.stop_loss_margin_pct)
