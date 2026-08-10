@@ -2495,6 +2495,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       await this.wakeNow(trigger);
       return;
     }
+    const payload: RelayExecutorWakeRequest = {
+      trigger,
+      at: new Date().toISOString(),
+      tradeId: tradeId ?? null,
+    };
+    // The signed lifecycle event is already durable before this method is
+    // queued. Start the authenticated private-network wake immediately; the
+    // dashboard copy below remains the crash/restart fallback and must not sit
+    // in front of the latency-sensitive dispatch.
+    void this.dispatchDirectExecutorWake(payload);
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
     if (!agent) return;
     const instances = await this.prisma.tradingAgentInstance.findMany({
@@ -2506,11 +2516,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       select: { id: true, dashboardState: true },
       take: 50,
     });
-    const payload: RelayExecutorWakeRequest = {
-      trigger,
-      at: new Date().toISOString(),
-      tradeId: tradeId ?? null,
-    };
     for (const inst of instances) {
       const next = applyDashboardPatch(
         (inst.dashboardState ?? {}) as Record<string, unknown>,
@@ -2520,7 +2525,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         .update({ where: { id: inst.id }, data: { dashboardState: next as object } })
         .catch(() => {});
     }
-    void this.dispatchDirectExecutorWake(payload);
   }
 
   private async dispatchDirectExecutorWake(payload: RelayExecutorWakeRequest): Promise<void> {
@@ -2629,11 +2633,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   private async executePersistedFastWake(wake: RelayExecutorWakeRequest): Promise<void> {
     const startedAtMs = Date.now();
-    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
-    if (!agent) return;
     const instances = await this.prisma.tradingAgentInstance.findMany({
       where: {
-        agentId: agent.id,
+        agent: { slug: AGENT_SLUG },
         exchangeProvider: 'bitfinex',
         status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
       },
@@ -2654,7 +2656,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           where: {
             userId: instance.userId,
             status: SignalCycleStatus.OPEN,
-            cycle: { agentId: agent.id },
+            cycle: { agentId: instance.agentId },
           },
           include: { cycle: true },
         });
@@ -2670,7 +2672,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           ) continue;
           exitAttempts += 1;
           await this.tryImmediateShowcaseMirrorExit(
-            agent.id,
+            instance.agentId,
             instance.userId,
             participant.cycle,
             participant,
@@ -2688,7 +2690,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         continue;
       }
       if (wake.trigger === 'ORDER_PLACED' && instance.status === TradingAgentInstanceStatus.ACTIVE) {
-        const placed = await this.tryFreshSignedFlatEntry(agent.id, instance);
+        const placed = await this.tryFreshSignedFlatEntry(instance.agentId, instance);
         await this.persistFastWakeTelemetry(
           instance.id,
           wake,
@@ -2968,15 +2970,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (armedAt == null) return false;
     if (intentMirrorKillSwitchActive() || intentMirrorDryRunActive(instance)) return false;
 
-    const cycles = await this.prisma.signalCycle.findMany({
-      where: {
-        agentId,
-        status: SignalCycleStatus.INTENT,
-        createdAt: { gt: new Date(armedAt) },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
+    const [cycles, creds, marginCap] = await Promise.all([
+      this.prisma.signalCycle.findMany({
+        where: {
+          agentId,
+          status: SignalCycleStatus.INTENT,
+          createdAt: { gt: new Date(armedAt) },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+      this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider),
+      loadSubscriberMaxMarginUsd(this.prisma),
+    ]);
     const cycle = cycles.find((candidate) => {
       if (!isMirrorableLaneTradeId(candidate.tradeId)) return false;
       if (isPaperLaneTradeId(candidate.tradeId)) return false;
@@ -2988,10 +2994,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
     if (!cycle) return false;
 
-    const creds = await this.exchanges.getUserCredentials(
-      instance.userId,
-      instance.exchangeProvider,
-    );
     if (!creds) return false;
 
     const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd] = await Promise.all([
@@ -3064,7 +3066,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // The live exchange book above is authoritative and every non-flat order
     // was matched to an owned virtual lot. Clear only a stale cached orphan
     // warning before the normal eligibility gate reads dashboardState.
-    await this.clearOrphanOrderIds(freshInstance.id).catch(() => {});
     const cleanInstance = {
       ...freshInstance,
       dashboardState: applyDashboardPatch(
@@ -3072,7 +3073,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         { orphanOrderIds: [] },
       ) as TradingAgentInstance['dashboardState'],
     };
-    const marginCap = await loadSubscriberMaxMarginUsd(this.prisma);
     const managedOrderIds = new Set(activeOrders.map((order) => order.id));
     const eligibility = await this.evaluateEntryEligibility(
       creds,
@@ -3087,6 +3087,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       intentDirection,
       cleanInstance,
       availableUsd ?? undefined,
+      true,
     );
     if (!eligibility.canEnter) return false;
 
@@ -5427,6 +5428,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     newDirection?: 'LONG' | 'SHORT',
     instance?: { id: string; dashboardState?: unknown },
     availableUsdOverride?: number,
+    skipOrphanDashboardClear = false,
   ): Promise<EntryEligibility> {
     let available = availableUsdOverride;
     if (available == null) try {
@@ -5470,7 +5472,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // surfacer already does this, but keep the clear here as a belt-and-braces
     // fallback for the case where evaluateEntryEligibility runs without a
     // preceding surfacer (e.g. the idle `entriesThisTick === 0` branch below).
-    if (instance?.id) {
+    if (instance?.id && !skipOrphanDashboardClear) {
       await this.clearOrphanOrderIds(instance.id).catch(() => {
         /* best-effort */
       });
