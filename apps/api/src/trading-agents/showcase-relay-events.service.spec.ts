@@ -323,8 +323,12 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
 
   assert.equal(storedEnvelope.context.showcase_event_seq, 6);
   assert.equal(storedEnvelope.entry.exact_limit_price, 63_960);
-  assert.equal(advisoryCalls, 2);
+  // Each revision takes one canonical-state lock and one audit-idempotency
+  // lock; the executor wake begins between those two durable transactions.
+  assert.equal(advisoryCalls, 4);
   assert.deepEqual(advisoryKeys, [
+    'agent-race:cont-race',
+    'agent-race:cont-race',
     'agent-race:cont-race',
     'agent-race:cont-race',
   ]);

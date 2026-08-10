@@ -89,6 +89,10 @@ type RelayPersistenceReceipt = {
   intentApplied: boolean;
 };
 
+type CanonicalRelayPersistenceReceipt = RelayPersistenceReceipt & {
+  cycleId?: string;
+};
+
 /** Prove that the exact incoming revision is the cycle's canonical envelope. */
 export function exactLifecycleRevisionMatches(
   current: RelayLifecycleEnvelope | null | undefined,
@@ -314,6 +318,7 @@ export class ShowcaseRelayEventsService {
    * corresponding cross-replica guarantee.
    */
   private readonly relayPersistenceTails = new Map<string, Promise<void>>();
+  private relayAgentId: string | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -589,8 +594,17 @@ export class ShowcaseRelayEventsService {
     // the relay wake (the wake is the critical side-effect).
     let persisted = false;
     let canonicalRevisionApplied = false;
+    let executionWakeQueued = false;
     try {
-      const receipt = await this.persistRelayEvent(slug, persistBody);
+      const receipt = await this.persistRelayEvent(slug, persistBody, () => {
+        // Canonical signed state is committed before this callback. Start the
+        // private executor wake while audit-row idempotency is persisted so
+        // bookkeeping never sits in front of the exchange path.
+        if (event !== 'APPROVE_PENDING') {
+          this.queueExecutionWake(event, body.trade_id ?? null);
+          executionWakeQueued = true;
+        }
+      });
       persisted = receipt.persisted;
       canonicalRevisionApplied = receipt.intentApplied;
     } catch (err) {
@@ -604,7 +618,7 @@ export class ShowcaseRelayEventsService {
 
     // Return the webhook response without waiting for exchange reconciliation.
     // The durable cycle plus the normal 2s runner remain the crash backstop.
-    if (event !== 'APPROVE_PENDING') {
+    if (event !== 'APPROVE_PENDING' && !executionWakeQueued) {
       this.queueExecutionWake(event, body.trade_id ?? null);
     }
     if (signedLifecycleEvent) {
@@ -648,6 +662,7 @@ export class ShowcaseRelayEventsService {
   private async persistRelayEvent(
     slug: string,
     body: ShowcaseRelayEventBody,
+    onCanonicalPersisted?: (receipt: CanonicalRelayPersistenceReceipt) => void,
   ): Promise<RelayPersistenceReceipt> {
     const tradeId = (body.trade_id ?? '').trim();
     if (!tradeId) return { persisted: false, intentApplied: false };
@@ -660,11 +675,16 @@ export class ShowcaseRelayEventsService {
         body.ts ?? 'unknown',
       ].join(':');
     const eventBody: ShowcaseRelayEventBody = { ...body, event_id: eventId };
-    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
-    if (!agent) return { persisted: false, intentApplied: false };
+    let agentId = this.relayAgentId;
+    if (!agentId) {
+      const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+      if (!agent) return { persisted: false, intentApplied: false };
+      agentId = agent.id;
+      this.relayAgentId = agentId;
+    }
 
-    const lockKey = `${agent.id}:${tradeId}`;
-    return this.withRelayPersistenceLock(lockKey, () =>
+    const lockKey = `${agentId}:${tradeId}`;
+    const canonical = await this.withRelayPersistenceLock(lockKey, () =>
       this.prisma.$transaction(async (tx) => {
         // Transaction-scoped advisory locking makes the envelope
         // compare-and-write atomic across every Railway API replica. Without
@@ -686,30 +706,13 @@ export class ShowcaseRelayEventsService {
         // same revision remain harmless.
         const cycleReceipt = await this.ensureCycle(
           tx,
-          agent.id,
+          agentId,
           tradeId,
           eventBody.direction,
           eventBody,
         );
         if (!cycleReceipt) return { persisted: false, intentApplied: false };
         const { cycleId, intentApplied } = cycleReceipt;
-        const already = await tx.signalCycleEvent.findFirst({
-          where: {
-            cycleId,
-            eventType: eventBody.event,
-            payload: { path: ['event_id'], equals: eventId },
-          },
-          select: { id: true },
-        });
-        if (already) return { persisted: true, intentApplied }; // replay protection
-
-        await tx.signalCycleEvent.create({
-          data: {
-            cycleId,
-            eventType: eventBody.event,
-            payload: eventBody as unknown as Prisma.InputJsonValue,
-          },
-        });
 
         // The showcase ORDER_PLACED event is audit evidence, not proof that
         // this subscriber has an exchange order. Only the subscriber execution
@@ -718,7 +721,7 @@ export class ShowcaseRelayEventsService {
         if (eventBody.event === 'POSITION_CLOSED') {
           const cycle = await tx.signalCycle.findUnique({ where: { id: cycleId } });
           if (!cycle || cycle.status === SignalCycleStatus.CLOSED) {
-            return { persisted: true, intentApplied };
+            return { persisted: true, intentApplied, cycleId };
           }
           await tx.signalCycle.update({
             where: { id: cycleId },
@@ -726,9 +729,38 @@ export class ShowcaseRelayEventsService {
           });
         }
 
-        return { persisted: true, intentApplied };
+        return { persisted: true, intentApplied, cycleId };
       }),
     );
+    if (!canonical.persisted || !canonical.cycleId) return canonical;
+
+    onCanonicalPersisted?.(canonical);
+
+    await this.withRelayPersistenceLock(lockKey, () =>
+      this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`
+          SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))
+        `;
+        const already = await tx.signalCycleEvent.findFirst({
+          where: {
+            cycleId: canonical.cycleId,
+            eventType: eventBody.event,
+            payload: { path: ['event_id'], equals: eventId },
+          },
+          select: { id: true },
+        });
+        if (!already) {
+          await tx.signalCycleEvent.create({
+            data: {
+              cycleId: canonical.cycleId,
+              eventType: eventBody.event,
+              payload: eventBody as unknown as Prisma.InputJsonValue,
+            },
+          });
+        }
+      }),
+    );
+    return { persisted: true, intentApplied: canonical.intentApplied };
   }
 
   private async withRelayPersistenceLock<T>(
@@ -771,16 +803,27 @@ export class ShowcaseRelayEventsService {
     // leave the PostgreSQL transaction aborted (25P02).
     const raw = tradeId.toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(8, '0');
     const cycleId = `cyc_rel_${raw.slice(0, 22)}`.slice(0, 30);
-    let existing = await db.signalCycle.findUnique({
-      where: { agentId_tradeId: { agentId, tradeId } },
-      select: { id: true, agentId: true, intentEnvelope: true, status: true },
-    });
-    if (!existing) {
-      const stableIdMatch = await db.signalCycle.findUnique({
-        where: { id: cycleId },
+    let existing;
+    if (typeof db.signalCycle.findFirst === 'function') {
+      existing = await db.signalCycle.findFirst({
+          where: {
+            agentId,
+            OR: [{ tradeId }, { id: cycleId }],
+          },
+          select: { id: true, agentId: true, intentEnvelope: true, status: true },
+        });
+    } else {
+      existing = await db.signalCycle.findUnique({
+        where: { agentId_tradeId: { agentId, tradeId } },
         select: { id: true, agentId: true, intentEnvelope: true, status: true },
       });
-      if (stableIdMatch?.agentId === agentId) existing = stableIdMatch;
+      if (!existing) {
+        const stableIdMatch = await db.signalCycle.findUnique({
+          where: { id: cycleId },
+          select: { id: true, agentId: true, intentEnvelope: true, status: true },
+        });
+        if (stableIdMatch?.agentId === agentId) existing = stableIdMatch;
+      }
     }
     if (existing) {
       const current = existing.intentEnvelope as

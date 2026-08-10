@@ -5937,17 +5937,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // cycle/user concurrently, its create hits the (cycleId, userId) unique constraint
     // (P2002) and it bails out — preventing a DUPLICATE order on Bitfinex. The claim is
     // released (deleted) if order placement fails, so a future tick can retry.
-    const existingClaim = await this.prisma.signalCycleParticipant.findUnique({
-      where: { cycleId_userId: { cycleId, userId: instance.userId } },
-    });
-    if (existingClaim) {
-      // A participant already exists (race with another replica, or a prior claim) — do
-      // NOT place another order; the existing claim/participant owns this cycle.
-      this.logger.log(
-        `Hire skip ${instance.userId} cycle=${cycleId}: participant already exists (status=${existingClaim.status})`,
-      );
-      return false;
-    }
     try {
       const claimed = await this.prisma.signalCycleParticipant.create({
         data: {
@@ -5961,7 +5950,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     } catch (err) {
       if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
         this.logger.log(
-          `Hire claim-lost ${instance.userId} cycle=${cycleId} — another replica is placing it`,
+          `Hire claim-lost ${instance.userId} cycle=${cycleId} — an existing participant owns it`,
         );
         return false;
       }
