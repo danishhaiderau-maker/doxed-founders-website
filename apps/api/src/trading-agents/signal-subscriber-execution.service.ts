@@ -4108,19 +4108,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const copyPending = participants.filter((p) => p.status === SignalCycleStatus.PENDING_ENTRY);
     const copyOpen = participants.filter((p) => p.status === SignalCycleStatus.OPEN);
+    // Cancel-race fills and adopted exchange positions intentionally rewrite
+    // cycle.tradeId to an audit identifier (`relink:*` / `adopt:*`). Mirror
+    // comparison must use the canonical showcase identity, otherwise an
+    // exactly matched live position is reported both missing and orphaned.
+    const mirrorTradeIdFor = (participant: (typeof participants)[number]) =>
+      resolveShowcaseMirrorTradeIdFromInputs(
+        participant.cycle?.tradeId,
+        metaById.get(participant.id)?.originTradeId,
+      );
     const copyTradeIds = new Set(
       participants
-        .map((p) => p.cycle?.tradeId)
+        .map(mirrorTradeIdFor)
         .filter((t): t is string => typeof t === 'string' && t.length > 0),
     );
     const copyOpenTradeIds = new Set(
       copyOpen
-        .map((p) => p.cycle?.tradeId)
+        .map(mirrorTradeIdFor)
         .filter((t): t is string => typeof t === 'string' && t.length > 0),
     );
     const copyPendingTradeIds = new Set(
       copyPending
-        .map((p) => p.cycle?.tradeId)
+        .map(mirrorTradeIdFor)
         .filter((t): t is string => typeof t === 'string' && t.length > 0),
     );
 
@@ -4147,7 +4156,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // Copy resting orders vs showcase pending limits (per-order price delta).
     for (const p of copyPending) {
       const meta = metaById.get(p.id);
-      const tradeId = p.cycle?.tradeId ?? undefined;
+      const tradeId = mirrorTradeIdFor(p) ?? undefined;
       const copyLimit = meta?.limitPrice;
       if (!tradeId || !copyLimit || copyLimit <= 0 || !meta?.bitfinexOrderId) continue;
       const showcaseOrder = showcaseOrders.find((o) => o.trade_id === tradeId);
@@ -4238,7 +4247,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       });
     }
     for (const p of copyOpen) {
-      const tradeId = p.cycle?.tradeId ?? undefined;
+      const tradeId = mirrorTradeIdFor(p) ?? undefined;
       if (!tradeId) continue;
       if (showcasePositions.some((x) => x.trade_id === tradeId)) continue;
       const meta = metaById.get(p.id);
