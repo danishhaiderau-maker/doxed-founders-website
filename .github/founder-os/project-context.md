@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-perf(relay): remove fast wake preflight stalls
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
