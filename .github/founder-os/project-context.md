@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(relay): persist closes after cycle relink
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
