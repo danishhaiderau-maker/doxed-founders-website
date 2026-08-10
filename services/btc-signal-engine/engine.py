@@ -11193,6 +11193,34 @@ def ai_decision_should_execute(ai: dict) -> bool:
     return bool(ai.get("approved")) and str(ai.get("decision", "")).upper() == "APPROVE"
 
 
+def continuous_score_gap_execution_tier(ai: dict) -> str:
+    """Derive the Continuous lane verdict from directional scores only.
+
+    The shared direction prompt may still emit a textual ``decision`` field,
+    but the Continuous contract is deliberately deterministic: the higher
+    LONG/SHORT score selects the side and its raw gap selects the execution
+    tier.  Trusting the model's textual decision here can silently reject an
+    otherwise executable score pair (for example SHORT 65 vs LONG 35).
+    """
+    if not ai or ai.get("ai_error") or ai.get("zero_score_reject"):
+        return "REJECT"
+    try:
+        long_score = int(ai.get("long_score", 0) or 0)
+        short_score = int(ai.get("short_score", 0) or 0)
+    except (TypeError, ValueError):
+        return "REJECT"
+    # Preserve the existing fail-closed inert-score contract even for callers
+    # that construct an AI record without the parser's zero_score_reject flag.
+    if long_score + short_score < 50:
+        return "REJECT"
+    direction = derive_candidate_direction(
+        long_score,
+        short_score,
+        ai.get("direction") or ai.get("candidate_direction") or ai.get("raw_direction"),
+    )
+    return derive_research_decision_tier(0, long_score, short_score, direction)
+
+
 def normalize_research_ai_decision(ai_result: dict) -> dict:
     """Research 5-tier AI: STRONG_APPROVE/APPROVE/SOFT_APPROVE execute; SOFT_REJECT/REJECT shadow."""
     if not (is_research_data_collection() and AI_RESEARCH_MODE_ENABLED):
@@ -14898,14 +14926,27 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     spawn_ctx["shared_ai_call_ts"] = (ai or {}).get("shared_ai_call_ts")
     spawn_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_CONTINUOUS)
     orders_on = continuous_ai_research_enabled()
-    continuous_accept = ai_decision_should_execute(ai)
-    continuous_reason = str(
-        ai.get("execution_tier")
-        or ai.get("research_soft")
-        or ai.get("raw_decision")
-        or ai.get("decision")
-        or "NO_VERDICT"
+    continuous_ai = copy.deepcopy(ai)
+    continuous_tier = continuous_score_gap_execution_tier(continuous_ai)
+    continuous_accept = continuous_tier in AI_EXECUTE_TIERS
+    continuous_reason = continuous_tier
+    long_score = int(continuous_ai.get("long_score", 0) or 0)
+    short_score = int(continuous_ai.get("short_score", 0) or 0)
+    continuous_ai["raw_decision"] = str(
+        continuous_ai.get("raw_decision") or continuous_ai.get("decision") or ""
+    ).upper()
+    continuous_ai["direction"] = derive_candidate_direction(
+        long_score,
+        short_score,
+        continuous_ai.get("direction")
+        or continuous_ai.get("candidate_direction")
+        or continuous_ai.get("raw_direction"),
     )
+    continuous_ai["candidate_direction"] = continuous_ai["direction"]
+    continuous_ai["execution_tier"] = continuous_tier
+    continuous_ai["research_soft"] = continuous_tier
+    continuous_ai["decision"] = "APPROVE" if continuous_accept else "REJECT"
+    continuous_ai["approved"] = continuous_accept
     # R2 spread floor (2026-08-04): backtest on 21 realized trades showed
     # spread<4 = 28.6% win rate / -$10.61 PnL vs spread>=4 = 71.4% win / -$0.15.
     # Filter weak-edge signals before they enter the chase lifecycle. Only
@@ -14918,8 +14959,6 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     # threshold directly (raw gap >= CONTINUOUS_MIN_SPREAD_FLOOR).
     r2_floor_blocked = False
     if continuous_accept:
-        long_score = int(ai.get("long_score", 0) or 0)
-        short_score = int(ai.get("short_score", 0) or 0)
         spread = abs(long_score - short_score)
         if spread < CONTINUOUS_MIN_SPREAD_FLOOR:
             r2_floor_blocked = True
@@ -14938,14 +14977,16 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         RESEARCH_LANE_CONTINUOUS,
         continuous_accept,
         continuous_reason,
-        score=abs(int(ai.get("long_score", 0) or 0) - int(ai.get("short_score", 0) or 0)),
+        score=abs(long_score - short_score),
         policy_version="continuous_shared_direction_gap_v1",
     )
     if r2_floor_blocked:
         return
     logger.info(
         f"[CONTINUOUS LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
-        f"decision={ai.get('decision')} orders={'ON' if orders_on else 'OFF(data-only)'} "
+        f"decision={continuous_ai.get('decision')} tier={continuous_tier} "
+        f"raw_decision={continuous_ai.get('raw_decision') or '-'} "
+        f"orders={'ON' if orders_on else 'OFF(data-only)'} "
         f"[PIPELINE ENFORCEMENT]"
     )
     # Apply the same toggle contract as every other execution tile. ON enters
@@ -14953,7 +14994,7 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     # process_signal call stopped at DATA_COLLECT_ONLY and produced no shadow.
     _spawn_combo_lane(
         spawn_ctx,
-        copy.deepcopy(ai),
+        continuous_ai,
         float(edge_score or 0),
         features or {},
         RESEARCH_LANE_CONTINUOUS,

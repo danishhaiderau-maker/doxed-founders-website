@@ -46,6 +46,7 @@ jobs:
           python test_fly_data_sync_contract.py
           python test_fly_relay_state_pusher_contract.py
           python test_ws_live_readiness_contract.py
+          python -m pytest test_continuous_r2_floor.py -q
           python -m pytest test_chase_exact_bucket_controls.py -q
           python test_manual_pause_entry_gate.py
           python test_paper_mode_private_api_isolation.py

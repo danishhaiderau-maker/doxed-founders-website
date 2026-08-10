@@ -8,12 +8,13 @@ own. The R2 floor gates AI signals before they reach the chase lifecycle.
 Stage 1 Fix #4 (2026-08-06): the prior implementation multiplied the constant
 by 10, making the effective threshold raw gap >= 40 (8x stricter than the
 original R2 intent of raw gap >= ~5). The constant is now used as a RAW
-score-gap threshold directly, so raw gap >= CONTINUOUS_MIN_SPREAD_FLOOR (= 4)
-passes the floor. This un-starves the Continuous lane of valid signals.
+score-gap threshold directly. The canonical tier gate remains the stricter
+execution authority at raw gap >= 5; the R2 floor is defense in depth.
 
-Score scale is 0-100 (long_score/short_score). After Fix #4:
-  raw gap  3 -> REJECTED (< floor 4)
-  raw gap  4 -> ACCEPTED (== floor)
+Score scale is 0-100 (long_score/short_score). The canonical Continuous tier
+gate is gap >= 5; the older R2 floor remains a lower-bound safety check:
+  raw gap  3 -> REJECTED
+  raw gap  4 -> REJECTED by the canonical tier gate
   raw gap  5 -> ACCEPTED (> floor)
   raw gap 10 -> ACCEPTED (well above floor)
   raw gap 30 -> ACCEPTED (well above floor; previously REJECTED under * 10 bug)
@@ -43,12 +44,12 @@ def _approved_ai(long_score: int, short_score: int) -> dict:
     }
 
 
-def _run_spawn(long_score: int, short_score: int, monkeypatch) -> bool:
-    """Return True if the floor let the signal through to the chase lifecycle."""
-    calls: list[tuple] = []
+def _run_spawn(long_score: int, short_score: int, monkeypatch, textual_decision="APPROVE") -> dict:
+    """Return the normalized AI record handed to the Continuous lifecycle."""
+    calls: list[dict] = []
 
     def fake_spawn_combo_lane(ctx, ai, edge_score, features, target_lane, trigger_reason):
-        calls.append((target_lane, ai.get("long_score"), ai.get("short_score")))
+        calls.append(dict(ai))
         return None
 
     monkeypatch.setattr(bot, "_spawn_combo_lane", fake_spawn_combo_lane)
@@ -56,6 +57,9 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch) -> bool:
 
     ctx = {"trade_id": "test-ctx"}
     ai = _approved_ai(long_score, short_score)
+    ai["decision"] = textual_decision
+    ai["approved"] = textual_decision == "APPROVE"
+    ai["execution_tier"] = textual_decision
     bot.spawn_continuous_lane_from_ai_scan(
         ctx=ctx,
         ai=ai,
@@ -63,7 +67,8 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch) -> bool:
         features={},
         source_lane=bot.RESEARCH_LANE_AI_SCAN,
     )
-    return len(calls) == 1
+    assert len(calls) == 1
+    return calls[0]
 
 
 def test_floor_constant_is_four() -> None:
@@ -74,40 +79,56 @@ def test_floor_constant_is_four() -> None:
 
 
 def test_raw_gap_three_is_rejected(monkeypatch) -> None:
-    # long 50 / short 53 -> raw gap 3 -> REJECTED (< floor 4)
-    passed = _run_spawn(long_score=50, short_score=53, monkeypatch=monkeypatch)
-    assert passed is False, "raw gap 3 must be REJECTED by R2 floor (< 4)"
+    # long 50 / short 53 -> raw gap 3 -> REJECTED
+    normalized = _run_spawn(long_score=50, short_score=53, monkeypatch=monkeypatch)
+    assert normalized["decision"] == "REJECT"
 
 
-def test_raw_gap_four_is_accepted(monkeypatch) -> None:
-    # long 50 / short 54 -> raw gap 4 -> ACCEPTED (== floor 4)
-    passed = _run_spawn(long_score=50, short_score=54, monkeypatch=monkeypatch)
-    assert passed is True, "raw gap 4 must be ACCEPTED (== floor)"
+def test_raw_gap_four_is_rejected_by_canonical_tier(monkeypatch) -> None:
+    normalized = _run_spawn(long_score=50, short_score=54, monkeypatch=monkeypatch)
+    assert normalized["decision"] == "REJECT"
 
 
 def test_raw_gap_five_is_accepted(monkeypatch) -> None:
-    # long 0 / short 5 -> raw gap 5 -> ACCEPTED (> floor 4)
-    passed = _run_spawn(long_score=0, short_score=5, monkeypatch=monkeypatch)
-    assert passed is True, "raw gap 5 must be ACCEPTED (> floor)"
+    normalized = _run_spawn(long_score=48, short_score=53, monkeypatch=monkeypatch)
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "SOFT_APPROVE"
 
 
 def test_raw_gap_ten_is_accepted(monkeypatch) -> None:
     # long 45 / short 55 -> raw gap 10 -> ACCEPTED (well above floor)
     # Note: under the prior * 10 bug this was REJECTED. Fix #4 restored the
     # intended semantics so this signal now correctly enters the lifecycle.
-    passed = _run_spawn(long_score=45, short_score=55, monkeypatch=monkeypatch)
-    assert passed is True, "raw gap 10 must be ACCEPTED (well above floor 4)"
+    normalized = _run_spawn(long_score=45, short_score=55, monkeypatch=monkeypatch)
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "APPROVE"
 
 
 def test_raw_gap_thirty_is_accepted(monkeypatch) -> None:
     # long 20 / short 50 -> raw gap 30 -> ACCEPTED (well above floor)
     # Note: under the prior * 10 bug this was REJECTED at threshold 40.
-    passed = _run_spawn(long_score=20, short_score=50, monkeypatch=monkeypatch)
-    assert passed is True, "raw gap 30 must be ACCEPTED (well above floor 4)"
+    normalized = _run_spawn(long_score=35, short_score=65, monkeypatch=monkeypatch)
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "STRONG_APPROVE"
+    assert normalized["direction"] == "SHORT"
 
 
-def test_rejected_ai_does_not_reach_floor(monkeypatch) -> None:
-    """When AI itself rejects, the floor must not even fire (shadow path)."""
+def test_textual_reject_cannot_override_executable_score_gap(monkeypatch) -> None:
+    """Production regression: 35/65 must execute even if the model says REJECT."""
+    normalized = _run_spawn(
+        long_score=35,
+        short_score=65,
+        monkeypatch=monkeypatch,
+        textual_decision="REJECT",
+    )
+    assert normalized["raw_decision"] == "REJECT"
+    assert normalized["decision"] == "APPROVE"
+    assert normalized["execution_tier"] == "STRONG_APPROVE"
+    assert normalized["approved"] is True
+
+
+def test_zero_gap_remains_rejected(monkeypatch) -> None:
+    """A textual reject with no directional separation remains shadow-only."""
     calls: list[tuple] = []
 
     def fake_spawn_combo_lane(ctx, ai, edge_score, features, target_lane, trigger_reason):
