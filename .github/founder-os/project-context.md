@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(vercel): include application docs routes
+chore(bitfinex): approve relay orphan-race fix
 
 ## Last Activity
 
