@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(second-brain): use supported Gemini Flash default
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
