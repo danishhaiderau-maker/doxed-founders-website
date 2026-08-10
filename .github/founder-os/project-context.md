@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(web): remove broken Fushu directory link
+fix(vercel): include application docs routes
 
 ## Last Activity
 
