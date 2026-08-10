@@ -25616,6 +25616,9 @@ HTML = """<!DOCTYPE html>
         #tradingParamsPanel > summary::after { content:'Show'; float:right; color:var(--muted); font-weight:500; }
         #tradingParamsPanel[open] > summary::after { content:'Hide'; }
         .advanced-content { padding:0 14px 14px; border-top:1px solid var(--line); }
+        .admin-access { display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:10px 0 14px;padding:11px 14px;background:#111827;border:1px solid #374151;border-radius:8px; }
+        .admin-access a,.admin-access button { display:inline-flex;align-items:center;min-height:34px;margin:0;padding:7px 13px;border-radius:7px;text-decoration:none;font-weight:700; }
+        .admin-access form { margin:0; }
         @media (max-width:900px) {
           body { padding:12px 12px 36px; }
           #pathwayLaneTiles { grid-template-columns:1fr !important; }
@@ -25652,6 +25655,7 @@ HTML = """<!DOCTYPE html>
 <p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
   Server: checking…
 </p>
+__ADMIN_ACCESS_CONTROLS__
 <nav class="section-nav" aria-label="Dashboard sections">
   <a href="#marketOverview">Overview</a>
   <a href="#pathwayLab">Decisions</a>
@@ -27913,8 +27917,11 @@ def dashboard_admin_login():
 </head><body><main>
   <h2>Bot admin access</h2>
   <p>Enter the current owner token. It is stored only as a secure HttpOnly cookie and is not added to the address bar.</p>
-  <form method="post" autocomplete="off">
-    <input name="token" type="password" required autofocus placeholder="Admin token" autocomplete="current-password">
+  <form method="post" action="/admin/login" autocomplete="on">
+    <label for="adminUsername">Account</label>
+    <input id="adminUsername" name="username" type="text" value="bot-admin" readonly autocomplete="username">
+    <label for="adminToken">Admin token</label>
+    <input id="adminToken" name="token" type="password" required autofocus placeholder="Admin token" autocomplete="current-password">
     <button type="submit">Open dashboard</button>
   </form>
 </main></body></html>
@@ -27937,30 +27944,44 @@ def dashboard_admin_login():
     return resp
 
 
+@app.route('/admin/logout', methods=['POST'])
+def dashboard_admin_logout():
+    """Clear dashboard authentication without exposing token material."""
+    resp = make_response('', 303)
+    resp.headers['Location'] = '/'
+    forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    secure = bool(request.is_secure or forwarded_proto == 'https')
+    resp.delete_cookie(
+        'bot_admin_token', httponly=True, samesite='Lax', path='/', secure=secure,
+    )
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
 @app.route('/')
 def dashboard():
+    if _admin_authed():
+        admin_controls = """
+<div class="admin-access" id="adminAccessPanel">
+  <span><strong style="color:#3fb950;">Admin unlocked</strong> - settings changes are authorized on this browser.</span>
+  <form method="post" action="/admin/logout"><button type="submit" style="background:#374151;">Sign out</button></form>
+</div>"""
+    else:
+        admin_controls = """
+<div class="admin-access" id="adminAccessPanel">
+  <span><strong style="color:#f59e0b;">Read-only</strong> - sign in before changing controls.</span>
+  <a href="/admin/login" style="background:#238636;color:white;">Admin login</a>
+</div>"""
     page = (
         HTML.replace("__DASHBOARD_URL__", dashboard_public_url())
         .replace("__ANALYZER_URL__", research_dashboard_public_url())
         .replace("__AGENT_HUB_URL__", AGENT_HUB_PUBLIC_URL)
         .replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
+        .replace("__ADMIN_ACCESS_CONTROLS__", admin_controls)
     )
     resp = make_response(render_template_string(page))
-    # If the owner visits /?admin_token=XXX, mint an http-only cookie so the
-    # dashboard's own fetch() calls pass the _emergency_api_guard admin gate.
-    # Phone operators use the canonical Fly URL with ?admin_token=TOKEN once;
-    # subsequent polls/saves ride the cookie (full /api/state + write access).
-    tok = request.args.get("admin_token", "")
-    if _BOT_ADMIN_TOKEN and tok == _BOT_ADMIN_TOKEN:
-        # Fly terminates TLS before forwarding to Flask on :7002.
-        forwarded_proto = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
-        secure = bool(request.is_secure or forwarded_proto == "https")
-        resp.set_cookie(
-            "bot_admin_token", _BOT_ADMIN_TOKEN,
-            httponly=True, samesite="Lax", path="/", max_age=60 * 60 * 24 * 30,
-            secure=secure,
-        )
+    resp.headers['Cache-Control'] = 'no-store'
     return resp
 
 
