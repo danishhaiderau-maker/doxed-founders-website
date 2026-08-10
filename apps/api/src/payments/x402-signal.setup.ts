@@ -74,6 +74,21 @@ function sendManual402(res: Response, payTo: string): void {
   });
 }
 
+/**
+ * Keep the API online while failing the paid signal route closed when its
+ * startup dependencies (normally Neon treasury lookup) are unavailable.
+ */
+export function attachX402SignalIntentUnavailableMiddleware(app: INestApplication): void {
+  const expressApp = app.getHttpAdapter().getInstance();
+  expressApp.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.method !== 'GET' || !intentPathMatch(req.path)) return next();
+    res.status(503).json({
+      error: 'Signal intent payment route temporarily unavailable',
+      retryable: true,
+    });
+  });
+}
+
 function loadX402Paywall(payTo: string): ExpressMiddleware {
   // CJS require — @x402 packages ship ESM types that break Nest's Node resolution.
   // eslint-disable-next-line @typescript-eslint/no-require-imports

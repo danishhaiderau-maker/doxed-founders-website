@@ -50,8 +50,19 @@ async function bootstrap() {
     next();
   });
 
-  const { attachX402SignalIntentMiddleware } = await import('./payments/x402-signal.setup');
-  await attachX402SignalIntentMiddleware(app);
+  const {
+    attachX402SignalIntentMiddleware,
+    attachX402SignalIntentUnavailableMiddleware,
+  } = await import('./payments/x402-signal.setup');
+  try {
+    await attachX402SignalIntentMiddleware(app);
+  } catch (error) {
+    // x402 is an optional paid route. A transient Neon/facilitator failure must
+    // not kill the whole API, dashboard, or trading control plane. Keep that
+    // route fail-closed until the next healthy process start.
+    attachX402SignalIntentUnavailableMiddleware(app);
+    console.error('[x402] Startup failed; paid signal route disabled with HTTP 503.', error);
+  }
 
   const port = Number(process.env.PORT ?? process.env.API_PORT ?? 4000);
   const host = process.env.API_BIND_HOST ?? '0.0.0.0';
