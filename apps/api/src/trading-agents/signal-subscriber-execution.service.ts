@@ -2750,7 +2750,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         continue;
       }
       if (wake.trigger === 'ORDER_PLACED' && instance.status === TradingAgentInstanceStatus.ACTIVE) {
-        const placed = await this.tryFreshSignedFlatEntry(instance.agentId, instance);
+        const placed = await this.tryFreshSignedFlatEntry(
+          instance.agentId,
+          instance,
+          wake.tradeId ?? undefined,
+        );
         await this.persistFastWakeTelemetry(
           instance.id,
           wake,
@@ -3022,6 +3026,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private async tryFreshSignedFlatEntry(
     agentId: string,
     instance: TradingAgentInstance,
+    preferredTradeId?: string,
   ): Promise<boolean> {
     const armedAt = relayArmTimestampMs(instance.dashboardState);
     if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return false;
@@ -3036,9 +3041,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           agentId,
           status: SignalCycleStatus.INTENT,
           createdAt: { gt: new Date(armedAt) },
+          ...(preferredTradeId ? { tradeId: preferredTradeId } : {}),
         },
         orderBy: { createdAt: 'desc' },
-        take: 5,
+        take: preferredTradeId ? 1 : 5,
       }),
       this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider),
       loadSubscriberMaxMarginUsd(this.prisma),
@@ -3161,7 +3167,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       marginCap,
       cycle.tradeId,
       'bitfinex',
-      { availableUsd, markPrice },
+      {
+        availableUsd,
+        markPrice,
+        exchangeBookProvenEmpty: flatPreflight,
+      },
     );
     if (placed) {
       this.logger.log(
@@ -5750,7 +5760,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     marginCap: number,
     tradeId: string,
     venue = 'bitfinex',
-    fastPreflight?: { availableUsd: number; markPrice: number },
+    fastPreflight?: {
+      availableUsd: number;
+      markPrice: number;
+      exchangeBookProvenEmpty?: boolean;
+    },
   ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
     if (
@@ -5958,7 +5972,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // place a second: the earlier participant is the mirror owner of this
       // book entry. Expire this claim ledger-side WITHOUT touching the
       // exchange (mirrors the showcase book's own DUPLICATE_LIMIT_PRICE).
-      if (mirrorConvergenceEnabled()) {
+      if (mirrorConvergenceEnabled() && !fastPreflight?.exchangeBookProvenEmpty) {
         const dup = await this.findDuplicateRestingLimit(
           instance.userId,
           agentId,
@@ -6000,8 +6014,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
     let prePosition: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
+    let latestGate: { status: TradingAgentInstanceStatus; dashboardState: unknown } | null = null;
+    let latestCycle: { createdAt: Date } | null = null;
     try {
-      prePosition = await this.activeTrading.getOpenPositionDetail(creds);
+      [prePosition, [latestGate, latestCycle]] = await Promise.all([
+        this.activeTrading.getOpenPositionDetail(creds),
+        venue === 'bitfinex'
+          ? Promise.all([
+              this.prisma.tradingAgentInstance.findUnique({
+                where: { id: instance.id },
+                select: { status: true, dashboardState: true },
+              }),
+              this.prisma.signalCycle.findUnique({
+                where: { id: cycleId },
+                select: { createdAt: true },
+              }),
+            ])
+          : Promise.resolve([null, null] as const),
+      ]);
     } catch (err) {
       if (claimParticipantId) {
         await this.prisma.signalCycleParticipant
@@ -6010,7 +6040,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         claimParticipantId = null;
       }
       this.logger.warn(
-        `Hire entry blocked ${instance.userId} cycle=${cycleId}: exchange position preflight failed — ${
+        `Hire entry blocked ${instance.userId} cycle=${cycleId}: final exchange/gate preflight failed — ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -6023,16 +6053,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // atomic participant claim is released so a later explicit Start can
     // consume only a newly-created post-arm cycle.
     if (venue === 'bitfinex') {
-      const [latestGate, latestCycle] = await Promise.all([
-        this.prisma.tradingAgentInstance.findUnique({
-          where: { id: instance.id },
-          select: { status: true, dashboardState: true },
-        }),
-        this.prisma.signalCycle.findUnique({
-          where: { id: cycleId },
-          select: { createdAt: true },
-        }),
-      ]);
       if (
         !latestGate ||
         !latestCycle ||
