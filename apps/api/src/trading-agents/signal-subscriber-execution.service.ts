@@ -3180,6 +3180,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     let activeOrderIdSet = new Set<number>();
     let activeOrdersSnapshot: BitfinexActiveOrder[] = [];
+    let activeOrdersSnapshotFresh = false;
     if (instance.exchangeProvider === 'bitfinex') {
       try {
         this.currentStage = 'BITFINEX_MARGIN_CHECK';
@@ -3192,6 +3193,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         this.currentStage = 'BITFINEX_ACTIVE_ORDERS';
         const activeOrders = await this.activeTrading.listActiveOrders(creds);
         activeOrdersSnapshot = activeOrders;
+        activeOrdersSnapshotFresh = true;
         activeOrderIdSet = new Set(activeOrders.map((o) => o.id));
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -3510,8 +3512,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (instance.exchangeProvider === 'bitfinex') {
       try {
         activeOrdersSnapshot = await this.activeTrading.listActiveOrders(creds);
+        activeOrdersSnapshotFresh = true;
         activeOrderIdSet = new Set(activeOrdersSnapshot.map((o) => o.id));
       } catch (err) {
+        activeOrdersSnapshotFresh = false;
         this.logger.warn(
           `Bitfinex active-order refresh before ledger reconcile ${instance.userId}: ${
             err instanceof Error ? err.message : String(err)
@@ -3542,7 +3546,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // don't double-query the exchange. evaluateEntryEligibility now READS the
     // persisted orphanOrderIds instead of re-querying listActiveOrders.
     this.currentStage = 'SURFACE_ORPHAN_ORDERS';
-    const foreignOrphanOrders = await this.surfaceOrphanOrders(instance, creds, managedOrderIds);
+    const foreignOrphanOrders = await this.surfaceOrphanOrders(
+      instance,
+      creds,
+      managedOrderIds,
+      activeOrdersSnapshotFresh ? activeOrdersSnapshot : undefined,
+    );
 
     this.currentStage = 'CLEANUP_ORPHAN_ORDERS';
     await this.cleanupOrphanCopyOrders(
@@ -4892,11 +4901,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     instance: TradingAgentInstance,
     creds: ExchangeCredentials,
     managedOrderIds: Set<number>,
+    freshOrders?: BitfinexActiveOrder[],
   ): Promise<Array<{ id: number; amount?: number; amountOrig?: number; price?: number; status?: string; orderType?: string; cid?: number; createdAtMs?: number }>> {
     if (instance.exchangeProvider !== 'bitfinex') return [];
     let orders: Awaited<ReturnType<ExecutionTradingClient['listActiveOrders']>>;
     try {
-      orders = await this.activeTrading.listActiveOrders(creds);
+      // The tick already refreshes this exact Bitfinex book immediately before
+      // ledger reconciliation. Reusing that successful snapshot removes a
+      // redundant authenticated request from the serialized nonce lane. Under
+      // exchange latency, that third read could sit queued long enough to trip
+      // the 60s watchdog at SURFACE_ORPHAN_ORDERS and unnecessarily disarm an
+      // otherwise flat, healthy relay. If the refresh failed, retain the
+      // original fail-closed read here instead of trusting stale data.
+      orders = freshOrders ?? (await this.activeTrading.listActiveOrders(creds));
     } catch (err) {
       await this.persistExchangeOrderAudit(instance.id, {
         known: false,
