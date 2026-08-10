@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Fix relinked live-copy mirror identity
+Refresh Bitfinex policy lock
 
 ## Last Activity
 
