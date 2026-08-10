@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(relay): acknowledge fast wakes before execution
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
