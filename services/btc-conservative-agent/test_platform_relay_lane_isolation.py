@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 BOT_SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
@@ -110,8 +111,31 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert 'pos.get("research_lane")' in close_source
 
 
+def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:
+    class FakeEnvironment:
+        @staticmethod
+        def getenv(name: str) -> str:
+            if name == "SHOWCASE_RELAY_WEBHOOK_URL":
+                return "https://platform.example/api/showcase/relay?ignored=yes"
+            return ""
+
+    keepalive_url = _compile_function(
+        "_platform_relay_keepalive_url",
+        {"os": FakeEnvironment(), "urlsplit": urlsplit},
+    )
+    assert keepalive_url() == "https://platform.example/api/health"
+
+    loop_source = ast.get_source_segment(
+        BOT_SOURCE,
+        _function("_platform_relay_connection_keepalive_loop"),
+    )
+    assert "_relay_http_session.get(" in loop_source
+    assert "_relay_http_session.post(" not in loop_source
+
+
 if __name__ == "__main__":
     test_relay_lane_resolution_requires_matching_allowlisted_prefix()
     test_type_b_chase_and_close_events_stop_before_network_post()
     test_every_relay_lifecycle_path_is_wired_to_lane_metadata()
+    test_relay_keepalive_is_health_only_on_the_exact_webhook_origin()
     print("Platform relay lane isolation checks passed")

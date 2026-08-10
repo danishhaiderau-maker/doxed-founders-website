@@ -36,6 +36,7 @@ import signal
 import ssl
 import hashlib
 import hmac
+from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
 import numpy as np
@@ -7401,6 +7402,39 @@ _relay_http_adapter = requests.adapters.HTTPAdapter(
 )
 _relay_http_session.mount("https://", _relay_http_adapter)
 _relay_http_session.mount("http://", _relay_http_adapter)
+
+
+def _platform_relay_keepalive_url() -> str:
+    """Return a health-only URL on the exact relay origin."""
+    raw = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return ""
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}/api/health"
+
+
+def _platform_relay_connection_keepalive_loop():
+    """Keep Fly -> platform DNS/TLS/HTTP transport warm without mutations."""
+    url = _platform_relay_keepalive_url()
+    if not url:
+        return
+    while not shutdown_event.is_set():
+        try:
+            response = _relay_http_session.get(
+                url,
+                headers={"Accept": "application/json"},
+                timeout=1.5,
+            )
+            response.close()
+        except Exception:
+            # Relay POST durability and retries remain authoritative. Warm-up
+            # failure is intentionally silent and never changes bot state.
+            pass
+        if shutdown_event.wait(3.0):
+            return
 
 
 def _relay_delivery_lag_ms(source_ts, platform_received_at):
@@ -36462,6 +36496,10 @@ def main():
     threading.Thread(target=safe_thread(periodic_pipeline_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bitfinex_live_reconcile_loop), daemon=True).start()
+    threading.Thread(
+        target=safe_thread(_platform_relay_connection_keepalive_loop),
+        daemon=True,
+    ).start()
     update_logger_level()
     while True:
         try:

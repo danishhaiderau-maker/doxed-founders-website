@@ -2256,6 +2256,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   onModuleInit() {
     if (!executionEnabled()) {
+      this.startExecutorConnectionKeepalive();
       this.logger.warn('Subscriber execution disabled (SUBSCRIBER_EXECUTION_ENABLED=false)');
       return;
     }
@@ -2290,6 +2291,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // recovery and reconciliation backstop.
     setInterval(() => void this.pollPersistedFastWake(), 250).unref();
     setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
+  }
+
+  /** Keep the private/public Railway transport to the isolated executor hot.
+   * Signals can be tens of minutes apart; without this health-only probe the
+   * first money-path wake pays DNS + TLS + edge connection setup. */
+  private startExecutorConnectionKeepalive(): void {
+    const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
+    if (!base) return;
+    const probe = () => {
+      void fetch(`${base}/api/health/live`, {
+        method: 'GET',
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(1_500),
+      }).then(async (response) => {
+        // Drain the tiny health response so Undici can return the socket to
+        // its keep-alive pool rather than treating the stream as aborted.
+        await response.arrayBuffer();
+      }).catch(() => {
+        // The durable Neon wake remains the safety backstop. A failed warm-up
+        // must never change relay state or create noisy production errors.
+      });
+    };
+    probe();
+    setInterval(probe, 3_000).unref();
   }
 
   getHealthSnapshot(nowMs = Date.now()): RelayExecutorHealthSnapshot {
