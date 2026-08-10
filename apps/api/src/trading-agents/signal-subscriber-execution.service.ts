@@ -2154,6 +2154,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private running = false;
   private wakeQueued = false;
   private fastWakeRunning = false;
+  /** Authenticated direct wakes that arrived while a read-only durable-wake
+   * poll or another direct wake was finishing. Never drop the latency hint on
+   * a transient 409/busy window. */
+  private readonly pendingDirectWakes: RelayExecutorWakeRequest[] = [];
   /** Exact direct wakes completed by this process. Prevent the durable
    * crash-fallback copy from executing the same wake a second time. */
   private readonly completedDirectWakeAt = new Map<string, number>();
@@ -2637,7 +2641,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   async acceptDirectExecutorWake(wake: RelayExecutorWakeRequest): Promise<boolean> {
-    if (!executionEnabled() || this.fastWakeRunning) return false;
+    if (!executionEnabled()) return false;
+    if (this.fastWakeRunning) {
+      this.enqueueDirectWake(wake);
+      return true;
+    }
+    this.startDirectExecutorWake(wake);
+    return true;
+  }
+
+  private enqueueDirectWake(wake: RelayExecutorWakeRequest): void {
+    const key = this.executorWakeKey(wake);
+    if (this.pendingDirectWakes.some((candidate) => this.executorWakeKey(candidate) === key)) {
+      return;
+    }
+    this.pendingDirectWakes.push(wake);
+    if (this.pendingDirectWakes.length > 20) this.pendingDirectWakes.shift();
+  }
+
+  private drainQueuedDirectWake(): void {
+    if (this.fastWakeRunning) return;
+    const next = this.pendingDirectWakes.shift();
+    if (next) this.startDirectExecutorWake(next);
+  }
+
+  private startDirectExecutorWake(wake: RelayExecutorWakeRequest): void {
     this.fastWakeRunning = true;
     // Acknowledge the authenticated private wake immediately. The previous
     // implementation held the HTTP response open until Bitfinex completed,
@@ -2659,9 +2687,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         })
         .finally(() => {
           this.fastWakeRunning = false;
+          this.drainQueuedDirectWake();
         });
     });
-    return true;
   }
 
   private executorWakeKey(wake: RelayExecutorWakeRequest): string {
@@ -2741,6 +2769,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (this.running) this.wakeQueued = true;
     } finally {
       this.fastWakeRunning = false;
+      this.drainQueuedDirectWake();
     }
   }
 

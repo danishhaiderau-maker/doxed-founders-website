@@ -67,6 +67,42 @@ import {
   shouldRunLocalRealSideSafetyNet,
 } from './signal-subscriber-execution.service';
 
+test('authenticated direct wake queues instead of returning busy', async () => {
+  const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
+  process.env.RELAY_EXECUTOR_WORKER = 'true';
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.fastWakeRunning = true;
+    service.pendingDirectWakes = [];
+    const wake = {
+      trigger: 'ORDER_PLACED',
+      tradeId: 'cont-queued-direct',
+      at: new Date().toISOString(),
+    };
+
+    assert.equal(await service.acceptDirectExecutorWake(wake), true);
+    assert.deepEqual(service.pendingDirectWakes, [wake]);
+    assert.equal(await service.acceptDirectExecutorWake(wake), true);
+    assert.equal(service.pendingDirectWakes.length, 1);
+
+    let launched: unknown = null;
+    service.fastWakeRunning = false;
+    service.startDirectExecutorWake = (candidate: unknown) => {
+      launched = candidate;
+    };
+    service.drainQueuedDirectWake();
+    assert.equal(launched, wake);
+    assert.equal(service.pendingDirectWakes.length, 0);
+  } finally {
+    if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
+    if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
+  }
+});
+
 test('executor direct wake requires the exact shared control secret', () => {
   assert.equal(executorWakeAuthorized('secret', 'secret'), true);
   assert.equal(executorWakeAuthorized('wrong', 'secret'), false);
