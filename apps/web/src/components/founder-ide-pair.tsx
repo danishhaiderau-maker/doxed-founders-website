@@ -59,10 +59,10 @@ export function FounderIdePair({
       if (stopped) return;
       try {
         const status = await fetchFounderNodeStatus(accessToken);
-        const first = status.nodes?.[0];
-        if (first && !firedRef.current) {
+        const firstOnline = status.nodes?.find((node) => node.status === 'online');
+        if (firstOnline && !firedRef.current) {
           firedRef.current = true;
-          onPaired?.(first.nodeId);
+          onPaired?.(firstOnline.nodeId);
           return;
         }
       } catch {

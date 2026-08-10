@@ -24,8 +24,8 @@ export default function FounderIdePage() {
     }
     try {
       const status = await fetchFounderNodeStatus(session.accessToken);
-      const first = status.nodes?.[0];
-      if (first) setPairedNodeId(first.nodeId);
+      const firstOnline = status.nodes?.find((node) => node.status === 'online');
+      setPairedNodeId(firstOnline?.nodeId ?? null);
     } catch {
       // ignore — user may not be signed in or backend down; show landing.
     } finally {
