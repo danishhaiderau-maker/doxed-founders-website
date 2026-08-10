@@ -177,7 +177,6 @@ function snapshotKey(bot, inst, parts, events) {
   return JSON.stringify({
     bot: bot?.ok
       ? {
-          price: bot.price,
           open: bot.openPositions?.map((p) => p.trade_id),
           pend: bot.pendingOrders?.map((o) => `${o.trade_id}:${o.limit}:${o.chase}`),
         }
@@ -188,7 +187,6 @@ function snapshotKey(bot, inst, parts, events) {
           err: inst.lastError,
           orphan: (inst.dashboardState?.orphanOrderIds || []).length,
           delta: inst.dashboardState?.copyRelayReconcile?.deltaBtc,
-          tick: inst.dashboardState?.lastTickAt,
         }
       : null,
     parts: parts.map((p) => `${p.tradeId}|${p.pStatus}`),
@@ -208,6 +206,7 @@ const showcaseClosedAt = new Map();
 const alerted = new Set();
 /** @type {Set<string>} */
 const seenEventKeys = new Set();
+let botDownMisses = 0;
 
 function alertOnce(key, msg) {
   if (alerted.has(key)) return;
@@ -284,6 +283,29 @@ async function readCopyState(userId, agentId) {
   };
 }
 
+async function readShowcaseCycleBirths(agentId, bot) {
+  const tradeIds = [
+    ...(bot?.openPositions || []).map((p) => p.trade_id),
+    ...(bot?.pendingOrders || []).map((o) => o.trade_id),
+  ].filter(Boolean);
+  if (!tradeIds.length) return new Map();
+  const cycles = await prisma.signalCycle.findMany({
+    where: { agentId, tradeId: { in: [...new Set(tradeIds)] } },
+    select: { tradeId: true, createdAt: true },
+  });
+  return new Map(cycles.map((cycle) => [cycle.tradeId, cycle.createdAt.getTime()]));
+}
+
+function isPreArmShowcaseTrade(tradeId, dash, showcaseCycleBirths) {
+  const armedAtMs = Date.parse(dash?.relayArmedAt ?? dash?.realTradingConfirmedAt ?? '');
+  const cycleCreatedAtMs = showcaseCycleBirths.get(tradeId);
+  return (
+    Number.isFinite(armedAtMs) &&
+    Number.isFinite(cycleCreatedAtMs) &&
+    cycleCreatedAtMs <= armedAtMs
+  );
+}
+
 function formatEvent(e) {
   const pl = e.payload && typeof e.payload === 'object' ? e.payload : {};
   const bits = [
@@ -298,7 +320,7 @@ function formatEvent(e) {
   return bits.join(' ');
 }
 
-function checkAlerts(bot, inst, copy, nowMs) {
+function checkAlerts(bot, inst, copy, showcaseCycleBirths, nowMs) {
   const dash = inst?.dashboardState || {};
   const orphanN = Array.isArray(dash.orphanOrderIds) ? dash.orphanOrderIds.length : 0;
   if (orphanN > 0) alertOnce(`orphan:${inst.id}`, `orphanOrders=${orphanN} on instance ${inst.id}`);
@@ -318,12 +340,23 @@ function checkAlerts(bot, inst, copy, nowMs) {
     alertOnce(`stale:${Math.floor(tickAt / 60_000)}`, `lastTickAt stale ${Math.round((nowMs - tickAt) / 1000)}s`);
   }
 
-  if (!bot?.ok) alertOnce('bot:down', 'showcase bot unreachable (local + tunnel)');
+  if (!bot?.ok) {
+    botDownMisses += 1;
+    if (botDownMisses >= 3) {
+      alertOnce('bot:down', 'showcase bot unreachable for 3 consecutive polls (local + tunnel)');
+    }
+  } else {
+    botDownMisses = 0;
+  }
 
   const copyOpenIds = new Set(copy.participants.filter((p) => OPEN_PART_STATUSES.has(p.pStatus)).map((p) => p.tradeId));
   const showcaseOpenIds = new Set((bot?.openPositions || []).map((p) => p.trade_id).filter(Boolean));
 
   for (const tid of showcaseOpenIds) {
+    if (isPreArmShowcaseTrade(tid, dash, showcaseCycleBirths)) {
+      showcaseOpenSince.delete(tid);
+      continue;
+    }
     if (!showcaseOpenSince.has(tid)) showcaseOpenSince.set(tid, nowMs);
     // PENDING_ENTRY / INTENT count as entry action taken (not an action miss).
     if (!copyOpenIds.has(tid) && nowMs - showcaseOpenSince.get(tid) > MISSED_ENTRY_SEC * 1000) {
@@ -414,6 +447,9 @@ async function tick() {
   const copy = inst
     ? await readCopyState(inst.userId, inst.agentId)
     : { participants: [], recentCycles: [], events: [] };
+  const showcaseCycleBirths = inst
+    ? await readShowcaseCycleBirths(inst.agentId, bot)
+    : new Map();
 
   const dash = inst?.dashboardState || {};
   const recon = dash.copyRelayReconcile || null;
@@ -425,7 +461,7 @@ async function tick() {
   const changed = key !== prevKey;
   prevKey = key;
 
-  checkAlerts(bot, inst, copy, nowMs);
+  checkAlerts(bot, inst, copy, showcaseCycleBirths, nowMs);
 
   if (!changed) {
     append(`... steady (bot=${bot.ok ? bot.source : 'DOWN'} inst=${inst?.status ?? 'none'} open=${parts.length})`);
@@ -470,12 +506,17 @@ async function tick() {
   }
 
   const showcaseOpen = new Set((bot.openPositions || []).map((p) => p.trade_id));
+  const actionableShowcaseOpen = new Set(
+    [...showcaseOpen].filter(
+      (tradeId) => !isPreArmShowcaseTrade(tradeId, dash, showcaseCycleBirths),
+    ),
+  );
   const copyOpen = new Set(parts.filter((p) => OPEN_PART_STATUSES.has(p.pStatus)).map((p) => p.tradeId));
-  const matched = [...showcaseOpen].filter((t) => copyOpen.has(t));
-  const missCopy = [...showcaseOpen].filter((t) => !copyOpen.has(t));
+  const matched = [...actionableShowcaseOpen].filter((t) => copyOpen.has(t));
+  const missCopy = [...actionableShowcaseOpen].filter((t) => !copyOpen.has(t));
   if (showcaseOpen.size || copyOpen.size) {
     logConsole(
-      `MATCH open showcase=${showcaseOpen.size} copy=${copyOpen.size} matched=${matched.length}${missCopy.length ? ` MISSING_ON_COPY=${missCopy.map((t) => t.slice(0, 10)).join(',')}` : ''}`,
+      `MATCH open showcase=${showcaseOpen.size} actionable=${actionableShowcaseOpen.size} copy=${copyOpen.size} matched=${matched.length}${missCopy.length ? ` MISSING_ON_COPY=${missCopy.map((t) => t.slice(0, 10)).join(',')}` : ''}`,
     );
   }
 
@@ -488,7 +529,21 @@ async function main() {
   logConsole(`polling every ${POLL_MS / 1000}s | instance=${INSTANCE_ID} | log=${LOG}`);
   process.env.DATABASE_URL = loadDbUrl();
   prisma = new PrismaClient({ log: ['error'] });
-  await prisma.$connect();
+  let connectAttempt = 0;
+  while (true) {
+    connectAttempt += 1;
+    try {
+      await prisma.$connect();
+      break;
+    } catch (error) {
+      if (connectAttempt === 1 || connectAttempt % 6 === 0) {
+        logConsole(
+          `Neon connect attempt ${connectAttempt} failed; retrying in 5s: ${error instanceof Error ? error.message.split('\n')[0] : error}`,
+        );
+      }
+      await new Promise((resolveRetry) => setTimeout(resolveRetry, 5000));
+    }
+  }
   logConsole('Neon connected');
 
   await tick();
@@ -520,4 +575,11 @@ main().catch((e) => {
   process.exit(1);
 });
 
-export { tick, fetchBot, resolveInstance, readCopyState };
+export {
+  tick,
+  fetchBot,
+  resolveInstance,
+  readCopyState,
+  readShowcaseCycleBirths,
+  isPreArmShowcaseTrade,
+};

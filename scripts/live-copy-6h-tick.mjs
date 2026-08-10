@@ -74,6 +74,7 @@ function syncVerdict({
   copyAll,
   showcaseOpen,
   expectedMissedShowcase,
+  suppressedPreArmShowcase,
   entryEnabled,
   dash,
   alerts,
@@ -92,7 +93,9 @@ function syncVerdict({
 
   const actionableShowcaseOpen = new Set(
     entryEnabled
-      ? [...showcaseOpen].filter((t) => !expectedMissedShowcase.has(t))
+      ? [...showcaseOpen].filter(
+          (t) => !expectedMissedShowcase.has(t) && !suppressedPreArmShowcase.has(t),
+        )
       : [],
   );
   const missEntry = [...actionableShowcaseOpen].filter((t) => !copyAll.has(t));
@@ -175,24 +178,37 @@ try {
   const copyAll = new Set(participants.map((p) => p.cycle.tradeId));
   const showcaseOpen = new Set((bot.positions || []).map((p) => p.trade_id).filter(Boolean));
   const expectedMissedShowcase = new Set();
+  const suppressedPreArmShowcase = new Set();
   if (inst && showcaseOpen.size > 0) {
-    const missedFillEvents = await prisma.signalCycleEvent.findMany({
-      where: {
-        eventType: 'EXPIRED',
-        cycle: {
-          agentId: inst.agentId,
-          tradeId: { in: [...showcaseOpen] },
+    const armedAtMs = Date.parse(dash.relayArmedAt ?? dash.realTradingConfirmedAt ?? '');
+    const [missedFillEvents, showcaseCycles] = await Promise.all([
+      prisma.signalCycleEvent.findMany({
+        where: {
+          eventType: 'EXPIRED',
+          cycle: {
+            agentId: inst.agentId,
+            tradeId: { in: [...showcaseOpen] },
+          },
+          participant: {
+            userId: inst.userId,
+            status: 'EXPIRED',
+          },
         },
-        participant: {
-          userId: inst.userId,
-          status: 'EXPIRED',
+        select: {
+          payload: true,
+          cycle: { select: { tradeId: true } },
         },
-      },
-      select: {
-        payload: true,
-        cycle: { select: { tradeId: true } },
-      },
-    });
+      }),
+      prisma.signalCycle.findMany({
+        where: { agentId: inst.agentId, tradeId: { in: [...showcaseOpen] } },
+        select: { tradeId: true, createdAt: true },
+      }),
+    ]);
+    if (Number.isFinite(armedAtMs)) {
+      for (const cycle of showcaseCycles) {
+        if (cycle.createdAt.getTime() <= armedAtMs) suppressedPreArmShowcase.add(cycle.tradeId);
+      }
+    }
     for (const event of missedFillEvents) {
       const payload =
         event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
@@ -215,6 +231,7 @@ try {
     copyAll,
     showcaseOpen,
     expectedMissedShowcase,
+    suppressedPreArmShowcase,
     entryEnabled: inst?.status === 'ACTIVE',
     dash,
     alerts,
@@ -249,6 +266,7 @@ try {
       open: [...copyOpen],
       pending: copyPending,
       expectedMissedShowcase: [...expectedMissedShowcase],
+      suppressedPreArmShowcase: [...suppressedPreArmShowcase],
       reconcile: dash.copyRelayReconcile ?? null,
       executorHealth:
         dash.relayExecutor ?? dash.executorHealth ?? dash.relayExecutorHealth ?? null,
