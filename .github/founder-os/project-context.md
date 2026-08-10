@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(agent-hub): correlate relay trade ids
+perf(relay): dispatch isolated worker wake directly
 
 ## Last Activity
 
