@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Overlap relay safety preflight with signed intent commit
 
 ## Last Activity
 
