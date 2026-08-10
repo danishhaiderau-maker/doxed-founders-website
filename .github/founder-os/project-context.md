@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(relay): approve fast wake policy revision
+fix(dashboard): add secure admin login
 
 ## Last Activity
 
