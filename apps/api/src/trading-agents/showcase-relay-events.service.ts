@@ -765,10 +765,23 @@ export class ShowcaseRelayEventsService {
     direction?: string | null,
     body?: ShowcaseRelayEventBody,
   ): Promise<{ cycleId: string; intentApplied: boolean } | null> {
-    const existing = await db.signalCycle.findUnique({
+    // A cancel-race fill may relink cycle.tradeId while later signed events
+    // continue to carry the original showcase id. Resolve the deterministic
+    // primary key before attempting an insert; a caught unique violation would
+    // leave the PostgreSQL transaction aborted (25P02).
+    const raw = tradeId.toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(8, '0');
+    const cycleId = `cyc_rel_${raw.slice(0, 22)}`.slice(0, 30);
+    let existing = await db.signalCycle.findUnique({
       where: { agentId_tradeId: { agentId, tradeId } },
-      select: { id: true, intentEnvelope: true, status: true },
+      select: { id: true, agentId: true, intentEnvelope: true, status: true },
     });
+    if (!existing) {
+      const stableIdMatch = await db.signalCycle.findUnique({
+        where: { id: cycleId },
+        select: { id: true, agentId: true, intentEnvelope: true, status: true },
+      });
+      if (stableIdMatch?.agentId === agentId) existing = stableIdMatch;
+    }
     if (existing) {
       const current = existing.intentEnvelope as
         | (Record<string, unknown> & {
@@ -838,8 +851,6 @@ export class ShowcaseRelayEventsService {
 
     // Stable-ish id for the cycle — derived from the trade_id so replays land
     // on the same row. Strip non-alphanumerics; pad/truncate to fit the cuid-ish shape.
-    const raw = tradeId.toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(8, '0');
-    const cycleId = `cyc_rel_${raw.slice(0, 22)}`.slice(0, 30);
     try {
       const createdEnvelope = relayIntentEnvelope(
         cycleId,

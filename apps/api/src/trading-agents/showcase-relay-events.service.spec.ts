@@ -839,3 +839,71 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(trace.includes('execution'), true);
 });
+
+test('signed POSITION_CLOSED reuses a deterministic cycle whose tradeId was relinked', async () => {
+  const secret = 'test-webhook-secret';
+  let createCalls = 0;
+  let closed = false;
+  let storedEnvelope: Record<string, unknown> = {
+    action: 'ENTER',
+    direction: 'SHORT',
+    entry: { exact_limit_price: 65_256.66 },
+    context: { showcase_event: 'LIMIT_UPDATED' },
+  };
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findUnique: async (args: { where: Record<string, unknown> }) => {
+        if ('agentId_tradeId' in args.where) return null;
+        return {
+          id: 'cyc_rel_cont7051a335b325',
+          agentId: 'agent-1',
+          status: closed ? 'CLOSED' : 'OPEN',
+          intentEnvelope: storedEnvelope,
+        };
+      },
+      create: async () => {
+        createCalls += 1;
+        throw new Error('must not create over a relinked deterministic cycle');
+      },
+      update: async (args: {
+        data: { intentEnvelope?: Record<string, unknown>; status?: string };
+      }) => {
+        if (args.data.intentEnvelope) storedEnvelope = args.data.intentEnvelope;
+        if (args.data.status === 'CLOSED') closed = true;
+        return {};
+      },
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async () => ({}),
+    },
+  };
+  const service = createService('dashboard-active', secret, { prisma });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_CLOSED' as const,
+    trade_id: 'cont-7051a335b325',
+    direction: 'SHORT',
+    exit_price: 65_284,
+    exit_reason: 'THESIS_FAST_CUT',
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.persisted, true);
+  assert.equal(createCalls, 0);
+  assert.equal(closed, true);
+  const context = storedEnvelope.context as Record<string, unknown>;
+  assert.equal(context.showcase_event, 'POSITION_CLOSED');
+  assert.equal(context.showcase_exit_price, 65_284);
+});
