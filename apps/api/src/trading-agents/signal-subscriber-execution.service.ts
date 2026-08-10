@@ -1758,6 +1758,24 @@ export function resolveShowcaseMirrorTradeIdFromInputs(
   return tid;
 }
 
+/** Match a persisted close wake against the canonical showcase identity.
+ * Cancel-race fills rewrite cycle.tradeId to a relink:* audit id, so comparing
+ * the raw cycle id makes the fast wake miss the live lot and fall back to the
+ * slower reconciliation poll.
+ */
+export function persistedCloseWakeMatchesParticipant(
+  wakeTradeId: string | null | undefined,
+  cycleTradeId: string | null | undefined,
+  originTradeId: string | null | undefined,
+): boolean {
+  if (!wakeTradeId) return true;
+  const mirrorTradeId = resolveShowcaseMirrorTradeIdFromInputs(
+    cycleTradeId,
+    originTradeId,
+  );
+  return Boolean(mirrorTradeId && tradeIdsMatch(wakeTradeId, mirrorTradeId));
+}
+
 /**
  * Phase 2 — exit convergence master switch. Default ON (same pattern as
  * MIRROR_CONVERGENCE_ENABLED). When ON in showcase-mirror mode: wide disaster
@@ -2604,14 +2622,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         });
         let exitAttempts = 0;
         for (const participant of openLots) {
-          if (
-            wake.tradeId &&
-            participant.cycle.tradeId &&
-            !tradeIdsMatch(wake.tradeId, participant.cycle.tradeId)
-          ) {
-            continue;
-          }
           const meta = await this.loadExecutionMeta(participant.id);
+          if (
+            !persistedCloseWakeMatchesParticipant(
+              wake.tradeId,
+              participant.cycle.tradeId,
+              meta.originTradeId,
+            )
+          ) continue;
           exitAttempts += 1;
           await this.tryImmediateShowcaseMirrorExit(
             agent.id,

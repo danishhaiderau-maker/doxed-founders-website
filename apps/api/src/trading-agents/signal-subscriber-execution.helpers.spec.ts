@@ -55,11 +55,39 @@ import {
   SHOWCASE_RELINK_PRICE_BAND_PCT,
   SHOWCASE_RELINK_TIME_WINDOW_MS,
   resolveShowcaseMirrorTradeIdFromInputs,
+  persistedCloseWakeMatchesParticipant,
   hireExpiryBlocksNewLiveEntries,
   hireExpiryRequiresExitOnlyProcessing,
   expiredHireShouldRunExitOnly,
   readRelayExecutorWakeRequest,
 } from './signal-subscriber-execution.service';
+
+test('persisted close wake matches a cancel-race relink by canonical showcase id', () => {
+  assert.equal(
+    persistedCloseWakeMatchesParticipant(
+      'cont-fa8ce196a716',
+      'relink:unknown:cont-fa8ce196a716:1786346662320',
+      'cont-fa8ce196a716',
+    ),
+    true,
+  );
+  assert.equal(
+    persistedCloseWakeMatchesParticipant(
+      'cont-other',
+      'relink:unknown:cont-fa8ce196a716:1786346662320',
+      'cont-fa8ce196a716',
+    ),
+    false,
+  );
+  assert.equal(
+    persistedCloseWakeMatchesParticipant(
+      null,
+      'relink:unknown:cont-fa8ce196a716:1786346662320',
+      null,
+    ),
+    true,
+  );
+});
 
 test('orphan cleanup never cancels orders owned by active participants', () => {
   assert.equal(participantCanOwnOrphanOrder(SignalCycleStatus.INTENT), false);
