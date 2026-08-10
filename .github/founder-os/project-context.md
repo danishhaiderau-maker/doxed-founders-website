@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-ops(relay): add guarded fresh-only rearm
+Fix Continuous score-gap execution verdict
 
 ## Last Activity
 
