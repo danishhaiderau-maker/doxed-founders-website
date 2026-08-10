@@ -4,7 +4,7 @@
 
 ## Current Goal
 
-Product & platform (12 recent commits)
+Define your next milestone
 
 ## Progress
 
@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-fix(dashboard): add secure admin login
+fix: keep Founder IDE pairing available for offline nodes
 
 ## Last Activity
 
