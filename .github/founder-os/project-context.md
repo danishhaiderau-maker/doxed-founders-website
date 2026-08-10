@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-Avoid redundant Bitfinex orphan-order read
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
