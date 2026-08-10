@@ -2125,6 +2125,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private running = false;
   private wakeQueued = false;
   private fastWakeRunning = false;
+  /** Exact direct wakes completed by this process. Prevent the durable
+   * crash-fallback copy from executing the same wake a second time. */
+  private readonly completedDirectWakeAt = new Map<string, number>();
   private tickStartedAtMs = 0;
   private lastTickCompletedAtMs = 0;
   private lastTickDurationMs = 0;
@@ -2554,14 +2557,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   async acceptDirectExecutorWake(wake: RelayExecutorWakeRequest): Promise<boolean> {
     if (!executionEnabled() || this.fastWakeRunning) return false;
     this.fastWakeRunning = true;
-    try {
-      await this.executePersistedFastWake(wake);
-      if (this.running) this.wakeQueued = true;
-      else setImmediate(() => void this.tick());
-      return true;
-    } finally {
-      this.fastWakeRunning = false;
+    // Acknowledge the authenticated private wake immediately. The previous
+    // implementation held the HTTP response open until Bitfinex completed,
+    // so the API's 1.5s timeout reported a false failure while the order was
+    // already being placed. Keep execution owned by this process and retain
+    // the persisted dashboard wake as the crash/restart fallback.
+    setImmediate(() => {
+      void this.executePersistedFastWake(wake)
+        .then(() => {
+          this.completedDirectWakeAt.set(this.executorWakeKey(wake), Date.now());
+          if (this.running) this.wakeQueued = true;
+          else setImmediate(() => void this.tick());
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `Direct relay fast wake failed closed; durable wake retained: ${err instanceof Error ? err.message : err}`,
+          );
+          if (this.running) this.wakeQueued = true;
+        })
+        .finally(() => {
+          this.fastWakeRunning = false;
+        });
+    });
+    return true;
+  }
+
+  private executorWakeKey(wake: RelayExecutorWakeRequest): string {
+    return `${wake.trigger}:${wake.tradeId ?? ''}:${wake.at}`;
+  }
+
+  private directWakeAlreadyCompleted(wake: RelayExecutorWakeRequest): boolean {
+    const cutoff = Date.now() - 120_000;
+    for (const [key, completedAt] of this.completedDirectWakeAt) {
+      if (completedAt < cutoff) this.completedDirectWakeAt.delete(key);
     }
+    return this.completedDirectWakeAt.has(this.executorWakeKey(wake));
   }
 
   private async consumePersistedExecutorWakes(): Promise<RelayExecutorWakeRequest | null> {
@@ -2616,6 +2646,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     try {
       const wake = await this.consumePersistedExecutorWakes();
       if (!wake) return;
+      if (this.directWakeAlreadyCompleted(wake)) return;
       await this.executePersistedFastWake(wake);
       // Always queue the complete pass afterwards so fills, stops, dashboards,
       // and any non-fast-path ambiguity are reconciled authoritatively.
@@ -2996,7 +3027,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (!creds) return false;
 
-    const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd] = await Promise.all([
+    const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd, markPrice] = await Promise.all([
       this.activeTrading.listActiveOrders(creds),
       this.activeTrading.getOpenPositionDetail(creds),
       this.prisma.signalCycleParticipant.findMany({
@@ -3009,8 +3040,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }),
       this.prisma.tradingAgentInstance.findUnique({ where: { id: instance.id } }),
       this.activeTrading.getDerivativesAvailableUsd(creds).catch(() => null),
+      this.activeTrading.getMarkPrice().catch(() => null),
     ]);
-    if (!freshInstance) return false;
+    if (!freshInstance || availableUsd == null || markPrice == null) return false;
     if (!isCycleFreshForRelayArm(freshInstance.dashboardState, cycle.createdAt)) {
       return false;
     }
@@ -3100,6 +3132,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       marginCap,
       cycle.tradeId,
       'bitfinex',
+      { availableUsd, markPrice },
     );
     if (placed) {
       this.logger.log(
@@ -5662,6 +5695,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     marginCap: number,
     tradeId: string,
     venue = 'bitfinex',
+    fastPreflight?: { availableUsd: number; markPrice: number },
   ): Promise<boolean> {
     const intent = envelopeJson as SignalIntentEnvelope;
     if (
@@ -5773,7 +5807,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
     }
 
-    const mark = await this.activeTrading.getMarkPrice();
+    const mark = fastPreflight?.markPrice ?? await this.activeTrading.getMarkPrice();
     const limitPrice =
       rawLimit != null
         ? sanitizeLimitPrice(mark, rawLimit, intent.direction)
@@ -5797,14 +5831,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? Math.min(marginCap, intentCap)
         : marginCap;
 
-    let available = 0;
-    try {
-      available = await this.activeTrading.getDerivativesAvailableUsd(creds);
-    } catch (err) {
-      this.logger.warn(
-        `Hire skip ${instance.userId} cycle=${cycleId}: Derivatives balance check failed — ${err instanceof Error ? err.message : err}`,
-      );
-      return false;
+    let available = fastPreflight?.availableUsd ?? 0;
+    if (!fastPreflight) {
+      try {
+        available = await this.activeTrading.getDerivativesAvailableUsd(creds);
+      } catch (err) {
+        this.logger.warn(
+          `Hire skip ${instance.userId} cycle=${cycleId}: Derivatives balance check failed — ${err instanceof Error ? err.message : err}`,
+        );
+        return false;
+      }
     }
 
     const marginUsd = Math.min(effectiveCap, available * 0.95);
