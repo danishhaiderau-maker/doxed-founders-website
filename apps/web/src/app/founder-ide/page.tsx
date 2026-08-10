@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { FounderIdePair } from '@/components/founder-ide-pair';
 import { FounderIdeChat } from '@/components/founder-ide-chat';
-import { fetchFounderNodeStatus } from '@/lib/api';
+import { fetchFounderNodeStatus, revokeFounderNode } from '@/lib/api';
 
 export default function FounderIdePage() {
   const { data: session } = useSession();
@@ -16,6 +16,8 @@ export default function FounderIdePage() {
   // state instead of the pairing block.
   const [pairedNodeId, setPairedNodeId] = useState<string | null>(null);
   const [checkedPair, setCheckedPair] = useState(false);
+  const [replacingNode, setReplacingNode] = useState(false);
+  const [pairError, setPairError] = useState<string | null>(null);
 
   const checkPair = useCallback(async () => {
     if (!session?.accessToken) {
@@ -44,6 +46,21 @@ export default function FounderIdePage() {
       document.getElementById('founder-ide-chat')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 100);
   }, []);
+
+  const replaceStaleNode = useCallback(async () => {
+    if (!session?.accessToken || !pairedNodeId) return;
+    setReplacingNode(true);
+    setPairError(null);
+    try {
+      await revokeFounderNode(pairedNodeId, session.accessToken);
+      setPairedNodeId(null);
+      setShowPair(true);
+    } catch (error) {
+      setPairError(error instanceof Error ? error.message : 'Could not replace the stale Founder Node connection.');
+    } finally {
+      setReplacingNode(false);
+    }
+  }, [pairedNodeId, session?.accessToken]);
 
   return (
     <main className='min-h-screen bg-[#050508] text-zinc-100'>
@@ -149,6 +166,15 @@ export default function FounderIdePage() {
                   Pick an open project, type a message, and it lands in your Founder IDE chat box — ready for the
                   agent to act on.
                 </p>
+                <button
+                  type='button'
+                  onClick={() => void replaceStaleNode()}
+                  disabled={replacingNode}
+                  className='mt-3 text-xs text-zinc-400 underline underline-offset-4 hover:text-white disabled:cursor-not-allowed disabled:opacity-60'
+                >
+                  {replacingNode ? 'Replacing connection…' : 'Replace this Founder Node'}
+                </button>
+                {pairError && <p role='alert' className='mt-2 text-xs text-red-300'>{pairError}</p>}
               </div>
               <button
                 type='button'
