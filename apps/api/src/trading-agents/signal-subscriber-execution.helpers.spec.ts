@@ -1990,6 +1990,8 @@ test('reads a signed showcase close without another canonical-state fetch', () =
       context: {
         signed_showcase_event: true,
         showcase_event: 'POSITION_CLOSED',
+        showcase_event_at: '2026-08-10T18:46:47.476Z',
+        platform_received_at: '2026-08-10T18:46:47.584Z',
         showcase_exit_price: 64_444.25,
         showcase_exit_reason: 'PROFIT_LOCK_LADDER',
       },
@@ -1997,6 +1999,8 @@ test('reads a signed showcase close without another canonical-state fetch', () =
     {
       exitPrice: 64_444.25,
       exitReason: 'PROFIT_LOCK_LADDER',
+      sourceEventAtMs: Date.parse('2026-08-10T18:46:47.476Z'),
+      platformReceivedAtMs: Date.parse('2026-08-10T18:46:47.584Z'),
     },
   );
   assert.equal(

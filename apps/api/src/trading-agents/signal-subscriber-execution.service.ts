@@ -679,6 +679,12 @@ export type RelayLotExitTarget = {
   targetAmount: number;
   closeQty: number;
   finalAccountFlatten: boolean;
+  /** Wall-clock time immediately before the authenticated close submit. */
+  closeSubmitStartedAtMs?: number;
+  /** Wall-clock time when Bitfinex acknowledged the close submit. */
+  closeExchangeAckAtMs?: number;
+  /** Wall-clock time when the exchange position read confirmed the reduction. */
+  closeConfirmedAtMs?: number;
   reason?: string;
 };
 
@@ -1003,12 +1009,16 @@ export function readFreshSignedShowcaseExactLimit(
 export function readSignedShowcaseClose(envelopeJson: unknown): {
   exitPrice?: number;
   exitReason?: string;
+  sourceEventAtMs?: number;
+  platformReceivedAtMs?: number;
 } | null {
   const context = (
     envelopeJson as {
       context?: {
         signed_showcase_event?: boolean;
         showcase_event?: string;
+        showcase_event_at?: string;
+        platform_received_at?: string;
         showcase_exit_price?: number;
         showcase_exit_reason?: string;
       };
@@ -1021,10 +1031,14 @@ export function readSignedShowcaseClose(envelopeJson: unknown): {
     return null;
   }
   const rawExitPrice = Number(context.showcase_exit_price ?? 0);
+  const sourceEventAtMs = Date.parse(String(context.showcase_event_at ?? ''));
+  const platformReceivedAtMs = Date.parse(String(context.platform_received_at ?? ''));
   return {
     ...(Number.isFinite(rawExitPrice) && rawExitPrice > 0
       ? { exitPrice: rawExitPrice }
       : {}),
+    ...(Number.isFinite(sourceEventAtMs) ? { sourceEventAtMs } : {}),
+    ...(Number.isFinite(platformReceivedAtMs) ? { platformReceivedAtMs } : {}),
     ...(context.showcase_exit_reason
       ? { exitReason: context.showcase_exit_reason }
       : {}),
@@ -8672,6 +8686,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       {
         showcaseExitPrice,
         showcaseExitReason,
+        sourceEventAtMs: signedClose?.sourceEventAtMs,
+        platformReceivedAtMs: signedClose?.platformReceivedAtMs,
         mirrorRelinked,
         trigger: mirrorTrigger,
       },
@@ -8914,6 +8930,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
     if (btcToSats(target.closeQty) === 0) return target;
 
+    const closeSubmitStartedAtMs = Date.now();
     if (target.finalAccountFlatten) {
       await this.activeTrading.submitPositionFlatten(creds, {
         positionDirection: meta.direction,
@@ -8927,6 +8944,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         leverage,
       });
     }
+    const closeExchangeAckAtMs = Date.now();
     const confirmed = await this.waitForMarketCloseConfirmation(
       creds,
       meta.direction,
@@ -8940,7 +8958,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
       throw new Error(message);
     }
-    return target;
+    return {
+      ...target,
+      closeSubmitStartedAtMs,
+      closeExchangeAckAtMs,
+      closeConfirmedAtMs: Date.now(),
+    };
   }
 
   private async waitForMarketCloseConfirmation(
@@ -8990,6 +9013,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     opts?: {
       showcaseExitPrice?: number;
       showcaseExitReason?: string;
+      sourceEventAtMs?: number;
+      platformReceivedAtMs?: number;
       mirrorRelinked?: boolean;
       trigger?: string;
       /** Bypass hasParticipantExited (stale RECONCILE_CANCEL EXIT events). */
@@ -9164,6 +9189,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         opts?.showcaseExitPrice != null && exitPrice > 0 && meta.qty
           ? Math.round(Math.abs(exitPrice - opts.showcaseExitPrice) * meta.qty * 100) / 100
           : undefined;
+      const closeExchangeAckAtMs = closeTarget.closeExchangeAckAtMs;
+      const closeConfirmedAtMs = closeTarget.closeConfirmedAtMs;
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
         venue: 'bitfinex',
@@ -9172,6 +9199,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         showcase_exit_price: opts?.showcaseExitPrice,
         exit_slippage_usd: exitSlippageUsd,
         showcase_exit_reason: opts?.showcaseExitReason,
+        close_submit_started_at: closeTarget.closeSubmitStartedAtMs != null
+          ? new Date(closeTarget.closeSubmitStartedAtMs).toISOString()
+          : undefined,
+        close_exchange_ack_at: closeExchangeAckAtMs != null
+          ? new Date(closeExchangeAckAtMs).toISOString()
+          : undefined,
+        close_confirmed_at: closeConfirmedAtMs != null
+          ? new Date(closeConfirmedAtMs).toISOString()
+          : undefined,
+        source_to_close_ack_ms:
+          opts?.sourceEventAtMs != null && closeExchangeAckAtMs != null
+            ? Math.max(0, closeExchangeAckAtMs - opts.sourceEventAtMs)
+            : undefined,
+        platform_to_close_ack_ms:
+          opts?.platformReceivedAtMs != null && closeExchangeAckAtMs != null
+            ? Math.max(0, closeExchangeAckAtMs - opts.platformReceivedAtMs)
+            : undefined,
+        close_ack_to_confirm_ms:
+          closeExchangeAckAtMs != null && closeConfirmedAtMs != null
+            ? Math.max(0, closeConfirmedAtMs - closeExchangeAckAtMs)
+            : undefined,
         mirror_relinked: opts?.mirrorRelinked ?? false,
         mirror_trigger: opts?.trigger,
         pnl_usd: Math.round(pnlUsd * 100) / 100,
