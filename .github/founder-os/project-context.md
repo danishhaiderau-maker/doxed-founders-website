@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Start relay wakes from verified instance cache
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
