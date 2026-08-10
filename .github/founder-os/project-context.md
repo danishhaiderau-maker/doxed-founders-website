@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-chore(relay): lock entry latency policy
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
