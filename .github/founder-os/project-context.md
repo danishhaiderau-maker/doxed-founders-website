@@ -12,7 +12,7 @@ Product & platform (12 recent commits)
 
 ## Last Commit
 
-perf(relay): parallelize entry balance proof
+chore(relay): lock entry latency policy
 
 ## Last Activity
 
