@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-chore: refresh compatible dependency locks
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
