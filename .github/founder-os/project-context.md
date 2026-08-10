@@ -12,7 +12,7 @@ Define your next milestone
 
 ## Last Commit
 
-fix(dashboard): expose mobile admin login
+fix(relay): acknowledge fast wakes before execution
 
 ## Last Activity
 
