@@ -126,7 +126,7 @@ try {
 }
 Set-Content -LiteralPath $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 
-if (-not $env:BOT_ADMIN_TOKEN -and (Test-Path -LiteralPath $vaultEnv)) {
+if (Test-Path -LiteralPath $vaultEnv) {
   $tokenLine = Get-Content -LiteralPath $vaultEnv | Where-Object {
     $_ -match '^\s*BOT_ADMIN_TOKEN='
   } | Select-Object -Last 1

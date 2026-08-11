@@ -352,6 +352,8 @@ test('raw Fly evidence defaults to machine-local storage and migration is copy-o
   assert.match(paths, /DoxxedCrypto\\fly-data-mirror/);
   assert.match(syncLoop, /Get-DoxxedFlyMirrorDir/);
   assert.match(syncLoop, /syncArgs\.TargetDir = \$mirrorDir/);
+  assert.match(syncLoop, /if \(Test-Path -LiteralPath \$vaultEnv\)[\s\S]*BOT_ADMIN_TOKEN/);
+  assert.doesNotMatch(syncLoop, /if \(-not \$env:BOT_ADMIN_TOKEN -and \(Test-Path -LiteralPath \$vaultEnv\)\)/);
   assert.match(sync, /Get-DoxxedFlyMirrorDir/);
   assert.match(homeMode, /DataDir = Get-DoxxedFlyMirrorDir/);
   assert.match(migration, /Get-FileHash[\s\S]*SHA256/);
