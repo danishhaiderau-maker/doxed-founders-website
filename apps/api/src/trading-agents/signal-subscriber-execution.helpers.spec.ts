@@ -40,6 +40,7 @@ import {
   showcaseAbsentWithinOrderPropagationGrace,
   shouldDeferCancelByExchangeForReplacement,
   pendingEntryOwnershipAdvanced,
+  advanceReplacementMissingProbe,
   missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -2346,6 +2347,337 @@ test('fresh status change defers instead of recursing with a stale active-order 
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('participant lane deadlocked')), 250)),
   ]);
   assert.equal(replacementLaneEntered, false);
+});
+
+test('terminal monitor waits for replacement lane and cancels only the durable current order', async () => {
+  const cancelled: number[] = [];
+  const events: string[] = [];
+  const oldIntent = { action: 'ENTER', trade_id: 'cont-terminal-lane', risk: {}, context: { showcase_event_seq: 20 } };
+  const newIntent = { ...oldIntent, context: { showcase_event_seq: 21 } };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({
+      id: 'cycle-terminal-lane', tradeId: 'cont-terminal-lane', intentEnvelope: newIntent,
+      expiresAt: null, status: SignalCycleStatus.CLOSED,
+    }) },
+    signalCycleParticipant: { findUnique: async () => ({
+      id: 'participant-terminal-lane', status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+  };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 8102, limitPrice: 64_000, qty: 0.03,
+    replacementExchangeAckAtMs: Date.now(),
+  });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.cancelManagedOrderGone = async (_creds: unknown, id: number) => {
+    cancelled.push(id);
+    return { gone: true, reason: 'CANCELLED', attempts: 1 };
+  };
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  const releaseReplacement = await service.acquireParticipantMoneyLane('participant-terminal-lane');
+  const monitoring = service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-terminal-lane', tradeId: 'cont-terminal-lane', intentEnvelope: oldIntent, expiresAt: null, status: SignalCycleStatus.CLOSED },
+    { id: 'participant-terminal-lane', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 8101, limitPrice: 64_100, qty: 0.03 },
+    {}, new Set<number>(), false,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(cancelled, []);
+  releaseReplacement();
+  await monitoring;
+  assert.deepEqual(cancelled, [8102]);
+  assert.deepEqual(events, ['EXPIRED']);
+});
+
+test('partial-stop reconciliation waits for replacement and consumes only fresh durable ownership', async () => {
+  const seen: number[] = [];
+  const intent = { action: 'ENTER', trade_id: 'cont-partial-lane', risk: {}, context: { showcase_event_seq: 22 } };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({ id: 'cycle-partial-lane', tradeId: 'cont-partial-lane', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY }) },
+    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-partial-lane', status: SignalCycleStatus.PENDING_ENTRY }) },
+  };
+  service.loadExecutionMeta = async () => ({ direction: 'SHORT', bitfinexOrderId: 8202, qty: 0.03, partialFillQty: 0.01, partialFillStopOrderId: 9202 });
+  service.reconcilePendingPartialFillStop = async (_a: string, _u: string, _c: unknown, _p: string, meta: any) => { seen.push(meta.bitfinexOrderId); return true; };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+  const releaseReplacement = await service.acquireParticipantMoneyLane('participant-partial-lane');
+  const monitoring = service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-partial-lane', tradeId: 'cont-partial-lane', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+    { id: 'participant-partial-lane', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 8201, qty: 0.03, partialFillQty: 0.01, partialFillStopOrderId: 9201 },
+    {}, new Set<number>(), false,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, []);
+  releaseReplacement();
+  await monitoring;
+  assert.deepEqual(seen, [8202]);
+});
+
+test('immediate source-fill reconcile waits for lane and rejects a stale pending candidate', async () => {
+  let recorded = false;
+  const cycle = { id: 'cycle-fast-fill', tradeId: 'cont-fast-fill', status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {} };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.prisma = { signalCycleParticipant: {
+    findMany: async () => [{ id: 'participant-fast-fill', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+    findUnique: async () => ({ id: 'participant-fast-fill', status: SignalCycleStatus.OPEN, cycle: { ...cycle, status: SignalCycleStatus.OPEN } }),
+  } };
+  service.exchanges = { getUserCredentials: async () => ({}) };
+  service.loadExecutionMeta = async () => ({ direction: 'SHORT', bitfinexOrderId: 8302, qty: 0.03 });
+  service.recordCancelRaceFill = async () => { recorded = true; return true; };
+  const releaseWriter = await service.acquireParticipantMoneyLane('participant-fast-fill');
+  const reconcile = service.tryImmediateShowcaseFillReconcile(
+    'agent',
+    { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+    'cont-fast-fill',
+    new Date().toISOString(),
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(recorded, false);
+  releaseWriter();
+  assert.equal(await reconcile, false);
+  assert.equal(recorded, false);
+});
+
+test('same durable replacement survives first Bitfinex visibility miss and later active-list proof', async () => {
+  const events: string[] = [];
+  let findCalls = 0;
+  let positionCalls = 0;
+  const intent = {
+    action: 'ENTER', trade_id: 'cont-visibility', risk: {},
+    context: { showcase_event_seq: 10, showcase_event_at: '2026-08-11T10:46:07Z' },
+  };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.replacementMissingProbe = new Map();
+  service.botBridge = { isEnabled: () => false };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.activeTrading = {
+    findOrder: async () => { findCalls += 1; return null; },
+    listActiveOrders: async () => [{ id: 241808793805 }],
+    getOpenPositionDetail: async () => { positionCalls += 1; return null; },
+  };
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({
+      id: 'cycle-visibility', tradeId: 'cont-visibility', intentEnvelope: intent,
+      expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+    signalCycleParticipant: { findUnique: async () => ({
+      id: 'participant-visibility', status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+  };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 241808793805, limitPrice: 64_000,
+    qty: 0.03, replacementExchangeAckAtMs: Date.now() - 3_000,
+  });
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event),
+  };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  await service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-visibility', tradeId: 'cont-visibility', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+    { id: 'participant-visibility', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 241808793805, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 3_000 },
+    {}, new Set<number>(), false,
+  );
+  assert.equal(findCalls, 1);
+  assert.equal(positionCalls, 0);
+  assert.deepEqual(events, []);
+});
+
+test('merged same-direction position cannot phantom-expire a hidden replacement without terminal history', async () => {
+  const originalNow = Date.now;
+  let now = 100_000;
+  Date.now = () => now;
+  try {
+    const events: string[] = [];
+    const intent = { action: 'ENTER', trade_id: 'cont-phantom', risk: {}, context: { showcase_event_seq: 12 } };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.replacementMissingProbe = new Map();
+    service.botBridge = { isEnabled: () => false };
+    service.cancelAbsurdPendingOrders = async () => undefined;
+    service.activeTrading = {
+      listActiveOrders: async () => [],
+      getOpenPositionDetail: async () => ({ amount: -0.001, basePrice: 64_000 }),
+    };
+    const durableMeta = { direction: 'SHORT', bitfinexOrderId: 4001, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: 80_000 };
+    service.loadExecutionMeta = async (id: string) => id === 'other' ? { direction: 'SHORT', qty: 0.03 } : durableMeta;
+    service.prisma = {
+      signalCycle: { findUnique: async () => ({ id: 'cycle-p', tradeId: 'cont-phantom', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY }) },
+      signalCycleParticipant: {
+        findUnique: async () => ({ id: 'participant-p', status: SignalCycleStatus.PENDING_ENTRY }),
+        findMany: async () => [{ id: 'other' }],
+      },
+    };
+    service.bitfinex = { fetchOrderTrades: async () => [], fetchOrderHistoryEvidence: async () => null };
+    service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+    service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+    const args = [
+      'agent', 'user',
+      { id: 'cycle-p', tradeId: 'cont-phantom', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+      { id: 'participant-p', status: SignalCycleStatus.PENDING_ENTRY }, durableMeta, {}, new Set<number>([999]), false,
+    ];
+    await service.monitorEntry(...args);
+    now += 16_000;
+    await service.monitorEntry(...args);
+    assert.deepEqual(events, []);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('terminal NOT_FOUND cannot expire a hidden replacement without terminal-unfilled history', async () => {
+  const events: string[] = [];
+  const intent = { action: 'ENTER', trade_id: 'cont-terminal-hidden', risk: {}, context: { showcase_event_seq: 13 } };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.loadExecutionMeta = async () => ({ direction: 'SHORT', bitfinexOrderId: 5001, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 20_000 });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.cancelManagedOrderGone = async () => ({ gone: true, reason: 'NOT_FOUND', attempts: 1 });
+  service.bitfinex = { fetchOrderTrades: async () => [], fetchOrderHistoryEvidence: async () => null };
+  service.prisma = {
+    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-t', status: SignalCycleStatus.PENDING_ENTRY }) },
+    signalCycle: { findUnique: async () => ({ id: 'cycle-t', tradeId: 'cont-terminal-hidden', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.CLOSED }) },
+  };
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+  await service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-t', tradeId: 'cont-terminal-hidden', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.CLOSED },
+    { id: 'participant-t', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 5001, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 20_000 },
+    {}, new Set<number>(), false,
+  );
+  assert.deepEqual(events, []);
+});
+
+test('missed-showcase-fill NOT_FOUND cannot expire a hidden replacement without terminal history', async () => {
+  const events: string[] = [];
+  const intent = { action: 'ENTER', trade_id: 'cont-missed-hidden', risk: {}, context: {} };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.loadExecutionMeta = async () => ({ direction: 'SHORT', bitfinexOrderId: 6001, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 20_000 });
+  service.botBridge = { isEnabled: () => true };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.fetchExecutionBotState = async () => ({ positions: [] });
+  service.resolveShowcaseMirrorTradeId = () => 'cont-missed-hidden';
+  service.showcaseEntryAbandoned = () => ({ abandoned: true, reason: 'MISSED_SHOWCASE_FILL' });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.cancelManagedOrderGone = async () => ({ gone: true, reason: 'NOT_FOUND', attempts: 1 });
+  service.bitfinex = { fetchOrderTrades: async () => [], fetchOrderHistoryEvidence: async () => null };
+  service.prisma = {
+    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-m', status: SignalCycleStatus.PENDING_ENTRY }) },
+    signalCycle: { findUnique: async () => ({ id: 'cycle-m', tradeId: 'cont-missed-hidden', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY }) },
+  };
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+  await service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-m', tradeId: 'cont-missed-hidden', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+    { id: 'participant-m', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 6001, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 20_000 },
+    {}, new Set<number>(), false,
+  );
+  assert.deepEqual(events, []);
+});
+
+test('showcase catch-up cannot clear or duplicate-enter after hidden replacement NOT_FOUND', async () => {
+  const events: string[] = [];
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 7001, limitPrice: 64_000, qty: 0.03,
+    replacementExchangeAckAtMs: Date.now() - 20_000,
+  });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.cancelManagedOrderGone = async () => ({ gone: true, reason: 'NOT_FOUND', attempts: 1 });
+  service.bitfinex = { fetchOrderTrades: async () => [], fetchOrderHistoryEvidence: async () => null };
+  service.prisma = {
+    signalCycleParticipant: { findUnique: async () => ({ status: SignalCycleStatus.PENDING_ENTRY, cycleId: 'cycle-catchup' }) },
+    signalCycle: { findUnique: async () => ({ id: 'cycle-catchup' }) },
+  };
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.logger = { warn: () => undefined };
+  const cleared = await service.clearPendingForShowcaseCatchup(
+    'agent', 'user', { id: 'participant-catchup', cycleId: 'cycle-catchup' }, {},
+  );
+  assert.equal(cleared, false);
+  assert.deepEqual(events, []);
+});
+
+test('cancel-by-exchange reconcile cannot close a transient-hidden replacement', async () => {
+  let closed = false;
+  const meta = { direction: 'SHORT', bitfinexOrderId: 8001, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 30_000 };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.loadExecutionMeta = async () => meta;
+  service.activeTrading = { findOrder: async () => null };
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.bitfinex = { fetchOrderTrades: async () => [], fetchOrderHistoryEvidence: async () => null };
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({ id: 'cycle-r', tradeId: 'cont-r', status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {} }) },
+    signalCycleParticipant: {
+    findUnique: async () => ({ status: SignalCycleStatus.PENDING_ENTRY, cycleId: 'cycle-r' }),
+    findMany: async () => [{
+      id: 'participant-r', cycleId: 'cycle-r', venue: 'bitfinex',
+      cycle: { id: 'cycle-r', tradeId: 'cont-r', status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {} },
+    }],
+    update: async () => { closed = true; },
+  } };
+  service.cycles = { recordHireExecutionEvent: async () => { closed = true; } };
+  service.logger = { warn: () => undefined };
+  await service.reconcileCancelByExchange('user', 'agent', {}, new Set(), {}, ['participant-r']);
+  assert.equal(closed, false);
+});
+
+test('watchdog NOT_FOUND cannot expire a transient-hidden replacement', async () => {
+  let terminalized = false;
+  const meta = { direction: 'SHORT', bitfinexOrderId: 9001, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 30_000 };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.exchanges = { getUserCredentials: async () => ({}) };
+  service.bitfinex = {
+    findOrder: async () => ({ id: 9001, amount: -0.03, amountOrig: -0.03 }),
+    fetchOrderTrades: async () => [],
+    fetchOrderHistoryEvidence: async () => null,
+  };
+  service.loadExecutionMeta = async () => meta;
+  service.cancelManagedOrderGone = async () => ({ gone: true, reason: 'NOT_FOUND', attempts: 1 });
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({ id: 'cycle-w' }) },
+    signalCycleParticipant: {
+      findUnique: async () => ({ status: SignalCycleStatus.PENDING_ENTRY, cycleId: 'cycle-w' }),
+      findMany: async () => [{ id: 'participant-w', cycleId: 'cycle-w' }],
+    },
+    $transaction: async () => { terminalized = true; },
+  };
+  service.logger = { warn: () => undefined };
+  const count = await service.cancelVerifiedUnfilledPendingEntries(
+    'agent', { userId: 'user', exchangeProvider: 'bitfinex' },
+    'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED', 'watchdog',
+  );
+  assert.equal(count, 0);
+  assert.equal(terminalized, false);
+});
+
+test('replacement absence needs two fresh ticks and full missing grace for terminal eligibility', () => {
+  const ackAt = 1_000;
+  const first = advanceReplacementMissingProbe(undefined, '3001:seq:10', ackAt, 2_000);
+  assert.equal(first.probe.count, 1);
+  assert.equal(first.terminalEligible, false);
+  const earlySecond = advanceReplacementMissingProbe(first.probe, '3001:seq:10', ackAt, 10_000);
+  assert.equal(earlySecond.probe.count, 2);
+  assert.equal(earlySecond.terminalEligible, false);
+  const matureThird = advanceReplacementMissingProbe(earlySecond.probe, '3001:seq:10', ackAt, 17_100);
+  assert.equal(matureThird.terminalEligible, true);
+  const advanced = advanceReplacementMissingProbe(matureThird.probe, '3002:seq:11', 17_000, 17_200);
+  assert.equal(advanced.probe.count, 1);
+  assert.equal(advanced.terminalEligible, false);
 });
 
 test('deterministic 0.1% offset anchor is the canonical executable policy', () => {

@@ -5,6 +5,7 @@ import {
   bitfinexAuthPost,
   parseActiveOrdersPayload,
   parseOpenPositionPayload,
+  parseOrderHistoryEvidence,
 } from './bitfinex-api.client';
 
 const testCreds = {
@@ -42,6 +43,24 @@ test('active-order proof accepts only a valid array payload', () => {
     parseActiveOrdersPayload([activeOrderRow('tETHF0:USTF0')]).length,
     0,
   );
+});
+
+test('order-history evidence distinguishes terminal unfilled cancellation from execution', () => {
+  const cancelled = activeOrderRow();
+  cancelled[6] = -0.0005;
+  cancelled[7] = -0.0005;
+  cancelled[13] = 'CANCELED';
+  const evidence = parseOrderHistoryEvidence([cancelled], 241234567890);
+  assert.equal(evidence?.terminal, true);
+  assert.equal(evidence?.filledQty, 0);
+
+  const executed = activeOrderRow();
+  executed[6] = 0;
+  executed[7] = -0.0005;
+  executed[13] = 'EXECUTED @ 65000';
+  assert.ok((parseOrderHistoryEvidence([executed], 241234567890)?.filledQty ?? 0) > 0);
+  assert.equal(parseOrderHistoryEvidence([cancelled], 999), null);
+  assert.throws(() => parseOrderHistoryEvidence({ ok: true }, 1), /not an array/);
 });
 
 test('position proof rejects malformed successful payloads instead of reporting flat', () => {

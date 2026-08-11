@@ -404,6 +404,33 @@ export function parseActiveOrdersPayload(
   return parsed;
 }
 
+export type BitfinexOrderHistoryEvidence = {
+  id: number;
+  status: string;
+  terminal: boolean;
+  filledQty: number;
+};
+
+export function parseOrderHistoryEvidence(
+  payload: unknown,
+  orderId: number,
+): BitfinexOrderHistoryEvidence | null {
+  if (!Array.isArray(payload)) throw new Error('Bitfinex order-history response is not an array');
+  for (const [index, row] of payload.entries()) {
+    const order = parseActiveOrder(row as unknown[]);
+    if (!order) throw new Error(`Bitfinex order-history row ${index} is malformed`);
+    if (order.id !== orderId) continue;
+    const status = order.status.toUpperCase();
+    return {
+      id: order.id,
+      status: order.status,
+      terminal: status.includes('CANCELED') || status.includes('EXECUTED'),
+      filledQty: Math.max(0, Math.abs(order.amountOrig) - Math.abs(order.amount)),
+    };
+  }
+  return null;
+}
+
 export function parseOpenPositionPayload(
   payload: unknown,
   symbol = BITFINEX_BTC_PERP_SYMBOL,
@@ -792,6 +819,18 @@ export class BitfinexTradingClient {
     return rows
       .map((row) => parseOrderTrade(row))
       .filter((t): t is BitfinexOrderTrade => t != null);
+  }
+
+  async fetchOrderHistoryEvidence(
+    creds: ExchangeCredentials,
+    orderId: number,
+  ): Promise<BitfinexOrderHistoryEvidence | null> {
+    const rows = await bitfinexAuthPost<unknown[][]>(
+      creds,
+      'v2/auth/r/orders/hist',
+      { id: [orderId] },
+    );
+    return parseOrderHistoryEvidence(rows, orderId);
   }
 
   async listActiveOrders(

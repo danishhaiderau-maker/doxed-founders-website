@@ -99,6 +99,7 @@ const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
 const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
 const SHOWCASE_ORDER_SNAPSHOT_PROPAGATION_GRACE_MS = 15_000;
+const BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS = 15_000;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
 export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
@@ -882,6 +883,7 @@ type ExecutionPayload = {
   profitLockFloor?: number;
   stopLossPlaced?: boolean;
   lastChaseAtMs?: number;
+  replacementExchangeAckAtMs?: number;
   limitChaseCount?: number;
   fillPrice?: number;
   leverage?: number;
@@ -1374,6 +1376,25 @@ export function pendingEntryOwnershipAdvanced(
   const durableRevision = showcaseIntentRevision(durableIntent);
   return durableRevision != null && durableRevision !== observedRevision;
 }
+
+export function advanceReplacementMissingProbe(
+  prior: { generation: string; firstMissingAtMs: number; count: number } | undefined,
+  generation: string,
+  exchangeAckAtMs: number,
+  nowMs: number,
+): { probe: { generation: string; firstMissingAtMs: number; count: number }; terminalEligible: boolean } {
+  const probe = prior?.generation === generation
+    ? { ...prior, count: prior.count + 1 }
+    : { generation, firstMissingAtMs: nowMs, count: 1 };
+  return {
+    probe,
+    terminalEligible:
+      probe.count >= 2
+      && nowMs - exchangeAckAtMs >= BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS
+      && nowMs - probe.firstMissingAtMs >= BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS,
+  };
+}
+
 
 /**
  * A fresh source fill may immediately follow a signed exact-limit reprice.
@@ -2319,18 +2340,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /** One writer per participant while a cancel-race fill is promoted to OPEN. */
   private readonly cancelRaceFillInFlight = new Set<string>();
   /** Serializes cancel/replace persistence against gone-order classification. */
-  private readonly participantMoneyLane = new Map<string, Promise<void>>();
+  private participantMoneyLane = new Map<string, Promise<void>>();
+  private readonly replacementMissingProbe = new Map<
+    string,
+    { generation: string; firstMissingAtMs: number; count: number }
+  >();
 
   private async acquireParticipantMoneyLane(participantId: string): Promise<() => void> {
-    const prior = this.participantMoneyLane.get(participantId) ?? Promise.resolve();
+    const lane = this.participantMoneyLane ?? (this.participantMoneyLane = new Map());
+    const prior = lane.get(participantId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
-    this.participantMoneyLane.set(participantId, current);
+    lane.set(participantId, current);
     await prior;
     return () => {
       release();
-      if (this.participantMoneyLane.get(participantId) === current) {
-        this.participantMoneyLane.delete(participantId);
+      if (lane.get(participantId) === current) {
+        lane.delete(participantId);
       }
     };
   }
@@ -2658,7 +2684,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       select: { id: true, cycleId: true },
     });
     for (const participant of pending) {
-      const meta = await this.loadExecutionMeta(participant.id);
+      const releaseMoneyLane = await this.acquireParticipantMoneyLane(participant.id);
+      try {
+      const [freshParticipant, freshCycle, meta] = await Promise.all([
+        this.prisma.signalCycleParticipant.findUnique({
+          where: { id: participant.id },
+          select: { status: true, cycleId: true },
+        }),
+        this.prisma.signalCycle.findUnique({
+          where: { id: participant.cycleId },
+          select: { id: true },
+        }),
+        this.loadExecutionMeta(participant.id),
+      ]);
+      if (
+        !freshParticipant
+        || !freshCycle
+        || freshParticipant.status !== SignalCycleStatus.PENDING_ENTRY
+        || freshParticipant.cycleId !== participant.cycleId
+      ) continue;
       const orderId = meta.bitfinexOrderId;
       if (!orderId) continue;
       const order = await this.activeTrading.findOrder(creds, orderId);
@@ -2681,6 +2725,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           `CANCEL_FAILED_ORDER_STILL_LIVE order=${orderId} participant=${participant.id}`,
         );
       }
+      if (
+        cancelled.reason === 'NOT_FOUND'
+        && !(await this.replacementTerminalUnfilledProof(creds, meta))
+      ) continue;
       // Keep the participant-level audit truthful without closing the shared
       // showcase cycle: another subscriber may still be mirroring that same
       // source order. The UI can now distinguish watchdog cancellation from
@@ -2717,6 +2765,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         `${logLabel} cancelled verified-unfilled entry ${orderId} ` +
           `participant=${participant.id} cycle=${participant.cycleId}`,
       );
+      } finally {
+        releaseMoneyLane();
+      }
     }
     return cancelledCount;
   }
@@ -3156,13 +3207,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       tradeIdsMatch(candidate.cycle.tradeId, preferredTradeId),
     );
     if (!participant || !tradeIdsMatch(participant.cycle.tradeId, preferredTradeId)) return false;
-    const meta = await this.loadExecutionMeta(participant.id);
-    if (!meta.bitfinexOrderId || !meta.direction) return false;
     const creds = await this.exchanges.getUserCredentials(
       instance.userId,
       instance.exchangeProvider,
     );
     if (!creds) return false;
+
+    const releaseMoneyLane = await this.acquireParticipantMoneyLane(participant.id);
+    try {
+    const [freshParticipant, meta] = await Promise.all([
+      this.prisma.signalCycleParticipant.findUnique({
+        where: { id: participant.id },
+        include: { cycle: true },
+      }),
+      this.loadExecutionMeta(participant.id),
+    ]);
+    if (
+      !freshParticipant
+      || freshParticipant.status !== SignalCycleStatus.PENDING_ENTRY
+      || freshParticipant.cycle.status !== SignalCycleStatus.PENDING_ENTRY
+      || !tradeIdsMatch(freshParticipant.cycle.tradeId, preferredTradeId)
+      || !meta.bitfinexOrderId
+      || !meta.direction
+    ) return false;
 
     // Bitfinex can cross a few hundred milliseconds after the source's paper
     // book. Stay below the 3s contract while avoiding a market-order fallback.
@@ -3173,17 +3240,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return this.recordCancelRaceFill(
           agentId,
           instance.userId,
-          participant.cycle,
-          participant.id,
+          freshParticipant.cycle,
+          freshParticipant.id,
           meta,
           creds,
-          participant.cycle.intentEnvelope as SignalIntentEnvelope,
+          freshParticipant.cycle.intentEnvelope as SignalIntentEnvelope,
           fill,
           'SHOWCASE_POSITION_OPENED_WAKE',
           sourceFillAt,
       );
     }
     return false;
+    } finally {
+      releaseMoneyLane();
+    }
   }
 
   /**
@@ -6239,7 +6309,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     participant: { id: string; cycleId: string },
     creds: ExchangeCredentials,
   ): Promise<boolean> {
-    const meta = await this.loadExecutionMeta(participant.id);
+    const release = await this.acquireParticipantMoneyLane(participant.id);
+    try {
+    const [freshParticipant, freshCycle, meta] = await Promise.all([
+      this.prisma.signalCycleParticipant.findUnique({
+        where: { id: participant.id },
+        select: { status: true, cycleId: true },
+      }),
+      this.prisma.signalCycle.findUnique({
+        where: { id: participant.cycleId },
+        select: { id: true },
+      }),
+      this.loadExecutionMeta(participant.id),
+    ]);
+    if (
+      !freshParticipant
+      || !freshCycle
+      || freshParticipant.status !== SignalCycleStatus.PENDING_ENTRY
+      || freshParticipant.cycleId !== participant.cycleId
+    ) return false;
     const orderId = meta.bitfinexOrderId;
     if (orderId) {
       const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
@@ -6260,6 +6348,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
         return false;
       }
+      if (
+        cancel.reason === 'NOT_FOUND'
+        && !(await this.replacementTerminalUnfilledProof(creds, meta))
+      ) return false;
     }
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXPIRED', {
@@ -6273,6 +6365,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       `[MIRROR-CATCHUP] cleared stale pending ${participant.id} cycle=${participant.cycleId} for showcase catch-up`,
     );
     return true;
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -6792,6 +6887,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ?? (result.ok && !gone ? 'CANCEL_ACK_NOT_CONFIRMED' : undefined),
       attempts: result.attempts,
     };
+  }
+
+  private async replacementTerminalUnfilledProof(
+    creds: ExchangeCredentials,
+    meta: ExecutionPayload,
+  ): Promise<boolean> {
+    const orderId = meta.bitfinexOrderId;
+    if (!orderId || !meta.replacementExchangeAckAtMs) return true;
+    try {
+      const [trades, history] = await Promise.all([
+        this.bitfinex.fetchOrderTrades(creds, orderId),
+        this.bitfinex.fetchOrderHistoryEvidence(creds, orderId),
+      ]);
+      return (
+        !trades.some((trade) => Math.abs(trade.execAmount) > 0)
+        && history?.terminal === true
+        && history.filledQty === 0
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -7390,8 +7506,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     activeOrderIdSet: Set<number>,
     exitOnly = false,
   ) {
-    const intent = cycle.intentEnvelope as SignalIntentEnvelope;
-    const orderId = meta.bitfinexOrderId;
+    let intent = cycle.intentEnvelope as SignalIntentEnvelope;
+    let orderId = meta.bitfinexOrderId;
     if (!orderId || !meta.direction) return;
 
     if (participant.status === SignalCycleStatus.OPEN) {
@@ -7399,18 +7515,53 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
-    if (meta.partialFillQty && meta.partialFillStopOrderId) {
-      const stopHandled = await this.reconcilePendingPartialFillStop(
-        agentId,
-        userId,
-        cycle,
-        participant.id,
-        meta,
-        creds,
-        intent,
-      );
-      if (stopHandled) return;
-    }
+    // Serialize every pending-entry terminal/cancel decision against exact
+    // limit replacement. Reload ownership only after entering the lane so a
+    // tick that began on the prior generation can never cancel/expire it while
+    // the newly ACKed order is being persisted.
+    const releaseTerminalLane = await this.acquireParticipantMoneyLane(participant.id);
+    let chaseCurrentOrder = false;
+    try {
+      const observedCycleStatus = cycle.status;
+      const observedParticipantStatus = participant.status;
+      const canReloadOwnership = !!this.prisma?.signalCycle?.findUnique
+        && !!this.prisma?.signalCycleParticipant?.findUnique;
+      const [freshCycle, freshParticipant, freshMeta] = canReloadOwnership ? await Promise.all([
+        this.prisma.signalCycle.findUnique({
+          where: { id: cycle.id },
+          select: { id: true, tradeId: true, intentEnvelope: true, expiresAt: true, status: true },
+        }),
+        this.prisma.signalCycleParticipant.findUnique({
+          where: { id: participant.id },
+          select: { id: true, status: true },
+        }),
+        this.loadExecutionMeta(participant.id),
+      ]) : [cycle, participant, meta];
+      if (!freshCycle || !freshParticipant) return;
+      if (
+        freshCycle.status !== observedCycleStatus
+        || freshParticipant.status !== observedParticipantStatus
+      ) return; // next tick must branch from one coherent durable snapshot
+      if (freshParticipant.status !== SignalCycleStatus.PENDING_ENTRY) return;
+      cycle = freshCycle;
+      participant = freshParticipant;
+      meta = freshMeta;
+      intent = cycle.intentEnvelope as SignalIntentEnvelope;
+      orderId = meta.bitfinexOrderId;
+      if (!orderId || !meta.direction) return;
+
+      if (meta.partialFillQty && meta.partialFillStopOrderId) {
+        const stopHandled = await this.reconcilePendingPartialFillStop(
+          agentId,
+          userId,
+          cycle,
+          participant.id,
+          meta,
+          creds,
+          intent,
+        );
+        if (stopHandled) return;
+      }
 
     // C2 fix: showcase cycle already CLOSED/EXPIRED (syncShowcaseCycleClosures marked it
     // because the showcase position exited). A relay still in PENDING_ENTRY must drop its
@@ -7465,6 +7616,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.log(
         `Hire expire ${userId} cycle=${cycle.id}: showcase cycle ${cycle.status} — cancelled relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
       );
+      if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
         pnl_usd: 0,
@@ -7607,6 +7759,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             );
             return;
           }
+          if (
+            resolution.cancelReason === 'NOT_FOUND'
+            && !(await this.replacementTerminalUnfilledProof(creds, meta))
+          ) return;
           this.logger.warn(
             `Missed showcase fill ${userId} cycle=${cycle.id}: exchange-proven unfilled managed order ${orderId} cancelled — copy expired without market catch-up`,
           );
@@ -7683,6 +7839,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         this.logger.log(
           `Hire expire ${userId} cycle=${cycle.id}: showcase abandoned (${abandon.reason ?? 'unknown'}) — cancelled relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
         );
+        if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
           venue: 'bitfinex',
           pnl_usd: 0,
@@ -7733,6 +7890,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         });
         return;
       }
+      if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
         pnl_usd: 0,
@@ -7746,6 +7904,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? activeOrderIdSet.has(orderId)
         : !!(await this.activeTrading.findOrder(creds, orderId).catch(() => null));
     if (active) {
+      this.replacementMissingProbe.delete(participant.id);
       if (exitOnly) {
         // PAUSED / hire-expired exit-only must CANCEL resting entries, not
         // early-return. Returning here left cont-3d3cd2524783 live on Bitfinex
@@ -7796,6 +7955,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         this.logger.log(
           `Exit-only ${userId} cycle=${cycle.id}: cancelled resting relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
         );
+        if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
           venue: 'bitfinex',
           pnl_usd: 0,
@@ -7804,17 +7964,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         });
         return;
       }
-      await this.applyLimitChase(
-        agentId,
-        userId,
-        cycle.id,
-        participant.id,
-        meta,
-        creds,
-        intent,
-        cycle.tradeId,
-        false,
-      );
+      chaseCurrentOrder = true;
+    }
+
+    } finally {
+      releaseTerminalLane();
+    }
+
+    if (chaseCurrentOrder) {
+      await this.applyLimitChase(agentId, userId, cycle.id, participant.id, meta, creds, intent, cycle.tradeId, false);
       return;
     }
 
@@ -7865,6 +8023,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return;
     }
 
+    if (durableMeta.bitfinexOrderId === orderId && durableMeta.replacementExchangeAckAtMs) {
+      let freshOrders: Array<{ id?: number }>;
+      try {
+        freshOrders = await this.activeTrading.listActiveOrders(creds);
+      } catch {
+        return; // unavailable exchange proof is never absence
+      }
+      if (freshOrders.some((order) => Number(order.id) === orderId)) {
+        this.replacementMissingProbe.delete(participant.id);
+        return;
+      }
+      const generation = `${orderId}:${showcaseIntentRevision(durableCycle.intentEnvelope) ?? 'unknown'}`;
+      const nowMs = Date.now();
+      const priorProbe = this.replacementMissingProbe.get(participant.id);
+      const { probe, terminalEligible } = advanceReplacementMissingProbe(
+        priorProbe,
+        generation,
+        durableMeta.replacementExchangeAckAtMs,
+        nowMs,
+      );
+      this.replacementMissingProbe.set(participant.id, probe);
+      if (!terminalEligible) return;
+    }
+
     let positionFetchFailed = false;
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => {
       positionFetchFailed = true;
@@ -7883,6 +8065,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return;
       }
       this.logger.warn(`Order ${orderId} gone without position for ${userId} — treating as cancelled`);
+      if (!(await this.replacementTerminalUnfilledProof(creds, durableMeta))) return;
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
         pnl_usd: 0,
@@ -7919,6 +8102,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const freshBaselineMinQty = otherAttributedQty + lotQty * 0.85;
       if (currentExchangeQty + MIN_QTY_BTC < freshBaselineMinQty) {
+      if (!(await this.replacementTerminalUnfilledProof(creds, durableMeta))) return;
       this.logger.warn(
           `Order ${orderId} gone but merged position ${currentExchangeQty.toFixed(5)} BTC did not grow for lot ${lotQty.toFixed(5)} (baseline ${exchangeQtyAtOrder.toFixed(5)}, fresh attributed ${otherAttributedQty.toFixed(5)}) — expire phantom pending`,
       );
@@ -8347,7 +8531,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     });
 
     for (const row of candidates) {
-      const meta = await this.loadExecutionMeta(row.id);
+      const releaseMoneyLane = await this.acquireParticipantMoneyLane(row.id);
+      try {
+      const [freshParticipant, freshCycle, meta] = await Promise.all([
+        this.prisma.signalCycleParticipant.findUnique({
+          where: { id: row.id },
+          select: { status: true, cycleId: true },
+        }),
+        this.prisma.signalCycle.findUnique({
+          where: { id: row.cycleId },
+          select: { id: true, tradeId: true, status: true, intentEnvelope: true },
+        }),
+        this.loadExecutionMeta(row.id),
+      ]);
+      if (
+        !freshParticipant
+        || !freshCycle
+        || freshParticipant.status !== SignalCycleStatus.PENDING_ENTRY
+        || freshParticipant.cycleId !== row.cycleId
+      ) continue;
       const oid = meta.bitfinexOrderId;
       if (oid == null) continue;
       // If the order is still resting on the exchange, it has NOT been
@@ -8362,10 +8564,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (stillThere) continue;
 
       const latestMeta = await this.loadExecutionMeta(row.id);
-      const latestIntent = (row.cycle?.intentEnvelope ?? null) as SignalIntentEnvelope | null;
+      const latestIntent = (freshCycle.intentEnvelope ?? null) as SignalIntentEnvelope | null;
       if (
         shouldDeferCancelByExchangeForReplacement(
-          row.cycle?.tradeId ?? '',
+          freshCycle.tradeId ?? '',
           latestIntent,
           oid,
           latestMeta.bitfinexOrderId,
@@ -8391,8 +8593,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             userId,
             {
               id: row.cycleId,
-              status: row.cycle?.status ?? SignalCycleStatus.PENDING_ENTRY,
-              tradeId: row.cycle?.tradeId ?? null,
+              status: freshCycle.status,
+              tradeId: freshCycle.tradeId ?? null,
             },
             row.id,
             latestMeta,
@@ -8411,6 +8613,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
 
       const venue = row.venue ?? 'bitfinex';
+
+      if (!(await this.replacementTerminalUnfilledProof(creds, latestMeta))) continue;
 
       await this.prisma.signalCycleParticipant.update({
         where: { id: row.id },
@@ -8436,6 +8640,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.logger.warn(
         `[RECONCILE-ADOPT] cancel-by-exchange detected ${userId} participant=${row.id} cycle=${row.cycleId} bitfinexOrderId=${oid} — order vanished with no FILLED event, marking EXIT @ $0`,
       );
+      } finally {
+        releaseMoneyLane();
+      }
     }
 
     // Phase 6 fix 5 — defensive re-cancel of the inverse case: a participant
@@ -9178,6 +9385,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         clientOrderId,
         local_mark: opts.mark,
         lastChaseAtMs: opts.now,
+        replacementExchangeAckAtMs: exchangeAckAtMs,
         limitChaseCount: chaseCount,
         ...(signedExactLimit
           ? {
