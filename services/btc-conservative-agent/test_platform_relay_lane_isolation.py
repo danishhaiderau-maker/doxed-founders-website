@@ -109,6 +109,7 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     )
     assert "_platform_relay_lane_for_event" in push_source
     assert 'payload["research_lane"] = relay_lane' in push_source
+    assert 'isinstance(payload.get("qty"), (int, float))' in push_source
     assert "_platform_relay_lane_for_event" in emit_source
     assert '"research_lane": (' in close_source
     assert 'pos.get("research_lane")' in close_source
@@ -116,6 +117,9 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert '_push_showcase_relay_event(' in fill_source
     assert '"POSITION_OPENED"' in fill_source
     assert '"fill_price": fill_px' in fill_source
+
+    chase_source = ast.get_source_segment(BOT_SOURCE, _function("_apply_limit_chase"))
+    assert '"qty": float(order.get("qty") or 0)' in chase_source
 
 
 def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:

@@ -7732,6 +7732,8 @@ def _push_showcase_relay_event(
             (
                 event == "LIMIT_UPDATED"
                 and isinstance(payload.get("limit_price"), (int, float))
+                and isinstance(payload.get("qty"), (int, float))
+                and float(payload.get("qty") or 0) > 0
                 and payload.get("entry_limit_policy") in EXECUTABLE_ENTRY_POLICY_VERSIONS
                 and payload.get("executable") is True
             )
@@ -7882,6 +7884,10 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         or 0
     )
     margin_usdt = float(sig.get("margin_usdt") or FIXED_MARGIN_USDT)
+    try:
+        exact_qty = float(sig.get("qty"))
+    except (TypeError, ValueError):
+        exact_qty = 0.0
     win_prob = ai_dict.get("win_prob") if isinstance(ai_dict.get("win_prob"), (int, float)) else None
     edge_score = sig.get("edge_score_at_entry")
     eff_thr = sig.get("effective_threshold_at_entry")
@@ -7908,12 +7914,13 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         direction not in ("LONG", "SHORT")
         or not limit_price
         or limit_price <= 0
+        or (event == "ORDER_PLACED" and exact_qty <= 0)
         or not is_executable_entry_policy(entry_limit_policy)
     ):
         logger.warning(
             f"[INTENT WEBHOOK] blocked inexact lifecycle event={event} "
             f"trade={trade_id} direction={direction or 'MISSING'} "
-            f"limit={limit_price} policy={entry_limit_policy or 'MISSING'}"
+            f"limit={limit_price} qty={exact_qty} policy={entry_limit_policy or 'MISSING'}"
         )
         return
 
@@ -7937,6 +7944,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "direction": direction or None,
         "signal_price": signal_price if signal_price > 0 else None,
         "limit_price": limit_price if limit_price and limit_price > 0 else None,
+        "qty": exact_qty if exact_qty > 0 else None,
         "margin_usdt": margin_usdt,
         "leverage": leverage,
         "win_prob": win_prob,
@@ -18496,6 +18504,7 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         order.get("trade_id"),
         {
             "limit_price": new_limit,
+            "qty": float(order.get("qty") or 0),
             "direction": direction,
             "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
             "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
@@ -18580,6 +18589,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         order.get("trade_id"),
         {
             "limit_price": new_limit,
+            "qty": float(order.get("qty") or 0),
             "direction": direction,
             "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
             "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
@@ -18670,6 +18680,7 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
             {
                 "event_id": transition_id,
                 "limit_price": new_limit,
+                "qty": float(order.get("qty") or 0),
                 "direction": direction,
                 "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
                 "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),

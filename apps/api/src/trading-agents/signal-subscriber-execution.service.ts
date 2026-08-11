@@ -107,6 +107,45 @@ export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
 export const LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS = 30_000;
 const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
 
+export type ExactShowcaseEntryQtyResolution =
+  | { ok: true; qty: number; requiredMarginUsd: number; capQty: number }
+  | { ok: false; reason: 'MISSING_EXACT_QTY' | 'INVALID_SIZING_CONTEXT' | 'BELOW_EXCHANGE_MIN_QTY' | 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
+
+/**
+ * Preserve the showcase's canonical quantity at Bitfinex's five-decimal BTC
+ * precision. The subscriber margin setting is a ceiling only: exceeding it
+ * blocks the entry instead of silently producing a different-sized trade.
+ */
+export function resolveExactShowcaseEntryQty(input: {
+  exactQtyBtc: unknown;
+  maxMarginUsd: number;
+  leverage: number;
+  limitPrice: number;
+  minQtyBtc?: number;
+}): ExactShowcaseEntryQtyResolution {
+  const exact = typeof input.exactQtyBtc === 'number' ? input.exactQtyBtc : Number.NaN;
+  if (!Number.isFinite(exact) || exact <= 0) return { ok: false, reason: 'MISSING_EXACT_QTY' };
+  if (
+    !Number.isFinite(input.maxMarginUsd) || input.maxMarginUsd <= 0
+    || !Number.isFinite(input.leverage) || input.leverage <= 0
+    || !Number.isFinite(input.limitPrice) || input.limitPrice <= 0
+  ) return { ok: false, reason: 'INVALID_SIZING_CONTEXT' };
+  const qty = Math.floor((exact + Number.EPSILON) * 1e5) / 1e5;
+  const minQty = input.minQtyBtc ?? MIN_QTY_BTC;
+  if (qty < minQty) return { ok: false, reason: 'BELOW_EXCHANGE_MIN_QTY' };
+  const rawCapQty = input.maxMarginUsd * input.leverage / input.limitPrice;
+  const capQty = Math.floor((rawCapQty + Number.EPSILON) * 1e5) / 1e5;
+  if (btcToSats(qty) > btcToSats(capQty)) {
+    return { ok: false, reason: 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
+  }
+  return {
+    ok: true,
+    qty,
+    capQty,
+    requiredMarginUsd: qty * input.limitPrice / input.leverage,
+  };
+}
+
 /**
  * Ops kill-switch for sustained live-fidelity auto-pause.
  * Default ON (unset). Set LIVE_FIDELITY_GUARD_ENABLED=0|false|off|no to skip
@@ -1009,6 +1048,7 @@ type SignedShowcaseExactLimit = {
   tradeId: string;
   direction: 'LONG' | 'SHORT';
   limitPrice: number;
+  exactQtyBtc: number;
   receivedAtMs: number;
   sourceEventAtMs?: number;
 };
@@ -1017,6 +1057,7 @@ type SignedShowcaseEnvelope = SignalIntentEnvelope & {
   trade_id?: string;
   entry: SignalIntentEnvelope['entry'] & {
     exact_limit_price?: number;
+    exact_qty_btc?: number;
   };
   context: SignalIntentEnvelope['context'] & {
     signed_showcase_event?: boolean;
@@ -1037,6 +1078,7 @@ export function readFreshSignedShowcaseExactLimit(
   const receivedAtMs = Date.parse(String(intent?.context?.platform_received_at ?? ''));
   const sourceEventAtMs = Date.parse(String(intent?.context?.showcase_event_at ?? ''));
   const limitPrice = Number(intent?.entry?.exact_limit_price ?? 0);
+  const exactQtyBtc = Number(intent?.entry?.exact_qty_btc ?? 0);
   const direction = intent?.direction;
   const event = String(intent?.context?.showcase_event ?? '');
   if (
@@ -1052,6 +1094,8 @@ export function readFreshSignedShowcaseExactLimit(
     || (direction !== 'LONG' && direction !== 'SHORT')
     || !Number.isFinite(limitPrice)
     || limitPrice <= 0
+    || !Number.isFinite(exactQtyBtc)
+    || exactQtyBtc <= 0
     || !Number.isFinite(receivedAtMs)
     || receivedAtMs > nowMs + 5_000
     || nowMs - receivedAtMs > SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS
@@ -1062,6 +1106,7 @@ export function readFreshSignedShowcaseExactLimit(
     tradeId,
     direction,
     limitPrice,
+    exactQtyBtc,
     receivedAtMs,
     ...(Number.isFinite(sourceEventAtMs) ? { sourceEventAtMs } : {}),
   };
@@ -6890,7 +6935,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       exchangeBookProvenEmpty?: boolean;
     },
   ): Promise<boolean> {
-    const intent = envelopeJson as SignalIntentEnvelope;
+    const intent = envelopeJson as SignalIntentEnvelope & {
+      entry: SignalIntentEnvelope['entry'] & { exact_qty_btc?: number };
+    };
     if (
       !tradeId
       || !intent?.direction
@@ -6898,6 +6945,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       || intent.signalId !== tradeId
       || intent.entry?.mode !== 'EXACT_LIMIT'
       || intent.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
+      || typeof intent.entry?.exact_qty_btc !== 'number'
       || !isExecutableEntryPolicy(intent.context?.entry_limit_policy)
     ) {
       this.logger.warn(
@@ -6996,7 +7044,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     } else {
       botStateForEntry = mergeSignedShowcaseOrders(null, [signedExactLimit]);
       this.logger.log(
-        `[SIGNED-FAST] exact showcase limit accepted trade=${tradeId} limit=${signedExactLimit.limitPrice.toFixed(2)} ageMs=${Date.now() - signedExactLimit.receivedAtMs}`,
+        `[SIGNED-FAST] exact showcase order accepted trade=${tradeId} limit=${signedExactLimit.limitPrice.toFixed(2)} qty=${signedExactLimit.exactQtyBtc.toFixed(8)} ageMs=${Date.now() - signedExactLimit.receivedAtMs}`,
       );
     }
 
@@ -7023,6 +7071,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       intentCap != null && Number.isFinite(intentCap) && intentCap > 0
         ? Math.min(marginCap, intentCap)
         : marginCap;
+    const leverage = resolveSubscriberLeverage(intent);
+    const exactQty = resolveExactShowcaseEntryQty({
+      exactQtyBtc: intent.entry.exact_qty_btc,
+      maxMarginUsd: effectiveCap,
+      leverage,
+      limitPrice,
+      minQtyBtc: MIN_QTY_BTC,
+    });
+    if (!exactQty.ok) {
+      this.logger.error(
+        `Hire reject ${instance.userId} cycle=${cycleId}: exact showcase quantity rejected reason=${exactQty.reason}`,
+      );
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          lastError: exactQty.reason === 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP'
+            ? 'Showcase quantity exceeds your configured per-trade margin cap; exact copy was blocked.'
+            : 'Signed showcase order is missing a valid exact quantity; entry was blocked.',
+        },
+      });
+      return false;
+    }
+    const qty = exactQty.qty;
+    const marginUsd = exactQty.requiredMarginUsd;
 
     let available = fastPreflight?.availableUsd ?? 0;
     if (!fastPreflight) {
@@ -7036,15 +7108,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
     }
 
-    const marginUsd = Math.min(effectiveCap, available * 0.95);
-    if (marginUsd < effectiveCap * 0.9) {
+    if (available * 0.95 < marginUsd) {
       this.logger.log(
-        `Hire skip ${instance.userId} cycle=${cycleId}: free margin $${available.toFixed(2)} < $${effectiveCap} required`,
+        `Hire skip ${instance.userId} cycle=${cycleId}: free margin $${available.toFixed(2)} < $${marginUsd.toFixed(2)} exact-copy requirement`,
       );
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
         data: {
-          lastError: `Insufficient Derivatives margin ($${available.toFixed(2)} available, need ~$${effectiveCap}). Move USDT to Derivatives in Bitfinex.`,
+          lastError: `Insufficient Derivatives margin ($${available.toFixed(2)} available, need ~$${marginUsd.toFixed(2)}). Move USDT to Derivatives in Bitfinex.`,
         },
       });
       return false;
@@ -7122,9 +7193,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           return false;
         }
       }
-
-      const leverage = resolveSubscriberLeverage(intent);
-      const qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
 
     let prePosition: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
     let latestGate: { status: TradingAgentInstanceStatus; dashboardState: unknown } | null = null;
@@ -7247,6 +7315,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       limit_price: limitPrice,
         original_limit_price: limitPrice,
       qty,
+        source_exact_qty_btc: intent.entry.exact_qty_btc,
+        venue_qty_btc: qty,
         margin_usd: marginUsd,
         margin_cap_usd: effectiveCap,
         leverage,
@@ -9780,7 +9850,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (!meta.direction || !meta.bitfinexOrderId || !meta.limitPrice) return;
 
     const leverage = resolveSubscriberLeverage(intent);
-    const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
+    const exactReplacementQty = resolveExactShowcaseEntryQty({
+      exactQtyBtc: (intent.entry as SignalIntentEnvelope['entry'] & { exact_qty_btc?: number })?.exact_qty_btc,
+      maxMarginUsd: Number(intent.risk?.max_margin_usd ?? meta.margin_usd ?? 0),
+      leverage,
+      limitPrice: opts.newLimit,
+      minQtyBtc: MIN_QTY_BTC,
+    });
+    const qty = meta.qty ?? (exactReplacementQty.ok ? exactReplacementQty.qty : 0);
+    if (btcToSats(qty) === 0) {
+      this.logger.error(
+        `Hire chase ${userId} cycle=${cycleId}: exact managed quantity unavailable; replacement blocked`,
+      );
+      return;
+    }
     const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
     const signedExactLimitCandidate = opts.tradeId
       ? readFreshSignedShowcaseExactLimit(opts.tradeId, intent, opts.now)
@@ -11626,6 +11709,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
 
       const showcaseEntry = typeof pos.entry === 'number' && pos.entry > 0 ? pos.entry : mark;
+      const showcaseQty = typeof pos.qty === 'number' ? pos.qty : Number.NaN;
+      if (!Number.isFinite(showcaseQty) || showcaseQty <= 0) {
+        await this.recordActionMissEntry(
+          agentId,
+          instance.userId,
+          matchedCycle.id,
+          tradeId,
+          'NO_EXACT_QTY',
+          { showcase_entry: showcaseEntry, showcase_qty: pos.qty ?? null, mark },
+        );
+        continue;
+      }
       const slipUsd = Math.abs(mark - showcaseEntry);
       if (maxSlip != null && slipUsd > maxSlip) {
         this.logger.warn(
@@ -11744,6 +11839,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         marginCap,
         tradeId,
         showcaseEntry,
+        showcaseQty,
         mark,
         slipUsd,
       );
@@ -11824,6 +11920,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     marginCap: number,
     tradeId: string,
     showcaseEntry: number,
+    showcaseQty: number,
     mark: number,
     slipUsd: number,
   ): Promise<boolean> {
@@ -11933,14 +12030,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       await releaseClaim();
       return false;
     }
-    const marginUsd = Math.min(effectiveCap, available * 0.95);
-    if (marginUsd < effectiveCap * 0.9) {
+    const leverage = resolveSubscriberLeverage(intent);
+    const exactQty = resolveExactShowcaseEntryQty({
+      exactQtyBtc: showcaseQty,
+      maxMarginUsd: effectiveCap,
+      leverage,
+      limitPrice: mark,
+      minQtyBtc: MIN_QTY_BTC,
+    });
+    if (!exactQty.ok) {
+      await releaseClaim();
+      await this.recordActionMissEntry(
+        agentId,
+        instance.userId,
+        cycleId,
+        tradeId,
+        exactQty.reason,
+        {
+          source_exact_qty_btc: showcaseQty,
+          margin_cap_usd: effectiveCap,
+          mark,
+        },
+      );
+      return false;
+    }
+    const marginUsd = exactQty.requiredMarginUsd;
+    if (available * 0.95 < marginUsd) {
       await releaseClaim();
       return false;
     }
 
-    const leverage = resolveSubscriberLeverage(intent);
-    const qty = computeQty(marginUsd, leverage, mark, MIN_QTY_BTC);
+    const qty = exactQty.qty;
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
 
     let marketOrderId: number;
@@ -11986,9 +12106,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         mark_at_entry: mark,
         slip_usd: Math.round(slipUsd * 100) / 100,
         qty,
+        source_exact_qty_btc: showcaseQty,
+        venue_qty_btc: qty,
         direction: intent.direction,
         leverage,
         margin_usd: marginUsd,
+        margin_cap_usd: effectiveCap,
         limitPrice: fillPrice,
         originalLimitPrice: showcaseEntry,
         fillPrice,
@@ -12006,9 +12129,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       venue: 'bitfinex',
       fill_price: fillPrice,
       qty,
+      source_exact_qty_btc: showcaseQty,
+      venue_qty_btc: qty,
       direction: intent.direction,
       leverage,
       margin_usd: marginUsd,
+      margin_cap_usd: effectiveCap,
       limitPrice: fillPrice,
       originalLimitPrice: showcaseEntry,
       fillPrice,
@@ -12143,7 +12269,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
       const intent = cycle.intentEnvelope as SignalIntentEnvelope & {
         intent_source?: 'paper' | 'live';
-        entry?: { exact_limit_price?: number };
+        entry?: { exact_limit_price?: number; exact_qty_btc?: number };
         margin_usdt?: number;
       };
       if (!intent?.direction || intent.action !== 'ENTER') continue;
@@ -12177,6 +12303,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (
         intent.entry?.mode !== 'EXACT_LIMIT'
         || intent.entry?.reference !== 'SHOWCASE_EXACT_LIMIT'
+        || typeof intent.entry?.exact_qty_btc !== 'number'
         || !isExecutableEntryPolicy(intent.context?.entry_limit_policy)
         || !Number.isFinite(exactLimit)
         || exactLimit <= 0
@@ -12198,10 +12325,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
       limitPrice = sanitized;
 
-      // §8 #3 — platform cap always wins. marginCap (subscriberMaxMarginUsd)
-      // is the ceiling; the envelope's margin_usdt is informational only.
+      // Exact showcase quantity is authoritative; the subscriber margin is a
+      // hard safety ceiling and never a replacement sizing instruction.
       const leverage = resolveSubscriberLeverage(intent);
-      const qty = computeQty(marginCap, leverage, limitPrice, MIN_QTY_BTC);
+      const exactQty = resolveExactShowcaseEntryQty({
+        exactQtyBtc: intent.entry.exact_qty_btc,
+        maxMarginUsd: marginCap,
+        leverage,
+        limitPrice,
+        minQtyBtc: MIN_QTY_BTC,
+      });
+      if (!exactQty.ok) {
+        this.logger.warn(
+          `[INTENT-MIRROR] exact quantity blocked trade=${tid} user=${instance.userId} reason=${exactQty.reason}`,
+        );
+        continue;
+      }
+      const qty = exactQty.qty;
+      const exactMarginUsd = exactQty.requiredMarginUsd;
 
       // N4 — dry-run mode. Log the would-be order + audit row, no exchange call.
       if (intentMirrorDryRunActive(instance)) {
@@ -12212,7 +12353,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           direction: intent.direction,
           limit_price: Math.round(limitPrice * 100) / 100,
           qty,
-          margin_usd: marginCap,
+          source_exact_qty_btc: intent.entry.exact_qty_btc,
+          margin_usd: exactMarginUsd,
+          margin_cap_usd: marginCap,
           leverage,
           intent_source: intent.intent_source ?? 'unknown',
           cycle_id: cycle.id,
@@ -12222,7 +12365,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           reason: 'INTENT_MIRROR_DRY_RUN',
         };
         this.logger.log(
-          `[INTENT-MIRROR][DRY-RUN] would place user=${instance.userId} cycle=${cycle.id} trade=${tid} ${intent.direction} qty=${qty.toFixed(5)} @ ${limitPrice.toFixed(2)} margin=$${marginCap.toFixed(2)} lev=${leverage}x intent_source=${intent.intent_source ?? 'unknown'}`,
+          `[INTENT-MIRROR][DRY-RUN] would place user=${instance.userId} cycle=${cycle.id} trade=${tid} ${intent.direction} qty=${qty.toFixed(5)} @ ${limitPrice.toFixed(2)} exactMargin=$${exactMarginUsd.toFixed(2)} cap=$${marginCap.toFixed(2)} lev=${leverage}x intent_source=${intent.intent_source ?? 'unknown'}`,
         );
         try {
           await this.prisma.signalCycleEvent.create({
@@ -12274,7 +12417,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                 trade_id: tid,
                 direction: intent.direction,
                 limit_price: Math.round(limitPrice * 100) / 100,
-                margin_usd: marginCap,
+                qty,
+                source_exact_qty_btc: intent.entry.exact_qty_btc,
+                margin_usd: exactMarginUsd,
+                margin_cap_usd: marginCap,
                 leverage,
                 intent_source: intent.intent_source ?? 'unknown',
                 entry_mode: 'EXACT_LIMIT',
@@ -13939,7 +14085,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     let qty = meta.qty;
     if ((!qty || btcToSats(qty) === 0) && limitPrice && limitPrice > 0 && marginUsd > 0) {
-      qty = computeQty(marginUsd, leverage, limitPrice, MIN_QTY_BTC);
+      const exactRepairQty = resolveExactShowcaseEntryQty({
+        exactQtyBtc: (intent?.entry as SignalIntentEnvelope['entry'] & { exact_qty_btc?: number })?.exact_qty_btc,
+        maxMarginUsd: marginUsd,
+        leverage,
+        limitPrice,
+        minQtyBtc: MIN_QTY_BTC,
+      });
+      if (exactRepairQty.ok) qty = exactRepairQty.qty;
     }
 
     if (qty && btcToSats(qty) > 0 && direction) {

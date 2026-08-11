@@ -95,6 +95,8 @@ export type SignalIntentEnvelope = {
     offset_pct: number;
     /** Canonical showcase limit; authoritative whenever mode=EXACT_LIMIT. */
     exact_limit_price?: number;
+    /** Exact canonical showcase order quantity; subscribers may reject but never resize it. */
+    exact_qty_btc?: number;
     reference: 'SUBSCRIBER_MARK_AT_RECEIPT' | 'SHOWCASE_EXACT_LIMIT';
     ttl_sec: number;
   };

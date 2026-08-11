@@ -885,6 +885,8 @@ def test_pending_intent_is_non_executable_and_only_published_after_exact_limit_p
     webhook_source = ast.get_source_segment(BOT_SOURCE, webhook)
     assert '"executable": event == "ORDER_PLACED"' in webhook_source
     assert '"entry_limit_policy": entry_limit_policy' in webhook_source
+    assert '"qty": exact_qty if exact_qty > 0 else None' in webhook_source
+    assert 'event == "ORDER_PLACED" and exact_qty <= 0' in webhook_source
     # The webhook admits any canonical executable anchor policy (deterministic
     # 0.1% offset or the legacy structural limit) via is_executable_entry_policy.
     assert "is_executable_entry_policy(entry_limit_policy)" in webhook_source

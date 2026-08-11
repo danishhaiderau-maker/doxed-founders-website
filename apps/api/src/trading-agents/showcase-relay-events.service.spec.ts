@@ -12,7 +12,7 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
   const current = {
     action: 'ENTER',
     trade_id: 'cont-race',
-    entry: { exact_limit_price: 63_167 },
+    entry: { exact_limit_price: 63_167, exact_qty_btc: 0.02361 },
     context: {
       showcase_event: 'LIMIT_UPDATED',
       showcase_event_id: 'revision-a',
@@ -26,6 +26,7 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
       event_id: 'revision-a',
       event_seq: 4,
       limit_price: 63_167,
+      qty: 0.02361,
     }),
     true,
   );
@@ -36,9 +37,26 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
       event_id: 'revision-b',
       event_seq: 4,
       limit_price: 63_166,
+      qty: 0.02361,
     }),
     false,
   );
+});
+
+test('signed executable envelope preserves the exact showcase quantity', () => {
+  const envelope = relayIntentEnvelope('cycle-q', 'cont-exact-qty', {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'ORDER_PLACED',
+    trade_id: 'cont-exact-qty',
+    ts: '2026-08-11T15:55:44.546Z',
+    platform_received_at: '2026-08-11T15:55:44.653Z',
+    direction: 'SHORT',
+    executable: true,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    limit_price: 63_614.55,
+    qty: 0.02361832782239017,
+  }) as { entry?: { exact_qty_btc?: number } };
+  assert.equal(envelope.entry?.exact_qty_btc, 0.02361832782239017);
 });
 
 test('terminal fallback marker survives only on its signed exact-limit revision', () => {
@@ -304,6 +322,7 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
     ts: `2026-07-30T01:00:0${seq}.000Z`,
     direction: 'LONG',
     limit_price: price,
+    qty: 0.02361,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     entry_reason: 'LOCAL_SUPPORT_LIMIT',
     executable: true,
@@ -553,6 +572,29 @@ test('rejects signed ORDER_PLACED without executable structural exact-limit cont
   );
 });
 
+test('rejects a signed executable order that omits exact showcase quantity', async () => {
+  const secret = 'test-webhook-secret';
+  const service = createService('dashboard-active', secret);
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'ORDER_PLACED' as const,
+    trade_id: 'cont-0a0c1a1b',
+    direction: 'SHORT',
+    limit_price: 63_614.55,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    executable: true,
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  await assert.rejects(
+    service.ingest('conservative-btc', body, { rawBody, signatureHeader: signature }),
+    /requires exact executable limit policy and quantity/,
+  );
+});
+
 test('persists and enriches before waking subscriber execution', async () => {
   const trace: string[] = [];
   const service = createService('dashboard-active', undefined, { trace });
@@ -742,6 +784,7 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     direction: 'SHORT',
     signal_price: 64_540,
     limit_price: 64_555.25,
+    qty: 0.02361,
     event_id: 'cont-fast:ORDER_PLACED:3',
     event_seq: 3,
     entry_limit_policy: 'micro_sr_structural_limit_v1',

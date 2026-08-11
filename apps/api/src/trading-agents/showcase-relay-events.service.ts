@@ -81,6 +81,7 @@ type RelayLifecycleEnvelope = {
   trade_id?: unknown;
   entry?: {
     exact_limit_price?: unknown;
+    exact_qty_btc?: unknown;
   };
   context?: {
     showcase_event?: unknown;
@@ -106,6 +107,8 @@ export function exactLifecycleRevisionMatches(
 ): boolean {
   const currentLimit = Number(current?.entry?.exact_limit_price);
   const incomingLimit = Number(incoming.limit_price);
+  const currentQty = Number(current?.entry?.exact_qty_btc);
+  const incomingQty = Number(incoming.qty);
   return Boolean(
     current?.action === 'ENTER'
     && String(current?.trade_id ?? '') === String(incoming.trade_id ?? '')
@@ -114,8 +117,17 @@ export function exactLifecycleRevisionMatches(
     && Number(current?.context?.showcase_event_seq) === Number(incoming.event_seq)
     && Number.isFinite(currentLimit)
     && Number.isFinite(incomingLimit)
-    && Math.abs(currentLimit - incomingLimit) < 0.005,
+    && Math.abs(currentLimit - incomingLimit) < 0.005
+    && Number.isFinite(currentQty)
+    && currentQty > 0
+    && Number.isFinite(incomingQty)
+    && incomingQty > 0
+    && btcQuantityMatches(currentQty, incomingQty),
   );
+}
+
+function btcQuantityMatches(a: number, b: number): boolean {
+  return Math.abs(Math.floor(a * 1e8) - Math.floor(b * 1e8)) <= 1;
 }
 
 /** Prevent a delayed webhook retry from replacing a newer canonical exact limit. */
@@ -195,6 +207,14 @@ export function relayIntentEnvelope(
     && body.limit_price > 0
       ? body.limit_price
       : null;
+  const exactQtyBtc =
+    (body?.event === 'ORDER_PLACED' || body?.event === 'LIMIT_UPDATED')
+    && body?.executable === true
+    && typeof body?.qty === 'number'
+    && Number.isFinite(body.qty)
+    && body.qty > 0
+      ? body.qty
+      : null;
   const settleNotBeforeMs = Date.parse(
     String(body?.relay_settle_not_before_ts ?? ''),
   );
@@ -259,6 +279,7 @@ export function relayIntentEnvelope(
     trade_id: string;
     entry: SignalIntentEnvelope['entry'] & {
       exact_limit_price?: number;
+      exact_qty_btc?: number;
     };
     context: SignalIntentEnvelope['context'] & {
       signed_showcase_event?: boolean;
@@ -286,6 +307,7 @@ export function relayIntentEnvelope(
       mode: 'EXACT_LIMIT',
       offset_pct: 0,
       exact_limit_price: exactLimitPrice,
+      ...(exactQtyBtc !== null ? { exact_qty_btc: exactQtyBtc } : {}),
       reference: 'SHOWCASE_EXACT_LIMIT',
       ttl_sec: 1800,
     },
@@ -583,7 +605,10 @@ export class ShowcaseRelayEventsService {
       && isExecutableEntryPolicy(body.entry_limit_policy)
       && typeof body.limit_price === 'number'
       && Number.isFinite(body.limit_price)
-      && body.limit_price > 0;
+      && body.limit_price > 0
+      && typeof body.qty === 'number'
+      && Number.isFinite(body.qty)
+      && body.qty > 0;
 
     if (
       signedLifecycleEvent
@@ -591,7 +616,7 @@ export class ShowcaseRelayEventsService {
       && !directExecutableIntent
     ) {
       throw new BadRequestException(
-        'Signed executable relay event requires exact executable limit policy',
+        'Signed executable relay event requires exact executable limit policy and quantity',
       );
     }
 
@@ -936,7 +961,10 @@ export class ShowcaseRelayEventsService {
         && isExecutableEntryPolicy(body?.entry_limit_policy)
         && typeof body?.limit_price === 'number'
         && Number.isFinite(body.limit_price)
-        && body.limit_price > 0;
+        && body.limit_price > 0
+        && typeof body?.qty === 'number'
+        && Number.isFinite(body.qty)
+        && body.qty > 0;
       const carriesSignedClose =
         body?.event === 'POSITION_CLOSED'
         && Boolean(body.platform_received_at);

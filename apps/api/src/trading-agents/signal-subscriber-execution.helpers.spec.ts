@@ -74,7 +74,197 @@ import {
   readRelayExecutorWakeRequest,
   pollForVerifiedEntryFill,
   shouldRunLocalRealSideSafetyNet,
+  resolveExactShowcaseEntryQty,
 } from './signal-subscriber-execution.service';
+
+test('exact showcase quantity is preserved below the subscriber cap', () => {
+  const result = resolveExactShowcaseEntryQty({
+    exactQtyBtc: 0.02361832782239017,
+    maxMarginUsd: 20,
+    leverage: 100,
+    limitPrice: 63_614.55,
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    qty: 0.02361,
+    requiredMarginUsd: 0.02361 * 63_614.55 / 100,
+    capQty: 0.03143,
+  });
+});
+
+test('exact showcase quantity exceeding the subscriber cap is blocked, never resized', () => {
+  assert.deepEqual(
+    resolveExactShowcaseEntryQty({
+      exactQtyBtc: 0.03143,
+      maxMarginUsd: 15,
+      leverage: 100,
+      limitPrice: 63_614.55,
+    }),
+    { ok: false, reason: 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' },
+  );
+  assert.deepEqual(
+    resolveExactShowcaseEntryQty({
+      exactQtyBtc: null,
+      maxMarginUsd: 20,
+      leverage: 100,
+      limitPrice: 63_614.55,
+    }),
+    { ok: false, reason: 'MISSING_EXACT_QTY' },
+  );
+});
+
+test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const now = Date.now();
+  const createdAt = new Date(now);
+  const dashboardState = {
+    relayExecutionMode: 'LIVE',
+    relayPolicyVersion: 'continuous_only_v5',
+    realTradingConfirmedAt: new Date(now - 2_000).toISOString(),
+    relayArmedAt: new Date(now - 1_000).toISOString(),
+  };
+  const instance = {
+    id: 'instance-exact-qty',
+    userId: 'user-exact-qty',
+    agentId: 'agent-exact-qty',
+    status: TradingAgentInstanceStatus.ACTIVE,
+    dashboardState,
+  };
+  const envelope = {
+    schema: 'dcf-signal-intent/v1',
+    cycleId: 'cycle-exact-qty',
+    signalId: 'cont-e0ac7001',
+    trade_id: 'cont-e0ac7001',
+    version: 'test',
+    action: 'ENTER',
+    direction: 'SHORT',
+    entry: {
+      type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0,
+      exact_limit_price: 63_614.55,
+      exact_qty_btc: 0.02361832782239017,
+      reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1_800,
+    },
+    risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+    context: {
+      regime: 'UNKNOWN', edge: 0, ai_win_prob: 0,
+      entry_mode_source: 'test', entry_limit_policy: 'micro_sr_structural_limit_v1',
+      research_venue: 'bitfinex', disclaimer: 'test',
+      signed_showcase_event: true, showcase_event: 'ORDER_PLACED',
+      showcase_event_at: new Date(now - 200).toISOString(),
+      platform_received_at: new Date(now - 100).toISOString(),
+    },
+  };
+  const submitted: Array<Record<string, unknown>> = [];
+  const events: Array<Record<string, unknown>> = [];
+  service.logger = { log() {}, warn() {}, error() {} };
+  service.cycleAudit = { stage() {} };
+  service.activeTrading = {
+    getOpenPositionDetail: async () => null,
+    submitLimitOrder: async (_creds: unknown, order: Record<string, unknown>) => {
+      submitted.push(order);
+      return 9001;
+    },
+  };
+  service.prisma = {
+    signalCycleParticipant: {
+      create: async () => ({ id: 'participant-exact-qty' }),
+      delete: async () => ({}),
+      findUnique: async () => null,
+    },
+    tradingAgentInstance: {
+      findUnique: async () => ({ status: TradingAgentInstanceStatus.ACTIVE, dashboardState }),
+      update: async () => ({}),
+    },
+    signalCycle: { findUnique: async () => ({ createdAt }) },
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (...args: unknown[]) => {
+      events.push(args.at(-1) as Record<string, unknown>);
+    },
+  };
+  service.applyLimitChase = async () => {};
+
+  const placed = await service.placeEntry(
+    instance.agentId,
+    instance,
+    'cycle-exact-qty',
+    envelope,
+    { apiKey: 'redacted', apiSecret: 'redacted' },
+    20,
+    'cont-e0ac7001',
+    'bitfinex',
+    { availableUsd: 100, markPrice: 63_620, exchangeBookProvenEmpty: true },
+  );
+  assert.equal(placed, true);
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].qty, 0.02361);
+  assert.notEqual(submitted[0].qty, 0.03143);
+  assert.equal(events.at(-1)?.source_exact_qty_btc, 0.02361832782239017);
+  assert.equal(events.at(-1)?.venue_qty_btc, 0.02361);
+  assert.equal(events.at(-1)?.margin_cap_usd, 20);
+});
+
+test('market catch-up money path also submits the exact showcase position quantity', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const submitted: Array<Record<string, unknown>> = [];
+  const events: Array<Record<string, unknown>> = [];
+  service.logger = { log() {}, warn() {}, error() {} };
+  service.positionRuntime = new Map();
+  service.showcaseUnreachableSince = new Map();
+  service.showcaseRecoveryHits = new Map();
+  service.showcaseSafeModeNoticeAt = new Map();
+  service.prisma = {
+    signalCycleParticipant: {
+      findUnique: async () => null,
+      create: async () => ({ id: 'participant-catchup-exact-qty' }),
+      delete: async () => ({}),
+      update: async () => ({}),
+    },
+  };
+  service.activeTrading = {
+    getDerivativesAvailableUsd: async () => 100,
+    submitMarketEntry: async (_creds: unknown, order: Record<string, unknown>) => {
+      submitted.push(order);
+      return 9101;
+    },
+    submitStopOrder: async () => 9102,
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (...args: unknown[]) => {
+      events.push(args.at(-1) as Record<string, unknown>);
+    },
+  };
+  service.healStuckPendingFill = async () => {};
+
+  const placed = await service.placeMirrorCatchupEntry(
+    'agent-catchup',
+    {
+      id: 'instance-catchup', userId: 'user-catchup', agentId: 'agent-catchup',
+      status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {},
+    },
+    'cycle-catchup',
+    {
+      direction: 'SHORT',
+      entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+    },
+    { apiKey: 'redacted', apiSecret: 'redacted' },
+    20,
+    'cont-catchup-exact',
+    63_614.55,
+    0.02361832782239017,
+    63_620,
+    5.45,
+  );
+
+  assert.equal(placed, true);
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].qty, 0.02361);
+  assert.notEqual(submitted[0].qty, 0.03143);
+  assert.equal(events[0].source_exact_qty_btc, 0.02361832782239017);
+  assert.equal(events[0].venue_qty_btc, 0.02361);
+  assert.equal(events[0].margin_cap_usd, 20);
+});
 
 test('mirror position diff flags material quantity under-copy despite matching row counts', () => {
   const delta = mirrorPositionQuantityDelta(0.031206116, 0.015);
@@ -779,6 +969,7 @@ test('signed LIMIT_UPDATED fast wake reprices only its exact owned pending order
       mode: 'EXACT_LIMIT',
       reference: 'SHOWCASE_EXACT_LIMIT',
       exact_limit_price: 64_218.63,
+      exact_qty_btc: 0.02361,
     },
     context: {
       signed_showcase_event: true,
@@ -3185,6 +3376,7 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
           mode: 'EXACT_LIMIT',
           reference: 'SHOWCASE_EXACT_LIMIT',
           exact_limit_price: 64_555.25,
+          exact_qty_btc: 0.02361,
         },
         context: {
           signed_showcase_event: true,
@@ -3200,6 +3392,7 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
       tradeId: 'cont-fast',
       direction: 'SHORT',
       limitPrice: 64_555.25,
+      exactQtyBtc: 0.02361,
       receivedAtMs: Date.parse('2026-07-20T01:02:02.250Z'),
       sourceEventAtMs: Date.parse('2026-07-20T01:02:01.750Z'),
     },
@@ -3218,6 +3411,7 @@ test('rejects unsigned, stale, and non-resting exact-limit events', () => {
       mode: 'EXACT_LIMIT',
       reference: 'SHOWCASE_EXACT_LIMIT',
       exact_limit_price: 64_500,
+      exact_qty_btc: 0.02361,
     },
     context: {
       signed_showcase_event: true,
