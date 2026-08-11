@@ -814,11 +814,21 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
       trigger: string,
       tradeId: string | null,
       receivedAt?: string,
+      signedClose?: {
+        exitPrice?: number;
+        exitReason?: string;
+        sourceEventAtMs?: number;
+        platformReceivedAtMs?: number;
+      },
     ) => {
       trace.push('prewake');
       assert.equal(trigger, 'POSITION_CLOSED');
       assert.equal(tradeId, 'cont-c105efa5');
       assert.equal(typeof receivedAt, 'string');
+      assert.equal(signedClose?.exitPrice, 64_620.5);
+      assert.equal(signedClose?.exitReason, 'PROFIT_LOCK_LADDER');
+      assert.equal(signedClose?.platformReceivedAtMs, Date.parse(receivedAt!));
+      assert.equal(typeof signedClose?.sourceEventAtMs, 'number');
     },
     requestExecutorWake: async () => {
       trace.push('execution');
@@ -841,6 +851,7 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
     signal_price: 64_500,
     exit_price: 64_620.5,
     exit_reason: 'PROFIT_LOCK_LADDER',
+    ts: '2026-08-11T12:09:54.625Z',
     dashboard_owner: true,
     bot_instance_id: 'dashboard-active',
     dashboard_port: 7002,

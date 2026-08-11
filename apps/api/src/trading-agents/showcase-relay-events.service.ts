@@ -445,13 +445,17 @@ export class ShowcaseRelayEventsService {
     event: ShowcaseRelayEventType,
     tradeId?: string | null,
     receivedAt?: string,
+    signedClose?: {
+      exitPrice?: number; exitReason?: string;
+      sourceEventAtMs?: number; platformReceivedAtMs?: number;
+    },
   ): void {
     // Start the private-network dispatch in the current event-loop turn. The
     // method remains non-blocking (the promise is intentionally not awaited),
     // but avoiding setImmediate prevents an already-busy API loop from adding
     // an avoidable scheduling turn to the money path. This mattered on a live
     // close that reached Bitfinex in 3069 ms: only 69 ms outside the contract.
-    void this.execution.requestExecutorWake(event, tradeId, receivedAt).catch((err) => {
+    void this.execution.requestExecutorWake(event, tradeId, receivedAt, signedClose).catch((err) => {
       this.logger.error(
         `Showcase execution wake ${event} failed: ${err instanceof Error ? err.message : err}`,
       );
@@ -581,6 +585,17 @@ export class ShowcaseRelayEventsService {
       );
     }
 
+    const signedCloseEvidence = event === 'POSITION_CLOSED' && body.ts
+      && Number.isFinite(Date.parse(body.ts)) && persistBody.platform_received_at
+      ? {
+          ...(typeof body.exit_price === 'number' && Number.isFinite(body.exit_price)
+            ? { exitPrice: body.exit_price } : {}),
+          ...(body.exit_reason ? { exitReason: body.exit_reason } : {}),
+          sourceEventAtMs: Date.parse(body.ts),
+          platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
+        }
+      : undefined;
+
     // Start the private worker's safety preflight as soon as the signed owner
     // event is authenticated. Entry still waits for this exact cycle to become
     // durable. Close can converge only an already-owned open lot after the
@@ -594,6 +609,7 @@ export class ShowcaseRelayEventsService {
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
+        signedCloseEvidence,
       );
     }
 
@@ -631,6 +647,7 @@ export class ShowcaseRelayEventsService {
             event,
             body.trade_id ?? null,
             persistBody.platform_received_at ?? undefined,
+            signedCloseEvidence,
           );
           executionWakeQueued = true;
         }
@@ -653,6 +670,7 @@ export class ShowcaseRelayEventsService {
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
+        signedCloseEvidence,
       );
     }
     if (signedLifecycleEvent) {

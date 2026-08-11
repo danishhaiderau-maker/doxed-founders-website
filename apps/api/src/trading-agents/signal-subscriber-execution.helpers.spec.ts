@@ -120,6 +120,11 @@ test('partial entry lifecycle retains only a live nonterminal remainder', () => 
 test('service money path protects a partial fill without cancelling its entry remainder', async () => {
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
   let entryCancelCalls = 0;
+  let resolveSubmit!: (id: number) => void;
+  const submit = new Promise<number>((resolve) => { resolveSubmit = resolve; });
+  const originalNow = Date.now;
+  const timestamps = [1_000, 1_100, 1_400];
+  Date.now = () => timestamps.shift() ?? 1_400;
   const service = new SignalSubscriberExecutionService(
     {} as never,
     {} as never,
@@ -139,13 +144,13 @@ test('service money path protects a partial fill without cancelling its entry re
     {} as never,
   );
   (service as any).activeTrading = {
-    submitStopOrder: async () => 7001,
+    submitStopOrder: async () => submit,
     getMarkPrice: async () => 64_126.31,
     cancelOrder: async () => {
       entryCancelCalls += 1;
     },
   };
-  await (service as any).protectPartialFillAndRetainRemainder(
+  const protecting = (service as any).protectPartialFillAndRetainRemainder(
     'agent',
     'user',
     'cycle',
@@ -160,12 +165,39 @@ test('service money path protects a partial fill without cancelling its entry re
     { risk: { stop_loss_margin_pct: 10 } },
     0.015,
   );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(events.length, 0, 'no ownership event may persist before exchange ACK');
+  resolveSubmit(7001);
+  await protecting.finally(() => { Date.now = originalNow; });
   assert.equal(entryCancelCalls, 0);
+  assert.equal(events.length, 2);
   assert.equal(events.at(0)?.type, 'UPDATE_STOPS');
+  assert.equal(events.at(0)?.payload.event, 'PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED');
+  assert.equal(events.at(1)?.type, 'UPDATE_STOPS');
+  assert.equal(events.at(1)?.payload.event, 'PARTIAL_FILL_REMAINDER_RETAINED');
   assert.equal(events.at(0)?.payload.bitfinexOrderId, 6001);
   assert.equal(events.at(0)?.payload.partialFillStopOrderId, 7001);
   assert.equal(events.at(0)?.payload.partialFillQty, 0.015);
   assert.ok(Number(events.at(0)?.payload.remaining_qty) > 0);
+  const timing = (payload: Record<string, unknown> | undefined) => ({
+    detected: payload?.partial_fill_detected_at,
+    submit: payload?.stop_submit_started_at,
+    ack: payload?.stop_exchange_ack_at,
+    detectionToAck: payload?.detection_to_stop_ack_ms,
+    submitToAck: payload?.stop_submit_to_ack_ms,
+  });
+  assert.deepEqual(timing(events.at(0)?.payload), {
+    detected: new Date(1_000).toISOString(),
+    submit: new Date(1_100).toISOString(),
+    ack: new Date(1_400).toISOString(),
+    detectionToAck: 400,
+    submitToAck: 300,
+  });
+  assert.deepEqual(timing(events.at(1)?.payload), timing(events.at(0)?.payload));
+  assert.ok(Date.parse(String(events.at(0)?.payload.partial_fill_detected_at))
+    <= Date.parse(String(events.at(0)?.payload.stop_submit_started_at)));
+  assert.ok(Date.parse(String(events.at(0)?.payload.stop_submit_started_at))
+    <= Date.parse(String(events.at(0)?.payload.stop_exchange_ack_at)));
 });
 
 test('service persists replacement stop ownership before cancelling the old partial stop', async () => {
@@ -322,6 +354,56 @@ test('live close does not await public mark enrichment before reduce-only close 
     source.indexOf(']);', source.indexOf('Promise.all', markPromiseAt)) + 3,
   );
   assert.doesNotMatch(criticalPromiseAll, /getMarkPrice/);
+});
+
+test('authenticated close prewake uses carried terminal evidence without polling Fly or waiting for Neon', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never,
+  );
+  let botFetches = 0;
+  let closeOpts: Record<string, unknown> | undefined;
+  (service as any).fetchExecutionBotState = async () => {
+    botFetches += 1;
+    throw new Error('prewake must not poll canonical Fly state');
+  };
+  (service as any).executeShowcaseMirrorClose = async (
+    _agent: unknown, _user: unknown, _cycle: unknown, _participant: unknown,
+    _meta: unknown, _creds: unknown, opts: Record<string, unknown>,
+  ) => {
+    closeOpts = opts;
+    return true;
+  };
+  const priorMirror = process.env.SHOWCASE_MIRROR_ONLY;
+  const priorConvergence = process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+  process.env.SHOWCASE_MIRROR_ONLY = 'true';
+  process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = 'true';
+  try {
+    const closed = await (service as any).tryImmediateShowcaseMirrorExit(
+      'agent', 'user',
+      { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-close', intentEnvelope: {} },
+      { id: 'participant', fillPrice: 64_500 },
+      { direction: 'SHORT', qty: 0.01 },
+      { apiKey: 'k', apiSecret: 's' }, false,
+      {
+        exitPrice: 64_400,
+        exitReason: 'PROFIT_LOCK',
+        sourceEventAtMs: 1_000,
+        platformReceivedAtMs: 2_000,
+      },
+    );
+    assert.equal(closed, true);
+    assert.equal(botFetches, 0);
+    assert.equal(closeOpts?.trigger, 'SHOWCASE_CLOSED_WEBHOOK');
+    assert.equal(closeOpts?.showcaseExitPrice, 64_400);
+    assert.equal(closeOpts?.sourceEventAtMs, 1_000);
+    assert.equal(closeOpts?.platformReceivedAtMs, 2_000);
+  } finally {
+    if (priorMirror == null) delete process.env.SHOWCASE_MIRROR_ONLY;
+    else process.env.SHOWCASE_MIRROR_ONLY = priorMirror;
+    if (priorConvergence == null) delete process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+    else process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = priorConvergence;
+  }
 });
 
 test('service protection failure writes terminal state only after confirmed emergency reduction', async () => {
@@ -822,7 +904,7 @@ test('persisted close wake matches a cancel-race relink by canonical showcase id
       'relink:unknown:cont-fa8ce196a716:1786346662320',
       null,
     ),
-    true,
+    false,
   );
 });
 
@@ -3617,4 +3699,68 @@ test('relay executor wake request reads POSITION_CLOSED payload', () => {
   assert.equal(wake?.trigger, 'POSITION_CLOSED');
   assert.equal(wake?.tradeId, 'cont-ffe6d1689ec2');
   assert.equal(readRelayExecutorWakeRequest({}), null);
+});
+
+test('close wake selects exactly its matching participant and no others', () => {
+  const lots = [
+    { cycleTradeId: 'cont-target', originTradeId: null },
+    { cycleTradeId: 'cont-other', originTradeId: null },
+    { cycleTradeId: 'relink:unknown:cont-third:1', originTradeId: 'cont-third' },
+  ];
+  assert.deepEqual(
+    lots.filter((lot) => persistedCloseWakeMatchesParticipant(
+      'cont-target', lot.cycleTradeId, lot.originTradeId,
+    )),
+    [lots[0]],
+  );
+  assert.equal(lots.filter((lot) => persistedCloseWakeMatchesParticipant(
+    'cont-mismatch', lot.cycleTradeId, lot.originTradeId,
+  )).length, 0);
+});
+
+test('duplicate pre/post POSITION_CLOSED wake cannot queue a second close', async () => {
+  const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
+  process.env.RELAY_EXECUTOR_WORKER = 'true';
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.fastWakeRunning = true;
+    service.pendingDirectWakes = [];
+    service.activeDirectWake = {
+      trigger: 'POSITION_CLOSED', tradeId: 'cont-close-one', at: '2026-08-11T12:09:56.107Z',
+    };
+    assert.equal(await service.acceptDirectExecutorWake({
+      trigger: 'POSITION_CLOSED', tradeId: 'cont-close-one', at: '2026-08-11T12:09:56.107Z',
+    }), true);
+    assert.deepEqual(service.pendingDirectWakes, []);
+  } finally {
+    if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
+    if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
+  }
+});
+
+test('private wake parser preserves only bounded POSITION_CLOSED evidence', () => {
+  const now = Date.now();
+  const wake = parseExecutorWakeRequest({
+    trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
+    signedClose: {
+      exitPrice: 64_400, exitReason: 'PROFIT_LOCK',
+      sourceEventAtMs: now - 1_200, platformReceivedAtMs: now,
+    },
+  });
+  assert.equal(wake?.signedClose?.exitPrice, 64_400);
+  assert.equal(wake?.signedClose?.sourceEventAtMs, now - 1_200);
+  for (const bad of [
+    { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), signedClose: { sourceEventAtMs: now - 1, platformReceivedAtMs: now } },
+    { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: '', signedClose: { sourceEventAtMs: now - 1, platformReceivedAtMs: now } },
+    { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedClose: {} },
+    { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedClose: { sourceEventAtMs: now + 1, platformReceivedAtMs: now } },
+  ]) assert.equal(parseExecutorWakeRequest(bad), null);
+  assert.equal(parseExecutorWakeRequest({
+    trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-entry',
+    signedClose: { exitPrice: 64_400 },
+  }), null);
 });

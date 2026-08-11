@@ -1643,6 +1643,13 @@ export type RelayExecutorWakeRequest = {
   trigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
   at: string;
   tradeId?: string | null;
+  /** HMAC-verified close evidence carried by the latency-only private prewake. */
+  signedClose?: {
+    exitPrice?: number;
+    exitReason?: string;
+    sourceEventAtMs?: number;
+    platformReceivedAtMs?: number;
+  };
 };
 
 /** Bounded source-fill hint polling; private exchange state remains authority. */
@@ -1954,7 +1961,7 @@ export function persistedCloseWakeMatchesParticipant(
   cycleTradeId: string | null | undefined,
   originTradeId: string | null | undefined,
 ): boolean {
-  if (!wakeTradeId) return true;
+  if (!wakeTradeId) return false;
   const mirrorTradeId = resolveShowcaseMirrorTradeIdFromInputs(
     cycleTradeId,
     originTradeId,
@@ -2781,6 +2788,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     trigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
     tradeId?: string | null,
     receivedAt?: string,
+    signedClose?: RelayExecutorWakeRequest['signedClose'],
   ): Promise<void> {
     if (executionEnabled()) {
       await this.wakeNow(trigger);
@@ -2796,6 +2804,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? receivedAt
         : new Date().toISOString(),
       tradeId: tradeId ?? null,
+      ...(trigger === 'POSITION_CLOSED' && signedClose ? { signedClose } : {}),
     };
     // The signed lifecycle event is already durable before this method is
     // queued. Start the authenticated private-network wake immediately; the
@@ -2836,6 +2845,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED',
     tradeId?: string | null,
     receivedAt?: string,
+    signedClose?: RelayExecutorWakeRequest['signedClose'],
   ): void {
     if (executionEnabled()) return;
     const payload: RelayExecutorWakeRequest = {
@@ -2844,6 +2854,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? receivedAt
         : new Date().toISOString(),
       tradeId: tradeId ?? null,
+      ...(trigger === 'POSITION_CLOSED' && signedClose ? { signedClose } : {}),
     };
     void this.dispatchDirectExecutorWake(payload);
   }
@@ -2891,7 +2902,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // remains the crash fallback, so dropping only this in-process duplicate
     // cannot lose the entry.
     if (
-      (wake.trigger === 'ORDER_PLACED' || wake.trigger === 'POSITION_OPENED')
+      (wake.trigger === 'ORDER_PLACED'
+        || wake.trigger === 'POSITION_OPENED'
+        || wake.trigger === 'POSITION_CLOSED')
       &&
       this.activeDirectWake
       && this.executorWakeLogicalKey(this.activeDirectWake) === logicalKey
@@ -3090,6 +3103,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
               meta,
               creds,
               false,
+              wake.signedClose,
             );
           }
           await this.persistFastWakeTelemetry(
@@ -9782,6 +9796,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     filledQty: number,
   ): Promise<void> {
     if (!meta.direction || btcToSats(filledQty) <= 0 || !meta.bitfinexOrderId) return;
+    const protectionDetectedAtMs = Date.now();
     const desiredQty = meta.qty ?? filledQty;
     const remainingQty = Math.max(0, desiredQty - filledQty);
     const priorStopId = meta.partialFillStopOrderId ?? meta.stopOrderId;
@@ -9816,6 +9831,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
     let newStopId: number;
+    const stopSubmitStartedAtMs = Date.now();
+    let stopExchangeAckAtMs: number | undefined;
     try {
       newStopId = await this.activeTrading.submitStopOrder(creds, {
         positionDirection: meta.direction,
@@ -9823,6 +9840,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         stopPrice,
         leverage,
       });
+      stopExchangeAckAtMs = Date.now();
     } catch (err) {
       const message = `PARTIAL_FILL_PROTECTION_FAILED cycle=${cycleId}: ${
         err instanceof Error ? err.message : String(err)
@@ -9924,6 +9942,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       intended_qty: desiredQty,
       remaining_qty: remainingQty,
       stop_price: stopPrice,
+      partial_fill_detected_at: new Date(protectionDetectedAtMs).toISOString(),
+      stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
+      stop_exchange_ack_at: new Date(stopExchangeAckAtMs).toISOString(),
+      detection_to_stop_ack_ms: Math.max(0, stopExchangeAckAtMs - protectionDetectedAtMs),
+      stop_submit_to_ack_ms: Math.max(0, stopExchangeAckAtMs - stopSubmitStartedAtMs),
     });
 
     if (priorStopId && priorStopId !== newStopId) {
@@ -9948,6 +9971,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       intended_qty: desiredQty,
       remaining_qty: remainingQty,
       stop_price: stopPrice,
+      partial_fill_detected_at: new Date(protectionDetectedAtMs).toISOString(),
+      stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
+      stop_exchange_ack_at: new Date(stopExchangeAckAtMs).toISOString(),
+      detection_to_stop_ack_ms: Math.max(0, stopExchangeAckAtMs - protectionDetectedAtMs),
+      stop_submit_to_ack_ms: Math.max(0, stopExchangeAckAtMs - stopSubmitStartedAtMs),
     });
 
     if (supersededStopId) {
@@ -10308,6 +10336,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     meta: ExecutionPayload,
     creds: ExchangeCredentials,
     simActive = false,
+    preWakeSignedClose?: RelayExecutorWakeRequest['signedClose'],
   ): Promise<boolean> {
     if (simActive) return false;
     if (!mirrorExitConvergenceEnabled() || !isShowcaseMirrorOnlyMode()) return false;
@@ -10316,11 +10345,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const mirrorRelinked = (cycle.tradeId ?? '').startsWith('adopt:');
 
     let closed =
-      cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED;
+      preWakeSignedClose != null
+      || cycle.status === SignalCycleStatus.CLOSED
+      || cycle.status === SignalCycleStatus.EXPIRED;
     let showcaseExitPrice: number | undefined;
     let showcaseExitReason: string | undefined;
     let mirrorTrigger = mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED';
-    const signedClose = readSignedShowcaseClose(cycle.intentEnvelope);
+    // The private prewake is emitted only after owner + HMAC verification. Carry
+    // that exact terminal evidence into the worker so it can close the already-
+    // owned lot while the canonical Neon transaction is still committing,
+    // instead of polling Fly and losing the intended overlap.
+    const signedClose = preWakeSignedClose ?? readSignedShowcaseClose(cycle.intentEnvelope);
     if (closed && signedClose) {
       showcaseExitPrice = signedClose.exitPrice;
       showcaseExitReason = signedClose.exitReason;
