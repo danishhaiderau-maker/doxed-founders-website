@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(founder-node): revoke remote node on self-disconnect
 
 ## Last Activity
 
