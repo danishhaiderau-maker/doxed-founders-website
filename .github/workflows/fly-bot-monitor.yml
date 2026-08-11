@@ -55,8 +55,17 @@ jobs:
               health = json.load(response)
           if response.status != 200 or health.get("process_alive") is not True:
               raise SystemExit(f"Fly process is not alive: {health}")
-          actual = str(health.get("source_git_rev") or health.get("git_rev") or "")
-          if not re.fullmatch(r"[0-9a-f]{40}", actual):
+          reported = str(health.get("source_git_rev") or health.get("git_rev") or "")
+          if not re.fullmatch(r"[0-9a-f]{7,40}", reported):
+              raise SystemExit(f"Fly returned an invalid source revision: {reported}")
+          resolved = subprocess.run(
+              ["git", "rev-parse", "--verify", f"{reported}^{{commit}}"],
+              check=False,
+              capture_output=True,
+              text=True,
+          )
+          actual = resolved.stdout.strip()
+          if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", actual):
               raise SystemExit(f"Fly returned an invalid source revision: {actual}")
           # A path-filtered push deploys the push HEAD, which may be a metadata
           # descendant of the newest bot-source commit. Exact equality creates
