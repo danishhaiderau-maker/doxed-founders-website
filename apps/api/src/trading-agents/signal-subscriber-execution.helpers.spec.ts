@@ -4432,3 +4432,49 @@ test('service WebSocket success dedupe cleanup is bounded and never prunes in-fl
   assert.equal(service.wsTradeCompletedAt.has('expired'),false); assert.equal(service.wsTradeCompletedAt.has('active'),true);
   assert.ok(service.wsTradeCompletedAt.size<=20_001);
 });
+
+test('fast-wake completion latency excludes dashboard telemetry persistence', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  ) as any;
+  let releaseRead!: () => void;
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  let persistedPatch: any = null;
+  service.prisma = {
+    tradingAgentInstance: {
+      findUnique: async () => {
+        await readGate;
+        return { dashboardState: { retained: true } };
+      },
+      update: async ({ data }: any) => {
+        persistedPatch = data.dashboardState;
+        return {};
+      },
+    },
+  };
+  const originalNow = Date.now;
+  let nowCalls = 0;
+  Date.now = () => {
+    nowCalls += 1;
+    return 2_000;
+  };
+  try {
+    const persisting = service.persistFastWakeTelemetry(
+      'instance-1',
+      { trigger: 'ORDER_PLACED', tradeId: 'cont-telemetry', at: new Date(1_000).toISOString() },
+      1_500,
+      'ENTRY_PLACED',
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(nowCalls, 1, 'completion must be captured before the delayed telemetry read resolves');
+    releaseRead();
+    await persisting;
+  } finally {
+    Date.now = originalNow;
+  }
+  assert.equal(persistedPatch.retained, true);
+  assert.equal(persistedPatch.relayExecutorFastWake.completedAt, new Date(2_000).toISOString());
+  assert.equal(persistedPatch.relayExecutorFastWake.latencyMs, 1_000);
+  assert.equal(persistedPatch.relayExecutorFastWake.outcome, 'ENTRY_PLACED');
+});

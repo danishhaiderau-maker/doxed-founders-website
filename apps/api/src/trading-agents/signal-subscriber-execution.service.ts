@@ -3865,12 +3865,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     startedAtMs: number,
     outcome: string,
   ): Promise<void> {
+    // The fast-wake SLA ends when the exchange action returns.  Reading and
+    // persisting dashboard telemetry is observability work and must not make a
+    // completed order/replace/close look slower than it actually was.
+    const completedAt = new Date(Date.now());
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instanceId },
       select: { dashboardState: true },
     });
     if (!fresh) return;
-    const completedAt = new Date();
     const persistedAtMs = Date.parse(wake.at);
     const latencyMs = Number.isFinite(persistedAtMs)
       ? Math.max(0, completedAt.getTime() - persistedAtMs)
