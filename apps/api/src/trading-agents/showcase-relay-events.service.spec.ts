@@ -869,6 +869,53 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
   assert.deepEqual(trace, ['prewake', 'persist', 'closed', 'execution']);
 });
 
+test('signed ORDER_EXPIRED carries exact generation without sliding platform fallback TTL', async () => {
+  const secret = 'test-webhook-secret';
+  const expiresAtWrites: unknown[] = [];
+  let storedEnvelope: Record<string, unknown> = {
+    action: 'ENTER', direction: 'SHORT', entry: { mode: 'EXACT_LIMIT', exact_limit_price: 64_417.03 },
+    context: { showcase_event_seq: 1 },
+  };
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findUnique: async () => ({ id:'cycle-expiry', status:'PENDING_ENTRY', intentEnvelope:storedEnvelope }),
+      update: async (args: { data: { intentEnvelope?: Record<string, unknown>; expiresAt?: unknown } }) => {
+        if (args.data.intentEnvelope) storedEnvelope = args.data.intentEnvelope;
+        expiresAtWrites.push(args.data.expiresAt);
+        return {};
+      },
+    },
+    signalCycleEvent: { findFirst: async()=>null, create: async()=>({}) },
+  };
+  const wakes: unknown[][] = [];
+  const execution = {
+    requestExecutorPreWake: (...args: unknown[]) => wakes.push(args),
+    requestExecutorWake: async (...args: unknown[]) => wakes.push(args),
+  };
+  const service = createService('dashboard-active', secret, { prisma, execution });
+  const body = {
+    schema:'dcf-showcase-intent-v1', event:'ORDER_EXPIRED' as const,
+    trade_id:'cont-143962d491f6', direction:'SHORT', event_seq:1,
+    event_id:'cont-143962d491f6:ORDER_EXPIRED:1:2026-08-11T13:14:12.703492+00:00',
+    limit_price:64_417.03, reason:'SIGNAL_TTL_EXPIRED',
+    ts:'2026-08-11T13:14:12.703492+00:00',
+    source_created_at:'2026-08-11T12:44:12.310797+00:00',
+    source_expires_at:'2026-08-11T13:14:12.703492+00:00',
+    research_lane:'CONTINUOUS', dashboard_owner:true,
+    bot_instance_id:'dashboard-active', dashboard_port:7002,
+  };
+  const rawBody=Buffer.from(JSON.stringify(body));
+  const signature=`sha256=${createHmac('sha256',secret).update(rawBody).digest('hex')}`;
+  const result=await service.ingest('conservative-btc',body,{rawBody,signatureHeader:signature});
+  assert.equal(result.ok,true);
+  assert.equal(wakes[0]?.[0],'ORDER_EXPIRED');
+  assert.equal((wakes[0]?.[3] as {eventSeq?:number})?.eventSeq,1);
+  assert.ok(expiresAtWrites.every((value)=>value===undefined));
+  const context=storedEnvelope.context as Record<string,unknown>;
+  assert.equal(context.source_expires_at,body.source_expires_at);
+});
+
 test('signed POSITION_OPENED persists source fill evidence and queues the fill wake', async () => {
   const secret = 'test-webhook-secret';
   const trace: string[] = [];

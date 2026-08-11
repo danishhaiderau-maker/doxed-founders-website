@@ -4,6 +4,7 @@ import { isMirrorableLaneTradeId } from '@dcf/utils';
 
 const WAKE_TRIGGERS = new Set<RelayExecutorWakeRequest['trigger']>([
   'POSITION_CLOSED',
+  'ORDER_EXPIRED',
   'POSITION_OPENED',
   'ORDER_PLACED',
   'APPROVE_PENDING',
@@ -49,10 +50,35 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
       ...(typeof close.platformReceivedAtMs === 'number' ? { platformReceivedAtMs: close.platformReceivedAtMs } : {}),
     };
   } else if (raw.signedClose != null) return null;
+  let signedExpiry: RelayExecutorWakeRequest['signedExpiry'];
+  if (raw.trigger === 'ORDER_EXPIRED') {
+    if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
+    if (!raw.signedExpiry || typeof raw.signedExpiry !== 'object' || Array.isArray(raw.signedExpiry)) return null;
+    const expiry = raw.signedExpiry as Record<string, unknown>;
+    if (
+      typeof expiry.sourceEventAtMs !== 'number'
+      || typeof expiry.sourceExpiresAtMs !== 'number'
+      || typeof expiry.platformReceivedAtMs !== 'number'
+      || typeof expiry.eventSeq !== 'number'
+      || typeof expiry.limitPrice !== 'number'
+      || typeof expiry.eventId !== 'string'
+      || typeof expiry.reason !== 'string'
+    ) return null;
+    const { sourceEventAtMs, sourceExpiresAtMs, platformReceivedAtMs, eventSeq, limitPrice } = expiry;
+    const eventId = expiry.eventId.trim();
+    const reason = expiry.reason as 'SIGNAL_TTL_EXPIRED' | 'TTL_EXPIRED';
+    if (![sourceEventAtMs, sourceExpiresAtMs, platformReceivedAtMs, limitPrice].every(Number.isFinite)) return null;
+    if (!Number.isInteger(eventSeq) || eventSeq < 0 || limitPrice <= 0) return null;
+    if (!eventId || eventId.length > 255 || !['SIGNAL_TTL_EXPIRED', 'TTL_EXPIRED'].includes(reason)) return null;
+    if (sourceExpiresAtMs > sourceEventAtMs || sourceEventAtMs > platformReceivedAtMs || platformReceivedAtMs > atMs) return null;
+    if (atMs - sourceExpiresAtMs > 300_000 || atMs - platformReceivedAtMs > 5_000) return null;
+    signedExpiry = { sourceEventAtMs, sourceExpiresAtMs, platformReceivedAtMs, eventSeq, limitPrice, eventId, reason };
+  } else if (raw.signedExpiry != null) return null;
   return {
     trigger: raw.trigger as RelayExecutorWakeRequest['trigger'],
     at: raw.at,
     tradeId: typeof raw.tradeId === 'string' ? raw.tradeId : null,
     ...(signedClose ? { signedClose } : {}),
+    ...(signedExpiry ? { signedExpiry } : {}),
   };
 }

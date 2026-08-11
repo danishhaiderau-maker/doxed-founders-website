@@ -27,6 +27,7 @@ export type ShowcaseRelayEventType =
   | 'ORDER_PLACED'
   | 'POSITION_OPENED'
   | 'POSITION_CLOSED'
+  | 'ORDER_EXPIRED'
   | 'LIMIT_UPDATED';
 
 export type ShowcaseRelayEventBody = {
@@ -43,6 +44,8 @@ export type ShowcaseRelayEventBody = {
   exit_price?: number | null;
   reason?: string | null;
   exit_reason?: string | null;
+  source_created_at?: string | null;
+  source_expires_at?: string | null;
   direction?: string | null;
   /** N2 (intent-mirror) — paper/live provenance tag from the showcase bot. */
   intent_source?: 'paper' | 'live' | null;
@@ -232,6 +235,12 @@ export function relayIntentEnvelope(
       : {}),
     ...(body?.event === 'POSITION_CLOSED' && body.exit_reason
       ? { showcase_exit_reason: body.exit_reason }
+      : {}),
+    ...(body?.event === 'ORDER_EXPIRED' && body.source_created_at
+      ? { source_created_at: body.source_created_at }
+      : {}),
+    ...(body?.event === 'ORDER_EXPIRED' && body.source_expires_at
+      ? { source_expires_at: body.source_expires_at }
       : {}),
   };
   if (exactLimitPrice == null) {
@@ -445,9 +454,10 @@ export class ShowcaseRelayEventsService {
     event: ShowcaseRelayEventType,
     tradeId?: string | null,
     receivedAt?: string,
-    signedClose?: {
+    signedTerminal?: {
       exitPrice?: number; exitReason?: string;
       sourceEventAtMs?: number; platformReceivedAtMs?: number;
+      sourceExpiresAtMs?: number;
     },
   ): void {
     // Start the private-network dispatch in the current event-loop turn. The
@@ -455,7 +465,7 @@ export class ShowcaseRelayEventsService {
     // but avoiding setImmediate prevents an already-busy API loop from adding
     // an avoidable scheduling turn to the money path. This mattered on a live
     // close that reached Bitfinex in 3069 ms: only 69 ms outside the contract.
-    void this.execution.requestExecutorWake(event, tradeId, receivedAt, signedClose).catch((err) => {
+    void this.execution.requestExecutorWake(event, tradeId, receivedAt, signedTerminal).catch((err) => {
       this.logger.error(
         `Showcase execution wake ${event} failed: ${err instanceof Error ? err.message : err}`,
       );
@@ -595,6 +605,36 @@ export class ShowcaseRelayEventsService {
           platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
         }
       : undefined;
+    const signedExpiryEvidence = event === 'ORDER_EXPIRED'
+      && body.ts && body.source_expires_at && persistBody.platform_received_at
+      && Number.isFinite(Date.parse(body.ts))
+      && Number.isFinite(Date.parse(body.source_expires_at))
+      && typeof body.event_seq === 'number'
+      && typeof body.limit_price === 'number'
+      && typeof body.event_id === 'string'
+      && typeof body.reason === 'string'
+      ? {
+          sourceEventAtMs: Date.parse(body.ts),
+          sourceExpiresAtMs: Date.parse(body.source_expires_at),
+          platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
+          eventSeq: body.event_seq,
+          limitPrice: body.limit_price,
+          eventId: body.event_id.trim(),
+          reason: body.reason as 'SIGNAL_TTL_EXPIRED' | 'TTL_EXPIRED',
+        }
+      : undefined;
+    if (event === 'ORDER_EXPIRED' && signedLifecycleEvent && (
+      !signedExpiryEvidence
+      || !Number.isInteger(signedExpiryEvidence.eventSeq)
+      || signedExpiryEvidence.eventSeq < 0
+      || !Number.isFinite(signedExpiryEvidence.limitPrice)
+      || signedExpiryEvidence.limitPrice <= 0
+      || !signedExpiryEvidence.eventId
+      || signedExpiryEvidence.eventId.length > 255
+      || !['SIGNAL_TTL_EXPIRED', 'TTL_EXPIRED'].includes(signedExpiryEvidence.reason)
+    )) {
+      throw new BadRequestException('Signed order expiry requires exact source expiry timestamp');
+    }
 
     // Start the private worker's safety preflight as soon as the signed owner
     // event is authenticated. Entry still waits for this exact cycle to become
@@ -603,13 +643,13 @@ export class ShowcaseRelayEventsService {
     // overlaps transport / safety reads with the canonical transaction below.
     if (
       signedLifecycleEvent
-      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED')
+      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED' || event === 'ORDER_EXPIRED')
     ) {
       this.execution.requestExecutorPreWake?.(
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
-        signedCloseEvidence,
+        event === 'ORDER_EXPIRED' ? signedExpiryEvidence : signedCloseEvidence,
       );
     }
 
@@ -647,7 +687,7 @@ export class ShowcaseRelayEventsService {
             event,
             body.trade_id ?? null,
             persistBody.platform_received_at ?? undefined,
-            signedCloseEvidence,
+            event === 'ORDER_EXPIRED' ? signedExpiryEvidence : signedCloseEvidence,
           );
           executionWakeQueued = true;
         }
@@ -900,6 +940,10 @@ export class ShowcaseRelayEventsService {
       const carriesSignedClose =
         body?.event === 'POSITION_CLOSED'
         && Boolean(body.platform_received_at);
+      const carriesSignedExpiry =
+        body?.event === 'ORDER_EXPIRED'
+        && Boolean(body.platform_received_at)
+        && Boolean(body.source_expires_at);
       const applyExactLimit =
         carriesExactLimit
         && existing.status !== SignalCycleStatus.CLOSED
@@ -909,7 +953,7 @@ export class ShowcaseRelayEventsService {
       );
       if (
         signedIntent
-        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose)
+        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose || carriesSignedExpiry)
       ) {
         const incoming = relayIntentEnvelope(existing.id, tradeId, body) as Record<
           string,
@@ -919,7 +963,7 @@ export class ShowcaseRelayEventsService {
           context?: Record<string, unknown>;
         };
         const intentEnvelope =
-          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose)
+          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose || carriesSignedExpiry)
             ? {
                 ...current,
                 direction: incoming.direction,
@@ -934,7 +978,12 @@ export class ShowcaseRelayEventsService {
             intentEnvelope:
               intentEnvelope as unknown as import('@prisma/client').Prisma.InputJsonValue,
             botVersion: body.bot_version ?? undefined,
-            expiresAt: new Date(Date.now() + 1_800_000),
+            // Platform TTL is a fallback anchored at initial activation. A
+            // chase revision must not slide it; source expiry is persisted
+            // separately in the signed lifecycle context.
+            expiresAt: body.event === 'ORDER_PLACED'
+              ? new Date(Date.now() + 1_800_000)
+              : undefined,
           },
         });
         intentApplied = Boolean(

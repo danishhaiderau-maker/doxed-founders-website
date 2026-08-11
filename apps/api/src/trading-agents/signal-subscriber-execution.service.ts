@@ -1640,7 +1640,7 @@ export function hireExpiryRequiresExitOnlyProcessing(
 const RELAY_EXECUTOR_WAKE_KEY = 'relayExecutorWake';
 
 export type RelayExecutorWakeRequest = {
-  trigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
+  trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
   at: string;
   tradeId?: string | null;
   /** HMAC-verified close evidence carried by the latency-only private prewake. */
@@ -1649,6 +1649,15 @@ export type RelayExecutorWakeRequest = {
     exitReason?: string;
     sourceEventAtMs?: number;
     platformReceivedAtMs?: number;
+  };
+  signedExpiry?: {
+    sourceEventAtMs: number;
+    sourceExpiresAtMs: number;
+    platformReceivedAtMs: number;
+    eventSeq: number;
+    limitPrice: number;
+    eventId: string;
+    reason: 'SIGNAL_TTL_EXPIRED' | 'TTL_EXPIRED';
   };
 };
 
@@ -2785,10 +2794,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * so the isolated relay-executor worker picks it up on the next poll / tick.
    */
   async requestExecutorWake(
-    trigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
+    trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
     tradeId?: string | null,
     receivedAt?: string,
-    signedClose?: RelayExecutorWakeRequest['signedClose'],
+    signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'],
   ): Promise<void> {
     if (executionEnabled()) {
       await this.wakeNow(trigger);
@@ -2804,7 +2813,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? receivedAt
         : new Date().toISOString(),
       tradeId: tradeId ?? null,
-      ...(trigger === 'POSITION_CLOSED' && signedClose ? { signedClose } : {}),
+      ...(trigger === 'POSITION_CLOSED' && signedTerminal ? { signedClose: signedTerminal as RelayExecutorWakeRequest['signedClose'] } : {}),
+      ...(trigger === 'ORDER_EXPIRED' && signedTerminal ? { signedExpiry: signedTerminal as RelayExecutorWakeRequest['signedExpiry'] } : {}),
     };
     // The signed lifecycle event is already durable before this method is
     // queued. Start the authenticated private-network wake immediately; the
@@ -2842,10 +2852,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * crash/restart backstop.
    */
   requestExecutorPreWake(
-    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED',
+    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED' | 'ORDER_EXPIRED',
     tradeId?: string | null,
     receivedAt?: string,
-    signedClose?: RelayExecutorWakeRequest['signedClose'],
+    signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'],
   ): void {
     if (executionEnabled()) return;
     const payload: RelayExecutorWakeRequest = {
@@ -2854,7 +2864,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ? receivedAt
         : new Date().toISOString(),
       tradeId: tradeId ?? null,
-      ...(trigger === 'POSITION_CLOSED' && signedClose ? { signedClose } : {}),
+      ...(trigger === 'POSITION_CLOSED' && signedTerminal ? { signedClose: signedTerminal as RelayExecutorWakeRequest['signedClose'] } : {}),
+      ...(trigger === 'ORDER_EXPIRED' && signedTerminal ? { signedExpiry: signedTerminal as RelayExecutorWakeRequest['signedExpiry'] } : {}),
     };
     void this.dispatchDirectExecutorWake(payload);
   }
@@ -2904,7 +2915,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (
       (wake.trigger === 'ORDER_PLACED'
         || wake.trigger === 'POSITION_OPENED'
-        || wake.trigger === 'POSITION_CLOSED')
+        || wake.trigger === 'POSITION_CLOSED'
+        || wake.trigger === 'ORDER_EXPIRED')
       &&
       this.activeDirectWake
       && this.executorWakeLogicalKey(this.activeDirectWake) === logicalKey
@@ -2968,10 +2980,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private executorWakeLogicalKey(wake: RelayExecutorWakeRequest): string {
+    if (wake.trigger === 'ORDER_EXPIRED' && wake.signedExpiry) {
+      return `${wake.trigger}:${wake.tradeId ?? ''}:${wake.signedExpiry.eventSeq}:${wake.signedExpiry.eventId}`;
+    }
     return `${wake.trigger}:${wake.tradeId ?? ''}`;
   }
 
   private executorWakeKey(wake: RelayExecutorWakeRequest): string {
+    if (wake.trigger === 'ORDER_EXPIRED' && wake.signedExpiry) {
+      return `${wake.trigger}:${wake.tradeId ?? ''}:${wake.signedExpiry.eventSeq}:${wake.signedExpiry.eventId}`;
+    }
     return `${wake.trigger}:${wake.tradeId ?? ''}:${wake.at}`;
   }
 
@@ -3067,6 +3085,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         if (processedInstanceIds.has(instance.id)) continue;
         if (isCopyRelaySimActive(instance.dashboardState)) continue;
         this.activeTrading = this.bitfinex;
+        if (wake.trigger === 'ORDER_EXPIRED') {
+          const handled = await this.tryImmediateSignedOrderExpiry(instance, wake);
+          await this.persistFastWakeTelemetry(
+            instance.id, wake, startedAtMs,
+            handled ? 'ORDER_EXPIRY_DISPATCHED' : 'ORDER_EXPIRY_NOT_ELIGIBLE',
+          );
+          processedInstanceIds.add(instance.id);
+          continue;
+        }
         if (wake.trigger === 'POSITION_CLOSED') {
           const creds = await this.exchanges.getUserCredentials(
             instance.userId,
@@ -3190,6 +3217,173 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.relayInstanceCache.set(instance.id, instance);
     }
     await processInstances(discoveredInstances);
+  }
+
+  private async tryImmediateSignedOrderExpiry(
+    instance: TradingAgentInstance,
+    wake: RelayExecutorWakeRequest,
+  ): Promise<boolean> {
+    const evidence = wake.signedExpiry;
+    if (!wake.tradeId || !evidence) return false;
+    const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
+    if (!creds) return false;
+    const candidates = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId: instance.agentId },
+      },
+      include: { cycle: true },
+    });
+    for (const candidate of candidates) {
+      const release = await this.acquireParticipantMoneyLane(candidate.id);
+      try {
+        const participant = await this.prisma.signalCycleParticipant.findUnique({
+          where: { id: candidate.id }, include: { cycle: true },
+        });
+        if (!participant || participant.status !== SignalCycleStatus.PENDING_ENTRY) continue;
+        const meta = await this.loadExecutionMeta(participant.id);
+        if (!persistedCloseWakeMatchesParticipant(wake.tradeId, participant.cycle.tradeId, meta.originTradeId)) continue;
+        const intent = participant.cycle.intentEnvelope as SignalIntentEnvelope;
+        const context = (intent?.context ?? {}) as Record<string, unknown>;
+        const currentSeq = Number(context.showcase_event_seq ?? 0);
+        const currentLimit = Number(intent?.entry?.exact_limit_price ?? meta.limitPrice ?? 0);
+        // A stale expiry generation must never cancel a later replacement.
+        if (currentSeq !== evidence.eventSeq || Math.abs(currentLimit - evidence.limitPrice) > 1e-8) continue;
+        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+        if (fill) {
+          await this.recordCancelRaceFill(
+            instance.agentId, instance.userId, participant.cycle, participant.id,
+            meta, creds, intent, fill, 'SHOWCASE_ORDER_EXPIRED',
+            new Date(evidence.sourceExpiresAtMs).toISOString(),
+          );
+          return true;
+        }
+        if (!meta.bitfinexOrderId) return false;
+        let cancelTiming: { submitStartedAtMs: number; exchangeAckAtMs: number; confirmedAtMs: number } | undefined;
+        const cancel = await this.cancelManagedOrderGone(
+          creds, meta.bitfinexOrderId,
+          `Signed source expiry oid=${meta.bitfinexOrderId} trade=${wake.tradeId}`,
+          (timing) => { cancelTiming = timing; },
+        );
+        if (!cancel.gone) return false;
+        // Close the cancel race with fresh, explicit private evidence. A read
+        // failure is UNKNOWN, never equivalent to an unfilled order.
+        const postCancel = await this.classifyPostCancelEntry(creds, meta, cancel.reason);
+        if (postCancel.kind === 'FILL') {
+          await this.recordCancelRaceFill(
+            instance.agentId, instance.userId, participant.cycle, participant.id,
+            meta, creds, intent, postCancel.fill, 'SHOWCASE_ORDER_EXPIRED',
+            new Date(evidence.sourceExpiresAtMs).toISOString(),
+          );
+          return true;
+        }
+        if (postCancel.kind === 'UNKNOWN') {
+          const error = `SIGNED_EXPIRY_UNCONFIRMED ${postCancel.reason}`;
+          await Promise.all([
+            this.cycles.recordHireExecutionEvent(
+              instance.userId, instance.agentId, participant.cycle.id, 'RECONCILE_CANCEL_FAILED', {
+                venue: 'bitfinex', source: 'hire', event: 'SHOWCASE_ORDER_EXPIRED',
+                reason: error, bitfinex_order_id: meta.bitfinexOrderId,
+                showcase_event_id: evidence.eventId, showcase_event_seq: evidence.eventSeq,
+              },
+            ).catch(() => undefined),
+            this.prisma.tradingAgentInstance.update({
+              where: { id: instance.id }, data: { lastError: error.slice(0, 500) },
+            }).catch(() => undefined),
+          ]);
+          return false;
+        }
+        if (!cancelTiming) return false;
+        await this.cycles.recordHireExecutionEvent(
+          instance.userId, instance.agentId, participant.cycle.id, 'EXPIRED', {
+            venue: 'bitfinex', source: 'hire', event: 'SHOWCASE_ORDER_EXPIRED',
+            reason: evidence.reason, bitfinex_order_id: meta.bitfinexOrderId,
+            showcase_event_id: evidence.eventId, showcase_event_seq: evidence.eventSeq,
+            source_expires_at: new Date(evidence.sourceExpiresAtMs).toISOString(),
+            platform_received_at: new Date(evidence.platformReceivedAtMs).toISOString(),
+            cancel_submit_started_at: new Date(cancelTiming.submitStartedAtMs).toISOString(),
+            cancel_exchange_ack_at: new Date(cancelTiming.exchangeAckAtMs).toISOString(),
+            cancel_confirmed_at: new Date(cancelTiming.confirmedAtMs).toISOString(),
+            source_to_cancel_ack_ms: cancelTiming.exchangeAckAtMs - evidence.sourceExpiresAtMs,
+            platform_to_cancel_ack_ms: cancelTiming.exchangeAckAtMs - evidence.platformReceivedAtMs,
+            cancel_submit_to_ack_ms: cancelTiming.exchangeAckAtMs - cancelTiming.submitStartedAtMs,
+          },
+        );
+        return true;
+      } finally { release(); }
+    }
+    return false;
+  }
+
+  private async classifyPostCancelEntry(
+    creds: ExchangeCredentials,
+    meta: ExecutionPayload,
+    cancelReason?: string,
+  ): Promise<
+    | { kind: 'FILL'; fill: { filledQty: number; fillPrice: number; source: 'ORDER_PARTIAL' | 'POSITION_DELTA'; orderResting: boolean } }
+    | { kind: 'PROVEN_UNFILLED' }
+    | { kind: 'UNKNOWN'; reason: string }
+  > {
+    const orderId = meta.bitfinexOrderId;
+    if (!orderId || !meta.direction) return { kind: 'UNKNOWN', reason: 'MISSING_ORDER_OWNERSHIP' };
+    let trades: Array<{ execAmount: number; execPrice: number }>;
+    try {
+      trades = await this.bitfinex.fetchOrderTrades(creds, orderId);
+    } catch {
+      return { kind: 'UNKNOWN', reason: 'ORDER_TRADES_UNAVAILABLE' };
+    }
+    const executions = trades.filter((trade) => Math.abs(trade.execAmount) > 0);
+    if (executions.length > 0) {
+      const filledQty = executions.reduce((sum, trade) => sum + Math.abs(trade.execAmount), 0);
+      const notional = executions.reduce((sum, trade) => sum + Math.abs(trade.execAmount) * trade.execPrice, 0);
+      return { kind: 'FILL', fill: {
+        filledQty, fillPrice: notional / filledQty,
+        source: 'ORDER_PARTIAL', orderResting: false,
+      } };
+    }
+    let position: { amount: number; basePrice: number } | null;
+    try {
+      position = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch {
+      return { kind: 'UNKNOWN', reason: 'POSITION_UNAVAILABLE' };
+    }
+    const sameDirection = Boolean(position && (
+      (meta.direction === 'LONG' && position.amount > 0)
+      || (meta.direction === 'SHORT' && position.amount < 0)
+    ));
+    if (sameDirection && position) {
+      const baseline = meta.exchangeQtyAtOrder ?? 0;
+      const lotQty = meta.qty ?? MIN_QTY_BTC;
+      // Any exchange-representable attributable increase is a fill. The old
+      // 85% heuristic could erase a small partial execution after cancel.
+      const attributableDeltaSats = Math.max(
+        0,
+        btcToSats(Math.abs(position.amount)) - btcToSats(baseline),
+      );
+      if (attributableDeltaSats > 1) {
+        const fillPrice = meta.limitPrice && meta.limitPrice > 0
+          ? meta.limitPrice
+          : position.basePrice;
+        if (!(fillPrice > 0)) return { kind: 'UNKNOWN', reason: 'FILL_PRICE_UNAVAILABLE' };
+        return { kind: 'FILL', fill: {
+          filledQty: Math.min(lotQty, satsToBtc(attributableDeltaSats)),
+          fillPrice,
+          source: 'POSITION_DELTA', orderResting: false,
+        } };
+      }
+    }
+    if (cancelReason === 'NOT_FOUND' && meta.replacementExchangeAckAtMs) {
+      try {
+        const history = await this.bitfinex.fetchOrderHistoryEvidence(creds, orderId);
+        if (!history || history.terminal !== true || history.filledQty !== 0) {
+          return { kind: 'UNKNOWN', reason: 'ORDER_HISTORY_NOT_TERMINAL_UNFILLED' };
+        }
+      } catch {
+        return { kind: 'UNKNOWN', reason: 'ORDER_HISTORY_UNAVAILABLE' };
+      }
+    }
+    return { kind: 'PROVEN_UNFILLED' };
   }
 
   /**
@@ -3385,7 +3579,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
-  async wakeNow(trigger?: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
+  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
     if (!executionEnabled()) return;
     if (trigger) {
       this.lastShowcaseWakeAt = Date.now();
@@ -6884,16 +7078,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     orderId: number,
     label: string,
+    onTiming?: (timing: { submitStartedAtMs: number; exchangeAckAtMs: number; confirmedAtMs: number }) => void,
   ): Promise<{ gone: boolean; reason?: string; attempts: number }> {
     const client = this.activeTrading as CancelCapableClient;
+    const submitStartedAtMs = Date.now();
     const result = await cancelOrderWithRetry(client, creds, orderId, {
       logger: this.logger,
       label,
     });
+    const exchangeAckAtMs = Date.now();
     // Bitfinex can acknowledge the HTTP request while the v2 notification is
     // stale or reports an application-level error. Treat the cancel response
     // as intent only; every outcome must be followed by an active-book read.
     const gone = await confirmOrderGone(client, creds, orderId);
+    const confirmedAtMs = Date.now();
+    onTiming?.({ submitStartedAtMs, exchangeAckAtMs, confirmedAtMs });
     return {
       gone,
       reason:
@@ -7124,6 +7323,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const mustTerminatePartial = new Set([
       'SHOWCASE_CYCLE_CLOSED',
       'SHOWCASE_ABANDONED',
+      'SHOWCASE_ORDER_EXPIRED',
       'SIGNAL_TTL_EXPIRED',
       'EXIT_ONLY_PENDING_CANCEL',
     ]).has(cancelContext);

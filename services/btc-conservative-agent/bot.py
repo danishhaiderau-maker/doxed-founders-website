@@ -7702,7 +7702,7 @@ def _push_showcase_relay_event(
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
-    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED"):
+    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED"):
         relay_lane = _platform_relay_lane_for_event(
             trade_id,
             payload.get("research_lane"),
@@ -7726,7 +7726,7 @@ def _push_showcase_relay_event(
     # only when this canonical owner also HMAC-signs the payload.
     if (
         webhook_secret
-        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED")
+        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED")
         and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
         and (
             (
@@ -7743,6 +7743,10 @@ def _push_showcase_relay_event(
                 event == "POSITION_CLOSED"
                 and isinstance(payload.get("exit_price"), (int, float))
             )
+            or (
+                event == "ORDER_EXPIRED"
+                and isinstance(payload.get("source_expires_at"), str)
+            )
         )
     ):
         payload["schema"] = "dcf-showcase-intent-v1"
@@ -7753,8 +7757,8 @@ def _push_showcase_relay_event(
         # POSITION_CLOSED must not drop on a 2.5s Railway blip — exits are
         # latency-critical and the poll backstop is slower. Allow a longer
         # client timeout plus a couple of tight retries for that event only.
-        post_timeout = 8.0 if event == "POSITION_CLOSED" else 2.5
-        attempts = 3 if event == "POSITION_CLOSED" else 1
+        post_timeout = 8.0 if event in ("POSITION_CLOSED", "ORDER_EXPIRED") else 2.5
+        attempts = 3 if event in ("POSITION_CLOSED", "ORDER_EXPIRED") else 1
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -21476,6 +21480,17 @@ def _expired_already_recorded(trade_id: str) -> bool:
         return any(e.get("trade_id") == trade_id for e in expired_orders)
 
 
+def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
+    """Only a real, previously-resting SIM_LIMIT may drive copy cancellation."""
+    return bool(
+        str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
+        and source.get("entry_type") == "SIM_LIMIT"
+        and source.get("created_ts")
+        and isinstance(limit_price, (int, float))
+        and limit_price > 0
+    )
+
+
 def _record_expired_order(source: dict, reason: str):
     """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
     if source.get("bitfinex_order_id"):
@@ -21587,6 +21602,24 @@ def _record_expired_order(source: dict, reason: str):
         {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
         source_ts=float(now),
     )
+    if (
+        _is_executable_order_expiry(source, reason, limit_price)
+        and _platform_relay_lane_for_event(tid, row.get("research_lane"))
+        in PLATFORM_RELAY_ELIGIBLE_LANES
+    ):
+        # The expired resting order itself is authoritative. Never borrow a
+        # newer master/signal revision and pair it with this older limit.
+        generation = int(source.get("event_seq") or source.get("limit_chase_count") or 0)
+        _push_showcase_relay_event(
+            "ORDER_EXPIRED", tid, {
+                "direction": row.get("dir"), "reason": reason,
+                "event_seq": generation, "limit_price": limit_price,
+                "event_id": f"{tid}:ORDER_EXPIRED:{generation}:{row['time']}",
+                "source_created_at": datetime.fromtimestamp(created, timezone.utc).isoformat() if created else None,
+                "source_expires_at": row["time"],
+                "research_lane": row.get("research_lane"),
+            },
+        )
     log_expired_order(row)
     if row.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
         lifecycle_event = (

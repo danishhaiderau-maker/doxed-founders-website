@@ -3764,3 +3764,196 @@ test('private wake parser preserves only bounded POSITION_CLOSED evidence', () =
     signedClose: { exitPrice: 64_400 },
   }), null);
 });
+
+test('duplicate pre/post ORDER_EXPIRED wake cannot queue a second cancellation', async () => {
+  const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
+  process.env.RELAY_EXECUTOR_WORKER = 'true';
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.fastWakeRunning = true;
+    service.pendingDirectWakes = [];
+    service.activeDirectWake = {
+      trigger: 'ORDER_EXPIRED', tradeId: 'cont-expiry-one', at: '2026-08-11T13:14:25.652Z',
+      signedExpiry: { sourceExpiresAtMs:1,sourceEventAtMs:2,platformReceivedAtMs:3,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED' },
+    };
+    assert.equal(await service.acceptDirectExecutorWake({
+      trigger: 'ORDER_EXPIRED', tradeId: 'cont-expiry-one', at: '2026-08-11T13:14:25.652Z',
+      signedExpiry: { sourceExpiresAtMs:1,sourceEventAtMs:2,platformReceivedAtMs:3,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED' },
+    }), true);
+    assert.deepEqual(service.pendingDirectWakes, []);
+    assert.equal(await service.acceptDirectExecutorWake({
+      trigger: 'ORDER_EXPIRED', tradeId: 'cont-expiry-one', at: '2026-08-11T13:14:26.652Z',
+      signedExpiry: { sourceExpiresAtMs:4,sourceEventAtMs:5,platformReceivedAtMs:6,eventSeq:2,limitPrice:63990,eventId:'expiry-2',reason:'SIGNAL_TTL_EXPIRED' },
+    }), true);
+    assert.equal(service.pendingDirectWakes.length, 1);
+  } finally {
+    if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
+    if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
+  }
+});
+
+test('private expiry wake requires exact identity, generation, price, and coherent timestamps', () => {
+  const now = Date.now();
+  const valid = {
+    trigger: 'ORDER_EXPIRED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
+    signedExpiry: {
+      sourceExpiresAtMs: now - 100, sourceEventAtMs: now - 90,
+      platformReceivedAtMs: now, eventSeq: 3, limitPrice: 64_400,
+      eventId: 'expiry-3', reason: 'SIGNAL_TTL_EXPIRED',
+    },
+  };
+  assert.equal(parseExecutorWakeRequest(valid)?.signedExpiry?.eventSeq, 3);
+  assert.equal(parseExecutorWakeRequest({ ...valid, tradeId: '' }), null);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: {} }), null);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: { ...valid.signedExpiry, sourceExpiresAtMs: now + 1 } }), null);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: { ...valid.signedExpiry, eventSeq: '3' } }), null);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: { ...valid.signedExpiry, limitPrice: '64400' } }), null);
+});
+
+test('signed expiry cancels only current exact pending generation before terminal persistence', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never,
+  ) as any;
+  service.participantMoneyLane = new Map();
+  const cycle = {
+    id: 'cycle-expiry', agentId: 'agent', tradeId: 'cont-c105efa5',
+    intentEnvelope: { action: 'ENTER', entry: { exact_limit_price: 64_400 }, context: { showcase_event_seq: 3 } },
+  };
+  const participant = { id: 'participant-expiry', status: SignalCycleStatus.PENDING_ENTRY, cycle };
+  service.prisma = { signalCycleParticipant: {
+    findMany: async () => [participant], findUnique: async () => participant,
+  }};
+  service.exchanges = { getUserCredentials: async () => ({ apiKey: 'k', apiSecret: 's' }) };
+  service.loadExecutionMeta = async () => ({ bitfinexOrderId: 7001, direction: 'SHORT', qty: 0.01, limitPrice: 64_400 });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.bitfinex = { fetchOrderTrades: async () => [] };
+  service.activeTrading = { getOpenPositionDetail: async () => null };
+  const order: string[] = [];
+  service.cancelManagedOrderGone = async (_c:unknown,_o:unknown,_l:unknown,onTiming?:(v:unknown)=>void) => {
+    onTiming?.({submitStartedAtMs:1000,exchangeAckAtMs:1100,confirmedAtMs:1200});
+    order.push('cancel-confirmed'); return { gone: true, reason: 'CANCELLED' };
+  };
+  service.cycles = { recordHireExecutionEvent: async () => { order.push('EXPIRED'); } };
+  const wake = {
+    trigger: 'ORDER_EXPIRED', tradeId: 'cont-c105efa5', at: new Date().toISOString(),
+    signedExpiry: { sourceExpiresAtMs: Date.now() - 100, sourceEventAtMs: Date.now() - 90, platformReceivedAtMs: Date.now(), eventSeq: 3, limitPrice: 64_400, eventId:'expiry-3', reason:'SIGNAL_TTL_EXPIRED' },
+  };
+  assert.equal(await service.tryImmediateSignedOrderExpiry({ id:'i', userId:'u', agentId:'agent', exchangeProvider:'bitfinex' }, wake), true);
+  assert.deepEqual(order, ['cancel-confirmed', 'EXPIRED']);
+  order.length = 0;
+  assert.equal(await service.tryImmediateSignedOrderExpiry({ id:'i', userId:'u', agentId:'agent', exchangeProvider:'bitfinex' }, {
+    ...wake, signedExpiry: { ...wake.signedExpiry, eventSeq: 2 },
+  }), false);
+  assert.deepEqual(order, []);
+});
+
+test('signed expiry promotes a detected fill through terminal fill-close funnel and never blindly expires', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never,
+  ) as any;
+  service.participantMoneyLane = new Map();
+  const cycle = { id:'c', agentId:'a', tradeId:'cont-c105efa5', intentEnvelope:{ action:'ENTER', entry:{exact_limit_price:64000}, context:{showcase_event_seq:1} } };
+  const participant = { id:'p', status:SignalCycleStatus.PENDING_ENTRY, cycle };
+  service.prisma = { signalCycleParticipant:{ findMany:async()=>[participant], findUnique:async()=>participant } };
+  service.exchanges = { getUserCredentials:async()=>({apiKey:'k',apiSecret:'s'}) };
+  service.loadExecutionMeta = async()=>({bitfinexOrderId:7,direction:'SHORT',qty:.01,limitPrice:64000});
+  service.detectEntryFillBeforeCancel = async()=>({filledQty:.004,fillPrice:64010,source:'ORDER_PARTIAL',orderResting:true});
+  let context = '';
+  service.recordCancelRaceFill = async (...args: unknown[]) => { context = String(args[8]); return true; };
+  service.cancelManagedOrderGone = async()=>{ throw new Error('must stay in fill funnel'); };
+  service.cycles = { recordHireExecutionEvent:async()=>{ throw new Error('must not direct-expire'); } };
+  const now=Date.now();
+  assert.equal(await service.tryImmediateSignedOrderExpiry({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'}, {
+    trigger:'ORDER_EXPIRED',tradeId:'cont-c105efa5',at:new Date(now).toISOString(),
+    signedExpiry:{sourceExpiresAtMs:now-100,sourceEventAtMs:now-90,platformReceivedAtMs:now,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED'},
+  }), true);
+  assert.equal(context, 'SHOWCASE_ORDER_EXPIRED');
+});
+
+test('signed expiry rechecks a fill that races cancellation before EXPIRED', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map();
+  const cycle={id:'c',agentId:'a',tradeId:'cont-c105efa5',intentEnvelope:{action:'ENTER',entry:{exact_limit_price:64000},context:{showcase_event_seq:1}}};
+  const participant={id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[participant],findUnique:async()=>participant}};
+  service.exchanges={getUserCredentials:async()=>({apiKey:'k',apiSecret:'s'})};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:7,direction:'SHORT',qty:.01,limitPrice:64000});
+  let reads=0;
+  service.detectEntryFillBeforeCancel=async()=>++reads===1?null:{filledQty:.003,fillPrice:64000,source:'POSITION_DELTA',orderResting:false};
+  service.bitfinex={fetchOrderTrades:async()=>[{execAmount:.003,execPrice:64000}]};
+  service.activeTrading={getOpenPositionDetail:async()=>null};
+  service.cancelManagedOrderGone=async(_c:unknown,_o:unknown,_l:unknown,onTiming:(v:unknown)=>void)=>{onTiming({submitStartedAtMs:1,exchangeAckAtMs:2,confirmedAtMs:3});return{gone:true,reason:'CANCELLED'}};
+  let promoted=false;
+  service.recordCancelRaceFill=async()=>{promoted=true;return true};
+  service.cycles={recordHireExecutionEvent:async()=>{throw new Error('must not expire raced fill')}};
+  const now=Date.now();
+  assert.equal(await service.tryImmediateSignedOrderExpiry({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'},{trigger:'ORDER_EXPIRED',tradeId:'cont-c105efa5',at:new Date(now).toISOString(),signedExpiry:{sourceExpiresAtMs:now-100,sourceEventAtMs:now-90,platformReceivedAtMs:now,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED'}}),true);
+  assert.equal(promoted,true);
+  assert.equal(reads,1);
+});
+
+test('signed expiry cancellation failure remains pending and never records EXPIRED', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map();
+  const cycle={id:'c',agentId:'a',tradeId:'cont-c105efa5',intentEnvelope:{action:'ENTER',entry:{exact_limit_price:64000},context:{showcase_event_seq:1}}};
+  const participant={id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[participant],findUnique:async()=>participant},tradingAgentInstance:{update:async()=>({})}};
+  service.exchanges={getUserCredentials:async()=>({apiKey:'k',apiSecret:'s'})};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:7,direction:'SHORT',qty:.01,limitPrice:64000});
+  service.detectEntryFillBeforeCancel=async()=>null;
+  service.bitfinex={fetchOrderTrades:async()=>{throw new Error('read failed')}};
+  service.activeTrading={getOpenPositionDetail:async()=>null};
+  service.cancelManagedOrderGone=async(_c:unknown,_o:unknown,_l:unknown,onTiming:(v:unknown)=>void)=>{onTiming({submitStartedAtMs:1,exchangeAckAtMs:2,confirmedAtMs:3});return{gone:true,reason:'CANCELLED'}};
+  let expired=false;
+  service.cycles={recordHireExecutionEvent:async(_u:unknown,_a:unknown,_c:unknown,event:string)=>{if(event==='EXPIRED')expired=true}};
+  const now=Date.now();
+  assert.equal(await service.tryImmediateSignedOrderExpiry({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'},{trigger:'ORDER_EXPIRED',tradeId:'cont-c105efa5',at:new Date(now).toISOString(),signedExpiry:{sourceExpiresAtMs:now-100,sourceEventAtMs:now-90,platformReceivedAtMs:now,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED'}}),false);
+  assert.equal(expired,false);
+});
+
+test('post-cancel expiry proof distinguishes zero-flat, NOT_FOUND proof, and unknown reads', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  const meta={bitfinexOrderId:7,direction:'SHORT',qty:.01,limitPrice:64000,replacementExchangeAckAtMs:100};
+  service.bitfinex={fetchOrderTrades:async()=>[],fetchOrderHistoryEvidence:async()=>({terminal:true,filledQty:0})};
+  service.activeTrading={getOpenPositionDetail:async()=>null};
+  assert.deepEqual(await service.classifyPostCancelEntry({},meta,'CANCELLED'),{kind:'PROVEN_UNFILLED'});
+  assert.deepEqual(await service.classifyPostCancelEntry({},meta,'NOT_FOUND'),{kind:'PROVEN_UNFILLED'});
+  service.bitfinex.fetchOrderHistoryEvidence=async()=>{throw new Error('history unavailable')};
+  assert.deepEqual(await service.classifyPostCancelEntry({},meta,'NOT_FOUND'),{kind:'UNKNOWN',reason:'ORDER_HISTORY_UNAVAILABLE'});
+  service.bitfinex.fetchOrderHistoryEvidence=async()=>({terminal:true,filledQty:0});
+  service.activeTrading.getOpenPositionDetail=async()=>{throw new Error('position unavailable')};
+  assert.deepEqual(await service.classifyPostCancelEntry({},meta,'CANCELLED'),{kind:'UNKNOWN',reason:'POSITION_UNAVAILABLE'});
+});
+
+test('post-cancel position proof treats every attributable partial delta as a fill', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.bitfinex={fetchOrderTrades:async()=>[]};
+  const meta={bitfinexOrderId:7,direction:'SHORT',qty:.01,limitPrice:64000};
+  service.activeTrading={getOpenPositionDetail:async()=>({amount:-.000001,basePrice:64001})};
+  let result=await service.classifyPostCancelEntry({},meta,'CANCELLED');
+  assert.equal(result.kind,'FILL');
+  assert.equal(result.fill.filledQty,.000001);
+
+  service.activeTrading.getOpenPositionDetail=async()=>({amount:-.020001,basePrice:64001});
+  result=await service.classifyPostCancelEntry({}, {...meta,exchangeQtyAtOrder:.02},'CANCELLED');
+  assert.equal(result.kind,'FILL');
+  assert.equal(result.fill.filledQty,.000001);
+
+  service.activeTrading.getOpenPositionDetail=async()=>({amount:-.02,basePrice:64001});
+  assert.deepEqual(
+    await service.classifyPostCancelEntry({}, {...meta,exchangeQtyAtOrder:.02},'CANCELLED'),
+    {kind:'PROVEN_UNFILLED'},
+  );
+
+  service.activeTrading.getOpenPositionDetail=async()=>({amount:.020001,basePrice:64001});
+  assert.deepEqual(
+    await service.classifyPostCancelEntry({}, {...meta,exchangeQtyAtOrder:.02},'CANCELLED'),
+    {kind:'PROVEN_UNFILLED'},
+  );
+});
