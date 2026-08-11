@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Queue direct relay wakes during executor busy window
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
