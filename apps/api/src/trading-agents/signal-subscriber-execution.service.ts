@@ -845,6 +845,27 @@ export function mirrorPositionQuantityDelta(
   return Math.abs(delta) > tolerance ? delta : null;
 }
 
+/**
+ * Price available at the instant an exchange-verified fill is observed.
+ * ORDER_PARTIAL supplies the resting order price; POSITION_DELTA supplies the
+ * managed limit (or position base price). This deliberately precedes private
+ * trade-history enrichment. For a BUY limit, execution is at/below the limit,
+ * so a limit-anchored long stop is equal or tighter; for a SELL limit,
+ * execution is at/above the limit, so a limit-anchored short stop is likewise
+ * equal or tighter. The optimization therefore cannot widen initial risk.
+ */
+export function protectiveStopReferencePrice(
+  verifiedOrderOrPositionPrice: number | null | undefined,
+  managedLimitPrice: number | null | undefined,
+  fallbackMarkPrice: number | null | undefined,
+): number {
+  if (verifiedOrderOrPositionPrice != null && verifiedOrderOrPositionPrice > 0) {
+    return verifiedOrderOrPositionPrice;
+  }
+  if (managedLimitPrice != null && managedLimitPrice > 0) return managedLimitPrice;
+  return fallbackMarkPrice != null && fallbackMarkPrice > 0 ? fallbackMarkPrice : 0;
+}
+
 type ExecutionPayload = {
   bitfinexOrderId?: number;
   stopOrderId?: number;
@@ -6926,6 +6947,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     sourceFillAt?: string,
   ): Promise<boolean> {
     if (!meta.direction) return false;
+    // Capture at funnel entry, before any remainder cancellation or exchange
+    // enrichment, so detection->stop ACK measures the whole protection path.
+    const fillDetectedAtMs = Date.now();
 
     const intendedQty = meta.qty ?? fill.filledQty;
     const mustTerminatePartial = new Set([
@@ -6986,27 +7010,34 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
     }
 
-    // Fix D — the order (partially) executed, so its trade history now holds
-    // the REAL volume-weighted fill price; the heuristic price (limit price /
-    // merged basePrice) stays as fallback.
-    const fillDetectedAtMs = Date.now();
-    const exchangeFillEvidence = await this.resolveExchangeTradesFillEvidence(
-      creds,
-      meta.bitfinexOrderId,
+    // Protection is the first write after exchange-verified fill detection.
+    // Do not put the optional private trade-history enrichment ahead of the
+    // stop ACK: that extra round trip previously consumed most of the <3s
+    // protection budget. The already verified order/position price is safe for
+    // stop placement; authoritative VWAP/MTS is enriched immediately after.
+    const fallbackMarkPrice =
+      fill.fillPrice > 0 || (meta.limitPrice != null && meta.limitPrice > 0)
+        ? 0
+        : await this.activeTrading.getMarkPrice().catch(() => 0);
+    const stopReferencePrice = protectiveStopReferencePrice(
+      fill.fillPrice,
+      meta.limitPrice,
+      fallbackMarkPrice,
     );
-    const fillPrice =
-      exchangeFillEvidence?.price ??
-      (fill.fillPrice > 0
-        ? fill.fillPrice
-        : await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0));
-    if (!fillPrice || fillPrice <= 0) return false;
+    if (!stopReferencePrice || stopReferencePrice <= 0) return false;
     const qty = fill.filledQty;
     const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent?.risk?.stop_loss_margin_pct, {
       mirrorMode: isShowcaseMirrorOnlyMode(),
     });
-    const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+    const stopPrice = computeStopPrice(
+      stopReferencePrice,
+      meta.direction,
+      stopLossMarginPct,
+      leverage,
+    );
 
+    const stopSubmitStartedAtMs = Date.now();
     const stopOrderId = await this.activeTrading
       .submitStopOrder(creds, {
         positionDirection: meta.direction,
@@ -7020,6 +7051,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         );
         return null;
       });
+    const stopExchangeAckAtMs = stopOrderId != null ? Date.now() : null;
+
+    const exchangeFillEvidence = await this.resolveExchangeTradesFillEvidence(
+      creds,
+      meta.bitfinexOrderId,
+    );
+    // VWAP is accounting enrichment only. Do not replace the acknowledged
+    // stop afterward: the limit/order reference is already a no-worse risk
+    // boundary for a valid limit execution, and a second stop handoff would
+    // add exchange churn without improving protection.
+    const fillPrice = exchangeFillEvidence?.price ?? stopReferencePrice;
 
     let supersededPartialStopOrderId: number | undefined;
     if (meta.partialFillStopOrderId) {
@@ -7086,11 +7128,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       exchange_fill_last_at: exchangeFillEvidence?.lastExecutedAtMs
         ? new Date(exchangeFillEvidence.lastExecutedAtMs).toISOString()
         : undefined,
+      exchange_fill_mts: exchangeFillEvidence?.lastExecutedAtMs
+        ? new Date(exchangeFillEvidence.lastExecutedAtMs).toISOString()
+        : undefined,
       exchange_fill_detected_at: new Date(fillDetectedAtMs).toISOString(),
+      fill_detected_at: new Date(fillDetectedAtMs).toISOString(),
+      fill_detection_path: fill.source,
+      fill_detection_context: cancelContext,
       exchange_fill_detection_lag_ms: exchangeFillEvidence?.lastExecutedAtMs
         ? Math.max(0, fillDetectedAtMs - exchangeFillEvidence.lastExecutedAtMs)
         : undefined,
+      stop_reference_price: stopReferencePrice,
+      stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
+      stop_exchange_ack_at: stopExchangeAckAtMs != null
+        ? new Date(stopExchangeAckAtMs).toISOString()
+        : undefined,
+      stop_submit_to_ack_ms: stopExchangeAckAtMs != null
+        ? Math.max(0, stopExchangeAckAtMs - stopSubmitStartedAtMs)
+        : undefined,
+      fill_detection_to_stop_ack_ms: stopExchangeAckAtMs != null
+        ? Math.max(0, stopExchangeAckAtMs - fillDetectedAtMs)
+        : undefined,
+      exchange_fill_to_stop_ack_ms:
+        stopExchangeAckAtMs != null && exchangeFillEvidence?.lastExecutedAtMs
+          ? Math.max(0, stopExchangeAckAtMs - exchangeFillEvidence.lastExecutedAtMs)
+          : undefined,
       source_fill_at: sourceFillAt,
+      source_event_at: sourceFillAt,
       qty,
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
@@ -7109,6 +7173,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         stop_price: stopPrice,
         stopOrderId,
         qty,
+        fill_detection_path: fill.source,
+        stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
+        stop_exchange_ack_at: new Date(stopExchangeAckAtMs!).toISOString(),
+        stop_submit_to_ack_ms: Math.max(0, stopExchangeAckAtMs! - stopSubmitStartedAtMs),
+        fill_detection_to_stop_ack_ms: Math.max(0, stopExchangeAckAtMs! - fillDetectedAtMs),
+        exchange_fill_to_stop_ack_ms:
+          exchangeFillEvidence?.lastExecutedAtMs
+            ? Math.max(0, stopExchangeAckAtMs! - exchangeFillEvidence.lastExecutedAtMs)
+            : undefined,
         source: 'hire',
       });
     }
@@ -10373,16 +10446,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
       let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
       let remainingLedgerAmount: number | null;
-      let preparedExitPrice: number;
+      // Public mark is audit/PnL enrichment, not a prerequisite for a
+      // reduce-only close. Start it concurrently but never hold the exchange
+      // close submission behind it; consume it only after the close ACK (or in
+      // the already-flat accounting branch).
+      const preparedExitPricePromise = this.activeTrading
+        .getMarkPrice()
+        .catch(() => fillPrice || 0);
       try {
         // Once any linked entry remainder is confirmed gone, overlap the
-        // independent ledger, position and public-mark reads. The target path
-        // deliberately performs one final fresh position read immediately
-        // before cancelling the stop and submitting the close.
-        [position, remainingLedgerAmount, preparedExitPrice] = await Promise.all([
+        // independent ledger and position reads. The target path deliberately
+        // performs one final fresh position read immediately before cancelling
+        // the stop and submitting the close.
+        [position, remainingLedgerAmount] = await Promise.all([
           this.activeTrading.getOpenPositionDetail(creds),
           this.expectedRemainingLedgerAmount(agentId, userId, participant.id),
-          this.activeTrading.getMarkPrice(),
         ]);
       } catch (err) {
         const message =
@@ -10421,7 +10499,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         }
         const exitPrice =
           opts?.showcaseExitPrice ??
-          (await this.activeTrading.getMarkPrice().catch(() => fillPrice || 0));
+          await preparedExitPricePromise;
         let pnlUsd = 0;
         let pnlMarginPct = 0;
         let pnlSource: 'exchange_realised' | 'reconstructed' = 'reconstructed';
@@ -10472,7 +10550,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return true;
       }
 
-      let exitPrice = preparedExitPrice;
       let closeTarget: RelayLotExitTarget;
       try {
         closeTarget = await this.closeParticipantPositionToLedgerTarget(
@@ -10506,6 +10583,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ).catch(() => {});
         return false;
       }
+      const exitPrice = await preparedExitPricePromise;
       const closeQty = closeTarget.closeQty;
 
       const direction = meta.direction;

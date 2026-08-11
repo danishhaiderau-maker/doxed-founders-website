@@ -23,6 +23,7 @@ import {
   capRelayLimitAtShowcaseFill,
   mirrorPositionQuantityDelta,
   partialEntryFillDisposition,
+  protectiveStopReferencePrice,
   flatSignedFastPathPreflight,
   sameDirectionPendingSignedFastPathPreflight,
   readPersistedRelayExecutorHealth,
@@ -194,6 +195,131 @@ test('service persists replacement stop ownership before cancelling the old part
     {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
   );
   assert.deepEqual(order, ['persist', 'cancel-old', 'persist']);
+});
+
+test('pre-enrichment limit stop reference is no wider than the real limit execution boundary', () => {
+  const buyLimit = 64_100;
+  const buyExecution = 64_000; // BUY limits fill at or below their limit.
+  const longReference = protectiveStopReferencePrice(buyLimit, buyLimit, 63_900);
+  assert.equal(longReference, buyLimit);
+  assert.ok(longReference * 0.999 >= buyExecution * 0.999);
+
+  const sellLimit = 64_100;
+  const sellExecution = 64_200; // SELL limits fill at or above their limit.
+  const shortReference = protectiveStopReferencePrice(sellLimit, sellLimit, 64_300);
+  assert.equal(shortReference, sellLimit);
+  assert.ok(shortReference * 1.001 <= sellExecution * 1.001);
+
+  assert.equal(protectiveStopReferencePrice(0, buyLimit, 63_900), buyLimit);
+  assert.equal(protectiveStopReferencePrice(0, 0, 63_900), 63_900);
+});
+
+test('verified fill submits protective stop before trade enrichment and persists exact ACK timing', async () => {
+  const order: string[] = [];
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const exchangeFillAtMs = Date.now() - 2_000;
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeTrading = {
+    submitStopOrder: async () => {
+      order.push('stop-submit');
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      order.push('stop-ack');
+      return 7003;
+    },
+  };
+  service.cancelManagedOrderGone = async () => {
+    order.push('cancel-start');
+    await new Promise<void>((resolve) => setTimeout(resolve, 12));
+    order.push('cancel-confirmed');
+    return { gone: true, attempts: 1, reason: 'CANCELLED' };
+  };
+  service.resolveExchangeTradesFillEvidence = async () => {
+    order.push('trade-enrichment');
+    return {
+      price: 64_279,
+      qty: 0.0311,
+      firstExecutedAtMs: exchangeFillAtMs,
+      lastExecutedAtMs: exchangeFillAtMs,
+    };
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (
+      _userId: string,
+      _agentId: string,
+      _cycleId: string,
+      type: string,
+      payload: Record<string, unknown>,
+    ) => {
+      order.push(type);
+      events.push({ type, payload });
+    },
+  };
+  service.prisma = {
+    signalCycleEvent: { count: async () => 0 },
+    signalCycle: { update: async () => ({}) },
+  };
+  service.healStuckPendingFill = async () => {};
+  service.executeShowcaseMirrorClose = async () => true;
+  service.positionRuntime = new Map();
+  service.stopManagerCircuitOpen = new Map();
+
+  const recorded = await service.recordCancelRaceFillOwned(
+    'agent',
+    'user',
+    { id: 'cycle', status: SignalCycleStatus.CLOSED, tradeId: 'cont-timing' },
+    'participant',
+    { direction: 'SHORT', qty: 0.0311, bitfinexOrderId: 6003, limitPrice: 64_280 },
+    {},
+    { risk: { stop_loss_margin_pct: 10 } },
+    {
+      filledQty: 0.0311,
+      fillPrice: 64_280,
+      source: 'POSITION_DELTA',
+      orderResting: true,
+    },
+    'SHOWCASE_CYCLE_CLOSED',
+    new Date(exchangeFillAtMs).toISOString(),
+  );
+
+  assert.equal(recorded, true);
+  assert.ok(order.indexOf('cancel-confirmed') < order.indexOf('stop-submit'));
+  assert.ok(order.indexOf('stop-ack') < order.indexOf('trade-enrichment'));
+  assert.ok(order.indexOf('trade-enrichment') < order.indexOf('FILLED'));
+  const filled = events.find((event) => event.type === 'FILLED')?.payload;
+  const armed = events.find((event) => event.type === 'STOP_LOSS_ARMED')?.payload;
+  assert.ok(filled);
+  assert.equal(filled?.fill_detection_path, 'POSITION_DELTA');
+  assert.equal(filled?.fill_detection_context, 'SHOWCASE_CYCLE_CLOSED');
+  assert.equal(filled?.fill_detected_at, filled?.exchange_fill_detected_at);
+  assert.equal(filled?.exchange_fill_mts, new Date(exchangeFillAtMs).toISOString());
+  assert.equal(filled?.source_event_at, new Date(exchangeFillAtMs).toISOString());
+  assert.equal(filled?.stopOrderId, 7003);
+  const submitAt = Date.parse(String(filled?.stop_submit_started_at));
+  const ackAt = Date.parse(String(filled?.stop_exchange_ack_at));
+  assert.ok(Number.isFinite(submitAt));
+  assert.ok(Number.isFinite(ackAt));
+  assert.ok(ackAt >= submitAt);
+  assert.equal(filled?.stop_submit_to_ack_ms, ackAt - submitAt);
+  assert.ok(Number(filled?.fill_detection_to_stop_ack_ms) >= 12);
+  assert.equal(filled?.exchange_fill_to_stop_ack_ms, ackAt - exchangeFillAtMs);
+  assert.equal(armed?.stop_exchange_ack_at, filled?.stop_exchange_ack_at);
+});
+
+test('live close does not await public mark enrichment before reduce-only close submission', () => {
+  const source = String(
+    (SignalSubscriberExecutionService.prototype as any).executeShowcaseMirrorClose,
+  );
+  const markPromiseAt = source.indexOf('preparedExitPricePromise');
+  const closeAt = source.indexOf('closeParticipantPositionToLedgerTarget', markPromiseAt);
+  const auditAwaitAt = source.indexOf('await preparedExitPricePromise', closeAt);
+  assert.ok(markPromiseAt >= 0);
+  assert.ok(closeAt > markPromiseAt);
+  assert.ok(auditAwaitAt > closeAt);
+  const criticalPromiseAll = source.slice(
+    source.indexOf('Promise.all', markPromiseAt),
+    source.indexOf(']);', source.indexOf('Promise.all', markPromiseAt)) + 3,
+  );
+  assert.doesNotMatch(criticalPromiseAll, /getMarkPrice/);
 });
 
 test('service protection failure writes terminal state only after confirmed emergency reduction', async () => {
