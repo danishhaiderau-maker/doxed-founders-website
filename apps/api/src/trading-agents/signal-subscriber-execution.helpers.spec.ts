@@ -4481,6 +4481,18 @@ test('full WebSocket fill is non-resting so protection cannot cancel before stop
   assert.equal(resting,false);
 });
 
+test('WebSocket full fill one sat below the acknowledged quantity is terminal, not a phantom remainder', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map();
+  const cycle={id:'c',agentId:'a',intentEnvelope:{}};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle})}};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.0314});
+  let resting:boolean|undefined;
+  service.recordCancelRaceFill=async(...args:unknown[])=>{resting=(args[7] as any).orderResting;return true};
+  await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},{tradeId:1,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.03139999,execPrice:64000,receivedAtMs:1100,cumulativeQty:.03139999,cumulativeAveragePrice:64000});
+  assert.equal(resting,false);
+});
+
 test('secret-only credential rotation has a distinct fingerprint and retires old stream', async () => {
   const priorExecution=process.env.SUBSCRIBER_EXECUTION_ENABLED;
   const priorWorker=process.env.RELAY_EXECUTOR_WORKER;

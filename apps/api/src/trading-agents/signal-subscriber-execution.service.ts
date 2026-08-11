@@ -2703,7 +2703,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         const expectedSign = meta.direction === 'LONG' ? 1 : -1;
         if (Math.sign(trade.execAmount) !== expectedSign) return false;
         const intendedQty = meta.qty ?? trade.cumulativeQty;
-        const orderResting = btcToSats(trade.cumulativeQty) < btcToSats(intendedQty);
+        // Bitfinex trade aggregation can finish one satoshi below the
+        // acknowledged order quantity.  A one-satoshi remainder is below the
+        // venue's executable lot size and must take the terminal-fill path so
+        // finalizedEntryFillQty can snap it to the durable order quantity.
+        // Larger deficits remain resting and retain their protected remainder.
+        const orderResting =
+          btcToSats(trade.cumulativeQty) + 1 < btcToSats(intendedQty);
         return await this.recordCancelRaceFill(
           participant.cycle.agentId, userId, participant.cycle, participant.id, meta, creds,
           participant.cycle.intentEnvelope as SignalIntentEnvelope,
