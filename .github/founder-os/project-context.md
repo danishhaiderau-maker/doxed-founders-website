@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(bitfinex): mirror source order expiry
+test(fly): cover order expiry relay lane
 
 ## Last Activity
 
