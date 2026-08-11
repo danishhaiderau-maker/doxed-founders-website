@@ -134,7 +134,13 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert "_position_open_relay_allowed(pos, master)" in commit_source
 
     chase_source = ast.get_source_segment(BOT_SOURCE, _function("_apply_limit_chase"))
-    assert '"qty": float(order.get("qty") or 0)' in chase_source
+    chase_commit_source = ast.get_source_segment(
+        BOT_SOURCE,
+        _function("_commit_relay_limit_chase"),
+    )
+    assert "_commit_relay_limit_chase(" in chase_source
+    assert '"qty": float(order.get("qty") or 0)' in chase_commit_source
+    assert '"ts": utc_iso()' in chase_commit_source
 
 
 def test_terminal_close_dominates_a_late_fill_thread() -> None:
@@ -207,6 +213,42 @@ def test_terminal_close_wins_the_actual_open_commit_barrier() -> None:
     assert snapshot["_persist_ts"] == "2026-08-11T00:00:01Z"
     assert any(call[0] == "push" and call[3]["ts"] == "2026-08-11T00:00:01Z" for call in calls)
     assert any(call[0] == "mirror" for call in calls)
+
+
+def test_limit_chase_never_emits_after_the_same_trade_is_open() -> None:
+    lock = threading.RLock()
+    order = {
+        "trade_id": "cont-chase-open-race", "status": "PENDING",
+        "limit_price": 64_100.0, "limit_chase_count": 1, "qty": 0.01,
+    }
+    signal = {"research_lane": "CONTINUOUS"}
+    pending = [order]
+    positions: list[dict] = []
+    namespace = {
+        "trade_lock": lock,
+        "pending_orders": pending,
+        "open_positions": positions,
+        "_resolve_fill_model": lambda _signal, _order: "SIM_LIMIT",
+        "utc_iso": lambda: "2026-08-11T19:50:32.000Z",
+    }
+    commit = _compile_function("_commit_relay_limit_chase", namespace)
+
+    event = commit(
+        order, signal, direction="SHORT", old_limit=64_100.0,
+        new_limit=64_090.0, chase_count=2, now=123.0,
+    )
+    assert event["ts"] == "2026-08-11T19:50:32.000Z"
+    assert event["event_seq"] == 2
+    assert order["limit_price"] == 64_090.0
+
+    positions.append({"trade_id": "cont-chase-open-race", "status": "OPEN"})
+    rejected = commit(
+        order, signal, direction="SHORT", old_limit=64_090.0,
+        new_limit=64_080.0, chase_count=3, now=124.0,
+    )
+    assert rejected is None
+    assert order["limit_price"] == 64_090.0
+    assert order["limit_chase_count"] == 2
 
 
 def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:

@@ -18534,6 +18534,68 @@ def _compute_limit_chase_target(
     return round(new_limit, 2), "LIMIT_CHASE"
 
 
+def _commit_relay_limit_chase(
+    order: dict,
+    signal: dict,
+    *,
+    direction: str,
+    old_limit: float,
+    new_limit: float,
+    chase_count: int,
+    now: float,
+    tier: str = None,
+    urgent_marketable: bool = False,
+) -> dict | None:
+    """Atomically commit a still-pending chase and snapshot its causal event.
+
+    A fill may win after a chase decision is calculated but before the
+    fire-and-forget relay POST is built.  Do not mutate or emit a LIMIT_UPDATED
+    in that case.  If the chase wins, capture its source timestamp while the
+    pending generation is still current so an asynchronously delivered update
+    can never claim to be newer than a later POSITION_OPENED.
+    """
+    with trade_lock:
+        trade_id = order.get("trade_id")
+        if (
+            order not in pending_orders
+            or order.get("status") != "PENDING"
+            or not trade_id
+            or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
+            or int(order.get("limit_chase_count") or 0) != chase_count - 1
+            or any(
+                p.get("trade_id") == trade_id and p.get("status") != "CLOSED"
+                for p in open_positions
+            )
+        ):
+            return None
+        order["limit_price"] = new_limit
+        order["limit_chase_count"] = chase_count
+        order["last_chase_ts"] = now
+        if tier:
+            order["urgent_chase_tier"] = tier
+        if urgent_marketable:
+            order["urgent_marketable_chase"] = True
+        order["fill_model"] = _resolve_fill_model(signal, order)
+        if signal:
+            signal["limit_price"] = new_limit
+            signal["limit_chase_count"] = chase_count
+            signal["last_chase_ts"] = now
+            if tier:
+                signal["urgent_chase_tier"] = tier
+            signal["fill_model"] = order["fill_model"]
+        return {
+            "ts": utc_iso(),
+            "limit_price": new_limit,
+            "qty": float(order.get("qty") or 0),
+            "direction": direction,
+            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+            "event_seq": chase_count,
+            "executable": True,
+        }
+
+
 def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now: float, tier: str = "extreme") -> bool:
     """URGENT_CHASE_ALPHA extreme tier — immediate marketable limit (no 10m wait)."""
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
@@ -18561,18 +18623,13 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         )
         _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
         return False
-    order["limit_price"] = new_limit
-    order["limit_chase_count"] = chase_count
-    order["last_chase_ts"] = now
-    order["urgent_chase_tier"] = tier
-    order["urgent_marketable_chase"] = True
-    order["fill_model"] = _resolve_fill_model(signal, order)
-    if signal:
-        signal["limit_price"] = new_limit
-        signal["limit_chase_count"] = chase_count
-        signal["last_chase_ts"] = now
-        signal["urgent_chase_tier"] = tier
-        signal["fill_model"] = order["fill_model"]
+    relay_event = _commit_relay_limit_chase(
+        order, signal, direction=direction, old_limit=old_limit,
+        new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
+        urgent_marketable=True,
+    )
+    if relay_event is None:
+        return False
     logger.info(
         f"[SIM] URGENT_MARKETABLE_CHASE trade_id={order.get('trade_id')} dir={direction} tier={tier} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
@@ -18595,16 +18652,7 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {
-            "limit_price": new_limit,
-            "qty": float(order.get("qty") or 0),
-            "direction": direction,
-            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
-            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
-            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-            "event_seq": chase_count,
-            "executable": True,
-        },
+        relay_event,
     )
     return True
 
@@ -18645,19 +18693,12 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = next_chase_count
-    order["limit_price"] = new_limit
-    order["limit_chase_count"] = chase_count
-    order["last_chase_ts"] = now
-    order["fill_model"] = _resolve_fill_model(signal, order)
-    if tier:
-        order["urgent_chase_tier"] = tier
-    if signal:
-        signal["limit_price"] = new_limit
-        signal["limit_chase_count"] = chase_count
-        signal["last_chase_ts"] = now
-        signal["fill_model"] = order["fill_model"]
-        if tier:
-            signal["urgent_chase_tier"] = tier
+    relay_event = _commit_relay_limit_chase(
+        order, signal, direction=direction, old_limit=old_limit,
+        new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
+    )
+    if relay_event is None:
+        return False
     tier_note = f" tier={tier}" if tier else ""
     logger.info(
         f"[SIM] LIMIT_CHASE trade_id={order.get('trade_id')} dir={direction} "
@@ -18680,16 +18721,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {
-            "limit_price": new_limit,
-            "qty": float(order.get("qty") or 0),
-            "direction": direction,
-            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
-            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
-            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-            "event_seq": chase_count,
-            "executable": True,
-        },
+        relay_event,
     )
     return True
 

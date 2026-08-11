@@ -3705,11 +3705,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
-   * A source paper fill is a latency hint, never proof that Bitfinex filled.
-   * Poll the one already-owned order for a short bounded window and promote it
-   * only when private Bitfinex state proves a partial/full execution. The
-   * ordinary full tick remains the eventual backstop when the exchange limit
-   * fills later than the source.
+   * A source paper fill retires its exact pending mirror immediately. Private
+   * Bitfinex state remains the only fill authority: a pre-cancel check and the
+   * post-cancel tri-state classifier either promote a real execution or prove
+   * the order was unfilled before it can be expired.
    */
   private async tryImmediateShowcaseFillReconcile(
     agentId: string,
@@ -3757,11 +3756,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       || !meta.direction
     ) return false;
 
-    // Bitfinex can cross a few hundred milliseconds after the source's paper
-    // book. Stay below the 3s contract while avoiding a market-order fallback.
-    const fill = await pollForVerifiedEntryFill({
-      detect: () => this.detectEntryFillBeforeCancel(creds, meta, true),
-    });
+    // A source POSITION_OPENED is terminal for its resting entry generation.
+    // Do one authoritative private check, then retire the exact current order
+    // immediately. Waiting through a multi-second poll window leaves a copy
+    // order executable after the showcase is already filled, and was the
+    // direct cause of cont-7c1b47001742's 12s missed-fill cleanup.
+    const fill = await this.detectEntryFillBeforeCancel(creds, meta, true)
+      .catch(() => null);
     if (fill) {
       return this.recordCancelRaceFill(
           agentId,
@@ -3776,7 +3777,87 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           sourceFillAt,
       );
     }
-    return false;
+    let cancelTiming: { submitStartedAtMs: number; exchangeAckAtMs: number; confirmedAtMs: number } | undefined;
+    const cancel = await this.cancelManagedOrderGone(
+      creds,
+      meta.bitfinexOrderId,
+      `Signed showcase fill pending oid=${meta.bitfinexOrderId} trade=${preferredTradeId}`,
+      (timing) => { cancelTiming = timing; },
+    );
+    if (!cancel.gone) {
+      await this.cycles.recordHireExecutionEvent(
+        instance.userId,
+        agentId,
+        freshParticipant.cycle.id,
+        'RECONCILE_CANCEL_FAILED',
+        {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'MISSED_SHOWCASE_FILL',
+          reason: cancel.reason ?? 'CANCEL_UNCONFIRMED',
+          bitfinex_order_id: meta.bitfinexOrderId,
+        },
+      ).catch(() => undefined);
+      return false;
+    }
+    const postCancel = await this.classifyPostCancelEntry(creds, meta, cancel.reason);
+    if (postCancel.kind === 'FILL') {
+      return this.recordCancelRaceFill(
+        agentId,
+        instance.userId,
+        freshParticipant.cycle,
+        freshParticipant.id,
+        meta,
+        creds,
+        freshParticipant.cycle.intentEnvelope as SignalIntentEnvelope,
+        postCancel.fill,
+        'SHOWCASE_POSITION_OPENED_WAKE',
+        sourceFillAt,
+      );
+    }
+    if (postCancel.kind === 'UNKNOWN' || !cancelTiming) {
+      await this.cycles.recordHireExecutionEvent(
+        instance.userId,
+        agentId,
+        freshParticipant.cycle.id,
+        'RECONCILE_CANCEL_FAILED',
+        {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'MISSED_SHOWCASE_FILL',
+          reason: postCancel.kind === 'UNKNOWN' ? postCancel.reason : 'CANCEL_TIMING_MISSING',
+          bitfinex_order_id: meta.bitfinexOrderId,
+        },
+      ).catch(() => undefined);
+      return false;
+    }
+    await this.cycles.recordHireExecutionEvent(
+      instance.userId,
+      agentId,
+      freshParticipant.cycle.id,
+      'EXPIRED',
+      {
+        venue: 'bitfinex',
+        source: 'hire',
+        event: 'MISSED_SHOWCASE_FILL',
+        reason: 'SHOWCASE_FILLED_BEFORE_COPY_FILL',
+        bitfinex_order_id: meta.bitfinexOrderId,
+        source_fill_at: sourceFillAt,
+        cancel_submit_started_at: new Date(cancelTiming.submitStartedAtMs).toISOString(),
+        cancel_exchange_ack_at: new Date(cancelTiming.exchangeAckAtMs).toISOString(),
+        cancel_confirmed_at: new Date(cancelTiming.confirmedAtMs).toISOString(),
+        platform_to_cancel_ack_ms: cancelTiming.exchangeAckAtMs - Date.parse(sourceFillAt),
+        cancel_submit_to_ack_ms: cancelTiming.exchangeAckAtMs - cancelTiming.submitStartedAtMs,
+      },
+    );
+    void this.cancelPhantomShowcasePosition(
+      instance.userId,
+      agentId,
+      freshParticipant.cycle.id,
+      freshParticipant.cycle.tradeId,
+      'SHOWCASE_FILLED_BEFORE_COPY_FILL',
+    );
+    return true;
     } finally {
       releaseMoneyLane();
     }

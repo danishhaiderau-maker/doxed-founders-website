@@ -2780,6 +2780,80 @@ test('immediate source-fill reconcile waits for lane and rejects a stale pending
   assert.equal(recorded, false);
 });
 
+test('signed source fill retires an exchange-proven unfilled pending order without a poll dwell', async () => {
+  const events: Array<{ type: string; payload: any }> = [];
+  const cancelled: number[] = [];
+  const phantom: string[] = [];
+  const cycle = {
+    id: 'cycle-fast-retire', tradeId: 'cont-fast-retire',
+    status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {},
+  };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.prisma = { signalCycleParticipant: {
+    findMany: async () => [{ id: 'participant-fast-retire', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+    findUnique: async () => ({ id: 'participant-fast-retire', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
+  } };
+  service.exchanges = { getUserCredentials: async () => ({}) };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 8402, limitPrice: 64_000, qty: 0.03,
+  });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.cancelManagedOrderGone = async (_creds: unknown, id: number, _note: string, timing: any) => {
+    cancelled.push(id);
+    timing({ submitStartedAtMs: 1_100, exchangeAckAtMs: 1_300, confirmedAtMs: 1_400 });
+    return { gone: true, reason: 'CANCELLED', attempts: 1 };
+  };
+  service.classifyPostCancelEntry = async () => ({ kind: 'PROVEN_UNFILLED' });
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => events.push({ type, payload }) };
+  service.cancelPhantomShowcasePosition = async (_u: string, _a: string, _c: string, tradeId: string) => { phantom.push(tradeId); };
+  const handled = await service.tryImmediateShowcaseFillReconcile(
+    'agent',
+    { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+    'cont-fast-retire',
+    new Date(1_000).toISOString(),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(handled, true);
+  assert.deepEqual(cancelled, [8402]);
+  assert.deepEqual(events.map((event) => event.type), ['EXPIRED']);
+  assert.equal(events[0].payload.reason, 'SHOWCASE_FILLED_BEFORE_COPY_FILL');
+  assert.equal(events[0].payload.platform_to_cancel_ack_ms, 300);
+  assert.deepEqual(phantom, ['cont-fast-retire']);
+});
+
+test('signed source fill promotes a cancel-race execution instead of expiring it', async () => {
+  const cycle = {
+    id: 'cycle-fast-race', tradeId: 'cont-fast-race',
+    status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {},
+  };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.prisma = { signalCycleParticipant: {
+    findMany: async () => [{ id: 'participant-fast-race', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+    findUnique: async () => ({ id: 'participant-fast-race', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
+  } };
+  service.exchanges = { getUserCredentials: async () => ({}) };
+  service.loadExecutionMeta = async () => ({ direction: 'SHORT', bitfinexOrderId: 8403, limitPrice: 64_000, qty: 0.03 });
+  service.detectEntryFillBeforeCancel = async () => null;
+  service.cancelManagedOrderGone = async (_creds: unknown, _id: number, _note: string, timing: any) => {
+    timing({ submitStartedAtMs: 1_100, exchangeAckAtMs: 1_300, confirmedAtMs: 1_400 });
+    return { gone: true, reason: 'CANCELLED', attempts: 1 };
+  };
+  service.classifyPostCancelEntry = async () => ({ kind: 'FILL', fill: { filledQty: 0.01, fillPrice: 64_000, source: 'ORDER_PARTIAL', orderResting: false } });
+  let recorded: any = null;
+  service.recordCancelRaceFill = async (...args: any[]) => { recorded = args; return true; };
+  service.cycles = { recordHireExecutionEvent: async () => assert.fail('cancel-race fill must not expire') };
+  const handled = await service.tryImmediateShowcaseFillReconcile(
+    'agent',
+    { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+    'cont-fast-race',
+    new Date(1_000).toISOString(),
+  );
+  assert.equal(handled, true);
+  assert.equal(recorded[8], 'SHOWCASE_POSITION_OPENED_WAKE');
+});
+
 test('same durable replacement survives first Bitfinex visibility miss and later active-list proof', async () => {
   const events: string[] = [];
   let findCalls = 0;
