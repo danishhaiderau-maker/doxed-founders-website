@@ -17,6 +17,42 @@ SPEC.loader.exec_module(retention)
 
 
 class ResearchRetentionTests(unittest.TestCase):
+    def test_cap_deletes_only_receipt_acknowledged_closed_rotations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active = root / "signal_replay.jsonl"
+            active.write_bytes(b"a" * 800)
+            acknowledged = root / "signal_replay.jsonl.2"
+            acknowledged.write_bytes(b"b" * 500)
+            unacknowledged = root / "other.jsonl.1"
+            unacknowledged.write_bytes(b"c" * 500)
+            closed_log = root / "bot_runtime.log.4"
+            closed_log.write_bytes(b"d" * 100)
+            inventory = [retention._fingerprint(acknowledged)]
+
+            result = retention._enforce_raw_mirror_cap(
+                root, cap_bytes=1200, acknowledged_inventory=inventory
+            )
+
+            self.assertEqual(result["status"], "FAIL_SAFE_CAP_EXCEEDED")
+            self.assertFalse(acknowledged.exists())
+            self.assertTrue(active.exists())
+            self.assertTrue(unacknowledged.exists())
+            self.assertTrue(closed_log.exists())
+            self.assertEqual(result["unsafe_files_deleted"], 0)
+
+    def test_cap_reports_unprunable_active_data_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active = root / "trade_lifecycle.jsonl"
+            active.write_bytes(b"x" * 2000)
+            result = retention._enforce_raw_mirror_cap(
+                root, cap_bytes=1000, acknowledged_inventory=[]
+            )
+            self.assertEqual(result["status"], "FAIL_SAFE_CAP_EXCEEDED")
+            self.assertTrue(active.exists())
+            self.assertEqual(result["deleted"], 0)
+
     def test_daily_snapshot_preserves_live_ledgers_and_prunes_intraday_archives(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -36,7 +72,7 @@ class ResearchRetentionTests(unittest.TestCase):
             result = retention.run_analyzer_retention(root, now=now, force=True)
 
             self.assertEqual(result["status"], "COMPLETED")
-            self.assertEqual(result["schema"], "analyzer_retention_v2")
+            self.assertEqual(result["schema"], "analyzer_retention_v3")
             self.assertEqual(live.read_text(encoding="utf-8"), '{"trade_id":"one","adx":31}\n')
             self.assertTrue(
                 (root / "research_retention" / "daily" / "2026-07-21" / "daily_evidence_manifest.json").is_file()
@@ -44,6 +80,9 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertTrue((root / "analysis_summary.md").is_file())
             self.assertTrue(
                 (root / "research_retention" / "daily" / "2026-07-21" / "analysis_summary.md").is_file()
+            )
+            self.assertTrue(
+                (root / "research_retention" / "daily" / "2026-07-21" / "storage_retention_receipt.md").is_file()
             )
             self.assertLess(len(list(history.iterdir())), 5)
             manifest = json.loads(
@@ -75,6 +114,12 @@ class ResearchRetentionTests(unittest.TestCase):
             )
             self.assertEqual(len(manifest["closed_rotation_inventory"]), 4)
             self.assertEqual(manifest["closed_rotation_prune"]["deleted"], 2)
+            receipt = (
+                root / "research_retention" / "daily" / "2026-07-21"
+                / "storage_retention_receipt.md"
+            ).read_text(encoding="utf-8")
+            self.assertIn("## Enforcement outcome", receipt)
+            self.assertIn("Closed rotations deleted: 2", receipt)
 
     def test_raw_db_prunes_only_expired_high_frequency_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

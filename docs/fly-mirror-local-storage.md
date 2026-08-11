@@ -1,5 +1,20 @@
 # Fly mirror local storage
 
+## Hard 30 GiB raw-mirror boundary
+
+The desktop mirror has two coordinated safeguards. The downloader refuses any
+sync whose projected local growth would exceed 30 GiB (`MaxLocalMirrorGiB`).
+The analyzer retention pass records fingerprints in both the daily JSON
+manifest and `storage_retention_receipt.md`, then may remove only closed numeric
+JSONL/CSV/log/text rotations recorded by that receipt. Active ledgers, databases, and files
+that have not been acknowledged in the receipt are never cap-deletion
+candidates. If those protected files alone exceed the cap, status becomes
+`FAIL_SAFE_CAP_EXCEEDED` and downloads remain blocked for operator review.
+
+The analyzer dashboard reports bytes, percentage, configured GiB, and cap
+status. `ANALYZER_RAW_MIRROR_CAP_GIB` can change the analyzer boundary; the
+downloader parameter must be changed to the same reviewed value.
+
 Raw Fly runtime evidence is stored outside the repository and outside OneDrive by default:
 
 `%LOCALAPPDATA%\DoxxedCrypto\fly-data-mirror`

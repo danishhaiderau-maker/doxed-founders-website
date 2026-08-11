@@ -22864,6 +22864,31 @@ def _admin_authed_strict() -> bool:
     return False
 
 
+def _analyzer_view_cookie_value() -> str:
+    """Return an opaque, revocable session value for the read-only analyzer.
+
+    The browser never receives BOT_ADMIN_TOKEN as a cookie on this path.  A
+    token rotation invalidates this derived value automatically, while the
+    cookie cannot authorize any trading or settings endpoint.
+    """
+    if not _BOT_ADMIN_TOKEN:
+        return ""
+    return hmac.new(
+        _BOT_ADMIN_TOKEN.encode("utf-8"),
+        b"doxxed-analyzer-view-v1",
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _analyzer_view_authed() -> bool:
+    """Accept full admin auth or the narrower analyzer-only browser session."""
+    if _admin_authed_strict():
+        return True
+    expected = _analyzer_view_cookie_value()
+    presented = request.cookies.get("analyzer_view_session", "")
+    return bool(expected and presented and hmac.compare_digest(presented, expected))
+
+
 @app.before_request
 def _emergency_api_guard():
     path = request.path or ""
@@ -33026,15 +33051,89 @@ def api_analyzer_mirror_status():
 
 @app.route('/analysis')
 def analyzer_mirror_dashboard():
-    if not _admin_authed_strict():
-        return jsonify({"error": "admin token required"}), 401
+    if not _analyzer_view_authed():
+        resp = make_response('', 303)
+        resp.headers['Location'] = '/analysis/login'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
     report = _analyzer_mirror_dir() / "analysis_dashboard.html"
     if not report.is_file():
         return jsonify({
             "error": "no analyzer mirror is available yet",
             "next": "run the local sync/analyzer publisher while the PC is online",
         }), 404
-    return send_file(report, mimetype="text/html")
+    resp = make_response(send_file(report, mimetype="text/html"))
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'DENY'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+@app.route('/analysis/login', methods=['GET', 'POST'])
+def analyzer_mirror_login():
+    """Mobile-friendly, read-only analyzer authentication.
+
+    The owner token is accepted only in a POST body and exchanged for a
+    derived HttpOnly cookie which is deliberately ignored by every mutation
+    endpoint.
+    """
+    if request.method == 'GET':
+        return render_template_string("""
+<!doctype html>
+<html lang="en"><head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BTC Analyzer Access</title>
+  <style>
+    body{background:#0b0f14;color:#e5e7eb;font-family:system-ui;margin:0;padding:32px 18px}
+    main{max-width:420px;margin:12vh auto;background:#111827;padding:24px;border-radius:14px}
+    input,button{box-sizing:border-box;width:100%;padding:13px;margin-top:12px;border-radius:8px}
+    input{background:#030712;color:#fff;border:1px solid #374151}
+    button{background:#2563eb;color:#fff;border:0;font-weight:700}
+    p{color:#9ca3af;line-height:1.45}
+  </style>
+</head><body><main>
+  <h2>Read-only analyzer</h2>
+  <p>Enter the owner token once. This creates an analyzer-only session; it cannot change trading settings or place orders.</p>
+  <form method="post" action="/analysis/login" autocomplete="on">
+    <label for="analyzerUsername">Account</label>
+    <input id="analyzerUsername" name="username" type="text" value="bot-analyzer" readonly autocomplete="username">
+    <label for="analyzerToken">Owner token</label>
+    <input id="analyzerToken" name="token" type="password" required autofocus placeholder="Owner token" autocomplete="current-password">
+    <button type="submit">Open analyzer</button>
+  </form>
+</main></body></html>
+        """), 200, {'Cache-Control': 'no-store'}
+
+    token = request.form.get('token', '')
+    if not _BOT_ADMIN_TOKEN or not hmac.compare_digest(token, _BOT_ADMIN_TOKEN):
+        return 'Invalid owner token', 401, {'Cache-Control': 'no-store'}
+
+    resp = make_response('', 303)
+    resp.headers['Location'] = '/analysis'
+    forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    secure = bool(request.is_secure or forwarded_proto == 'https')
+    resp.set_cookie(
+        'analyzer_view_session', _analyzer_view_cookie_value(),
+        httponly=True, samesite='Lax', path='/analysis',
+        max_age=60 * 60 * 24 * 30, secure=secure,
+    )
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/analysis/logout', methods=['POST'])
+def analyzer_mirror_logout():
+    resp = make_response('', 303)
+    resp.headers['Location'] = '/analysis/login'
+    forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    secure = bool(request.is_secure or forwarded_proto == 'https')
+    resp.delete_cookie(
+        'analyzer_view_session', httponly=True, samesite='Lax',
+        path='/analysis', secure=secure,
+    )
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 def _read_log_tail(path, max_lines=400):

@@ -23,7 +23,8 @@ from pathlib import Path
 STATUS_FILE = "research_retention_status.json"
 MARKER_FILE = ".research_retention_last_run.json"
 DAILY_DIR = Path("research_retention") / "daily"
-RETENTION_SCHEMA = "analyzer_retention_v2"
+RETENTION_SCHEMA = "analyzer_retention_v3"
+DEFAULT_RAW_MIRROR_CAP_GIB = 30
 
 COMPACT_EVIDENCE_FILES = (
     "analysis_summary.md",
@@ -149,12 +150,136 @@ def _fingerprint(path: Path) -> dict:
 
 
 def _closed_jsonl_rotations(root: Path) -> list[Path]:
-    """Return immutable ``*.jsonl.N`` siblings, never the active base file."""
+    """Return immutable append-ledger ``*.N`` siblings, never active files."""
     found = []
-    for path in root.glob("*.jsonl.*"):
-        if path.is_file() and path.suffix[1:].isdigit():
+    safe_bases = (".jsonl", ".csv", ".log", ".txt")
+    for path in root.iterdir() if root.is_dir() else ():
+        if not path.is_file() or not path.suffix[1:].isdigit():
+            continue
+        base = Path(path.name.rsplit(".", 1)[0])
+        if base.suffix.lower() in safe_bases:
             found.append(path)
     return sorted(found, key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
+
+
+def _tree_bytes(root: Path) -> int:
+    total = 0
+    if not root.is_dir():
+        return total
+    for path in root.rglob("*"):
+        try:
+            if path.is_file():
+                total += int(path.stat().st_size)
+        except OSError:
+            continue
+    return total
+
+
+def _write_storage_receipt(path: Path, *, now: datetime, cap_bytes: int,
+                           before_bytes: int, candidates: list[dict]) -> None:
+    """Write human-readable evidence before any cap-driven deletion."""
+    lines = [
+        "# Raw mirror storage retention receipt", "",
+        f"- Generated: {now.isoformat()}",
+        f"- Mirror bytes before enforcement: {before_bytes}",
+        f"- Hard admission cap bytes: {cap_bytes}",
+        "- Safety: active ledgers and unacknowledged files are never deletion candidates.",
+        "- Candidate rule: closed numeric append-only raw rotation, fingerprinted in the accompanying daily manifest.",
+        "", "## Fingerprinted candidates", "",
+    ]
+    if not candidates:
+        lines.append("No eligible closed rotations were present.")
+    else:
+        for row in candidates:
+            lines.append(
+                f"- `{row['path']}` - {row['bytes']} bytes - "
+                f"{row['fingerprint_mode']} `{row['fingerprint']}`"
+            )
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _append_storage_outcome(path: Path, outcome: dict) -> None:
+    """Atomically add the completed action list to the readable receipt."""
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except OSError:
+        existing = "# Raw mirror storage retention receipt\n"
+    lines = [
+        "", "## Enforcement outcome", "",
+        f"- Status: {outcome.get('status')}",
+        f"- Mirror bytes after enforcement: {outcome.get('after_bytes')}",
+        f"- Cap usage: {outcome.get('usage_pct')}%",
+        f"- Fingerprint mismatches retained: {outcome.get('fingerprint_mismatches', 0)}",
+        f"- Closed rotations deleted: {outcome.get('deleted', 0)}",
+    ]
+    for name in outcome.get("deleted_files") or []:
+        lines.append(f"  - `{name}`")
+    lines.extend(["", f"Safety result: {outcome.get('reason')}", ""])
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(existing.rstrip() + "\n" + "\n".join(lines), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _enforce_raw_mirror_cap(
+    data_root: Path, *, cap_bytes: int, acknowledged_inventory: list[dict]
+) -> dict:
+    """Delete only receipt-acknowledged closed rotations; otherwise fail safe."""
+    before = _tree_bytes(data_root)
+    deleted: list[str] = []
+    deleted_bytes = 0
+    inventory = {str(row.get("path")): row for row in acknowledged_inventory}
+    candidates: list[Path] = []
+    fingerprint_mismatches = 0
+    for path in _closed_jsonl_rotations(data_root):
+        row = inventory.get(path.name)
+        if not row or not row.get("fingerprint"):
+            continue
+        try:
+            current_fingerprint = _fingerprint(path)
+        except OSError:
+            continue
+        if (
+            current_fingerprint.get("fingerprint") != row.get("fingerprint")
+            or current_fingerprint.get("bytes") != row.get("bytes")
+            or current_fingerprint.get("fingerprint_mode") != row.get("fingerprint_mode")
+        ):
+            fingerprint_mismatches += 1
+            continue
+        candidates.append(path)
+    candidates.sort(key=lambda p: (p.stat().st_mtime, p.name))
+    current = before
+    for path in candidates:
+        if current <= cap_bytes:
+            break
+        try:
+            size = int(path.stat().st_size)
+            path.unlink()
+            deleted.append(path.name)
+            deleted_bytes += size
+            current -= size
+        except OSError:
+            continue
+    after = _tree_bytes(data_root)
+    return {
+        "status": "WITHIN_CAP" if after <= cap_bytes else "FAIL_SAFE_CAP_EXCEEDED",
+        "cap_bytes": cap_bytes,
+        "before_bytes": before,
+        "after_bytes": after,
+        "usage_pct": round((after / cap_bytes) * 100, 3) if cap_bytes else 0,
+        "acknowledged_candidates": len(candidates),
+        "fingerprint_mismatches": fingerprint_mismatches,
+        "deleted": len(deleted),
+        "deleted_bytes": deleted_bytes,
+        "deleted_files": deleted,
+        "unsafe_files_deleted": 0,
+        "reason": (
+            "Only receipt-acknowledged closed rotations were eligible."
+            if after <= cap_bytes else
+            "Active or unacknowledged data exceeds the cap; sync admission must remain blocked."
+        ),
+    }
 
 
 def _rotation_base(path: Path) -> str:
@@ -167,6 +292,7 @@ def _prune_closed_rotations(
     now: datetime,
     minimum_age_hours: int,
     keep_latest: int,
+    acknowledged_inventory: list[dict] | None = None,
 ) -> dict:
     """Delete only fingerprinted, closed rotations outside the hot window."""
     by_base: dict[str, list[Path]] = {}
@@ -175,6 +301,10 @@ def _prune_closed_rotations(
     deleted = []
     deleted_bytes = 0
     kept = []
+    inventory = {
+        str(row.get("path")): row for row in (acknowledged_inventory or [])
+    }
+    fingerprint_mismatches = 0
     for base, siblings in sorted(by_base.items()):
         siblings.sort(key=lambda path: (path.stat().st_mtime, path.name), reverse=True)
         for index, path in enumerate(siblings):
@@ -185,6 +315,21 @@ def _prune_closed_rotations(
             age_hours = max(0.0, (now.timestamp() - stat.st_mtime) / 3600.0)
             if index < keep_latest or age_hours < minimum_age_hours:
                 kept.append(path.name)
+                continue
+            acknowledged = inventory.get(path.name)
+            try:
+                current_fingerprint = _fingerprint(path)
+            except OSError:
+                kept.append(path.name)
+                continue
+            if (
+                not acknowledged
+                or current_fingerprint.get("fingerprint") != acknowledged.get("fingerprint")
+                or current_fingerprint.get("bytes") != acknowledged.get("bytes")
+                or current_fingerprint.get("fingerprint_mode") != acknowledged.get("fingerprint_mode")
+            ):
+                kept.append(path.name)
+                fingerprint_mismatches += 1
                 continue
             try:
                 path.unlink()
@@ -200,6 +345,7 @@ def _prune_closed_rotations(
         "deleted_files": deleted,
         "minimum_age_hours": minimum_age_hours,
         "keep_latest_per_ledger": keep_latest,
+        "fingerprint_mismatches": fingerprint_mismatches,
     }
 
 
@@ -365,6 +511,10 @@ def run_analyzer_retention(
     rotation_age_hours = _env_int("ANALYZER_ROTATED_RAW_RETENTION_HOURS", 24, 6)
     rotation_keep_latest = _env_int("ANALYZER_ROTATED_RAW_KEEP_LATEST", 2, 1)
     raw_db_retain_hours = _env_int("ANALYZER_RAW_DB_RETENTION_HOURS", 72, 24)
+    raw_mirror_cap_gib = _env_int(
+        "ANALYZER_RAW_MIRROR_CAP_GIB", DEFAULT_RAW_MIRROR_CAP_GIB, 1
+    )
+    raw_mirror_cap_bytes = raw_mirror_cap_gib * 1024 * 1024 * 1024
     marker = root / MARKER_FILE
     if marker.is_file() and not force:
         try:
@@ -450,20 +600,47 @@ def run_analyzer_retention(
     }
     # Persist the evidence receipt before removing any source data.
     _atomic_json(daily / "daily_evidence_manifest.json", evidence)
+    _write_storage_receipt(
+        daily / "storage_retention_receipt.md",
+        now=now,
+        cap_bytes=raw_mirror_cap_bytes,
+        before_bytes=_tree_bytes(data_root),
+        candidates=rotation_inventory,
+    )
 
     rotation_prune = _prune_closed_rotations(
         rotation_paths,
         now=now,
         minimum_age_hours=rotation_age_hours,
         keep_latest=rotation_keep_latest,
+        acknowledged_inventory=rotation_inventory,
     )
     db_prune = _prune_research_db_raw(
         db_path,
         now=now,
         retain_hours=raw_db_retain_hours,
     )
+    cap_enforcement = _enforce_raw_mirror_cap(
+        data_root,
+        cap_bytes=raw_mirror_cap_bytes,
+        acknowledged_inventory=rotation_inventory,
+    )
+    _append_storage_outcome(
+        daily / "storage_retention_receipt.md",
+        {
+            **cap_enforcement,
+            "deleted": int(rotation_prune.get("deleted") or 0)
+            + int(cap_enforcement.get("deleted") or 0),
+            "deleted_files": list(rotation_prune.get("deleted_files") or [])
+            + list(cap_enforcement.get("deleted_files") or []),
+            "fingerprint_mismatches": int(
+                rotation_prune.get("fingerprint_mismatches") or 0
+            ) + int(cap_enforcement.get("fingerprint_mismatches") or 0),
+        },
+    )
     evidence["closed_rotation_prune"] = rotation_prune
     evidence["research_db_prune"] = db_prune
+    evidence["raw_mirror_cap"] = cap_enforcement
     _atomic_json(daily / "daily_evidence_manifest.json", evidence)
 
     prune_results = [
@@ -499,10 +676,18 @@ def run_analyzer_retention(
         "raw_db_rows_deleted": db_prune["rows_deleted"],
         "raw_db_reclaimable_bytes": int(db_prune.get("reclaimable_bytes") or 0),
         "raw_db_status": db_prune["status"],
+        "raw_mirror_cap_gib": raw_mirror_cap_gib,
+        "raw_mirror_cap_bytes": raw_mirror_cap_bytes,
+        "raw_mirror_bytes": cap_enforcement["after_bytes"],
+        "raw_mirror_usage_pct": cap_enforcement["usage_pct"],
+        "raw_mirror_cap_status": cap_enforcement["status"],
+        "cap_deleted_rotations": cap_enforcement["deleted"],
+        "cap_deleted_bytes": cap_enforcement["deleted_bytes"],
         "pruned": prune_results,
         "deleted_bytes": (
             sum(int(row.get("deleted_bytes") or 0) for row in prune_results)
             + int(rotation_prune["deleted_bytes"])
+            + int(cap_enforcement["deleted_bytes"])
         ),
     }
     _atomic_json(root / STATUS_FILE, status)

@@ -3,7 +3,8 @@ param(
   [string]$AdminToken = "",
   [string]$TargetDir = "",
   [string]$PublishAnalyzerReport = "",
-  [string[]]$IncludePath = @()
+  [string[]]$IncludePath = @(),
+  [int]$MaxLocalMirrorGiB = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +86,29 @@ if ($IncludePath.Count -gt 0) {
   if ($selectedFiles.Count -ne $IncludePath.Count) {
     throw "One or more IncludePath entries were not present in the Fly manifest."
   }
+}
+# Hard admission guard. Retention may remove only analyzer-acknowledged,
+# fingerprinted closed rotations; this downloader never deletes data to make
+# room and refuses a sync whose projected growth crosses the local cap.
+$capBytes = [int64]$MaxLocalMirrorGiB * 1GB
+$currentMirrorBytes = [int64](
+  (Get-ChildItem -LiteralPath $targetRoot -Recurse -File -Force -ErrorAction SilentlyContinue |
+    Measure-Object -Property Length -Sum).Sum
+)
+$incomingGrowth = [int64]0
+foreach ($row in $selectedFiles) {
+  $candidate = Join-Path $targetRoot (([string]$row.path) -replace "/", "\")
+  $existingBytes = if (Test-Path -LiteralPath $candidate) {
+    [int64](Get-Item -LiteralPath $candidate).Length
+  } else { 0 }
+  $incomingGrowth += [Math]::Max([int64]0, ([int64]$row.size - $existingBytes))
+}
+if (($currentMirrorBytes + $incomingGrowth) -gt $capBytes) {
+  throw (
+    "Local Fly mirror hard cap would be exceeded: current=$currentMirrorBytes " +
+    "incoming=$incomingGrowth cap=$capBytes. Analyzer retention must produce " +
+    "fingerprinted receipts and free eligible closed rotations before sync resumes."
+  )
 }
 foreach ($row in $selectedFiles) {
   $rel = [string]$row.path

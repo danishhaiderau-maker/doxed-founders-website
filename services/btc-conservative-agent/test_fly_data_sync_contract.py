@@ -56,6 +56,13 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "and not is_authenticated_data_sync" in BOT
 
 
+def test_local_sync_has_fail_closed_30_gib_admission_guard():
+    assert "[int]$MaxLocalMirrorGiB = 30" in SYNC_SCRIPT
+    assert "$currentMirrorBytes + $incomingGrowth" in SYNC_SCRIPT
+    assert "Local Fly mirror hard cap would be exceeded" in SYNC_SCRIPT
+    assert "fingerprinted receipts" in SYNC_SCRIPT
+
+
 def test_retention_never_removes_active_or_unacknowledged_files():
     assert "active/unacked files retained" in BOT
     assert "newest_kept = frozenset(sorted(generations)[-keep_newest:])" in BOT
@@ -110,6 +117,7 @@ def test_remote_analyzer_mirror_is_read_only_and_admin_gated():
 if __name__ == "__main__":
     test_fly_runtime_cwd_is_volume_backed()
     test_incremental_sync_is_authenticated_and_chunk_verified()
+    test_local_sync_has_fail_closed_30_gib_admission_guard()
     test_retention_never_removes_active_or_unacknowledged_files()
     test_numbered_rotations_are_supported_and_highest_two_are_retained()
     test_remote_analyzer_mirror_is_read_only_and_admin_gated()
