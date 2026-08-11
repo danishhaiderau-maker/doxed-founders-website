@@ -2853,6 +2853,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           if (placed) processedInstanceIds.add(instance.id);
         } else if (wake.trigger === 'ORDER_PLACED') {
           await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'ENTRY_SKIPPED_PAUSED');
+        } else if (
+          wake.trigger === 'LIMIT_UPDATED'
+          && instance.status === TradingAgentInstanceStatus.ACTIVE
+        ) {
+          const repriced = await this.tryImmediateSignedLimitUpdate(
+            instance.agentId,
+            instance,
+            wake.tradeId ?? undefined,
+          );
+          await this.persistFastWakeTelemetry(
+            instance.id,
+            wake,
+            startedAtMs,
+            repriced ? 'LIMIT_REPRICE_DISPATCHED' : 'LIMIT_REPRICE_NOT_ELIGIBLE',
+          );
+          if (repriced) processedInstanceIds.add(instance.id);
+        } else if (wake.trigger === 'LIMIT_UPDATED') {
+          await this.persistFastWakeTelemetry(
+            instance.id,
+            wake,
+            startedAtMs,
+            'LIMIT_REPRICE_SKIPPED_PAUSED',
+          );
         }
       }
     };
@@ -2866,6 +2889,83 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.relayInstanceCache.set(instance.id, instance);
     }
     await processInstances(discoveredInstances);
+  }
+
+  /**
+   * Reprice one already-owned resting entry directly from a durable signed
+   * LIMIT_UPDATED revision. This is deliberately narrower than a full tick:
+   * it cannot create a participant or a new position, requires the exact
+   * trade id, and delegates cancel-race/fill safety to replaceRestingLimit.
+   */
+  private async tryImmediateSignedLimitUpdate(
+    agentId: string,
+    instance: TradingAgentInstance,
+    preferredTradeId?: string,
+  ): Promise<boolean> {
+    if (!preferredTradeId) return false;
+    if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return false;
+    if (isCopyRelaySimActive(instance.dashboardState)) return false;
+    if (intentMirrorKillSwitchActive() || intentMirrorDryRunActive(instance)) return false;
+
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: {
+          agentId,
+          status: SignalCycleStatus.PENDING_ENTRY,
+        },
+      },
+      include: { cycle: true },
+      take: 20,
+    });
+    const participant = participants.find((candidate) =>
+      tradeIdsMatch(candidate.cycle.tradeId, preferredTradeId),
+    );
+    if (!participant) return false;
+
+    const intent = participant.cycle.intentEnvelope as SignalIntentEnvelope;
+    const signedLimit = readFreshSignedShowcaseExactLimit(
+      participant.cycle.tradeId,
+      intent,
+    );
+    if (!signedLimit) return false;
+
+    const meta = await this.loadExecutionMeta(participant.id);
+    if (!meta.bitfinexOrderId || !meta.direction || !meta.limitPrice) return false;
+    const creds = await this.exchanges.getUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    if (!creds) return false;
+
+    const mark = await this.activeTrading.getMarkPrice().catch(() => null);
+    if (mark == null || !Number.isFinite(mark) || mark <= 0) return false;
+    const newLimit = sanitizeLimitPrice(mark, signedLimit.limitPrice, meta.direction);
+    if (newLimit == null || Math.abs(newLimit - meta.limitPrice) < 0.01) return false;
+
+    // Do not fetch the canonical bot snapshot here. The HMAC-verified revision
+    // in Neon is the newest exact source limit and a cross-region snapshot may
+    // still contain the preceding anchor. replaceRestingLimit independently
+    // proves the managed order is live and unfilled before cancel+replace.
+    await this.replaceRestingLimit(
+      agentId,
+      instance.userId,
+      participant.cycleId,
+      participant.id,
+      meta,
+      creds,
+      intent,
+      {
+        newLimit,
+        mark,
+        now: Date.now(),
+        chaseLabel: `signed-limit=${signedLimit.limitPrice.toFixed(2)}`,
+        event: 'BOT_ANCHOR_CHASE',
+        tradeId: participant.cycle.tradeId,
+      },
+    );
+    return true;
   }
 
   private async persistFastWakeTelemetry(

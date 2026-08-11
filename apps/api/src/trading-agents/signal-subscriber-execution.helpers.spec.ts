@@ -103,6 +103,97 @@ test('authenticated direct wake queues instead of returning busy', async () => {
   }
 });
 
+test('signed LIMIT_UPDATED fast wake reprices only its exact owned pending order', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const intent = {
+    schema: 'dcf-signal-intent/v1',
+    signalId: 'cont-fast-reprice',
+    trade_id: 'cont-fast-reprice',
+    action: 'ENTER',
+    direction: 'SHORT',
+    entry: {
+      mode: 'EXACT_LIMIT',
+      reference: 'SHOWCASE_EXACT_LIMIT',
+      exact_limit_price: 64_218.63,
+    },
+    context: {
+      signed_showcase_event: true,
+      showcase_event: 'LIMIT_UPDATED',
+      platform_received_at: new Date().toISOString(),
+      entry_limit_policy: 'micro_sr_structural_limit_v1',
+    },
+  };
+  service.prisma = {
+    signalCycleParticipant: {
+      findMany: async () => [{
+        id: 'participant-fast-reprice',
+        cycleId: 'cycle-fast-reprice',
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: {
+          id: 'cycle-fast-reprice',
+          tradeId: 'cont-fast-reprice',
+          status: SignalCycleStatus.PENDING_ENTRY,
+          intentEnvelope: intent,
+        },
+      }],
+    },
+  };
+  service.loadExecutionMeta = async () => ({
+    bitfinexOrderId: 241795753908,
+    direction: 'SHORT',
+    limitPrice: 64_238.17,
+  });
+  const creds = { apiKey: 'redacted', apiSecret: 'redacted' };
+  service.exchanges = { getUserCredentials: async () => creds };
+  service.activeTrading = { getMarkPrice: async () => 64_220 };
+  let replaceArgs: unknown[] | null = null;
+  service.replaceRestingLimit = async (...args: unknown[]) => {
+    replaceArgs = args;
+  };
+  const instance = {
+    id: 'instance-fast-reprice',
+    agentId: 'agent-fast-reprice',
+    userId: 'user-fast-reprice',
+    exchangeProvider: 'bitfinex',
+    status: TradingAgentInstanceStatus.ACTIVE,
+    dashboardState: {
+      relayExecutionMode: 'LIVE',
+      relayPolicyVersion: 'continuous_only_v5',
+      realTradingConfirmedAt: new Date().toISOString(),
+    },
+  };
+
+  assert.equal(
+    await service.tryImmediateSignedLimitUpdate(
+      instance.agentId,
+      instance,
+      'cont-fast-reprice',
+    ),
+    true,
+  );
+  assert.ok(replaceArgs);
+  assert.equal(replaceArgs![2], 'cycle-fast-reprice');
+  assert.deepEqual(replaceArgs![7], {
+    newLimit: 64_218.63,
+    mark: 64_220,
+    now: (replaceArgs![7] as { now: number }).now,
+    chaseLabel: 'signed-limit=64218.63',
+    event: 'BOT_ANCHOR_CHASE',
+    tradeId: 'cont-fast-reprice',
+  });
+
+  replaceArgs = null;
+  assert.equal(
+    await service.tryImmediateSignedLimitUpdate(
+      instance.agentId,
+      instance,
+      'cont-other-trade',
+    ),
+    false,
+  );
+  assert.equal(replaceArgs, null);
+});
+
 test('executor direct wake requires the exact shared control secret', () => {
   assert.equal(executorWakeAuthorized('secret', 'secret'), true);
   assert.equal(executorWakeAuthorized('wrong', 'secret'), false);

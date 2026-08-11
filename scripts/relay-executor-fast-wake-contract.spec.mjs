@@ -28,6 +28,20 @@ test('durable fallback skips an identical successfully completed direct wake', a
   assert.match(source, /const cutoff = Date\.now\(\) - 120_000;/);
 });
 
+test('signed LIMIT_UPDATED uses the private fast wake instead of the full poll cadence', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  const fastWake = source.slice(
+    source.indexOf('private async executePersistedFastWake('),
+    source.indexOf('private async persistFastWakeTelemetry(', source.indexOf('private async executePersistedFastWake(')),
+  );
+
+  assert.match(fastWake, /wake\.trigger === 'LIMIT_UPDATED'/);
+  assert.match(fastWake, /this\.tryImmediateSignedLimitUpdate\(/);
+  assert.match(fastWake, /LIMIT_REPRICE_DISPATCHED/);
+  assert.match(source, /status: SignalCycleStatus\.PENDING_ENTRY/);
+  assert.match(source, /readFreshSignedShowcaseExactLimit\(/);
+});
+
 test('signed fast entry reuses same-invocation price and balance preflight', async () => {
   const source = await readFile(executionPath, 'utf8');
 
