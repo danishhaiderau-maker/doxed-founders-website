@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Verify deployed Fly revision by bot-source ancestry
+Resolve abbreviated Fly runtime revisions
 
 ## Last Activity
 
