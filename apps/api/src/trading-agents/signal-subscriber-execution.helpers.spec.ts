@@ -24,6 +24,7 @@ import {
   capRelayLimitAtShowcaseFill,
   mirrorPositionQuantityDelta,
   partialEntryFillDisposition,
+  finalizedEntryFillQty,
   protectiveStopReferencePrice,
   flatSignedFastPathPreflight,
   sameDirectionPendingSignedFastPathPreflight,
@@ -305,6 +306,41 @@ test('partial entry lifecycle retains only a live nonterminal remainder', () => 
       terminalSource: true,
     }),
     'FINALIZE_FILL',
+  );
+});
+
+test('finalized entry quantity snaps only a terminal one-satoshi transport artifact', () => {
+  assert.equal(
+    finalizedEntryFillQty({
+      intendedQty: 0.02359,
+      filledQty: 0.02358999,
+      orderResting: false,
+    }),
+    0.02359,
+  );
+  assert.equal(
+    finalizedEntryFillQty({
+      intendedQty: 0.02359,
+      filledQty: 0.02358999,
+      orderResting: true,
+    }),
+    0.02358999,
+  );
+  assert.equal(
+    finalizedEntryFillQty({
+      intendedQty: 0.02359,
+      filledQty: 0.02358998,
+      orderResting: false,
+    }),
+    0.02358998,
+  );
+  assert.equal(
+    finalizedEntryFillQty({
+      intendedQty: 0.02359,
+      filledQty: 0.02359001,
+      orderResting: false,
+    }),
+    0.02359001,
   );
 });
 

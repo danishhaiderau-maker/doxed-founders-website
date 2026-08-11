@@ -872,6 +872,33 @@ export function partialEntryFillDisposition(input: {
     : 'FINALIZE_FILL';
 }
 
+/**
+ * Normalize a terminal exchange fill without hiding a real partial quantity.
+ * Bitfinex order/trade arithmetic can report a completed amount one satoshi
+ * below the acknowledged order amount (for example 0.02358999 for 0.02359).
+ * Once the order is proven non-resting, snap only that one-satoshi transport
+ * artifact to the durable intended amount. Larger deficits remain exact.
+ */
+export function finalizedEntryFillQty(input: {
+  intendedQty: number;
+  filledQty: number;
+  orderResting: boolean;
+}): number {
+  const intendedSats = Math.abs(btcToSats(input.intendedQty));
+  const filledSats = Math.abs(btcToSats(input.filledQty));
+  const terminalShortfallSats = intendedSats - filledSats;
+  if (
+    !input.orderResting
+    && intendedSats > 0
+    && filledSats > 0
+    && terminalShortfallSats >= 0
+    && terminalShortfallSats <= 1
+  ) {
+    return satsToBtc(intendedSats);
+  }
+  return satsToBtc(filledSats);
+}
+
 /** Quantity parity for an already matched showcase/copy position identity. */
 export function mirrorPositionQuantityDelta(
   showcaseQty: number | null | undefined,
@@ -7713,7 +7740,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       fallbackMarkPrice,
     );
     if (!stopReferencePrice || stopReferencePrice <= 0) return false;
-    const qty = fill.filledQty;
+    const qty = finalizedEntryFillQty({
+      intendedQty,
+      filledQty: fill.filledQty,
+      orderResting: fill.orderResting,
+    });
     const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent?.risk?.stop_loss_margin_pct, {
       mirrorMode: isShowcaseMirrorOnlyMode(),
