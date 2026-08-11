@@ -965,9 +965,13 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         self.assertLess(live_check, touch)
         chase = function_source("_apply_limit_chase")
         self.assertIn('order.get("bitfinex_order_id")', chase)
+        self.assertIn("_commit_relay_limit_chase(", chase)
+        commit = function_source("_commit_relay_limit_chase")
+        self.assertIn("with trade_lock:", commit)
+        self.assertIn('order["limit_price"] = new_limit', commit)
         self.assertLess(
             chase.index('order.get("bitfinex_order_id")'),
-            chase.index('order["limit_price"] = new_limit'),
+            chase.index("_commit_relay_limit_chase("),
         )
 
     def test_private_submit_precedes_local_exposure_registration(self):
