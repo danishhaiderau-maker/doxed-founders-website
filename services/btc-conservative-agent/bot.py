@@ -9989,7 +9989,7 @@ def persist_signal(signal, stage="UNKNOWN"):
         if not signal or not signal.get("trade_id"):
             return
         row = {
-            "ts": utc_iso(),
+            "ts": signal.get("_persist_ts") or utc_iso(),
             "trade_id": signal.get("trade_id"),
             "stage": stage,
             "direction": signal.get("final_direction"),
@@ -10007,6 +10007,99 @@ def persist_signal(signal, stage="UNKNOWN"):
 
 def persist_signal_close(trade_id, status):
     logger.info(f"[PERSIST CLOSE] trade_id={trade_id} status={status} [PIPELINE ENFORCEMENT]")
+
+
+def _position_open_relay_allowed(pos, master=None):
+    """Refuse to publish or re-persist an OPEN after terminal close won.
+
+    ``fill_order`` performs persistence and analytics after registering the
+    in-memory position. A strategy/admin close may legitimately win during
+    those slower steps. Terminal state must dominate that late fill thread.
+    """
+    if not isinstance(pos, dict):
+        return False
+    if (
+        pos.get("status") == "CLOSED"
+        or pos.get("_close_in_progress")
+        or pos.get("exit_reason")
+    ):
+        return False
+    if isinstance(master, dict) and is_terminal_signal(master):
+        return False
+    return True
+
+
+def _commit_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
+    """Atomically commit OPEN or yield to a concurrent terminal close."""
+    with position_close_lock:
+        if not _position_open_relay_allowed(pos, master):
+            return None
+        if isinstance(master, dict):
+            master.update({
+                "status": "FILLED",
+                "filled_ts": time.time(),
+                "fill_price": fill_px,
+                "planned_limit_price": order.get("planned_limit_price"),
+                "outcome": "OPEN",
+            })
+        snapshot = copy.deepcopy(master or signal or {})
+        snapshot["_persist_ts"] = opened_ts
+        return snapshot
+
+
+def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
+    """Publish only after OPEN won the terminal-state commit race.
+
+    External/local callbacks remain outside ``position_close_lock`` so a slow
+    analytics bridge cannot delay a risk-reducing close. Their immutable
+    source timestamp still records the causal OPEN commit before that close.
+    """
+    snapshot = _commit_position_open_lifecycle(
+        pos, master, signal, order, fill_px, opened_ts
+    )
+    if snapshot is None:
+        return None
+    _emit_genome_execution_event("ORDER_FILLED", {
+        "trade_id": order.get("trade_id"),
+        "fill_price": fill_px,
+        "direction": order.get("signal_dir"),
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+        "chase_count": int(order.get("limit_chase_count") or 0),
+    })
+    _emit_genome_execution_event("POSITION_OPENED", {
+        "trade_id": pos.get("trade_id"),
+        "entry_price": fill_px,
+        "direction": pos.get("dir"),
+        "qty": pos.get("qty"),
+        "research_lane": pos.get("research_lane"),
+        "stop_loss": pos.get("sl"),
+    })
+    _push_showcase_relay_event(
+        "POSITION_OPENED",
+        order.get("trade_id"),
+        {
+            "ts": opened_ts,
+            "direction": order.get("signal_dir"),
+            "fill_price": fill_px,
+            "qty": order.get("qty"),
+            "research_lane": (signal or {}).get("research_lane")
+            or order.get("research_lane"),
+        },
+    )
+    _relay_mirror(
+        "FILLED",
+        {
+            "trade_id": order.get("trade_id"),
+            "direction": order.get("signal_dir"),
+            "qty": order.get("qty"),
+            "fill_price": fill_px,
+            "entry": fill_px,
+            "research_lane": (signal or {}).get("research_lane"),
+        },
+        source_ts=time.time(),
+    )
+    return snapshot
+
 
 def validate_startup():
     required = ["reset_all_csv","update_logger_level","prune_signals","process_signal","evaluate_signal_with_ai","execute_order","pipeline_state_sync","persist_signal","compute_edge_score","update_debug_state_always"]
@@ -19059,6 +19152,9 @@ def fill_order(order):
             return
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
+        # Bind relay chronology to the actual position registration, not to
+        # the end of slower persistence/analytics work below.
+        position_opened_relay_ts = utc_iso()
     fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
     if fill_lane:
         log_lane_opportunity_event(
@@ -19071,60 +19167,28 @@ def fill_order(order):
             block_reason="PENDING_LIMIT_TOUCHED",
         )
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
-    _emit_genome_execution_event("ORDER_FILLED", {
-        "trade_id": order.get("trade_id"),
-        "fill_price": fill_px,
-        "direction": order.get("signal_dir"),
-        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-        "chase_count": int(order.get("limit_chase_count") or 0),
-    })
-    _emit_genome_execution_event("POSITION_OPENED", {
-        "trade_id": pos.get("trade_id"),
-        "entry_price": fill_px,
-        "direction": pos.get("dir"),
-        "qty": pos.get("qty"),
-        "research_lane": pos.get("research_lane"),
-        "stop_loss": pos.get("sl"),
-    })
-    mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
-    if master:
-        master.update({
-            "status": "FILLED",
-            "filled_ts": time.time(),
-            "fill_price": fill_px,
-            "planned_limit_price": order.get("planned_limit_price"),
-            "outcome": "OPEN",
-        })
-    persist_signal(master or signal, "FILLED")
+    fill_snapshot = _finalize_position_open_lifecycle(
+        pos,
+        master,
+        signal,
+        order,
+        fill_px,
+        position_opened_relay_ts,
+    )
+    if fill_snapshot is None:
+        logger.warning(
+            "[FILL GUARD] terminal close won before OPEN commit "
+            f"trade_id={order.get('trade_id')} — suppressing all late fill events"
+        )
+        return
+    mark_approve_research_executed(pos.get("trade_id"), fill_px)
+    persist_signal(fill_snapshot, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
     # C3 fix: persist the newly-opened position to disk immediately so a crash between
     # this fill and the next save never loses an open position (was only saved on close
     # or graceful shutdown — a non-graceful crash orphaned every open position).
     save_positions()
-    _push_showcase_relay_event(
-        "POSITION_OPENED",
-        order.get("trade_id"),
-        {
-            "direction": order.get("signal_dir"),
-            "fill_price": fill_px,
-            "qty": order.get("qty"),
-            "research_lane": (signal or {}).get("research_lane")
-            or order.get("research_lane"),
-        },
-    )
-    _relay_mirror(
-        "FILLED",
-        {
-            "trade_id": order.get("trade_id"),
-            "direction": order.get("signal_dir"),
-            "qty": order.get("qty"),
-            "fill_price": fill_px,
-            "entry": fill_px,
-            "research_lane": (signal or {}).get("research_lane"),
-        },
-        source_ts=time.time(),
-    )
     pipeline_state_sync()
 
 def _observable_exit_price() -> float:

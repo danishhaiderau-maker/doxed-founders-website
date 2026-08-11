@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import ast
+import copy
 from pathlib import Path
+import threading
+import time
 from urllib.parse import urlsplit
 
 
@@ -114,12 +117,96 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert '"research_lane": (' in close_source
     assert 'pos.get("research_lane")' in close_source
     fill_source = ast.get_source_segment(BOT_SOURCE, _function("fill_order"))
-    assert '_push_showcase_relay_event(' in fill_source
-    assert '"POSITION_OPENED"' in fill_source
-    assert '"fill_price": fill_px' in fill_source
+    finalize_source = ast.get_source_segment(
+        BOT_SOURCE,
+        _function("_finalize_position_open_lifecycle"),
+    )
+    commit_source = ast.get_source_segment(
+        BOT_SOURCE,
+        _function("_commit_position_open_lifecycle"),
+    )
+    assert "_finalize_position_open_lifecycle(" in fill_source
+    assert '_push_showcase_relay_event(' in finalize_source
+    assert '"POSITION_OPENED"' in finalize_source
+    assert '"fill_price": fill_px' in finalize_source
+    assert '"ts": opened_ts' in finalize_source
+    assert "with position_close_lock:" in commit_source
+    assert "_position_open_relay_allowed(pos, master)" in commit_source
 
     chase_source = ast.get_source_segment(BOT_SOURCE, _function("_apply_limit_chase"))
     assert '"qty": float(order.get("qty") or 0)' in chase_source
+
+
+def test_terminal_close_dominates_a_late_fill_thread() -> None:
+    allowed = _compile_function(
+        "_position_open_relay_allowed",
+        {
+            "is_terminal_signal": lambda row: row.get("status") in {"CLOSED", "EXPIRED"},
+        },
+    )
+
+    assert allowed({"status": "OPEN"}, {"status": "FILLED"}) is True
+    assert allowed({"status": "CLOSED"}, {"status": "FILLED"}) is False
+    assert allowed({"status": "OPEN", "_close_in_progress": True}, {"status": "FILLED"}) is False
+    assert allowed({"status": "OPEN"}, {"status": "CLOSED"}) is False
+    assert allowed({"status": "OPEN", "exit_reason": "PROFIT_LOCK_LADDER"}, None) is False
+
+
+def test_terminal_close_wins_the_actual_open_commit_barrier() -> None:
+    lock = threading.Lock()
+    calls: list[tuple] = []
+    namespace = {
+        "copy": copy,
+        "time": time,
+        "position_close_lock": lock,
+        "is_terminal_signal": lambda row: row.get("status") in {"CLOSED", "EXPIRED"},
+        "_emit_genome_execution_event": lambda *args: calls.append(("genome", *args)),
+        "_push_showcase_relay_event": lambda *args: calls.append(("push", *args)),
+        "_relay_mirror": lambda *args, **kwargs: calls.append(("mirror", *args)),
+    }
+    _compile_function("_position_open_relay_allowed", namespace)
+    _compile_function("_commit_position_open_lifecycle", namespace)
+    finalize = _compile_function("_finalize_position_open_lifecycle", namespace)
+    pos = {"trade_id": "cont-race", "status": "OPEN", "dir": "SHORT", "qty": 0.01}
+    master = {"trade_id": "cont-race", "status": "PENDING_ENTRY"}
+    order = {"trade_id": "cont-race", "signal_dir": "SHORT", "qty": 0.01}
+    started = threading.Event()
+    result: list[object] = []
+
+    def late_fill() -> None:
+        started.set()
+        result.append(finalize(pos, master, master, order, 63_500, "2026-08-11T00:00:00Z"))
+
+    lock.acquire()
+    thread = threading.Thread(target=late_fill)
+    thread.start()
+    assert started.wait(timeout=1)
+    pos.update({"status": "CLOSED", "exit_reason": "PROFIT_LOCK_LADDER"})
+    master.update({"status": "CLOSED", "outcome": "WIN"})
+    lock.release()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert result == [None]
+    assert calls == []
+    assert pos["status"] == "CLOSED"
+    assert master["status"] == "CLOSED"
+
+    pos2 = {"trade_id": "cont-valid", "status": "OPEN", "dir": "SHORT", "qty": 0.01}
+    master2 = {"trade_id": "cont-valid", "status": "PENDING_ENTRY"}
+    order2 = {"trade_id": "cont-valid", "signal_dir": "SHORT", "qty": 0.01}
+    snapshot = finalize(
+        pos2,
+        master2,
+        master2,
+        order2,
+        63_500,
+        "2026-08-11T00:00:01Z",
+    )
+    assert snapshot["status"] == "FILLED"
+    assert snapshot["_persist_ts"] == "2026-08-11T00:00:01Z"
+    assert any(call[0] == "push" and call[3]["ts"] == "2026-08-11T00:00:01Z" for call in calls)
+    assert any(call[0] == "mirror" for call in calls)
 
 
 def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:
@@ -148,5 +235,7 @@ if __name__ == "__main__":
     test_relay_lane_resolution_requires_matching_allowlisted_prefix()
     test_type_b_chase_and_close_events_stop_before_network_post()
     test_every_relay_lifecycle_path_is_wired_to_lane_metadata()
+    test_terminal_close_dominates_a_late_fill_thread()
+    test_terminal_close_wins_the_actual_open_commit_barrier()
     test_relay_keepalive_is_health_only_on_the_exact_webhook_origin()
     print("Platform relay lane isolation checks passed")
