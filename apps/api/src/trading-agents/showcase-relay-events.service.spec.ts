@@ -807,6 +807,16 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
     },
   };
   const execution = {
+    requestExecutorPreWake: (
+      trigger: string,
+      tradeId: string | null,
+      receivedAt?: string,
+    ) => {
+      trace.push('prewake');
+      assert.equal(trigger, 'POSITION_CLOSED');
+      assert.equal(tradeId, 'cont-c105efa5');
+      assert.equal(typeof receivedAt, 'string');
+    },
     requestExecutorWake: async () => {
       trace.push('execution');
       const context = storedEnvelope.context as {
@@ -842,7 +852,7 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
 
   assert.equal(result.ok, true);
   assert.equal(typeof result.platform_received_at, 'string');
-  assert.deepEqual(trace, ['persist', 'closed', 'execution']);
+  assert.deepEqual(trace, ['prewake', 'persist', 'closed', 'execution']);
 });
 
 test('signed POSITION_CLOSED reuses a deterministic cycle whose tradeId was relinked', async () => {

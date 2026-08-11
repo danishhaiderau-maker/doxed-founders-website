@@ -574,12 +574,15 @@ export class ShowcaseRelayEventsService {
       );
     }
 
-    // Start the private worker's read-only safety preflight as soon as the
-    // signed owner event is authenticated. The worker waits for this exact
-    // cycle to become durable before it can claim or submit, so Neon remains
-    // the canonical gate while network delivery and exchange reads overlap
-    // the canonical transaction below.
-    if (directExecutableIntent && event === 'ORDER_PLACED') {
+    // Start the private worker's safety preflight as soon as the signed owner
+    // event is authenticated. Entry still waits for this exact cycle to become
+    // durable. Close can converge only an already-owned open lot after the
+    // worker independently observes the canonical showcase closure. This
+    // overlaps transport / safety reads with the canonical transaction below.
+    if (
+      signedLifecycleEvent
+      && (event === 'ORDER_PLACED' || event === 'POSITION_CLOSED')
+    ) {
       this.execution.requestExecutorPreWake?.(
         event,
         body.trade_id ?? null,

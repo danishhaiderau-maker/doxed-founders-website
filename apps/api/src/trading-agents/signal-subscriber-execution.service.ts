@@ -2597,12 +2597,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /**
    * Latency-only direct hint sent after HMAC + owner verification but before
    * the API's canonical Neon transaction completes. It is deliberately not a
-   * durable wake: the executor may perform only read-only preflight until the
-   * exact signed cycle is visible in Neon. The ordinary post-commit wake above
-   * remains the crash/restart backstop.
+   * durable wake. Entry still waits for the exact signed cycle in Neon; close
+   * may converge only from the already-open owned lot plus the authenticated
+   * canonical showcase state. The ordinary post-commit wake above remains the
+   * crash/restart backstop.
    */
   requestExecutorPreWake(
-    trigger: 'ORDER_PLACED',
+    trigger: 'ORDER_PLACED' | 'POSITION_CLOSED',
     tradeId?: string | null,
     receivedAt?: string,
   ): void {
@@ -2671,26 +2672,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // Acknowledge the authenticated private wake immediately. The previous
     // implementation held the HTTP response open until Bitfinex completed,
     // so the API's 1.5s timeout reported a false failure while the order was
-    // already being placed. Keep execution owned by this process and retain
-    // the persisted dashboard wake as the crash/restart fallback.
-    setImmediate(() => {
-      void this.executePersistedFastWake(wake)
-        .then(() => {
-          this.completedDirectWakeAt.set(this.executorWakeKey(wake), Date.now());
-          if (this.running) this.wakeQueued = true;
-          else setImmediate(() => void this.tick());
-        })
-        .catch((err) => {
-          this.logger.warn(
-            `Direct relay fast wake failed closed; durable wake retained: ${err instanceof Error ? err.message : err}`,
-          );
-          if (this.running) this.wakeQueued = true;
-        })
-        .finally(() => {
-          this.fastWakeRunning = false;
-          this.drainQueuedDirectWake();
-        });
-    });
+    // already being placed. Start the async work in this event-loop turn (it
+    // yields on its first database/network await), so the HTTP handler can
+    // still return 202 without adding another setImmediate turn to a close
+    // whose contract is measured in milliseconds. The persisted dashboard
+    // wake remains the crash/restart fallback.
+    void this.executePersistedFastWake(wake)
+      .then(() => {
+        this.completedDirectWakeAt.set(this.executorWakeKey(wake), Date.now());
+        if (this.running) this.wakeQueued = true;
+        else setImmediate(() => void this.tick());
+      })
+      .catch((err) => {
+        this.logger.warn(
+          `Direct relay fast wake failed closed; durable wake retained: ${err instanceof Error ? err.message : err}`,
+        );
+        if (this.running) this.wakeQueued = true;
+      })
+      .finally(() => {
+        this.fastWakeRunning = false;
+        this.drainQueuedDirectWake();
+      });
   }
 
   private executorWakeKey(wake: RelayExecutorWakeRequest): string {
@@ -9027,18 +9029,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     creds: ExchangeCredentials,
     leverage: number,
     stopOrderIds: Iterable<number>,
+    prepared?: {
+      remainingLedgerAmount: number | null;
+    },
   ): Promise<RelayLotExitTarget> {
     if (!meta.direction) {
       throw new Error('EXIT_TARGET_MISSING_DIRECTION');
     }
-    const remainingLedgerAmount = await this.expectedRemainingLedgerAmount(
-      agentId,
-      userId,
-      participantId,
-    );
+    const remainingLedgerAmount = prepared
+      ? prepared.remainingLedgerAmount
+      : await this.expectedRemainingLedgerAmount(agentId, userId, participantId);
     if (remainingLedgerAmount == null) {
       throw new Error('EXIT_TARGET_OTHER_LOT_METADATA_INCOMPLETE');
     }
+    // Always read the position immediately before stop cancellation and close
+    // submission. An earlier observation may be stale if the protective stop
+    // filled while the public mark / ledger target was being resolved.
     const position = await this.activeTrading.getOpenPositionDetail(creds);
     const target = relayLotExitTarget({
       currentAmount: position?.amount ?? 0,
@@ -9159,6 +9165,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       forceMirrorExit?: boolean;
     },
   ): Promise<boolean> {
+    const closePreflightStartedAtMs = Date.now();
     if (!opts?.forceMirrorExit && (await this.hasParticipantExited(participant.id))) return true;
     if (this.exitingLots.has(participant.id)) return true;
 
@@ -9185,8 +9192,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
 
       let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+      let remainingLedgerAmount: number | null;
+      let preparedExitPrice: number;
       try {
-        position = await this.activeTrading.getOpenPositionDetail(creds);
+        // Once any linked entry remainder is confirmed gone, overlap the
+        // independent ledger, position and public-mark reads. The target path
+        // deliberately performs one final fresh position read immediately
+        // before cancelling the stop and submitting the close.
+        [position, remainingLedgerAmount, preparedExitPrice] = await Promise.all([
+          this.activeTrading.getOpenPositionDetail(creds),
+          this.expectedRemainingLedgerAmount(agentId, userId, participant.id),
+          this.activeTrading.getMarkPrice(),
+        ]);
       } catch (err) {
         const message =
           `EXIT_POSITION_READ_FAILED cycle=${cycle.id}: Bitfinex position is unknown; ` +
@@ -9205,6 +9222,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             creds,
             leverage,
             meta.stopOrderId ? [meta.stopOrderId] : [],
+            { remainingLedgerAmount },
           );
         } catch (err) {
           await this.pauseUserRelayForPositionMismatch(
@@ -9274,10 +9292,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return true;
       }
 
-      let exitPrice = fillPrice ?? 0;
+      let exitPrice = preparedExitPrice;
       let closeTarget: RelayLotExitTarget;
       try {
-        exitPrice = await this.activeTrading.getMarkPrice();
         closeTarget = await this.closeParticipantPositionToLedgerTarget(
           agentId,
           userId,
@@ -9286,6 +9303,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           creds,
           leverage,
           meta.stopOrderId ? [meta.stopOrderId] : [],
+          { remainingLedgerAmount },
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -9340,6 +9358,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         close_submit_started_at: closeTarget.closeSubmitStartedAtMs != null
           ? new Date(closeTarget.closeSubmitStartedAtMs).toISOString()
           : undefined,
+        close_preflight_started_at: new Date(closePreflightStartedAtMs).toISOString(),
         close_exchange_ack_at: closeExchangeAckAtMs != null
           ? new Date(closeExchangeAckAtMs).toISOString()
           : undefined,
@@ -9353,6 +9372,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         platform_to_close_ack_ms:
           opts?.platformReceivedAtMs != null && closeExchangeAckAtMs != null
             ? Math.max(0, closeExchangeAckAtMs - opts.platformReceivedAtMs)
+            : undefined,
+        platform_to_close_submit_ms:
+          opts?.platformReceivedAtMs != null && closeTarget.closeSubmitStartedAtMs != null
+            ? Math.max(0, closeTarget.closeSubmitStartedAtMs - opts.platformReceivedAtMs)
+            : undefined,
+        close_preflight_to_submit_ms:
+          closeTarget.closeSubmitStartedAtMs != null
+            ? Math.max(0, closeTarget.closeSubmitStartedAtMs - closePreflightStartedAtMs)
             : undefined,
         close_ack_to_confirm_ms:
           closeExchangeAckAtMs != null && closeConfirmedAtMs != null
