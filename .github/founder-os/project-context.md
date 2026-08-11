@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Resolve abbreviated Fly runtime revisions
+Measure relay duration from exchange fill
 
 ## Last Activity
 
