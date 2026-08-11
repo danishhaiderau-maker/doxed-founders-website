@@ -19,6 +19,21 @@ test('Bitfinex WS auth signs AUTH nonce without exposing secret', () => {
   assert.equal(JSON.stringify(auth).includes('secret'), false);
 });
 
+test('production socket factory does not depend on a global WebSocket', () => {
+  const saved = (globalThis as any).WebSocket;
+  try {
+    (globalThis as any).WebSocket = undefined;
+    const stream = new BitfinexAuthTradeStream(
+      { apiKey: 'runtime-key', apiSecret: 'runtime-secret' },
+      () => true,
+    );
+    assert.doesNotThrow(() => stream.start());
+    stream.stop();
+  } finally {
+    (globalThis as any).WebSocket = saved;
+  }
+});
+
 test('auth trade parser strictly validates event, symbol and numeric types', () => {
   const row = [11, 'tBTCF0:USTF0', 1_000, 42, -0.004, 64_000];
   assert.equal(parseBitfinexAuthTradeMessage([0, 'te', row], 1_100)?.orderId, 42);

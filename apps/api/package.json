@@ -46,7 +46,8 @@
     "rxjs": "^7.8.2",
     "sharp": "^0.34.5",
     "stripe": "^18.5.0",
-    "tweetnacl": "^1.0.3"
+    "tweetnacl": "^1.0.3",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.7",

@@ -1,4 +1,5 @@
 import { createHmac, createHash } from 'crypto';
+import WebSocket from 'ws';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { allocateBitfinexAuthNonce } from './bitfinex-api.client';
 
@@ -68,6 +69,9 @@ export class BitfinexAuthTradeStream {
   constructor(
     private readonly creds: ExchangeCredentials,
     private readonly onTrade: (trade: BitfinexWsTrade) => boolean | Promise<boolean>,
+    // Railway currently runs a Node release without a global WebSocket. Keep
+    // the runtime dependency explicit so production cannot silently depend on
+    // browser globals that happen to exist in a developer/test process.
     private readonly socketFactory: SocketFactory = (url) => new WebSocket(url) as unknown as SocketLike,
     private readonly now: () => number = Date.now,
   ) {}
