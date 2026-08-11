@@ -15,6 +15,19 @@ def test_unauthenticated_mobile_analysis_redirects_to_login():
     assert "Cache-Control" in route
 
 
+def test_fly_dashboard_link_uses_same_origin_mobile_analysis_route():
+    helper = _route("research_dashboard_public_url", "DAILY_DRAWDOWN_PAUSE_USD")
+    assert 'os.getenv("FLY_APP_NAME")' in helper
+    assert 'return "/analysis"' in helper
+    assert helper.index('os.getenv("FLY_APP_NAME")') < helper.index('return "http://127.0.0.1:9001/"')
+
+
+def test_expired_order_hint_explains_zero_age_duplicate_rejection():
+    assert "Age 0.0 with DUPLICATE_LIMIT_PRICE" in SOURCE
+    assert "rejected before placement" in SOURCE
+    assert "no paper or exchange order was cancelled" in SOURCE
+
+
 def test_analyzer_session_is_opaque_and_narrowly_scoped():
     helper = _route("_analyzer_view_cookie_value", "def _analyzer_view_authed")
     assert "hmac.new(" in helper

@@ -1285,6 +1285,17 @@ export function showcaseAbsentWithinOrderPropagationGrace(
   return nowMs - anchorMs <= Math.max(1, graceMs);
 }
 
+export function shouldDeferCancelByExchangeForReplacement(
+  tradeId: string,
+  intentEnvelope: unknown,
+  observedOrderId: number,
+  latestOrderId: number | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (latestOrderId != null && latestOrderId !== observedOrderId) return true;
+  return showcaseAbsentWithinOrderPropagationGrace(tradeId, intentEnvelope, nowMs);
+}
+
 /**
  * A fresh source fill may immediately follow a signed exact-limit reprice.
  * Keep the managed Bitfinex order alive during the bounded convergence window
@@ -6986,11 +6997,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     if (this.botBridge.isEnabled() && cycle.tradeId) {
       const botState = await this.fetchExecutionBotState();
-      const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
+      const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId;
+      const abandon = this.showcaseEntryAbandoned(botState, showcaseTradeId);
       if (abandon.abandoned) {
         if (
           abandon.reason === 'SHOWCASE_ABSENT'
-          && showcaseAbsentWithinOrderPropagationGrace(cycle.tradeId, intent)
+          && showcaseAbsentWithinOrderPropagationGrace(showcaseTradeId, intent)
         ) {
           this.logger.warn(
             `Showcase snapshot propagation grace ${userId} cycle=${cycle.id}: signed exact order ${cycle.tradeId} is not visible yet — retaining managed order ${orderId}`,
@@ -7001,7 +7013,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           if (
             missedShowcaseFillWithinSettlementGrace(
               botState,
-              cycle.tradeId,
+              showcaseTradeId,
               intent,
             )
           ) {
@@ -7801,7 +7813,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         ...participantScope,
       },
       include: {
-        cycle: { select: { id: true, status: true, intentEnvelope: true } },
+        cycle: { select: { id: true, tradeId: true, status: true, intentEnvelope: true } },
       },
     });
 
@@ -7820,6 +7832,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const stillThere = await this.activeTrading.findOrder(creds, oid).catch(() => null);
       if (stillThere) continue;
 
+      const latestMeta = await this.loadExecutionMeta(row.id);
+      const latestIntent = (row.cycle?.intentEnvelope ?? null) as SignalIntentEnvelope | null;
+      if (
+        shouldDeferCancelByExchangeForReplacement(
+          row.cycle?.tradeId ?? '',
+          latestIntent,
+          oid,
+          latestMeta.bitfinexOrderId,
+        )
+      ) {
+        this.logger.warn(
+          `[RECONCILE-ADOPT] cancel-by-exchange deferred ${userId} participant=${row.id}: exact-limit replacement is settling (observed=${oid}, latest=${latestMeta.bitfinexOrderId ?? 'unknown'})`,
+        );
+        continue;
+      }
+
       // Cancel-race fill check (always on — misclassification is a bug, not a
       // feature flag): a vanished order is NOT necessarily cancelled — it may
       // have FILLED. Check the merged-position delta before declaring
@@ -7827,17 +7855,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       // the real price instead of a $0 close that orphans the position slice
       // (the orphan-adoption loss factory).
       {
-        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
+        const fill = await this.detectEntryFillBeforeCancel(creds, latestMeta).catch(() => null);
         if (fill) {
-          const intent = (row.cycle?.intentEnvelope ?? null) as SignalIntentEnvelope | null;
           const recorded = await this.recordCancelRaceFill(
             agentId,
             userId,
             { id: row.cycleId, status: row.cycle?.status ?? SignalCycleStatus.PENDING_ENTRY },
             row.id,
-            meta,
+            latestMeta,
             creds,
-            intent,
+            latestIntent,
             fill,
             'RECONCILE_CANCEL_BY_EXCHANGE',
           );
@@ -8525,6 +8552,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const leverage = resolveSubscriberLeverage(intent);
     const qty = meta.qty ?? computeQty(20, leverage, opts.newLimit, MIN_QTY_BTC);
     const clientOrderId = computeClientOrderId(cycleId, participantId, opts.tradeId);
+    const signedExactLimitCandidate = opts.tradeId
+      ? readFreshSignedShowcaseExactLimit(opts.tradeId, intent, opts.now)
+      : null;
+    const signedExactLimit =
+      signedExactLimitCandidate
+      && Math.abs(signedExactLimitCandidate.limitPrice - opts.newLimit) < 0.01
+        ? signedExactLimitCandidate
+        : null;
 
     // Cancel-race fill check (always on): never cancel+replace an order that
     // already (partially) executed — record the real fill instead. If the
@@ -8572,6 +8607,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         leverage,
         clientOrderId,
       });
+      const exchangeAckAtMs = Date.now();
       const chaseCount = (meta.limitChaseCount ?? 0) + 1;
       this.logger.log(
         `Hire chase ${userId} cycle=${cycleId} ${opts.event} ${meta.limitPrice.toFixed(2)} → ${opts.newLimit.toFixed(2)} (mark ${opts.mark.toFixed(2)}${opts.chaseLabel ? ` ${opts.chaseLabel}` : ''})`,
@@ -8587,6 +8623,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         local_mark: opts.mark,
         lastChaseAtMs: opts.now,
         limitChaseCount: chaseCount,
+        ...(signedExactLimit
+          ? {
+              platformReceivedAt: new Date(signedExactLimit.receivedAtMs).toISOString(),
+              platformToExchangeAckMs: Math.max(
+                0,
+                exchangeAckAtMs - signedExactLimit.receivedAtMs,
+              ),
+              ...(signedExactLimit.sourceEventAtMs != null
+                ? {
+                    sourceEventAt: new Date(signedExactLimit.sourceEventAtMs).toISOString(),
+                    sourceToPlatformMs: Math.max(
+                      0,
+                      signedExactLimit.receivedAtMs - signedExactLimit.sourceEventAtMs,
+                    ),
+                    sourceToExchangeAckMs: Math.max(
+                      0,
+                      exchangeAckAtMs - signedExactLimit.sourceEventAtMs,
+                    ),
+                  }
+                : {}),
+            }
+          : {}),
         source: 'hire',
       });
       const runtime = this.hydrateRuntime(participantId, meta);

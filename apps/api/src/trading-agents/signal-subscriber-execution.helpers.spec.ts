@@ -35,6 +35,7 @@ import {
   showcasePositionAbsenceActionable,
   pendingCopyShowcaseDisposition,
   showcaseAbsentWithinOrderPropagationGrace,
+  shouldDeferCancelByExchangeForReplacement,
   missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -1680,6 +1681,38 @@ test('fresh signed order tolerates canonical snapshot propagation lag without we
       { ...intent, context: { ...intent.context, showcase_event: 'ORDER_CANCELLED' } },
       now,
       15_000,
+    ),
+    false,
+  );
+});
+
+test('cancel-by-exchange cannot close a participant during exact-limit replacement', () => {
+  const now = Date.parse('2026-08-11T05:55:05.000Z');
+  const intent = {
+    action: 'ENTER',
+    trade_id: 'cont-reprice',
+    context: {
+      signed_showcase_event: true,
+      showcase_event: 'LIMIT_UPDATED',
+      showcase_event_at: '2026-08-11T05:55:01.690Z',
+      platform_received_at: '2026-08-11T05:55:02.476Z',
+    },
+  };
+  assert.equal(
+    shouldDeferCancelByExchangeForReplacement(
+      'cont-reprice', intent, 241797238088, 241793992470, now,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldDeferCancelByExchangeForReplacement(
+      'cont-reprice', intent, 241797238088, 241797238088, now,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldDeferCancelByExchangeForReplacement(
+      'cont-reprice', intent, 241797238088, 241797238088, now + 20_000,
     ),
     false,
   );

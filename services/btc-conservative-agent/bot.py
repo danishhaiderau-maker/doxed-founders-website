@@ -6651,6 +6651,13 @@ def research_dashboard_public_url() -> str:
     custom = (os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL") or "").strip()
     if custom:
         return custom if custom.endswith("/") else custom + "/"
+    # Fly does not run the heavyweight analyzer process on :9001.  It serves
+    # the uploaded, read-only analyzer mirror at this same-origin route.  A
+    # relative URL also continues to work when Fly is reached through a custom
+    # domain, and prevents mobile clients from being sent to their own
+    # (unrelated) 127.0.0.1.
+    if (os.getenv("FLY_APP_NAME") or "").strip():
+        return "/analysis"
     # Analyzer dashboard (research_dashboard.py) binds :9001 by default.
     # Previous default :9500 was wrong — nothing listens there.
     return "http://127.0.0.1:9001/"
@@ -26035,7 +26042,7 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>Expired Orders</h2>
-<p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv.</p>
+<p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv. Age 0.0 with DUPLICATE_LIMIT_PRICE means a duplicate candidate was rejected before placement; no paper or exchange order was cancelled.</p>
 <table>
     <thead><tr><th>Expired Time (Melbourne)</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
