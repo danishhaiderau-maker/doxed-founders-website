@@ -985,6 +985,31 @@ test('post-commit POSITION_OPENED does not duplicate its running pre-wake', asyn
   }
 });
 
+test('queued source fill preempts a queued reprice and coalesces its durable duplicate', () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeDirectWake = {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-priority-fill', at: '2026-08-11T20:43:22.070Z',
+  };
+  service.pendingDirectWakes = [{
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-other', at: '2026-08-11T20:43:22.200Z',
+  }];
+  const preWake = {
+    trigger: 'POSITION_OPENED', tradeId: 'cont-priority-fill', at: '2026-08-11T20:43:23.114Z',
+  };
+  const postCommit = {
+    trigger: 'POSITION_OPENED', tradeId: 'cont-priority-fill', at: '2026-08-11T20:43:23.842Z',
+  };
+
+  service.enqueueDirectWake(preWake);
+  service.enqueueDirectWake(postCommit);
+
+  assert.deepEqual(service.pendingDirectWakes, [preWake, {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-other', at: '2026-08-11T20:43:22.200Z',
+  }]);
+  assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-priority-fill'), true);
+  assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-other'), false);
+});
+
 test('queued LIMIT_UPDATED burst coalesces to newest exact revision', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.activeDirectWake = {
@@ -2995,6 +3020,46 @@ test('missed-showcase-fill NOT_FOUND cannot expire a hidden replacement without 
     {}, new Set<number>(), false,
   );
   assert.deepEqual(events, []);
+});
+
+test('snapshot missed-fill fallback defers while its exact signed source-fill wake is queued', async () => {
+  let detectCalls = 0;
+  let cancelCalls = 0;
+  const intent = { action: 'ENTER', trade_id: 'cont-fill-priority', risk: {}, context: {} };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.pendingDirectWakes = [{
+    trigger: 'POSITION_OPENED', tradeId: 'cont-fill-priority', at: new Date().toISOString(),
+  }];
+  service.activeDirectWake = {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-fill-priority', at: new Date().toISOString(),
+  };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 6002, limitPrice: 64_000, qty: 0.03,
+  });
+  service.botBridge = { isEnabled: () => true };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.fetchExecutionBotState = async () => ({ positions: [] });
+  service.resolveShowcaseMirrorTradeId = () => 'cont-fill-priority';
+  service.showcaseEntryAbandoned = () => ({ abandoned: true, reason: 'MISSED_SHOWCASE_FILL' });
+  service.detectEntryFillBeforeCancel = async () => { detectCalls += 1; return null; };
+  service.cancelManagedOrderGone = async () => { cancelCalls += 1; return { gone: true, reason: 'CANCELLED', attempts: 1 }; };
+  service.prisma = {
+    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-fill-priority', status: SignalCycleStatus.PENDING_ENTRY }) },
+    signalCycle: { findUnique: async () => ({ id: 'cycle-fill-priority', tradeId: 'cont-fill-priority', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY }) },
+  };
+  service.cycles = { recordHireExecutionEvent: async () => assert.fail('queued signed fill wake must own terminalization') };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  await service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-fill-priority', tradeId: 'cont-fill-priority', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+    { id: 'participant-fill-priority', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 6002, limitPrice: 64_000, qty: 0.03 },
+    {}, new Set<number>([6002]), false,
+  );
+
+  assert.equal(detectCalls, 0);
+  assert.equal(cancelCalls, 0);
 });
 
 test('showcase catch-up cannot clear or duplicate-enter after hidden replacement NOT_FOUND', async () => {

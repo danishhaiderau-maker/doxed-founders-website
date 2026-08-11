@@ -3142,8 +3142,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         return;
       }
     }
+    // A verified source fill is terminal for its resting entry.  It must not
+    // wait behind a queued reprice: doing so allows the regular reconciliation
+    // pass to observe the source position first and take its slower fallback
+    // missed-fill path.  Keep the first receipt for the same fill (the
+    // pre-commit wake has the earliest causal timestamp), but run it before
+    // any non-terminal queued work as soon as the current money operation
+    // releases its participant lane.
+    if (wake.trigger === 'POSITION_OPENED') {
+      const existing = this.pendingDirectWakes.find((candidate) =>
+        candidate.trigger === 'POSITION_OPENED'
+        && this.executorWakeLogicalKey(candidate) === logicalKey,
+      );
+      if (existing) return;
+      this.pendingDirectWakes.unshift(wake);
+      if (this.pendingDirectWakes.length > 20) this.pendingDirectWakes.pop();
+      return;
+    }
     this.pendingDirectWakes.push(wake);
     if (this.pendingDirectWakes.length > 20) this.pendingDirectWakes.shift();
+  }
+
+  /**
+   * The normal reconciliation must never terminalize a pending order via its
+   * slower snapshot fallback while an authenticated exact source-fill wake is
+   * already queued or executing for that same showcase trade.  The wake owns
+   * the lower-latency, exchange-proven cancel-or-fill funnel.
+   */
+  private hasQueuedOrActiveSourceFillWake(tradeId: string | null | undefined): boolean {
+    if (!tradeId) return false;
+    const matches = (wake: RelayExecutorWakeRequest | null): boolean => {
+      if (!wake || wake.trigger !== 'POSITION_OPENED' || !wake.tradeId) return false;
+      return tradeIdsMatch(wake.tradeId, tradeId);
+    };
+    return matches(this.activeDirectWake)
+      || (this.pendingDirectWakes ?? []).some((wake) => matches(wake));
   }
 
   private drainQueuedDirectWake(): void {
@@ -8302,6 +8335,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           return;
         }
         if (abandon.reason === 'MISSED_SHOWCASE_FILL') {
+          if (this.hasQueuedOrActiveSourceFillWake(cycle.tradeId)) {
+            this.logger.log(
+              `Missed showcase fill ${userId} cycle=${cycle.id}: exact signed POSITION_OPENED wake is queued/active — deferring snapshot fallback`,
+            );
+            return;
+          }
           if (
             missedShowcaseFillWithinSettlementGrace(
               botState,
