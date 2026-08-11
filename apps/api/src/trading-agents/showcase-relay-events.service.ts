@@ -25,6 +25,7 @@ import { PrismaService } from '../prisma/prisma.service';
 export type ShowcaseRelayEventType =
   | 'APPROVE_PENDING'
   | 'ORDER_PLACED'
+  | 'POSITION_OPENED'
   | 'POSITION_CLOSED'
   | 'LIMIT_UPDATED';
 
@@ -37,6 +38,8 @@ export type ShowcaseRelayEventBody = {
   trade_id?: string | null;
   ts?: string | null;
   limit_price?: number | null;
+  fill_price?: number | null;
+  qty?: number | null;
   exit_price?: number | null;
   reason?: string | null;
   exit_reason?: string | null;
@@ -585,7 +588,7 @@ export class ShowcaseRelayEventsService {
     // overlaps transport / safety reads with the canonical transaction below.
     if (
       signedLifecycleEvent
-      && (event === 'ORDER_PLACED' || event === 'POSITION_CLOSED')
+      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED')
     ) {
       this.execution.requestExecutorPreWake?.(
         event,

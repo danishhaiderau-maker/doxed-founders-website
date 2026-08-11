@@ -103,12 +103,16 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     emit_source = ast.get_source_segment(BOT_SOURCE, _function("emit_signal_webhook"))
     close_source = ast.get_source_segment(BOT_SOURCE, _function("close_position"))
 
-    assert 'event in ("LIMIT_UPDATED", "POSITION_CLOSED")' in push_source
+    assert 'event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED")' in push_source
     assert "_platform_relay_lane_for_event" in push_source
     assert 'payload["research_lane"] = relay_lane' in push_source
     assert "_platform_relay_lane_for_event" in emit_source
     assert '"research_lane": (' in close_source
     assert 'pos.get("research_lane")' in close_source
+    fill_source = ast.get_source_segment(BOT_SOURCE, _function("fill_order"))
+    assert '_push_showcase_relay_event(' in fill_source
+    assert '"POSITION_OPENED"' in fill_source
+    assert '"fill_price": fill_px' in fill_source
 
 
 def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:

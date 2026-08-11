@@ -858,6 +858,66 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
   assert.deepEqual(trace, ['prewake', 'persist', 'closed', 'execution']);
 });
 
+test('signed POSITION_OPENED persists source fill evidence and queues the fill wake', async () => {
+  const secret = 'test-webhook-secret';
+  const trace: string[] = [];
+  const createdEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findUnique: async (args: { where: Record<string, unknown> }) =>
+        'agentId_tradeId' in args.where
+          ? { id: 'cycle-existing', status: 'PENDING_ENTRY', intentEnvelope: { action: 'ENTER' } }
+          : null,
+      update: async () => ({}),
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async (args: { data: { eventType: string; payload: Record<string, unknown> } }) => {
+        createdEvents.push(args.data);
+        return {};
+      },
+    },
+  };
+  const execution = {
+    requestExecutorPreWake: (trigger: string, tradeId: string, receivedAt?: string) => {
+      trace.push(`prewake:${trigger}:${tradeId}:${typeof receivedAt}`);
+    },
+    requestExecutorWake: async (trigger: string, tradeId: string, receivedAt?: string) => {
+      trace.push(`wake:${trigger}:${tradeId}:${typeof receivedAt}`);
+    },
+  };
+  const service = createService('dashboard-active', secret, { prisma, execution });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_OPENED' as const,
+    trade_id: 'cont-f111aabbccdd',
+    direction: 'SHORT',
+    fill_price: 64_000,
+    qty: 0.03125,
+    research_lane: 'CONTINUOUS',
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.persisted, true);
+  assert.deepEqual(trace, [
+    'prewake:POSITION_OPENED:cont-f111aabbccdd:string',
+    'wake:POSITION_OPENED:cont-f111aabbccdd:string',
+  ]);
+  assert.equal(createdEvents.at(-1)?.eventType, 'POSITION_OPENED');
+  assert.equal(createdEvents.at(-1)?.payload.fill_price, 64_000);
+});
+
 test('signed POSITION_CLOSED reuses a deterministic cycle whose tradeId was relinked', async () => {
   const secret = 'test-webhook-secret';
   let createCalls = 0;

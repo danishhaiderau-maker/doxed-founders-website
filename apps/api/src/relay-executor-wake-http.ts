@@ -3,6 +3,7 @@ import type { RelayExecutorWakeRequest } from './trading-agents/signal-subscribe
 
 const WAKE_TRIGGERS = new Set<RelayExecutorWakeRequest['trigger']>([
   'POSITION_CLOSED',
+  'POSITION_OPENED',
   'ORDER_PLACED',
   'APPROVE_PENDING',
   'LIMIT_UPDATED',

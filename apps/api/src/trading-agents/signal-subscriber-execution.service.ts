@@ -1540,10 +1540,28 @@ export function hireExpiryRequiresExitOnlyProcessing(
 const RELAY_EXECUTOR_WAKE_KEY = 'relayExecutorWake';
 
 export type RelayExecutorWakeRequest = {
-  trigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
+  trigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
   at: string;
   tradeId?: string | null;
 };
+
+/** Bounded source-fill hint polling; private exchange state remains authority. */
+export async function pollForVerifiedEntryFill<T>(input: {
+  detect: () => Promise<T | null>;
+  attempts?: number;
+  intervalMs?: number;
+  wait?: (ms: number) => Promise<void>;
+}): Promise<T | null> {
+  const attempts = Math.max(1, input.attempts ?? 7);
+  const intervalMs = Math.max(0, input.intervalMs ?? 300);
+  const wait = input.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const fill = await input.detect();
+    if (fill != null) return fill;
+    if (attempt + 1 < attempts) await wait(intervalMs);
+  }
+  return null;
+}
 
 export function readRelayExecutorWakeRequest(dashboardState: unknown): RelayExecutorWakeRequest | null {
   const dash =
@@ -2219,6 +2237,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   /** Exact direct wakes completed by this process. Prevent the durable
    * crash-fallback copy from executing the same wake a second time. */
   private readonly completedDirectWakeAt = new Map<string, number>();
+  /** One writer per participant while a cancel-race fill is promoted to OPEN. */
+  private readonly cancelRaceFillInFlight = new Set<string>();
   /** Recently discovered Bitfinex relay instances. Direct signed wakes start
    * these known subscribers immediately while a fresh discovery query runs in
    * parallel for newly activated subscribers. Every cached row is revalidated
@@ -2274,7 +2294,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * slow one.
    */
   private lastShowcaseWakeAt = 0;
-  private lastShowcaseWakeTrigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | null = null;
+  private lastShowcaseWakeTrigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | null = null;
 
   /**
    * F1/F2/F3 — per-instance showcase-unreachable tracking.
@@ -2612,7 +2632,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * so the isolated relay-executor worker picks it up on the next poll / tick.
    */
   async requestExecutorWake(
-    trigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
+    trigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
     tradeId?: string | null,
     receivedAt?: string,
   ): Promise<void> {
@@ -2667,7 +2687,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * crash/restart backstop.
    */
   requestExecutorPreWake(
-    trigger: 'ORDER_PLACED' | 'POSITION_CLOSED',
+    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED',
     tradeId?: string | null,
     receivedAt?: string,
   ): void {
@@ -2725,7 +2745,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // remains the crash fallback, so dropping only this in-process duplicate
     // cannot lose the entry.
     if (
-      wake.trigger === 'ORDER_PLACED'
+      (wake.trigger === 'ORDER_PLACED' || wake.trigger === 'POSITION_OPENED')
       &&
       this.activeDirectWake
       && this.executorWakeLogicalKey(this.activeDirectWake) === logicalKey
@@ -2973,6 +2993,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             startedAtMs,
             'LIMIT_REPRICE_SKIPPED_PAUSED',
           );
+        } else if (
+          wake.trigger === 'POSITION_OPENED'
+          && instance.status === TradingAgentInstanceStatus.ACTIVE
+        ) {
+          const filled = await this.tryImmediateShowcaseFillReconcile(
+            instance.agentId,
+            instance,
+            wake.tradeId ?? undefined,
+            wake.at,
+          );
+          await this.persistFastWakeTelemetry(
+            instance.id,
+            wake,
+            startedAtMs,
+            filled ? 'FILL_RECORDED' : 'FILL_NOT_YET_VISIBLE',
+          );
+          if (filled) processedInstanceIds.add(instance.id);
+        } else if (wake.trigger === 'POSITION_OPENED') {
+          await this.persistFastWakeTelemetry(
+            instance.id,
+            wake,
+            startedAtMs,
+            'FILL_RECONCILE_SKIPPED_PAUSED',
+          );
         }
       }
     };
@@ -2986,6 +3030,65 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       this.relayInstanceCache.set(instance.id, instance);
     }
     await processInstances(discoveredInstances);
+  }
+
+  /**
+   * A source paper fill is a latency hint, never proof that Bitfinex filled.
+   * Poll the one already-owned order for a short bounded window and promote it
+   * only when private Bitfinex state proves a partial/full execution. The
+   * ordinary full tick remains the eventual backstop when the exchange limit
+   * fills later than the source.
+   */
+  private async tryImmediateShowcaseFillReconcile(
+    agentId: string,
+    instance: TradingAgentInstance,
+    preferredTradeId: string | undefined,
+    sourceFillAt: string,
+  ): Promise<boolean> {
+    if (!preferredTradeId || instance.status !== TradingAgentInstanceStatus.ACTIVE) return false;
+    if (isCopyRelaySimActive(instance.dashboardState)) return false;
+    const candidates = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId, status: SignalCycleStatus.PENDING_ENTRY },
+      },
+      include: { cycle: true },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    const participant = candidates.find((candidate) =>
+      tradeIdsMatch(candidate.cycle.tradeId, preferredTradeId),
+    );
+    if (!participant || !tradeIdsMatch(participant.cycle.tradeId, preferredTradeId)) return false;
+    const meta = await this.loadExecutionMeta(participant.id);
+    if (!meta.bitfinexOrderId || !meta.direction) return false;
+    const creds = await this.exchanges.getUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    if (!creds) return false;
+
+    // Bitfinex can cross a few hundred milliseconds after the source's paper
+    // book. Stay below the 3s contract while avoiding a market-order fallback.
+    const fill = await pollForVerifiedEntryFill({
+      detect: () => this.detectEntryFillBeforeCancel(creds, meta, true),
+    });
+    if (fill) {
+      return this.recordCancelRaceFill(
+          agentId,
+          instance.userId,
+          participant.cycle,
+          participant.id,
+          meta,
+          creds,
+          participant.cycle.intentEnvelope as SignalIntentEnvelope,
+          fill,
+          'SHOWCASE_POSITION_OPENED_WAKE',
+          sourceFillAt,
+      );
+    }
+    return false;
   }
 
   /**
@@ -3103,7 +3206,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
-  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
+  async wakeNow(trigger?: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
     if (!executionEnabled()) return;
     if (trigger) {
       this.lastShowcaseWakeAt = Date.now();
@@ -6625,29 +6728,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
    * (meta.limitPrice / merged basePrice). Cheap by design: only invoked at
    * fill-RECORDING time (never per tick) and always best-effort.
    */
-  private async resolveExchangeTradesFillPrice(
+  private async resolveExchangeTradesFillEvidence(
     creds: ExchangeCredentials,
     orderId: number | null | undefined,
-  ): Promise<number | null> {
+  ): Promise<{
+    price: number;
+    firstExecutedAtMs: number | null;
+    lastExecutedAtMs: number | null;
+  } | null> {
     if (!orderId) return null;
     try {
       const trades = await this.bitfinex.fetchOrderTrades(creds, orderId);
       let qtySum = 0;
       let notional = 0;
+      const executionTimes: number[] = [];
       for (const t of trades) {
         const qty = Math.abs(t.execAmount);
         if (!(qty > 0) || !(t.execPrice > 0)) continue;
         qtySum += qty;
         notional += qty * t.execPrice;
+        if (Number.isFinite(t.mtsCreate) && t.mtsCreate > 0) executionTimes.push(t.mtsCreate);
       }
       if (qtySum <= 0) return null;
-      return notional / qtySum;
+      return {
+        price: notional / qtySum,
+        firstExecutedAtMs: executionTimes.length ? Math.min(...executionTimes) : null,
+        lastExecutedAtMs: executionTimes.length ? Math.max(...executionTimes) : null,
+      };
     } catch (err) {
       this.logger.warn(
         `fetchOrderTrades ${orderId} failed (falling back to approximate fill price): ${err instanceof Error ? err.message : err}`,
       );
       return null;
     }
+  }
+
+  /** Compatibility price-only view for existing adoption/healing paths. */
+  private async resolveExchangeTradesFillPrice(
+    creds: ExchangeCredentials,
+    orderId: number | null | undefined,
+  ): Promise<number | null> {
+    return (await this.resolveExchangeTradesFillEvidence(creds, orderId))?.price ?? null;
   }
 
   /**
@@ -6665,6 +6786,48 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private async recordCancelRaceFill(
     agentId: string,
     userId: string,
+    // tradeId is deliberately required. A cancel-race caller once passed a
+    // narrowed cycle shape without it; Cure 1 then treated the already-
+    // canonical cycle as `unknown` and rewrote it to
+    // relink:unknown:<same-trade>:*. Requiring the field makes that identity
+    // loss a compile-time error at every future call site.
+    cycle: { id: string; status: SignalCycleStatus; tradeId: string | null },
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope | null,
+    fill: {
+      filledQty: number;
+      fillPrice: number;
+      source: 'ORDER_PARTIAL' | 'POSITION_DELTA';
+      orderResting: boolean;
+    },
+    cancelContext: string,
+    sourceFillAt?: string,
+  ): Promise<boolean> {
+    if (this.cancelRaceFillInFlight.has(participantId)) return false;
+    this.cancelRaceFillInFlight.add(participantId);
+    try {
+      return await this.recordCancelRaceFillOwned(
+        agentId,
+        userId,
+        cycle,
+        participantId,
+        meta,
+        creds,
+        intent,
+        fill,
+        cancelContext,
+        sourceFillAt,
+      );
+    } finally {
+      this.cancelRaceFillInFlight.delete(participantId);
+    }
+  }
+
+  private async recordCancelRaceFillOwned(
+    agentId: string,
+    userId: string,
     cycle: { id: string; status: SignalCycleStatus; tradeId?: string | null },
     participantId: string,
     meta: ExecutionPayload,
@@ -6677,6 +6840,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       orderResting: boolean;
     },
     cancelContext: string,
+    sourceFillAt?: string,
   ): Promise<boolean> {
     if (!meta.direction) return false;
 
@@ -6709,12 +6873,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // Fix D — the order (partially) executed, so its trade history now holds
     // the REAL volume-weighted fill price; the heuristic price (limit price /
     // merged basePrice) stays as fallback.
-    const exchangeFillPrice = await this.resolveExchangeTradesFillPrice(
+    const fillDetectedAtMs = Date.now();
+    const exchangeFillEvidence = await this.resolveExchangeTradesFillEvidence(
       creds,
       meta.bitfinexOrderId,
     );
     const fillPrice =
-      exchangeFillPrice ??
+      exchangeFillEvidence?.price ??
       (fill.fillPrice > 0
         ? fill.fillPrice
         : await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0));
@@ -6763,7 +6928,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
-      fill_price_source: exchangeFillPrice != null ? 'exchange_trades' : undefined,
+      fill_price_source: exchangeFillEvidence != null ? 'exchange_trades' : undefined,
+      exchange_fill_first_at: exchangeFillEvidence?.firstExecutedAtMs
+        ? new Date(exchangeFillEvidence.firstExecutedAtMs).toISOString()
+        : undefined,
+      exchange_fill_last_at: exchangeFillEvidence?.lastExecutedAtMs
+        ? new Date(exchangeFillEvidence.lastExecutedAtMs).toISOString()
+        : undefined,
+      exchange_fill_detected_at: new Date(fillDetectedAtMs).toISOString(),
+      exchange_fill_detection_lag_ms: exchangeFillEvidence?.lastExecutedAtMs
+        ? Math.max(0, fillDetectedAtMs - exchangeFillEvidence.lastExecutedAtMs)
+        : undefined,
+      source_fill_at: sourceFillAt,
       qty,
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
@@ -7860,7 +8036,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           const recorded = await this.recordCancelRaceFill(
             agentId,
             userId,
-            { id: row.cycleId, status: row.cycle?.status ?? SignalCycleStatus.PENDING_ENTRY },
+            {
+              id: row.cycleId,
+              status: row.cycle?.status ?? SignalCycleStatus.PENDING_ENTRY,
+              tradeId: row.cycle?.tradeId ?? null,
+            },
             row.id,
             latestMeta,
             creds,
@@ -8581,7 +8761,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           agentId,
           userId,
           // Chase runs only on non-terminal cycles — no status restore needed.
-          { id: cycleId, status: SignalCycleStatus.PENDING_ENTRY },
+          {
+            id: cycleId,
+            status: SignalCycleStatus.PENDING_ENTRY,
+            tradeId: opts.tradeId ?? null,
+          },
           participantId,
           meta,
           creds,
@@ -8809,6 +8993,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const bot = await this.fetchExecutionBotState().catch(() => null);
     if (!bot) return null;
 
+    // Some reconciliation paths historically carried only cycle.id/status.
+    // Resolve the durable identity before candidate matching so an already-
+    // canonical fill cannot be mistaken for a drift merely because the
+    // caller's narrowed snapshot omitted tradeId.
+    let currentTradeId = input.cycle.tradeId ?? null;
+    if (!currentTradeId || currentTradeId === 'unknown') {
+      const persistedCycle = await this.prisma.signalCycle
+        .findUnique({
+          where: { id: input.cycle.id },
+          select: { tradeId: true },
+        })
+        .catch(() => null);
+      currentTradeId = persistedCycle?.tradeId ?? currentTradeId;
+    }
+
     // Build the set of showcase tradeIds already claimed by other OPEN
     // participants via re-link, so two real fills can't both point at the
     // same showcase position.
@@ -8834,7 +9033,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     const candidate = resolveShowcaseRelinkForRealFill({
       showcasePositions: bot.positions ?? [],
       realFill: input.realFill,
-      currentTradeId: input.cycle.tradeId ?? null,
+      currentTradeId,
       nowMs: Date.now(),
       alreadyRelinkedTo: claimedByOthers,
     });
@@ -8849,7 +9048,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       return candidate.tradeId;
     }
 
-    const originTradeId = input.cycle.tradeId ?? 'unknown';
+    const originTradeId = currentTradeId ?? 'unknown';
     const relinkedTradeId = `relink:${originTradeId}:${candidate.tradeId}:${Date.now()}`;
 
     try {

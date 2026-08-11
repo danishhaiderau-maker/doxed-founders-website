@@ -7702,7 +7702,7 @@ def _push_showcase_relay_event(
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
-    if event in ("LIMIT_UPDATED", "POSITION_CLOSED"):
+    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED"):
         relay_lane = _platform_relay_lane_for_event(
             trade_id,
             payload.get("research_lane"),
@@ -7726,7 +7726,7 @@ def _push_showcase_relay_event(
     # only when this canonical owner also HMAC-signs the payload.
     if (
         webhook_secret
-        and event in ("LIMIT_UPDATED", "POSITION_CLOSED")
+        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED")
         and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
         and (
             (
@@ -7734,6 +7734,10 @@ def _push_showcase_relay_event(
                 and isinstance(payload.get("limit_price"), (int, float))
                 and payload.get("entry_limit_policy") in EXECUTABLE_ENTRY_POLICY_VERSIONS
                 and payload.get("executable") is True
+            )
+            or (
+                event == "POSITION_OPENED"
+                and isinstance(payload.get("fill_price"), (int, float))
             )
             or (
                 event == "POSITION_CLOSED"
@@ -19083,6 +19087,17 @@ def fill_order(order):
     # this fill and the next save never loses an open position (was only saved on close
     # or graceful shutdown — a non-graceful crash orphaned every open position).
     save_positions()
+    _push_showcase_relay_event(
+        "POSITION_OPENED",
+        order.get("trade_id"),
+        {
+            "direction": order.get("signal_dir"),
+            "fill_price": fill_px,
+            "qty": order.get("qty"),
+            "research_lane": (signal or {}).get("research_lane")
+            or order.get("research_lane"),
+        },
+    )
     _relay_mirror(
         "FILLED",
         {

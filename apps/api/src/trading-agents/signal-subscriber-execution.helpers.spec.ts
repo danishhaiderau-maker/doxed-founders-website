@@ -66,8 +66,37 @@ import {
   hireExpiryRequiresExitOnlyProcessing,
   expiredHireShouldRunExitOnly,
   readRelayExecutorWakeRequest,
+  pollForVerifiedEntryFill,
   shouldRunLocalRealSideSafetyNet,
 } from './signal-subscriber-execution.service';
+
+test('source-fill wake polling records only an exchange-verified fill', async () => {
+  let checks = 0;
+  const waits: number[] = [];
+  const fill = await pollForVerifiedEntryFill({
+    detect: async () => (++checks === 3 ? { qty: 0.03125, price: 64_000 } : null),
+    attempts: 7,
+    intervalMs: 300,
+    wait: async (ms) => { waits.push(ms); },
+  });
+  assert.deepEqual(fill, { qty: 0.03125, price: 64_000 });
+  assert.equal(checks, 3);
+  assert.deepEqual(waits, [300, 300]);
+});
+
+test('source-fill wake polling stays fail-closed when Bitfinex has no fill', async () => {
+  let checks = 0;
+  let waits = 0;
+  const fill = await pollForVerifiedEntryFill({
+    detect: async () => { checks += 1; return null; },
+    attempts: 7,
+    intervalMs: 300,
+    wait: async () => { waits += 1; },
+  });
+  assert.equal(fill, null);
+  assert.equal(checks, 7);
+  assert.equal(waits, 6);
+});
 
 test('authenticated direct wake queues instead of returning busy', async () => {
   const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
@@ -123,6 +152,30 @@ test('post-commit ORDER_PLACED does not queue behind its running pre-wake', asyn
     };
 
     assert.equal(await service.acceptDirectExecutorWake(postCommit), true);
+    assert.deepEqual(service.pendingDirectWakes, []);
+  } finally {
+    if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
+    if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
+  }
+});
+
+test('post-commit POSITION_OPENED does not duplicate its running pre-wake', async () => {
+  const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
+  process.env.RELAY_EXECUTOR_WORKER = 'true';
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.fastWakeRunning = true;
+    service.pendingDirectWakes = [];
+    service.activeDirectWake = {
+      trigger: 'POSITION_OPENED', tradeId: 'cont-fill', at: '2026-08-11T06:59:32.389Z',
+    };
+    assert.equal(await service.acceptDirectExecutorWake({
+      trigger: 'POSITION_OPENED', tradeId: 'cont-fill', at: '2026-08-11T06:59:32.500Z',
+    }), true);
     assert.deepEqual(service.pendingDirectWakes, []);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
