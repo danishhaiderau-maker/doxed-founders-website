@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-reduce confirmed exit persistence latency
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
