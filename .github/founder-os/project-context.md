@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): normalize terminal websocket fill quantity
+chore(relay): refresh Bitfinex policy lock
 
 ## Last Activity
 
