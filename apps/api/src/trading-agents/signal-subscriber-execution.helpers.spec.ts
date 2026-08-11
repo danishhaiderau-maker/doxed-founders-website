@@ -21,6 +21,8 @@ import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
+  mirrorPositionQuantityDelta,
+  partialEntryFillDisposition,
   flatSignedFastPathPreflight,
   sameDirectionPendingSignedFastPathPreflight,
   readPersistedRelayExecutorHealth,
@@ -69,6 +71,343 @@ import {
   pollForVerifiedEntryFill,
   shouldRunLocalRealSideSafetyNet,
 } from './signal-subscriber-execution.service';
+
+test('mirror position diff flags material quantity under-copy despite matching row counts', () => {
+  const delta = mirrorPositionQuantityDelta(0.031206116, 0.015);
+  assert.ok(delta != null);
+  assert.ok(delta! < 0);
+  assert.equal(Math.abs(delta! + 0.016206116) < 1e-12, true);
+});
+
+test('mirror position diff ignores only bounded exchange quantity rounding', () => {
+  assert.equal(mirrorPositionQuantityDelta(0.031206116, 0.0312), null);
+  assert.equal(mirrorPositionQuantityDelta(0, 0.015), null);
+});
+
+test('partial entry lifecycle retains only a live nonterminal remainder', () => {
+  assert.equal(
+    partialEntryFillDisposition({
+      intendedQty: 0.031206116,
+      filledQty: 0.015,
+      orderResting: true,
+      terminalSource: false,
+    }),
+    'RETAIN_PROTECTED_REMAINDER',
+  );
+  assert.equal(
+    partialEntryFillDisposition({
+      intendedQty: 0.031206116,
+      filledQty: 0.031206116,
+      orderResting: false,
+      terminalSource: false,
+    }),
+    'FINALIZE_FILL',
+  );
+  assert.equal(
+    partialEntryFillDisposition({
+      intendedQty: 0.031206116,
+      filledQty: 0.015,
+      orderResting: true,
+      terminalSource: true,
+    }),
+    'FINALIZE_FILL',
+  );
+});
+
+test('service money path protects a partial fill without cancelling its entry remainder', async () => {
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  let entryCancelCalls = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never,
+    {} as never,
+    {
+      recordHireExecutionEvent: async (
+        _userId: string,
+        _agentId: string,
+        _cycleId: string,
+        type: string,
+        payload: Record<string, unknown>,
+      ) => events.push({ type, payload }),
+    } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async () => 7001,
+    getMarkPrice: async () => 64_126.31,
+    cancelOrder: async () => {
+      entryCancelCalls += 1;
+    },
+  };
+  await (service as any).protectPartialFillAndRetainRemainder(
+    'agent',
+    'user',
+    'cycle',
+    'participant',
+    {
+      direction: 'SHORT',
+      qty: 0.031206116,
+      bitfinexOrderId: 6001,
+      limitPrice: 64_126.31,
+    },
+    {},
+    { risk: { stop_loss_margin_pct: 10 } },
+    0.015,
+  );
+  assert.equal(entryCancelCalls, 0);
+  assert.equal(events.at(0)?.type, 'UPDATE_STOPS');
+  assert.equal(events.at(0)?.payload.bitfinexOrderId, 6001);
+  assert.equal(events.at(0)?.payload.partialFillStopOrderId, 7001);
+  assert.equal(events.at(0)?.payload.partialFillQty, 0.015);
+  assert.ok(Number(events.at(0)?.payload.remaining_qty) > 0);
+});
+
+test('service persists replacement stop ownership before cancelling the old partial stop', async () => {
+  const order: string[] = [];
+  const service = new SignalSubscriberExecutionService(
+    {} as never,
+    {} as never,
+    { recordHireExecutionEvent: async () => order.push('persist') } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async () => 7002,
+    getMarkPrice: async () => 64_126.31,
+  };
+  (service as any).cancelManagedOrderGone = async () => {
+    order.push('cancel-old');
+    return { gone: true, attempts: 1 };
+  };
+  await (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant',
+    {
+      direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001,
+      limitPrice: 64_126.31, partialFillQty: 0.01, partialFillStopOrderId: 7001,
+    },
+    {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
+  );
+  assert.deepEqual(order, ['persist', 'cancel-old', 'persist']);
+});
+
+test('service protection failure writes terminal state only after confirmed emergency reduction', async () => {
+  const types: string[] = [];
+  let emergencyCloseQty = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never,
+    {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async () => { throw new Error('stop rejected'); },
+    getOpenPositionDetail: async () => ({ amount: -0.02 }),
+    submitMarketClose: async (_creds: unknown, input: { qty: number }) => {
+      emergencyCloseQty = input.qty;
+      return 8001;
+    },
+  };
+  (service as any).pauseUserRelayForPositionMismatch = async () => {};
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  (service as any).waitForMarketCloseConfirmation = async () => true;
+  await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant',
+    { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31 },
+    {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
+  ));
+  assert.deepEqual(types, ['EXPIRED']);
+  assert.equal(emergencyCloseQty, 0.02);
+});
+
+test('service protection failure never terminalizes an unconfirmed emergency close', async () => {
+  const types: string[] = [];
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async () => { throw new Error('stop rejected'); },
+    getOpenPositionDetail: async () => ({ amount: -0.02 }),
+    submitMarketClose: async () => 8001,
+  };
+  (service as any).pauseUserRelayForPositionMismatch = async () => {};
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  (service as any).waitForMarketCloseConfirmation = async () => false;
+  await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant',
+    { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31 },
+    {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
+  ));
+  assert.deepEqual(types, ['RECONCILE_CANCEL_FAILED']);
+});
+
+test('service distinguishes explicit flat from an unknown exchange read during fail-close', async () => {
+  for (const scenario of ['flat', 'unknown'] as const) {
+    const types: string[] = [];
+    const service = new SignalSubscriberExecutionService(
+      {} as never, {} as never,
+      { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+      {} as never, {} as never, {} as never, {} as never, {} as never,
+    );
+    (service as any).activeTrading = {
+      submitStopOrder: async () => { throw new Error('stop rejected'); },
+      getOpenPositionDetail: async () => {
+        if (scenario === 'unknown') throw new Error('exchange unavailable');
+        return null;
+      },
+    };
+    (service as any).pauseUserRelayForPositionMismatch = async () => {};
+    (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+    await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
+      'agent', 'user', 'cycle', 'participant',
+      { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31 },
+      {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
+    ));
+    assert.deepEqual(types, [scenario === 'flat' ? 'EXPIRED' : 'RECONCILE_CANCEL_FAILED']);
+  }
+});
+
+test('service stop-trigger path refuses terminal state while residual exposure remains', async () => {
+  const types: string[] = [];
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    findOrder: async () => null,
+    getOpenPositionDetail: async () => ({ amount: -0.005 }),
+  };
+  (service as any).pauseUserRelayForPositionMismatch = async () => {};
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  const handled = await (service as any).reconcilePendingPartialFillStop(
+    'agent', 'user', { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-x' },
+    'participant',
+    { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, partialFillQty: 0.015, partialFillStopOrderId: 7001 },
+    {}, { risk: { stop_loss_margin_pct: 10 } },
+  );
+  assert.equal(handled, true);
+  assert.deepEqual(types, ['RECONCILE_CANCEL_FAILED']);
+});
+
+test('service stop-trigger path records fill and exit only after fresh flat proof', async () => {
+  const types: string[] = [];
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    findOrder: async () => null,
+    getOpenPositionDetail: async () => null,
+  };
+  (service as any).pauseUserRelayForPositionMismatch = async () => {};
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  await (service as any).reconcilePendingPartialFillStop(
+    'agent', 'user', { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-x' },
+    'participant',
+    { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31, partialFillQty: 0.015, partialFillStopOrderId: 7001 },
+    {}, { risk: { stop_loss_margin_pct: 10 } },
+  );
+  assert.deepEqual(types, ['FILLED', 'EXIT']);
+});
+
+test('gone entry order routes any increased trade-evidence quantity', async () => {
+  let recordedQty = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = { findOrder: async () => null };
+  (service as any).resolveExchangeTradesFillEvidence = async () => ({
+    price: 64_127,
+    qty: 0.02,
+    firstExecutedAtMs: 1,
+    lastExecutedAtMs: 2,
+  });
+  (service as any).recordCancelRaceFill = async (
+    _a: string, _u: string, _c: unknown, _p: string, _m: unknown,
+    _creds: unknown, _intent: unknown, fill: { filledQty: number },
+  ) => {
+    recordedQty = fill.filledQty;
+    return true;
+  };
+  const handled = await (service as any).reconcilePendingPartialFillStop(
+    'agent', 'user', { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-x' },
+    'participant',
+    { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, partialFillQty: 0.015, partialFillStopOrderId: 7001 },
+    {}, { risk: { stop_loss_margin_pct: 10 } },
+  );
+  assert.equal(handled, true);
+  assert.equal(recordedQty, 0.02);
+});
+
+test('terminal source takes precedence over partial stop rearm in the same tick', async () => {
+  let context = '';
+  let closedQty = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    findOrder: async () => { throw new Error('must not rearm before terminal cleanup'); },
+    getOpenPositionDetail: async () => ({ amount: -0.015 }),
+  };
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1, reason: 'NOT_FOUND' });
+  (service as any).resolveExchangeTradesFillEvidence = async () => null;
+  (service as any).recordCancelRaceFill = async (...args: unknown[]) => {
+    context = String(args[8]);
+    closedQty = Number((args[7] as { filledQty: number }).filledQty);
+    return true;
+  };
+  const handled = await (service as any).reconcilePendingPartialFillStop(
+    'agent', 'user', { id: 'cycle', status: SignalCycleStatus.CLOSED, tradeId: 'cont-x' },
+    'participant',
+    { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, partialFillQty: 0.015, partialFillStopOrderId: 7001 },
+    {}, { risk: { stop_loss_margin_pct: 10 } },
+  );
+  assert.equal(handled, true);
+  assert.equal(context, 'SHOWCASE_CYCLE_CLOSED');
+  assert.equal(closedQty, 0.015);
+});
+
+test('terminal protected partial already flat records FILLED and EXIT without submitting a stop', async () => {
+  const types: string[] = [];
+  let stopSubmits = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    getOpenPositionDetail: async () => null,
+    submitStopOrder: async () => {
+      stopSubmits += 1;
+      return 9001;
+    },
+  };
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1, reason: 'NOT_FOUND' });
+  (service as any).resolveExchangeTradesFillEvidence = async () => null;
+  const handled = await (service as any).reconcilePendingPartialFillStop(
+    'agent', 'user', { id: 'cycle', status: SignalCycleStatus.CLOSED, tradeId: 'cont-x' },
+    'participant',
+    {
+      direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001,
+      limitPrice: 64_126.31, partialFillQty: 0.015, partialFillStopOrderId: 7001,
+    },
+    {}, { risk: { stop_loss_margin_pct: 10 } },
+  );
+  assert.equal(handled, true);
+  assert.deepEqual(types, ['FILLED', 'EXIT']);
+  assert.equal(stopSubmits, 0);
+});
 
 test('source-fill wake polling records only an exchange-verified fill', async () => {
   let checks = 0;
@@ -1503,6 +1842,14 @@ test('paused relay suppresses expected source-only mirror gaps but keeps exposur
     { type: 'COPY_POSITION_NO_SHOWCASE', tradeId: 'cont-orphan-position' },
   ];
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, false), diffs.slice(2));
+  assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true), diffs);
+});
+
+test('pending partial remains reportable until fresh exchange convergence proves exact quantity', () => {
+  const diffs = [
+    { type: 'QTY_DELTA', tradeId: 'cont-partial', copyQty: 0.015, showcaseQty: 0.031206116 },
+    { type: 'QTY_DELTA', tradeId: 'cont-open-underfill', copyQty: 0.015, showcaseQty: 0.031206116 },
+  ];
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true), diffs);
 });
 

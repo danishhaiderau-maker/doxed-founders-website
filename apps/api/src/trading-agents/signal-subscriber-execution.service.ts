@@ -816,6 +816,35 @@ export function capRelayLimitAtShowcaseFill(
     : Math.max(currentLimit, showcaseFill);
 }
 
+export function partialEntryFillDisposition(input: {
+  intendedQty: number;
+  filledQty: number;
+  orderResting: boolean;
+  terminalSource: boolean;
+}): 'RETAIN_PROTECTED_REMAINDER' | 'FINALIZE_FILL' {
+  const tolerance = Math.max(MIN_QTY_BTC, input.intendedQty * 0.001);
+  const materiallyPartial =
+    input.orderResting &&
+    btcToSats(input.filledQty) + btcToSats(tolerance) < btcToSats(input.intendedQty);
+  return materiallyPartial && !input.terminalSource
+    ? 'RETAIN_PROTECTED_REMAINDER'
+    : 'FINALIZE_FILL';
+}
+
+/** Quantity parity for an already matched showcase/copy position identity. */
+export function mirrorPositionQuantityDelta(
+  showcaseQty: number | null | undefined,
+  copyQty: number | null | undefined,
+): number | null {
+  if (!(showcaseQty != null && showcaseQty > 0) || !(copyQty != null && copyQty > 0)) {
+    return null;
+  }
+  const delta = copyQty - showcaseQty;
+  // Ignore exchange rounding only: 0.00005 BTC or 1% of source size.
+  const tolerance = Math.max(0.00005, showcaseQty * 0.01);
+  return Math.abs(delta) > tolerance ? delta : null;
+}
+
 type ExecutionPayload = {
   bitfinexOrderId?: number;
   stopOrderId?: number;
@@ -854,6 +883,12 @@ type ExecutionPayload = {
   originParticipantId?: string;
   originCycleId?: string;
   originTradeId?: string;
+  /** Cumulative entry execution while the participant remains PENDING_ENTRY. */
+  partialFillQty?: number | null;
+  /** Current reduce-only stop covering partialFillQty. */
+  partialFillStopOrderId?: number | null;
+  /** Older reduce-only stop awaiting confirmed cancellation. */
+  supersededPartialStopOrderId?: number | null;
 };
 
 type RepairableLotMeta = Pick<ExecutionPayload, 'qty' | 'direction'>;
@@ -4615,6 +4650,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     type MirrorDiffDivergence = {
       type:
         | 'PRICE_DELTA'
+        | 'QTY_DELTA'
         | 'COPY_ORDER_NO_SHOWCASE'
         | 'SHOWCASE_ORDER_NOT_MIRRORED'
         | 'SHOWCASE_FILLED_COPY_PENDING'
@@ -4626,6 +4662,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       copyLimit?: number;
       showcaseLimit?: number;
       deltaUsd?: number;
+      showcaseQty?: number;
+      copyQty?: number;
+      deltaQty?: number;
       showcaseDir?: string;
       copyDir?: string;
       sourceCreatedAtMs?: number;
@@ -4661,6 +4700,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       } else {
         const showcasePos = showcasePositions.find((x) => x.trade_id === tradeId);
         if (showcasePos) {
+          const partialQty = meta?.partialFillQty ?? 0;
+          const showcaseQty = Number(showcasePos.qty ?? 0);
+          if (partialQty > 0) {
+            divergences.push({
+              type: 'QTY_DELTA',
+              tradeId,
+              participantId: p.id,
+              cycleId: p.cycleId,
+              showcaseQty,
+              copyQty: partialQty,
+              deltaQty: mirrorPositionQuantityDelta(showcaseQty, partialQty) ?? 0,
+              showcaseDir: showcasePos.dir ?? showcasePos.side,
+              copyDir: meta?.direction,
+            });
+            continue;
+          }
           // Showcase already filled this trade while the copy is still pending.
           divergences.push({
             type: 'SHOWCASE_FILLED_COPY_PENDING',
@@ -4723,6 +4778,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         showcaseDir: pos.dir ?? pos.side,
         sourceCreatedAtMs:
           sourceEntityCreatedAtMs(pos as Record<string, unknown>) ?? undefined,
+      });
+    }
+    // Identity/count parity is insufficient: one OPEN row on each side can
+    // still hide a materially under-filled copy. Compare source quantity with
+    // the durable real lot quantity for the matching canonical trade.
+    for (const pos of showcasePositions) {
+      const tradeId = pos.trade_id as string;
+      const copy = copyOpen.find((row) => mirrorTradeIdFor(row) === tradeId);
+      if (!copy) continue;
+      const showcaseQty = Number(pos.qty ?? 0);
+      const copyQty = Number(metaById.get(copy.id)?.qty ?? 0);
+      const deltaQty = mirrorPositionQuantityDelta(showcaseQty, copyQty);
+      if (deltaQty == null) continue;
+      divergences.push({
+        type: 'QTY_DELTA',
+        tradeId,
+        participantId: copy.id,
+        cycleId: copy.cycleId,
+        showcaseQty,
+        copyQty,
+        deltaQty,
+        showcaseDir: pos.dir ?? pos.side,
+        copyDir: metaById.get(copy.id)?.direction,
       });
     }
     for (const p of copyOpen) {
@@ -4900,6 +4978,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           copy_limit: d.copyLimit,
           showcase_limit: d.showcaseLimit,
           delta_usd: d.deltaUsd,
+          showcase_qty: d.showcaseQty,
+          copy_qty: d.copyQty,
+          delta_qty: d.deltaQty,
           showcase_dir: d.showcaseDir,
           copy_dir: d.copyDir,
         })
@@ -6733,6 +6814,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     orderId: number | null | undefined,
   ): Promise<{
     price: number;
+    qty: number;
     firstExecutedAtMs: number | null;
     lastExecutedAtMs: number | null;
   } | null> {
@@ -6752,6 +6834,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       if (qtySum <= 0) return null;
       return {
         price: notional / qtySum,
+        qty: qtySum,
         firstExecutedAtMs: executionTimes.length ? Math.min(...executionTimes) : null,
         lastExecutedAtMs: executionTimes.length ? Math.max(...executionTimes) : null,
       };
@@ -6844,6 +6927,39 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ): Promise<boolean> {
     if (!meta.direction) return false;
 
+    const intendedQty = meta.qty ?? fill.filledQty;
+    const mustTerminatePartial = new Set([
+      'SHOWCASE_CYCLE_CLOSED',
+      'SHOWCASE_ABANDONED',
+      'SIGNAL_TTL_EXPIRED',
+      'EXIT_ONLY_PENDING_CANCEL',
+    ]).has(cancelContext);
+    if (
+      partialEntryFillDisposition({
+        intendedQty,
+        filledQty: fill.filledQty,
+        orderResting: fill.orderResting,
+        terminalSource: mustTerminatePartial,
+      }) === 'RETAIN_PROTECTED_REMAINDER'
+    ) {
+      // Every discovery path (poll, reconcile, source POSITION_OPENED, chase)
+      // funnels through here. A partial execution is not a completed entry:
+      // retain the exact exchange remainder and protect only the cumulative
+      // filled slice. This prevents non-chase reconciliation from recreating
+      // the cont-9e9 undercopy bug.
+      await this.protectPartialFillAndRetainRemainder(
+        agentId,
+        userId,
+        cycle.id,
+        participantId,
+        meta,
+        creds,
+        intent,
+        fill.filledQty,
+      );
+      return true;
+    }
+
     if (fill.orderResting && meta.bitfinexOrderId) {
       const cancel = await this.cancelManagedOrderGone(
         creds,
@@ -6905,6 +7021,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         return null;
       });
 
+    let supersededPartialStopOrderId: number | undefined;
+    if (meta.partialFillStopOrderId) {
+      if (stopOrderId == null) {
+        const message = `FULL_FILL_STOP_HANDOFF_FAILED cycle=${cycle.id}; partial stop remains active`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.setInstanceLastError(userId, agentId, message);
+        return false;
+      }
+      // Persist exchange ACK before cancelling the prior partial stop. A
+      // restart between these operations can therefore recover both ids.
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+        venue: 'bitfinex',
+        source: 'hire',
+        event: 'FULL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED',
+        stopOrderId,
+        partialFillStopOrderId: stopOrderId,
+        partialFillQty: qty,
+        supersededPartialStopOrderId: meta.partialFillStopOrderId,
+      });
+      const oldGone = await this.cancelManagedOrderGone(
+        creds,
+        meta.partialFillStopOrderId,
+        `FULL-FILL supersede partial stop ${meta.partialFillStopOrderId} with ${stopOrderId}`,
+      );
+      if (!oldGone.gone) {
+        // The new stop already covers the exact full quantity. The old stop is
+        // also reduce-only and therefore cannot reverse the position; retain
+        // its id for loud retry on the OPEN tick and pause new entries.
+        supersededPartialStopOrderId = meta.partialFillStopOrderId;
+        const message = `FULL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id}; old=${meta.partialFillStopOrderId} new=${stopOrderId}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.setInstanceLastError(userId, agentId, message);
+      }
+    }
+
     const priorCycleStatus = cycle.status;
 
     const staleExitCount = await this.prisma.signalCycleEvent.count({
@@ -6944,6 +7095,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,
+      partialFillQty: null,
+      partialFillStopOrderId: null,
+      supersededPartialStopOrderId,
       source: 'hire',
       event: 'CANCEL_RACE_FILL',
       cancel_context: cancelContext,
@@ -6981,6 +7135,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       consecutiveStopFailures: 0,
     });
     this.stopManagerCircuitOpen.delete(participantId);
+
+    if (mustTerminatePartial) {
+      const closed = await this.executeShowcaseMirrorClose(
+        agentId,
+        userId,
+        { id: cycle.id, intentEnvelope: intent },
+        { id: participantId, fillPrice: { toNumber: () => fillPrice } },
+        {
+          ...meta,
+          qty,
+          fillPrice,
+          stopOrderId: stopOrderId ?? undefined,
+          partialFillQty: null,
+          partialFillStopOrderId: null,
+        },
+        creds,
+        { trigger: `${cancelContext}_PARTIAL_FILL`, forceMirrorExit: true },
+      );
+      if (!closed) {
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `PARTIAL_FILL_TERMINAL_CLOSE_FAILED cycle=${cycle.id} context=${cancelContext}`,
+        ).catch(() => {});
+      }
+      return true;
+    }
 
     // Cure 1 — a real fill that landed on a different showcase signal than
     // the cycle's own tradeId (mirror-owner-of-duplicate-limit race, or a
@@ -7104,6 +7285,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     if (participant.status === SignalCycleStatus.OPEN) {
       await this.ensureProtectiveStop(agentId, userId, cycle.id, participant.id, meta, creds, intent);
       return;
+    }
+
+    if (meta.partialFillQty && meta.partialFillStopOrderId) {
+      const stopHandled = await this.reconcilePendingPartialFillStop(
+        agentId,
+        userId,
+        cycle,
+        participant.id,
+        meta,
+        creds,
+        intent,
+      );
+      if (stopHandled) return;
     }
 
     // C2 fix: showcase cycle already CLOSED/EXPIRED (syncShowcaseCycleClosures marked it
@@ -8757,26 +8951,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       }
       const filledQty = satsToBtc(exchangeOrderFilledQtySats(resting));
       if (btcToSats(filledQty) > 0) {
-        await this.recordCancelRaceFill(
+        // Preserve the exact managed remainder and keep this participant
+        // PENDING_ENTRY. A cumulative partial slice is protected separately;
+        // only an exchange-proven full intended quantity may transition OPEN.
+        await this.protectPartialFillAndRetainRemainder(
           agentId,
           userId,
-          // Chase runs only on non-terminal cycles — no status restore needed.
-          {
-            id: cycleId,
-            status: SignalCycleStatus.PENDING_ENTRY,
-            tradeId: opts.tradeId ?? null,
-          },
+          cycleId,
           participantId,
           meta,
           creds,
           intent,
-          {
-            filledQty,
-            fillPrice: resting.price > 0 ? resting.price : meta.limitPrice,
-            source: 'ORDER_PARTIAL',
-            orderResting: true,
-          },
-          'LIMIT_CHASE_REPLACE',
+          filledQty,
         );
         return;
       }
@@ -8840,6 +9026,548 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       );
     }
   }
+
+  /**
+   * Reconcile protection while a partial entry remainder is still resting.
+   * A missing stop with unchanged exposure is re-armed; a triggered stop first
+   * cancels the entry remainder, then durably records the filled/closed slice.
+   */
+  private async reconcilePendingPartialFillStop(
+    agentId: string,
+    userId: string,
+    cycle: { id: string; status: SignalCycleStatus; tradeId: string },
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope,
+  ): Promise<boolean> {
+    const stopId = meta.partialFillStopOrderId;
+    const partialQty = meta.partialFillQty ?? 0;
+    if (!stopId || partialQty <= 0 || !meta.direction) return false;
+
+    // Source terminality wins over stop/remainder maintenance. Reconcile any
+    // exchange fill using the terminal context now; otherwise return to the
+    // caller's normal terminal cancellation path in this same tick.
+    if (cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED) {
+      // partialFillQty is durable proof that real exchange exposure exists.
+      // Do not let the generic <85%-of-target fill detector turn this into a
+      // zero-fill EXPIRED row when the remainder order has already vanished.
+      const remainder = meta.bitfinexOrderId
+        ? await this.cancelManagedOrderGone(
+            creds,
+            meta.bitfinexOrderId,
+            `Terminal partial ${userId} cycle=${cycle.id}: cancel-confirm entry remainder`,
+          )
+        : { gone: true, attempts: 0, reason: 'NO_ORDER_ID' };
+      if (!remainder.gone) {
+        const message = `TERMINAL_PARTIAL_REMAINDER_NOT_GONE cycle=${cycle.id}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        return true;
+      }
+
+      const tradeEvidence = await this.resolveExchangeTradesFillEvidence(
+        creds,
+        meta.bitfinexOrderId,
+      );
+      let signedPosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> | undefined;
+      try {
+        signedPosition = await this.activeTrading.getOpenPositionDetail(creds);
+      } catch {
+        signedPosition = undefined;
+      }
+      if (signedPosition === undefined) {
+        const message = `TERMINAL_PARTIAL_POSITION_UNKNOWN cycle=${cycle.id}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        return true;
+      }
+      const knownStopIds = [
+        meta.partialFillStopOrderId,
+        meta.stopOrderId,
+        meta.supersededPartialStopOrderId,
+      ].filter((id, index, all): id is number => !!id && all.indexOf(id) === index);
+      if (signedPosition === null || btcToSats(Math.abs(signedPosition.amount)) === 0) {
+        for (const knownStopId of knownStopIds) {
+          const stopGone = await this.cancelManagedOrderGone(
+            creds,
+            knownStopId,
+            `Terminal partial already-flat ${userId} cycle=${cycle.id}: clear stop ${knownStopId}`,
+          );
+          if (!stopGone.gone) {
+            const message = `TERMINAL_PARTIAL_FLAT_STOP_NOT_GONE cycle=${cycle.id} stop=${knownStopId}`;
+            await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+            return true;
+          }
+        }
+        const realizedQty = Math.max(partialQty, tradeEvidence?.qty ?? 0);
+        const realizedPrice = tradeEvidence?.price ?? meta.limitPrice ?? meta.fillPrice ?? 0;
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'TERMINAL_PARTIAL_ALREADY_FLAT',
+          fill_price: realizedPrice,
+          qty: realizedQty,
+          stopOrderId: null,
+          partialFillQty: null,
+          partialFillStopOrderId: null,
+          supersededPartialStopOrderId: null,
+        });
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'TERMINAL_PARTIAL_ALREADY_FLAT',
+          exit_reason: 'EXCHANGE_ALREADY_FLAT',
+          qty_closed: realizedQty,
+          pnl_usd: 0,
+        });
+        return true;
+      }
+      const signedDirectionMatches =
+        (meta.direction === 'LONG' && signedPosition.amount > 0) ||
+        (meta.direction === 'SHORT' && signedPosition.amount < 0);
+      if (!signedDirectionMatches) {
+        const message = `TERMINAL_PARTIAL_OPPOSITE_EXPOSURE cycle=${cycle.id} amount=${signedPosition.amount}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        return true;
+      }
+      const sameDirectionQty =
+        signedPosition &&
+        ((meta.direction === 'LONG' && signedPosition.amount > 0) ||
+          (meta.direction === 'SHORT' && signedPosition.amount < 0))
+          ? Math.abs(signedPosition.amount)
+          : 0;
+      const attributablePositionDelta = Math.max(
+        0,
+        sameDirectionQty - (meta.exchangeQtyAtOrder ?? 0),
+      );
+      const cumulativeQty = Math.max(
+        partialQty,
+        tradeEvidence?.qty ?? 0,
+        attributablePositionDelta,
+      );
+      if (btcToSats(cumulativeQty) > 0) {
+        return this.recordCancelRaceFill(
+          agentId,
+          userId,
+          cycle,
+          participantId,
+          meta,
+          creds,
+          intent,
+          {
+            filledQty: cumulativeQty,
+            fillPrice: tradeEvidence?.price ?? meta.limitPrice ?? 0,
+            source: 'POSITION_DELTA',
+            orderResting: false,
+          },
+          'SHOWCASE_CYCLE_CLOSED',
+        );
+      }
+
+      let terminalFill: Awaited<ReturnType<typeof this.detectEntryFillBeforeCancel>>;
+      try {
+        terminalFill = await this.detectEntryFillBeforeCancel(creds, meta);
+      } catch (err) {
+        const message = `TERMINAL_PARTIAL_FILL_STATUS_UNKNOWN cycle=${cycle.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        return true;
+      }
+      if (!terminalFill) return false;
+      return this.recordCancelRaceFill(
+        agentId,
+        userId,
+        cycle,
+        participantId,
+        meta,
+        creds,
+        intent,
+        terminalFill,
+        'SHOWCASE_CYCLE_CLOSED',
+      );
+    }
+
+    let stop: Awaited<ReturnType<ExecutionTradingClient['findOrder']>>;
+    try {
+      stop = await this.activeTrading.findOrder(creds, stopId);
+    } catch (err) {
+      const message = `PARTIAL_FILL_STOP_STATUS_UNKNOWN cycle=${cycle.id}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      return true;
+    }
+    if (stop) return false;
+
+    // The entry remainder can fill while the stop lookup is in flight. Read
+    // its latest cumulative exchange fill before deciding what quantity needs
+    // protection; never re-arm from stale durable partialFillQty alone.
+    let entryOrder: Awaited<ReturnType<ExecutionTradingClient['findOrder']>>;
+    try {
+      entryOrder = meta.bitfinexOrderId
+        ? await this.activeTrading.findOrder(creds, meta.bitfinexOrderId)
+        : null;
+    } catch (err) {
+      const message = `PARTIAL_FILL_ENTRY_STATUS_UNKNOWN cycle=${cycle.id}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      return true;
+    }
+    const goneOrderEvidence = entryOrder
+      ? null
+      : await this.resolveExchangeTradesFillEvidence(creds, meta.bitfinexOrderId);
+    const freshCumulativeQty = entryOrder
+      ? satsToBtc(exchangeOrderFilledQtySats(entryOrder))
+      : (goneOrderEvidence?.qty ?? partialQty);
+    const intendedQty = meta.qty ?? partialQty;
+    if (
+      !entryOrder &&
+      btcToSats(freshCumulativeQty) > btcToSats(partialQty)
+    ) {
+      return this.recordCancelRaceFill(
+        agentId,
+        userId,
+        cycle,
+        participantId,
+        meta,
+        creds,
+        intent,
+        {
+          filledQty: freshCumulativeQty,
+          fillPrice: goneOrderEvidence?.price ?? meta.limitPrice ?? 0,
+          source: 'POSITION_DELTA',
+          orderResting: false,
+        },
+        'PARTIAL_REMAINDER_GONE_FILL_RECONCILE',
+      );
+    }
+    if (
+      !entryOrder &&
+      btcToSats(freshCumulativeQty) + btcToSats(Math.max(MIN_QTY_BTC, intendedQty * 0.001)) >=
+        btcToSats(intendedQty)
+    ) {
+      return this.recordCancelRaceFill(
+        agentId,
+        userId,
+        cycle,
+        participantId,
+        meta,
+        creds,
+        intent,
+        {
+          filledQty: freshCumulativeQty,
+          fillPrice: goneOrderEvidence?.price ?? meta.limitPrice ?? 0,
+          source: 'POSITION_DELTA',
+          orderResting: false,
+        },
+        'PARTIAL_REMAINDER_FULL_FILL_RECONCILE',
+      );
+    }
+    if (entryOrder && btcToSats(freshCumulativeQty) > btcToSats(partialQty)) {
+      await this.protectPartialFillAndRetainRemainder(
+        agentId,
+        userId,
+        cycle.id,
+        participantId,
+        { ...meta, partialFillStopOrderId: null, stopOrderId: undefined },
+        creds,
+        intent,
+        freshCumulativeQty,
+      );
+      return true;
+    }
+
+    let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    try {
+      position = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch (err) {
+      const message = `PARTIAL_FILL_POSITION_STATUS_UNKNOWN cycle=${cycle.id}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      return true;
+    }
+    const sameDirectionQty =
+      position &&
+      ((meta.direction === 'LONG' && position.amount > 0) ||
+        (meta.direction === 'SHORT' && position.amount < 0))
+        ? Math.abs(position.amount)
+        : 0;
+    const tolerance = Math.max(MIN_QTY_BTC, partialQty * 0.01);
+    if (sameDirectionQty + tolerance >= partialQty) {
+      // The stop disappeared without reducing exposure (for example a manual
+      // cancellation). Re-arm before allowing any further entry lifecycle.
+      await this.protectPartialFillAndRetainRemainder(
+        agentId,
+        userId,
+        cycle.id,
+        participantId,
+        { ...meta, partialFillStopOrderId: null, stopOrderId: undefined },
+        creds,
+        intent,
+        partialQty,
+      );
+      return true;
+    }
+
+    if (meta.bitfinexOrderId) {
+      const cancel = await this.cancelManagedOrderGone(
+        creds,
+        meta.bitfinexOrderId,
+        `Partial stop triggered ${userId} cycle=${cycle.id}: cancel entry remainder`,
+      );
+      if (!cancel.gone) {
+        const message = `PARTIAL_STOP_TRIGGERED_REMAINDER_CANCEL_FAILED cycle=${cycle.id}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        return true;
+      }
+    }
+
+    const flatProof = await this.activeTrading.getOpenPositionDetail(creds).catch(() => undefined);
+    if (flatProof === undefined || (flatProof && btcToSats(Math.abs(flatProof.amount)) > 0)) {
+      const message = `PARTIAL_STOP_TRIGGER_NOT_FLAT_PROVEN cycle=${cycle.id}`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      await this.cycles.recordHireExecutionEvent(
+        userId,
+        agentId,
+        cycle.id,
+        'RECONCILE_CANCEL_FAILED',
+        {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'PARTIAL_FILL_STOP_MISSING',
+          reason: 'RESIDUAL_FLAT_NOT_PROVEN',
+          observed_amount: flatProof?.amount,
+        },
+      ).catch(() => {});
+      return true;
+    }
+
+    const fillPrice = meta.limitPrice ?? meta.fillPrice ?? 0;
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
+      venue: 'bitfinex',
+      fill_price: fillPrice,
+      qty: partialQty,
+      source: 'hire',
+      event: 'PARTIAL_FILL_STOP_TRIGGERED',
+      stopOrderId: null,
+      partialFillQty: null,
+      partialFillStopOrderId: null,
+    });
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+      venue: 'bitfinex',
+      source: 'hire',
+      event: 'PARTIAL_FILL_STOP_TRIGGERED',
+      exit_reason: 'EXCHANGE_STOP',
+      qty_closed: partialQty,
+      pnl_usd: 0,
+    });
+    await this.pauseUserRelayForPositionMismatch(
+      userId,
+      agentId,
+      `PARTIAL_FILL_STOP_TRIGGERED cycle=${cycle.id}; source/copy diverged`,
+    ).catch(() => {});
+    return true;
+  }
+
+  /**
+   * Keep a partially executed managed limit on-book for its exact remainder.
+   * Protection is resized submit-new-before-cancel-old: both orders are
+   * reduce-only, so the brief overlap cannot reverse or over-close the
+   * position, while there is never an unprotected cancellation window.
+   */
+  private async protectPartialFillAndRetainRemainder(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope | null,
+    filledQty: number,
+  ): Promise<void> {
+    if (!meta.direction || btcToSats(filledQty) <= 0 || !meta.bitfinexOrderId) return;
+    const desiredQty = meta.qty ?? filledQty;
+    const remainingQty = Math.max(0, desiredQty - filledQty);
+    const priorStopId = meta.partialFillStopOrderId ?? meta.stopOrderId;
+    const alreadyCovered = meta.partialFillQty ?? 0;
+
+    if (priorStopId && btcToSats(alreadyCovered) >= btcToSats(filledQty)) {
+      const existing = await this.activeTrading.findOrder(creds, priorStopId);
+      if (existing) return;
+    }
+
+    // Retry cleanup from a prior acknowledged overlap before creating another
+    // generation of stops.
+    if (meta.supersededPartialStopOrderId) {
+      const oldGone = await this.cancelManagedOrderGone(
+        creds,
+        meta.supersededPartialStopOrderId,
+        `PARTIAL-FILL retry superseded stop ${meta.supersededPartialStopOrderId}`,
+      );
+      if (!oldGone.gone) {
+        const message = `PARTIAL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycleId}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        throw new Error(message);
+      }
+    }
+
+    const leverage = resolveSubscriberLeverage(intent);
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+      intent?.risk?.stop_loss_margin_pct,
+      { mirrorMode: isShowcaseMirrorOnlyMode() },
+    );
+    const fillPrice = meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
+    const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+
+    let newStopId: number;
+    try {
+      newStopId = await this.activeTrading.submitStopOrder(creds, {
+        positionDirection: meta.direction,
+        qty: filledQty,
+        stopPrice,
+        leverage,
+      });
+    } catch (err) {
+      const message = `PARTIAL_FILL_PROTECTION_FAILED cycle=${cycleId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      // Fail closed: never leave an unprotected partial position while its
+      // remaining entry can continue filling. Cancel the remainder first,
+      // then flatten only the proven partial slice and confirm reduction.
+      const remainder = await this.cancelManagedOrderGone(
+        creds,
+        meta.bitfinexOrderId,
+        `Partial protection failed ${userId} cycle=${cycleId}: cancel entry remainder`,
+      );
+      let flattened = false;
+      if (remainder.gone) {
+        let before: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> | undefined;
+        try {
+          before = await this.activeTrading.getOpenPositionDetail(creds);
+        } catch {
+          before = undefined;
+        }
+        if (before === null) {
+          flattened = true;
+        } else if (before !== undefined) {
+          const sameDirection =
+            (meta.direction === 'LONG' && before.amount > 0) ||
+            (meta.direction === 'SHORT' && before.amount < 0);
+          if (!sameDirection && btcToSats(Math.abs(before.amount)) > 0) {
+            const mismatch = `PARTIAL_FILL_OPPOSITE_EXPOSURE cycle=${cycleId} amount=${before.amount}`;
+            await this.pauseUserRelayForPositionMismatch(userId, agentId, mismatch).catch(() => {});
+          } else {
+            const beforeQty = Math.abs(before.amount);
+            // After the entry remainder is confirmed gone, flatten the fresh
+            // same-direction exchange quantity rather than the stale observed
+            // partial. A concurrent final fill can otherwise survive as an orphan.
+            const closeQty = beforeQty;
+            if (btcToSats(closeQty) === 0) {
+              flattened = true;
+            } else {
+          await this.activeTrading.submitMarketClose(creds, {
+            positionDirection: meta.direction,
+            qty: closeQty,
+            leverage: resolveSubscriberLeverage(intent),
+          }).catch(() => null);
+          flattened = await this.waitForMarketCloseConfirmation(
+            creds,
+            meta.direction,
+            beforeQty,
+            closeQty,
+          ).catch(() => false);
+            }
+          }
+        }
+      }
+      if (flattened) {
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXPIRED', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'PARTIAL_FILL_PROTECTION_FAIL_CLOSED',
+          reason: 'STOP_SUBMIT_FAILED_EXCHANGE_FLAT_CONFIRMED',
+          partial_fill_qty: filledQty,
+          pnl_usd: 0,
+        });
+      } else {
+        await this.cycles.recordHireExecutionEvent(
+          userId,
+          agentId,
+          cycleId,
+          'RECONCILE_CANCEL_FAILED',
+          {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: 'PARTIAL_FILL_PROTECTION_FAILED',
+            reason: remainder.gone
+              ? 'EMERGENCY_FLAT_NOT_CONFIRMED'
+              : 'ENTRY_REMAINDER_CANCEL_NOT_CONFIRMED',
+          },
+        ).catch(() => {});
+      }
+      throw new Error(message);
+    }
+
+    // Persist the new stop id before touching the old one. A process crash
+    // after exchange ACK can then recover both reduce-only orders instead of
+    // leaving the new protection invisible to the ledger.
+    let supersededStopId: number | undefined = priorStopId && priorStopId !== newStopId
+      ? priorStopId
+      : undefined;
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+      venue: 'bitfinex',
+      source: 'hire',
+      event: 'PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED',
+      participant_id: participantId,
+      bitfinexOrderId: meta.bitfinexOrderId,
+      stopOrderId: newStopId,
+      partialFillStopOrderId: newStopId,
+      partialFillQty: filledQty,
+      supersededPartialStopOrderId: supersededStopId,
+      intended_qty: desiredQty,
+      remaining_qty: remainingQty,
+      stop_price: stopPrice,
+    });
+
+    if (priorStopId && priorStopId !== newStopId) {
+      const oldGone = await this.cancelManagedOrderGone(
+        creds,
+        priorStopId,
+        `PARTIAL-FILL supersede stop ${priorStopId} with ${newStopId}`,
+      );
+      if (oldGone.gone) supersededStopId = undefined;
+    }
+
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+      venue: 'bitfinex',
+      source: 'hire',
+      event: 'PARTIAL_FILL_REMAINDER_RETAINED',
+      participant_id: participantId,
+      bitfinexOrderId: meta.bitfinexOrderId,
+      stopOrderId: newStopId,
+      partialFillStopOrderId: newStopId,
+      partialFillQty: filledQty,
+      supersededPartialStopOrderId: supersededStopId,
+      intended_qty: desiredQty,
+      remaining_qty: remainingQty,
+      stop_price: stopPrice,
+    });
+
+    if (supersededStopId) {
+      const message = `PARTIAL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycleId}; old=${supersededStopId} new=${newStopId}`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      throw new Error(message);
+    }
+    this.logger.warn(
+      `Partial entry protected and retained ${userId} cycle=${cycleId}: ` +
+      `filled=${filledQty.toFixed(8)} remaining=${remainingQty.toFixed(8)} ` +
+      `entry=${meta.bitfinexOrderId} stop=${newStopId}`,
+    );
+  }
+
 
   /** Cancel resting limits whose price is far from market (e.g. $904 on $64k BTC). */
   private async cancelAbsurdPendingOrders(creds: ExchangeCredentials, userId: string) {
@@ -10928,6 +11656,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ) {
     if (!meta.qty || !meta.direction) return;
     if (await this.hasParticipantExited(participant.id)) return;
+
+    if (meta.supersededPartialStopOrderId) {
+      const gone = await this.cancelManagedOrderGone(
+        creds,
+        meta.supersededPartialStopOrderId,
+        `OPEN cleanup superseded partial stop ${meta.supersededPartialStopOrderId}`,
+      );
+      if (!gone.gone) {
+        const message = `FULL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        return;
+      }
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+        venue: 'bitfinex',
+        source: 'hire',
+        event: 'SUPERSEDED_PARTIAL_STOP_CLEARED',
+        supersededPartialStopOrderId: null,
+      });
+    }
 
     const intent = cycle.intentEnvelope as SignalIntentEnvelope;
     const position = await this.activeTrading.getOpenPositionDetail(creds);
