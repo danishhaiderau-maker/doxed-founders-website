@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Tighten relay close wake and analyzer retention
+Harden relay pause state and local analyzer storage
 
 ## Last Activity
 
