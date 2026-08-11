@@ -144,6 +144,22 @@ export class FounderNodeController {
     return this.syncJobs.runAgent(user.id, body.agent, body);
   }
 
+  /**
+   * Allows an authenticated installed Founder Node to revoke only itself.
+   * This closes the gap where the desktop app removed its local credential but
+   * left a live-looking node visible on the Remote Access website.
+   */
+  @UseGuards(FounderNodeGuard)
+  @Delete('self')
+  revokeSelf(
+    @Req() req: { founderNode: FounderNodeRequestUser },
+  ) {
+    return this.nodes.revokeNode(
+      req.founderNode.userId,
+      req.founderNode.nodeId,
+    );
+  }
+
   @Delete(':nodeId')
   revoke(@CurrentUser() user: AuthUser, @Param('nodeId') nodeId: string) {
     return this.nodes.revokeNode(user.id, nodeId);
