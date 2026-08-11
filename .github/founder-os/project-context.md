@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(security): structure policy digests safely
+fix(relay): copy exact showcase quantity
 
 ## Last Activity
 
