@@ -3957,3 +3957,72 @@ test('post-cancel position proof treats every attributable partial delta as a fi
     {kind:'PROVEN_UNFILLED'},
   );
 });
+
+test('signed close retires only its exact current pending order and preserves canonical CLOSED', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map();
+  const cycle={id:'c',agentId:'a',tradeId:'cont-close-pending',status:SignalCycleStatus.PENDING_ENTRY,intentEnvelope:{action:'ENTER'}};
+  const participant={id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle};
+  const terminal:string[]=[];
+  service.prisma={
+    signalCycleParticipant:{findMany:async()=>[participant],findUnique:async()=>participant},
+    signalCycle:{update:async(args:{data:{status:string}})=>{terminal.push(args.data.status);return{}}},
+  };
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:8002,direction:'SHORT',qty:.01,limitPrice:64000,originTradeId:null});
+  service.detectEntryFillBeforeCancel=async()=>null;
+  let cancelled=0;
+  service.cancelManagedOrderGone=async(_c:unknown,oid:number,_l:unknown,onTiming:(v:unknown)=>void)=>{cancelled=oid;onTiming({submitStartedAtMs:100,exchangeAckAtMs:120,confirmedAtMs:130});return{gone:true,reason:'CANCELLED'}};
+  service.classifyPostCancelEntry=async()=>({kind:'PROVEN_UNFILLED'});
+  service.cycles={recordHireExecutionEvent:async(_u:unknown,_a:unknown,_c:unknown,event:string,body:{reason:string})=>{terminal.push(`${event}:${body.reason}`)}};
+  const now=Date.now();
+  assert.equal(await service.tryImmediateSignedPendingClose({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'},{trigger:'POSITION_CLOSED',tradeId:'cont-close-pending',at:new Date(now).toISOString(),signedClose:{sourceEventAtMs:now-100,platformReceivedAtMs:now-50}},{}),true);
+  assert.equal(cancelled,8002);
+  assert.deepEqual(terminal,['EXPIRED:SHOWCASE_CLOSED_BEFORE_COPY_FILL',SignalCycleStatus.CLOSED]);
+});
+
+test('signed close pending path keeps unknown and cancel-race fills retryable', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map();
+  const cycle={id:'c',agentId:'a',tradeId:'cont-close-pending',status:SignalCycleStatus.PENDING_ENTRY,intentEnvelope:{action:'ENTER'}};
+  const participant={id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[participant],findUnique:async()=>participant}};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:8002,direction:'SHORT',qty:.01,limitPrice:64000});
+  service.detectEntryFillBeforeCancel=async()=>null;
+  service.cancelManagedOrderGone=async(_c:unknown,_o:unknown,_l:unknown,onTiming:(v:unknown)=>void)=>{onTiming({submitStartedAtMs:1,exchangeAckAtMs:2,confirmedAtMs:3});return{gone:true,reason:'CANCELLED'}};
+  let expired=false;
+  service.cycles={recordHireExecutionEvent:async(_u:unknown,_a:unknown,_c:unknown,event:string)=>{if(event==='EXPIRED')expired=true}};
+  const now=Date.now();
+  const wake={trigger:'POSITION_CLOSED',tradeId:'cont-close-pending',at:new Date(now).toISOString(),signedClose:{sourceEventAtMs:now-100,platformReceivedAtMs:now-50}};
+  service.classifyPostCancelEntry=async()=>({kind:'UNKNOWN',reason:'POSITION_UNAVAILABLE'});
+  assert.equal(await service.tryImmediateSignedPendingClose({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'},wake,{}),false);
+  assert.equal(expired,false);
+  service.classifyPostCancelEntry=async()=>({kind:'FILL',fill:{filledQty:.001,fillPrice:64000,source:'POSITION_DELTA',orderResting:false}});
+  let context='';
+  service.recordCancelRaceFill=async(...args:unknown[])=>{context=String(args[8]);return false};
+  assert.equal(await service.tryImmediateSignedPendingClose({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'},wake,{}),false);
+  assert.equal(context,'SHOWCASE_CYCLE_CLOSED');
+  assert.equal(expired,false);
+});
+
+test('signed close waits for replacement lane then cancels the freshly durable order id', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  const cycle={id:'c',agentId:'a',tradeId:'cont-close-pending',status:SignalCycleStatus.PENDING_ENTRY,intentEnvelope:{action:'ENTER'}};
+  const participant={id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle};
+  let releaseLane!:()=>void;
+  const lane=new Promise<void>((resolve)=>{releaseLane=resolve});
+  service.acquireParticipantMoneyLane=async()=>{await lane;return()=>{}};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[participant],findUnique:async()=>participant},signalCycle:{update:async()=>({})}};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:9002,direction:'SHORT',qty:.01,limitPrice:63990});
+  service.detectEntryFillBeforeCancel=async()=>null;
+  let cancelled=0;
+  service.cancelManagedOrderGone=async(_c:unknown,oid:number,_l:unknown,onTiming:(v:unknown)=>void)=>{cancelled=oid;onTiming({submitStartedAtMs:1,exchangeAckAtMs:2,confirmedAtMs:3});return{gone:true,reason:'CANCELLED'}};
+  service.classifyPostCancelEntry=async()=>({kind:'PROVEN_UNFILLED'});
+  service.cycles={recordHireExecutionEvent:async()=>({})};
+  const now=Date.now();
+  const pending=service.tryImmediateSignedPendingClose({id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex'},{trigger:'POSITION_CLOSED',tradeId:'cont-close-pending',at:new Date(now).toISOString(),signedClose:{sourceEventAtMs:now-100,platformReceivedAtMs:now-50}},{});
+  await Promise.resolve();
+  assert.equal(cancelled,0);
+  releaseLane();
+  assert.equal(await pending,true);
+  assert.equal(cancelled,9002);
+});

@@ -3095,22 +3095,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
           continue;
         }
         if (wake.trigger === 'POSITION_CLOSED') {
-          const creds = await this.exchanges.getUserCredentials(
-            instance.userId,
-            instance.exchangeProvider,
-          );
+          const [creds, liveLots] = await Promise.all([
+            this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider),
+            this.prisma.signalCycleParticipant.findMany({
+              where: {
+                userId: instance.userId,
+                status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+                cycle: { agentId: instance.agentId },
+              },
+              include: { cycle: true },
+            }),
+          ]);
           if (!creds) {
             await this.persistFastWakeTelemetry(instance.id, wake, startedAtMs, 'CREDENTIALS_MISSING');
             continue;
           }
-          const openLots = await this.prisma.signalCycleParticipant.findMany({
-            where: {
-              userId: instance.userId,
-              status: SignalCycleStatus.OPEN,
-              cycle: { agentId: instance.agentId },
-            },
-            include: { cycle: true },
-          });
+          const openLots = liveLots.filter((lot) => lot.status === SignalCycleStatus.OPEN);
+          const pendingLots = liveLots.filter((lot) => lot.status === SignalCycleStatus.PENDING_ENTRY);
           let exitAttempts = 0;
           for (const participant of openLots) {
             const meta = await this.loadExecutionMeta(participant.id);
@@ -3133,11 +3134,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
               wake.signedClose,
             );
           }
+          const pendingHandled = await this.tryImmediateSignedPendingClose(
+            instance, wake, creds, pendingLots,
+          );
           await this.persistFastWakeTelemetry(
             instance.id,
             wake,
             startedAtMs,
-            exitAttempts > 0 ? 'EXIT_DISPATCHED' : 'NO_MATCHING_OPEN_LOT',
+            exitAttempts > 0
+              ? 'EXIT_DISPATCHED'
+              : pendingHandled
+                ? 'PENDING_ENTRY_TERMINATED'
+                : 'NO_MATCHING_OPEN_LOT',
           );
           processedInstanceIds.add(instance.id);
           continue;
@@ -3310,6 +3318,113 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
             cancel_submit_to_ack_ms: cancelTiming.exchangeAckAtMs - cancelTiming.submitStartedAtMs,
           },
         );
+        return true;
+      } finally { release(); }
+    }
+    return false;
+  }
+
+  private async tryImmediateSignedPendingClose(
+    instance: TradingAgentInstance,
+    wake: RelayExecutorWakeRequest,
+    creds: ExchangeCredentials,
+    prefetchedCandidates?: Array<{ id: string }>,
+  ): Promise<boolean> {
+    if (!wake.tradeId || !wake.signedClose) return false;
+    const candidates = prefetchedCandidates ?? await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: instance.userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId: instance.agentId },
+      },
+      include: { cycle: true },
+    });
+    for (const candidate of candidates) {
+      const release = await this.acquireParticipantMoneyLane(candidate.id);
+      try {
+        const participant = await this.prisma.signalCycleParticipant.findUnique({
+          where: { id: candidate.id }, include: { cycle: true },
+        });
+        if (!participant || participant.status !== SignalCycleStatus.PENDING_ENTRY) continue;
+        const meta = await this.loadExecutionMeta(participant.id);
+        if (!persistedCloseWakeMatchesParticipant(
+          wake.tradeId, participant.cycle.tradeId, meta.originTradeId,
+        )) continue;
+        const intent = participant.cycle.intentEnvelope as SignalIntentEnvelope;
+        let fill: Awaited<ReturnType<typeof this.detectEntryFillBeforeCancel>>;
+        try {
+          fill = await this.detectEntryFillBeforeCancel(creds, meta, true);
+        } catch {
+          await this.cycles.recordHireExecutionEvent(
+            instance.userId, instance.agentId, participant.cycle.id, 'RECONCILE_CANCEL_FAILED', {
+              venue: 'bitfinex', source: 'hire', event: 'SHOWCASE_CYCLE_CLOSED',
+              reason: 'PRE_CANCEL_EXCHANGE_READ_UNAVAILABLE', bitfinex_order_id: meta.bitfinexOrderId,
+            },
+          ).catch(() => undefined);
+          return false;
+        }
+        if (fill) {
+          return await this.recordCancelRaceFill(
+            instance.agentId, instance.userId, participant.cycle, participant.id,
+            meta, creds, intent, fill, 'SHOWCASE_CYCLE_CLOSED',
+            new Date(wake.signedClose.sourceEventAtMs!).toISOString(),
+          );
+        }
+        if (!meta.bitfinexOrderId) return false;
+        let cancelTiming: { submitStartedAtMs: number; exchangeAckAtMs: number; confirmedAtMs: number } | undefined;
+        const cancel = await this.cancelManagedOrderGone(
+          creds, meta.bitfinexOrderId,
+          `Signed showcase close pending oid=${meta.bitfinexOrderId} trade=${wake.tradeId}`,
+          (timing) => { cancelTiming = timing; },
+        );
+        if (!cancel.gone) {
+          await this.cycles.recordHireExecutionEvent(
+            instance.userId, instance.agentId, participant.cycle.id, 'RECONCILE_CANCEL_FAILED', {
+              venue: 'bitfinex', source: 'hire', event: 'SHOWCASE_CYCLE_CLOSED',
+              reason: cancel.reason ?? 'CANCEL_UNCONFIRMED', bitfinex_order_id: meta.bitfinexOrderId,
+            },
+          ).catch(() => undefined);
+          return false;
+        }
+        const postCancel = await this.classifyPostCancelEntry(creds, meta, cancel.reason);
+        if (postCancel.kind === 'FILL') {
+          return await this.recordCancelRaceFill(
+            instance.agentId, instance.userId, participant.cycle, participant.id,
+            meta, creds, intent, postCancel.fill, 'SHOWCASE_CYCLE_CLOSED',
+            new Date(wake.signedClose.sourceEventAtMs!).toISOString(),
+          );
+        }
+        if (postCancel.kind === 'UNKNOWN' || !cancelTiming) {
+          await this.cycles.recordHireExecutionEvent(
+            instance.userId, instance.agentId, participant.cycle.id, 'RECONCILE_CANCEL_FAILED', {
+              venue: 'bitfinex', source: 'hire', event: 'SHOWCASE_CYCLE_CLOSED',
+              reason: postCancel.kind === 'UNKNOWN' ? postCancel.reason : 'CANCEL_TIMING_MISSING',
+              bitfinex_order_id: meta.bitfinexOrderId,
+            },
+          ).catch(() => undefined);
+          return false;
+        }
+        await this.cycles.recordHireExecutionEvent(
+          instance.userId, instance.agentId, participant.cycle.id, 'EXPIRED', {
+            venue: 'bitfinex', source: 'hire', event: 'SHOWCASE_CYCLE_CLOSED',
+            reason: 'SHOWCASE_CLOSED_BEFORE_COPY_FILL', bitfinex_order_id: meta.bitfinexOrderId,
+            source_close_at: new Date(wake.signedClose.sourceEventAtMs!).toISOString(),
+            platform_received_at: new Date(wake.signedClose.platformReceivedAtMs!).toISOString(),
+            cancel_submit_started_at: new Date(cancelTiming.submitStartedAtMs).toISOString(),
+            cancel_exchange_ack_at: new Date(cancelTiming.exchangeAckAtMs).toISOString(),
+            cancel_confirmed_at: new Date(cancelTiming.confirmedAtMs).toISOString(),
+            source_to_cancel_ack_ms: cancelTiming.exchangeAckAtMs - wake.signedClose.sourceEventAtMs!,
+            platform_to_cancel_ack_ms: cancelTiming.exchangeAckAtMs - wake.signedClose.platformReceivedAtMs!,
+            cancel_submit_to_ack_ms: cancelTiming.exchangeAckAtMs - cancelTiming.submitStartedAtMs,
+          },
+        );
+        // A no-fill participant expires, but the canonical source lifecycle is
+        // a close. Pre-wake may beat platform persistence, so preserve that
+        // source terminal state explicitly instead of leaving the cycle EXPIRED.
+        await this.prisma.signalCycle.update({
+          where: { id: participant.cycle.id },
+          data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
+        });
         return true;
       } finally { release(); }
     }
