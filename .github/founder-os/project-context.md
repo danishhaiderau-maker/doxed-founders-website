@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Guard fresh relay orders from snapshot lag
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
