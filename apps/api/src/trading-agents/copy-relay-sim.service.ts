@@ -344,7 +344,7 @@ export class CopyRelaySimService {
         },
         events: {
           orderBy: { createdAt: 'asc' },
-          select: { eventType: true, payload: true },
+          select: { eventType: true, payload: true, createdAt: true },
         },
       },
       orderBy: { updatedAt: 'desc' },
@@ -357,6 +357,8 @@ export class CopyRelaySimService {
       markPrice: markPrice ?? undefined,
       participants: participants.map((p) => {
         const meta = foldParticipantExecutionMeta(p.events);
+        const filledAt = p.events.find((event) => event.eventType === 'FILLED')?.createdAt ?? null;
+        const closedAt = p.events.find((event) => event.eventType === 'EXIT')?.createdAt ?? null;
         return {
           status: p.status,
           fillPrice: p.fillPrice != null ? Number(p.fillPrice) : null,
@@ -368,6 +370,8 @@ export class CopyRelaySimService {
           stopLoss: meta.stopPrice,
           takeProfit: meta.profitLockFloor,
           exchangeProven: meta.exchangeProven,
+          filledAt,
+          closedAt,
           updatedAt: p.updatedAt,
           createdAt: p.createdAt,
           cycle: p.cycle,

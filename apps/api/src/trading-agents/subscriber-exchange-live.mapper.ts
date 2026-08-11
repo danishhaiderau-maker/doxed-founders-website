@@ -30,6 +30,10 @@ export type SubscriberCycleRow = {
   takeProfit?: number | null;
   terminalReason?: string | null;
   exchangeProven?: boolean;
+  /** Exchange holding-period boundary, sourced from the first FILLED event. */
+  filledAt?: Date | null;
+  /** Exchange holding-period boundary, sourced from the first EXIT event. */
+  closedAt?: Date | null;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -298,12 +302,19 @@ export function mapSubscriberExchangeLiveBook(input: {
     ) {
       const entry = Number(row.fillPrice);
       const exit = Number(row.exitPrice);
+      // A participant is created when the relay receives the signal, often
+      // minutes before its limit fills. Measure the actual exchange holding
+      // period, not signal-to-terminal bookkeeping time. The fallbacks retain
+      // compatibility with historical rows that predate lifecycle timestamps.
+      const holdingStartedAt = row.filledAt ?? row.createdAt;
+      const holdingClosedAt = row.closedAt ?? row.updatedAt;
       const durationMin = Math.max(
         0,
-        Math.round(((row.updatedAt.getTime() - row.createdAt.getTime()) / 60_000) * 10) / 10,
+        Math.round(((holdingClosedAt.getTime() - holdingStartedAt.getTime()) / 60_000) * 10) /
+          10,
       );
       participantCloseFallbacks.push({
-        time: fmtTime(row.updatedAt),
+        time: fmtTime(holdingClosedAt),
         tradeId: row.cycle.tradeId,
         direction,
         entry,

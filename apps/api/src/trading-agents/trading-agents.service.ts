@@ -1130,7 +1130,7 @@ export class TradingAgentsService implements OnModuleInit {
         },
         events: {
           orderBy: { createdAt: 'asc' },
-          select: { eventType: true, payload: true },
+          select: { eventType: true, payload: true, createdAt: true },
         },
       },
       orderBy: { updatedAt: 'desc' },
@@ -1139,6 +1139,8 @@ export class TradingAgentsService implements OnModuleInit {
 
     const participants: SubscriberCycleRow[] = rows.map((r) => {
       const meta = foldParticipantExecutionMeta(r.events);
+      const filledAt = r.events.find((event) => event.eventType === 'FILLED')?.createdAt ?? null;
+      const closedAt = r.events.find((event) => event.eventType === 'EXIT')?.createdAt ?? null;
       return {
         status: r.status,
         fillPrice: r.fillPrice != null ? Number(r.fillPrice) : null,
@@ -1151,6 +1153,8 @@ export class TradingAgentsService implements OnModuleInit {
         takeProfit: meta.profitLockFloor,
         terminalReason: meta.terminalReason,
         exchangeProven: meta.exchangeProven,
+        filledAt,
+        closedAt,
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {

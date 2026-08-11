@@ -338,6 +338,47 @@ test('renders one exchange-proven participant close when Bitfinex close ledger i
   assert.equal(book.trades[0]?.netUsd, -1.6);
 });
 
+test('measures a completed live-copy trade from exchange fill to first close', () => {
+  const createdAt = new Date('2026-08-11T00:09:05.569Z');
+  const filledAt = new Date('2026-08-11T00:21:57.590Z');
+  const closedAt = new Date('2026-08-11T02:22:07.512Z');
+  // A later duplicate reconciliation event updated the participant after the
+  // real close. Neither pre-fill chase time nor that bookkeeping tail belongs
+  // in the exchange holding duration.
+  const updatedAt = new Date('2026-08-11T02:22:10.690Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.CLOSED,
+        fillPrice: 64_025,
+        exitPrice: 64_085,
+        pnlUsd: -1.87,
+        pnlMarginPct: -9.37,
+        qty: 0.03122,
+        terminalReason: 'SHOWCASE_MIRROR',
+        exchangeProven: true,
+        createdAt,
+        filledAt,
+        closedAt,
+        updatedAt,
+        cycle: {
+          tradeId: 'cont-d05a25f5874c',
+          status: SignalCycleStatus.CLOSED,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: 'TIME_EXIT',
+          createdAt,
+        },
+      },
+    ],
+    ledgerCloses: [],
+  });
+
+  assert.equal(book.trades[0]?.durationMin, 120.2);
+  assert.equal(book.trades[0]?.time, '2026-08-11 12:22:07 AEST');
+});
+
 test('renders Neon CLOSED live-copy rows when Bitfinex close ledger is empty', () => {
   const createdAt = new Date('2026-08-07T16:53:00.000Z');
   const closedAt = new Date('2026-08-07T16:58:00.000Z');
