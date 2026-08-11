@@ -34,6 +34,7 @@ import {
   pendingFillReconcileDecision,
   showcasePositionAbsenceActionable,
   pendingCopyShowcaseDisposition,
+  showcaseAbsentWithinOrderPropagationGrace,
   missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -1637,6 +1638,50 @@ test('a still-resting showcase limit remains eligible for exact-price chase', ()
       'cont-pending',
     ),
     'SHOWCASE_ABSENT',
+  );
+});
+
+test('fresh signed order tolerates canonical snapshot propagation lag without weakening abandon safety', () => {
+  const now = Date.parse('2026-08-11T04:00:10.000Z');
+  const intent = {
+    action: 'ENTER',
+    trade_id: 'cont-propagating',
+    context: {
+      signed_showcase_event: true,
+      showcase_event: 'ORDER_PLACED',
+      showcase_event_at: '2026-08-11T04:00:05.500Z',
+      platform_received_at: '2026-08-11T04:00:06.000Z',
+    },
+  };
+  assert.equal(
+    showcaseAbsentWithinOrderPropagationGrace('cont-propagating', intent, now, 15_000),
+    true,
+  );
+  assert.equal(
+    showcaseAbsentWithinOrderPropagationGrace('cont-propagating', intent, now + 15_001, 15_000),
+    false,
+  );
+  assert.equal(
+    showcaseAbsentWithinOrderPropagationGrace('different-trade', intent, now, 15_000),
+    false,
+  );
+  assert.equal(
+    showcaseAbsentWithinOrderPropagationGrace(
+      'cont-propagating',
+      { ...intent, context: { ...intent.context, signed_showcase_event: false } },
+      now,
+      15_000,
+    ),
+    false,
+  );
+  assert.equal(
+    showcaseAbsentWithinOrderPropagationGrace(
+      'cont-propagating',
+      { ...intent, context: { ...intent.context, showcase_event: 'ORDER_CANCELLED' } },
+      now,
+      15_000,
+    ),
+    false,
   );
 });
 

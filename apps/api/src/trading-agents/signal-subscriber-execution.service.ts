@@ -98,6 +98,7 @@ const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
 const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
+const SHOWCASE_ORDER_SNAPSHOT_PROPAGATION_GRACE_MS = 15_000;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
 export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
@@ -1241,6 +1242,47 @@ export function pendingCopyShowcaseDisposition(
     (position) => String(position.trade_id ?? '') === tradeId,
   );
   return filled ? 'MISSED_SHOWCASE_FILL' : 'SHOWCASE_ABSENT';
+}
+
+/**
+ * A signed exact-order webhook can reach Railway before the independently
+ * published canonical snapshot contains that same order. During this bounded
+ * propagation window, absence from the snapshot is not evidence that the
+ * showcase abandoned the trade. Explicit terminal evidence (expired order or
+ * terminal signal) is handled before this helper and is never delayed.
+ */
+export function showcaseAbsentWithinOrderPropagationGrace(
+  tradeId: string,
+  intentEnvelope: unknown,
+  nowMs = Date.now(),
+  graceMs = SHOWCASE_ORDER_SNAPSHOT_PROPAGATION_GRACE_MS,
+): boolean {
+  if (!tradeId) return false;
+  const intent = intentEnvelope as {
+    action?: unknown;
+    trade_id?: unknown;
+    context?: {
+      signed_showcase_event?: unknown;
+      showcase_event?: unknown;
+      showcase_event_at?: unknown;
+      platform_received_at?: unknown;
+    };
+  } | null;
+  const context = intent?.context;
+  const event = String(context?.showcase_event ?? '').toUpperCase();
+  if (
+    intent?.action !== 'ENTER'
+    || String(intent?.trade_id ?? '') !== tradeId
+    || context?.signed_showcase_event !== true
+    || (event !== 'ORDER_PLACED' && event !== 'LIMIT_UPDATED')
+  ) {
+    return false;
+  }
+  const receivedAtMs = sourceTimestampMs(context?.platform_received_at);
+  const eventAtMs = sourceTimestampMs(context?.showcase_event_at);
+  const anchorMs = receivedAtMs ?? eventAtMs;
+  if (anchorMs == null || anchorMs > nowMs + 5_000) return false;
+  return nowMs - anchorMs <= Math.max(1, graceMs);
 }
 
 /**
@@ -6946,6 +6988,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
       const botState = await this.fetchExecutionBotState();
       const abandon = this.showcaseEntryAbandoned(botState, cycle.tradeId);
       if (abandon.abandoned) {
+        if (
+          abandon.reason === 'SHOWCASE_ABSENT'
+          && showcaseAbsentWithinOrderPropagationGrace(cycle.tradeId, intent)
+        ) {
+          this.logger.warn(
+            `Showcase snapshot propagation grace ${userId} cycle=${cycle.id}: signed exact order ${cycle.tradeId} is not visible yet — retaining managed order ${orderId}`,
+          );
+          return;
+        }
         if (abandon.reason === 'MISSED_SHOWCASE_FILL') {
           if (
             missedShowcaseFillWithinSettlementGrace(
