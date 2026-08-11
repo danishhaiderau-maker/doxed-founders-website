@@ -51,6 +51,8 @@ const dashboardProxyPath = new URL('./fly-dashboard-proxy.py', import.meta.url);
 const desktopMirrorPath = new URL('./start-fly-desktop-mirror.ps1', import.meta.url);
 const flySyncLoopPath = new URL('./sync-fly-bot-data-loop.ps1', import.meta.url);
 const flySyncPath = new URL('./sync-fly-bot-data.ps1', import.meta.url);
+const flyDataPathsPath = new URL('./fly-data-paths.ps1', import.meta.url);
+const flyMirrorMigrationPath = new URL('./migrate-fly-mirror-to-local.ps1', import.meta.url);
 const analyzerAutoRestartPath = new URL('./analyzer-auto-restart.ps1', import.meta.url);
 const botSourcePath = new URL(
   '../services/btc-conservative-agent/bot.py',
@@ -336,6 +338,25 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
     recovery,
     /Desktop command bridge did not become reachable on :\$bridgePort/,
   );
+});
+
+test('raw Fly evidence defaults to machine-local storage and migration is copy-only', async () => {
+  const paths = await readFile(flyDataPathsPath, 'utf8');
+  const syncLoop = await readFile(flySyncLoopPath, 'utf8');
+  const sync = await readFile(flySyncPath, 'utf8');
+  const migration = await readFile(flyMirrorMigrationPath, 'utf8');
+  const homeMode = await readFile(homeModePath, 'utf8');
+
+  assert.match(paths, /DOXXED_FLY_MIRROR_DIR/);
+  assert.match(paths, /LOCALAPPDATA/);
+  assert.match(paths, /DoxxedCrypto\\fly-data-mirror/);
+  assert.match(syncLoop, /Get-DoxxedFlyMirrorDir/);
+  assert.match(syncLoop, /syncArgs\.TargetDir = \$mirrorDir/);
+  assert.match(sync, /Get-DoxxedFlyMirrorDir/);
+  assert.match(homeMode, /DataDir = Get-DoxxedFlyMirrorDir/);
+  assert.match(migration, /Get-FileHash[\s\S]*SHA256/);
+  assert.match(migration, /SourceRetained = \$true/);
+  assert.doesNotMatch(migration, /Remove-Item|Move-Item/);
 });
 
 test('analyzer singleton self-heals the data-only Fly mirror worker', async () => {

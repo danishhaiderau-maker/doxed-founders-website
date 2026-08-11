@@ -5,6 +5,7 @@
   "desktopBotEnabled": false,
   "desktopDashboardProxyPort": 7002,
   "desktopAnalyzerPort": 9001,
-  "desktopDataMirror": "services/btc-conservative-agent/fly-data-mirror",
+  "desktopDataMirrorDefault": "%LOCALAPPDATA%/DoxxedCrypto/fly-data-mirror",
+  "desktopDataMirrorEnv": "DOXXED_FLY_MIRROR_DIR",
   "reason": "One AI call and one strategy owner: Fly.io. Desktop is mirror/analyzer only."
 }

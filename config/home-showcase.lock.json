@@ -9,7 +9,8 @@
   "botRole": "fly-dashboard-proxy",
   "analyzerPort": 9001,
   "analyzerRole": "fly-data-mirror-analysis",
-  "dataDirRelative": "services/btc-conservative-agent/fly-data-mirror",
+  "dataDirDefault": "%LOCALAPPDATA%/DoxxedCrypto/fly-data-mirror",
+  "dataDirEnv": "DOXXED_FLY_MIRROR_DIR",
   "disableLocalStrategy": true,
   "disableRelayWebhook": true,
   "disableTunnel": true

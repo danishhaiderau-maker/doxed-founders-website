@@ -206,3 +206,22 @@ export function applyDashboardPatch(
   }
   return next;
 }
+
+/**
+ * Apply background telemetry while preserving the authoritative relay
+ * lifecycle invariant. A PAUSED instance must never regain LIVE arm metadata
+ * from an in-flight writer holding a pre-pause dashboard JSON snapshot.
+ */
+export function applyInstanceDashboardPatch(
+  status: string,
+  dash: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const next = applyDashboardPatch(dash, patch);
+  if (status === 'PAUSED') {
+    next.relayExecutionMode = 'PAUSED';
+    next.relayArmedAt = null;
+    next.realTradingConfirmedAt = null;
+  }
+  return next;
+}

@@ -307,6 +307,7 @@ Contents:
   continuous_trades.csv       — every CONTINUOUS fill with day-of-week
   sessions/                   — full report tree per archived session ({len(timeline)} folders)
   live/                       — latest reports + summaries from live bot folder
+  evidence/daily/             — durable daily Markdown summaries, manifests, and fingerprints
   csv/                        — raw pipeline CSVs (trades, decisions, blocked)
 
 Open continuous_session_timeline.json to see how CONTINUOUS PnL evolved across sessions.
@@ -339,6 +340,7 @@ Open continuous_weekend_breakdown.json for weekend vs weekday split.
         live_names = (
             "executive_summary.txt", "research_findings.txt", "research_highlights.txt",
             "research_coverage.txt", "research_compact_summary.json", "report_manifest.json",
+            "analysis_summary.md", "research_retention_status.json",
             "analysis_dashboard.html", "analyzer_run.log", "benchmark_vs_lanes_report.json",
         )
         for name in live_names:
@@ -351,6 +353,16 @@ Open continuous_weekend_breakdown.json for weekend vs weekday split.
                     file_count += 1
         file_count += _add_tree(zf, live_root / REPORTS_DIR, "live/reports", seen)
         file_count += _add_tree(zf, live_root / REPORTS_DIR / "all_data", "live/reports/all_data", seen)
+        # Retention writes one immutable, readable evidence receipt per UTC day
+        # before any closed raw rotation is eligible for pruning. Include the
+        # complete tree so a transferred bundle still proves what was analyzed
+        # after the bulky downloaded rotations have been retired.
+        file_count += _add_tree(
+            zf,
+            live_root / "research_retention" / "daily",
+            "evidence/daily",
+            seen,
+        )
 
         for name in CSV_CANDIDATES:
             for root in (data_root, live_root, history_root):

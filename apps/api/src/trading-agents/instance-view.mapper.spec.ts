@@ -1,6 +1,40 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readInstanceScope, readRelayFidelitySessionStart } from './instance-view.mapper';
+import {
+  applyInstanceDashboardPatch,
+  readInstanceScope,
+  readRelayFidelitySessionStart,
+} from './instance-view.mapper';
+
+test('paused instance status dominates stale live relay arm telemetry', () => {
+  const next = applyInstanceDashboardPatch(
+    'PAUSED',
+    {
+      relayExecutionMode: 'LIVE',
+      relayArmedAt: '2026-08-11T00:07:21.756Z',
+      realTradingConfirmedAt: '2026-08-11T00:07:21.756Z',
+      mirrorDiff: { ticks: 1 },
+    },
+    { copyRelayReconcile: { openLots: 0 } },
+  );
+  assert.equal(next.relayExecutionMode, 'PAUSED');
+  assert.equal(next.relayArmedAt, null);
+  assert.equal(next.realTradingConfirmedAt, null);
+  assert.deepEqual(next.mirrorDiff, { ticks: 1 });
+  assert.deepEqual(next.copyRelayReconcile, { openLots: 0 });
+});
+
+test('active instance telemetry preserves its current live arm epoch', () => {
+  const armedAt = '2026-08-11T00:07:21.756Z';
+  const next = applyInstanceDashboardPatch(
+    'ACTIVE',
+    { relayExecutionMode: 'LIVE', relayArmedAt: armedAt, realTradingConfirmedAt: armedAt },
+    { lastTickAt: '2026-08-11T02:43:27.278Z' },
+  );
+  assert.equal(next.relayExecutionMode, 'LIVE');
+  assert.equal(next.relayArmedAt, armedAt);
+  assert.equal(next.realTradingConfirmedAt, armedAt);
+});
 
 test('live fidelity has no epoch before explicit NEXT_FRESH_ONLY arm', () => {
   const start = readRelayFidelitySessionStart({

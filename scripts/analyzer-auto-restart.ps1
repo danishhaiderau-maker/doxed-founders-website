@@ -47,9 +47,10 @@ $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 $agentDir  = Join-Path $repoRoot "services\btc-conservative-agent"
+. (Join-Path $scriptDir "fly-data-paths.ps1")
 $flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
 $analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
-  Join-Path $agentDir "fly-data-mirror"
+  Get-DoxxedFlyMirrorDir
 } else {
   $agentDir
 }

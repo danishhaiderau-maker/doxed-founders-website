@@ -68,6 +68,7 @@ import { TradeCycleAuditService } from './trade-cycle-audit.service';
 import { BitfinexSimTradingClient } from '../exchanges/bitfinex-sim-trading.client';
 import {
   applyDashboardPatch,
+  applyInstanceDashboardPatch,
   participantTouchesSession,
 } from './instance-view.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
@@ -4438,7 +4439,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instance.id },
-      select: { dashboardState: true },
+      select: { dashboardState: true, status: true },
     });
     if (!fresh) return;
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
@@ -4563,7 +4564,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
-        dashboardState: applyDashboardPatch(dash, {
+        dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
           mirrorDiff: {
             at: new Date(now).toISOString(),
             botStateSource: botState.snapshot_source ?? 'live_bot',
@@ -5010,7 +5011,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ) {
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instance.id },
-      select: { dashboardState: true },
+      select: { dashboardState: true, status: true },
     });
     if (!fresh) return;
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
@@ -5032,7 +5033,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
-        dashboardState: applyDashboardPatch(dash, {
+        dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
           copyRelayCapacity: capacity,
           // Fix F — tick liveness watchdog. persistCapacityState already runs
           // once per processInstance (both exit-only and normal paths), so this
@@ -5134,14 +5135,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   ) {
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instanceId },
-      select: { dashboardState: true },
+      select: { dashboardState: true, status: true },
     });
     if (!fresh) return;
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
     await this.prisma.tradingAgentInstance.update({
       where: { id: instanceId },
       data: {
-        dashboardState: applyDashboardPatch(dash, {
+        dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
           exchangeOrderAudit,
         }) as unknown as Prisma.InputJsonValue,
       },
@@ -5250,7 +5251,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
     const fresh = await this.prisma.tradingAgentInstance.findUnique({
       where: { id: instance.id },
-      select: { dashboardState: true },
+      select: { dashboardState: true, status: true },
     });
     if (!fresh) return false;
     const dash = (fresh.dashboardState ?? {}) as Record<string, unknown>;
@@ -5310,7 +5311,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
-        dashboardState: applyDashboardPatch(dash, {
+        dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
           copyRelayReconcile: reconcile,
           pendingFillReconcileGrace,
           ...(simActiveNow

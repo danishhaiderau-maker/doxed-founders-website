@@ -15,6 +15,8 @@ if (-not $RepoRoot) {
 function Get-HomeStackMode {
   param([string]$Root = $RepoRoot)
 
+  . (Join-Path $Root "scripts\fly-data-paths.ps1")
+
   $flyLockPath = Join-Path $Root "config\fly-canonical.lock.json"
   $mirrorLockPath = Join-Path $Root "config\home-showcase.lock.json"
   if (-not (Test-Path $flyLockPath) -or -not (Test-Path $mirrorLockPath)) {
@@ -40,7 +42,7 @@ function Get-HomeStackMode {
     RelayEnabled = $false
     LocalStrategyEnabled = $false
     SourceUrl = [string]$fly.sourceUrl
-    DataDir = Join-Path $Root ($mirror.dataDirRelative -replace '/', '\')
+    DataDir = Get-DoxxedFlyMirrorDir
     Label = "Fly dashboard proxy :$($mirror.botPort) + analyzer mirror :$($mirror.analyzerPort)"
   }
 }

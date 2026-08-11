@@ -7,6 +7,7 @@ $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
+. (Join-Path $scriptDir "fly-data-paths.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
@@ -23,7 +24,7 @@ $guardFile = Join-Path $machineLockDir ".fly-data-sync-loop.guard"
 $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 $freshSignalFile = Join-Path $repoRoot ".fly-data-sync-loop.last-fresh.json"
-$mirrorDir = Join-Path $agentDir "fly-data-mirror"
+$mirrorDir = Get-DoxxedFlyMirrorDir
 $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
 $growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
 
@@ -259,6 +260,7 @@ try {
       if (Test-Path -LiteralPath $analyzerReport) {
         $syncArgs.PublishAnalyzerReport = $analyzerReport
       }
+      $syncArgs.TargetDir = $mirrorDir
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
       $didSync = $true
       $lastSyncedTotalBytes = $currentTotalBytes
