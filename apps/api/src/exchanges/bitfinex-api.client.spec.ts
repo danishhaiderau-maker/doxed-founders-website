@@ -2,9 +2,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   BITFINEX_BTC_PERP_SYMBOL,
+  bitfinexAuthPost,
   parseActiveOrdersPayload,
   parseOpenPositionPayload,
 } from './bitfinex-api.client';
+
+const testCreds = {
+  apiKey: 'nonce-lane-deadline-test',
+  apiSecret: 'not-a-real-secret',
+  testnet: false,
+};
 
 function activeOrderRow(symbol = BITFINEX_BTC_PERP_SYMBOL): unknown[] {
   const row = Array(32).fill(null);
@@ -96,4 +103,31 @@ test('position proof returns a valid exact eight-decimal BTC position', () => {
       direction: 'SHORT',
     },
   );
+});
+
+test('authenticated nonce lane bounds queue wait and never sends expired queued work later', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    return new Response('[]', { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const first = bitfinexAuthPost(testCreds, 'v2/auth/r/positions', {}, 100);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const queued = bitfinexAuthPost(testCreds, 'v2/auth/r/orders', {}, 20);
+
+    await assert.rejects(
+      queued,
+      /authenticated request total deadline exceeded after 20ms/,
+    );
+    assert.equal(calls, 1, 'the expired queued request must not reach Bitfinex');
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(calls, 1, 'the expired queued request must not execute after the lane drains');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

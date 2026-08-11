@@ -675,6 +675,7 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     schema: 'showcase_relay_audit_v1',
   };
   const trace: string[] = [];
+  let preWakeAt: string | undefined;
   const prisma = {
     tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
     signalCycle: {
@@ -704,11 +705,13 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
     },
   };
   const execution = {
-    requestExecutorPreWake: () => {
+    requestExecutorPreWake: (_event: string, _tradeId: string, receivedAt?: string) => {
       trace.push('prewake');
+      preWakeAt = receivedAt;
     },
-    requestExecutorWake: async () => {
+    requestExecutorWake: async (_event: string, _tradeId: string, receivedAt?: string) => {
       trace.push('execution');
+      assert.equal(receivedAt, preWakeAt);
       const entry = storedEnvelope.entry as {
         exact_limit_price?: number;
         mode?: string;

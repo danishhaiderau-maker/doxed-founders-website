@@ -75,6 +75,7 @@ test('authenticated direct wake queues instead of returning busy', async () => {
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
     service.fastWakeRunning = true;
+    service.activeDirectWake = null;
     service.pendingDirectWakes = [];
     const wake = {
       trigger: 'ORDER_PLACED',
@@ -101,6 +102,64 @@ test('authenticated direct wake queues instead of returning busy', async () => {
     if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
     else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
   }
+});
+
+test('post-commit ORDER_PLACED does not queue behind its running pre-wake', async () => {
+  const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
+  process.env.RELAY_EXECUTOR_WORKER = 'true';
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.fastWakeRunning = true;
+    service.pendingDirectWakes = [];
+    service.activeDirectWake = {
+      trigger: 'ORDER_PLACED', tradeId: 'cont-same', at: '2026-08-11T04:35:00.000Z',
+    };
+    const postCommit = {
+      trigger: 'ORDER_PLACED', tradeId: 'cont-same', at: '2026-08-11T04:35:00.250Z',
+    };
+
+    assert.equal(await service.acceptDirectExecutorWake(postCommit), true);
+    assert.deepEqual(service.pendingDirectWakes, []);
+  } finally {
+    if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
+    if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
+  }
+});
+
+test('queued LIMIT_UPDATED burst coalesces to newest exact revision', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeDirectWake = {
+    trigger: 'ORDER_PLACED', tradeId: 'cont-burst', at: '2026-08-11T04:35:00.000Z',
+  };
+  service.pendingDirectWakes = [];
+  const oldWake = {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-burst', at: '2026-08-11T04:35:01.000Z',
+  };
+  const newWake = {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-burst', at: '2026-08-11T04:35:01.500Z',
+  };
+
+  service.enqueueDirectWake(oldWake);
+  service.enqueueDirectWake(newWake);
+  assert.deepEqual(service.pendingDirectWakes, [newWake]);
+});
+
+test('new LIMIT_UPDATED queues behind an in-flight older revision', () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeDirectWake = {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-active-chase', at: '2026-08-11T04:35:01.000Z',
+  };
+  service.pendingDirectWakes = [];
+  const newest = {
+    trigger: 'LIMIT_UPDATED', tradeId: 'cont-active-chase', at: '2026-08-11T04:35:02.000Z',
+  };
+
+  service.enqueueDirectWake(newest);
+  assert.deepEqual(service.pendingDirectWakes, [newest]);
 });
 
 test('signed LIMIT_UPDATED fast wake reprices only its exact owned pending order', async () => {

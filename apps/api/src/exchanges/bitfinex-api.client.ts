@@ -201,11 +201,38 @@ export async function bitfinexAuthPost<T = unknown>(
   timeoutMs = 12_000,
 ): Promise<T> {
   const lane = nonceLaneFor(creds.apiKey);
+  const enqueuedAtMs = Date.now();
+  const deadlineAtMs = enqueuedAtMs + Math.max(1, timeoutMs);
+  let expiredBeforeStart = false;
   const run = async (): Promise<T> => {
+    // The authenticated API is serialized per key because Bitfinex requires a
+    // strictly increasing nonce.  A network timeout only bounded the request
+    // *after* it reached the head of this lane; during exchange degradation a
+    // safety read could otherwise wait behind an arbitrary queue for longer
+    // than the executor watchdog.  Refuse work whose total queue + HTTP budget
+    // has elapsed.  In particular, a timed-out queued mutation is never sent
+    // later as an abandoned side effect.
+    if (expiredBeforeStart || Date.now() >= deadlineAtMs) {
+      throw new Error(
+        `Bitfinex ${apiPath}: authenticated request queue deadline exceeded after ${timeoutMs}ms`,
+      );
+    }
     for (let attempt = 0; attempt < 4; attempt++) {
+      const remainingMs = deadlineAtMs - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          `Bitfinex ${apiPath}: authenticated request deadline exceeded after ${timeoutMs}ms`,
+        );
+      }
       const nonce = allocMonotonicNonce(lane);
       try {
-        return await bitfinexAuthPostOnce<T>(creds, apiPath, body, timeoutMs, nonce);
+        return await bitfinexAuthPostOnce<T>(
+          creds,
+          apiPath,
+          body,
+          Math.max(1, remainingMs),
+          nonce,
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (attempt < 3 && /nonce:\s*small/i.test(msg)) {
@@ -223,7 +250,23 @@ export async function bitfinexAuthPost<T = unknown>(
     () => undefined,
     () => undefined,
   );
-  return result;
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    expiryTimer = setTimeout(() => {
+      expiredBeforeStart = true;
+      reject(
+        new Error(
+          `Bitfinex ${apiPath}: authenticated request total deadline exceeded after ${timeoutMs}ms`,
+        ),
+      );
+    }, Math.max(1, deadlineAtMs - Date.now()));
+    expiryTimer.unref?.();
+  });
+  try {
+    return await Promise.race([result, deadline]);
+  } finally {
+    if (expiryTimer) clearTimeout(expiryTimer);
+  }
 }
 
 export async function bitfinexPublicGet<T = unknown>(apiPath: string): Promise<T> {

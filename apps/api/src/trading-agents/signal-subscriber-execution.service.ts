@@ -2155,6 +2155,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private running = false;
   private wakeQueued = false;
   private fastWakeRunning = false;
+  /** Wake currently owning the serial money lane. Kept separately from the
+   * boolean so the post-commit copy of an already-running pre-wake can be
+   * identified and discarded instead of delaying the next LIMIT_UPDATED. */
+  private activeDirectWake: RelayExecutorWakeRequest | null = null;
   /** Authenticated direct wakes that arrived while a read-only durable-wake
    * poll or another direct wake was finishing. Never drop the latency hint on
    * a transient 409/busy window. */
@@ -2557,6 +2561,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   async requestExecutorWake(
     trigger: 'POSITION_CLOSED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
     tradeId?: string | null,
+    receivedAt?: string,
   ): Promise<void> {
     if (executionEnabled()) {
       await this.wakeNow(trigger);
@@ -2564,7 +2569,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     }
     const payload: RelayExecutorWakeRequest = {
       trigger,
-      at: new Date().toISOString(),
+      // Preserve the ingress identity used by the pre-wake. The direct and
+      // durable copies must have the same exact key so a successfully finished
+      // pre-wake suppresses its dashboard fallback instead of executing the
+      // same expensive exchange preflight twice.
+      at: receivedAt && Number.isFinite(Date.parse(receivedAt))
+        ? receivedAt
+        : new Date().toISOString(),
       tradeId: tradeId ?? null,
     };
     // The signed lifecycle event is already durable before this method is
@@ -2653,9 +2664,36 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private enqueueDirectWake(wake: RelayExecutorWakeRequest): void {
+    const logicalKey = this.executorWakeLogicalKey(wake);
+    // ORDER_PLACED is intentionally sent twice: a latency-only pre-wake and a
+    // durable post-commit wake. If the pre-wake is already executing, queuing
+    // the latter repeats all Bitfinex/Neon preflight work and creates head-of-
+    // line blocking for the first chase revision. The durable dashboard copy
+    // remains the crash fallback, so dropping only this in-process duplicate
+    // cannot lose the entry.
+    if (
+      wake.trigger === 'ORDER_PLACED'
+      &&
+      this.activeDirectWake
+      && this.executorWakeLogicalKey(this.activeDirectWake) === logicalKey
+    ) return;
     const key = this.executorWakeKey(wake);
     if (this.pendingDirectWakes.some((candidate) => this.executorWakeKey(candidate) === key)) {
       return;
+    }
+    // A burst of signed chase revisions needs only its newest exact limit.
+    // Replacing an older queued LIMIT_UPDATED is safe because execution reads
+    // the latest HMAC-verified envelope from Neon, and prevents obsolete
+    // cancel/replace work from delaying the current source price.
+    if (wake.trigger === 'LIMIT_UPDATED') {
+      const existing = this.pendingDirectWakes.findIndex((candidate) =>
+        candidate.trigger === 'LIMIT_UPDATED'
+        && this.executorWakeLogicalKey(candidate) === logicalKey,
+      );
+      if (existing >= 0) {
+        this.pendingDirectWakes[existing] = wake;
+        return;
+      }
     }
     this.pendingDirectWakes.push(wake);
     if (this.pendingDirectWakes.length > 20) this.pendingDirectWakes.shift();
@@ -2669,6 +2707,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
 
   private startDirectExecutorWake(wake: RelayExecutorWakeRequest): void {
     this.fastWakeRunning = true;
+    this.activeDirectWake = wake;
     // Acknowledge the authenticated private wake immediately. The previous
     // implementation held the HTTP response open until Bitfinex completed,
     // so the API's 1.5s timeout reported a false failure while the order was
@@ -2690,9 +2729,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         if (this.running) this.wakeQueued = true;
       })
       .finally(() => {
+        this.activeDirectWake = null;
         this.fastWakeRunning = false;
         this.drainQueuedDirectWake();
       });
+  }
+
+  private executorWakeLogicalKey(wake: RelayExecutorWakeRequest): string {
+    return `${wake.trigger}:${wake.tradeId ?? ''}`;
   }
 
   private executorWakeKey(wake: RelayExecutorWakeRequest): string {

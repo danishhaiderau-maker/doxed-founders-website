@@ -438,13 +438,17 @@ export class ShowcaseRelayEventsService {
     return true;
   }
 
-  private queueExecutionWake(event: ShowcaseRelayEventType, tradeId?: string | null): void {
+  private queueExecutionWake(
+    event: ShowcaseRelayEventType,
+    tradeId?: string | null,
+    receivedAt?: string,
+  ): void {
     // Start the private-network dispatch in the current event-loop turn. The
     // method remains non-blocking (the promise is intentionally not awaited),
     // but avoiding setImmediate prevents an already-busy API loop from adding
     // an avoidable scheduling turn to the money path. This mattered on a live
     // close that reached Bitfinex in 3069 ms: only 69 ms outside the contract.
-    void this.execution.requestExecutorWake(event, tradeId).catch((err) => {
+    void this.execution.requestExecutorWake(event, tradeId, receivedAt).catch((err) => {
       this.logger.error(
         `Showcase execution wake ${event} failed: ${err instanceof Error ? err.message : err}`,
       );
@@ -620,7 +624,11 @@ export class ShowcaseRelayEventsService {
         // private executor wake while audit-row idempotency is persisted so
         // bookkeeping never sits in front of the exchange path.
         if (event !== 'APPROVE_PENDING') {
-          this.queueExecutionWake(event, body.trade_id ?? null);
+          this.queueExecutionWake(
+            event,
+            body.trade_id ?? null,
+            persistBody.platform_received_at ?? undefined,
+          );
           executionWakeQueued = true;
         }
       });
@@ -638,7 +646,11 @@ export class ShowcaseRelayEventsService {
     // Return the webhook response without waiting for exchange reconciliation.
     // The durable cycle plus the normal 2s runner remain the crash backstop.
     if (event !== 'APPROVE_PENDING' && !executionWakeQueued) {
-      this.queueExecutionWake(event, body.trade_id ?? null);
+      this.queueExecutionWake(
+        event,
+        body.trade_id ?? null,
+        persistBody.platform_received_at ?? undefined,
+      );
     }
     if (signedLifecycleEvent) {
       this.queueCanonicalReconcile(event);
