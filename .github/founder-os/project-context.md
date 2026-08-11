@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Verify deployed Fly revision by bot-source ancestry
 
 ## Last Activity
 
