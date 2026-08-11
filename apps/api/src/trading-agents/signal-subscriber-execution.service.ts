@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
 import {
@@ -85,6 +85,7 @@ import {
   type RelayFidelitySnapshot,
 } from './relay-fidelity.mapper';
 import { NotificationsService } from '../notifications/notifications.service';
+import { BitfinexAuthTradeStream, type BitfinexWsTrade } from '../exchanges/bitfinex-auth-trade-stream';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -2333,11 +2334,16 @@ type VirtualLotSummary = {
 type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
 
 @Injectable()
-export class SignalSubscriberExecutionService implements OnModuleInit {
+export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
   private readonly bitfinex = new BitfinexTradingClient();
   private activeTrading: ExecutionTradingClient;
   private readonly positionRuntime = new Map<string, PositionRuntime>();
+  private readonly bitfinexTradeStreams = new Map<string, BitfinexAuthTradeStream>();
+  private streamSyncRunning = false;
+  private streamSyncQueued = false;
+  private readonly wsTradeInFlight = new Map<string, Promise<boolean>>();
+  private readonly wsTradeCompletedAt = new Map<string, number>();
   private readonly exitingLots = new Set<string>();
   private running = false;
   private wakeQueued = false;
@@ -2509,7 +2515,122 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // entry / exitingLots-guarded close path. The normal tick remains the crash
     // recovery and reconciliation backstop.
     setInterval(() => void this.pollPersistedFastWake(), 250).unref();
+    // Authenticated account-info trades are the latency path for exchange fills.
+    // They consume no REST nonce/read budget; the ordinary reconciliation tick
+    // remains the fail-closed reconnect/outage backstop.
+    setInterval(() => void this.syncBitfinexTradeStreams(), 5_000).unref();
+    void this.syncBitfinexTradeStreams();
     setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
+  }
+
+  onModuleDestroy() {
+    for (const stream of this.bitfinexTradeStreams.values()) stream.stop();
+    this.bitfinexTradeStreams.clear();
+  }
+
+  private async syncBitfinexTradeStreams(): Promise<void> {
+    if (!executionEnabled()) return;
+    if (this.streamSyncRunning) { this.streamSyncQueued = true; return; }
+    this.streamSyncRunning = true;
+    try {
+      do {
+        this.streamSyncQueued = false;
+        await this.syncBitfinexTradeStreamsOwned();
+      } while (this.streamSyncQueued);
+    } finally { this.streamSyncRunning = false; }
+  }
+
+  private async syncBitfinexTradeStreamsOwned(): Promise<void> {
+    const wanted = new Set<string>();
+    for (const instance of this.relayInstanceCache.values()) {
+      if (isCopyRelaySimActive(instance.dashboardState) || instance.exchangeProvider !== 'bitfinex') continue;
+      const observed = await this.exchanges.getUserCredentials(instance.userId, 'bitfinex');
+      if (!observed) continue;
+      // Credential lookup may overlap a rotation. Re-read immediately before
+      // installation and use only the newest fingerprint.
+      const creds = await this.exchanges.getUserCredentials(instance.userId, 'bitfinex');
+      if (!creds) continue;
+      const key = this.bitfinexStreamKey(instance.userId, creds);
+      wanted.add(key);
+      this.ensureBitfinexTradeStream(instance.userId, creds);
+    }
+    for (const [key, stream] of this.bitfinexTradeStreams) {
+      if (!wanted.has(key)) { stream.stop(); this.bitfinexTradeStreams.delete(key); }
+    }
+  }
+
+  private ensureBitfinexTradeStream(userId: string, creds: ExchangeCredentials): BitfinexAuthTradeStream {
+    const key = this.bitfinexStreamKey(userId, creds);
+    let stream = this.bitfinexTradeStreams.get(key);
+    if (!stream) {
+      stream = new BitfinexAuthTradeStream(creds, (trade) => this.handleBitfinexWsTrade(userId, creds, trade));
+      this.bitfinexTradeStreams.set(key, stream);
+      stream.start();
+    }
+    return stream;
+  }
+
+  private bitfinexStreamKey(userId: string, creds: ExchangeCredentials): string {
+    // Internal only; hashing both fields makes secret-only credential rotation
+    // replace the old socket without ever logging either credential.
+    return `${userId}:${createHash('sha256').update(`${creds.apiKey}\0${creds.apiSecret}`).digest('hex')}`;
+  }
+
+  private async handleBitfinexWsTrade(userId: string, creds: ExchangeCredentials, trade: BitfinexWsTrade): Promise<boolean> {
+    this.pruneWsTradeDedupe(Date.now());
+    const dedupeKey = `${userId}:${createHash('sha256').update(creds.apiKey).digest('hex')}:${trade.tradeId}`;
+    const completedAt = this.wsTradeCompletedAt.get(dedupeKey);
+    if (completedAt && Date.now() - completedAt < 60 * 60_000) return true;
+    const existing = this.wsTradeInFlight.get(dedupeKey);
+    if (existing) return existing;
+    const work = this.handleBitfinexWsTradeOwned(userId, creds, trade);
+    this.wsTradeInFlight.set(dedupeKey, work);
+    try {
+      const handled = await work;
+      if (handled) this.wsTradeCompletedAt.set(dedupeKey, Date.now());
+      return handled;
+    } finally { this.wsTradeInFlight.delete(dedupeKey); }
+  }
+
+  private pruneWsTradeDedupe(nowMs: number): void {
+    const cutoff = nowMs - 60 * 60_000;
+    for (const [key, at] of this.wsTradeCompletedAt) {
+      if (at < cutoff && !this.wsTradeInFlight.has(key)) this.wsTradeCompletedAt.delete(key);
+    }
+    if (this.wsTradeCompletedAt.size > 20_000) {
+      for (const key of this.wsTradeCompletedAt.keys()) {
+        if (!this.wsTradeInFlight.has(key)) this.wsTradeCompletedAt.delete(key);
+        if (this.wsTradeCompletedAt.size <= 20_000) break;
+      }
+    }
+  }
+
+  private async handleBitfinexWsTradeOwned(userId: string, creds: ExchangeCredentials, trade: BitfinexWsTrade): Promise<boolean> {
+    const candidates = await this.prisma.signalCycleParticipant.findMany({
+      where: { userId, status: SignalCycleStatus.PENDING_ENTRY },
+      select: { id: true },
+    });
+    for (const candidate of candidates) {
+      const release = await this.acquireParticipantMoneyLane(candidate.id);
+      try {
+        const [participant, meta] = await Promise.all([
+          this.prisma.signalCycleParticipant.findUnique({ where: { id: candidate.id }, include: { cycle: true } }),
+          this.loadExecutionMeta(candidate.id),
+        ]);
+        if (!participant || participant.status !== SignalCycleStatus.PENDING_ENTRY || Number(meta.bitfinexOrderId) !== trade.orderId) continue;
+        const expectedSign = meta.direction === 'LONG' ? 1 : -1;
+        if (Math.sign(trade.execAmount) !== expectedSign) return false;
+        const intendedQty = meta.qty ?? trade.cumulativeQty;
+        const orderResting = btcToSats(trade.cumulativeQty) < btcToSats(intendedQty);
+        return await this.recordCancelRaceFill(
+          participant.cycle.agentId, userId, participant.cycle, participant.id, meta, creds,
+          participant.cycle.intentEnvelope as SignalIntentEnvelope,
+          { filledQty: trade.cumulativeQty, fillPrice: trade.cumulativeAveragePrice, source: 'ORDER_PARTIAL', orderResting },
+          'BITFINEX_AUTH_WS_TRADE', new Date(trade.mts).toISOString(),
+        );
+      } finally { release(); }
+    }
+    return false;
   }
 
   /** Keep the private/public Railway transport to the isolated executor hot.
@@ -4131,6 +4252,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
         data: { lastError: 'Exchange credentials missing — re-hire with API keys' },
       });
       return;
+    }
+
+    // Never place new live money until the private trade stream is authenticated.
+    // Existing OPEN risk continues through the ordinary reconciliation path;
+    // this gate is reached before any new-entry submission on a fresh hire.
+    if (!simActive && instance.exchangeProvider === 'bitfinex') {
+      const fillStream = this.ensureBitfinexTradeStream(instance.userId, creds);
+      if (!(await fillStream.waitUntilReady())) {
+        this.logger.warn(
+          `Bitfinex private trade stream not ready for user=${instance.userId}; this tick is exit-only and entry will retry`,
+        );
+        exitOnly = true;
+      }
     }
 
     this.currentStage = 'LOAD_MARGIN_CAP';

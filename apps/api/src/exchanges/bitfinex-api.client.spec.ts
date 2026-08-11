@@ -1,12 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import './bitfinex-auth-trade-stream.spec';
 import {
   BITFINEX_BTC_PERP_SYMBOL,
+  allocateBitfinexAuthNonce,
   bitfinexAuthPost,
   parseActiveOrdersPayload,
   parseOpenPositionPayload,
   parseOrderHistoryEvidence,
 } from './bitfinex-api.client';
+
+test('REST and WS nonce allocations share one strictly monotonic api-key sequence', () => {
+  const values = Array.from({ length: 20 }, () => BigInt(allocateBitfinexAuthNonce('shared-nonce-key')));
+  for (let index = 1; index < values.length; index++) assert.ok(values[index] > values[index - 1]);
+});
 
 const testCreds = {
   apiKey: 'nonce-lane-deadline-test',

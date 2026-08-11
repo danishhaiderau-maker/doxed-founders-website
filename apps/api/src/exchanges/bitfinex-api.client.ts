@@ -139,6 +139,11 @@ function allocMonotonicNonce(lane: NonceLane): string {
   return next.toString();
 }
 
+/** Shared by REST and authenticated WebSocket sessions for one API key. */
+export function allocateBitfinexAuthNonce(apiKey: string): string {
+  return allocMonotonicNonce(nonceLaneFor(apiKey));
+}
+
 async function bitfinexAuthPostOnce<T>(
   creds: ExchangeCredentials,
   apiPath: string,
@@ -224,7 +229,7 @@ export async function bitfinexAuthPost<T = unknown>(
           `Bitfinex ${apiPath}: authenticated request deadline exceeded after ${timeoutMs}ms`,
         );
       }
-      const nonce = allocMonotonicNonce(lane);
+      const nonce = allocateBitfinexAuthNonce(creds.apiKey);
       try {
         return await bitfinexAuthPostOnce<T>(
           creds,

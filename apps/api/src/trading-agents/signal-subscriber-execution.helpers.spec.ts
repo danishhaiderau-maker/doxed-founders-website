@@ -16,6 +16,7 @@ import {
   BITFINEX_REDUCE_ONLY_FLAG,
   BITFINEX_SAFE_CLOSE_FLAGS,
 } from '../exchanges/bitfinex-api.client';
+import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
   SignalSubscriberExecutionService,
   canonicalPendingIntentCycles,
@@ -4025,4 +4026,155 @@ test('signed close waits for replacement lane then cancels the freshly durable o
   releaseLane();
   assert.equal(await pending,true);
   assert.equal(cancelled,9002);
+});
+
+test('authenticated Bitfinex trade event records exact owned fill without source POSITION_OPENED', async () => {
+  const previousExecution=process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker=process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED='true';
+  process.env.RELAY_EXECUTOR_WORKER='true';
+  try {
+    const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+    service.participantMoneyLane=new Map();
+    const instance={id:'i',userId:'u',agentId:'a',exchangeProvider:'bitfinex',dashboardState:{}};
+    const cycle={id:'c',agentId:'a',tradeId:'cont-exchange-fill',status:SignalCycleStatus.PENDING_ENTRY,intentEnvelope:{action:'ENTER'}};
+    const participant={id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle};
+    service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>participant}};
+    service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01,limitPrice:64000});
+    let context='';
+    let fill:any;
+    service.recordCancelRaceFill=async(...args:unknown[])=>{fill=args[7];context=String(args[8]);return true};
+    await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},{tradeId:1,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.004,execPrice:64000,receivedAtMs:1100,cumulativeQty:.004,cumulativeAveragePrice:64000});
+    assert.equal(context,'BITFINEX_AUTH_WS_TRADE');
+    assert.equal(fill.filledQty,.004);
+  } finally {
+    if(previousExecution==null)delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED=previousExecution;
+    if(previousWorker==null)delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER=previousWorker;
+  }
+});
+
+test('authenticated Bitfinex trade ignores non-owned order id', async () => {
+  const previousExecution=process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker=process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED='true';
+  process.env.RELAY_EXECUTOR_WORKER='true';
+  try {
+    const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+    service.participantMoneyLane=new Map();
+    service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle:{agentId:'a',intentEnvelope:{}}})}};
+    service.loadExecutionMeta=async()=>({bitfinexOrderId:99,direction:'SHORT'});
+    let recorded=false; service.recordCancelRaceFill=async()=>{recorded=true};
+    await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},{tradeId:1,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.004,execPrice:64000,receivedAtMs:1100,cumulativeQty:.004,cumulativeAveragePrice:64000});
+    assert.equal(recorded,false);
+  } finally {
+    if(previousExecution==null)delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED=previousExecution;
+    if(previousWorker==null)delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER=previousWorker;
+  }
+});
+
+test('full WebSocket fill is non-resting so protection cannot cancel before stop', async () => {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map();
+  const cycle={id:'c',agentId:'a',intentEnvelope:{}};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle})}};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01});
+  let resting:boolean|undefined;
+  service.recordCancelRaceFill=async(...args:unknown[])=>{resting=(args[7] as any).orderResting;return true};
+  await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},{tradeId:1,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.01,execPrice:64000,receivedAtMs:1100,cumulativeQty:.01,cumulativeAveragePrice:64000});
+  assert.equal(resting,false);
+});
+
+test('secret-only credential rotation has a distinct fingerprint and retires old stream', async () => {
+  const priorExecution=process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const priorWorker=process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED='true'; process.env.RELAY_EXECUTOR_WORKER='true';
+  try {
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  const oldCreds={apiKey:'same',apiSecret:'old'}; const newCreds={apiKey:'same',apiSecret:'new'};
+  const oldKey=service.bitfinexStreamKey('u',oldCreds); const newKey=service.bitfinexStreamKey('u',newCreds);
+  assert.notEqual(oldKey,newKey); assert.equal(oldKey.includes('old'),false); assert.equal(newKey.includes('new'),false);
+  let stopped=false;
+  service.bitfinexTradeStreams=new Map([[oldKey,{stop(){stopped=true}}]]);
+  service.relayInstanceCache=new Map([['i',{userId:'u',exchangeProvider:'bitfinex',dashboardState:{}}]]);
+  service.exchanges={getUserCredentials:async()=>newCreds};
+  service.ensureBitfinexTradeStream=()=>({start(){},stop(){}});
+  await service.syncBitfinexTradeStreams();
+  assert.equal(stopped,true); assert.equal(service.bitfinexTradeStreams.has(oldKey),false);
+  } finally {
+    if(priorExecution==null)delete process.env.SUBSCRIBER_EXECUTION_ENABLED;else process.env.SUBSCRIBER_EXECUTION_ENABLED=priorExecution;
+    if(priorWorker==null)delete process.env.RELAY_EXECUTOR_WORKER;else process.env.RELAY_EXECUTOR_WORKER=priorWorker;
+  }
+});
+
+test('actual te socket event reaches exact participant fill funnel immediately', async () => {
+  class Socket {
+    readyState=1; listeners=new Map<string,((event:any)=>void)[]>();
+    addEventListener(type:string,fn:(event:any)=>void){this.listeners.set(type,[...(this.listeners.get(type)??[]),fn])}
+    send(_data:string){} close(){} emit(type:string,event:any){for(const fn of this.listeners.get(type)??[])fn(event)}
+  }
+  const socket=new Socket();
+  const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map(); service.cancelRaceFillInFlight=new Set(); service.positionRuntime=new Map(); service.stopManagerCircuitOpen=new Map();
+  const cycle={id:'c',agentId:'a',tradeId:'cont-ws-real',status:SignalCycleStatus.PENDING_ENTRY,intentEnvelope:{risk:{stop_loss_margin_pct:10}}};
+  service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle})},signalCycleEvent:{count:async()=>0},signalCycle:{update:async()=>({})}};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01,limitPrice:64000});
+  const calls:string[]=[]; let filledResolve!:()=>void; const filledDone=new Promise<void>(resolve=>{filledResolve=resolve});
+  service.activeTrading={submitStopOrder:async()=>{calls.push('stop-submit');return 7001},getMarkPrice:async()=>64000};
+  service.cancelManagedOrderGone=async()=>{calls.push('entry-cancel');return{gone:true,attempts:1}};
+  service.resolveExchangeTradesFillEvidence=async()=>null; service.healStuckPendingFill=async()=>{}; service.executeShowcaseMirrorClose=async()=>true;
+  service.cycles={recordHireExecutionEvent:async(_u:string,_a:string,_c:string,type:string)=>{calls.push(type);if(type==='FILLED')filledResolve()}};
+  const stream=new BitfinexAuthTradeStream({apiKey:'socket-k',apiSecret:'socket-s'},trade=>service.handleBitfinexWsTrade('u',{apiKey:'socket-k',apiSecret:'socket-s'},trade),()=>socket as any);
+  stream.start(); socket.emit('open',{}); socket.emit('message',{data:JSON.stringify({event:'auth',status:'OK'})});
+  socket.emit('message',{data:JSON.stringify([0,'te',[7,'tBTCF0:USTF0',1000,42,-.01,64000]])});
+  await filledDone;
+  assert.equal(calls[0],'stop-submit'); assert.equal(calls.includes('entry-cancel'),false); stream.stop();
+});
+
+test('overlapping stream sync serializes rotation and installs only newest fingerprint', async () => {
+  const priorExecution=process.env.SUBSCRIBER_EXECUTION_ENABLED, priorWorker=process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED='true';process.env.RELAY_EXECUTOR_WORKER='true';
+  try {
+    const service=new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+    service.relayInstanceCache=new Map([['i',{userId:'u',exchangeProvider:'bitfinex',dashboardState:{}}]]); service.bitfinexTradeStreams=new Map();
+    let releaseOld!:(value:any)=>void; const delayed=new Promise(resolve=>{releaseOld=resolve}); let reads=0;
+    const newest={apiKey:'k',apiSecret:'new'};
+    service.exchanges={getUserCredentials:async()=>{reads+=1;if(reads===1)return delayed;return newest}};
+    const installed:string[]=[];
+    service.ensureBitfinexTradeStream=(userId:string,creds:any)=>{const key=service.bitfinexStreamKey(userId,creds);installed.push(key);service.bitfinexTradeStreams.set(key,{stop(){}});return{}};
+    const first=service.syncBitfinexTradeStreams(); const second=service.syncBitfinexTradeStreams();
+    releaseOld({apiKey:'k',apiSecret:'old'}); await Promise.all([first,second]);
+    const newKey=service.bitfinexStreamKey('u',newest),oldKey=service.bitfinexStreamKey('u',{apiKey:'k',apiSecret:'old'});
+    assert.equal(service.bitfinexTradeStreams.has(newKey),true); assert.equal(service.bitfinexTradeStreams.has(oldKey),false);
+    assert.equal(new Set(installed).size,1);
+  } finally {
+    if(priorExecution==null)delete process.env.SUBSCRIBER_EXECUTION_ENABLED;else process.env.SUBSCRIBER_EXECUTION_ENABLED=priorExecution;
+    if(priorWorker==null)delete process.env.RELAY_EXECUTOR_WORKER;else process.env.RELAY_EXECUTOR_WORKER=priorWorker;
+  }
+});
+
+test('service dedupes concurrent user api-key trade id only after successful handling', async () => {
+  const service=new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  service.participantMoneyLane=new Map(); service.wsTradeInFlight=new Map(); service.wsTradeCompletedAt=new Map();
+  service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle:{agentId:'a',intentEnvelope:{}}})}};
+  service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01});
+  let calls=0; let release!:()=>void; const gate=new Promise<void>(resolve=>{release=resolve});
+  service.recordCancelRaceFill=async()=>{calls+=1;await gate;return true};
+  const trade={tradeId:99,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.01,execPrice:64000,receivedAtMs:1100,cumulativeQty:.01,cumulativeAveragePrice:64000};
+  const a=service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},trade); const b=service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},trade);
+  await new Promise(resolve=>setImmediate(resolve)); assert.equal(calls,1); release(); assert.deepEqual(await Promise.all([a,b]),[true,true]);
+  assert.equal(await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},trade),true); assert.equal(calls,1);
+});
+
+test('service WebSocket success dedupe cleanup is bounded and never prunes in-flight key', () => {
+  const service=new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
+  const now=10_000_000; service.wsTradeCompletedAt=new Map(); service.wsTradeInFlight=new Map();
+  service.wsTradeCompletedAt.set('expired',now-3_700_000); service.wsTradeCompletedAt.set('active',now-3_700_000); service.wsTradeInFlight.set('active',Promise.resolve(true));
+  for(let i=0;i<20_005;i++)service.wsTradeCompletedAt.set(`recent-${i}`,now);
+  service.pruneWsTradeDedupe(now);
+  assert.equal(service.wsTradeCompletedAt.has('expired'),false); assert.equal(service.wsTradeCompletedAt.has('active'),true);
+  assert.ok(service.wsTradeCompletedAt.size<=20_001);
 });
