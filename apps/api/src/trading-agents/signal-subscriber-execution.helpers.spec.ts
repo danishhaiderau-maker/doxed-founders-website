@@ -39,6 +39,7 @@ import {
   pendingCopyShowcaseDisposition,
   showcaseAbsentWithinOrderPropagationGrace,
   shouldDeferCancelByExchangeForReplacement,
+  pendingEntryOwnershipAdvanced,
   missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -2242,6 +2243,109 @@ test('cancel-by-exchange cannot close a participant during exact-limit replaceme
     ),
     false,
   );
+});
+
+test('stale monitor ownership recognizes a durable order or intent revision advance', () => {
+  const oldIntent = { context: { showcase_event_seq: 7, showcase_event_at: '2026-08-11T07:00:00Z' } };
+  const newIntent = { context: { showcase_event_seq: 8, showcase_event_at: '2026-08-11T07:00:02Z' } };
+  assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1002, newIntent), true);
+  assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1001, newIntent), true);
+  assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1001, oldIntent), false);
+});
+
+test('money lane makes stale gone-order monitor wait for replacement persistence and never expire it', async () => {
+  const events: string[] = [];
+  const oldIntent = {
+    action: 'ENTER', trade_id: 'cont-race', risk: {},
+    context: { showcase_event_seq: 7, showcase_event_at: '2026-08-11T07:00:00Z' },
+  };
+  const newIntent = {
+    ...oldIntent,
+    context: { showcase_event_seq: 8, showcase_event_at: '2026-08-11T07:00:02Z' },
+  };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.botBridge = { isEnabled: () => false };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.activeTrading = {
+    findOrder: async () => null,
+    getOpenPositionDetail: async () => {
+      throw new Error('position classification must not run for stale ownership');
+    },
+  };
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({
+      id: 'cycle', tradeId: 'cont-race', intentEnvelope: newIntent,
+      expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+    signalCycleParticipant: { findUnique: async () => ({
+      id: 'participant', status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+  };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 1002, limitPrice: 64_000, qty: 0.03,
+  });
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event),
+  };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  const releaseReplacement = await service.acquireParticipantMoneyLane('participant');
+  const monitor = service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle', tradeId: 'cont-race', intentEnvelope: oldIntent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+    { id: 'participant', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 1001, limitPrice: 64_100, qty: 0.03 },
+    {}, new Set<number>(), false,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [], 'monitor cannot classify while replacement owns money lane');
+  releaseReplacement();
+  await monitor;
+  assert.deepEqual(events, []);
+});
+
+test('fresh status change defers instead of recursing with a stale active-order snapshot', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.botBridge = { isEnabled: () => false };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.activeTrading = { findOrder: async () => null };
+  const intent = {
+    action: 'ENTER', trade_id: 'cont-status-race', risk: {},
+    context: { showcase_event_seq: 9, showcase_event_at: '2026-08-11T07:01:00Z' },
+  };
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({
+      id: 'cycle-status', tradeId: 'cont-status-race', intentEnvelope: intent,
+      expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+    signalCycleParticipant: { findUnique: async () => ({
+      id: 'participant-status', status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+  };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 2002, limitPrice: 64_000, qty: 0.03,
+  });
+  let replacementLaneEntered = false;
+  service.applyLimitChase = async () => {
+    const release = await service.acquireParticipantMoneyLane('participant-status');
+    replacementLaneEntered = true;
+    release();
+  };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  await Promise.race([
+    service.monitorEntry(
+      'agent', 'user',
+      { id: 'cycle-status', tradeId: 'cont-status-race', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.INTENT },
+      { id: 'participant-status', status: SignalCycleStatus.PENDING_ENTRY },
+      { direction: 'SHORT', bitfinexOrderId: 2000, limitPrice: 64_100, qty: 0.03 },
+      {}, new Set<number>([2001]), false,
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('participant lane deadlocked')), 250)),
+  ]);
+  assert.equal(replacementLaneEntered, false);
 });
 
 test('deterministic 0.1% offset anchor is the canonical executable policy', () => {

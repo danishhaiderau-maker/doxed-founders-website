@@ -1352,6 +1352,29 @@ export function shouldDeferCancelByExchangeForReplacement(
   return showcaseAbsentWithinOrderPropagationGrace(tradeId, intentEnvelope, nowMs);
 }
 
+export function showcaseIntentRevision(intentEnvelope: unknown): string | null {
+  const intent = intentEnvelope as {
+    context?: { showcase_event_seq?: unknown; showcase_event_at?: unknown };
+  } | null;
+  const seq = Number(intent?.context?.showcase_event_seq);
+  if (Number.isInteger(seq) && seq >= 0) return `seq:${seq}`;
+  const eventAtMs = sourceTimestampMs(intent?.context?.showcase_event_at);
+  return eventAtMs == null ? null : `at:${eventAtMs}`;
+}
+
+/** A stale monitor observation must not expire a newly committed replacement. */
+export function pendingEntryOwnershipAdvanced(
+  observedOrderId: number,
+  observedIntent: unknown,
+  durableOrderId: number | undefined,
+  durableIntent: unknown,
+): boolean {
+  if (durableOrderId != null && durableOrderId !== observedOrderId) return true;
+  const observedRevision = showcaseIntentRevision(observedIntent);
+  const durableRevision = showcaseIntentRevision(durableIntent);
+  return durableRevision != null && durableRevision !== observedRevision;
+}
+
 /**
  * A fresh source fill may immediately follow a signed exact-limit reprice.
  * Keep the managed Bitfinex order alive during the bounded convergence window
@@ -2295,6 +2318,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   private readonly completedDirectWakeAt = new Map<string, number>();
   /** One writer per participant while a cancel-race fill is promoted to OPEN. */
   private readonly cancelRaceFillInFlight = new Set<string>();
+  /** Serializes cancel/replace persistence against gone-order classification. */
+  private readonly participantMoneyLane = new Map<string, Promise<void>>();
+
+  private async acquireParticipantMoneyLane(participantId: string): Promise<() => void> {
+    const prior = this.participantMoneyLane.get(participantId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.participantMoneyLane.set(participantId, current);
+    await prior;
+    return () => {
+      release();
+      if (this.participantMoneyLane.get(participantId) === current) {
+        this.participantMoneyLane.delete(participantId);
+      }
+    };
+  }
   /** Recently discovered Bitfinex relay instances. Direct signed wakes start
    * these known subscribers immediately while a fresh discovery query runs in
    * parallel for newly activated subscribers. Every cached row is revalidated
@@ -7782,6 +7821,50 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     // Fix 7b — distinguish a transient position-fetch failure from a genuine
     // no-position state. Classifying on a failed fetch recorded EXPIRED while
     // the fill was real (orphan factory). Fail-closed: defer to next tick.
+    const releaseGoneClassification = await this.acquireParticipantMoneyLane(participant.id);
+    let goneClassificationReleased = false;
+    const releaseGoneClassificationOnce = () => {
+      if (goneClassificationReleased) return;
+      goneClassificationReleased = true;
+      releaseGoneClassification();
+    };
+    try {
+    // Before any zero-position/phantom EXPIRED path, re-read authoritative
+    // ownership. LIMIT_UPDATED may have committed a replacement while this
+    // tick still holds the prior order id and intent revision.
+    const [durableCycle, durableParticipant, durableMeta] = await Promise.all([
+      this.prisma.signalCycle.findUnique({
+        where: { id: cycle.id },
+        select: { id: true, tradeId: true, intentEnvelope: true, expiresAt: true, status: true },
+      }),
+      this.prisma.signalCycleParticipant.findUnique({
+        where: { id: participant.id },
+        select: { id: true, status: true },
+      }),
+      this.loadExecutionMeta(participant.id),
+    ]);
+    if (!durableCycle || !durableParticipant) return;
+    if (durableCycle.status !== cycle.status || durableParticipant.status !== participant.status) {
+      // The active-order snapshot belongs to the stale pass too. Do not recurse
+      // with it: doing so can misclassify the durable replacement even after
+      // releasing the lane. The already-queued/next executor tick reloads both
+      // authoritative DB ownership and the exchange active book together.
+      this.logger.warn(
+        `Order ${orderId} state advanced during gone-order classification for ${userId} — deferring to a fresh executor snapshot`,
+      );
+      return;
+    }
+    if (
+      pendingEntryOwnershipAdvanced(
+        orderId, intent, durableMeta.bitfinexOrderId, durableCycle.intentEnvelope,
+      )
+    ) {
+      this.logger.warn(
+        `Order ${orderId} is stale for ${userId}; durable pending ownership is order ${durableMeta.bitfinexOrderId ?? 'pending-persist'} revision ${showcaseIntentRevision(durableCycle.intentEnvelope) ?? 'unknown'} — deferring all order-gone expiry paths`,
+      );
+      return;
+    }
+
     let positionFetchFailed = false;
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => {
       positionFetchFailed = true;
@@ -7961,6 +8044,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
     this.logger.log(
       `Hire fill ${userId} cycle=${cycle.id} @ ${fillPrice.toFixed(2)} qty=${qty} stop=${stopPrice.toFixed(2)} armed=${stopOrderId != null}`,
     );
+    } finally {
+      releaseGoneClassificationOnce();
+    }
   }
 
   /** Prior deploys recorded FILLED events but participant stayed PENDING_ENTRY when stop failed. */
@@ -8976,6 +9062,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit {
   }
 
   private async replaceRestingLimit(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    participantId: string,
+    meta: ExecutionPayload,
+    creds: ExchangeCredentials,
+    intent: SignalIntentEnvelope,
+    opts: {
+      newLimit: number;
+      mark: number;
+      now: number;
+      chaseLabel: string;
+      event: 'LIMIT_CHASE' | 'BOT_ANCHOR_CHASE';
+      tradeId?: string | null;
+    },
+  ) {
+    const release = await this.acquireParticipantMoneyLane(participantId);
+    try {
+      await this.replaceRestingLimitOwned(
+        agentId, userId, cycleId, participantId, meta, creds, intent, opts,
+      );
+    } finally {
+      release();
+    }
+  }
+
+  private async replaceRestingLimitOwned(
     agentId: string,
     userId: string,
     cycleId: string,
