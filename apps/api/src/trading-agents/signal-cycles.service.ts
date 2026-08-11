@@ -857,14 +857,22 @@ export class SignalCyclesService implements OnModuleInit {
     event: SignalCycleEventType,
     body: Record<string, unknown>,
   ) {
-    const cycle = await this.prisma.signalCycle.findFirst({
-      where: { id: cycleId, agentId },
-    });
+    // Cycle ownership and participant identity are independent reads. Running
+    // them serially put two Neon round trips in front of every durable event;
+    // on the strict mirror EXIT path that alone consumed ~137 ms after the
+    // exchange was already confirmed flat. Keep both validations, but overlap
+    // them so the EXIT event can be persisted immediately after confirmation.
+    const [cycle, existingParticipant] = await Promise.all([
+      this.prisma.signalCycle.findFirst({
+        where: { id: cycleId, agentId },
+      }),
+      this.prisma.signalCycleParticipant.findUnique({
+        where: { cycleId_userId: { cycleId, userId } },
+      }),
+    ]);
     if (!cycle) throw new NotFoundException('Cycle not found');
 
-    let participant = await this.prisma.signalCycleParticipant.findUnique({
-      where: { cycleId_userId: { cycleId, userId } },
-    });
+    let participant = existingParticipant;
 
     if (!participant) {
       participant = await this.prisma.signalCycleParticipant.create({
