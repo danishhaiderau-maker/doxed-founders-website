@@ -43,6 +43,11 @@ if (!existsSync(lockPath)) {
 }
 
 const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+const lockedFiles = new Map(
+  Array.isArray(lock.files)
+    ? lock.files.map((entry) => [String(entry?.path ?? ''), String(entry?.sha256 ?? '')])
+    : Object.entries(lock.files ?? {}).map(([path, sha256]) => [path, String(sha256)]),
+);
 const current = {};
 for (const rel of POLICY_FILES) {
   current[rel] = sha256File(rel);
@@ -50,7 +55,7 @@ for (const rel of POLICY_FILES) {
 
 const mismatches = [];
 for (const rel of POLICY_FILES) {
-  if (lock.files?.[rel] !== current[rel]) mismatches.push(rel);
+  if (lockedFiles.get(rel) !== current[rel]) mismatches.push(rel);
 }
 
 const policySrc = readFileSync(join(root, 'packages/utils/src/bitfinex-copy-policy.ts'), 'utf8');

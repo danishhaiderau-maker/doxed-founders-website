@@ -29,10 +29,14 @@ const policySrc = readFileSync(join(root, 'packages/utils/src/bitfinex-copy-poli
 const versionMatch = policySrc.match(/BITFINEX_COPY_POLICY_VERSION\s*=\s*(\d+)/);
 const policyVersion = versionMatch ? Number(versionMatch[1]) : 1;
 
-const files = {};
+const files = [];
 for (const rel of POLICY_FILES) {
   if (!existsSync(join(root, rel))) throw new Error(`Missing ${rel}`);
-  files[rel] = sha256File(rel);
+  // Keep the source path and digest in distinct JSON fields. Besides making
+  // the manifest easier to validate structurally, this prevents generic
+  // secret scanners from interpreting a high-entropy digest beside an
+  // `apps/api/...` object key as an API credential.
+  files.push({ path: rel, sha256: sha256File(rel) });
 }
 
 const lock = {
