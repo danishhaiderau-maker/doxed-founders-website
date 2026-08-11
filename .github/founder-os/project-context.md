@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-test(fly): cover order expiry relay lane
+fix(bitfinex): retire pending entry on source close
 
 ## Last Activity
 
