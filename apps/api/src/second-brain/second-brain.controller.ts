@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
+import { IsBoolean, IsOptional, IsString, MaxLength } from 'class-validator';
 import { Public } from '../auth/public.decorator';
 import { AdminGuard, JwtAuthGuard } from '../auth/guards';
 import { SecondBrainCallerGuard } from './second-brain-caller.guard';
@@ -10,9 +11,18 @@ import {
 } from './second-brain.service';
 
 class CritiqueBodyDto {
+  @IsString()
+  @MaxLength(12_000)
   agentOutput!: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80_000)
   context?: string;
+
   /** Premium GLM last-resort — default false so cheap cascade is preferred. */
+  @IsOptional()
+  @IsBoolean()
   allowGlmSpend?: boolean;
 }
 
