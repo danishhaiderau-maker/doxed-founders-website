@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Harden relay pause state and local analyzer storage
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
