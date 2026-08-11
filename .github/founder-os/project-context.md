@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): preserve exact qty across anchor offset
+test(showcase): cover atomic limit chase commit
 
 ## Last Activity
 
