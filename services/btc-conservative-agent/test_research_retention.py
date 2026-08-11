@@ -41,6 +41,10 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertTrue(
                 (root / "research_retention" / "daily" / "2026-07-21" / "daily_evidence_manifest.json").is_file()
             )
+            self.assertTrue((root / "analysis_summary.md").is_file())
+            self.assertTrue(
+                (root / "research_retention" / "daily" / "2026-07-21" / "analysis_summary.md").is_file()
+            )
             self.assertLess(len(list(history.iterdir())), 5)
             manifest = json.loads(
                 (root / "research_retention" / "daily" / "2026-07-21" / "daily_evidence_manifest.json").read_text(encoding="utf-8")
@@ -100,6 +104,35 @@ class ResearchRetentionTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM research_events").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM lifecycle_genome").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM trade_genome").fetchone()[0], 1)
+
+    def test_separate_mirror_root_is_inventoried_and_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "reports"
+            mirror = Path(tmp) / "fly-data-mirror"
+            root.mkdir()
+            mirror.mkdir()
+            now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+            (root / "research_compact_summary.json").write_text("{}", encoding="utf-8")
+            active = mirror / "signal_replay.jsonl"
+            active.write_text('{"trade_id":"active"}\n', encoding="utf-8")
+            for index in range(1, 5):
+                path = mirror / f"signal_replay.jsonl.{index}"
+                path.write_text(f'{{"trade_id":"rotated-{index}"}}\n', encoding="utf-8")
+                stamp = (now - timedelta(hours=48 - index)).timestamp()
+                os.utime(path, (stamp, stamp))
+
+            result = retention.run_analyzer_retention(
+                root, data_root=mirror, now=now, force=True
+            )
+
+            self.assertEqual(result["data_root"], str(mirror.resolve()))
+            self.assertEqual(result["rotated_raw_inventoried"], 4)
+            self.assertEqual(result["rotated_raw_deleted"], 2)
+            self.assertTrue(active.is_file())
+            manifest = json.loads(
+                (root / "research_retention" / "daily" / "2026-07-21" / "daily_evidence_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["data_root"], str(mirror.resolve()))
 
     def test_interval_prevents_repeated_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:

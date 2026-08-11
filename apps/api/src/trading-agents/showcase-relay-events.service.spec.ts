@@ -759,7 +759,7 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
 
   assert.equal(result.ok, true);
   assert.equal(result.persisted, true);
-  assert.deepEqual(trace, ['prewake', 'persist']);
+  assert.deepEqual(trace, ['prewake', 'persist', 'execution']);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(trace, ['prewake', 'persist', 'execution', 'canonical']);
 });
@@ -842,9 +842,7 @@ test('signed POSITION_CLOSED durably carries exit evidence into the immediate wa
 
   assert.equal(result.ok, true);
   assert.equal(typeof result.platform_received_at, 'string');
-  assert.deepEqual(trace, ['persist', 'closed']);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(trace.includes('execution'), true);
+  assert.deepEqual(trace, ['persist', 'closed', 'execution']);
 });
 
 test('signed POSITION_CLOSED reuses a deterministic cycle whose tradeId was relinked', async () => {

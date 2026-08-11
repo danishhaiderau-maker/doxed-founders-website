@@ -2,7 +2,7 @@
 // scripts/verify-stack-deployed.mjs
 //
 // Post-deploy verification harness. Verifies that code actually reached
-// production across four surfaces (GitHub, Railway, Vercel, Neon) and prints
+// production across five surfaces (GitHub, Railway, Vercel, Fly, Neon) and prints
 // a single GREEN/RED verdict table.
 //
 // Exit 0 = all green (yellow allowed), 1 = any red.
@@ -36,6 +36,15 @@ const VERCEL_API = 'https://api.vercel.com';
 const VERCEL_PROJECT_NAME = 'doxed-founders-website';
 const VERCEL_TEAM_ID = 'team_KZnVXkwWtzHaT0EfltPcy3LE';
 const VERCEL_SITE_URL = 'https://doxxedcrypto.digital';
+const VERCEL_RELEVANT_PATHS = [
+  'apps/web',
+  'packages/utils',
+  'package.json',
+  'pnpm-lock.yaml',
+  'turbo.json',
+  'vercel.json',
+];
+const FLY_BOT_URL = 'https://doxed-btc-bot.fly.dev';
 
 const HTTP_TIMEOUT_MS = 10000;
 const NEON_TIMEOUT_MS = 8000;
@@ -92,6 +101,15 @@ function resolveDatabaseUrl() {
   if (process.env.DATABASE_URL?.trim()) return process.env.DATABASE_URL.trim();
   for (const name of ['.env.neon', '.env.vercel.check', '.env.production']) {
     const v = readDotEnv(join(vault, name)).DATABASE_URL?.trim();
+    if (v) return v;
+  }
+  return null;
+}
+
+function resolveBotAdminToken() {
+  if (process.env.BOT_ADMIN_TOKEN?.trim()) return process.env.BOT_ADMIN_TOKEN.trim();
+  for (const name of ['home-bot.env', '.env.production']) {
+    const v = readDotEnv(join(vault, name)).BOT_ADMIN_TOKEN?.trim();
     if (v) return v;
   }
   return null;
@@ -307,7 +325,7 @@ async function checkVercel(token, target) {
   try {
     const url =
       `${VERCEL_API}/v6/deployments?app=${VERCEL_PROJECT_NAME}` +
-      `&target=production&limit=5&teamId=${VERCEL_TEAM_ID}`;
+      `&target=production&limit=100&teamId=${VERCEL_TEAM_ID}`;
     const res = await fetchWithTimeout(
       url,
       { headers: { Authorization: `Bearer ${token}` } },
@@ -320,7 +338,7 @@ async function checkVercel(token, target) {
     }
     const j = await res.json();
     const deps = (j.deployments ?? []).filter(
-      (d) => d.target === 'production' && d.readyState !== 'CANCELED' && d.readyState !== 'SKIPPED'
+      (d) => d.target === 'production' && d.readyState === 'READY'
     );
     latestProd = deps[0] ?? null;
   } catch (e) {
@@ -333,12 +351,15 @@ async function checkVercel(token, target) {
     const st = latestProd.readyState;
     const sha = latestProd.meta?.githubCommitSha ?? null;
     if (st === 'READY') {
-      if (target && sha) {
-        if (isAncestorOrEqual(target, sha)) {
+      const expected = target ?? execSync('git rev-parse origin/master', { encoding: 'utf8', cwd: root }).trim();
+      if (expected && sha) {
+        if (isAncestorOrEqual(expected, sha)) {
           notes.push(`READY ${shortSha(sha)}`);
+        } else if (deploymentTreeUnchanged(sha, expected, VERCEL_RELEVANT_PATHS)) {
+          notes.push(`READY ${shortSha(sha)} (frontend tree unchanged through ${shortSha(expected)})`);
         } else {
           r.status = RED;
-          notes.push(`${shortSha(target)} not deployed (READY is ${shortSha(sha)})`);
+          notes.push(`${shortSha(expected)} frontend changes not deployed (READY is ${shortSha(sha)})`);
         }
       } else {
         notes.push(`READY ${shortSha(sha)}`);
@@ -387,6 +408,52 @@ async function checkVercel(token, target) {
 // pooler host — sufficient as a "is the DB reachable" liveness gate, and
 // fast/pure-Node. A real query check belongs in the API's own health endpoint
 // (already covered by the Railway row).
+async function checkFly(adminToken) {
+  const r = { surface: 'FLY', status: GREEN, detail: '', meta: {} };
+  if (!adminToken) {
+    r.status = YELLOW;
+    r.detail = 'no BOT_ADMIN_TOKEN - authenticated owner state not verified';
+    return r;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      `${FLY_BOT_URL}/api/relay-state`,
+      { headers: { 'X-Bot-Admin-Token': adminToken } },
+      HTTP_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      r.status = RED;
+      r.detail = `authenticated relay-state HTTP ${res.status}`;
+      return r;
+    }
+    const state = await res.json();
+    const owner = state.dashboard_owner === true;
+    const sourceRev = state.source_git_rev ?? state.git_rev ?? null;
+    const positions = Array.isArray(state.positions) ? state.positions.length : null;
+    const orders = Array.isArray(state.orders) ? state.orders.length : null;
+    if (!owner) r.status = RED;
+    r.detail = `${owner ? 'canonical owner' : 'NOT canonical owner'} - health 200 - source ${shortSha(sourceRev)}`;
+    r.meta = { dashboardOwner: owner, sourceRevision: sourceRev, positions, pendingOrders: orders };
+  } catch (e) {
+    r.status = RED;
+    r.detail = `authenticated relay-state unreachable: ${e.message}`;
+  }
+  return r;
+}
+
+function deploymentTreeUnchanged(deployedSha, target, paths) {
+  if (!deployedSha || !target) return false;
+  try {
+    execSync(`git diff --quiet ${deployedSha} ${target} -- ${paths.join(' ')}`, {
+      stdio: 'ignore',
+      cwd: root,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function parsePgHost(connStr) {
   // postgresql://user:pass@host:port/db?...
   const m = String(connStr).match(/^postgres(?:ql)?:\/\/[^@]*@([^:/?#]+)/);
@@ -497,15 +564,17 @@ async function main() {
   const railwayToken = resolveRailwayToken();
   const vercelToken = resolveVercelToken();
   const databaseUrl = resolveDatabaseUrl();
+  const botAdminToken = resolveBotAdminToken();
 
-  const [github, railway, vercel, neon] = await Promise.all([
+  const [github, railway, vercel, fly, neon] = await Promise.all([
     Promise.resolve(checkGitHub()),
     checkRailway(railwayToken, targetSha),
     checkVercel(vercelToken, targetSha),
+    checkFly(botAdminToken),
     checkNeon(databaseUrl),
   ]);
 
-  const results = [github, railway, vercel, neon];
+  const results = [github, railway, vercel, fly, neon];
 
   if (jsonMode) {
     const reds = results.filter((r) => r.status === RED).length;

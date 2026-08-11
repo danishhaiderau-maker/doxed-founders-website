@@ -151,6 +151,7 @@ REPORTS_DIR = "reports"
 ALL_DATA_REPORTS_DIR = os.path.join(REPORTS_DIR, "all_data")
 HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
 RETENTION_STATUS_FILE = "research_retention_status.json"
+MIRROR_SIZE_REPORT_FILE = "_size_report.json"
 ARCHIVE_DIR = "research_session_archives"
 ARCHIVE_INDEX_FILE = "research_session_index.json"
 PAST_ANALYSIS_DIR = "past_analysis"
@@ -1607,6 +1608,13 @@ def api_summary():
     paused_shadow = _read_json("paused_shadow_research_report.json")
     typeb_research_v2 = _typeb_research_v2_payload()
     retention = _read_json(RETENTION_STATUS_FILE)
+    mirror_size = {}
+    mirror_size_path = DATA_ROOT / MIRROR_SIZE_REPORT_FILE
+    if mirror_size_path.is_file():
+        try:
+            mirror_size = json.loads(mirror_size_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            mirror_size = {}
     stale_meta = _summary_stale_meta(compact)
     p = dict(compact.get("performance") or {})
     re = compact.get("real_edge") or real
@@ -1640,6 +1648,21 @@ def api_summary():
         "paused_shadow_cohort": paused_shadow,
         "type_b_research_v2": typeb_research_v2,
         "retention": retention,
+        "storage": {
+            "local_size_mb": mirror_size.get("local_size_mb"),
+            "local_file_count": mirror_size.get("local_file_count"),
+            "local_limit_mb": 30 * 1024,
+            "local_limit_pct": round(
+                100.0 * float(mirror_size.get("local_size_mb") or 0) / (30 * 1024), 2
+            ),
+            "fly_size_mb": mirror_size.get("fly_size_mb"),
+            "fly_volume_total_mb": mirror_size.get("fly_volume_total_mb"),
+            "fly_volume_pct": mirror_size.get("fly_volume_pct"),
+            "sync_computed_at": mirror_size.get("computed_at"),
+            "fly_computed_at": mirror_size.get("fly_computed_at"),
+            "sync_interval_seconds": mirror_size.get("sync_interval_seconds"),
+            "sync_threshold_mb": mirror_size.get("sync_threshold_mb"),
+        },
     })
 
 
@@ -3059,6 +3082,7 @@ async function loadSummary() {
   const histPerf = hist.performance || {};
   const v2 = d.type_b_research_v2 || {};
   const retention = d.retention || {};
+  const storage = d.storage || {};
   const integrity = d.integrity || {};
   const iBanner = document.getElementById('integrity-banner');
   if (iBanner) {
@@ -3109,6 +3133,17 @@ async function loadSummary() {
         + (retention.raw_db_rows_deleted ?? 0) + ' raw rows · '
         + (Number(retention.deleted_bytes || 0) / 1048576).toFixed(1) + ' MB')
       : 'Pending first run'],
+    ['Local mirror', storage.local_size_mb == null
+      ? 'No size report'
+      : (Number(storage.local_size_mb).toFixed(1) + ' MB / 30 GB Â· '
+        + Number(storage.local_limit_pct || 0).toFixed(2) + '% Â· '
+        + (storage.local_file_count ?? 0) + ' files')],
+    ['Fly runtime data', storage.fly_size_mb == null
+      ? 'No Fly size report'
+      : (Number(storage.fly_size_mb).toFixed(1) + ' MB / '
+        + Number(storage.fly_volume_total_mb || 1024).toFixed(0) + ' MB Â· '
+        + Number(storage.fly_volume_pct || 0).toFixed(1) + '%')],
+    ['Last data sync', storage.sync_computed_at ? fmtMelb(storage.sync_computed_at) : 'No sync receipt'],
     ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],

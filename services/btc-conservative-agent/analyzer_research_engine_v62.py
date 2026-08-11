@@ -18016,7 +18016,10 @@ def finalize_analyzer_outputs(
     try:
         from research.retention import run_analyzer_retention
 
-        retention = run_analyzer_retention(os.getcwd())
+        retention = run_analyzer_retention(
+            os.getcwd(),
+            data_root=os.getenv("BTC_AGENT_DATA_DIR") or os.getcwd(),
+        )
         if retention.get("status") == "COMPLETED":
             print(
                 "  ✅ Daily retention: compact evidence saved; "

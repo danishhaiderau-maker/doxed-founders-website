@@ -26,6 +26,7 @@ DAILY_DIR = Path("research_retention") / "daily"
 RETENTION_SCHEMA = "analyzer_retention_v2"
 
 COMPACT_EVIDENCE_FILES = (
+    "analysis_summary.md",
     "research_compact_summary.json",
     "report_manifest.json",
     "executive_summary.txt",
@@ -69,6 +70,57 @@ def _atomic_json(path: Path, payload: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _write_readable_markdown_summary(root: Path, now: datetime) -> Path:
+    """Persist a small human-readable receipt before raw inputs may be pruned."""
+    compact_path = root / "research_compact_summary.json"
+    compact: dict = {}
+    if compact_path.is_file():
+        try:
+            compact = json.loads(compact_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            compact = {}
+    performance = compact.get("performance") or {}
+    coverage = compact.get("coverage") or {}
+    dataset = compact.get("dataset") or {}
+    findings_path = root / "research_findings.txt"
+    findings = "No generated findings were available for this pass."
+    if findings_path.is_file():
+        try:
+            findings = findings_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    lines = [
+        "# Analyzer evidence summary",
+        "",
+        f"- Evidence generated: {now.isoformat()}",
+        f"- Analyzer output generated: {compact.get('generated_at') or 'unknown'}",
+        f"- Analyzer version: {compact.get('analyzer_version') or 'unknown'}",
+        f"- Scope: {compact.get('data_scope') or compact.get('session_scope') or 'unknown'}",
+        f"- Session hours: {compact.get('session_hours', 'unknown')}",
+        f"- Trades analyzed: {performance.get('trades', dataset.get('csv_trades', 0))}",
+        f"- Win rate: {performance.get('win_rate_pct', 'unknown')}%",
+        f"- Net PnL: ${performance.get('net_pnl_usd', 'unknown')}",
+        f"- Expectancy per trade: ${performance.get('expectancy_usd', 'unknown')}",
+        f"- MFE capture: {performance.get('mfe_capture_pct', 'unknown')}%",
+        f"- Edge verdict: {compact.get('edge_verdict') or 'unknown'}",
+        f"- Statistical confidence: {coverage.get('confidence_status') or 'unknown'}",
+        "",
+        "## Generated findings",
+        "",
+        "```text",
+        findings,
+        "```",
+        "",
+        "The accompanying JSON manifest contains fingerprints and inventories for auditability.",
+        "",
+    ]
+    path = root / "analysis_summary.md"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(str(line) for line in lines), encoding="utf-8")
+    os.replace(tmp, path)
+    return path
 
 
 def _fingerprint(path: Path) -> dict:
@@ -290,11 +342,20 @@ def _reconcile_session_index(root: Path) -> None:
 def run_analyzer_retention(
     root: str | Path = ".",
     *,
+    data_root: str | Path | None = None,
     now: datetime | None = None,
     force: bool = False,
 ) -> dict:
-    """Create daily evidence and prune redundant derived archives once per day."""
+    """Create evidence and bound reports plus the analyzer's raw-data mirror.
+
+    ``root`` owns the readable reports and retention receipts. ``data_root``
+    owns the downloaded ledgers. They are normally the same directory, but the
+    production desktop analyzer deliberately writes reports outside its
+    ``fly-data-mirror``. Keeping the roots explicit prevents retention from
+    silently inventorying zero raw files while that mirror grows forever.
+    """
     root = Path(root).resolve()
+    data_root = Path(data_root).resolve() if data_root is not None else root
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -340,6 +401,7 @@ def run_analyzer_retention(
 
     daily = root / DAILY_DIR / now.date().isoformat()
     daily.mkdir(parents=True, exist_ok=True)
+    _write_readable_markdown_summary(root, now)
     copied: list[str] = []
     for name in COMPACT_EVIDENCE_FILES:
         src = root / name
@@ -349,14 +411,14 @@ def run_analyzer_retention(
 
     live_inventory = []
     for name in LIVE_LEDGER_FILES:
-        path = root / name
+        path = data_root / name
         if path.is_file():
             try:
                 live_inventory.append(_fingerprint(path))
             except OSError:
                 continue
 
-    rotation_paths = _closed_jsonl_rotations(root)
+    rotation_paths = _closed_jsonl_rotations(data_root)
     rotation_inventory = []
     for path in rotation_paths:
         try:
@@ -365,13 +427,15 @@ def run_analyzer_retention(
             rotation_inventory.append(row)
         except OSError:
             continue
-    db_path = root / "research.db"
+    db_path = data_root / "research.db"
     db_inventory = _research_db_inventory(db_path)
 
     evidence = {
         "schema": "daily_research_evidence_v2",
         "generated_at": now.isoformat(),
         "day_utc": now.date().isoformat(),
+        "report_root": str(root),
+        "data_root": str(data_root),
         "compact_files": copied,
         "live_ledger_inventory": live_inventory,
         "closed_rotation_inventory": rotation_inventory,
@@ -425,6 +489,7 @@ def run_analyzer_retention(
         "rotated_raw_keep_latest": rotation_keep_latest,
         "raw_db_retention_hours": raw_db_retain_hours,
         "daily_snapshot": str(daily),
+        "data_root": str(data_root),
         "compact_files": len(copied),
         "live_ledgers_inventoried": len(live_inventory),
         "live_ledgers_deleted": 0,
