@@ -79,6 +79,9 @@ test('Fly monitor compares against the latest bot-source revision', async () => 
     /EXPECTED_REVISION:\s*\$\{\{\s*steps\.expected\.outputs\.revision\s*\}\}/,
   );
   assert.doesNotMatch(workflow, /EXPECTED_REVISION:\s*\$\{\{\s*github\.sha\s*\}\}/);
+  assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*required,\s*actual/);
+  assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*actual,\s*"HEAD"/);
+  assert.doesNotMatch(workflow, /actual\.startswith\(expected\)/);
 });
 
 test('flat-boundary proof targets the canonical Fly owner', async () => {
