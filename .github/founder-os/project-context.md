@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Approve relay pause-state policy change
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
