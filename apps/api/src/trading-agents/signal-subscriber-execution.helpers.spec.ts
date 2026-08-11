@@ -114,6 +114,30 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   );
 });
 
+test('exact showcase quantity allows only the deterministic anchor margin overhead', () => {
+  const canonical = resolveExactShowcaseEntryQty({
+    exactQtyBtc: 0.03143566690767344,
+    maxMarginUsd: 20,
+    leverage: 100,
+    limitPrice: 63_685.62,
+  });
+  assert.deepEqual(canonical, {
+    ok: true,
+    qty: 0.03143,
+    requiredMarginUsd: 0.03143 * 63_685.62 / 100,
+    capQty: 0.0314,
+  });
+  assert.deepEqual(
+    resolveExactShowcaseEntryQty({
+      exactQtyBtc: 0.03148,
+      maxMarginUsd: 20,
+      leverage: 100,
+      limitPrice: 63_685.62,
+    }),
+    { ok: false, reason: 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' },
+  );
+});
+
 test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   const now = Date.now();

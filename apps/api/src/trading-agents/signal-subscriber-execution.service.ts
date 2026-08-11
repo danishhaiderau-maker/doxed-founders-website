@@ -101,6 +101,13 @@ const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
 const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
 const SHOWCASE_ORDER_SNAPSHOT_PROPAGATION_GRACE_MS = 15_000;
 const BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS = 15_000;
+/**
+ * The showcase sizes collateral at its signal price, then posts its canonical
+ * deterministic limit up to 0.1% away. Preserve that exact quantity while
+ * allowing only a tightly bounded extra margin for the signed anchor offset
+ * and decimal transport. Materially larger source sizing still fails closed.
+ */
+export const EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT = 0.2;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
 export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
@@ -135,14 +142,17 @@ export function resolveExactShowcaseEntryQty(input: {
   if (qty < minQty) return { ok: false, reason: 'BELOW_EXCHANGE_MIN_QTY' };
   const rawCapQty = input.maxMarginUsd * input.leverage / input.limitPrice;
   const capQty = Math.floor((rawCapQty + Number.EPSILON) * 1e5) / 1e5;
-  if (btcToSats(qty) > btcToSats(capQty)) {
+  const requiredMarginUsd = qty * input.limitPrice / input.leverage;
+  const toleratedMarginUsd = input.maxMarginUsd
+    * (1 + EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT / 100);
+  if (requiredMarginUsd > toleratedMarginUsd + Number.EPSILON) {
     return { ok: false, reason: 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
   }
   return {
     ok: true,
     qty,
     capQty,
-    requiredMarginUsd: qty * input.limitPrice / input.leverage,
+    requiredMarginUsd,
   };
 }
 
