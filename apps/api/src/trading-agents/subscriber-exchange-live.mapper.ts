@@ -30,6 +30,8 @@ export type SubscriberCycleRow = {
   takeProfit?: number | null;
   terminalReason?: string | null;
   exchangeProven?: boolean;
+  /** Explicitly distinguishes an enabled same-trade late-entry from a normal pending copy. */
+  lateEntryContinuation?: boolean;
   /** Exchange holding-period boundary, sourced from the first FILLED event. */
   filledAt?: Date | null;
   /** Exchange holding-period boundary, sourced from the first EXIT event. */
@@ -275,7 +277,9 @@ export function mapSubscriberExchangeLiveBook(input: {
         pullRequiredPct: 0,
         signalPrice: limitPrice,
         maxPullPct: 0,
-        outcome: row.status,
+        outcome: row.lateEntryContinuation
+          ? 'LATE_ENTRY_BETTER_ONLY_CONTINUATION'
+          : row.status,
         fillPrice: row.fillPrice,
         exitReason: null,
       });

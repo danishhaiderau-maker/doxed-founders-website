@@ -82,6 +82,50 @@ test('renders one pending row when Bitfinex rounds the relay quantity', () => {
   assert.equal(book.activeSignals[0]?.tradeId, 'cont-6aec65edb25c');
 });
 
+test('labels an opted-in late entry continuation separately from a normal pending copy', () => {
+  const now = new Date('2026-08-12T07:00:00.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [
+      {
+        id: 241999000001,
+        symbol: 'tBTCF0:USTF0',
+        amount: -0.031,
+        amountOrig: -0.031,
+        price: 64_200,
+        status: 'ACTIVE',
+        orderType: 'LIMIT',
+      },
+    ],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.PENDING_ENTRY,
+        fillPrice: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlMarginPct: null,
+        limitPrice: 64_200,
+        qty: 0.031,
+        stopLoss: null,
+        takeProfit: null,
+        terminalReason: null,
+        lateEntryContinuation: true,
+        createdAt: now,
+        updatedAt: now,
+        cycle: {
+          tradeId: 'cont-late-entry-visible',
+          status: SignalCycleStatus.OPEN,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: null,
+          createdAt: now,
+        },
+      },
+    ],
+  });
+
+  assert.equal(book.activeSignals[0]?.outcome, 'LATE_ENTRY_BETTER_ONLY_CONTINUATION');
+});
+
 test('keeps genuinely separate pending orders visible', () => {
   const now = new Date('2026-07-23T10:55:53.717Z');
   const book = mapSubscriberExchangeLiveBook({

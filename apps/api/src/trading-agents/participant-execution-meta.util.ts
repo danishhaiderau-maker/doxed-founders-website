@@ -7,6 +7,8 @@ export type ParticipantExecutionMeta = {
   direction: 'LONG' | 'SHORT' | null;
   terminalReason: string | null;
   exchangeProven: boolean;
+  /** An opt-in, source-owned better-or-equal entry continuation is active. */
+  lateEntryContinuation: boolean;
 };
 
 type EventRow = { eventType: string; payload: unknown };
@@ -61,6 +63,7 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
   const stopRaw = merged.stop_price ?? merged.stopPrice;
   const floorRaw = merged.profitLockFloor ?? merged.lock_floor_margin_pct;
   const dirRaw = merged.direction;
+  const lateEntryContinuationRaw = merged.lateEntryContinuation ?? merged.late_entry_continuation;
   const fillRaw = merged.fill_price ?? merged.fillPrice;
 
   const limitPrice =
@@ -72,6 +75,7 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
     typeof floorRaw === 'number' && Number.isFinite(floorRaw) && floorRaw > 0 ? floorRaw : null;
   const direction =
     dirRaw === 'LONG' || dirRaw === 'SHORT' ? dirRaw : null;
+  const lateEntryContinuation = lateEntryContinuationRaw === true;
 
   if (!stopPrice && direction) {
     const entry =
@@ -91,6 +95,7 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
     direction,
     terminalReason,
     exchangeProven,
+    lateEntryContinuation,
   };
 }
 
