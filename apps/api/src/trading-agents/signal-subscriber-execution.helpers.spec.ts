@@ -50,6 +50,7 @@ import {
   relayWatchdogShouldRestart,
   resolveMissedShowcaseFill,
   untrackedActiveOrderIds,
+  ownedStopOrderIds,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
   relayArmTimestampMs,
@@ -2315,6 +2316,54 @@ test('historical orphan recovery ignores orders attributed to current live lots'
     untrackedActiveOrderIds([101, 999], [{ bitfinexOrderId: 101 }]),
     [999],
   );
+});
+
+test('replacement stop remains owned until its predecessor is confirmed cleared', () => {
+  const meta = {
+    stopOrderId: 202,
+    supersededStopOrderId: 201,
+    partialFillStopOrderId: null,
+    supersededPartialStopOrderId: null,
+  };
+  assert.deepEqual(ownedStopOrderIds(meta), [202, 201]);
+  assert.deepEqual(untrackedActiveOrderIds([201, 202], [meta]), []);
+});
+
+test('generic stop rearm persists replacement ownership before clearing a missing predecessor', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never,
+  ) as any;
+  const actions: string[] = [];
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  service.activeTrading = {
+    findOrder: async () => null,
+    submitStopOrder: async () => {
+      actions.push('submit-replacement');
+      return 202;
+    },
+  };
+  service.cancelManagedOrderGone = async (_creds: unknown, orderId: number) => {
+    actions.push(`cancel-${orderId}`);
+    return { gone: true };
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: unknown, _a: unknown, _c: unknown, type: string, payload: Record<string, unknown>) => {
+      events.push({ type, payload });
+    },
+  };
+  await service.ensureProtectiveStop(
+    'agent', 'user', 'cycle', 'participant',
+    { direction: 'LONG', qty: 0.01, limitPrice: 64_000, stopOrderId: 201 },
+    {} as never,
+    { risk: { stop_loss_margin_pct: -40 } },
+  );
+  assert.deepEqual(actions, ['submit-replacement', 'cancel-201']);
+  assert.deepEqual(events.map((event) => event.type), ['STOP_LOSS_ARMED', 'UPDATE_STOPS']);
+  assert.equal(events[0]?.payload.stopOrderId, 202);
+  assert.equal(events[0]?.payload.supersededStopOrderId, 201);
+  assert.equal(events[1]?.payload.event, 'SUPERSEDED_STOP_CLEARED');
+  assert.equal(events[1]?.payload.supersededStopOrderId, null);
 });
 
 test('relay executor health fails closed while starting, stale, or stuck', () => {

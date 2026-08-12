@@ -527,14 +527,27 @@ export function shouldRetryImmediateFlatReconcile(input: {
  */
 export function untrackedActiveOrderIds(
   activeOrderIds: Iterable<number>,
-  liveLotMeta: Iterable<Pick<ExecutionPayload, 'bitfinexOrderId' | 'stopOrderId'>>,
+  liveLotMeta: Iterable<Pick<ExecutionPayload, 'bitfinexOrderId' | 'stopOrderId' | 'supersededStopOrderId'>>,
 ): number[] {
   const untracked = new Set(activeOrderIds);
   for (const meta of liveLotMeta) {
     if (meta.bitfinexOrderId != null) untracked.delete(meta.bitfinexOrderId);
     if (meta.stopOrderId != null) untracked.delete(meta.stopOrderId);
+    if (meta.supersededStopOrderId != null) untracked.delete(meta.supersededStopOrderId);
   }
   return [...untracked];
+}
+
+/** Every stop currently owned by a virtual lot, including a replacement still awaiting cleanup. */
+export function ownedStopOrderIds(
+  meta: Pick<ExecutionPayload, 'stopOrderId' | 'partialFillStopOrderId' | 'supersededPartialStopOrderId' | 'supersededStopOrderId'>,
+): number[] {
+  return [...new Set([
+    meta.stopOrderId,
+    meta.partialFillStopOrderId,
+    meta.supersededPartialStopOrderId,
+    meta.supersededStopOrderId,
+  ].filter((id): id is number => id != null))];
 }
 
 /**
@@ -1017,6 +1030,8 @@ type ExecutionPayload = {
   partialFillStopOrderId?: number | null;
   /** Older reduce-only stop awaiting confirmed cancellation. */
   supersededPartialStopOrderId?: number | null;
+  /** Prior full-lot stop retained as managed until the replacement is confirmed cleared. */
+  supersededStopOrderId?: number | null;
   /** Opt-in, same-trade resting continuation after a verified showcase fill. */
   lateEntryContinuation?: boolean;
   lateEntryShowcaseFill?: number;
@@ -4896,6 +4911,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       execMetaById.set(p.id, m);
       if (m.bitfinexOrderId) managedOrderIds.add(m.bitfinexOrderId);
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
+      if (m.supersededStopOrderId) managedOrderIds.add(m.supersededStopOrderId);
     }
 
     // Refresh the active-order book before ledger reconcile. The early-tick
@@ -9984,6 +10000,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (existing) return;
     }
 
+    const priorStopOrderId = meta.stopOrderId;
     const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
       positionDirection: meta.direction,
       qty,
@@ -9998,8 +10015,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         stopOrderId,
         qty,
         stop_loss_margin_pct: stopLossMarginPct,
+        supersededStopOrderId:
+          priorStopOrderId != null && priorStopOrderId !== stopOrderId
+            ? priorStopOrderId
+            : null,
         source: 'hire',
       });
+      // A stop can be briefly absent from the active-order snapshot while it
+      // is still live. The replacement is durably recorded first, then the
+      // prior stop remains owned until cancellation is confirmed. This avoids
+      // surfacing a second protective stop as a foreign/orphan order.
+      if (priorStopOrderId != null && priorStopOrderId !== stopOrderId) {
+        const priorGone = await this.cancelManagedOrderGone(
+          creds,
+          priorStopOrderId,
+          `STOP_REARM supersede prior stop ${priorStopOrderId} with ${stopOrderId}`,
+        );
+        if (priorGone.gone) {
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: 'SUPERSEDED_STOP_CLEARED',
+            supersededStopOrderId: null,
+          });
+        }
+      }
       this.logger.log(`Hire stop retry ${userId} cycle=${cycleId} @ ${stopPrice.toFixed(2)}`);
     }
   }
@@ -11723,7 +11763,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             meta,
             creds,
             leverage,
-            meta.stopOrderId ? [meta.stopOrderId] : [],
+            ownedStopOrderIds(meta),
             { remainingLedgerAmount },
           );
         } catch (err) {
@@ -11803,7 +11843,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           meta,
           creds,
           leverage,
-          meta.stopOrderId ? [meta.stopOrderId] : [],
+          ownedStopOrderIds(meta),
           { remainingLedgerAmount },
         );
       } catch (err) {
@@ -11823,7 +11863,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           creds,
           cycle.intentEnvelope as SignalIntentEnvelope,
           fillPrice || undefined,
-          meta.stopOrderId ? [meta.stopOrderId] : [],
+          ownedStopOrderIds(meta),
         ).catch(() => {});
         return false;
       }
@@ -13042,22 +13082,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (!meta.qty || !meta.direction) return;
     if (await this.hasParticipantExited(participant.id)) return;
 
-    if (meta.supersededPartialStopOrderId) {
+    const supersededStops = [
+      { id: meta.supersededPartialStopOrderId, kind: 'partial' },
+      { id: meta.supersededStopOrderId, kind: 'full' },
+    ].filter((stop): stop is { id: number; kind: 'partial' | 'full' } => stop.id != null);
+    for (const stop of supersededStops) {
       const gone = await this.cancelManagedOrderGone(
         creds,
-        meta.supersededPartialStopOrderId,
-        `OPEN cleanup superseded partial stop ${meta.supersededPartialStopOrderId}`,
+        stop.id,
+        `OPEN cleanup superseded ${stop.kind} stop ${stop.id}`,
       );
       if (!gone.gone) {
-        const message = `FULL_FILL_SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id}`;
+        const message = `SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id} kind=${stop.kind}`;
         await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
         return;
       }
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
         venue: 'bitfinex',
         source: 'hire',
-        event: 'SUPERSEDED_PARTIAL_STOP_CLEARED',
-        supersededPartialStopOrderId: null,
+        event: stop.kind === 'partial' ? 'SUPERSEDED_PARTIAL_STOP_CLEARED' : 'SUPERSEDED_STOP_CLEARED',
+        ...(stop.kind === 'partial'
+          ? { supersededPartialStopOrderId: null }
+          : { supersededStopOrderId: null }),
       });
     }
 
