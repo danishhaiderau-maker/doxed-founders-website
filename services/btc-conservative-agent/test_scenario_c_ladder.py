@@ -1,8 +1,8 @@
 """
 Scenario C profit-lock ladder contract tests.
 
-Locks in the 2026-08-06 (Danish decision) first-rung change: both lanes
-(CONTINUOUS and TYPE_B_HUNTER_V1) must start with (8, 5).
+Locks in the 2026-08-13 operator decision: both lanes start with the early
+profit-lock rungs (4, 2) and (5, 3), ahead of the existing (8, 5) rung.
 """
 from scenario_c_config import (
     TRAIL_LADDER_SCENARIO_C,
@@ -12,12 +12,12 @@ from scenario_c_config import (
 )
 
 
-def test_continuous_first_rung_is_8_5():
-    assert TRAIL_LADDER_SCENARIO_C[0] == (8, 5)
+def test_continuous_starts_with_early_profit_lock_rungs():
+    assert TRAIL_LADDER_SCENARIO_C[:3] == [(4, 2), (5, 3), (8, 5)]
 
 
-def test_type_b_first_rung_is_8_5():
-    assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6[0] == (8, 5)
+def test_type_b_starts_with_early_profit_lock_rungs():
+    assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6[:3] == [(4, 2), (5, 3), (8, 5)]
 
 
 def test_labels_show_8_5_first():
