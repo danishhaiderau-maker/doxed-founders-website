@@ -1897,9 +1897,10 @@ export function expiredHireShouldRunExitOnly(input: {
 
 /**
  * A fresh signed limit may bypass the slow full reconciliation pass while the
- * account already has same-direction resting copy limits. This remains
- * fail-closed: every exchange order must be owned by a current pending virtual
- * lot, no position may be open, and the configured capacity must have room.
+ * account already has same-direction owned virtual lots. This remains
+ * fail-closed: every resting exchange order must be owned by a PENDING lot;
+ * any merged exchange position must exactly match the attributable OPEN and
+ * protected-partial quantities; and the configured capacity must have room.
  */
 export function sameDirectionPendingSignedFastPathPreflight(input: {
   status: TradingAgentInstanceStatus;
@@ -1913,6 +1914,8 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
     status: SignalCycleStatus;
     direction?: 'LONG' | 'SHORT';
     bitfinexOrderId?: number;
+    qty?: number;
+    partialFillQty?: number | null;
   }>;
   exchangeActiveOrderIds: number[];
 }): boolean {
@@ -1921,33 +1924,48 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
     input.simActive ||
     input.hireExpired ||
     !input.relayArmed ||
-    Math.abs(input.exchangePositionQty) !== 0 ||
     input.virtualLots.length === 0 ||
     input.virtualLots.length >= input.maxConcurrent
   ) {
     return false;
   }
 
-  const ownedOrderIds = new Set<number>();
+  const ownedPendingOrderIds = new Set<number>();
+  let attributableSats = 0;
   for (const lot of input.virtualLots) {
     if (
-      lot.status !== SignalCycleStatus.PENDING_ENTRY ||
-      lot.direction !== input.candidateDirection ||
-      !Number.isInteger(lot.bitfinexOrderId) ||
-      (lot.bitfinexOrderId ?? 0) <= 0
+      lot.direction !== input.candidateDirection
     ) {
       return false;
     }
-    ownedOrderIds.add(lot.bitfinexOrderId!);
+    if (lot.status === SignalCycleStatus.PENDING_ENTRY) {
+      if (!Number.isInteger(lot.bitfinexOrderId) || (lot.bitfinexOrderId ?? 0) <= 0) {
+        return false;
+      }
+      ownedPendingOrderIds.add(lot.bitfinexOrderId!);
+      attributableSats += Math.max(0, btcToSats(lot.partialFillQty ?? 0));
+    } else if (lot.status === SignalCycleStatus.OPEN) {
+      if (!lot.qty || btcToSats(lot.qty) <= 0) return false;
+      attributableSats += btcToSats(lot.qty);
+    } else {
+      return false;
+    }
   }
 
   if (
-    ownedOrderIds.size !== input.virtualLots.length ||
-    input.exchangeActiveOrderIds.length !== ownedOrderIds.size
+    ownedPendingOrderIds.size !== input.virtualLots.filter((lot) => lot.status === SignalCycleStatus.PENDING_ENTRY).length ||
+    input.exchangeActiveOrderIds.length !== ownedPendingOrderIds.size ||
+    !input.exchangeActiveOrderIds.every((orderId) => ownedPendingOrderIds.has(orderId))
   ) {
     return false;
   }
-  return input.exchangeActiveOrderIds.every((orderId) => ownedOrderIds.has(orderId));
+
+  const exchangeSats = btcToSats(Math.abs(input.exchangePositionQty));
+  if (exchangeSats !== attributableSats) return false;
+  if (attributableSats === 0) return input.exchangePositionQty === 0;
+  return input.candidateDirection === 'LONG'
+    ? input.exchangePositionQty > 0
+    : input.exchangePositionQty < 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -4444,9 +4462,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
   /**
    * Low-latency entry path for states that can be proven safe cheaply: either
-   * a fully flat account, or an account whose complete exchange order book is
-   * already owned by same-direction pending virtual lots. Any ambiguity returns
-   * false and the unchanged full reconciliation path runs immediately after.
+   * a fully flat account, or an account whose complete exchange state is
+   * already owned by same-direction virtual lots. Any ambiguity returns false
+   * and the unchanged full reconciliation path runs immediately after.
    */
   private async tryFreshSignedFlatEntry(
     agentId: string,
@@ -4589,8 +4607,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const eligibility = await this.evaluateEntryEligibility(
       creds,
       {
-        open: 0,
-        pending: virtualLots.length,
+        open: virtualLots.filter((lot) => lot.status === SignalCycleStatus.OPEN).length,
+        pending: virtualLots.filter((lot) => lot.status === SignalCycleStatus.PENDING_ENTRY).length,
         direction: flatPreflight ? null : intentDirection,
       },
       managedOrderIds,

@@ -3651,6 +3651,32 @@ test('signed pending fast path allows only fully attributed same-direction resti
   );
 });
 
+test('signed same-direction fast path permits an exactly ledger-backed OPEN lot plus an owned pending entry', () => {
+  const input = {
+    status: TradingAgentInstanceStatus.ACTIVE,
+    simActive: false,
+    hireExpired: false,
+    relayArmed: true,
+    exchangePositionQty: -0.03153,
+    candidateDirection: 'SHORT' as const,
+    maxConcurrent: 3,
+    virtualLots: [
+      { status: SignalCycleStatus.OPEN, direction: 'SHORT' as const, qty: 0.03153 },
+      { status: SignalCycleStatus.PENDING_ENTRY, direction: 'SHORT' as const, bitfinexOrderId: 202, qty: 0.0315 },
+    ],
+    exchangeActiveOrderIds: [202],
+  };
+  assert.equal(sameDirectionPendingSignedFastPathPreflight(input), true);
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({ ...input, exchangePositionQty: -0.02 }),
+    false,
+  );
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({ ...input, exchangePositionQty: 0.03153 }),
+    false,
+  );
+});
+
 test('showcase fill cap permits improvement but never a worse copied entry', () => {
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 64_010, 64_000), 64_000);
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 63_900, 64_000), 63_900);
