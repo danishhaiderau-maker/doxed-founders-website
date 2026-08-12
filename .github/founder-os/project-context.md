@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-feat(dashboard): show completed trade exit cause
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
