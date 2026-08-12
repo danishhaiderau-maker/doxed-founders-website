@@ -3907,6 +3907,85 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       || !meta.direction
     ) return false;
 
+    // An authenticated source fill normally retires its exact resting copy
+    // immediately.  The opt-in late-entry policy is the one exception: when
+    // the *same* showcase trade is still OPEN, retain this exact owned order
+    // and cap it at a no-worse entry instead of letting the fast wake bypass
+    // the continuation branch in monitorEntry.
+    if (lateEntryContinuationEnabled() && this.botBridge.isEnabled()) {
+      const botState = await this.fetchExecutionBotState().catch(() => null);
+      const showcasePosition = (botState?.positions ?? []).find((position) =>
+        tradeIdsMatch(String(position.trade_id ?? ''), freshParticipant.cycle.tradeId),
+      );
+      const showcaseFill = Number(showcasePosition?.entry ?? 0);
+      const retainLateEntry = shouldRetainLateEntryContinuation({
+        enabled: true,
+        showcaseTradeOpen: !!showcasePosition && Number.isFinite(showcaseFill) && showcaseFill > 0,
+        participantStatus: freshParticipant.status,
+        hasManagedOrder: true,
+      });
+      if (retainLateEntry) {
+        const lateEntryStartedAtMs = Date.now();
+        const continuedMeta: ExecutionPayload = {
+          ...meta,
+          lateEntryContinuation: true,
+          lateEntryShowcaseFill: showcaseFill,
+          lateEntryStartedAtMs,
+        };
+        if (
+          !meta.lateEntryContinuation
+          || Math.abs(Number(meta.lateEntryShowcaseFill ?? 0) - showcaseFill) >= 0.01
+        ) {
+          await this.cycles.recordHireExecutionEvent(
+            instance.userId,
+            agentId,
+            freshParticipant.cycle.id,
+            'UPDATE_STOPS',
+            {
+              venue: 'bitfinex',
+              source: 'hire',
+              event: 'LATE_ENTRY_BETTER_ONLY_CONTINUATION',
+              trade_id: freshParticipant.cycle.tradeId,
+              bitfinex_order_id: meta.bitfinexOrderId,
+              lateEntryContinuation: true,
+              lateEntryShowcaseFill: showcaseFill,
+              lateEntryStartedAtMs,
+              late_entry_continuation: true,
+              late_entry_showcase_fill: showcaseFill,
+              late_entry_started_at: new Date(lateEntryStartedAtMs).toISOString(),
+              source_fill_at: sourceFillAt,
+            },
+          );
+        }
+        const cappedLimit = capRelayLimitAtShowcaseFill(
+          meta.direction,
+          meta.limitPrice ?? showcaseFill,
+          showcaseFill,
+        );
+        if (meta.limitPrice && Math.abs(cappedLimit - meta.limitPrice) >= 0.01) {
+          const mark = await this.activeTrading.getMarkPrice();
+          await this.replaceRestingLimitOwned(
+            agentId,
+            instance.userId,
+            freshParticipant.cycle.id,
+            freshParticipant.id,
+            continuedMeta,
+            creds,
+            freshParticipant.cycle.intentEnvelope as SignalIntentEnvelope,
+            {
+              newLimit: cappedLimit,
+              mark,
+              now: Date.now(),
+              chaseLabel: `showcase-fill-cap=${showcaseFill.toFixed(2)}`,
+              event: 'BOT_ANCHOR_CHASE',
+              tradeId: freshParticipant.cycle.tradeId,
+            },
+          );
+        }
+        return true;
+      }
+    }
+
     // A source POSITION_OPENED is terminal for its resting entry generation.
     // Do one authoritative private check, then retire the exact current order
     // immediately. Waiting through a multi-second poll window leaves a copy

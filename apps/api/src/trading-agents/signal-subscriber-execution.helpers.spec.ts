@@ -3054,6 +3054,52 @@ test('signed source fill retires an exchange-proven unfilled pending order witho
   assert.deepEqual(phantom, ['cont-fast-retire']);
 });
 
+test('signed source fill retains and caps the exact pending order when late-entry continuation is enabled', async () => {
+  const previous = process.env.LATE_ENTRY_CONTINUATION_ENABLED;
+  process.env.LATE_ENTRY_CONTINUATION_ENABLED = 'true';
+  try {
+    const events: Array<{ type: string; payload: any }> = [];
+    const replacements: any[] = [];
+    const cycle = {
+      id: 'cycle-fast-late', tradeId: 'cont-fast-late',
+      status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {},
+    };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.prisma = { signalCycleParticipant: {
+      findMany: async () => [{ id: 'participant-fast-late', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+      findUnique: async () => ({ id: 'participant-fast-late', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
+    } };
+    service.exchanges = { getUserCredentials: async () => ({}) };
+    service.botBridge = { isEnabled: () => true };
+    service.fetchExecutionBotState = async () => ({ positions: [{ trade_id: 'cont-fast-late', entry: 64_000 }] });
+    service.loadExecutionMeta = async () => ({
+      direction: 'LONG', bitfinexOrderId: 8404, limitPrice: 64_100, qty: 0.03,
+    });
+    service.activeTrading = { getMarkPrice: async () => 64_050 };
+    service.replaceRestingLimitOwned = async (...args: any[]) => { replacements.push(args); };
+    service.cancelManagedOrderGone = async () => assert.fail('late continuation must not cancel the exact managed order');
+    service.detectEntryFillBeforeCancel = async () => assert.fail('late continuation must not retire before applying its no-worse cap');
+    service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => events.push({ type, payload }) };
+
+    const handled = await service.tryImmediateShowcaseFillReconcile(
+      'agent',
+      { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+      'cont-fast-late',
+      new Date(1_000).toISOString(),
+    );
+    assert.equal(handled, true);
+    assert.deepEqual(events.map((event) => event.payload.event), ['LATE_ENTRY_BETTER_ONLY_CONTINUATION']);
+    assert.equal(events[0].payload.lateEntryShowcaseFill, 64_000);
+    assert.equal(replacements.length, 1);
+    assert.equal(replacements[0][7].newLimit, 64_000);
+    assert.equal(replacements[0][4].lateEntryContinuation, true);
+  } finally {
+    if (previous === undefined) delete process.env.LATE_ENTRY_CONTINUATION_ENABLED;
+    else process.env.LATE_ENTRY_CONTINUATION_ENABLED = previous;
+  }
+});
+
 test('signed source fill promotes a cancel-race execution instead of expiring it', async () => {
   const cycle = {
     id: 'cycle-fast-race', tradeId: 'cont-fast-race',
