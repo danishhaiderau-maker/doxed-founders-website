@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: allow signed entry beside managed stops
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
