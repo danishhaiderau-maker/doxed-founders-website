@@ -9502,6 +9502,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         const intent = p.cycle?.intentEnvelope as SignalIntentEnvelope | null;
 
         if (p.status === SignalCycleStatus.OPEN) {
+          // A close already owns this lot. Never hydrate or re-arm its stop
+          // from a concurrent reconciliation snapshot: the close path will
+          // record the durable terminal event before releasing this fence.
+          if (this.exitingLots.has(p.id)) {
+            this.logger.log(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=showcase_close_in_progress`,
+            );
+            continue;
+          }
           // Re-hydrate runtime if missing so monitorOpenPosition resumes
           // Scenario C mirroring (peak/profit-lock tracking + exit ladder).
           if (!this.positionRuntime.has(p.id)) {
@@ -9658,6 +9667,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           // ensureProtectiveStop uses fillPrice ?? meta.limitPrice as the entry
           // reference for stop placement; pass the verified fillPrice
           // explicitly so it never falls back to a stale limitPrice.
+          // A showcase-close fast path can terminalize this participant while
+          // this reconcile pass is waiting on the exchange stop lookup above.
+          // Re-read its durable state immediately before a write so a stale
+          // OPEN snapshot cannot re-arm a stop after a confirmed exit.
+          const durableParticipant = await this.prisma.signalCycleParticipant.findUnique({
+            where: { id: p.id },
+            select: { status: true },
+          });
+          if (durableParticipant?.status !== SignalCycleStatus.OPEN) {
+            this.logger.log(
+              `[RECONCILE-ADOPT] participant=${p.id} cycle=${cycleId} action=skip reason=terminalized_during_stop_check`,
+            );
+            continue;
+          }
           await this.ensureProtectiveStop(
             agentId,
             userId,
@@ -11370,20 +11393,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
       throw new Error(message);
     }
-    for (const stopOrderId of new Set(stopOrderIds)) {
-      await this.cancelManagedOrderGone(
-        creds,
-        stopOrderId,
-        `EXIT-TARGET cancel stop oid=${stopOrderId} ${userId} participant=${participantId}`,
-      ).then((result) => {
+    if (btcToSats(target.closeQty) === 0) {
+      // No market action is required, so there is no close-SLA critical path
+      // to protect. Retire any stale reduce-only stops before reporting the
+      // ledger-target result.
+      for (const stopOrderId of new Set(stopOrderIds)) {
+        const result = await this.cancelManagedOrderGone(
+          creds,
+          stopOrderId,
+          `EXIT-TARGET already-flat cancel stop oid=${stopOrderId} ${userId} participant=${participantId}`,
+        );
         if (!result.gone) {
           throw new Error(
             `EXIT_TARGET_STOP_CANCEL_FAILED oid=${stopOrderId} reason=${result.reason ?? 'unknown'}`,
           );
         }
-      });
+      }
+      return target;
     }
-    if (btcToSats(target.closeQty) === 0) return target;
 
     const closeSubmitStartedAtMs = Date.now();
     if (target.finalAccountFlatten) {
@@ -11412,6 +11439,32 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `${target.targetAmount.toFixed(8)} BTC after closing ${target.closeQty.toFixed(8)} BTC.`;
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
       throw new Error(message);
+    }
+    // Keep reduce-only protection live until the exchange has confirmed the
+    // market reduction. Cancelling a stop before submitting the close made the
+    // stop-cancel round trip part of the critical path (2.493s in cont-9b),
+    // even though a reduce-only stop cannot reverse a flat position. Cleanup
+    // is now post-confirmation and best effort; orphan reconciliation retains
+    // it as a backstop if Bitfinex has a transient cancel-read failure.
+    for (const stopOrderId of new Set(stopOrderIds)) {
+      try {
+        const result = await this.cancelManagedOrderGone(
+          creds,
+          stopOrderId,
+          `EXIT-TARGET post-close cancel stop oid=${stopOrderId} ${userId} participant=${participantId}`,
+        );
+        if (!result.gone) {
+          this.logger.warn(
+            `EXIT_TARGET_POST_CLOSE_STOP_CANCEL_PENDING oid=${stopOrderId} reason=${result.reason ?? 'unknown'}`,
+          );
+        }
+      } catch (err) {
+        this.logger.warn(
+          `EXIT_TARGET_POST_CLOSE_STOP_CANCEL_ERROR oid=${stopOrderId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
     return {
       ...target,

@@ -607,6 +607,33 @@ test('live close does not await public mark enrichment before reduce-only close 
   assert.doesNotMatch(criticalPromiseAll, /getMarkPrice/);
 });
 
+test('live close keeps reduce-only stop protection through exchange close confirmation', () => {
+  const source = String(
+    (SignalSubscriberExecutionService.prototype as any).closeParticipantPositionToLedgerTarget,
+  );
+  const submitAt = source.indexOf('submitPositionFlatten');
+  const fallbackSubmitAt = source.indexOf('submitMarketClose');
+  const confirmationAt = source.indexOf('waitForMarketCloseConfirmation');
+  const postCloseCancelAt = source.indexOf('EXIT-TARGET post-close cancel stop');
+  assert.ok(submitAt >= 0);
+  assert.ok(fallbackSubmitAt >= 0);
+  assert.ok(confirmationAt > submitAt);
+  assert.ok(postCloseCancelAt > confirmationAt);
+});
+
+test('reconcile adoption cannot re-arm a lot while a showcase close owns it', () => {
+  const source = String(
+    (SignalSubscriberExecutionService.prototype as any).reconcileAdoptLoop,
+  );
+  const closeFenceAt = source.indexOf('showcase_close_in_progress');
+  const rearmAt = source.indexOf('ensureProtectiveStop');
+  const durableStatusFenceAt = source.indexOf('terminalized_during_stop_check');
+  assert.ok(closeFenceAt >= 0);
+  assert.ok(rearmAt > closeFenceAt);
+  assert.ok(durableStatusFenceAt > closeFenceAt);
+  assert.ok(rearmAt > durableStatusFenceAt);
+});
+
 test('authenticated close prewake uses carried terminal evidence without polling Fly or waiting for Neon', async () => {
   const service = new SignalSubscriberExecutionService(
     {} as never, {} as never, {} as never, {} as never, {} as never,
