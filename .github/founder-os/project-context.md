@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): keep signed capacity snapshot across one tick
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
