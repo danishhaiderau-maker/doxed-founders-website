@@ -76,6 +76,10 @@ const relayEnv = {
   // Signed webhooks are primary; this is the documented crash/backfill poll.
   SIGNAL_CYCLE_POLL_MS: '2000',
   BITFINEX_COPY_POLICY_VERSION: '4',
+  // Explicitly enable the bounded source-fill catch-up policy in production.
+  // Without this, the code correctly falls back to strict cancellation, which
+  // is incompatible with the approved 5 bps catch-up lifecycle.
+  AGGRESSIVE_CATCHUP_ENABLED: 'true',
 };
 
 const homeBotUrl = CANONICAL_FLY_BOT_PUBLIC_URL;
