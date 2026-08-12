@@ -935,6 +935,25 @@ export function shouldRetainLateEntryContinuation(input: {
     && input.hasManagedOrder;
 }
 
+/**
+ * The authenticated fill wake durably marks an in-bounds aggressive catch-up
+ * before it updates the exchange order. A concurrent snapshot pass must
+ * preserve that current order while the same source position remains open.
+ */
+export function shouldRetainActiveAggressiveCatchup(input: {
+  enabled: boolean;
+  catchupActive: boolean;
+  showcaseTradeOpen: boolean;
+  participantStatus: SignalCycleStatus;
+  hasManagedOrder: boolean;
+}): boolean {
+  return input.enabled
+    && input.catchupActive
+    && input.showcaseTradeOpen
+    && input.participantStatus === SignalCycleStatus.PENDING_ENTRY
+    && input.hasManagedOrder;
+}
+
 export function partialEntryFillDisposition(input: {
   intendedQty: number;
   filledQty: number;
@@ -1065,6 +1084,10 @@ type ExecutionPayload = {
   lateEntryContinuation?: boolean;
   lateEntryShowcaseFill?: number;
   lateEntryStartedAtMs?: number;
+  /** A verified, bounded catch-up replacement is now the owner of this source-open trade. */
+  aggressiveCatchupActive?: boolean;
+  aggressiveCatchupSourceFill?: number;
+  aggressiveCatchupStartedAtMs?: number;
 };
 
 type RepairableLotMeta = Pick<ExecutionPayload, 'qty' | 'direction'>;
@@ -4056,6 +4079,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             catchup_max_adverse_bps: 5,
             local_mark: mark,
             source_fill_at: sourceFillAt,
+            aggressiveCatchupActive: true,
+            aggressiveCatchupSourceFill: showcaseFill,
+            aggressiveCatchupStartedAtMs: Date.now(),
           },
         );
         await this.replaceRestingLimitOwned(
@@ -8643,6 +8669,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         (position) => tradeIdsMatch(String(position.trade_id ?? ''), showcaseTradeId),
       );
       const showcaseFill = Number(showcasePosition?.entry ?? 0);
+      // A signed POSITION_OPENED wake may replace this same resting order with
+      // a bounded catch-up limit while this normal snapshot pass is waiting on
+      // its participant lane.  Once that durable marker exists, the source is
+      // deliberately still OPEN and the old missed-fill branch must never
+      // cancel the newly submitted catch-up order.  POSITION_CLOSED / TTL
+      // remains terminal and uses the existing exact-order cancellation path.
+      const retainActiveAggressiveCatchup = shouldRetainActiveAggressiveCatchup({
+        enabled: aggressiveCatchupEnabled(),
+        catchupActive: meta.aggressiveCatchupActive === true,
+        showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
+        participantStatus: participant.status,
+        hasManagedOrder: !!orderId,
+      });
+      if (retainActiveAggressiveCatchup) {
+        this.logger.log(
+          `Aggressive catch-up active ${userId} cycle=${cycle.id}: source remains open; retaining managed order ${orderId}`,
+        );
+        return;
+      }
       retainLateEntry = shouldRetainLateEntryContinuation({
         // Better-only continuation was replaced by the authenticated bounded
         // catch-up path above. Snapshot reconciliation must never resurrect it.

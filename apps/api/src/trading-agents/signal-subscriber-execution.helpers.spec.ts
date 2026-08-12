@@ -43,6 +43,7 @@ import {
   showcasePositionAbsenceActionable,
   pendingCopyShowcaseDisposition,
   shouldRetainLateEntryContinuation,
+  shouldRetainActiveAggressiveCatchup,
   showcaseAbsentWithinOrderPropagationGrace,
   shouldDeferCancelByExchangeForReplacement,
   pendingEntryOwnershipAdvanced,
@@ -136,6 +137,25 @@ test('late-entry continuation is opt-in and retains only the same live showcase 
       participantStatus: SignalCycleStatus.OPEN,
       hasManagedOrder: true,
     }),
+    false,
+  );
+});
+
+test('active bounded catch-up retains its managed order only while the exact source trade remains open', () => {
+  const base = {
+    enabled: true,
+    catchupActive: true,
+    showcaseTradeOpen: true,
+    participantStatus: SignalCycleStatus.PENDING_ENTRY,
+    hasManagedOrder: true,
+  };
+  assert.equal(shouldRetainActiveAggressiveCatchup(base), true);
+  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, enabled: false }), false);
+  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, catchupActive: false }), false);
+  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, showcaseTradeOpen: false }), false);
+  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, hasManagedOrder: false }), false);
+  assert.equal(
+    shouldRetainActiveAggressiveCatchup({ ...base, participantStatus: SignalCycleStatus.OPEN }),
     false,
   );
 });
