@@ -2825,6 +2825,40 @@ test('rapid signed reprices execute only against the newest durable order genera
   assert.equal(ownedArgs[7].newLimit, 64_050, 'use the newest signed source limit, not the stale wake target');
 });
 
+test('duplicate signed reprice does not churn an already-correct durable order id', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  const intent = {
+    action: 'ENTER', signalId: 'cont-duplicate-reprice', trade_id: 'cont-duplicate-reprice', direction: 'SHORT',
+    entry: { mode: 'EXACT_LIMIT', reference: 'SHOWCASE_EXACT_LIMIT', exact_limit_price: 64_010, exact_qty_btc: 0.03 },
+    context: {
+      signed_showcase_event: true, showcase_event: 'LIMIT_UPDATED',
+      showcase_event_at: new Date(Date.now() - 100).toISOString(),
+      platform_received_at: new Date(Date.now() - 50).toISOString(),
+      entry_limit_policy: 'deterministic_0.1pct_offset_v1',
+    },
+  };
+  service.prisma = { signalCycleParticipant: { findUnique: async () => ({
+    id: 'participant-duplicate', cycleId: 'cycle-duplicate', status: SignalCycleStatus.PENDING_ENTRY,
+    cycle: { id: 'cycle-duplicate', tradeId: 'cont-duplicate-reprice', status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: intent },
+  }) } };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 9002, limitPrice: 64_010, qty: 0.03,
+  });
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  let replacements = 0;
+  service.replaceRestingLimitOwned = async () => { replacements += 1; };
+
+  await service.replaceRestingLimit(
+    'agent', 'user', 'cycle-duplicate', 'participant-duplicate',
+    { direction: 'SHORT', bitfinexOrderId: 9001, limitPrice: 64_000, qty: 0.03 },
+    {}, { action: 'ENTER' },
+    { newLimit: 64_000, mark: 64_020, now: Date.now(), chaseLabel: '', event: 'BOT_ANCHOR_CHASE', tradeId: 'cont-duplicate-reprice' },
+  );
+
+  assert.equal(replacements, 0, 'the already-correct replacement must not be cancelled and recreated');
+});
+
 test('money lane makes stale gone-order monitor wait for replacement persistence and never expire it', async () => {
   const events: string[] = [];
   const oldIntent = {

@@ -10368,6 +10368,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         return;
       }
 
+      // The direct signed wake and the regular tick can both reach this
+      // serialized lane for the same source revision.  Once the first owner
+      // has durably replaced the order, the second must be a true no-op: do
+      // not cancel an already-correct new order just to submit the identical
+      // limit again under a different exchange order id.
+      if (Math.abs(durableOpts.newLimit - durableMeta.limitPrice) < 0.01) {
+        this.logger.log(
+          `Limit replacement skipped participant=${participantId}: durable order already matches target ${durableOpts.newLimit.toFixed(2)}`,
+        );
+        return;
+      }
+
       await this.replaceRestingLimitOwned(
         agentId,
         userId,
