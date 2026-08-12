@@ -40,6 +40,7 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
       const exchangeId =
         payload.exchangeOrderId ??
         payload.exchange_order_id ??
+        payload.bitfinexOrderId ??
         payload.bitfinex_order_id ??
         payload.orderId ??
         payload.order_id;

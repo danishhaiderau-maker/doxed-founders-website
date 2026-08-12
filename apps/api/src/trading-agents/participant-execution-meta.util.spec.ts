@@ -29,3 +29,30 @@ test('participant execution metadata does not mark virtual-only events as exchan
 
   assert.equal(meta.exchangeProven, false);
 });
+
+test('participant execution metadata folds the newest camel-case Bitfinex replacement over the original order', () => {
+  const meta = foldParticipantExecutionMeta([
+    {
+      eventType: 'ORDER_PLACED',
+      payload: {
+        bitfinexOrderId: 241852659810,
+        limit_price: 64_127.81,
+        qty: 0.03115,
+        direction: 'LONG',
+      },
+    },
+    {
+      eventType: 'UPDATE_STOPS',
+      payload: {
+        event: 'BOT_ANCHOR_CHASE',
+        bitfinexOrderId: 241852964885,
+        limitPrice: 64_187.26,
+      },
+    },
+  ]);
+
+  assert.equal(meta.limitPrice, 64_187.26);
+  assert.equal(meta.qty, 0.03115);
+  assert.equal(meta.direction, 'LONG');
+  assert.equal(meta.exchangeProven, true);
+});
