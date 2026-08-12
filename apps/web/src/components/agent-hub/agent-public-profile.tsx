@@ -762,6 +762,14 @@ export function AgentPublicProfile({
                   <div className="flex flex-wrap items-center gap-2">
                     <h1 className="text-2xl font-bold sm:text-3xl">{agent.name}</h1>
                     <span className="text-blue-400" title="Verified">✓</span>
+                    {slug === 'conservative-btc' && Number.isFinite(dashboard.currentPrice) && dashboard.currentPrice > 0 ? (
+                      <span
+                        className="rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs font-semibold tabular-nums text-amber-200 ring-1 ring-amber-500/30"
+                        title="Latest BTC price from the live showcase snapshot"
+                      >
+                        BTC ${dashboard.currentPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                      </span>
+                    ) : null}
                     <span
                       className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${deskHeroBadge.className}`}
                     >

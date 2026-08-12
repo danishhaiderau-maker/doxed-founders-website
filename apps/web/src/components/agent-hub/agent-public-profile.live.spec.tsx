@@ -196,6 +196,7 @@ test('signed-in live desk shows each Bitfinex entity once and no showcase panels
   assert.equal(count(html, 'Exchange net (actual)'), 1);
   assert.match(html, /Your Bitfinex live session/);
   assert.match(html, /Completed trades/);
+  assert.match(html, /BTC \$65,000/);
 
   const adminShowcaseHtml = renderToStaticMarkup(
     React.createElement(AgentPublicProfile, {
