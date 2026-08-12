@@ -4471,12 +4471,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     instance: TradingAgentInstance,
     preferredTradeId?: string,
   ): Promise<boolean> {
+    const reject = (reason: string): false => {
+      this.logger.warn(
+        `[SIGNED-ENTRY] rejected trade=${preferredTradeId ?? '?'} instance=${instance.id}: ${reason}`,
+      );
+      return false;
+    };
     const armedAt = relayArmTimestampMs(instance.dashboardState);
-    if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return false;
-    if (isCopyRelaySimActive(instance.dashboardState)) return false;
-    if (instance.expiresAt && instance.expiresAt.getTime() <= Date.now()) return false;
-    if (armedAt == null) return false;
-    if (intentMirrorKillSwitchActive() || intentMirrorDryRunActive(instance)) return false;
+    if (instance.status !== TradingAgentInstanceStatus.ACTIVE) return reject(`instance-status=${instance.status}`);
+    if (isCopyRelaySimActive(instance.dashboardState)) return reject('relay-sim-active');
+    if (instance.expiresAt && instance.expiresAt.getTime() <= Date.now()) return reject('hire-expired');
+    if (armedAt == null) return reject('relay-not-armed');
+    if (intentMirrorKillSwitchActive() || intentMirrorDryRunActive(instance)) return reject('intent-mirror-disabled');
 
     const cycleQuery = async () => this.prisma.signalCycle.findMany({
       where: {
@@ -4502,7 +4508,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     );
     const marginCapPromise = loadSubscriberMaxMarginUsd(this.prisma);
     const creds = await credsPromise;
-    if (!creds) return false;
+    if (!creds) return reject('credentials-missing');
 
     // Pre-wake can reach the worker while the API is still committing the
     // exact cycle. Overlap every read-only account proof with that wait; no
@@ -4537,12 +4543,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         candidate.intentEnvelope,
       ) != null;
     });
-    if (!cycle) return false;
+    if (!cycle) return reject('no-fresh-signed-intent');
 
     const [activeOrders, exchangePosition, virtualLots, freshInstance, availableUsd, markPrice] = preflight;
-    if (!freshInstance || availableUsd == null || markPrice == null) return false;
+    if (!freshInstance) return reject('fresh-instance-missing');
+    if (availableUsd == null) return reject('derivatives-balance-unavailable');
+    if (markPrice == null) return reject('mark-price-unavailable');
     if (!isCycleFreshForRelayArm(freshInstance.dashboardState, cycle.createdAt)) {
-      return false;
+      return reject(`cycle-not-fresh cycle=${cycle.id} created=${cycle.createdAt.toISOString()}`);
     }
 
     const flatPreflight = flatSignedFastPathPreflight({
@@ -4558,7 +4566,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       });
 
     const intentDirection = (cycle.intentEnvelope as SignalIntentEnvelope).direction;
-    if (!intentDirection) return false;
+    if (!intentDirection) return reject(`intent-direction-missing cycle=${cycle.id}`);
     // The normal executor cycle refreshes this owner-authenticated snapshot at
     // roughly a 12s cadence.  Keep it valid across one complete cycle: a 10s
     // window made an otherwise exact same-direction entry fall back to the
@@ -4569,7 +4577,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // A non-flat fast path still needs a canonical capacity snapshot; falling
     // back to the default could overbook if the dashboard cap was lowered.
     // The full reconciliation path fetches it authoritatively.
-    if (!flatPreflight && !cachedState) return false;
+    if (!flatPreflight && !cachedState) return reject('nonflat-capacity-snapshot-unavailable');
     const maxConcurrent = resolveMaxConcurrentCopySignals({
       botMaxActiveSignals: cachedState?.max_active_signals,
       envOverride: process.env.SUBSCRIBER_MAX_CONCURRENT_SIGNALS,
@@ -4597,7 +4605,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           virtualLots: virtualLotMeta,
           exchangeActiveOrderIds: activeOrders.map((order) => order.id),
         });
-    if (!flatPreflight && !sameDirectionPendingPreflight) return false;
+    if (!flatPreflight && !sameDirectionPendingPreflight) {
+      return reject(`same-direction-preflight-failed lots=${virtualLots.length} activeOrders=${activeOrders.length}`);
+    }
 
     // The live exchange book above is authoritative and every non-flat order
     // was matched to an owned virtual lot. Clear only a stale cached orphan
@@ -4625,7 +4635,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       availableUsd ?? undefined,
       true,
     );
-    if (!eligibility.canEnter) return false;
+    if (!eligibility.canEnter) return reject(`eligibility=${eligibility.reason ?? 'unknown'}`);
 
     const placed = await this.placeEntry(
       agentId,
@@ -4645,6 +4655,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (placed) {
       this.logger.log(
         `[SIGNED-${flatPreflight ? 'FLAT' : 'SAME-DIR'}-FAST] placed trade=${cycle.tradeId} user=${instance.userId}`,
+      );
+    } else {
+      this.logger.warn(
+        `[SIGNED-ENTRY] placement declined trade=${cycle.tradeId} user=${instance.userId} after fast preflight`,
       );
     }
     return placed;
