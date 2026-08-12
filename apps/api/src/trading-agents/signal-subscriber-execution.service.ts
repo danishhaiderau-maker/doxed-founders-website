@@ -867,6 +867,34 @@ export function capRelayLimitAtShowcaseFill(
     : Math.max(currentLimit, showcaseFill);
 }
 
+/**
+ * Optional continuation policy for a resting copy order after its exact
+ * showcase trade has filled.  It is deliberately disabled by default: when
+ * enabled, the existing order may remain only while that same showcase
+ * position is OPEN, and applyLimitChase clamps it to a no-worse limit.
+ *
+ * This is not market catch-up.  A SHORT may sell only at the showcase fill or
+ * higher; a LONG may buy only at the showcase fill or lower.  The source exit
+ * still owns cancellation and a later real fill still uses the normal
+ * protection/terminal funnel.
+ */
+function lateEntryContinuationEnabled(): boolean {
+  const value = (process.env.LATE_ENTRY_CONTINUATION_ENABLED ?? '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'on' || value === 'yes';
+}
+
+export function shouldRetainLateEntryContinuation(input: {
+  enabled: boolean;
+  showcaseTradeOpen: boolean;
+  participantStatus: SignalCycleStatus;
+  hasManagedOrder: boolean;
+}): boolean {
+  return input.enabled
+    && input.showcaseTradeOpen
+    && input.participantStatus === SignalCycleStatus.PENDING_ENTRY
+    && input.hasManagedOrder;
+}
+
 export function partialEntryFillDisposition(input: {
   intendedQty: number;
   filledQty: number;
@@ -989,6 +1017,10 @@ type ExecutionPayload = {
   partialFillStopOrderId?: number | null;
   /** Older reduce-only stop awaiting confirmed cancellation. */
   supersededPartialStopOrderId?: number | null;
+  /** Opt-in, same-trade resting continuation after a verified showcase fill. */
+  lateEntryContinuation?: boolean;
+  lateEntryShowcaseFill?: number;
+  lateEntryStartedAtMs?: number;
 };
 
 type RepairableLotMeta = Pick<ExecutionPayload, 'qty' | 'direction'>;
@@ -8391,11 +8423,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     await this.cancelAbsurdPendingOrders(creds, userId);
 
+    let retainLateEntry = false;
     if (this.botBridge.isEnabled() && cycle.tradeId) {
       const botState = await this.fetchExecutionBotState();
       const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId;
       const abandon = this.showcaseEntryAbandoned(botState, showcaseTradeId);
-      if (abandon.abandoned) {
+      const showcasePosition = (botState?.positions ?? []).find(
+        (position) => tradeIdsMatch(String(position.trade_id ?? ''), showcaseTradeId),
+      );
+      const showcaseFill = Number(showcasePosition?.entry ?? 0);
+      retainLateEntry = shouldRetainLateEntryContinuation({
+        enabled: lateEntryContinuationEnabled(),
+        showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
+        participantStatus: participant.status,
+        hasManagedOrder: !!orderId,
+      });
+      if (retainLateEntry) {
+        // A source position is still live.  Do not call the phantom-cancel
+        // path: after the lane releases, applyLimitChase freezes/reprices the
+        // same owned order at the no-worse showcase-fill boundary.  The source
+        // POSITION_CLOSED/TTL path still cancels it immediately.
+        if (
+          !meta.lateEntryContinuation
+          || Math.abs(Number(meta.lateEntryShowcaseFill ?? 0) - showcaseFill) >= 0.01
+        ) {
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: 'LATE_ENTRY_BETTER_ONLY_CONTINUATION',
+            trade_id: showcaseTradeId,
+            bitfinex_order_id: orderId,
+            lateEntryContinuation: true,
+            lateEntryShowcaseFill: showcaseFill > 0 ? showcaseFill : undefined,
+            lateEntryStartedAtMs: Date.now(),
+            late_entry_continuation: true,
+            late_entry_showcase_fill: showcaseFill > 0 ? showcaseFill : undefined,
+            late_entry_started_at: new Date().toISOString(),
+          });
+        }
+        chaseCurrentOrder = true;
+      }
+      if (abandon.abandoned && !retainLateEntry) {
         if (
           abandon.reason === 'SHOWCASE_ABSENT'
           && showcaseAbsentWithinOrderPropagationGrace(showcaseTradeId, intent)
@@ -8619,7 +8687,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
     }
 
-    if (cycle.expiresAt && cycle.expiresAt < new Date()) {
+    if (!retainLateEntry && cycle.expiresAt && cycle.expiresAt < new Date()) {
       // Cancel-race fill check (always on — see SHOWCASE_CYCLE_CLOSED branch).
       {
         const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);

@@ -39,6 +39,7 @@ import {
   pendingFillReconcileDecision,
   showcasePositionAbsenceActionable,
   pendingCopyShowcaseDisposition,
+  shouldRetainLateEntryContinuation,
   showcaseAbsentWithinOrderPropagationGrace,
   shouldDeferCancelByExchangeForReplacement,
   pendingEntryOwnershipAdvanced,
@@ -91,6 +92,45 @@ test('exact showcase quantity is preserved below the subscriber cap', () => {
     requiredMarginUsd: 0.02361 * 63_614.55 / 100,
     capQty: 0.03143,
   });
+});
+
+test('late-entry continuation is opt-in and retains only the same live showcase trade', () => {
+  assert.equal(
+    shouldRetainLateEntryContinuation({
+      enabled: false,
+      showcaseTradeOpen: true,
+      participantStatus: SignalCycleStatus.PENDING_ENTRY,
+      hasManagedOrder: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRetainLateEntryContinuation({
+      enabled: true,
+      showcaseTradeOpen: true,
+      participantStatus: SignalCycleStatus.PENDING_ENTRY,
+      hasManagedOrder: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRetainLateEntryContinuation({
+      enabled: true,
+      showcaseTradeOpen: false,
+      participantStatus: SignalCycleStatus.PENDING_ENTRY,
+      hasManagedOrder: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRetainLateEntryContinuation({
+      enabled: true,
+      showcaseTradeOpen: true,
+      participantStatus: SignalCycleStatus.OPEN,
+      hasManagedOrder: true,
+    }),
+    false,
+  );
 });
 
 test('exact showcase quantity exceeding the subscriber cap is blocked, never resized', () => {
@@ -2502,6 +2542,47 @@ test('showcase fill makes a still-pending copy fail closed even while relay is p
     'MISSED_SHOWCASE_FILL',
   );
   assert.equal(pendingCopyShowcaseDisposition(null, 'cont-filled'), 'SOURCE_UNAVAILABLE');
+});
+
+test('opt-in late entry retains the exact pending order while its showcase trade remains open', async () => {
+  const prior = process.env.LATE_ENTRY_CONTINUATION_ENABLED;
+  process.env.LATE_ENTRY_CONTINUATION_ENABLED = 'true';
+  const events: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  let cancelled = 0;
+  let chased = 0;
+  const intent = { action: 'ENTER', trade_id: 'cont-late-entry', risk: {}, context: {} };
+  const meta = { direction: 'SHORT' as const, bitfinexOrderId: 6011, limitPrice: 64_000, qty: 0.03 };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.replacementMissingProbe = new Map();
+  service.loadExecutionMeta = async () => meta;
+  service.botBridge = { isEnabled: () => true };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.fetchExecutionBotState = async () => ({ positions: [{ trade_id: 'cont-late-entry', entry: 64_020 }] });
+  service.resolveShowcaseMirrorTradeId = () => 'cont-late-entry';
+  service.showcaseEntryAbandoned = () => ({ abandoned: true, reason: 'MISSED_SHOWCASE_FILL' });
+  service.cancelManagedOrderGone = async () => { cancelled += 1; return { gone: true, reason: 'CANCELLED', attempts: 1 }; };
+  service.applyLimitChase = async (...args: unknown[]) => { chased += 1; assert.equal(args[7], 'cont-late-entry'); };
+  service.prisma = {
+    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-late', status: SignalCycleStatus.PENDING_ENTRY }) },
+    signalCycle: { findUnique: async () => ({ id: 'cycle-late', tradeId: 'cont-late-entry', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY }) },
+  };
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string, payload: Record<string, unknown>) => events.push({ event, payload }) };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+  try {
+    await service.monitorEntry(
+      'agent', 'user',
+      { id: 'cycle-late', tradeId: 'cont-late-entry', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+      { id: 'participant-late', status: SignalCycleStatus.PENDING_ENTRY }, meta, {}, new Set<number>([6011]), false,
+    );
+    assert.equal(cancelled, 0);
+    assert.equal(chased, 1);
+    assert.deepEqual(events.map((entry) => entry.event), ['UPDATE_STOPS']);
+    assert.equal(events[0]?.payload.event, 'LATE_ENTRY_BETTER_ONLY_CONTINUATION');
+    assert.equal(events[0]?.payload.trade_id, 'cont-late-entry');
+  } finally {
+    if (prior == null) delete process.env.LATE_ENTRY_CONTINUATION_ENABLED;
+    else process.env.LATE_ENTRY_CONTINUATION_ENABLED = prior;
+  }
 });
 
 test('fresh source fill retains the managed copy order during settlement grace', () => {
