@@ -15,6 +15,7 @@ import {
   BITFINEX_POSITION_CLOSE_FLAG,
   BITFINEX_REDUCE_ONLY_FLAG,
   BITFINEX_SAFE_CLOSE_FLAGS,
+  BitfinexTradingClient,
 } from '../exchanges/bitfinex-api.client';
 import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
@@ -2780,6 +2781,64 @@ test('stale monitor ownership recognizes a durable order or intent revision adva
   assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1002, newIntent), true);
   assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1001, newIntent), true);
   assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1001, oldIntent), false);
+});
+
+test('Bitfinex reprice amends the exact resting order in place without a cancel gap', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const activeTrading: any = Object.create(BitfinexTradingClient.prototype);
+  const calls: string[] = [];
+  activeTrading.findOrder = async () => ({ id: 9_002, amountOrig: -0.031, amount: -0.031 });
+  activeTrading.updateLimitOrder = async (_creds: unknown, input: { orderId: number; price: number }) => {
+    calls.push(`update:${input.orderId}:${input.price}`);
+    return input.orderId;
+  };
+  activeTrading.cancelOrder = async () => {
+    calls.push('cancel');
+  };
+  activeTrading.submitLimitOrder = async () => {
+    calls.push('submit');
+    return 9_003;
+  };
+  service.activeTrading = activeTrading;
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  service.positionRuntime = new Map();
+  service.hydrateRuntime = () => ({});
+  let persisted: any = null;
+  service.cycles = {
+    recordHireExecutionEvent: async (_userId: string, _agentId: string, _cycleId: string, _action: string, payload: Record<string, unknown>) => {
+      persisted = payload;
+    },
+  };
+
+  await service.replaceRestingLimitOwned(
+    'agent-native-update',
+    'user-native-update',
+    'cycle-native-update',
+    'participant-native-update',
+    {
+      bitfinexOrderId: 9_002,
+      direction: 'SHORT',
+      limitPrice: 64_100,
+      qty: 0.031,
+      limitChaseCount: 1,
+    },
+    { apiKey: 'redacted', apiSecret: 'redacted' },
+    { action: 'ENTER', direction: 'SHORT', entry: {}, risk: { max_margin_usd: 20 } },
+    {
+      newLimit: 64_075,
+      mark: 64_080,
+      now: 1_700_000_000_000,
+      chaseLabel: 'signed-limit=64075.00',
+      event: 'BOT_ANCHOR_CHASE',
+      tradeId: 'cont-native-update',
+    },
+  );
+
+  assert.deepEqual(calls, ['update:9002:64075']);
+  assert.equal(persisted?.bitfinexOrderId, 9_002);
+  assert.equal(persisted?.limitPrice, 64_075);
+  assert.equal(persisted?.replacementMode, 'BITFINEX_IN_PLACE_UPDATE');
+  assert.equal(persisted?.limitChaseCount, 2);
 });
 
 test('rapid signed reprices execute only against the newest durable order generation', async () => {
