@@ -41,6 +41,12 @@ def test_continuous_duplicate_band_is_fixed_twenty_dollars_without_percentage_fa
     assert "allow_percentage_fallback=not continuous_pair" in duplicate_scan
 
 
+def test_final_hard_stop_is_thirteen_percent_margin_loss():
+    assert "MAX_SL_MARGIN_PCT = 13.0" in SOURCE
+    helper = _route("sl_price_pct", "SL_PCT = sl_price_pct")
+    assert "MAX_SL_MARGIN_PCT / (lev * 100.0)" in helper
+
+
 def test_analyzer_session_is_opaque_and_narrowly_scoped():
     helper = _route("_analyzer_view_cookie_value", "def _analyzer_view_authed")
     assert "hmac.new(" in helper

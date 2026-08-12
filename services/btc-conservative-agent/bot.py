@@ -4521,7 +4521,9 @@ def compute_exposure():
 FIXED_MARGIN_USDT = 20.0
 # v79: always deploy full $20 margin — conviction/regime/ADX scaling disabled (logged for analyzer)
 FLAT_MARGIN_EVERY_TRADE = True
-MAX_SL_MARGIN_PCT = 30.0
+# Final fail-safe loss cap for every Continuous position.  Thesis/ladder exits
+# may close earlier, but no trade may remain open beyond this margin loss.
+MAX_SL_MARGIN_PCT = 13.0
 
 def sl_price_pct(leverage: int = None) -> float:
     lev = max(int(leverage or _state_leverage()), 1)
