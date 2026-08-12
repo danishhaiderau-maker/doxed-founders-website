@@ -78,6 +78,12 @@ function orderSide(amount: number): string {
   return amount > 0 ? 'LONG' : 'SHORT';
 }
 
+/** Keep an opted-in late entry recognisable after it has become terminal. */
+function lateEntryLifecycleLabel(reason: string | null | undefined): string {
+  const suffix = typeof reason === 'string' && reason.trim() ? `: ${reason.trim()}` : '';
+  return `LATE_ENTRY_BETTER_ONLY_CONTINUATION${suffix}`;
+}
+
 function pendingOrderMatchScore(
   exchangeOrder: TradingAgentDashboardState['liveBook']['pendingOrders'][number],
   participantOrder: {
@@ -192,7 +198,9 @@ export function mapSubscriberExchangeLiveBook(input: {
         direction,
         limitPrice,
         ageMin,
-        reason: row.terminalReason ?? row.cycle.showcaseExitReason ?? 'EXPIRED',
+        reason: row.lateEntryContinuation
+          ? lateEntryLifecycleLabel(row.terminalReason ?? row.cycle.showcaseExitReason ?? 'EXPIRED')
+          : row.terminalReason ?? row.cycle.showcaseExitReason ?? 'EXPIRED',
         confidence: Math.round(Number(intent.confidence ?? 0)),
         mode: 'LIVE_COPY',
       });
@@ -329,7 +337,9 @@ export function mapSubscriberExchangeLiveBook(input: {
         grossUsd: Number(row.pnlUsd),
         tradeFeesUsd: 0,
         fundingUsd: 0,
-        exitReason: row.cycle.showcaseExitReason ?? row.terminalReason ?? null,
+        exitReason: row.lateEntryContinuation
+          ? lateEntryLifecycleLabel(row.cycle.showcaseExitReason ?? row.terminalReason)
+          : row.cycle.showcaseExitReason ?? row.terminalReason ?? null,
         aiBand: row.exchangeProven === true ? 'EXCHANGE_VERIFIED' : 'NEON_CLOSED',
       });
     }

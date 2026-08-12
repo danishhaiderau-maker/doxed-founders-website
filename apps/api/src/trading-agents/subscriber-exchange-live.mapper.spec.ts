@@ -126,6 +126,43 @@ test('labels an opted-in late entry continuation separately from a normal pendin
   assert.equal(book.activeSignals[0]?.outcome, 'LATE_ENTRY_BETTER_ONLY_CONTINUATION');
 });
 
+test('keeps the late-entry label visible after an unfilled continuation is cancelled', () => {
+  const now = new Date('2026-08-12T07:00:00.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [
+      {
+        status: SignalCycleStatus.EXPIRED,
+        fillPrice: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlMarginPct: null,
+        limitPrice: 64_200,
+        qty: 0.031,
+        stopLoss: null,
+        takeProfit: null,
+        terminalReason: 'SHOWCASE_CYCLE_CLOSED',
+        lateEntryContinuation: true,
+        createdAt: now,
+        updatedAt: new Date('2026-08-12T07:03:00.000Z'),
+        cycle: {
+          tradeId: 'cont-late-entry-terminal',
+          status: SignalCycleStatus.CLOSED,
+          intentEnvelope: { direction: 'SHORT' },
+          showcaseExitReason: 'THESIS_FAST_CUT',
+          createdAt: now,
+        },
+      },
+    ],
+  });
+
+  assert.equal(
+    book.expiredOrders[0]?.reason,
+    'LATE_ENTRY_BETTER_ONLY_CONTINUATION: SHOWCASE_CYCLE_CLOSED',
+  );
+});
+
 test('keeps genuinely separate pending orders visible', () => {
   const now = new Date('2026-07-23T10:55:53.717Z');
   const book = mapSubscriberExchangeLiveBook({
