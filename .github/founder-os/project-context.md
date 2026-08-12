@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): retain late entry on source fill wake
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
