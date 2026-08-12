@@ -50,6 +50,24 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
       ...(typeof close.platformReceivedAtMs === 'number' ? { platformReceivedAtMs: close.platformReceivedAtMs } : {}),
     };
   } else if (raw.signedClose != null) return null;
+  let signedOpen: RelayExecutorWakeRequest['signedOpen'];
+  if (raw.trigger === 'POSITION_OPENED') {
+    if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
+    if (!raw.signedOpen || typeof raw.signedOpen !== 'object' || Array.isArray(raw.signedOpen)) return null;
+    const open = raw.signedOpen as Record<string, unknown>;
+    if (
+      typeof open.fillPrice !== 'number' || !Number.isFinite(open.fillPrice) || open.fillPrice <= 0
+      || typeof open.sourceEventAtMs !== 'number' || !Number.isFinite(open.sourceEventAtMs)
+      || typeof open.platformReceivedAtMs !== 'number' || !Number.isFinite(open.platformReceivedAtMs)
+    ) return null;
+    if (open.sourceEventAtMs > open.platformReceivedAtMs || open.platformReceivedAtMs > atMs) return null;
+    if (atMs - open.sourceEventAtMs > 300_000 || atMs - open.platformReceivedAtMs > 5_000) return null;
+    signedOpen = {
+      fillPrice: open.fillPrice,
+      sourceEventAtMs: open.sourceEventAtMs,
+      platformReceivedAtMs: open.platformReceivedAtMs,
+    };
+  } else if (raw.signedOpen != null) return null;
   let signedExpiry: RelayExecutorWakeRequest['signedExpiry'];
   if (raw.trigger === 'ORDER_EXPIRED') {
     if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
@@ -79,6 +97,7 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
     at: raw.at,
     tradeId: typeof raw.tradeId === 'string' ? raw.tradeId : null,
     ...(signedClose ? { signedClose } : {}),
+    ...(signedOpen ? { signedOpen } : {}),
     ...(signedExpiry ? { signedExpiry } : {}),
   };
 }

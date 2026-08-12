@@ -994,6 +994,7 @@ test('signed POSITION_OPENED persists source fill evidence and queues the fill w
     event: 'POSITION_OPENED' as const,
     trade_id: 'cont-f111aabbccdd',
     direction: 'SHORT',
+    ts: '2026-08-12T12:57:14.865Z',
     fill_price: 64_000,
     qty: 0.03125,
     research_lane: 'CONTINUOUS',

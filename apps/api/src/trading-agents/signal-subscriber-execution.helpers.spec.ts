@@ -3054,7 +3054,7 @@ test('signed source fill retires an exchange-proven unfilled pending order witho
   assert.deepEqual(phantom, ['cont-fast-retire']);
 });
 
-test('signed source fill retains and caps the exact pending order when late-entry continuation is enabled', async () => {
+test('signed source fill retains and caps the exact pending order from authenticated wake evidence without waiting for source snapshot', async () => {
   const previous = process.env.LATE_ENTRY_CONTINUATION_ENABLED;
   process.env.LATE_ENTRY_CONTINUATION_ENABLED = 'true';
   try {
@@ -3072,7 +3072,7 @@ test('signed source fill retains and caps the exact pending order when late-entr
     } };
     service.exchanges = { getUserCredentials: async () => ({}) };
     service.botBridge = { isEnabled: () => true };
-    service.fetchExecutionBotState = async () => ({ positions: [{ trade_id: 'cont-fast-late', entry: 64_000 }] });
+    service.fetchExecutionBotState = async () => assert.fail('signed source fill wake must not wait for eventually-consistent source snapshot');
     service.loadExecutionMeta = async () => ({
       direction: 'LONG', bitfinexOrderId: 8404, limitPrice: 64_100, qty: 0.03,
     });
@@ -3087,6 +3087,7 @@ test('signed source fill retains and caps the exact pending order when late-entr
       { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
       'cont-fast-late',
       new Date(1_000).toISOString(),
+      { fillPrice: 64_000, sourceEventAtMs: 900, platformReceivedAtMs: 1_000 },
     );
     assert.equal(handled, true);
     assert.deepEqual(events.map((event) => event.payload.event), ['LATE_ENTRY_BETTER_ONLY_CONTINUATION']);
@@ -4410,6 +4411,19 @@ test('private wake parser preserves only bounded POSITION_CLOSED evidence', () =
     trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-entry',
     signedClose: { exitPrice: 64_400 },
   }), null);
+});
+
+test('private wake parser preserves only bounded POSITION_OPENED fill evidence', () => {
+  const now = Date.now();
+  const valid = {
+    trigger: 'POSITION_OPENED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
+    signedOpen: { fillPrice: 64_200, sourceEventAtMs: now - 500, platformReceivedAtMs: now - 100 },
+  };
+  assert.equal(parseExecutorWakeRequest(valid)?.signedOpen?.fillPrice, 64_200);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedOpen: {} }), null);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedOpen: { ...valid.signedOpen, fillPrice: '64200' } }), null);
+  assert.equal(parseExecutorWakeRequest({ ...valid, signedOpen: { ...valid.signedOpen, sourceEventAtMs: now } }), null);
+  assert.equal(parseExecutorWakeRequest({ trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedOpen: valid.signedOpen }), null);
 });
 
 test('duplicate pre/post ORDER_EXPIRED wake cannot queue a second cancellation', async () => {

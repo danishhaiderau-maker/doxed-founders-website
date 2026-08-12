@@ -1780,6 +1780,12 @@ export type RelayExecutorWakeRequest = {
     sourceEventAtMs?: number;
     platformReceivedAtMs?: number;
   };
+  /** HMAC-verified source-fill evidence carried by a POSITION_OPENED wake. */
+  signedOpen?: {
+    fillPrice: number;
+    sourceEventAtMs: number;
+    platformReceivedAtMs: number;
+  };
   signedExpiry?: {
     sourceEventAtMs: number;
     sourceExpiresAtMs: number;
@@ -3059,7 +3065,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
     tradeId?: string | null,
     receivedAt?: string,
-    signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'],
+    signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'] | RelayExecutorWakeRequest['signedOpen'],
   ): Promise<void> {
     if (executionEnabled()) {
       await this.wakeNow(trigger);
@@ -3077,6 +3083,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       tradeId: tradeId ?? null,
       ...(trigger === 'POSITION_CLOSED' && signedTerminal ? { signedClose: signedTerminal as RelayExecutorWakeRequest['signedClose'] } : {}),
       ...(trigger === 'ORDER_EXPIRED' && signedTerminal ? { signedExpiry: signedTerminal as RelayExecutorWakeRequest['signedExpiry'] } : {}),
+      ...(trigger === 'POSITION_OPENED' && signedTerminal ? { signedOpen: signedTerminal as RelayExecutorWakeRequest['signedOpen'] } : {}),
     };
     // The signed lifecycle event is already durable before this method is
     // queued. Start the authenticated private-network wake immediately; the
@@ -3117,7 +3124,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED' | 'ORDER_EXPIRED',
     tradeId?: string | null,
     receivedAt?: string,
-    signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'],
+    signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'] | RelayExecutorWakeRequest['signedOpen'],
   ): void {
     if (executionEnabled()) return;
     const payload: RelayExecutorWakeRequest = {
@@ -3128,6 +3135,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       tradeId: tradeId ?? null,
       ...(trigger === 'POSITION_CLOSED' && signedTerminal ? { signedClose: signedTerminal as RelayExecutorWakeRequest['signedClose'] } : {}),
       ...(trigger === 'ORDER_EXPIRED' && signedTerminal ? { signedExpiry: signedTerminal as RelayExecutorWakeRequest['signedExpiry'] } : {}),
+      ...(trigger === 'POSITION_OPENED' && signedTerminal ? { signedOpen: signedTerminal as RelayExecutorWakeRequest['signedOpen'] } : {}),
     };
     void this.dispatchDirectExecutorWake(payload);
   }
@@ -3551,6 +3559,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             instance,
             wake.tradeId ?? undefined,
             wake.at,
+            wake.signedOpen,
           );
           await this.persistFastWakeTelemetry(
             instance.id,
@@ -3866,6 +3875,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     instance: TradingAgentInstance,
     preferredTradeId: string | undefined,
     sourceFillAt: string,
+    signedOpen?: RelayExecutorWakeRequest['signedOpen'],
   ): Promise<boolean> {
     if (!preferredTradeId || instance.status !== TradingAgentInstanceStatus.ACTIVE) return false;
     if (isCopyRelaySimActive(instance.dashboardState)) return false;
@@ -3913,14 +3923,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // and cap it at a no-worse entry instead of letting the fast wake bypass
     // the continuation branch in monitorEntry.
     if (lateEntryContinuationEnabled() && this.botBridge.isEnabled()) {
-      const botState = await this.fetchExecutionBotState().catch(() => null);
+      // The authenticated wake carries the exact source fill.  Prefer it over
+      // the eventually-consistent Fly state snapshot: the latter can lag the
+      // webhook by seconds, which previously let the old cancel path win.
+      const botState = signedOpen ? null : await this.fetchExecutionBotState().catch(() => null);
       const showcasePosition = (botState?.positions ?? []).find((position) =>
         tradeIdsMatch(String(position.trade_id ?? ''), freshParticipant.cycle.tradeId),
       );
-      const showcaseFill = Number(showcasePosition?.entry ?? 0);
+      const showcaseFill = Number(signedOpen?.fillPrice ?? showcasePosition?.entry ?? 0);
       const retainLateEntry = shouldRetainLateEntryContinuation({
         enabled: true,
-        showcaseTradeOpen: !!showcasePosition && Number.isFinite(showcaseFill) && showcaseFill > 0,
+        showcaseTradeOpen: !!signedOpen || (!!showcasePosition && Number.isFinite(showcaseFill) && showcaseFill > 0),
         participantStatus: freshParticipant.status,
         hasManagedOrder: true,
       });

@@ -630,6 +630,19 @@ export class ShowcaseRelayEventsService {
           platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
         }
       : undefined;
+    const signedOpenEvidence = event === 'POSITION_OPENED' && body.ts
+      && typeof body.fill_price === 'number' && Number.isFinite(body.fill_price) && body.fill_price > 0
+      && persistBody.platform_received_at
+      && Number.isFinite(Date.parse(body.ts))
+      ? {
+          fillPrice: body.fill_price,
+          sourceEventAtMs: Date.parse(body.ts),
+          platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
+        }
+      : undefined;
+    if (event === 'POSITION_OPENED' && signedLifecycleEvent && !signedOpenEvidence) {
+      throw new BadRequestException('Signed position open requires exact source fill evidence');
+    }
     const signedExpiryEvidence = event === 'ORDER_EXPIRED'
       && body.ts && body.source_expires_at && persistBody.platform_received_at
       && Number.isFinite(Date.parse(body.ts))
@@ -674,7 +687,7 @@ export class ShowcaseRelayEventsService {
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
-        event === 'ORDER_EXPIRED' ? signedExpiryEvidence : signedCloseEvidence,
+        event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
       );
     }
 
@@ -712,7 +725,7 @@ export class ShowcaseRelayEventsService {
             event,
             body.trade_id ?? null,
             persistBody.platform_received_at ?? undefined,
-            event === 'ORDER_EXPIRED' ? signedExpiryEvidence : signedCloseEvidence,
+            event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
           );
           executionWakeQueued = true;
         }
@@ -735,7 +748,7 @@ export class ShowcaseRelayEventsService {
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
-        signedCloseEvidence,
+        event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
       );
     }
     if (signedLifecycleEvent) {
