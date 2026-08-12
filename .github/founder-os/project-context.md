@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-feat(web): show live BTC price in agent hero
+fix(relay): preserve P&L for terminal partial fills
 
 ## Last Activity
 
