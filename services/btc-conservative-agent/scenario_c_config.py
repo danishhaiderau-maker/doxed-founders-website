@@ -1,14 +1,12 @@
 """
 Scenario C exit profile — single source for profit-lock ladder (bot + analyzer).
 
-Updated 2026-08-06 (Danish decision): add (8, 5) as the new first rung of BOTH
-ladders. The 61-trade history showed 4 winners peaking in the 0-10% MFE band
-that exited via THESIS_INVALIDATED at near-zero profit. A lower first rung locks
-in a +5% floor once peak hits +8%, catching those weak winners earlier. This
-overrides the prior v2a backtest warning for TYPE_B_HUNTER_V1 (which used 10→6
-as its first rung) — the Stage 1 strategy fixes (commit f03640dd) changed the
-entry direction logic, which may invalidate that older backtest. Paper soak
-will provide fresh data.
+Updated 2026-08-13 (operator decision): add early profit-lock rungs (4, 2)
+and (5, 3) ahead of the existing (8, 5) rung. A rung never closes at its peak:
+it protects a trade only after that peak has been reached and unrealized margin
+profit subsequently retreats to the associated lock floor. This preserves the
+existing higher-profit trail while preventing small positive moves from turning
+into losses during fast, crowded trading.
 
 Historical context (2026-07-15): tighter first rung lock (10→6 promoted to
 12→10) for the GLOBAL / CONTINUOUS benchmark ladder. Fresh 300-trade data
@@ -30,7 +28,9 @@ override fall back to `TRAIL_LADDER_SCENARIO_C` below.
 from __future__ import annotations
 
 TRAIL_LADDER_SCENARIO_C = [
-    (8, 5),       # NEW first rung (2026-08-06) — captures 0-10% MFE winners earlier
+    (4, 2),       # early winner: peak +4% then protect +2%
+    (5, 3),       # early winner: peak +5% then protect +3%
+    (8, 5),       # existing first mature-trend rung
     (12, 10),
     (19, 17),
     (40, 28),
@@ -45,6 +45,8 @@ TRAIL_LADDER_SCENARIO_C = [
 # get_lane_ladder_override) — the name is HISTORICAL; the first rung is now
 # (8, 5), changed from (10, 6) on 2026-08-06 (Danish decision).
 TRAIL_LADDER_SCENARIO_C_LEGACY_10_6 = [
+    (4, 2),       # early winner: peak +4% then protect +2%
+    (5, 3),       # early winner: peak +5% then protect +3%
     (8, 5),       # CHANGED from (10, 6) — Danish decision 2026-08-06
     (19, 17),
     (40, 28),
@@ -54,7 +56,7 @@ TRAIL_LADDER_SCENARIO_C_LEGACY_10_6 = [
     (150, 120),
 ]
 
-SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_8_v6_20260806"
-SCENARIO_C_LADDER_LABEL = "8→5, 12→10, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120"
-SCENARIO_C_LEGACY_10_6_PROFILE_ID = "SCENARIO_C_RUNNER_8_v6_TYPE_B_20260806"
-SCENARIO_C_LEGACY_10_6_LADDER_LABEL = "8→5, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120 (TYPE_B_HUNTER_V1)"
+SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_4_v7_20260813"
+SCENARIO_C_LADDER_LABEL = "4→2, 5→3, 8→5, 12→10, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120"
+SCENARIO_C_LEGACY_10_6_PROFILE_ID = "SCENARIO_C_RUNNER_4_v7_TYPE_B_20260813"
+SCENARIO_C_LEGACY_10_6_LADDER_LABEL = "4→2, 5→3, 8→5, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120 (TYPE_B_HUNTER_V1)"
