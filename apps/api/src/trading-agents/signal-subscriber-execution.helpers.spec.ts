@@ -71,6 +71,7 @@ import {
   resolveShowcaseRelinkForRealFill,
   SHOWCASE_RELINK_PRICE_BAND_PCT,
   SHOWCASE_RELINK_TIME_WINDOW_MS,
+  SHOWCASE_RELINK_MAX_ENTRY_LEAD_MS,
   resolveShowcaseMirrorTradeIdFromInputs,
   persistedCloseWakeMatchesParticipant,
   hireExpiryBlocksNewLiveEntries,
@@ -4084,6 +4085,26 @@ test('resolveShowcaseRelinkForRealFill: outside the time window is rejected', ()
     ],
     realFill: { price: 65_016, direction: 'LONG' },
     currentTradeId: 'cont-7805cc21c534',
+    nowMs: now,
+  });
+  assert.equal(res, null);
+});
+
+test('resolveShowcaseRelinkForRealFill: rejects an older price-near position instead of stealing a fresh canonical fill', () => {
+  // cont-02b475bf3a48: an older SHORT was only ~0.11% away in price, so the
+  // former symmetric 10-minute window incorrectly re-linked this fresh fill
+  // to it.  A candidate may precede a venue fill only by the narrow ordering
+  // allowance, never by minutes.
+  const now = Date.parse('2026-08-12T15:07:12.236Z');
+  const res = resolveShowcaseRelinkForRealFill({
+    showcasePositions: [{
+      trade_id: 'cont-older-short',
+      entry: 63_469.41,
+      dir: 'SHORT',
+      entry_ts: (now - SHOWCASE_RELINK_MAX_ENTRY_LEAD_MS - 1) / 1000,
+    }],
+    realFill: { price: 63_541, direction: 'SHORT' },
+    currentTradeId: 'cont-fresh-short',
     nowMs: now,
   });
   assert.equal(res, null);

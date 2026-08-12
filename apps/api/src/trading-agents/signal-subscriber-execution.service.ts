@@ -1977,6 +1977,15 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
 export const SHOWCASE_RELINK_PRICE_BAND_PCT = 0.15;
 /** Real fill must be within this window of the showcase position's entry. */
 export const SHOWCASE_RELINK_TIME_WINDOW_MS = 10 * 60 * 1000;
+/**
+ * A different showcase position can only repair a stale cycle identity when
+ * it was opened essentially contemporaneously with the real fill.  Price
+ * proximity alone is not identity proof: two same-direction BTC trades can
+ * easily be within the normal price band several minutes apart.  Keep a small
+ * backwards allowance for venue/source ordering, but never let an older live
+ * position steal a newly-filled canonical cycle.
+ */
+export const SHOWCASE_RELINK_MAX_ENTRY_LEAD_MS = 15_000;
 
 export type ShowcaseRelinkCandidate = {
   tradeId: string;
@@ -2047,7 +2056,10 @@ export function resolveShowcaseRelinkForRealFill(input: {
     let timeDeltaMs: number | null = null;
     if (entryMs != null && Number.isFinite(entryMs)) {
       timeDeltaMs = entryMs - input.nowMs;
-      if (Math.abs(timeDeltaMs) > windowMs) continue;
+      if (
+        timeDeltaMs < -SHOWCASE_RELINK_MAX_ENTRY_LEAD_MS ||
+        timeDeltaMs > windowMs
+      ) continue;
     }
 
     const candidate: ShowcaseRelinkCandidate = {
@@ -11207,6 +11219,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         })
         .catch(() => null);
       currentTradeId = persistedCycle?.tradeId ?? currentTradeId;
+    }
+
+    // A canonical cycle must never be re-linked merely because another
+    // same-direction position happens to be price-near.  If the source still
+    // reports this exact trade as open, its identity is authoritative.  This
+    // is deliberately checked before excluding currentTradeId in the helper:
+    // otherwise the helper can choose an older position and make that older
+    // trade's close flatten this distinct, valid copy lot.
+    if (
+      currentTradeId &&
+      !currentTradeId.startsWith('relink:') &&
+      !currentTradeId.startsWith('adopt:') &&
+      (bot.positions ?? []).some((position) =>
+        typeof position.trade_id === 'string' &&
+        tradeIdsMatch(position.trade_id, currentTradeId),
+      )
+    ) {
+      return currentTradeId;
     }
 
     // Build the set of showcase tradeIds already claimed by other OPEN
