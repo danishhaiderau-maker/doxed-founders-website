@@ -47,6 +47,7 @@ import {
   shouldDeferCancelByExchangeForReplacement,
   pendingEntryOwnershipAdvanced,
   advanceReplacementMissingProbe,
+  managedOrderExchangeAckAtMs,
   missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -3503,6 +3504,62 @@ test('replacement absence needs two fresh ticks and full missing grace for termi
   const advanced = advanceReplacementMissingProbe(matureThird.probe, '3002:seq:11', 17_000, 17_200);
   assert.equal(advanced.probe.count, 1);
   assert.equal(advanced.terminalEligible, false);
+});
+
+test('initial exchange ACK receives the same stale-book visibility fence as a replacement', () => {
+  assert.equal(
+    managedOrderExchangeAckAtMs({ bitfinexOrderId: 1001, entryExchangeAckAtMs: 1_000 }),
+    1_000,
+  );
+  assert.equal(
+    managedOrderExchangeAckAtMs({
+      bitfinexOrderId: 1001,
+      entryExchangeAckAtMs: 1_000,
+      replacementExchangeAckAtMs: 2_000,
+    }),
+    2_000,
+    'the current replacement generation takes precedence over the initial acknowledgement',
+  );
+  const firstMissing = advanceReplacementMissingProbe(undefined, '1001:seq:0', 1_000, 2_000);
+  assert.equal(firstMissing.terminalEligible, false, 'a freshly ACKed initial order cannot expire on one missing book read');
+});
+
+test('freshly ACKed initial order defers a transient absent active-book snapshot', async () => {
+  const events: string[] = [];
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.replacementMissingProbe = new Map();
+  service.botBridge = { isEnabled: () => false };
+  service.cancelAbsurdPendingOrders = async () => undefined;
+  service.activeTrading = {
+    findOrder: async () => null,
+    listActiveOrders: async () => [],
+    getOpenPositionDetail: async () => assert.fail('position classification must wait for missing-order proof'),
+  };
+  const intent = { action: 'ENTER', trade_id: 'cont-entry-visibility', risk: {}, context: { showcase_event_seq: 0 } };
+  service.prisma = {
+    signalCycle: { findUnique: async () => ({
+      id: 'cycle-entry-visibility', tradeId: 'cont-entry-visibility', intentEnvelope: intent,
+      expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY,
+    }) },
+    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-entry-visibility', status: SignalCycleStatus.PENDING_ENTRY }) },
+  };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 7001, limitPrice: 64_000, qty: 0.03,
+    entryExchangeAckAtMs: Date.now(),
+  });
+  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  await service.monitorEntry(
+    'agent', 'user',
+    { id: 'cycle-entry-visibility', tradeId: 'cont-entry-visibility', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
+    { id: 'participant-entry-visibility', status: SignalCycleStatus.PENDING_ENTRY },
+    { direction: 'SHORT', bitfinexOrderId: 7001, limitPrice: 64_000, qty: 0.03, entryExchangeAckAtMs: Date.now() },
+    {}, new Set<number>(), false,
+  );
+  assert.deepEqual(events, []);
+  assert.equal(service.replacementMissingProbe.get('participant-entry-visibility')?.count, 1);
 });
 
 test('deterministic 0.1% offset anchor is the canonical executable policy', () => {

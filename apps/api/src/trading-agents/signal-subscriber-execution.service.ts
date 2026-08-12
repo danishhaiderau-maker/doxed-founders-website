@@ -1028,6 +1028,8 @@ type ExecutionPayload = {
   profitLockFloor?: number;
   stopLossPlaced?: boolean;
   lastChaseAtMs?: number;
+  /** Timestamp immediately after the first exchange ACK for this owned entry. */
+  entryExchangeAckAtMs?: number;
   replacementExchangeAckAtMs?: number;
   limitChaseCount?: number;
   fillPrice?: number;
@@ -1550,6 +1552,16 @@ export function advanceReplacementMissingProbe(
       && nowMs - exchangeAckAtMs >= BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS
       && nowMs - probe.firstMissingAtMs >= BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS,
   };
+}
+
+/**
+ * Every order generation is vulnerable to the brief private active-book
+ * visibility gap after an ACK. Replacements carry their own ACK; the initial
+ * entry carries its first ACK. Old rows without either timestamp retain the
+ * legacy conservative recovery behaviour.
+ */
+export function managedOrderExchangeAckAtMs(meta: ExecutionPayload): number | undefined {
+  return meta.replacementExchangeAckAtMs ?? meta.entryExchangeAckAtMs;
 }
 
 
@@ -3926,7 +3938,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         } };
       }
     }
-    if (cancelReason === 'NOT_FOUND' && meta.replacementExchangeAckAtMs) {
+    if (cancelReason === 'NOT_FOUND' && managedOrderExchangeAckAtMs(meta)) {
       try {
         const history = await this.bitfinex.fetchOrderHistoryEvidence(creds, orderId);
         if (!history || history.terminal !== true || history.filledQty !== 0) {
@@ -7713,6 +7725,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       margin_usd: marginUsd,
       source: 'hire',
         lastChaseAtMs: 0,
+      entryExchangeAckAtMs: exchangeAckAtMs,
       limitChaseCount: 0,
       ...(signedExactLimit
         ? {
@@ -7858,7 +7871,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     meta: ExecutionPayload,
   ): Promise<boolean> {
     const orderId = meta.bitfinexOrderId;
-    if (!orderId || !meta.replacementExchangeAckAtMs) return true;
+    if (!orderId || !managedOrderExchangeAckAtMs(meta)) return true;
     try {
       const [trades, history] = await Promise.all([
         this.bitfinex.fetchOrderTrades(creds, orderId),
@@ -9036,7 +9049,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return;
     }
 
-    if (durableMeta.bitfinexOrderId === orderId && durableMeta.replacementExchangeAckAtMs) {
+    const durableOrderAckAtMs = managedOrderExchangeAckAtMs(durableMeta);
+    if (durableMeta.bitfinexOrderId === orderId && durableOrderAckAtMs) {
       let freshOrders: Array<{ id?: number }>;
       try {
         freshOrders = await this.activeTrading.listActiveOrders(creds);
@@ -9053,7 +9067,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const { probe, terminalEligible } = advanceReplacementMissingProbe(
         priorProbe,
         generation,
-        durableMeta.replacementExchangeAckAtMs,
+        durableOrderAckAtMs,
         nowMs,
       );
       this.replacementMissingProbe.set(participant.id, probe);
