@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): make terminal audit writes single-winner
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
