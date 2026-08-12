@@ -109,15 +109,20 @@ async function main() {
       (acc, event) => Object.assign(acc, pickPayload(event.payload)),
       {},
     );
+    // Events are an append-only execution ledger.  Seed from the original
+    // placement only for fields absent from later events; never overwrite a
+    // newer reprice/replacement with its initial order id or limit.
     const pp = {
-      ...mergedPayload,
       ...pickPayload(placed?.payload),
       ...pickPayload(catchup?.payload),
+      ...mergedPayload,
     };
 
     const orderId = pp.bitfinexOrderId ?? pp.bitfinex_order_id;
     const qty = pp.qty ?? 0;
-    const limit = pp.limit_price ?? pp.limitPrice;
+    // Newer relay events use limitPrice; preserve legacy limit_price only as
+    // a fallback so an initial snake-case field cannot mask a later reprice.
+    const limit = pp.limitPrice ?? pp.limit_price;
     const dir = pp.direction;
 
     if (row.status === 'OPEN') {
