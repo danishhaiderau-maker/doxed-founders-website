@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   AgentTransparencyTables,
   canonicalTradeIdForDisplay,
+  displayExitCause,
 } from './agent-transparency-tables';
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -19,6 +20,32 @@ test('dashboard displays canonical showcase ids for adopted and relinked exchang
     'cont-61251a7811df',
   );
   assert.equal(canonicalTradeIdForDisplay('cont-42d2923c0cae'), 'cont-42d2923c0cae');
+});
+
+test('completed trade exit causes use a readable label without hiding unknown audit codes', () => {
+  assert.equal(displayExitCause('PROFIT_LOCK_LADDER'), 'Profit lock (trailing)');
+  assert.equal(displayExitCause('THESIS_FAST_CUT'), 'Thesis fast cut');
+  assert.equal(displayExitCause('CUSTOM_FUTURE_EXIT'), 'CUSTOM FUTURE EXIT');
+  assert.equal(displayExitCause(null), 'Not recorded');
+});
+
+test('completed trade tables show the recorded exit cause', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(AgentTransparencyTables, {
+      executionOnly: true,
+      liveBook: {
+        activeSignals: [], positions: [], pendingOrders: [], expiredOrders: [],
+        trades: [{
+          time: '2026-08-12 12:00:00 AEST', tradeId: 'cont-exit-cause', direction: 'SHORT',
+          entry: 64_000, exit: 63_900, durationMin: 7.2, pnlPct: 4.1, netUsd: 0.82,
+          grossUsd: 0.82, tradeFeesUsd: 0, fundingUsd: 0, aiBand: 'EXCHANGE_VERIFIED',
+          exitReason: 'PROFIT_LOCK_LADDER',
+        }],
+      },
+    }),
+  );
+  assert.match(html, /Exit cause/);
+  assert.match(html, /Profit lock \(trailing\)/);
 });
 
 test('active signal table separates raw gap, execution bucket, and virtual chase from real orders', () => {

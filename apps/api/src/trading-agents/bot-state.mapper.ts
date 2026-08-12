@@ -550,6 +550,9 @@ function mapLiveBook(bot: BotApiState): TradingAgentDashboardState['liveBook'] {
         grossUsd: Number(row.gross_pnl_usd ?? 0),
         tradeFeesUsd: Number(row.trading_fees_usd ?? row.fees_usd ?? 0),
         fundingUsd: Number(row.funding_fees_usd ?? 0),
+        exitReason: typeof row.exit_reason === 'string' && row.exit_reason.trim()
+          ? row.exit_reason.trim()
+          : null,
         aiBand: String(row.ai_band ?? '—'),
       };
     }),

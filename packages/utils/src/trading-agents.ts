@@ -74,6 +74,8 @@ export type AgentLiveTradeRow = {
   tradeFeesUsd: number;
   fundingUsd: number;
   aiBand: string;
+  /** Canonical source or exchange terminal reason, when it is available. */
+  exitReason?: string | null;
 };
 
 export type TradingAgentDashboardState = {

@@ -325,6 +325,7 @@ export function mapSubscriberExchangeLiveBook(input: {
         grossUsd: Number(row.pnlUsd),
         tradeFeesUsd: 0,
         fundingUsd: 0,
+        exitReason: row.cycle.showcaseExitReason ?? row.terminalReason ?? null,
         aiBand: row.exchangeProven === true ? 'EXCHANGE_VERIFIED' : 'NEON_CLOSED',
       });
     }
@@ -345,6 +346,7 @@ export function mapSubscriberExchangeLiveBook(input: {
       grossUsd: row.pnlUsd,
       tradeFeesUsd: 0,
       fundingUsd: 0,
+      exitReason: null,
       aiBand: 'EXCHANGE',
     });
   }

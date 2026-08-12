@@ -26206,7 +26206,7 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -26234,6 +26234,22 @@ __ADMIN_ACCESS_CONTROLS__
 
 DASHBOARD_JS = """(function () {
   try {
+    function displayExitCause(reason) {
+      const raw = String(reason || '').trim();
+      if (!raw) return 'Not recorded';
+      const labels = {
+        PROFIT_LOCK_LADDER: 'Profit lock (trailing)',
+        TAKE_PROFIT: 'Take profit',
+        THESIS_FAST_CUT: 'Thesis fast cut',
+        EARLY_FAIL: 'Early thesis failure',
+        STOP_LOSS: 'Stop loss',
+        HARD_STOP: 'Safety stop',
+        TIME_EXIT: 'Maximum-hold exit',
+        ADMIN_MANUAL_CLOSE: 'Manual close',
+        CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
+      };
+      return labels[raw.toUpperCase()] || raw.replace(/_/g, ' ');
+    }
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
       const s = String(ts).trim();
@@ -27824,6 +27840,7 @@ DASHBOARD_JS = """(function () {
             <td>${t.entry != null ? t.entry.toFixed(2) : '-'}</td>
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
             <td>${t.dur_min != null ? t.dur_min.toFixed(1) : '-'}</td>
+            <td>${displayExitCause(t.exit_reason)}</td>
             <td>${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
             <td>$${t.net_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>

@@ -109,6 +109,29 @@ export function canonicalTradeIdForDisplay(tradeId: string | null | undefined): 
   return tradeId;
 }
 
+/** Human-readable display of the canonical terminal code retained in exports. */
+export function displayExitCause(reason: string | null | undefined): string {
+  const raw = String(reason ?? '').trim();
+  if (!raw) return 'Not recorded';
+  const labels: Record<string, string> = {
+    PROFIT_LOCK_LADDER: 'Profit lock (trailing)',
+    TAKE_PROFIT: 'Take profit',
+    THESIS_FAST_CUT: 'Thesis fast cut',
+    EARLY_FAIL: 'Early thesis failure',
+    STOP_LOSS: 'Stop loss',
+    HARD_STOP: 'Safety stop',
+    TIME_EXIT: 'Maximum-hold exit',
+    ADMIN_MANUAL_CLOSE: 'Manual close',
+    USER_RELAY_STOP: 'Relay stopped by user',
+    CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat',
+    SHOWCASE_MIRROR: 'Showcase exit mirrored',
+    SHOWCASE_CLOSED: 'Showcase closed',
+    EXCHANGE_STOP: 'Exchange protective stop',
+    EXCHANGE_ALREADY_FLAT: 'Already flat on exchange',
+  };
+  return labels[raw.toUpperCase()] ?? raw.replace(/_/g, ' ');
+}
+
 export const EMPTY_LIVE_BOOK: TradingAgentDashboardState['liveBook'] = {
   activeSignals: [],
   positions: [],
@@ -294,6 +317,7 @@ export function AgentTransparencyTables({
       fmtPrice(t.entry),
       fmtPrice(t.exit),
       String(t.durationMin),
+      displayExitCause(t.exitReason),
       pnlPctCell,
       formatUsd(t.netUsd),
       ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd)]),
@@ -385,6 +409,7 @@ export function AgentTransparencyTables({
             'Entry',
             'Exit',
             'Duration min',
+            'Exit cause',
             'PnL %',
             'Net USD',
           ]}
@@ -458,6 +483,7 @@ export function AgentTransparencyTables({
           'Entry',
           'Exit',
           'Duration min',
+          'Exit cause',
           'PnL %',
           'Net USD',
           'Gross USD',
