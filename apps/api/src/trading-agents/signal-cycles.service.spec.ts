@@ -3,36 +3,27 @@ import test from 'node:test';
 import { SignalCycleStatus } from '@prisma/client';
 import { SignalCyclesService } from './signal-cycles.service';
 
-test('hire EXIT overlaps independent cycle and participant reads before persistence', async () => {
-  let resolveCycle!: (value: Record<string, unknown>) => void;
-  let resolveParticipant!: (value: Record<string, unknown>) => void;
-  const cycleRead = new Promise<Record<string, unknown>>((resolve) => {
-    resolveCycle = resolve;
-  });
-  const participantRead = new Promise<Record<string, unknown>>((resolve) => {
-    resolveParticipant = resolve;
-  });
-  const calls: string[] = [];
-  const prisma = {
+function terminalEventPrisma(claimCount: number, calls: string[]) {
+  const prisma: any = {
     signalCycle: {
-      findFirst: () => {
+      findFirst: async () => {
         calls.push('cycle-read');
-        return cycleRead;
+        return { id: 'cycle-1', status: SignalCycleStatus.OPEN };
       },
-      update: async () => {
-        calls.push('cycle-update');
+      updateMany: async () => {
+        calls.push('cycle-terminal-update');
+        return { count: 1 };
       },
     },
     signalCycleParticipant: {
-      findUnique: () => {
+      findUnique: async () => {
         calls.push('participant-read');
-        return participantRead;
+        return { id: 'participant-1', venue: 'bitfinex' };
       },
-      create: async () => {
-        throw new Error('existing EXIT participant must not be recreated');
-      },
-      update: async () => {
-        calls.push('participant-update');
+      create: async () => assert.fail('existing participant must not be recreated'),
+      updateMany: async () => {
+        calls.push('participant-terminal-claim');
+        return { count: claimCount };
       },
     },
     signalCycleEvent: {
@@ -41,34 +32,40 @@ test('hire EXIT overlaps independent cycle and participant reads before persiste
       },
     },
   };
-  const service = new SignalCyclesService(
-    prisma as never,
-    {} as never,
-    {} as never,
-    {} as never,
+  prisma.$transaction = async (work: (tx: any) => Promise<unknown>) => work(prisma);
+  return prisma;
+}
+
+function terminalEventService(prisma: any) {
+  return new SignalCyclesService(prisma, {} as never, {} as never, {} as never);
+}
+
+test('hire terminal event atomically claims participant before appending its audit row', async () => {
+  const calls: string[] = [];
+  const service = terminalEventService(terminalEventPrisma(1, calls));
+
+  const result = await service.recordHireExecutionEvent(
+    'user-1', 'agent-1', 'cycle-1', 'EXIT', { venue: 'bitfinex', pnl_usd: 1, pnl_margin_pct: 1 },
   );
 
-  const pending = service.recordHireExecutionEvent(
-    'user-1',
-    'agent-1',
-    'cycle-1',
-    'EXIT',
-    { venue: 'bitfinex', pnl_usd: 1, pnl_margin_pct: 1 },
-  );
-
-  // Neither read has resolved, so observing both calls proves they were
-  // launched together rather than separated by an awaited network round trip.
-  await Promise.resolve();
-  assert.deepEqual(calls, ['cycle-read', 'participant-read']);
-
-  resolveCycle({ id: 'cycle-1', status: SignalCycleStatus.CLOSED });
-  resolveParticipant({ id: 'participant-1', venue: 'bitfinex' });
-  await pending;
-
+  assert.deepEqual(result, { ok: true, participantId: 'participant-1', duplicateTerminal: false });
   assert.deepEqual(calls, [
     'cycle-read',
     'participant-read',
+    'participant-terminal-claim',
     'event-create',
-    'participant-update',
+    'cycle-terminal-update',
   ]);
+});
+
+test('hire duplicate terminal event is ignored after another closer owns the participant', async () => {
+  const calls: string[] = [];
+  const service = terminalEventService(terminalEventPrisma(0, calls));
+
+  const result = await service.recordHireExecutionEvent(
+    'user-1', 'agent-1', 'cycle-1', 'EXIT', { venue: 'bitfinex', pnl_usd: 1, pnl_margin_pct: 1 },
+  );
+
+  assert.deepEqual(result, { ok: true, participantId: 'participant-1', duplicateTerminal: true });
+  assert.deepEqual(calls, ['cycle-read', 'participant-read', 'participant-terminal-claim']);
 });

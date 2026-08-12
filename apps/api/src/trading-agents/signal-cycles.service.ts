@@ -885,6 +885,55 @@ export class SignalCyclesService implements OnModuleInit {
       });
     }
 
+    // A showcase-close wake and the already-flat reconciler can both observe
+    // this OPEN lot. Claiming status and writing the terminal event together
+    // makes the first writer authoritative; later observers become harmless
+    // idempotent replays instead of appending a second EXIT audit row.
+    if (event === 'EXIT' || event === 'EXPIRED') {
+      const pnlUsd = typeof body.pnl_usd === 'number' ? body.pnl_usd : null;
+      const pnlMarginPct = typeof body.pnl_margin_pct === 'number' ? body.pnl_margin_pct : null;
+      const exitPrice = typeof body.exit_price === 'number' ? body.exit_price : null;
+      const terminalStatus = event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED;
+      const now = new Date();
+      const wonTerminalClaim = await this.prisma.$transaction(async (tx) => {
+        const claim = await tx.signalCycleParticipant.updateMany({
+          where: {
+            id: participant.id,
+            status: {
+              in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN],
+            },
+          },
+          data: {
+            status: terminalStatus,
+            exitPrice,
+            pnlUsd,
+            pnlMarginPct,
+            settlementStatus: SignalCycleSettlementStatus.WAIVED,
+            feeUsd: 0,
+            settledAt: now,
+          },
+        });
+        if (claim.count !== 1) return false;
+        await tx.signalCycleEvent.create({
+          data: {
+            cycleId,
+            participantId: participant.id,
+            eventType: event,
+            payload: body as Prisma.InputJsonValue,
+          },
+        });
+        await tx.signalCycle.updateMany({
+          where: {
+            id: cycleId,
+            status: { notIn: [SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED] },
+          },
+          data: { status: terminalStatus, closedAt: now },
+        });
+        return true;
+      });
+      return { ok: true, participantId: participant.id, duplicateTerminal: !wonTerminalClaim };
+    }
+
     await this.prisma.signalCycleEvent.create({
       data: {
         cycleId,
@@ -938,51 +987,6 @@ export class SignalCyclesService implements OnModuleInit {
         await this.prisma.signalCycle.update({
           where: { id: cycleId },
           data: { status: SignalCycleStatus.OPEN },
-        });
-      }
-    }
-
-    if (event === 'EXIT' || event === 'EXPIRED') {
-      const pnlUsd = typeof body.pnl_usd === 'number' ? body.pnl_usd : 0;
-      const pnlMarginPct = typeof body.pnl_margin_pct === 'number' ? body.pnl_margin_pct : null;
-      const exitPrice = typeof body.exit_price === 'number' ? body.exit_price : null;
-      await this.prisma.signalCycleParticipant.update({
-        where: { id: participant.id },
-        data: {
-          status: event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED,
-          exitPrice,
-          pnlUsd,
-          pnlMarginPct,
-          settlementStatus: SignalCycleSettlementStatus.WAIVED,
-          feeUsd: 0,
-          settledAt: new Date(),
-        },
-      });
-      if (cycle.status !== SignalCycleStatus.CLOSED && cycle.status !== SignalCycleStatus.EXPIRED) {
-        await this.prisma.signalCycle.update({
-          where: { id: cycleId },
-          data: {
-            status: event === 'EXPIRED' ? SignalCycleStatus.EXPIRED : SignalCycleStatus.CLOSED,
-            closedAt: new Date(),
-          },
-        });
-      }
-
-      // Significant-trade alert: only emit on real closures (not EXPIRED/no-fill) where the
-      // realized margin PnL magnitude is >= 20% (gain OR loss). Position opens, small moves,
-      // and expiries never create Alerts. Full trade detail is attached in metadata for the
-      // Alerts card to render.
-      if (event === 'EXIT' && pnlMarginPct != null && Math.abs(pnlMarginPct) >= 20) {
-        await this.maybeNotifySignificantTradeClose({
-          userId,
-          agentId,
-          cycleId,
-          participantId: participant.id,
-          pnlMarginPct,
-          pnlUsd,
-          exitPrice,
-          exitReason: typeof body.exit_reason === 'string' ? body.exit_reason : null,
-          qtyClosed: typeof body.qty_closed === 'number' ? body.qty_closed : null,
         });
       }
     }
