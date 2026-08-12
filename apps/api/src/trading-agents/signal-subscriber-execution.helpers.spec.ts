@@ -2781,6 +2781,49 @@ test('stale monitor ownership recognizes a durable order or intent revision adva
   assert.equal(pendingEntryOwnershipAdvanced(1001, oldIntent, 1001, oldIntent), false);
 });
 
+test('rapid signed reprices execute only against the newest durable order generation', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  const newestIntent = {
+    action: 'ENTER', signalId: 'cont-rapid-reprice', trade_id: 'cont-rapid-reprice', direction: 'SHORT',
+    entry: {
+      mode: 'EXACT_LIMIT', reference: 'SHOWCASE_EXACT_LIMIT',
+      exact_limit_price: 64_050, exact_qty_btc: 0.03,
+    },
+    context: {
+      signed_showcase_event: true, showcase_event: 'LIMIT_UPDATED',
+      showcase_event_at: new Date(Date.now() - 100).toISOString(),
+      platform_received_at: new Date(Date.now() - 50).toISOString(),
+      entry_limit_policy: 'deterministic_0.1pct_offset_v1',
+    },
+  };
+  service.prisma = { signalCycleParticipant: { findUnique: async () => ({
+    id: 'participant-rapid', cycleId: 'cycle-rapid', status: SignalCycleStatus.PENDING_ENTRY,
+    cycle: { id: 'cycle-rapid', tradeId: 'cont-rapid-reprice', status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: newestIntent },
+  }) } };
+  service.loadExecutionMeta = async () => ({
+    direction: 'SHORT', bitfinexOrderId: 9002, limitPrice: 64_010, qty: 0.03,
+  });
+  service.logger = { log: () => undefined, warn: () => undefined, error: () => undefined };
+  let ownedArgs: any[] = [];
+  service.replaceRestingLimitOwned = async (...args: any[]) => { ownedArgs = args; };
+
+  await service.replaceRestingLimit(
+    'agent', 'user', 'cycle-rapid', 'participant-rapid',
+    { direction: 'SHORT', bitfinexOrderId: 9001, limitPrice: 64_000, qty: 0.03 },
+    {}, { action: 'ENTER' },
+    {
+      newLimit: 64_000, mark: 64_020, now: Date.now(), chaseLabel: '',
+      event: 'BOT_ANCHOR_CHASE', tradeId: 'cont-rapid-reprice',
+    },
+  );
+
+  assert.equal(ownedArgs.length, 8, 'the latest signed revision must replace after the prior generation persists');
+  assert.equal(ownedArgs[4].bitfinexOrderId, 9002, 'never operate on stale order 9001');
+  assert.equal(ownedArgs[4].limitPrice, 64_010);
+  assert.equal(ownedArgs[7].newLimit, 64_050, 'use the newest signed source limit, not the stale wake target');
+});
+
 test('money lane makes stale gone-order monitor wait for replacement persistence and never expire it', async () => {
   const events: string[] = [];
   const oldIntent = {

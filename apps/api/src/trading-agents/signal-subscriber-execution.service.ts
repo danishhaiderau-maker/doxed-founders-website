@@ -10264,8 +10264,83 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   ) {
     const release = await this.acquireParticipantMoneyLane(participantId);
     try {
+      // A LIMIT_UPDATED wake can wait behind an earlier replacement.  Never
+      // execute the captured pre-wait ownership after acquiring the lane: that
+      // would either cancel an old order id or leave the latest signed source
+      // revision un-applied.  Rehydrate the durable participant, cycle and
+      // folded meta while holding the lane, then only operate on that current
+      // generation.
+      const durableParticipant = await this.prisma.signalCycleParticipant.findUnique({
+        where: { id: participantId },
+        include: { cycle: true },
+      });
+      if (
+        !durableParticipant
+        || durableParticipant.status !== SignalCycleStatus.PENDING_ENTRY
+        || (durableParticipant.cycleId != null && durableParticipant.cycleId !== cycleId)
+        || durableParticipant.cycle.status !== SignalCycleStatus.PENDING_ENTRY
+      ) {
+        this.logger.log(
+          `Limit replacement deferred participant=${participantId}: durable participant/cycle is no longer pending`,
+        );
+        return;
+      }
+
+      const durableMeta = await this.loadExecutionMeta(participantId);
+      if (!durableMeta.direction || !durableMeta.limitPrice || !durableMeta.bitfinexOrderId) {
+        this.logger.warn(
+          `Limit replacement deferred participant=${participantId}: current durable order ownership is incomplete`,
+        );
+        return;
+      }
+
+      const durableIntent = durableParticipant.cycle.intentEnvelope as SignalIntentEnvelope;
+      const durableTradeId = opts.tradeId ?? durableParticipant.cycle.tradeId;
+      let durableOpts = opts;
+      const ownershipAdvanced =
+        durableMeta.bitfinexOrderId !== meta.bitfinexOrderId
+        || Math.abs(durableMeta.limitPrice - (meta.limitPrice ?? 0)) >= 0.01;
+
+      if (opts.event === 'BOT_ANCHOR_CHASE' && durableTradeId) {
+        const currentSignedLimit = readFreshSignedShowcaseExactLimit(
+          durableTradeId,
+          durableIntent,
+          Date.now(),
+        );
+        if (currentSignedLimit) {
+          const currentTarget = sanitizeLimitPrice(
+            opts.mark,
+            currentSignedLimit.limitPrice,
+            durableMeta.direction,
+          );
+          if (currentTarget != null) {
+            durableOpts = {
+              ...opts,
+              newLimit: currentTarget,
+              now: Date.now(),
+              tradeId: durableTradeId,
+            };
+          }
+        }
+      } else if (ownershipAdvanced) {
+        // A local chase carries no signed source revision of its own.  Let the
+        // next tick compute a target from the latest generation instead of
+        // applying a stale local target to a just-replaced order.
+        this.logger.log(
+          `Limit replacement deferred participant=${participantId}: ownership advanced while waiting for money lane`,
+        );
+        return;
+      }
+
       await this.replaceRestingLimitOwned(
-        agentId, userId, cycleId, participantId, meta, creds, intent, opts,
+        agentId,
+        userId,
+        cycleId,
+        participantId,
+        durableMeta,
+        creds,
+        durableIntent,
+        durableOpts,
       );
     } finally {
       release();

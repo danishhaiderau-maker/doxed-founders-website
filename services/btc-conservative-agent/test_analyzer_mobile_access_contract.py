@@ -28,6 +28,19 @@ def test_expired_order_hint_explains_zero_age_duplicate_rejection():
     assert "no paper or exchange order was cancelled" in SOURCE
 
 
+def test_continuous_duplicate_band_is_fixed_twenty_dollars_without_percentage_fallback():
+    helper = _route("_limit_prices_near", "def _signal_direction")
+    duplicate_scan = _route("_find_duplicate_limit_exposure", "def _reject_duplicate_limit_order")
+    assert "allow_percentage_fallback: bool = True" in helper
+    assert "if not allow_percentage_fallback:" in helper
+    assert "return False" in helper
+    assert "RESEARCH_LANE_CONTINUOUS: 20.0" in SOURCE
+    # The caller uses the explicit twenty-dollar Continuous policy rather than
+    # the broad 0.25% BTC price-cluster fallback.
+    assert "continuous_pair = lane == RESEARCH_LANE_CONTINUOUS" in duplicate_scan
+    assert "allow_percentage_fallback=not continuous_pair" in duplicate_scan
+
+
 def test_analyzer_session_is_opaque_and_narrowly_scoped():
     helper = _route("_analyzer_view_cookie_value", "def _analyzer_view_authed")
     assert "hmac.new(" in helper
