@@ -6408,6 +6408,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         signedOpenQtySats += meta.direction === 'LONG' ? qtySats : -qtySats;
       } else if (p.status === SignalCycleStatus.PENDING_ENTRY) {
         pending += 1;
+        // A partially filled entry intentionally remains PENDING_ENTRY while
+        // its exact remainder stays managed.  Its filled slice is nevertheless
+        // real exchange exposure and must be counted in the signed ledger;
+        // otherwise reconciliation sees a false orphan position, pauses the
+        // relay, and loses the stop-protected ownership of that partial lot.
+        const partialQtySats = Math.abs(btcToSats(meta.partialFillQty ?? 0));
+        if (partialQtySats > 0) {
+          openQtySats += partialQtySats;
+          signedOpenQtySats += meta.direction === 'LONG' ? partialQtySats : -partialQtySats;
+        }
       }
     }
 

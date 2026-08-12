@@ -4498,6 +4498,22 @@ test('private wake parser preserves only bounded POSITION_CLOSED evidence', () =
   }), null);
 });
 
+test('partial pending entry contributes its protected filled slice to ledger reconciliation', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.loadExecutionMeta = async (id: string) => id === 'partial'
+    ? { direction: 'SHORT', qty: 0.03148, partialFillQty: 0.03022869 }
+    : { direction: 'LONG', qty: 0.02 };
+
+  const summary = await service.buildVirtualLotSummary([
+    { id: 'partial', status: SignalCycleStatus.PENDING_ENTRY },
+  ]);
+
+  assert.equal(summary.pending, 1);
+  assert.equal(summary.open, 0);
+  assert.equal(summary.openQty, 0.03022869);
+  assert.equal(summary.signedOpenQty, -0.03022869);
+});
+
 test('bounded aggressive catch-up never exceeds the five-basis-point adverse cap', () => {
   assert.equal(boundedAggressiveCatchupLimit('LONG', 64_000), 64_032);
   assert.equal(boundedAggressiveCatchupLimit('SHORT', 64_000), 63_968);
