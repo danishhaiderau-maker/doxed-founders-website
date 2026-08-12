@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: make Founder Node disconnect explicit
+chore(relay): refresh Bitfinex policy lock
 
 ## Last Activity
 
