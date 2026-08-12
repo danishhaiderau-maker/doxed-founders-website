@@ -45,6 +45,9 @@ def test_final_hard_stop_is_thirteen_percent_margin_loss():
     assert "MAX_SL_MARGIN_PCT = 13.0" in SOURCE
     helper = _route("sl_price_pct", "SL_PCT = sl_price_pct")
     assert "MAX_SL_MARGIN_PCT / (lev * 100.0)" in helper
+    strategy_lines = _route("_strategy_detail_lines", "def _annotate_lanes_with_exec_mode")
+    assert "Final hard stop:" in strategy_lines
+    assert "hard_stop_margin_pct" in strategy_lines
 
 
 def test_analyzer_session_is_opaque_and_narrowly_scoped():

@@ -6406,7 +6406,7 @@ THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
 # Stage 1 Fix #5 (2026-08-06): raised from 2.0% to 5.0%. A +2% MFE spike is
 # chop noise (the 3 recent losers each spiked +2% early as fakeout breakouts
 # then bled to -$6). When 2% triggered, the -12% fast-cut was bypassed and
-# the position ran to the hard SL at -30%. A +5% MFE is a real move, so the
+# the position ran to the final hard stop. A +5% MFE is a real move, so the
 # fast-cut actually fires when a trade goes bad.
 THESIS_MFE_PROTECT_PCT = 5.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 5% margin
 
@@ -23774,6 +23774,7 @@ def _scenario_c_exit_spec(research_lane: str = None):
         "profile": "Scenario C",
         "ladder": ladder_label,
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
@@ -23786,6 +23787,7 @@ def _runner_exit_spec():
         "profile": "Scenario C Runner Variant",
         "ladder": "18→14, 25→18, 40→28, 55→38",
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
@@ -23798,6 +23800,7 @@ def _recovery_monster_exit_spec():
         "profile": "Recovery Monster v1",
         "ladder": "18→14, 25→18, 40→28, 55→38",
         "thesis_stop_margin_pct": RECOVERY_MONSTER_THESIS_PCT,
+        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
         "mfe_protect_margin_pct": RECOVERY_MONSTER_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
@@ -23836,6 +23839,7 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
         f"AI cadence: {entry.get('ai_cadence') or shared['ai_scan_cadence_label']}",
         f"Exit: {exit.get('profile')} · ladder {exit.get('ladder')}",
         f"Thesis stop: {exit.get('thesis_stop_margin_pct')}% margin unreal",
+        f"Final hard stop: {exit.get('hard_stop_margin_pct')}% margin unreal",
         f"MFE protect: peak ≥{exit.get('mfe_protect_margin_pct')}% margin → skip fast thesis cut",
         f"Thesis pause above: +{exit.get('thesis_pause_above_margin_pct')}% unreal",
         f"Time cap: {exit.get('fixed_time_exit')}",
