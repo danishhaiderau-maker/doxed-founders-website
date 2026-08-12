@@ -47,8 +47,12 @@ export default function FounderIdePage() {
     }, 100);
   }, []);
 
-  const replaceStaleNode = useCallback(async () => {
+  const disconnectFounderNode = useCallback(async () => {
     if (!session?.accessToken || !pairedNodeId) return;
+    const confirmed = window.confirm(
+      'Disconnect this Founder Node? Remote requests will stop immediately. You can pair this computer again later.',
+    );
+    if (!confirmed) return;
     setReplacingNode(true);
     setPairError(null);
     try {
@@ -56,7 +60,7 @@ export default function FounderIdePage() {
       setPairedNodeId(null);
       setShowPair(true);
     } catch (error) {
-      setPairError(error instanceof Error ? error.message : 'Could not replace the stale Founder Node connection.');
+      setPairError(error instanceof Error ? error.message : 'Could not disconnect the Founder Node.');
     } finally {
       setReplacingNode(false);
     }
@@ -168,11 +172,11 @@ export default function FounderIdePage() {
                 </p>
                 <button
                   type='button'
-                  onClick={() => void replaceStaleNode()}
+                  onClick={() => void disconnectFounderNode()}
                   disabled={replacingNode}
-                  className='mt-3 text-xs text-zinc-400 underline underline-offset-4 hover:text-white disabled:cursor-not-allowed disabled:opacity-60'
+                  className='mt-3 text-xs text-red-300 underline underline-offset-4 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-60'
                 >
-                  {replacingNode ? 'Replacing connection…' : 'Replace this Founder Node'}
+                  {replacingNode ? 'Disconnecting…' : 'Disconnect this Founder Node'}
                 </button>
                 {pairError && <p role='alert' className='mt-2 text-xs text-red-300'>{pairError}</p>}
               </div>
