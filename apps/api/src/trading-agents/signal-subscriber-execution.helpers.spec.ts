@@ -24,6 +24,7 @@ import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
+  aggressiveCatchupEnabled,
   boundedAggressiveCatchupLimit,
   aggressiveCatchupIsWithinBound,
   mirrorPositionQuantityDelta,
@@ -4811,6 +4812,23 @@ test('bounded aggressive catch-up never exceeds the five-basis-point adverse cap
   assert.equal(aggressiveCatchupIsWithinBound('LONG', 64_032.01, 64_032), false);
   assert.equal(aggressiveCatchupIsWithinBound('SHORT', 63_968, 63_968), true);
   assert.equal(aggressiveCatchupIsWithinBound('SHORT', 63_967.99, 63_968), false);
+});
+
+test('bounded aggressive catch-up is production-default and can be explicitly disabled', () => {
+  const previousMode = process.env.NODE_ENV;
+  const previousEnabled = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    assert.equal(aggressiveCatchupEnabled(), true);
+    process.env.AGGRESSIVE_CATCHUP_ENABLED = 'false';
+    assert.equal(aggressiveCatchupEnabled(), false);
+  } finally {
+    if (previousMode === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousMode;
+    if (previousEnabled === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previousEnabled;
+  }
 });
 
 test('private wake parser preserves only bounded POSITION_OPENED fill evidence', () => {

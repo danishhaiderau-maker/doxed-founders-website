@@ -898,18 +898,20 @@ export function capRelayLimitAtShowcaseFill(
 }
 
 /**
- * Optional continuation policy for a resting copy order after its exact
- * showcase trade has filled.  It is deliberately disabled by default: when
- * enabled, the existing order may remain only while that same showcase
- * position is OPEN, and applyLimitChase clamps it to a no-worse limit.
+ * Bounded continuation policy for a resting copy order after its exact
+ * showcase trade has filled. It is enabled by default in production so the
+ * approved source-owned catch-up lifecycle cannot silently regress when a
+ * deployment omits an environment variable. An explicit false value remains
+ * an emergency off-switch.
  *
  * This is not market catch-up.  A SHORT may sell only at the showcase fill or
  * higher; a LONG may buy only at the showcase fill or lower.  The source exit
  * still owns cancellation and a later real fill still uses the normal
  * protection/terminal funnel.
  */
-function aggressiveCatchupEnabled(): boolean {
+export function aggressiveCatchupEnabled(): boolean {
   const value = (process.env.AGGRESSIVE_CATCHUP_ENABLED ?? '').trim().toLowerCase();
+  if (!value) return process.env.NODE_ENV === 'production';
   return value === '1' || value === 'true' || value === 'on' || value === 'yes';
 }
 
