@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: activate catch-up from canonical source fill
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
