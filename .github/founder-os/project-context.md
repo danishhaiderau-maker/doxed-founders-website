@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(ops): show latest pending replacement metadata
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
