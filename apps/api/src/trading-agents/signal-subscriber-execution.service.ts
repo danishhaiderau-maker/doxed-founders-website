@@ -4559,10 +4559,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     const intentDirection = (cycle.intentEnvelope as SignalIntentEnvelope).direction;
     if (!intentDirection) return false;
-    const cachedState = this.botBridge.getCachedExecutionState();
-    // A non-flat fast path also needs the current canonical capacity snapshot;
-    // falling back to the default could overbook if the dashboard cap was
-    // lowered. The full reconciliation path will fetch it authoritatively.
+    // The normal executor cycle refreshes this owner-authenticated snapshot at
+    // roughly a 12s cadence.  Keep it valid across one complete cycle: a 10s
+    // window made an otherwise exact same-direction entry fall back to the
+    // slow reconciliation path whenever the signed wake arrived in the small
+    // gap before that next refresh.  This is still an owner-bound snapshot,
+    // never a default-capacity fallback.
+    const cachedState = this.botBridge.getCachedExecutionState(20_000);
+    // A non-flat fast path still needs a canonical capacity snapshot; falling
+    // back to the default could overbook if the dashboard cap was lowered.
+    // The full reconciliation path fetches it authoritatively.
     if (!flatPreflight && !cachedState) return false;
     const maxConcurrent = resolveMaxConcurrentCopySignals({
       botMaxActiveSignals: cachedState?.max_active_signals,
