@@ -2441,6 +2441,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   /** Exact direct wakes completed by this process. Prevent the durable
    * crash-fallback copy from executing the same wake a second time. */
   private readonly completedDirectWakeAt = new Map<string, number>();
+  /**
+   * A verified source fill retires an executable pending order.  It cannot sit
+   * behind an unrelated global fast wake: the exact participant money lane
+   * below still serializes it against a concurrent limit replacement.
+   */
+  private prioritySourceFillWakes = new Set<string>();
   /** One writer per participant while a cancel-race fill is promoted to OPEN. */
   private readonly cancelRaceFillInFlight = new Set<string>();
   /** Serializes cancel/replace persistence against gone-order classification. */
@@ -3106,6 +3112,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   async acceptDirectExecutorWake(wake: RelayExecutorWakeRequest): Promise<boolean> {
     if (!executionEnabled()) return false;
     if (this.fastWakeRunning) {
+      if (wake.trigger === 'POSITION_OPENED') {
+        this.startPrioritySourceFillWake(wake);
+        return true;
+      }
       this.enqueueDirectWake(wake);
       return true;
     }
@@ -3129,6 +3139,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       &&
       this.activeDirectWake
       && this.executorWakeLogicalKey(this.activeDirectWake) === logicalKey
+    ) return;
+    if (
+      wake.trigger === 'POSITION_OPENED'
+      && (this.prioritySourceFillWakes ?? (this.prioritySourceFillWakes = new Set<string>())).has(logicalKey)
     ) return;
     const key = this.executorWakeKey(wake);
     if (this.pendingDirectWakes.some((candidate) => this.executorWakeKey(candidate) === key)) {
@@ -3189,6 +3203,46 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (this.fastWakeRunning) return;
     const next = this.pendingDirectWakes.shift();
     if (next) this.startDirectExecutorWake(next);
+  }
+
+  /**
+   * Execute an exact signed source-fill wake alongside a non-terminal global
+   * wake.  This deliberately does not bypass participantMoneyLane: if the
+   * currently running wake owns the same order's replacement, the fill waits
+   * only for that one atomic cancel/submit/persist operation, not for all
+   * cached instances or subsequent queued work.
+   */
+  private startPrioritySourceFillWake(wake: RelayExecutorWakeRequest): void {
+    const key = this.executorWakeLogicalKey(wake);
+    const inFlight = this.prioritySourceFillWakes ?? (this.prioritySourceFillWakes = new Set<string>());
+    if (inFlight.has(key)) return;
+    if (
+      this.activeDirectWake
+      && this.executorWakeLogicalKey(this.activeDirectWake) === key
+    ) return;
+    inFlight.add(key);
+    // The pre-wake is the earliest receipt.  Remove any queued durable copy
+    // before starting it so a later drain cannot repeat the same cancel path.
+    for (let index = this.pendingDirectWakes.length - 1; index >= 0; index -= 1) {
+      if (this.executorWakeLogicalKey(this.pendingDirectWakes[index]) === key) {
+        this.pendingDirectWakes.splice(index, 1);
+      }
+    }
+    void this.executePersistedFastWake(wake)
+      .then(() => {
+        this.completedDirectWakeAt.set(this.executorWakeKey(wake), Date.now());
+        if (this.running) this.wakeQueued = true;
+        else setImmediate(() => void this.tick());
+      })
+      .catch((err) => {
+        this.logger.warn(
+          `Priority source-fill wake failed closed; durable wake retained: ${err instanceof Error ? err.message : err}`,
+        );
+        if (this.running) this.wakeQueued = true;
+      })
+      .finally(() => {
+        inFlight.delete(key);
+      });
   }
 
   private startDirectExecutorWake(wake: RelayExecutorWakeRequest): void {

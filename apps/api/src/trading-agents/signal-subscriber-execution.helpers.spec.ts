@@ -1012,6 +1012,52 @@ test('post-commit POSITION_OPENED does not duplicate its running pre-wake', asyn
   }
 });
 
+test('source fill starts beside an unrelated running reprice but keeps its duplicate suppressed', async () => {
+  const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
+  process.env.RELAY_EXECUTOR_WORKER = 'true';
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.fastWakeRunning = true;
+    service.running = true;
+    service.wakeQueued = false;
+    service.activeDirectWake = {
+      trigger: 'LIMIT_UPDATED', tradeId: 'cont-unrelated-reprice', at: '2026-08-12T00:00:00.000Z',
+    };
+    service.pendingDirectWakes = [];
+    service.prioritySourceFillWakes = new Set<string>();
+    service.completedDirectWakeAt = new Map<string, number>();
+    service.logger = { warn: () => undefined };
+    let resolveExecution!: () => void;
+    const execution = new Promise<void>((resolve) => { resolveExecution = resolve; });
+    const launched: unknown[] = [];
+    service.executePersistedFastWake = async (wake: unknown) => {
+      launched.push(wake);
+      await execution;
+    };
+    const fillWake = {
+      trigger: 'POSITION_OPENED', tradeId: 'cont-exact-fill', at: '2026-08-12T00:00:01.000Z',
+    };
+
+    assert.equal(await service.acceptDirectExecutorWake(fillWake), true);
+    assert.equal(await service.acceptDirectExecutorWake({ ...fillWake, at: '2026-08-12T00:00:01.200Z' }), true);
+    assert.deepEqual(launched, [fillWake]);
+    assert.equal(service.pendingDirectWakes.length, 0);
+    assert.equal(service.prioritySourceFillWakes.has('POSITION_OPENED:cont-exact-fill'), true);
+
+    resolveExecution();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(service.prioritySourceFillWakes.size, 0);
+    assert.equal(service.wakeQueued, true);
+  } finally {
+    if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
+    if (previousWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = previousWorker;
+  }
+});
+
 test('queued source fill preempts a queued reprice and coalesces its durable duplicate', () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.activeDirectWake = {
