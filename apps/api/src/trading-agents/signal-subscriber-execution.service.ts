@@ -954,6 +954,25 @@ export function shouldRetainActiveAggressiveCatchup(input: {
     && input.hasManagedOrder;
 }
 
+/** A canonical exact source position can safely start the same bounded catch-up
+ * fallback when a private POSITION_OPENED wake is delayed behind a reprice. */
+export function shouldActivateAggressiveCatchup(input: {
+  enabled: boolean;
+  catchupActive: boolean;
+  showcaseTradeOpen: boolean;
+  showcaseFill: number;
+  participantStatus: SignalCycleStatus;
+  hasManagedOrder: boolean;
+}): boolean {
+  return input.enabled
+    && !input.catchupActive
+    && input.showcaseTradeOpen
+    && Number.isFinite(input.showcaseFill)
+    && input.showcaseFill > 0
+    && input.participantStatus === SignalCycleStatus.PENDING_ENTRY
+    && input.hasManagedOrder;
+}
+
 export function partialEntryFillDisposition(input: {
   intendedQty: number;
   filledQty: number;
@@ -4062,6 +4081,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // cancellation would discard an otherwise in-bounds catch-up.
     if (aggressiveCatchupEnabled() && signedOpen) {
       const showcaseFill = Number(signedOpen.fillPrice);
+      if (
+        meta.aggressiveCatchupActive === true
+        && Math.abs(Number(meta.aggressiveCatchupSourceFill ?? 0) - showcaseFill) < 0.01
+      ) return true;
       const boundedLimit = boundedAggressiveCatchupLimit(meta.direction, showcaseFill);
       const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
       if (aggressiveCatchupIsWithinBound(meta.direction, mark, boundedLimit)) {
@@ -8687,6 +8710,54 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           `Aggressive catch-up active ${userId} cycle=${cycle.id}: source remains open; retaining managed order ${orderId}`,
         );
         return;
+      }
+      // The normal monitor already treats this exact canonical source position
+      // as authority to cancel a stale copy.  Use the same authority to start
+      // the opted-in, bounded catch-up if the private signed wake is delayed by
+      // a concurrent LIMIT_UPDATED. This is deliberately identical to the
+      // signed-wake price bound, never a market order, and the durable marker
+      // above prevents the next monitor tick from cancelling this order.
+      if (shouldActivateAggressiveCatchup({
+        enabled: aggressiveCatchupEnabled(),
+        catchupActive: meta.aggressiveCatchupActive === true,
+        showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
+        showcaseFill,
+        participantStatus: participant.status,
+        hasManagedOrder: !!orderId,
+      })) {
+        const boundedLimit = boundedAggressiveCatchupLimit(meta.direction, showcaseFill);
+        const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
+        if (aggressiveCatchupIsWithinBound(meta.direction, mark, boundedLimit)) {
+          const sourceFillAtMs = sourceEntityCreatedAtMs(showcasePosition as Record<string, unknown>);
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: 'AGGRESSIVE_CATCHUP_BOUNDED',
+            catchup_source: 'CANONICAL_POSITION_FALLBACK',
+            trade_id: showcaseTradeId,
+            bitfinex_order_id: orderId,
+            source_fill_price: showcaseFill,
+            catchup_limit_price: boundedLimit,
+            catchup_max_adverse_bps: 5,
+            local_mark: mark,
+            source_fill_at: new Date(sourceFillAtMs ?? Date.now()).toISOString(),
+            aggressiveCatchupActive: true,
+            aggressiveCatchupSourceFill: showcaseFill,
+            aggressiveCatchupStartedAtMs: Date.now(),
+          });
+          await this.replaceRestingLimitOwned(
+            agentId, userId, cycle.id, participant.id, meta, creds, intent,
+            {
+              newLimit: boundedLimit,
+              mark,
+              now: Date.now(),
+              chaseLabel: `aggressive-catchup-5bps canonical-fill=${showcaseFill.toFixed(2)}`,
+              event: 'BOT_ANCHOR_CHASE',
+              tradeId: cycle.tradeId,
+            },
+          );
+          return;
+        }
       }
       retainLateEntry = shouldRetainLateEntryContinuation({
         // Better-only continuation was replaced by the authenticated bounded

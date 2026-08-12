@@ -44,6 +44,7 @@ import {
   pendingCopyShowcaseDisposition,
   shouldRetainLateEntryContinuation,
   shouldRetainActiveAggressiveCatchup,
+  shouldActivateAggressiveCatchup,
   showcaseAbsentWithinOrderPropagationGrace,
   shouldDeferCancelByExchangeForReplacement,
   pendingEntryOwnershipAdvanced,
@@ -158,6 +159,23 @@ test('active bounded catch-up retains its managed order only while the exact sou
     shouldRetainActiveAggressiveCatchup({ ...base, participantStatus: SignalCycleStatus.OPEN }),
     false,
   );
+});
+
+test('canonical source position starts bounded catch-up only once for its exact pending order', () => {
+  const base = {
+    enabled: true,
+    catchupActive: false,
+    showcaseTradeOpen: true,
+    showcaseFill: 63_474.01,
+    participantStatus: SignalCycleStatus.PENDING_ENTRY,
+    hasManagedOrder: true,
+  };
+  assert.equal(shouldActivateAggressiveCatchup(base), true);
+  assert.equal(shouldActivateAggressiveCatchup({ ...base, catchupActive: true }), false);
+  assert.equal(shouldActivateAggressiveCatchup({ ...base, enabled: false }), false);
+  assert.equal(shouldActivateAggressiveCatchup({ ...base, showcaseTradeOpen: false }), false);
+  assert.equal(shouldActivateAggressiveCatchup({ ...base, showcaseFill: 0 }), false);
+  assert.equal(shouldActivateAggressiveCatchup({ ...base, hasManagedOrder: false }), false);
 });
 
 test('exact showcase quantity exceeding the subscriber cap is blocked, never resized', () => {
