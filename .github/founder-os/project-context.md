@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): recognize protected partial stop in fast path
+feat(web): show live BTC price in agent hero
 
 ## Last Activity
 
