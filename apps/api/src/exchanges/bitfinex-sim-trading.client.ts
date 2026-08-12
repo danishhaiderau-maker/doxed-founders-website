@@ -195,6 +195,29 @@ export class BitfinexSimTradingClient {
     return id;
   }
 
+  /** In-memory equivalent of Bitfinex's in-place order update. */
+  async updateLimitOrder(
+    _creds: ExchangeCredentials,
+    input: {
+      orderId: number;
+      direction: 'LONG' | 'SHORT';
+      qty: number;
+      price: number;
+      leverage?: number;
+    },
+  ): Promise<number> {
+    void input.leverage;
+    const order = this.ledger.orders.find((candidate) => candidate.id === input.orderId);
+    if (!order || order.orderType !== 'LIMIT') {
+      throw new Error(`Bitfinex simulated limit order ${input.orderId} is not active`);
+    }
+    order.direction = input.direction;
+    order.qty = input.qty;
+    order.amount = orderAmount(input.direction, input.qty);
+    order.price = input.price;
+    return order.id;
+  }
+
   async submitStopOrder(
     _creds: ExchangeCredentials,
     input: {

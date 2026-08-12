@@ -3,6 +3,7 @@ import test from 'node:test';
 import './bitfinex-auth-trade-stream.spec';
 import {
   BITFINEX_BTC_PERP_SYMBOL,
+  BitfinexTradingClient,
   allocateBitfinexAuthNonce,
   bitfinexAuthPost,
   parseActiveOrdersPayload,
@@ -153,6 +154,36 @@ test('authenticated nonce lane bounds queue wait and never sends expired queued 
     await first;
     await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(calls, 1, 'the expired queued request must not execute after the lane drains');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('native limit update keeps the existing order id and sends only the in-place amend request', async () => {
+  const originalFetch = globalThis.fetch;
+  let request: { url: string; body: Record<string, unknown> } | null = null;
+  globalThis.fetch = (async (url, init) => {
+    request = { url: String(url), body: JSON.parse(String(init?.body ?? '{}')) };
+    return new Response(JSON.stringify([Date.now(), 'ou-req', null, null, [241234567890], null, 'SUCCESS']), {
+      status: 200,
+    });
+  }) as typeof fetch;
+
+  try {
+    const client = new BitfinexTradingClient();
+    const id = await client.updateLimitOrder(
+      { apiKey: 'native-update-test', apiSecret: 'not-a-real-secret', testnet: false },
+      { orderId: 241234567890, direction: 'SHORT', qty: 0.03123, price: 63_500.12, leverage: 10 },
+    );
+    assert.equal(id, 241234567890);
+    assert.equal(request?.url, 'https://api.bitfinex.com/v2/auth/w/order/update');
+    assert.deepEqual(request?.body, {
+      id: 241234567890,
+      amount: '-0.03123',
+      price: '63500.12',
+      lev: 10,
+      meta: { aff_code: 'doxxedcrypto' },
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

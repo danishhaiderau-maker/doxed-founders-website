@@ -670,6 +670,38 @@ export class BitfinexTradingClient {
     return id;
   }
 
+  /**
+   * Amend an active derivative limit in place.  Keeping the exchange order id
+   * avoids the cancel-then-submit gap during a fast showcase reprice.  Callers
+   * must still prove the order is active and unfilled immediately beforehand.
+   */
+  async updateLimitOrder(
+    creds: ExchangeCredentials,
+    input: {
+      orderId: number;
+      direction: 'LONG' | 'SHORT';
+      qty: number;
+      price: number;
+      leverage?: number;
+    },
+  ): Promise<number> {
+    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const amount = input.direction === 'LONG' ? Math.abs(input.qty) : -Math.abs(input.qty);
+    const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/update', {
+      id: input.orderId,
+      amount: amount.toFixed(5),
+      price: input.price.toFixed(2),
+      lev,
+      meta: { aff_code: 'doxxedcrypto' },
+    });
+    const id = parseBitfinexOrderId(res);
+    if (!id) throw new Error('Bitfinex limit order updated but no order id returned');
+    if (id !== input.orderId) {
+      throw new Error(`Bitfinex limit order update returned unexpected id ${id} (expected ${input.orderId})`);
+    }
+    return id;
+  }
+
   async submitStopOrder(
     creds: ExchangeCredentials,
     input: {

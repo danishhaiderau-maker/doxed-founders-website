@@ -10504,14 +10504,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     try {
-      await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId);
-      const newOrderId = await this.activeTrading.submitLimitOrder(creds, {
-        direction: meta.direction,
-        qty,
-        price: opts.newLimit,
-        leverage,
-        clientOrderId,
-      });
+      // Bitfinex's authenticated order-update endpoint preserves the existing
+      // id and removes the cancel/submit visibility gap.  The real venue only
+      // takes this branch; simulation and lightweight fixtures retain their
+      // established replacement behaviour.
+      const nativeUpdate = this.activeTrading instanceof BitfinexTradingClient;
+      const newOrderId = nativeUpdate
+        ? await this.activeTrading.updateLimitOrder(creds, {
+            orderId: meta.bitfinexOrderId,
+            direction: meta.direction,
+            qty,
+            price: opts.newLimit,
+            leverage,
+          })
+        : (await this.activeTrading.cancelOrder(creds, meta.bitfinexOrderId),
+          await this.activeTrading.submitLimitOrder(creds, {
+            direction: meta.direction,
+            qty,
+            price: opts.newLimit,
+            leverage,
+            clientOrderId,
+          }));
       const exchangeAckAtMs = Date.now();
       const chaseCount = (meta.limitChaseCount ?? 0) + 1;
       this.logger.log(
@@ -10525,6 +10538,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         limitPrice: opts.newLimit,
         bitfinexOrderId: newOrderId,
         clientOrderId,
+        replacementMode: nativeUpdate ? 'BITFINEX_IN_PLACE_UPDATE' : 'CANCEL_SUBMIT',
         local_mark: opts.mark,
         lastChaseAtMs: opts.now,
         replacementExchangeAckAtMs: exchangeAckAtMs,
