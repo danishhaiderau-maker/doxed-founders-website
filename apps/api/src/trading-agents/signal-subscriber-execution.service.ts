@@ -891,9 +891,36 @@ export function capRelayLimitAtShowcaseFill(
  * still owns cancellation and a later real fill still uses the normal
  * protection/terminal funnel.
  */
-function lateEntryContinuationEnabled(): boolean {
-  const value = (process.env.LATE_ENTRY_CONTINUATION_ENABLED ?? '').trim().toLowerCase();
+function aggressiveCatchupEnabled(): boolean {
+  const value = (process.env.AGGRESSIVE_CATCHUP_ENABLED ?? '').trim().toLowerCase();
   return value === '1' || value === 'true' || value === 'on' || value === 'yes';
+}
+
+/**
+ * Maximum executable catch-up boundary after the exact source trade has
+ * filled. This is deliberately a limit, never an unbounded market order:
+ * LONG may pay at most 5 bps above the source fill and SHORT may sell at most
+ * 5 bps below it. The source exit still owns the same trade identity.
+ */
+export function boundedAggressiveCatchupLimit(
+  direction: 'LONG' | 'SHORT',
+  showcaseFill: number,
+  maxAdverseBps = 5,
+): number {
+  if (!(showcaseFill > 0) || !(maxAdverseBps >= 0)) return 0;
+  const multiplier = maxAdverseBps / 10_000;
+  return direction === 'LONG'
+    ? showcaseFill * (1 + multiplier)
+    : showcaseFill * (1 - multiplier);
+}
+
+export function aggressiveCatchupIsWithinBound(
+  direction: 'LONG' | 'SHORT',
+  mark: number,
+  boundedLimit: number,
+): boolean {
+  if (!(mark > 0) || !(boundedLimit > 0)) return false;
+  return direction === 'LONG' ? mark <= boundedLimit : mark >= boundedLimit;
 }
 
 export function shouldRetainLateEntryContinuation(input: {
@@ -3917,84 +3944,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       || !meta.direction
     ) return false;
 
-    // An authenticated source fill normally retires its exact resting copy
-    // immediately.  The opt-in late-entry policy is the one exception: when
-    // the *same* showcase trade is still OPEN, retain this exact owned order
-    // and cap it at a no-worse entry instead of letting the fast wake bypass
-    // the continuation branch in monitorEntry.
-    if (lateEntryContinuationEnabled() && this.botBridge.isEnabled()) {
-      // The authenticated wake carries the exact source fill.  Prefer it over
-      // the eventually-consistent Fly state snapshot: the latter can lag the
-      // webhook by seconds, which previously let the old cancel path win.
-      const botState = signedOpen ? null : await this.fetchExecutionBotState().catch(() => null);
-      const showcasePosition = (botState?.positions ?? []).find((position) =>
-        tradeIdsMatch(String(position.trade_id ?? ''), freshParticipant.cycle.tradeId),
-      );
-      const showcaseFill = Number(signedOpen?.fillPrice ?? showcasePosition?.entry ?? 0);
-      const retainLateEntry = shouldRetainLateEntryContinuation({
-        enabled: true,
-        showcaseTradeOpen: !!signedOpen || (!!showcasePosition && Number.isFinite(showcaseFill) && showcaseFill > 0),
-        participantStatus: freshParticipant.status,
-        hasManagedOrder: true,
-      });
-      if (retainLateEntry) {
-        const lateEntryStartedAtMs = Date.now();
-        const continuedMeta: ExecutionPayload = {
-          ...meta,
-          lateEntryContinuation: true,
-          lateEntryShowcaseFill: showcaseFill,
-          lateEntryStartedAtMs,
-        };
-        if (
-          !meta.lateEntryContinuation
-          || Math.abs(Number(meta.lateEntryShowcaseFill ?? 0) - showcaseFill) >= 0.01
-        ) {
-          await this.cycles.recordHireExecutionEvent(
-            instance.userId,
-            agentId,
-            freshParticipant.cycle.id,
-            'UPDATE_STOPS',
-            {
-              venue: 'bitfinex',
-              source: 'hire',
-              event: 'LATE_ENTRY_BETTER_ONLY_CONTINUATION',
-              trade_id: freshParticipant.cycle.tradeId,
-              bitfinex_order_id: meta.bitfinexOrderId,
-              lateEntryContinuation: true,
-              lateEntryShowcaseFill: showcaseFill,
-              lateEntryStartedAtMs,
-              late_entry_continuation: true,
-              late_entry_showcase_fill: showcaseFill,
-              late_entry_started_at: new Date(lateEntryStartedAtMs).toISOString(),
-              source_fill_at: sourceFillAt,
-            },
-          );
-        }
-        const cappedLimit = capRelayLimitAtShowcaseFill(
-          meta.direction,
-          meta.limitPrice ?? showcaseFill,
-          showcaseFill,
+    // A source fill normally retires the exact resting copy immediately. The
+    // sole opt-in exception is a bounded catch-up: use a marketable LIMIT at
+    // most 5 bps worse than this exact source fill, never an unbounded market
+    // order. The old better-only continuation is intentionally not layered on
+    // top of this policy; an out-of-bound market falls through to safe cancel.
+    if (aggressiveCatchupEnabled() && signedOpen && this.botBridge.isEnabled()) {
+      const showcaseFill = Number(signedOpen.fillPrice);
+      const boundedLimit = boundedAggressiveCatchupLimit(meta.direction, showcaseFill);
+      const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
+      if (aggressiveCatchupIsWithinBound(meta.direction, mark, boundedLimit)) {
+        await this.cycles.recordHireExecutionEvent(
+          instance.userId,
+          agentId,
+          freshParticipant.cycle.id,
+          'UPDATE_STOPS',
+          {
+            venue: 'bitfinex', source: 'hire', event: 'AGGRESSIVE_CATCHUP_BOUNDED',
+            trade_id: freshParticipant.cycle.tradeId,
+            bitfinex_order_id: meta.bitfinexOrderId,
+            source_fill_price: showcaseFill,
+            catchup_limit_price: boundedLimit,
+            catchup_max_adverse_bps: 5,
+            local_mark: mark,
+            source_fill_at: sourceFillAt,
+          },
         );
-        if (meta.limitPrice && Math.abs(cappedLimit - meta.limitPrice) >= 0.01) {
-          const mark = await this.activeTrading.getMarkPrice();
-          await this.replaceRestingLimitOwned(
-            agentId,
-            instance.userId,
-            freshParticipant.cycle.id,
-            freshParticipant.id,
-            continuedMeta,
-            creds,
-            freshParticipant.cycle.intentEnvelope as SignalIntentEnvelope,
-            {
-              newLimit: cappedLimit,
-              mark,
-              now: Date.now(),
-              chaseLabel: `showcase-fill-cap=${showcaseFill.toFixed(2)}`,
-              event: 'BOT_ANCHOR_CHASE',
-              tradeId: freshParticipant.cycle.tradeId,
-            },
-          );
-        }
+        await this.replaceRestingLimitOwned(
+          agentId, instance.userId, freshParticipant.cycle.id, freshParticipant.id,
+          meta, creds, freshParticipant.cycle.intentEnvelope as SignalIntentEnvelope,
+          {
+            newLimit: boundedLimit, mark, now: Date.now(),
+            chaseLabel: `aggressive-catchup-5bps source-fill=${showcaseFill.toFixed(2)}`,
+            event: 'BOT_ANCHOR_CHASE', tradeId: freshParticipant.cycle.tradeId,
+          },
+        );
         return true;
       }
     }
@@ -8541,7 +8525,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       );
       const showcaseFill = Number(showcasePosition?.entry ?? 0);
       retainLateEntry = shouldRetainLateEntryContinuation({
-        enabled: lateEntryContinuationEnabled(),
+        // Better-only continuation was replaced by the authenticated bounded
+        // catch-up path above. Snapshot reconciliation must never resurrect it.
+        enabled: false,
         showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
         participantStatus: participant.status,
         hasManagedOrder: !!orderId,

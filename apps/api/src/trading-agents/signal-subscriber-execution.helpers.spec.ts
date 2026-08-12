@@ -22,6 +22,8 @@ import {
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
+  boundedAggressiveCatchupLimit,
+  aggressiveCatchupIsWithinBound,
   mirrorPositionQuantityDelta,
   partialEntryFillDisposition,
   finalizedEntryFillQty,
@@ -2593,47 +2595,6 @@ test('showcase fill makes a still-pending copy fail closed even while relay is p
   assert.equal(pendingCopyShowcaseDisposition(null, 'cont-filled'), 'SOURCE_UNAVAILABLE');
 });
 
-test('opt-in late entry retains the exact pending order while its showcase trade remains open', async () => {
-  const prior = process.env.LATE_ENTRY_CONTINUATION_ENABLED;
-  process.env.LATE_ENTRY_CONTINUATION_ENABLED = 'true';
-  const events: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  let cancelled = 0;
-  let chased = 0;
-  const intent = { action: 'ENTER', trade_id: 'cont-late-entry', risk: {}, context: {} };
-  const meta = { direction: 'SHORT' as const, bitfinexOrderId: 6011, limitPrice: 64_000, qty: 0.03 };
-  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-  service.replacementMissingProbe = new Map();
-  service.loadExecutionMeta = async () => meta;
-  service.botBridge = { isEnabled: () => true };
-  service.cancelAbsurdPendingOrders = async () => undefined;
-  service.fetchExecutionBotState = async () => ({ positions: [{ trade_id: 'cont-late-entry', entry: 64_020 }] });
-  service.resolveShowcaseMirrorTradeId = () => 'cont-late-entry';
-  service.showcaseEntryAbandoned = () => ({ abandoned: true, reason: 'MISSED_SHOWCASE_FILL' });
-  service.cancelManagedOrderGone = async () => { cancelled += 1; return { gone: true, reason: 'CANCELLED', attempts: 1 }; };
-  service.applyLimitChase = async (...args: unknown[]) => { chased += 1; assert.equal(args[7], 'cont-late-entry'); };
-  service.prisma = {
-    signalCycleParticipant: { findUnique: async () => ({ id: 'participant-late', status: SignalCycleStatus.PENDING_ENTRY }) },
-    signalCycle: { findUnique: async () => ({ id: 'cycle-late', tradeId: 'cont-late-entry', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY }) },
-  };
-  service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string, payload: Record<string, unknown>) => events.push({ event, payload }) };
-  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
-  try {
-    await service.monitorEntry(
-      'agent', 'user',
-      { id: 'cycle-late', tradeId: 'cont-late-entry', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY },
-      { id: 'participant-late', status: SignalCycleStatus.PENDING_ENTRY }, meta, {}, new Set<number>([6011]), false,
-    );
-    assert.equal(cancelled, 0);
-    assert.equal(chased, 1);
-    assert.deepEqual(events.map((entry) => entry.event), ['UPDATE_STOPS']);
-    assert.equal(events[0]?.payload.event, 'LATE_ENTRY_BETTER_ONLY_CONTINUATION');
-    assert.equal(events[0]?.payload.trade_id, 'cont-late-entry');
-  } finally {
-    if (prior == null) delete process.env.LATE_ENTRY_CONTINUATION_ENABLED;
-    else process.env.LATE_ENTRY_CONTINUATION_ENABLED = prior;
-  }
-});
-
 test('fresh source fill retains the managed copy order during settlement grace', () => {
   const now = Date.parse('2026-08-02T13:05:20.000Z');
   const bot = {
@@ -3054,9 +3015,9 @@ test('signed source fill retires an exchange-proven unfilled pending order witho
   assert.deepEqual(phantom, ['cont-fast-retire']);
 });
 
-test('signed source fill retains and caps the exact pending order from authenticated wake evidence without waiting for source snapshot', async () => {
-  const previous = process.env.LATE_ENTRY_CONTINUATION_ENABLED;
-  process.env.LATE_ENTRY_CONTINUATION_ENABLED = 'true';
+test('signed source fill replaces the exact pending order with a bounded catch-up limit', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
   try {
     const events: Array<{ type: string; payload: any }> = [];
     const replacements: any[] = [];
@@ -3072,14 +3033,13 @@ test('signed source fill retains and caps the exact pending order from authentic
     } };
     service.exchanges = { getUserCredentials: async () => ({}) };
     service.botBridge = { isEnabled: () => true };
-    service.fetchExecutionBotState = async () => assert.fail('signed source fill wake must not wait for eventually-consistent source snapshot');
     service.loadExecutionMeta = async () => ({
       direction: 'LONG', bitfinexOrderId: 8404, limitPrice: 64_100, qty: 0.03,
     });
-    service.activeTrading = { getMarkPrice: async () => 64_050 };
+    service.activeTrading = { getMarkPrice: async () => 64_010 };
     service.replaceRestingLimitOwned = async (...args: any[]) => { replacements.push(args); };
-    service.cancelManagedOrderGone = async () => assert.fail('late continuation must not cancel the exact managed order');
-    service.detectEntryFillBeforeCancel = async () => assert.fail('late continuation must not retire before applying its no-worse cap');
+    service.cancelManagedOrderGone = async () => assert.fail('bounded in-range catch-up must not cancel the exact managed order');
+    service.detectEntryFillBeforeCancel = async () => assert.fail('bounded in-range catch-up must replace before ordinary retirement');
     service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => events.push({ type, payload }) };
 
     const handled = await service.tryImmediateShowcaseFillReconcile(
@@ -3090,14 +3050,13 @@ test('signed source fill retains and caps the exact pending order from authentic
       { fillPrice: 64_000, sourceEventAtMs: 900, platformReceivedAtMs: 1_000 },
     );
     assert.equal(handled, true);
-    assert.deepEqual(events.map((event) => event.payload.event), ['LATE_ENTRY_BETTER_ONLY_CONTINUATION']);
-    assert.equal(events[0].payload.lateEntryShowcaseFill, 64_000);
+    assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_BOUNDED']);
+    assert.equal(events[0].payload.catchup_max_adverse_bps, 5);
     assert.equal(replacements.length, 1);
-    assert.equal(replacements[0][7].newLimit, 64_000);
-    assert.equal(replacements[0][4].lateEntryContinuation, true);
+    assert.equal(replacements[0][7].newLimit, 64_032);
   } finally {
-    if (previous === undefined) delete process.env.LATE_ENTRY_CONTINUATION_ENABLED;
-    else process.env.LATE_ENTRY_CONTINUATION_ENABLED = previous;
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
   }
 });
 
@@ -4411,6 +4370,15 @@ test('private wake parser preserves only bounded POSITION_CLOSED evidence', () =
     trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-entry',
     signedClose: { exitPrice: 64_400 },
   }), null);
+});
+
+test('bounded aggressive catch-up never exceeds the five-basis-point adverse cap', () => {
+  assert.equal(boundedAggressiveCatchupLimit('LONG', 64_000), 64_032);
+  assert.equal(boundedAggressiveCatchupLimit('SHORT', 64_000), 63_968);
+  assert.equal(aggressiveCatchupIsWithinBound('LONG', 64_031.99, 64_032), true);
+  assert.equal(aggressiveCatchupIsWithinBound('LONG', 64_032.01, 64_032), false);
+  assert.equal(aggressiveCatchupIsWithinBound('SHORT', 63_968, 63_968), true);
+  assert.equal(aggressiveCatchupIsWithinBound('SHORT', 63_967.99, 63_968), false);
 });
 
 test('private wake parser preserves only bounded POSITION_OPENED fill evidence', () => {
