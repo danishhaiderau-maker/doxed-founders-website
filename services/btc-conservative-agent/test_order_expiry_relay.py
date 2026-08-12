@@ -47,8 +47,18 @@ class OrderExpiryRelayTests(unittest.TestCase):
 
     def test_real_resting_limit_expiry_can_emit(self):
         predicate = load_predicate()
-        self.assertTrue(predicate(
-            {"entry_type": "SIM_LIMIT", "created_ts": 123.0, "status": "PENDING"},
+        for entry_type in ("LIMIT", "SIM_LIMIT"):
+            with self.subTest(entry_type=entry_type):
+                self.assertTrue(predicate(
+                    {"entry_type": entry_type, "created_ts": 123.0, "status": "PENDING"},
+                    "SIGNAL_TTL_EXPIRED",
+                    64000,
+                ))
+
+    def test_non_pending_limit_expiry_cannot_emit(self):
+        predicate = load_predicate()
+        self.assertFalse(predicate(
+            {"entry_type": "LIMIT", "created_ts": 123.0, "status": "ORDERED"},
             "SIGNAL_TTL_EXPIRED",
             64000,
         ))

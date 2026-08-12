@@ -21588,10 +21588,16 @@ def _expired_already_recorded(trade_id: str) -> bool:
 
 
 def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
-    """Only a real, previously-resting SIM_LIMIT may drive copy cancellation."""
+    """Only a real, previously-resting source limit may drive copy cancellation."""
     return bool(
         str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
-        and source.get("entry_type") == "SIM_LIMIT"
+        # Continuous creates real paper resting orders with entry_type LIMIT,
+        # while legacy/simulation paths use SIM_LIMIT.  Both represent an
+        # already-published, executable source order; excluding LIMIT made a
+        # genuine Continuous TTL fall back to the slow relay poll instead of
+        # emitting the signed, exact-generation ORDER_EXPIRED wake.
+        and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
+        and str(source.get("status") or "").upper() == "PENDING"
         and source.get("created_ts")
         and isinstance(limit_price, (int, float))
         and limit_price > 0
