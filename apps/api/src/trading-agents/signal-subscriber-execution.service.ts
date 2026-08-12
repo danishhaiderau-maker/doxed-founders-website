@@ -1898,7 +1898,8 @@ export function expiredHireShouldRunExitOnly(input: {
 /**
  * A fresh signed limit may bypass the slow full reconciliation pass while the
  * account already has same-direction owned virtual lots. This remains
- * fail-closed: every resting exchange order must be owned by a PENDING lot;
+ * fail-closed: every active exchange order must be an owned pending-entry
+ * order or an owned protective stop for an OPEN lot;
  * any merged exchange position must exactly match the attributable OPEN and
  * protected-partial quantities; and the configured capacity must have room.
  */
@@ -1914,6 +1915,11 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
     status: SignalCycleStatus;
     direction?: 'LONG' | 'SHORT';
     bitfinexOrderId?: number;
+    /** Managed reduce-only stops are expected active-book rows for OPEN lots. */
+    stopOrderId?: number;
+    partialFillStopOrderId?: number | null;
+    supersededPartialStopOrderId?: number | null;
+    supersededStopOrderId?: number | null;
     qty?: number;
     partialFillQty?: number | null;
   }>;
@@ -1931,6 +1937,7 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
   }
 
   const ownedPendingOrderIds = new Set<number>();
+  const ownedManagedOrderIds = new Set<number>();
   let attributableSats = 0;
   for (const lot of input.virtualLots) {
     if (
@@ -1943,9 +1950,20 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
         return false;
       }
       ownedPendingOrderIds.add(lot.bitfinexOrderId!);
+      ownedManagedOrderIds.add(lot.bitfinexOrderId!);
       attributableSats += Math.max(0, btcToSats(lot.partialFillQty ?? 0));
     } else if (lot.status === SignalCycleStatus.OPEN) {
       if (!lot.qty || btcToSats(lot.qty) <= 0) return false;
+      for (const orderId of [
+        lot.stopOrderId,
+        lot.partialFillStopOrderId,
+        lot.supersededPartialStopOrderId,
+        lot.supersededStopOrderId,
+      ]) {
+        if (Number.isInteger(orderId) && (orderId ?? 0) > 0) {
+          ownedManagedOrderIds.add(orderId!);
+        }
+      }
       attributableSats += btcToSats(lot.qty);
     } else {
       return false;
@@ -1954,8 +1972,8 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
 
   if (
     ownedPendingOrderIds.size !== input.virtualLots.filter((lot) => lot.status === SignalCycleStatus.PENDING_ENTRY).length ||
-    input.exchangeActiveOrderIds.length !== ownedPendingOrderIds.size ||
-    !input.exchangeActiveOrderIds.every((orderId) => ownedPendingOrderIds.has(orderId))
+    input.exchangeActiveOrderIds.length !== ownedManagedOrderIds.size ||
+    !input.exchangeActiveOrderIds.every((orderId) => ownedManagedOrderIds.has(orderId))
   ) {
     return false;
   }

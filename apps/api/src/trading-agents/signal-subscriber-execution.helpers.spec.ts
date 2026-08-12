@@ -3772,6 +3772,38 @@ test('signed same-direction fast path permits an exactly ledger-backed OPEN lot 
   );
 });
 
+test('signed same-direction fast path accepts only managed stops for existing open lots', () => {
+  const input = {
+    status: TradingAgentInstanceStatus.ACTIVE,
+    simActive: false,
+    hireExpired: false,
+    relayArmed: true,
+    exchangePositionQty: -0.06301,
+    candidateDirection: 'SHORT' as const,
+    maxConcurrent: 3,
+    virtualLots: [
+      {
+        status: SignalCycleStatus.OPEN,
+        direction: 'SHORT' as const,
+        qty: 0.0315,
+        stopOrderId: 301,
+      },
+      {
+        status: SignalCycleStatus.OPEN,
+        direction: 'SHORT' as const,
+        qty: 0.03151,
+        stopOrderId: 302,
+      },
+    ],
+    exchangeActiveOrderIds: [301, 302],
+  };
+  assert.equal(sameDirectionPendingSignedFastPathPreflight(input), true);
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({ ...input, exchangeActiveOrderIds: [301, 999] }),
+    false,
+  );
+});
+
 test('showcase fill cap permits improvement but never a worse copied entry', () => {
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 64_010, 64_000), 64_000);
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 63_900, 64_000), 63_900);
