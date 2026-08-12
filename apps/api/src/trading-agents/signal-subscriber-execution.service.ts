@@ -3979,7 +3979,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // most 5 bps worse than this exact source fill, never an unbounded market
     // order. The old better-only continuation is intentionally not layered on
     // top of this policy; an out-of-bound market falls through to safe cancel.
-    if (aggressiveCatchupEnabled() && signedOpen && this.botBridge.isEnabled()) {
+    // The signed POSITION_OPENED wake has already passed the source HMAC and
+    // active-owner checks.  Catch-up must not depend on the optional dashboard
+    // bridge: the executor can receive that verified wake while the bridge is
+    // intentionally unavailable or disabled, and silently falling through to
+    // cancellation would discard an otherwise in-bounds catch-up.
+    if (aggressiveCatchupEnabled() && signedOpen) {
       const showcaseFill = Number(signedOpen.fillPrice);
       const boundedLimit = boundedAggressiveCatchupLimit(meta.direction, showcaseFill);
       const mark = await this.activeTrading.getMarkPrice().catch(() => 0);

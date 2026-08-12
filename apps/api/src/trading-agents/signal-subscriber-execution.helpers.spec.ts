@@ -3110,7 +3110,9 @@ test('signed source fill replaces the exact pending order with a bounded catch-u
       findUnique: async () => ({ id: 'participant-fast-late', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
     } };
     service.exchanges = { getUserCredentials: async () => ({}) };
-    service.botBridge = { isEnabled: () => true };
+    // The direct, HMAC-verified POSITION_OPENED wake is sufficient authority
+    // for bounded catch-up; the optional dashboard bridge must not suppress it.
+    service.botBridge = { isEnabled: () => false };
     service.loadExecutionMeta = async () => ({
       direction: 'LONG', bitfinexOrderId: 8404, limitPrice: 64_100, qty: 0.03,
     });
