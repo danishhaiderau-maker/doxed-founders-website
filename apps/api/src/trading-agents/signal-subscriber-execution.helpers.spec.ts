@@ -20,6 +20,7 @@ import {
 import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
   SignalSubscriberExecutionService,
+  finiteDecimalLikeNumber,
   canonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
@@ -87,6 +88,13 @@ import {
   shouldRunLocalRealSideSafetyNet,
   resolveExactShowcaseEntryQty,
 } from './signal-subscriber-execution.service';
+
+test('decimal-like terminal fill prices remain finite for partial-close P&L accounting', () => {
+  assert.equal(finiteDecimalLikeNumber({ toNumber: () => 63_642 }), 63_642);
+  assert.equal(finiteDecimalLikeNumber({ toNumber: () => Number.NaN }), null);
+  assert.equal(finiteDecimalLikeNumber(63_642), 63_642);
+  assert.equal(finiteDecimalLikeNumber(null), null);
+});
 
 test('exact showcase quantity is preserved below the subscriber cap', () => {
   const result = resolveExactShowcaseEntryQty({

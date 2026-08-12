@@ -119,6 +119,23 @@ export type ExactShowcaseEntryQtyResolution =
   | { ok: false; reason: 'MISSING_EXACT_QTY' | 'INVALID_SIZING_CONTEXT' | 'BELOW_EXCHANGE_MIN_QTY' | 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
 
 /**
+ * Prisma Decimal values support Number(...), while the deliberately small
+ * decimal-like wrappers used by terminal fill funnels expose only toNumber().
+ * Treat both forms consistently: a terminal partial fill must never fall back
+ * to a fabricated zero P&L merely because its durable fill price is wrapped.
+ */
+export function finiteDecimalLikeNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (value != null && typeof value === 'object' && 'toNumber' in value) {
+    const candidate = (value as { toNumber?: () => unknown }).toNumber?.();
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
+  }
+  const candidate = Number(value);
+  return Number.isFinite(candidate) ? candidate : null;
+}
+
+/**
  * Preserve the showcase's canonical quantity at Bitfinex's five-decimal BTC
  * precision. The subscriber margin setting is a ceiling only: exceeding it
  * blocks the entry instead of silently producing a different-sized trade.
@@ -7044,10 +7061,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (!participant) continue;
 
       const mark = await this.activeTrading.getMarkPrice().catch(() => meta.limitPrice ?? 0);
-      const fillPrice =
-        participant.fillPrice != null
-          ? Number(participant.fillPrice)
-          : meta.limitPrice ?? mark;
+      const fillPrice = finiteDecimalLikeNumber(participant.fillPrice) ?? meta.limitPrice ?? mark;
       const leverage = DEFAULT_SUBSCRIBER_LEVERAGE;
 
       // Already-flat path: the exchange position is smaller than the ledger (or flat),
@@ -12210,9 +12224,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
 
       const fillPrice =
-        participant.fillPrice != null
-          ? Number(participant.fillPrice)
-          : meta.limitPrice ?? meta.fillPrice ?? 0;
+        finiteDecimalLikeNumber(participant.fillPrice) ?? meta.limitPrice ?? meta.fillPrice ?? 0;
       if (!meta.qty || !meta.direction) return false;
       const leverage =
         resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope);
@@ -13605,11 +13617,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (!hasExpected) return;
 
     const fillPrice =
-      participant.fillPrice != null
-        ? Number(participant.fillPrice)
-        : meta.limitPrice && meta.limitPrice > 0
-          ? meta.limitPrice
-          : 0;
+      finiteDecimalLikeNumber(participant.fillPrice) ??
+      (meta.limitPrice && meta.limitPrice > 0 ? meta.limitPrice : 0);
     if (!fillPrice || fillPrice <= 0) return;
 
     const leverage = resolveSubscriberLeverage(intent);
@@ -14482,9 +14491,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     const fillPrice =
-      participant.fillPrice != null
-        ? Number(participant.fillPrice)
-        : meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
+      finiteDecimalLikeNumber(participant.fillPrice) ??
+      meta.limitPrice ??
+      (await this.activeTrading.getMarkPrice());
     const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice ?? 0);
     const direction = meta.direction;
     const pnlUsd =
@@ -14784,9 +14793,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (stop) return false;
 
     const fillPrice =
-      participant.fillPrice != null
-        ? Number(participant.fillPrice)
-        : meta.limitPrice ?? position.basePrice;
+      finiteDecimalLikeNumber(participant.fillPrice) ?? meta.limitPrice ?? position.basePrice;
     const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
     const direction = meta.direction;
     const closeQty = Math.min(meta.qty, deficit);
