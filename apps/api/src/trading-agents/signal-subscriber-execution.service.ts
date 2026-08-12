@@ -4077,8 +4077,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // The signed POSITION_OPENED wake has already passed the source HMAC and
     // active-owner checks.  Catch-up must not depend on the optional dashboard
     // bridge: the executor can receive that verified wake while the bridge is
-    // intentionally unavailable or disabled, and silently falling through to
-    // cancellation would discard an otherwise in-bounds catch-up.
+    // intentionally unavailable or disabled.  A source position must never
+    // be force-closed merely because the bounded price guard cannot safely
+    // enter at this instant: retain the exact owned resting order and let its
+    // source-owned exit/TTL resolve it instead.
     if (aggressiveCatchupEnabled() && signedOpen) {
       const showcaseFill = Number(signedOpen.fillPrice);
       if (
@@ -4118,6 +4120,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         );
         return true;
       }
+      await this.cycles.recordHireExecutionEvent(
+        instance.userId,
+        agentId,
+        freshParticipant.cycle.id,
+        'UPDATE_STOPS',
+        {
+          venue: 'bitfinex', source: 'hire', event: 'AGGRESSIVE_CATCHUP_DEFERRED',
+          reason: mark > 0 ? 'OUTSIDE_5_BPS_BOUND' : 'MARK_UNAVAILABLE',
+          trade_id: freshParticipant.cycle.tradeId,
+          bitfinex_order_id: meta.bitfinexOrderId,
+          source_fill_price: showcaseFill,
+          catchup_limit_price: boundedLimit,
+          catchup_max_adverse_bps: 5,
+          local_mark: mark || undefined,
+          source_fill_at: sourceFillAt,
+        },
+      );
+      return true;
     }
 
     // A source POSITION_OPENED is terminal for its resting entry generation.
@@ -8717,14 +8737,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // a concurrent LIMIT_UPDATED. This is deliberately identical to the
       // signed-wake price bound, never a market order, and the durable marker
       // above prevents the next monitor tick from cancelling this order.
-      if (shouldActivateAggressiveCatchup({
+      const aggressiveCatchupEligible = shouldActivateAggressiveCatchup({
         enabled: aggressiveCatchupEnabled(),
         catchupActive: meta.aggressiveCatchupActive === true,
         showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
         showcaseFill,
         participantStatus: participant.status,
         hasManagedOrder: !!orderId,
-      })) {
+      });
+      if (aggressiveCatchupEligible) {
         const boundedLimit = boundedAggressiveCatchupLimit(meta.direction, showcaseFill);
         const mark = await this.activeTrading.getMarkPrice().catch(() => 0);
         if (aggressiveCatchupIsWithinBound(meta.direction, mark, boundedLimit)) {
@@ -8758,6 +8779,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           );
           return;
         }
+        // The catch-up cap is a price-safety boundary, not authority to erase
+        // the still-open Showcase trade. Keep the exact order pending for a
+        // later in-bound retry; POSITION_CLOSED/TTL remains the only terminal
+        // source authority for this generation.
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'AGGRESSIVE_CATCHUP_DEFERRED',
+          reason: mark > 0 ? 'OUTSIDE_5_BPS_BOUND' : 'MARK_UNAVAILABLE',
+          trade_id: showcaseTradeId,
+          bitfinex_order_id: orderId,
+          source_fill_price: showcaseFill,
+          catchup_limit_price: boundedLimit,
+          catchup_max_adverse_bps: 5,
+          local_mark: mark || undefined,
+          source_fill_at: new Date(sourceEntityCreatedAtMs(showcasePosition as Record<string, unknown>) ?? Date.now()).toISOString(),
+        });
+        this.logger.warn(
+          `Aggressive catch-up deferred ${userId} cycle=${cycle.id}: current market is outside the 5 bps bound; retaining managed order ${orderId}`,
+        );
+        return;
       }
       retainLateEntry = shouldRetainLateEntryContinuation({
         // Better-only continuation was replaced by the authenticated bounded

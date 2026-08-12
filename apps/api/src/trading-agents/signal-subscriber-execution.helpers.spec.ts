@@ -3259,6 +3259,48 @@ test('signed source fill replaces the exact pending order with a bounded catch-u
   }
 });
 
+test('signed source fill outside the catch-up bound retains source ownership and never phantom-cancels', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
+  try {
+    const events: Array<{ type: string; payload: any }> = [];
+    const cycle = {
+      id: 'cycle-fast-late-outside-bound', tradeId: 'cont-fast-late-outside-bound',
+      status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {},
+    };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.prisma = { signalCycleParticipant: {
+      findMany: async () => [{ id: 'participant-fast-late-outside-bound', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+      findUnique: async () => ({ id: 'participant-fast-late-outside-bound', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
+    } };
+    service.exchanges = { getUserCredentials: async () => ({}) };
+    service.botBridge = { isEnabled: () => false };
+    service.loadExecutionMeta = async () => ({
+      direction: 'LONG', bitfinexOrderId: 8405, limitPrice: 64_100, qty: 0.03,
+    });
+    service.activeTrading = { getMarkPrice: async () => 64_100 };
+    service.replaceRestingLimitOwned = async () => assert.fail('out-of-bound catch-up must not replace at an unsafe price');
+    service.cancelManagedOrderGone = async () => assert.fail('out-of-bound catch-up must not cancel the source trade or its order');
+    service.detectEntryFillBeforeCancel = async () => assert.fail('out-of-bound catch-up must retain before ordinary retirement');
+    service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => events.push({ type, payload }) };
+
+    const handled = await service.tryImmediateShowcaseFillReconcile(
+      'agent',
+      { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+      'cont-fast-late-outside-bound',
+      new Date(1_000).toISOString(),
+      { fillPrice: 64_000, sourceEventAtMs: 900, platformReceivedAtMs: 1_000 },
+    );
+    assert.equal(handled, true);
+    assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_DEFERRED']);
+    assert.equal(events[0].payload.reason, 'OUTSIDE_5_BPS_BOUND');
+  } finally {
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
+  }
+});
+
 test('signed source fill promotes a cancel-race execution instead of expiring it', async () => {
   const cycle = {
     id: 'cycle-fast-race', tradeId: 'cont-fast-race',
