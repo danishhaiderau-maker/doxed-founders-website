@@ -1045,10 +1045,14 @@ test('source fill starts beside an unrelated running reprice but keeps its dupli
     assert.deepEqual(launched, [fillWake]);
     assert.equal(service.pendingDirectWakes.length, 0);
     assert.equal(service.prioritySourceFillWakes.has('POSITION_OPENED:cont-exact-fill'), true);
+    // The regular reconciliation must also see this side-lane wake.  It is
+    // not activeDirectWake because the unrelated reprice owns that slot.
+    assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-exact-fill'), true);
 
     resolveExecution();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(service.prioritySourceFillWakes.size, 0);
+    assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-exact-fill'), false);
     assert.equal(service.wakeQueued, true);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;

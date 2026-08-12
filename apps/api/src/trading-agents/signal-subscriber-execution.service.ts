@@ -3195,8 +3195,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (!wake || wake.trigger !== 'POSITION_OPENED' || !wake.tradeId) return false;
       return tradeIdsMatch(wake.tradeId, tradeId);
     };
+    // A priority fill wake runs beside an unrelated direct wake while it waits
+    // for the same participant's money lane.  It is deliberately not assigned
+    // to activeDirectWake, so account for its in-flight logical key here as
+    // well.  Otherwise the normal reconciliation can emit a slower
+    // MISSED_SHOWCASE_FILL expiry during a concurrent reprice, defeating the
+    // signed source-fill path before it receives the lane.
+    const priorityFillRunning = Array.from(this.prioritySourceFillWakes ?? []).some((key) => {
+      const prefix = 'POSITION_OPENED:';
+      return key.startsWith(prefix) && tradeIdsMatch(key.slice(prefix.length), tradeId);
+    });
     return matches(this.activeDirectWake)
-      || (this.pendingDirectWakes ?? []).some((wake) => matches(wake));
+      || (this.pendingDirectWakes ?? []).some((wake) => matches(wake))
+      || priorityFillRunning;
   }
 
   private drainQueuedDirectWake(): void {
