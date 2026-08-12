@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-test: satisfy strict Railway type checking
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
