@@ -161,9 +161,9 @@ test('authenticated nonce lane bounds queue wait and never sends expired queued 
 
 test('native limit update keeps the existing order id and sends only the in-place amend request', async () => {
   const originalFetch = globalThis.fetch;
-  let request: { url: string; body: Record<string, unknown> } | null = null;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
   globalThis.fetch = (async (url, init) => {
-    request = { url: String(url), body: JSON.parse(String(init?.body ?? '{}')) };
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) });
     return new Response(JSON.stringify([Date.now(), 'ou-req', null, null, [241234567890], null, 'SUCCESS']), {
       status: 200,
     });
@@ -176,8 +176,9 @@ test('native limit update keeps the existing order id and sends only the in-plac
       { orderId: 241234567890, direction: 'SHORT', qty: 0.03123, price: 63_500.12, leverage: 10 },
     );
     assert.equal(id, 241234567890);
-    assert.equal(request?.url, 'https://api.bitfinex.com/v2/auth/w/order/update');
-    assert.deepEqual(request?.body, {
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, 'https://api.bitfinex.com/v2/auth/w/order/update');
+    assert.deepEqual(requests[0].body, {
       id: 241234567890,
       amount: '-0.03123',
       price: '63500.12',
