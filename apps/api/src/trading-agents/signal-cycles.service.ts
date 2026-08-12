@@ -395,6 +395,14 @@ export class SignalCyclesService implements OnModuleInit {
         }
       }
       const showcaseDetails = resolveShowcaseTradeDetails(bot, cycle.tradeId);
+      // The platform TTL is a fallback for an abandoned INTENT, never
+      // authority to erase an exact source position. A delayed/missed
+      // POSITION_OPENED can leave the cycle at INTENT while the canonical
+      // source is already live; expiring it here hides a real divergence and
+      // can prevent later source-owned cleanup.
+      const sourcePositionStillOpen = (bot.positions ?? []).some((position) =>
+        !!position.trade_id && tradeIdsMatch(position.trade_id, cycle.tradeId),
+      );
       const sigRef = mapEntry?.signal_ref;
       const mapClosed =
         sigRef &&
@@ -419,7 +427,12 @@ export class SignalCyclesService implements OnModuleInit {
               (typeof sigRef?.exit_reason === 'string' ? sigRef.exit_reason : 'SHOWCASE_CLOSED'),
           },
         });
-      } else if (cycle.expiresAt && cycle.expiresAt < new Date() && cycle.status === SignalCycleStatus.INTENT) {
+      } else if (
+        cycle.expiresAt
+        && cycle.expiresAt < new Date()
+        && cycle.status === SignalCycleStatus.INTENT
+        && !sourcePositionStillOpen
+      ) {
         await this.prisma.signalCycle.update({
           where: { id: cycle.id },
           data: { status: SignalCycleStatus.EXPIRED, closedAt: new Date() },

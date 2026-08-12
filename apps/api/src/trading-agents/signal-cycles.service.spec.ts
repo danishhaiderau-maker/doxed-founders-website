@@ -69,3 +69,28 @@ test('hire duplicate terminal event is ignored after another closer owns the par
   assert.deepEqual(result, { ok: true, participantId: 'participant-1', duplicateTerminal: true });
   assert.deepEqual(calls, ['cycle-read', 'participant-read', 'participant-terminal-claim']);
 });
+
+test('source-open position prevents fallback TTL from falsely expiring its INTENT cycle', async () => {
+  let updates = 0;
+  const cycle = {
+    id: 'cycle-source-open', tradeId: 'cont-source-open', status: SignalCycleStatus.INTENT,
+    expiresAt: new Date(Date.now() - 1_000), intentEnvelope: {},
+  };
+  const service = Object.create(SignalCyclesService.prototype) as any;
+  service.botBridge = {
+    isEnabled: () => true,
+    fetchStateForExecution: async () => ({
+      positions: [{ trade_id: 'cont-source-open', entry: 64_100 }],
+      trades: [], fidelity_trades: [], trades_map: {},
+    }),
+  };
+  service.prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findMany: async () => [cycle],
+      update: async () => { updates += 1; },
+    },
+  };
+  await service.syncShowcaseCycleClosures(true);
+  assert.equal(updates, 0);
+});
