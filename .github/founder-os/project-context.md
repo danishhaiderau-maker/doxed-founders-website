@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: reconcile protected partial pending exposure
+test: satisfy strict Railway type checking
 
 ## Last Activity
 
