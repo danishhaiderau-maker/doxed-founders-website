@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(relay): prioritize confirmed mirror exits
+chore(relay): approve close path policy lock
 
 ## Last Activity
 
