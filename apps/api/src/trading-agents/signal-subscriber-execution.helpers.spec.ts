@@ -3962,6 +3962,39 @@ test('signed same-direction fast path accepts only managed stops for existing op
   );
 });
 
+test('signed same-direction fast path accepts a protected partial remainder with an open lot', () => {
+  const input = {
+    status: TradingAgentInstanceStatus.ACTIVE,
+    simActive: false,
+    hireExpired: false,
+    relayArmed: true,
+    exchangePositionQty: -0.0521129,
+    candidateDirection: 'SHORT' as const,
+    maxConcurrent: 3,
+    virtualLots: [
+      {
+        status: SignalCycleStatus.OPEN,
+        direction: 'SHORT' as const,
+        qty: 0.03146,
+        stopOrderId: 101,
+      },
+      {
+        status: SignalCycleStatus.PENDING_ENTRY,
+        direction: 'SHORT' as const,
+        bitfinexOrderId: 202,
+        partialFillQty: 0.0206529,
+        partialFillStopOrderId: 203,
+      },
+    ],
+    exchangeActiveOrderIds: [101, 202, 203],
+  };
+  assert.equal(sameDirectionPendingSignedFastPathPreflight(input), true);
+  assert.equal(
+    sameDirectionPendingSignedFastPathPreflight({ ...input, exchangeActiveOrderIds: [101, 202, 999] }),
+    false,
+  );
+});
+
 test('showcase fill cap permits improvement but never a worse copied entry', () => {
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 64_010, 64_000), 64_000);
   assert.equal(capRelayLimitAtShowcaseFill('LONG', 63_900, 64_000), 63_900);

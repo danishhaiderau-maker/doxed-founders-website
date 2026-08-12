@@ -1971,7 +1971,7 @@ export function expiredHireShouldRunExitOnly(input: {
  * A fresh signed limit may bypass the slow full reconciliation pass while the
  * account already has same-direction owned virtual lots. This remains
  * fail-closed: every active exchange order must be an owned pending-entry
- * order or an owned protective stop for an OPEN lot;
+ * order or an owned protective stop for an OPEN or protected-partial lot;
  * any merged exchange position must exactly match the attributable OPEN and
  * protected-partial quantities; and the configured capacity must have room.
  */
@@ -2023,6 +2023,20 @@ export function sameDirectionPendingSignedFastPathPreflight(input: {
       }
       ownedPendingOrderIds.add(lot.bitfinexOrderId!);
       ownedManagedOrderIds.add(lot.bitfinexOrderId!);
+      // A partially filled pending entry keeps its remainder resting while a
+      // reduce-only stop protects the filled quantity.  Both orders are
+      // current, owned exchange rows; treating that stop as foreign forces a
+      // signed same-direction entry onto the slow reconciliation tick.
+      for (const orderId of [
+        lot.stopOrderId,
+        lot.partialFillStopOrderId,
+        lot.supersededPartialStopOrderId,
+        lot.supersededStopOrderId,
+      ]) {
+        if (Number.isInteger(orderId) && (orderId ?? 0) > 0) {
+          ownedManagedOrderIds.add(orderId!);
+        }
+      }
       attributableSats += Math.max(0, btcToSats(lot.partialFillQty ?? 0));
     } else if (lot.status === SignalCycleStatus.OPEN) {
       if (!lot.qty || btcToSats(lot.qty) <= 0) return false;
