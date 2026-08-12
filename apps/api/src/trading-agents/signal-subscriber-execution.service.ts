@@ -1564,6 +1564,24 @@ export function managedOrderExchangeAckAtMs(meta: ExecutionPayload): number | un
   return meta.replacementExchangeAckAtMs ?? meta.entryExchangeAckAtMs;
 }
 
+/**
+ * Orphan adoption is a recovery path, never an entry path. An order that the
+ * exchange reports as newly created may still be completing its durable owner
+ * registration on a parallel signed-entry wake. Deferring adoption is safe:
+ * the normal pending-entry monitor already owns the order, while a genuine
+ * orphan remains available for recovery on the next tick.
+ */
+export function shouldDeferRecentOrphanOrderAdoption(
+  orderCreatedAtMs: number | undefined,
+  nowMs = Date.now(),
+  graceMs = RECONCILE_ADOPT_NEW_ORDER_GRACE_MS,
+): boolean {
+  if (!Number.isFinite(orderCreatedAtMs) || !(orderCreatedAtMs! > 0)) return false;
+  // Future timestamps are not trustworthy enough for automatic adoption.
+  if (orderCreatedAtMs! > nowMs + 5_000) return true;
+  return nowMs - orderCreatedAtMs! < Math.max(1, graceMs);
+}
+
 
 /**
  * A fresh source fill may immediately follow a signed exact-limit reprice.
@@ -2518,6 +2536,11 @@ const RECONCILE_ADOPT_DUPLICATE_WINDOW_MS = 10 * 60_000;
  *  hard TTL after which monitorEntry cancels the resting order (fail-loud)
  *  and marks the participant EXPIRED. Matches the showcase entry TTL. */
 const RECONCILE_ADOPT_ORDER_TTL_MS = 30 * 60_000;
+
+// A newly ACKed order can reach the private active book before the signed-entry
+// transaction is visible to every concurrent reconciliation pass. Adoption is
+// recovery only, so it must yield to normal entry ownership during this window.
+const RECONCILE_ADOPT_NEW_ORDER_GRACE_MS = 60_000;
 
 /**
  * Deterministic Bitfinex client order id (`cid`) for a participant's entry
@@ -15463,6 +15486,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (meta.stopOrderId) trackedOrderIds.add(meta.stopOrderId);
     }
 
+    // Re-read exact order ownership immediately before any adoption write.
+    // The initial snapshot above can race a signed wake that has just received
+    // an exchange ACK. A recovery path must never steal that order merely
+    // because it observed the active book first.
+    const activeOwnerForOrder = async (orderId: number): Promise<string | null> => {
+      const current = await this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId: instance.userId,
+          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+          cycle: { agentId },
+        },
+        select: { id: true },
+      });
+      for (const row of current) {
+        const meta = await this.loadExecutionMeta(row.id);
+        if (meta.bitfinexOrderId === orderId || meta.stopOrderId === orderId) return row.id;
+      }
+      return null;
+    };
+
     // Only LIMIT orders are adoption candidates — STOP orders belong to OPEN
     // lots (their stop), and a resting STOP with no OPEN lot is a different
     // anomaly handled by the surface path. We also exclude the absurd-price
@@ -15470,6 +15513,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const candidates = orders.filter(
       (o) =>
         !trackedOrderIds.has(o.id) &&
+        !shouldDeferRecentOrphanOrderAdoption(o.createdAtMs) &&
         /LIMIT/i.test(o.orderType) &&
         Math.abs(o.amount) >= MIN_QTY_BTC,
     );
@@ -15477,6 +15521,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     for (const order of candidates) {
       if (budgetRemaining <= 0) break;
+
+      const ownerParticipantId = await activeOwnerForOrder(order.id);
+      if (ownerParticipantId) {
+        this.logger.log(
+          `[RECONCILE-ADOPT] S6a skip ${instance.userId}: order ${order.id} is durably owned by active participant ${ownerParticipantId}`,
+        );
+        continue;
+      }
 
       const direction: 'LONG' | 'SHORT' = order.amount > 0 ? 'LONG' : 'SHORT';
       const qty = Math.abs(order.amountOrig || order.amount);

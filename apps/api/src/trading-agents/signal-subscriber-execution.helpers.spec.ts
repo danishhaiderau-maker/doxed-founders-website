@@ -48,6 +48,7 @@ import {
   pendingEntryOwnershipAdvanced,
   advanceReplacementMissingProbe,
   managedOrderExchangeAckAtMs,
+  shouldDeferRecentOrphanOrderAdoption,
   missedShowcaseFillWithinSettlementGrace,
   relayEntryOrderIsCompletelyUnfilled,
   relayLotExitTarget,
@@ -1824,6 +1825,26 @@ test('orphan adoption defers to a same-direction pending entry that may own the 
       { direction: 'SHORT' },
     ]),
     false,
+  );
+});
+
+test('orphan adoption never steals a newly created exchange order from signed entry ownership', () => {
+  const nowMs = Date.parse('2026-08-12T18:26:54.000Z');
+  assert.equal(
+    shouldDeferRecentOrphanOrderAdoption(nowMs - 5_000, nowMs),
+    true,
+  );
+  assert.equal(
+    shouldDeferRecentOrphanOrderAdoption(nowMs - 59_999, nowMs),
+    true,
+  );
+  assert.equal(
+    shouldDeferRecentOrphanOrderAdoption(nowMs - 60_000, nowMs),
+    false,
+  );
+  assert.equal(
+    shouldDeferRecentOrphanOrderAdoption(nowMs + 5_001, nowMs),
+    true,
   );
 });
 
