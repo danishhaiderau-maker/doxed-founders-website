@@ -21726,6 +21726,12 @@ def _record_expired_order(source: dict, reason: str):
                 "source_expires_at": row["time"],
                 "research_lane": row.get("research_lane"),
             },
+            # An expiry retires real exchange exposure.  Unlike a cosmetic
+            # update, it must not be left on a daemon thread where the source
+            # loop can continue and the relay has to discover it by polling.
+            # The platform acknowledgement is idempotent and also gives this
+            # path an explicit retry/failure signal.
+            wait_for_durable_receipt=True,
         )
     log_expired_order(row)
     if row.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
