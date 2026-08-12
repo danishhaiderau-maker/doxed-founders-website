@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: retain source trade outside catch-up bound
+fix(relay): recognize protected partial stop in fast path
 
 ## Last Activity
 
