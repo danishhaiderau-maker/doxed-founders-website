@@ -3525,6 +3525,26 @@ test('snapshot missed-fill fallback defers while its exact signed source-fill wa
   assert.equal(cancelCalls, 0);
 });
 
+test('monitor yields its participant lane to an exact authenticated Bitfinex fill before snapshot work', async () => {
+  const intent = { action: 'ENTER', trade_id: 'cont-ws-priority', risk: {}, context: {} };
+  const cycle = { id: 'cycle-ws-priority', tradeId: 'cont-ws-priority', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY };
+  const participant = { id: 'participant-ws-priority', status: SignalCycleStatus.PENDING_ENTRY };
+  const meta = { direction: 'SHORT', bitfinexOrderId: 6003, limitPrice: 64_000, qty: 0.03 };
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.participantMoneyLane = new Map();
+  service.priorityWsFillParticipants = new Set([participant.id]);
+  service.prisma = {
+    signalCycleParticipant: { findUnique: async () => participant },
+    signalCycle: { findUnique: async () => cycle },
+  };
+  service.loadExecutionMeta = async () => meta;
+  service.cancelAbsurdPendingOrders = async () => assert.fail('authenticated fill must run before snapshot exchange reads');
+  service.fetchExecutionBotState = async () => assert.fail('authenticated fill must run before source snapshot reads');
+  service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+  await service.monitorEntry('agent', 'user', cycle, participant, meta, {}, new Set<number>([6003]), false);
+});
+
 test('canonical open position retains deferred catch-up even when the auxiliary snapshot calls it absent', async () => {
   const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
   process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
@@ -5162,10 +5182,13 @@ test('authenticated Bitfinex trade event records exact owned fill without source
     service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01,limitPrice:64000});
     let context='';
     let fill:any;
-    service.recordCancelRaceFill=async(...args:unknown[])=>{fill=args[7];context=String(args[8]);return true};
+    let receivedAt='';
+    service.recordCancelRaceFill=async(...args:unknown[])=>{fill=args[7];context=String(args[8]);receivedAt=String(args[10]);return true};
     await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},{tradeId:1,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.004,execPrice:64000,receivedAtMs:1100,cumulativeQty:.004,cumulativeAveragePrice:64000});
     assert.equal(context,'BITFINEX_AUTH_WS_TRADE');
     assert.equal(fill.filledQty,.004);
+    assert.equal(receivedAt,new Date(1100).toISOString());
+    assert.equal(service.priorityWsFillParticipants.size,0);
   } finally {
     if(previousExecution==null)delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
     else process.env.SUBSCRIBER_EXECUTION_ENABLED=previousExecution;

@@ -2685,6 +2685,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * below still serializes it against a concurrent limit replacement.
    */
   private prioritySourceFillWakes = new Set<string>();
+  /**
+   * Private Bitfinex trade-stream callbacks are the fastest evidence of an
+   * executed entry.  A regular monitor tick must yield its participant lane
+   * once that exact callback has identified the owned order; otherwise a
+   * slow snapshot/read pass can consume the protection budget before the
+   * reduce-only stop is submitted.
+   */
+  private readonly priorityWsFillParticipants = new Set<string>();
   /** One writer per participant while a cancel-race fill is promoted to OPEN. */
   private readonly cancelRaceFillInFlight = new Set<string>();
   /** Serializes cancel/replace persistence against gone-order classification. */
@@ -2937,6 +2945,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       select: { id: true },
     });
     for (const candidate of candidates) {
+      // Identify the exact owned order before joining the participant lane so
+      // an already-running snapshot monitor can yield instead of delaying a
+      // private exchange fill behind non-critical I/O.
+      const observedMeta = await this.loadExecutionMeta(candidate.id).catch(() => null);
+      if (!observedMeta || Number(observedMeta.bitfinexOrderId) !== trade.orderId) continue;
+      const priority = this.priorityWsFillParticipants;
+      priority.add(candidate.id);
       const release = await this.acquireParticipantMoneyLane(candidate.id);
       try {
         const [participant, meta] = await Promise.all([
@@ -2958,9 +2973,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           participant.cycle.agentId, userId, participant.cycle, participant.id, meta, creds,
           participant.cycle.intentEnvelope as SignalIntentEnvelope,
           { filledQty: trade.cumulativeQty, fillPrice: trade.cumulativeAveragePrice, source: 'ORDER_PARTIAL', orderResting },
-          'BITFINEX_AUTH_WS_TRADE', new Date(trade.mts).toISOString(),
+          'BITFINEX_AUTH_WS_TRADE', new Date(trade.mts).toISOString(), new Date(trade.receivedAtMs).toISOString(),
         );
-      } finally { release(); }
+      } finally {
+        release();
+        priority.delete(candidate.id);
+      }
     }
     return false;
   }
@@ -8162,6 +8180,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     },
     cancelContext: string,
     sourceFillAt?: string,
+    exchangeFillReceivedAt?: string,
   ): Promise<boolean> {
     if (this.cancelRaceFillInFlight.has(participantId)) return false;
     this.cancelRaceFillInFlight.add(participantId);
@@ -8177,6 +8196,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         fill,
         cancelContext,
         sourceFillAt,
+        exchangeFillReceivedAt,
       );
     } finally {
       this.cancelRaceFillInFlight.delete(participantId);
@@ -8199,6 +8219,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     },
     cancelContext: string,
     sourceFillAt?: string,
+    exchangeFillReceivedAt?: string,
   ): Promise<boolean> {
     if (!meta.direction) return false;
     // Capture at funnel entry, before any remainder cancellation or exchange
@@ -8392,6 +8413,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         : undefined,
       exchange_fill_detected_at: new Date(fillDetectedAtMs).toISOString(),
       fill_detected_at: new Date(fillDetectedAtMs).toISOString(),
+      exchange_fill_received_at: exchangeFillReceivedAt,
+      exchange_fill_transport_lag_ms:
+        exchangeFillReceivedAt && exchangeFillEvidence?.lastExecutedAtMs
+          ? Math.max(0, new Date(exchangeFillReceivedAt).getTime() - exchangeFillEvidence.lastExecutedAtMs)
+          : undefined,
       fill_detection_path: fill.source,
       fill_detection_context: cancelContext,
       exchange_fill_detection_lag_ms: exchangeFillEvidence?.lastExecutedAtMs
@@ -8654,6 +8680,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       orderId = meta.bitfinexOrderId;
       if (!orderId || !meta.direction) return;
 
+      // A private authenticated trade callback has already matched this exact
+      // participant. Yield before any non-critical reconciliation so it can
+      // submit protection without waiting behind snapshot work.
+      if (this.priorityWsFillParticipants?.has(participant.id)) return;
+
       if (meta.partialFillQty && meta.partialFillStopOrderId) {
         const stopHandled = await this.reconcilePendingPartialFillStop(
           agentId,
@@ -8732,6 +8763,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     await this.cancelAbsurdPendingOrders(creds, userId);
+
+    // cancelAbsurdPendingOrders can perform exchange reads. If the private
+    // stream identified a real fill while it was running, release the lane
+    // now rather than carrying on into bot-state and chase reconciliation.
+    if (this.priorityWsFillParticipants?.has(participant.id)) return;
 
     let retainLateEntry = false;
     if (this.botBridge.isEnabled() && cycle.tradeId) {
