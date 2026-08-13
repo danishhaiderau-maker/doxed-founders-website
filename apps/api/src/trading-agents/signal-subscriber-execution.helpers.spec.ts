@@ -165,7 +165,9 @@ test('active bounded catch-up retains its managed order only while the exact sou
   assert.equal(shouldRetainActiveAggressiveCatchup(base), true);
   assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, enabled: false }), false);
   assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, catchupActive: false }), false);
-  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, showcaseTradeOpen: false }), false);
+  // A signed source fill is durable authority. A later snapshot may be stale
+  // or temporarily omit the position, but that must not unlock phantom cancel.
+  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, showcaseTradeOpen: false }), true);
   assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, hasManagedOrder: false }), false);
   assert.equal(
     shouldRetainActiveAggressiveCatchup({ ...base, participantStatus: SignalCycleStatus.OPEN }),
@@ -3307,6 +3309,8 @@ test('signed source fill outside the catch-up bound retains source ownership and
     assert.equal(handled, true);
     assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_DEFERRED']);
     assert.equal(events[0].payload.reason, 'OUTSIDE_5_BPS_BOUND');
+    assert.equal(events[0].payload.aggressiveCatchupActive, true);
+    assert.equal(events[0].payload.aggressiveCatchupSourceFill, 64_000);
   } finally {
     if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
     else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
@@ -3603,6 +3607,7 @@ test('canonical open position retains deferred catch-up even when the auxiliary 
     await service.monitorEntry('agent', 'user', cycle, participant, meta, {}, new Set<number>([6601]), false);
     assert.equal(cancelCalls, 0);
     assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_DEFERRED']);
+    assert.equal(events[0].payload.aggressiveCatchupActive, true);
   } finally {
     if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
     else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;

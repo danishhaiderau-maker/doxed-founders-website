@@ -957,7 +957,10 @@ export function shouldRetainLateEntryContinuation(input: {
 /**
  * The authenticated fill wake durably marks an in-bounds aggressive catch-up
  * before it updates the exchange order. A concurrent snapshot pass must
- * preserve that current order while the same source position remains open.
+ * preserve that current order until an authenticated source terminal event
+ * or source TTL resolves it. Snapshot visibility is not terminal authority:
+ * it may lag the signed POSITION_OPENED event and must not revive the legacy
+ * missed-fill/phantom-cancel path.
  */
 export function shouldRetainActiveAggressiveCatchup(input: {
   enabled: boolean;
@@ -968,7 +971,6 @@ export function shouldRetainActiveAggressiveCatchup(input: {
 }): boolean {
   return input.enabled
     && input.catchupActive
-    && input.showcaseTradeOpen
     && input.participantStatus === SignalCycleStatus.PENDING_ENTRY
     && input.hasManagedOrder;
 }
@@ -4238,6 +4240,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             catchup_max_adverse_bps: 5,
             local_mark: mark || undefined,
             source_fill_at: sourceFillAt,
+            // Deferral is still a live, source-owned continuation. Persist
+            // the same fence as an in-bound catch-up so a later monitor tick
+            // cannot fall through to legacy missed-fill cancellation.
+            aggressiveCatchupActive: true,
+            aggressiveCatchupSourceFill: showcaseFill,
+            aggressiveCatchupStartedAtMs: Date.now(),
             aggressiveCatchupDeferredSourceFill: showcaseFill,
           },
         );
@@ -8927,6 +8935,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             catchup_max_adverse_bps: 5,
             local_mark: mark || undefined,
             source_fill_at: new Date(sourceEntityCreatedAtMs(showcasePosition as Record<string, unknown>) ?? Date.now()).toISOString(),
+            // An out-of-bound deferred catch-up remains an active source-owned
+            // continuation until the exact source close or TTL arrives.
+            aggressiveCatchupActive: true,
+            aggressiveCatchupSourceFill: showcaseFill,
+            aggressiveCatchupStartedAtMs: Date.now(),
             aggressiveCatchupDeferredSourceFill: showcaseFill,
           });
         }
