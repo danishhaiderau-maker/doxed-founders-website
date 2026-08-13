@@ -165,7 +165,9 @@ test('active bounded catch-up retains its managed order only while the exact sou
   assert.equal(shouldRetainActiveAggressiveCatchup(base), true);
   assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, enabled: false }), false);
   assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, catchupActive: false }), false);
-  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, showcaseTradeOpen: false }), false);
+  // A signed source fill is durable authority. A later snapshot may be stale
+  // or temporarily omit the position, but that must not unlock phantom cancel.
+  assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, showcaseTradeOpen: false }), true);
   assert.equal(shouldRetainActiveAggressiveCatchup({ ...base, hasManagedOrder: false }), false);
   assert.equal(
     shouldRetainActiveAggressiveCatchup({ ...base, participantStatus: SignalCycleStatus.OPEN }),
@@ -3307,6 +3309,8 @@ test('signed source fill outside the catch-up bound retains source ownership and
     assert.equal(handled, true);
     assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_DEFERRED']);
     assert.equal(events[0].payload.reason, 'OUTSIDE_5_BPS_BOUND');
+    assert.equal(events[0].payload.aggressiveCatchupActive, true);
+    assert.equal(events[0].payload.aggressiveCatchupSourceFill, 64_000);
   } finally {
     if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
     else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
@@ -3603,6 +3607,76 @@ test('canonical open position retains deferred catch-up even when the auxiliary 
     await service.monitorEntry('agent', 'user', cycle, participant, meta, {}, new Set<number>([6601]), false);
     assert.equal(cancelCalls, 0);
     assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_DEFERRED']);
+    assert.equal(events[0].payload.aggressiveCatchupActive, true);
+  } finally {
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
+  }
+});
+
+test('durable deferred catch-up survives a temporary dashboard-bridge outage', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
+  try {
+    const intent = { action: 'ENTER', trade_id: 'cont-deferred-bridge-outage', risk: {}, context: {} };
+    const cycle = {
+      id: 'cycle-deferred-bridge-outage', tradeId: 'cont-deferred-bridge-outage',
+      intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY,
+    };
+    const participant = { id: 'participant-deferred-bridge-outage', status: SignalCycleStatus.PENDING_ENTRY };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.priorityWsFillParticipants = new Set();
+    service.botBridge = { isEnabled: () => false };
+    service.cancelAbsurdPendingOrders = async () => undefined;
+    service.cancelManagedOrderGone = async () => assert.fail('durable catch-up must not fall through to missed-fill cancellation during bridge outage');
+    service.cancelPhantomShowcasePosition = async () => assert.fail('durable catch-up must never phantom-cancel the source trade during bridge outage');
+    service.prisma = {
+      signalCycleParticipant: { findUnique: async () => participant },
+      signalCycle: { findUnique: async () => cycle },
+    };
+    service.loadExecutionMeta = async () => ({
+      direction: 'SHORT', bitfinexOrderId: 6602, limitPrice: 64_000, qty: 0.03,
+      aggressiveCatchupActive: true, aggressiveCatchupSourceFill: 64_000,
+    });
+    service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+    await service.monitorEntry('agent', 'user', cycle, participant, {}, {}, new Set<number>([6602]), false);
+  } finally {
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
+  }
+});
+
+test('durable deferred catch-up survives an immediate reconcile without the original signed wake', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
+  try {
+    const cycle = {
+      id: 'cycle-deferred-immediate-reconcile', tradeId: 'cont-deferred-immediate-reconcile',
+      status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {},
+    };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.prisma = { signalCycleParticipant: {
+      findMany: async () => [{ id: 'participant-deferred-immediate-reconcile', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+      findUnique: async () => ({ id: 'participant-deferred-immediate-reconcile', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
+    } };
+    service.exchanges = { getUserCredentials: async () => ({}) };
+    service.loadExecutionMeta = async () => ({
+      direction: 'SHORT', bitfinexOrderId: 6603, limitPrice: 64_000, qty: 0.03,
+      aggressiveCatchupActive: true, aggressiveCatchupSourceFill: 64_000,
+    });
+    service.cancelManagedOrderGone = async () => assert.fail('durable catch-up must not cancel without a fresh signed wake');
+    service.cancelPhantomShowcasePosition = async () => assert.fail('durable catch-up must not phantom-cancel without a fresh signed wake');
+
+    const handled = await service.tryImmediateShowcaseFillReconcile(
+      'agent',
+      { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+      'cont-deferred-immediate-reconcile',
+      new Date().toISOString(),
+    );
+    assert.equal(handled, true);
   } finally {
     if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
     else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
