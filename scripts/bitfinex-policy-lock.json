@@ -1,14 +1,14 @@
 {
-  "policyVersion": 4,
-  "updatedAt": "2026-08-13T04:23:07.709Z",
+  "policyVersion": 5,
+  "updatedAt": "2026-08-13T05:27:55.944Z",
   "files": [
     {
       "path": "packages/utils/src/bitfinex-copy-policy.ts",
-      "sha256": "47c51127b0e42c5e25f557883e8caf4f9c4d0db6e9d0de47c58fd07a0e814fe7"
+      "sha256": "4250765eb1e1e5d2d50bc8b1757f40bc29b216bc8d211033571a6fd047bb5313"
     },
     {
       "path": "packages/utils/src/subscriber-exit.ts",
-      "sha256": "1c7ec9583f82f7cb7353868ca7275c2546ca87e5ff8e15a629bfa3b24f7cbc54"
+      "sha256": "13b5287e092e24cdb3f073a7f9b9696aee5bf4f13f6fc19a5677199641347034"
     },
     {
       "path": "apps/api/src/trading-agents/bot-bridge.service.ts",
@@ -24,7 +24,7 @@
     },
     {
       "path": "apps/api/src/trading-agents/signal-subscriber-execution.service.ts",
-      "sha256": "1000df91243c7ab2e9ca294444066316004cacd2d4b834deb960471c98846498"
+      "sha256": "d067f36961374e1b4f715aa191253a3e6b2366532908cdfc0328f5f92a29120d"
     }
   ]
 }

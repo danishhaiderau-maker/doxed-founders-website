@@ -2,7 +2,7 @@
  * Frozen Bitfinex live-copy policy (NestJS relay).
  * NOT overwritten by bybit_bot.py / sync-btc-research-bot — real money execution lives here.
  */
-export const BITFINEX_COPY_POLICY_VERSION = 4;
+export const BITFINEX_COPY_POLICY_VERSION = 5;
 
 /** Wide disaster stop (margin %) in showcase-mirror mode — crash/disconnect insurance only. */
 export const BITFINEX_COPY_MIRROR_DISASTER_STOP_MARGIN_PCT_DEFAULT = -40;
@@ -33,12 +33,14 @@ export const BITFINEX_COPY_DEFAULT_LEVERAGE = 100;
 
 /** Scenario C exits — must match subscriber-exit.ts ladder / thesis / hard stop.
  * Synced 2026-08-08 to bot.py THESIS_MFE_PROTECT_PCT=5.0 and scenario_c_config.py
- * TRAIL_LADDER_SCENARIO_C (8 rungs, first rung 8→5). */
+ * TRAIL_LADDER_SCENARIO_C (4→2, 5→3, then 8→5). */
 export const BITFINEX_COPY_EXIT_RULES = {
   thesisFastCutMarginPct: -12,
   thesisMfeProtectMarginPct: 5,
-  hardStopMarginPct: -18,
+  hardStopMarginPct: -13,
   profitLockLadder: [
+    [4, 2],
+    [5, 3],
     [8, 5],
     [12, 10],
     [19, 17],

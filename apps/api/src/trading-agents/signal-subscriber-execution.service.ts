@@ -2221,6 +2221,17 @@ export function resolveShowcaseRelinkForRealFill(input: {
 }
 
 /**
+ * Cross-trade re-linking is an emergency recovery mechanism for synthetic
+ * adoption records only. A normal `cont-*` cycle has a signed, immutable
+ * Showcase trade id from ORDER_PLACED; price proximity to another position is
+ * never sufficient authority to rewrite it.
+ */
+export function mayCrossTradeRelink(cycleTradeId: string | null | undefined): boolean {
+  const tradeId = String(cycleTradeId ?? '');
+  return tradeId.startsWith('adopt:') || tradeId.startsWith('relink:');
+}
+
+/**
  * Pure helper — resolve which showcase trade_id a copy cycle should mirror for
  * exit convergence, given the cycle's (possibly `adopt:`/`relink:`-prefixed)
  * tradeId and the participant's execution meta.
@@ -11634,6 +11645,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         })
         .catch(() => null);
       currentTradeId = persistedCycle?.tradeId ?? currentTradeId;
+    }
+
+    // Normal source-created cycles carry their own signed canonical identity.
+    // Never use a nearby unrelated Showcase position to reinterpret that
+    // identity. Only synthetic recovery/adoption records may use the narrow
+    // re-link fallback below.
+    if (!mayCrossTradeRelink(currentTradeId)) {
+      return currentTradeId;
     }
 
     // A canonical cycle must never be re-linked merely because another

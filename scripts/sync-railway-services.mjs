@@ -75,7 +75,7 @@ const relayEnv = {
   SUBSCRIBER_EXECUTION_POLL_MS: '800',
   // Signed webhooks are primary; this is the documented crash/backfill poll.
   SIGNAL_CYCLE_POLL_MS: '2000',
-  BITFINEX_COPY_POLICY_VERSION: '4',
+  BITFINEX_COPY_POLICY_VERSION: '5',
   // Explicitly enable the bounded source-fill catch-up policy in production.
   // Without this, the code correctly falls back to strict cancellation, which
   // is incompatible with the approved 5 bps catch-up lifecycle.

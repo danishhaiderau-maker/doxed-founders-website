@@ -81,6 +81,7 @@ import {
   SHOWCASE_RELINK_PRICE_BAND_PCT,
   SHOWCASE_RELINK_TIME_WINDOW_MS,
   SHOWCASE_RELINK_MAX_ENTRY_LEAD_MS,
+  mayCrossTradeRelink,
   resolveShowcaseMirrorTradeIdFromInputs,
   persistedCloseWakeMatchesParticipant,
   hireExpiryBlocksNewLiveEntries,
@@ -4433,6 +4434,22 @@ test('resolveShowcaseRelinkForRealFill: normal case (fill matches own cycle) ret
     nowMs: now,
   });
   assert.equal(res, null);
+});
+
+test('mayCrossTradeRelink: normal signed Showcase cycles are immutable', () => {
+  // Regression for cont-94a96f09d2b3: its fill was price-near an older
+  // cont-eaea331a0fa4 position, then a relink made the older trade's close
+  // flatten this distinct live lot. A normal source-created cont id is never
+  // eligible for a cross-trade rewrite.
+  assert.equal(mayCrossTradeRelink('cont-94a96f09d2b3'), false);
+  assert.equal(mayCrossTradeRelink('cont-eaea331a0fa4'), false);
+  assert.equal(mayCrossTradeRelink(''), false);
+  assert.equal(mayCrossTradeRelink(null), false);
+});
+
+test('mayCrossTradeRelink: synthetic recovery records retain the narrow fallback', () => {
+  assert.equal(mayCrossTradeRelink('adopt:cont-original:123'), true);
+  assert.equal(mayCrossTradeRelink('relink:cont-old:cont-new:123'), true);
 });
 
 test('resolveShowcaseRelinkForRealFill: tonight\'s case (fill matches a DIFFERENT signal) returns the new trade', () => {
