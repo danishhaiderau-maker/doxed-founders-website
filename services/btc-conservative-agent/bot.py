@@ -6369,9 +6369,7 @@ MAX_LONGS = 3
 MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
 _LANE_DUPLICATE_TOL_USD = {
-    # Continuous is a strict fixed-dollar overlap guard.  Do not let the
-    # percentage cluster fallback turn this into a ~$160 zone at BTC prices.
-    RESEARCH_LANE_CONTINUOUS: 20.0,
+    RESEARCH_LANE_CONTINUOUS: 15.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 15.0,
     RESEARCH_LANE_EXTREME_EDGE: 15.0,
     RESEARCH_LANE_EDGE_ALPHA_4: 15.0,
@@ -17602,13 +17600,7 @@ def _apply_lane_limit_offset(limit: float, lane: str, direction: str) -> float:
     return round(float(limit), 2)
 
 
-def _limit_prices_near(
-    a: float,
-    b: float,
-    lane: str = None,
-    tolerance: float = None,
-    allow_percentage_fallback: bool = True,
-) -> bool:
+def _limit_prices_near(a: float, b: float, lane: str = None, tolerance: float = None) -> bool:
     if a is None or b is None:
         return False
     try:
@@ -17620,8 +17612,6 @@ def _limit_prices_near(
     tol = float(tolerance) if tolerance is not None else _lane_duplicate_tolerance(lane)
     if abs(fa - fb) <= tol:
         return True
-    if not allow_percentage_fallback:
-        return False
     ref = max(fa, fb, 1.0)
     return abs(fa - fb) / ref < CLUSTER_MIN_DIST_PCT
 
@@ -17669,8 +17659,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 continue
             ref = o.get("planned_limit_price") or o.get("limit_price")
             tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(o_lane))
-            continuous_pair = lane == RESEARCH_LANE_CONTINUOUS or o_lane == RESEARCH_LANE_CONTINUOUS
-            if _limit_prices_near(limit_price, ref, tolerance=tol, allow_percentage_fallback=not continuous_pair):
+            if _limit_prices_near(limit_price, ref, tolerance=tol):
                 return {
                     "trade_id": tid,
                     "source": "pending_order",
@@ -17689,8 +17678,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 continue
             ref = p.get("entry") or 0
             tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(p_lane))
-            continuous_pair = lane == RESEARCH_LANE_CONTINUOUS or p_lane == RESEARCH_LANE_CONTINUOUS
-            if _limit_prices_near(limit_price, ref, tolerance=tol, allow_percentage_fallback=not continuous_pair):
+            if _limit_prices_near(limit_price, ref, tolerance=tol):
                 return {
                     "trade_id": tid,
                     "source": "open_position",
@@ -17723,13 +17711,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 continue
             ref = _signal_planned_limit(sig)
             tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(sig_lane))
-            continuous_pair = lane == RESEARCH_LANE_CONTINUOUS or sig_lane == RESEARCH_LANE_CONTINUOUS
-            if ref <= 0 or not _limit_prices_near(
-                limit_price,
-                ref,
-                tolerance=tol,
-                allow_percentage_fallback=not continuous_pair,
-            ):
+            if ref <= 0 or not _limit_prices_near(limit_price, ref, tolerance=tol):
                 continue
             return {
                 "trade_id": tid,
