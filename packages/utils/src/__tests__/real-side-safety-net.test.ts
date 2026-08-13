@@ -12,7 +12,7 @@ import {
  *
  * These tests pin the exact thresholds that map to the 2026-08-07 incident:
  *   - THESIS_FAST_CUT fires at -12% margin, suppressed after +5% MFE.
- *   - HARD_STOP is the absolute floor (-18% default).
+ *   - HARD_STOP is the absolute floor (-13% default).
  *   - PROFIT_LOCK rungs protect peak MFE through the SCENARIO_C_LADDER.
  *
  * NOTE: thresholds sync'd 2026-08-08 to the live bot (THESIS_MFE_PROTECT_PCT=5.0,
@@ -21,19 +21,19 @@ import {
  */
 describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C safety net', () => {
   describe('HARD_STOP — the absolute floor (only reachable after MFE protect suppresses fast-cut)', () => {
-    // THESIS_FAST_CUT (-12%) fires before HARD_STOP (-18%) whenever peak < +5.
+    // THESIS_FAST_CUT (-12%) fires before HARD_STOP (-13%) whenever peak < +5.
     // So HARD_STOP is only reachable when peak >= +5 (MFE protect suppresses
-    // the fast-cut), then the position reverses past -18%.
-    it('fires at -18% unrealized margin when peak reached MFE protect (peak=+5)', () => {
+    // the fast-cut), then the position reverses past -13%.
+    it('fires at -13% unrealized margin when peak reached MFE protect (peak=+5)', () => {
       const result = evaluateRealSideSafetyNetExit({
-        unrealMarginPct: -18,
+        unrealMarginPct: -13,
         peakMarginPct: 5,
       });
       assert.equal(result.reason, 'HARD_STOP');
       assert.equal(result.lockFloor, undefined);
     });
 
-    it('fires deeper than -18% when peak exceeded MFE protect', () => {
+    it('fires deeper than -13% when peak exceeded MFE protect', () => {
       // peak 6 > MFE threshold 5 (suppresses fast-cut) but < first ladder rung 8
       // (so no profit-lock floor), so HARD_STOP owns the exit at -25%.
       const result = evaluateRealSideSafetyNetExit({
@@ -43,18 +43,18 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
       assert.equal(result.reason, 'HARD_STOP');
     });
 
-    it('does NOT fire above -18% (peak >= +5)', () => {
+    it('does NOT fire above -13% (peak >= +5)', () => {
       const result = evaluateRealSideSafetyNetExit({
-        unrealMarginPct: -17.99,
+        unrealMarginPct: -12.99,
         peakMarginPct: 6,
       });
       assert.equal(result.reason, null);
     });
 
-    it('a -18% move with peak < +5 is caught earlier by THESIS_FAST_CUT at -12%', () => {
+    it('a -13% move with peak < +5 is caught earlier by THESIS_FAST_CUT at -12%', () => {
       // Documents the priority: fast-cut is the tighter exit and fires first.
       const result = evaluateRealSideSafetyNetExit({
-        unrealMarginPct: -18,
+        unrealMarginPct: -13,
         peakMarginPct: -5,
       });
       assert.equal(result.reason, 'THESIS_FAST_CUT');
@@ -109,9 +109,9 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
 
     it('does NOT fire when peak exceeded +5% MFE protect threshold', () => {
       // peak 6 > MFE threshold 5 (fast-cut suppressed) but < first ladder rung 8
-      // (no profit-lock floor), and unreal -14 > hard stop -18 → no exit fires.
+      // (no profit-lock floor), and unreal -12.99 > hard stop -13 → no exit fires.
       const result = evaluateRealSideSafetyNetExit({
-        unrealMarginPct: -14,
+        unrealMarginPct: -12.99,
         peakMarginPct: 6,
       });
       assert.equal(result.reason, null);
@@ -130,12 +130,15 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
         unrealMarginPct: -14,
         peakMarginPct: -5,
         thesisFastCutMarginPct: -15,
+        // Isolate the custom fast-cut boundary from the tighter global stop.
+        hardStopMarginPct: -18,
       });
       assert.equal(at14.reason, null);
       const at15 = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -15,
         peakMarginPct: -5,
         thesisFastCutMarginPct: -15,
+        hardStopMarginPct: -18,
       });
       assert.equal(at15.reason, 'THESIS_FAST_CUT');
     });
@@ -218,11 +221,11 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
     // At 100x leverage:
     //   - entry 65,016, exit 64,811.59 → price move -0.314% → margin -31.4%
     // Without the safety net, the position would have stayed open indefinitely.
-    // With the safety net, it closes via HARD_STOP at -18% margin (price -0.18%,
+    // With the safety net, it closes via HARD_STOP at -13% margin (price -0.13%,
     // i.e. mark ≈ 64,899) well before reaching -31%.
     it('safety net catches the position at THESIS_FAST_CUT (-12% margin) before HARD_STOP', () => {
       // The real position moved past -12% margin (price -0.12% at 100x,
-      // mark ≈ 64,938) before ever reaching -18%. With peak below +5% MFE
+      // mark ≈ 64,938) before ever reaching -13%. With peak below +5% MFE
       // protect, THESIS_FAST_CUT fires — the safety net closes the orphan
       // at a ~$2.40 loss instead of the ~$6.30 the showcase realized, and
       // infinitely better than the unmanaged position the user had to flatten.
@@ -235,7 +238,7 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
 
     it('HARD_STOP catches positions that proved themselves (peak >= +5) then reversed', () => {
       const result = evaluateRealSideSafetyNetExit({
-        unrealMarginPct: -18,
+        unrealMarginPct: -13,
         peakMarginPct: 6,
       });
       assert.equal(result.reason, 'HARD_STOP');

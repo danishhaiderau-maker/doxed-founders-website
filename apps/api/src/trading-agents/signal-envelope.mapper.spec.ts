@@ -59,6 +59,7 @@ test('canonical pending order produces an exact-limit envelope with no percentag
   assert.equal(envelope.entry.reference, 'SHOWCASE_EXACT_LIMIT');
   assert.equal(envelope.entry.exact_limit_price, 63_915);
   assert.equal(envelope.entry.offset_pct, 0);
+  assert.equal(envelope.risk.stop_loss_margin_pct, -13);
 });
 
 test('a filled position cannot be reconstructed into a stale entry envelope', () => {

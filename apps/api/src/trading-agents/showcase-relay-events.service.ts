@@ -15,6 +15,7 @@ import {
   isExecutableEntryPolicy,
   isMirrorableLaneTradeId,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
+  SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
   SUBSCRIBER_TRAIL_LADDER,
 } from '@dcf/utils';
 import { BotBridgeService } from './bot-bridge.service';
@@ -312,7 +313,7 @@ export function relayIntentEnvelope(
       ttl_sec: 1800,
     },
     risk: {
-      stop_loss_margin_pct: -18,
+      stop_loss_margin_pct: SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
       take_profit_ladder: SUBSCRIBER_TRAIL_LADDER.map(
         ([at_margin_pct, lock_margin_pct]) => ({
           at_margin_pct,

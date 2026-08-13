@@ -218,7 +218,8 @@ export const SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT = -12;
  * fakeouts then bled to -$6); +5% is a real move so the fast-cut fires on real losers. */
 export const SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT = 5;
 /** Default hard stop margin % — bot stop_loss path. */
-export const SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT = -18;
+/** User-approved real-copy disaster stop. Keep in sync with emitted Showcase intents. */
+export const SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT = -13;
 
 /**
  * Virtual lots on merged Bitfinex BTC-PERP (same direction only).
@@ -298,14 +299,14 @@ export function evaluateSubscriberLotExit(opts: {
  *
  * Default policy mirrors the showcase bot constants
  * (THESIS_FAST_EXIT_UNREAL_PCT=-12, THESIS_MFE_PROTECT_PCT=+5 margin,
- * SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT=-18, SCENARIO_C_LADDER). Callers can
+ * SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT=-13, SCENARIO_C_LADDER). Callers can
  * override any of these (e.g. a tighter hard stop for a conservative cap)
  * without changing the showcase strategy itself.
  */
 export function evaluateRealSideSafetyNetExit(opts: {
   unrealMarginPct: number;
   peakMarginPct: number;
-  /** Hard stop margin % (negative). Default -18 (SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT). */
+  /** Hard stop margin % (negative). Default -13 (SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT). */
   hardStopMarginPct?: number;
   /** Thesis fast-cut trigger (negative margin %). Default -12. */
   thesisFastCutMarginPct?: number;
