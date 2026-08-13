@@ -3525,6 +3525,47 @@ test('snapshot missed-fill fallback defers while its exact signed source-fill wa
   assert.equal(cancelCalls, 0);
 });
 
+test('canonical open position retains deferred catch-up even when the auxiliary snapshot calls it absent', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
+  try {
+    let cancelCalls = 0;
+    const events: Array<{ type: string; payload: any }> = [];
+    const intent = { action: 'ENTER', trade_id: 'cont-canonical-open', risk: {}, context: {} };
+    const cycle = { id: 'cycle-canonical-open', tradeId: 'cont-canonical-open', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY };
+    const participant = { id: 'participant-canonical-open', status: SignalCycleStatus.PENDING_ENTRY };
+    const meta = { direction: 'SHORT', bitfinexOrderId: 6601, limitPrice: 64_000, qty: 0.03 };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.botBridge = { isEnabled: () => true };
+    service.cancelAbsurdPendingOrders = async () => undefined;
+    service.fetchExecutionBotState = async () => ({ positions: [{ trade_id: 'cont-canonical-open', entry: 64_000, created_at: Date.now() }] });
+    service.resolveShowcaseMirrorTradeId = () => 'cont-canonical-open';
+    // Reproduces the stale auxiliary signal/expired-order snapshot that used
+    // to let the exact canonical position fall through to phantom cancel.
+    service.showcaseEntryAbandoned = () => ({ abandoned: true, reason: 'SHOWCASE_ABSENT' });
+    // SHORT requires the market to be at or above the capped sell limit.
+    // A lower mark is truly adverse and must leave the owned order resting.
+    service.activeTrading = { getMarkPrice: async () => 63_900 };
+    service.cancelManagedOrderGone = async () => { cancelCalls += 1; return { gone: true, reason: 'CANCELLED', attempts: 1 }; };
+    service.replaceRestingLimitOwned = async () => assert.fail('out-of-bound catch-up must retain the owned order');
+    service.prisma = {
+      signalCycle: { findUnique: async () => cycle },
+      signalCycleParticipant: { findUnique: async () => participant },
+    };
+    service.loadExecutionMeta = async () => meta;
+    service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => events.push({ type, payload }) };
+    service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+    await service.monitorEntry('agent', 'user', cycle, participant, meta, {}, new Set<number>([6601]), false);
+    assert.equal(cancelCalls, 0);
+    assert.deepEqual(events.map((event) => event.payload.event), ['AGGRESSIVE_CATCHUP_DEFERRED']);
+  } finally {
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
+  }
+});
+
 test('showcase catch-up cannot clear or duplicate-enter after hidden replacement NOT_FOUND', async () => {
   const events: string[] = [];
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;

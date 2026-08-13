@@ -124,6 +124,18 @@ jobs:
           NEXTAUTH_URL: https://doxxedcrypto.digital
           PUBLIC_SITE_URL: https://doxxedcrypto.digital
 
+      # A Railway release restarts the isolated relay executor.  Never roll
+      # that money-path runtime while the canonical Showcase or any relay
+      # account has live orders/positions; wait for a true flat boundary.
+      - name: Prove live relay flat boundary before restart
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          REQUIRE_BOT_ADMIN_TOKEN: YES
+          REQUIRE_CANONICAL_FLY_OWNER: YES
+          SHOWCASE_OWNER_URL: https://doxed-btc-bot.fly.dev
+        run: node scripts/check-relay-flat.mjs
+
       - name: Trigger Railway redeploy
         id: railway
         env:
