@@ -1124,6 +1124,8 @@ type ExecutionPayload = {
   lateEntryStartedAtMs?: number;
   /** A verified, bounded catch-up replacement is now the owner of this source-open trade. */
   aggressiveCatchupActive?: boolean;
+  /** Source fill already recorded as bounded-catch-up deferred. Execution still retries on later ticks. */
+  aggressiveCatchupDeferredSourceFill?: number;
   aggressiveCatchupSourceFill?: number;
   aggressiveCatchupStartedAtMs?: number;
 };
@@ -2481,6 +2483,44 @@ const DUPLICATE_LIMIT_EPSILON_USD = 0.01;
 
 /** Price delta below this (USD) is considered converged for MIRROR_DIFF. */
 const MIRROR_DIFF_PRICE_EPSILON_USD = 0.01;
+
+/**
+ * The signed LIMIT_UPDATED path is authoritative and persists its exchange ACK
+ * before this tick's display-oriented bot-book snapshot is necessarily fresh.
+ * Do not emit a false PRICE_DELTA for that short propagation window. This is
+ * observability-only: the execution path continues to use the signed update
+ * and its exact exchange acknowledgement without any grace.
+ */
+const MIRROR_DIFF_SIGNED_REPRICE_SNAPSHOT_GRACE_MS = 5_000;
+
+export function mirrorDiffPriceDeltaIsWithinSignedRepriceGrace(
+  lastChaseAtMs: number | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  return (
+    Number.isFinite(lastChaseAtMs) &&
+    Number.isFinite(nowMs) &&
+    Number(lastChaseAtMs) > 0 &&
+    nowMs >= Number(lastChaseAtMs) &&
+    nowMs - Number(lastChaseAtMs) <= MIRROR_DIFF_SIGNED_REPRICE_SNAPSHOT_GRACE_MS
+  );
+}
+
+/**
+ * A deferred catch-up is a durable decision for one immutable source fill.
+ * Keep retrying the price check, but do not append the same audit decision on
+ * every executor tick while the market remains outside the bound.
+ */
+export function shouldRecordAggressiveCatchupDeferred(
+  priorSourceFill: number | null | undefined,
+  sourceFill: number,
+): boolean {
+  return (
+    !Number.isFinite(priorSourceFill) ||
+    !Number.isFinite(sourceFill) ||
+    Math.abs(Number(priorSourceFill) - sourceFill) >= 0.01
+  );
+}
 
 /** Max 1 MIRROR_DIFF SignalCycleEvent per participant per this window. */
 const MIRROR_DIFF_EVENT_THROTTLE_MS = 60_000;
@@ -4171,23 +4211,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         );
         return true;
       }
-      await this.cycles.recordHireExecutionEvent(
-        instance.userId,
-        agentId,
-        freshParticipant.cycle.id,
-        'UPDATE_STOPS',
-        {
-          venue: 'bitfinex', source: 'hire', event: 'AGGRESSIVE_CATCHUP_DEFERRED',
-          reason: mark > 0 ? 'OUTSIDE_5_BPS_BOUND' : 'MARK_UNAVAILABLE',
-          trade_id: freshParticipant.cycle.tradeId,
-          bitfinex_order_id: meta.bitfinexOrderId,
-          source_fill_price: showcaseFill,
-          catchup_limit_price: boundedLimit,
-          catchup_max_adverse_bps: 5,
-          local_mark: mark || undefined,
-          source_fill_at: sourceFillAt,
-        },
-      );
+      if (shouldRecordAggressiveCatchupDeferred(meta.aggressiveCatchupDeferredSourceFill, showcaseFill)) {
+        await this.cycles.recordHireExecutionEvent(
+          instance.userId,
+          agentId,
+          freshParticipant.cycle.id,
+          'UPDATE_STOPS',
+          {
+            venue: 'bitfinex', source: 'hire', event: 'AGGRESSIVE_CATCHUP_DEFERRED',
+            reason: mark > 0 ? 'OUTSIDE_5_BPS_BOUND' : 'MARK_UNAVAILABLE',
+            trade_id: freshParticipant.cycle.tradeId,
+            bitfinex_order_id: meta.bitfinexOrderId,
+            source_fill_price: showcaseFill,
+            catchup_limit_price: boundedLimit,
+            catchup_max_adverse_bps: 5,
+            local_mark: mark || undefined,
+            source_fill_at: sourceFillAt,
+            aggressiveCatchupDeferredSourceFill: showcaseFill,
+          },
+        );
+      }
       return true;
     }
 
@@ -5889,7 +5932,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const showcaseOrder = showcaseOrders.find((o) => o.trade_id === tradeId);
       if (showcaseOrder?.limit_price) {
         const delta = copyLimit - showcaseOrder.limit_price;
-        if (Math.abs(delta) >= MIRROR_DIFF_PRICE_EPSILON_USD) {
+        const signedRepriceSnapshotPending = mirrorDiffPriceDeltaIsWithinSignedRepriceGrace(
+          meta?.lastChaseAtMs,
+          now,
+        );
+        if (
+          Math.abs(delta) >= MIRROR_DIFF_PRICE_EPSILON_USD &&
+          !signedRepriceSnapshotPending
+        ) {
           divergences.push({
             type: 'PRICE_DELTA',
             tradeId,
@@ -8853,19 +8903,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         // the still-open Showcase trade. Keep the exact order pending for a
         // later in-bound retry; POSITION_CLOSED/TTL remains the only terminal
         // source authority for this generation.
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
-          venue: 'bitfinex',
-          source: 'hire',
-          event: 'AGGRESSIVE_CATCHUP_DEFERRED',
-          reason: mark > 0 ? 'OUTSIDE_5_BPS_BOUND' : 'MARK_UNAVAILABLE',
-          trade_id: showcaseTradeId,
-          bitfinex_order_id: orderId,
-          source_fill_price: showcaseFill,
-          catchup_limit_price: boundedLimit,
-          catchup_max_adverse_bps: 5,
-          local_mark: mark || undefined,
-          source_fill_at: new Date(sourceEntityCreatedAtMs(showcasePosition as Record<string, unknown>) ?? Date.now()).toISOString(),
-        });
+        if (shouldRecordAggressiveCatchupDeferred(meta.aggressiveCatchupDeferredSourceFill, showcaseFill)) {
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+            venue: 'bitfinex',
+            source: 'hire',
+            event: 'AGGRESSIVE_CATCHUP_DEFERRED',
+            reason: mark > 0 ? 'OUTSIDE_5_BPS_BOUND' : 'MARK_UNAVAILABLE',
+            trade_id: showcaseTradeId,
+            bitfinex_order_id: orderId,
+            source_fill_price: showcaseFill,
+            catchup_limit_price: boundedLimit,
+            catchup_max_adverse_bps: 5,
+            local_mark: mark || undefined,
+            source_fill_at: new Date(sourceEntityCreatedAtMs(showcasePosition as Record<string, unknown>) ?? Date.now()).toISOString(),
+            aggressiveCatchupDeferredSourceFill: showcaseFill,
+          });
+        }
         this.logger.warn(
           `Aggressive catch-up deferred ${userId} cycle=${cycle.id}: current market is outside the 5 bps bound; retaining managed order ${orderId}`,
         );
