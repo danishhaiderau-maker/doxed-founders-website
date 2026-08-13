@@ -2,6 +2,7 @@ import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   DEFAULT_SUBSCRIBER_LEVERAGE,
+  SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
   SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
   SUBSCRIBER_TRAIL_LADDER,
 } from '@dcf/utils';
@@ -10,7 +11,7 @@ import {
   type BotApiState,
 } from './bot-state.mapper';
 
-const DEFAULT_STOP_LOSS_MARGIN_PCT = -18;
+const DEFAULT_STOP_LOSS_MARGIN_PCT = SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
 const LIMIT_TTL_SEC = 1800;
 
 export type BotApproveSnapshot = {

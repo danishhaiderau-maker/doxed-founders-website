@@ -29,7 +29,7 @@ export default function SignalApiDocsPage() {
           <li>Use <strong>your venue mark at receipt</strong> — never Bitfinex absolute prices.</li>
           <li>
             Place <strong>exchange-native stop-loss at fill</strong> at{' '}
-            <code className="text-green-400">risk.stop_loss_margin_pct</code> (default −18% margin).
+            <code className="text-green-400">risk.stop_loss_margin_pct</code> (default −13% margin).
           </li>
           <li>Post lifecycle events: <code>ORDER_PLACED</code> → <code>FILLED</code> → <code>EXIT</code>.</li>
           <li>
