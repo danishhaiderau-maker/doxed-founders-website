@@ -9,13 +9,15 @@ import {
 } from '../subscriber-exit';
 
 describe('SCENARIO_C_LADDER — canonical values match Python scenario_c_config.py', () => {
-  it('matches the Python TRAIL_LADDER_SCENARIO_C exactly (8→5 ... 150→120, 8 rungs)', () => {
+  it('matches the Python TRAIL_LADDER_SCENARIO_C exactly (4→2, 5→3, 8→5 ... 150→120)', () => {
     // Canonical source: services/btc-conservative-agent/scenario_c_config.py
-    // SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_8_v6_20260806"
-    // Synced 2026-08-08: (8,5) first rung + (12,10) rung 1 (Danish decision 2026-08-06).
+    // SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_4_v7_20260813"
+    // Synced 2026-08-13: early (4,2) and (5,3) locks precede the existing ladder.
     assert.deepEqual(
       [...SCENARIO_C_LADDER],
       [
+        [4, 2],
+        [5, 3],
         [8, 5],
         [12, 10],
         [19, 17],
@@ -55,63 +57,72 @@ describe('solveScenarioCRung — rung solver', () => {
     assert.equal(solveScenarioCRung(Number.NaN), null);
   });
 
-  it('returns null at 7.99% (just below first rung)', () => {
-    assert.equal(solveScenarioCRung(7.99), null);
+  it('returns null just below the new first rung', () => {
+    assert.equal(solveScenarioCRung(3.99), null);
   });
 
-  it('rung 0 at exactly 8% (first trigger crossed)', () => {
-    assert.equal(solveScenarioCRung(8), 0);
+  it('selects the early 4→2 and 5→3 rungs before 8→5', () => {
+    assert.equal(solveScenarioCRung(4), 0);
+    assert.equal(solveScenarioCRung(4.99), 0);
+    assert.equal(solveScenarioCRung(5), 1);
+    assert.equal(solveScenarioCRung(7.99), 1);
+    assert.equal(solveScenarioCRung(8), 2);
   });
 
-  it('rung 0 at 11% (only the first trigger crossed)', () => {
-    assert.equal(solveScenarioCRung(11), 0);
+  it('selects 8→5 at 11% (only mature first rung crossed)', () => {
+    assert.equal(solveScenarioCRung(11), 2);
   });
 
-  it('rung 1 at exactly 12% (second trigger crossed)', () => {
-    assert.equal(solveScenarioCRung(12), 1);
+  it('selects 12→10 at exactly 12%', () => {
+    assert.equal(solveScenarioCRung(12), 3);
   });
 
-  it('rung 2 at exactly 19% (third trigger crossed)', () => {
-    assert.equal(solveScenarioCRung(19), 2);
+  it('selects 19→17 at exactly 19%', () => {
+    assert.equal(solveScenarioCRung(19), 4);
   });
 
-  it('rung 2 at 20% (still below the 40 trigger)', () => {
-    assert.equal(solveScenarioCRung(20), 2);
+  it('keeps 19→17 at 20% (still below the 40 trigger)', () => {
+    assert.equal(solveScenarioCRung(20), 4);
   });
 
-  it('rung 3 at exactly 40%', () => {
-    assert.equal(solveScenarioCRung(40), 3);
+  it('selects 40→28 at exactly 40%', () => {
+    assert.equal(solveScenarioCRung(40), 5);
   });
 
-  it('rung 4 at exactly 60%', () => {
-    assert.equal(solveScenarioCRung(60), 4);
+  it('selects 60→45 at exactly 60%', () => {
+    assert.equal(solveScenarioCRung(60), 6);
   });
 
-  it('rung 5 at exactly 80%', () => {
-    assert.equal(solveScenarioCRung(80), 5);
+  it('selects 80→60 at exactly 80%', () => {
+    assert.equal(solveScenarioCRung(80), 7);
   });
 
-  it('rung 6 at exactly 100%', () => {
-    assert.equal(solveScenarioCRung(100), 6);
+  it('selects 100→75 at exactly 100%', () => {
+    assert.equal(solveScenarioCRung(100), 8);
   });
 
-  it('rung 7 at exactly 150% (top rung)', () => {
-    assert.equal(solveScenarioCRung(150), 7);
+  it('selects 150→120 at exactly 150% (top rung)', () => {
+    assert.equal(solveScenarioCRung(150), 9);
   });
 
-  it('rung 7 at 200% (clamps to highest)', () => {
-    assert.equal(solveScenarioCRung(200), 7);
-    assert.equal(solveScenarioCRung(1_000_000), 7);
+  it('clamps to the highest rung', () => {
+    assert.equal(solveScenarioCRung(200), 9);
+    assert.equal(solveScenarioCRung(1_000_000), 9);
   });
 });
 
 describe('getProfitLockFloor — lock floor per peak', () => {
   it('null below first rung', () => {
     assert.equal(getProfitLockFloor(0), null);
-    assert.equal(getProfitLockFloor(7.99), null);
+    assert.equal(getProfitLockFloor(3.99), null);
   });
 
-  it('5% floor at 8% peak (rung 0 protects 5)', () => {
+  it('locks 2% at a 4% peak and 3% at a 5% peak', () => {
+    assert.equal(getProfitLockFloor(4), 2);
+    assert.equal(getProfitLockFloor(5), 3);
+  });
+
+  it('5% floor at 8% peak', () => {
     assert.equal(getProfitLockFloor(8), 5);
   });
 

@@ -2,16 +2,18 @@
  * Scenario C profit-lock ladder — canonical source of truth for the relay.
  * Mirrors live showcase bot `TRAIL_LADDER_SCENARIO_C`
  * (services/btc-conservative-agent/scenario_c_config.py — SCENARIO_C_PROFILE_ID
- * "SCENARIO_C_RUNNER_8_v6_20260806"). Synced 2026-08-08 to the live bot:
- * 8 rungs, first rung (8, 5) added 2026-08-06 (Danish decision) to capture
- * 0-10% MFE winners earlier; (12, 10) restored as rung 1. The previous TS
- * ladder (7 rungs, [10,6] first) had drifted from the Python source.
+ * "SCENARIO_C_RUNNER_4_v7_20260813"). Synced 2026-08-13 to the live bot:
+ * early 4→2 and 5→3 rungs protect small winners before the established 8→5
+ * ladder. The relay must embed this exact snapshot in every new copied intent;
+ * otherwise Bitfinex and Showcase can follow different exit rules.
  *
  * Each tuple is `[peak_margin_pct_trigger, protected_margin_pct_floor]`. When
  * peak unrealized margin % crosses `trigger`, the protective stop advances
  * so that ~`protected`% of peak margin is locked in.
  */
 export const SCENARIO_C_LADDER: ReadonlyArray<readonly [number, number]> = [
+  [4, 2],
+  [5, 3],
   [8, 5],
   [12, 10],
   [19, 17],

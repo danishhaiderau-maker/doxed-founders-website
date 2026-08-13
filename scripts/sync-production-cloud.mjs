@@ -261,7 +261,7 @@ async function main() {
       SUBSCRIBER_EXECUTION_ENABLED: 'true',
       SUBSCRIBER_EXECUTION_POLL_MS: '800',
       SIGNAL_CYCLE_POLL_MS: '2000',
-      BITFINEX_COPY_POLICY_VERSION: '4',
+      BITFINEX_COPY_POLICY_VERSION: '5',
     });
     if (!x402PayTo) {
       console.warn(

@@ -15,30 +15,33 @@ import {
  *   - HARD_STOP is the absolute floor (-13% default).
  *   - PROFIT_LOCK rungs protect peak MFE through the SCENARIO_C_LADDER.
  *
- * NOTE: thresholds sync'd 2026-08-08 to the live bot (THESIS_MFE_PROTECT_PCT=5.0,
- * first ladder rung 8→5). Peak-margin test inputs use values that cross the NEW
- * thresholds so the logic boundaries (suppression, rung firing) stay covered.
+ * NOTE: thresholds sync'd 2026-08-13 to the live bot (THESIS_MFE_PROTECT_PCT=5.0,
+ * early 4→2 and 5→3 rungs). Hard-stop-only tests inject a deliberately high
+ * ladder so they isolate that fallback from normal profit-lock protection.
  */
 describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C safety net', () => {
   describe('HARD_STOP — the absolute floor (only reachable after MFE protect suppresses fast-cut)', () => {
     // THESIS_FAST_CUT (-12%) fires before HARD_STOP (-13%) whenever peak < +5.
-    // So HARD_STOP is only reachable when peak >= +5 (MFE protect suppresses
-    // the fast-cut), then the position reverses past -13%.
+    // With the live early profit rungs, any peak >=4 would close as PROFIT_LOCK
+    // before a deep loss. These tests inject a high custom rung to isolate the
+    // hard-stop fallback used if no profit lock is armed.
     it('fires at -13% unrealized margin when peak reached MFE protect (peak=+5)', () => {
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -13,
         peakMarginPct: 5,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, 'HARD_STOP');
       assert.equal(result.lockFloor, undefined);
     });
 
     it('fires deeper than -13% when peak exceeded MFE protect', () => {
-      // peak 6 > MFE threshold 5 (suppresses fast-cut) but < first ladder rung 8
-      // (so no profit-lock floor), so HARD_STOP owns the exit at -25%.
+      // peak 6 > MFE threshold 5 (suppresses fast-cut), while the injected
+      // high rung prevents a profit lock, so HARD_STOP owns the exit at -25%.
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -25,
         peakMarginPct: 6,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, 'HARD_STOP');
     });
@@ -47,6 +50,7 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -12.99,
         peakMarginPct: 6,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, null);
     });
@@ -76,6 +80,7 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
         unrealMarginPct: -12,
         peakMarginPct: 6,
         hardStopMarginPct: -12,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, 'HARD_STOP');
     });
@@ -99,20 +104,22 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
     });
 
     it('does NOT fire when peak reached +5% MFE protect threshold', () => {
-      // Trade "proved" itself by hitting +5% peak; let hard stop / profit-lock own the exit.
+      // The injected high rung ensures this checks MFE fast-cut suppression only.
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -12,
         peakMarginPct: 5,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, null);
     });
 
     it('does NOT fire when peak exceeded +5% MFE protect threshold', () => {
-      // peak 6 > MFE threshold 5 (fast-cut suppressed) but < first ladder rung 8
-      // (no profit-lock floor), and unreal -12.99 > hard stop -13 → no exit fires.
+      // peak 6 > MFE threshold 5 (fast-cut suppressed), injected high rung
+      // prevents a profit lock, and unreal -12.99 > hard stop -13 → no exit fires.
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -12.99,
         peakMarginPct: 6,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, null);
     });
@@ -145,7 +152,25 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
   });
 
   describe('PROFIT_LOCK — Scenario C ladder protects peak MFE', () => {
-    it('fires when peak crossed first rung (8) and unreal fell to lock floor (5)', () => {
+    it('fires at the new first rung: peak 4 and unreal falls to 2', () => {
+      const result = evaluateRealSideSafetyNetExit({
+        unrealMarginPct: 2,
+        peakMarginPct: 4,
+      });
+      assert.equal(result.reason, 'PROFIT_LOCK');
+      assert.equal(result.lockFloor, 2);
+    });
+
+    it('fires at the second early rung: peak 5 and unreal falls to 3', () => {
+      const result = evaluateRealSideSafetyNetExit({
+        unrealMarginPct: 3,
+        peakMarginPct: 5,
+      });
+      assert.equal(result.reason, 'PROFIT_LOCK');
+      assert.equal(result.lockFloor, 3);
+    });
+
+    it('fires when peak crossed the established 8 rung and unreal fell to 5', () => {
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: 5,
         peakMarginPct: 8,
@@ -175,7 +200,7 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
     it('does NOT fire when peak is below the first rung', () => {
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: 4,
-        peakMarginPct: 7.99,
+        peakMarginPct: 3.99,
       });
       assert.equal(result.reason, null);
     });
@@ -240,6 +265,7 @@ describe('evaluateRealSideSafetyNetExit — independent real-side Scenario C saf
       const result = evaluateRealSideSafetyNetExit({
         unrealMarginPct: -13,
         peakMarginPct: 6,
+        ladder: [[40, 28]],
       });
       assert.equal(result.reason, 'HARD_STOP');
     });
