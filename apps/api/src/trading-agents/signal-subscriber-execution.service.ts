@@ -8751,7 +8751,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const retainActiveAggressiveCatchup = shouldRetainActiveAggressiveCatchup({
         enabled: aggressiveCatchupEnabled(),
         catchupActive: meta.aggressiveCatchupActive === true,
-        showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
+        // The exact canonical position is the source-of-truth here.  Its
+        // surrounding signal/expired-order snapshot may arrive in either
+        // order, so requiring the auxiliary MISSED_SHOWCASE_FILL label lets
+        // a still-live source position fall through to phantom cancellation.
+        showcaseTradeOpen: !!showcasePosition,
         participantStatus: participant.status,
         hasManagedOrder: !!orderId,
       });
@@ -8770,7 +8774,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const aggressiveCatchupEligible = shouldActivateAggressiveCatchup({
         enabled: aggressiveCatchupEnabled(),
         catchupActive: meta.aggressiveCatchupActive === true,
-        showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
+        showcaseTradeOpen: !!showcasePosition,
         showcaseFill,
         participantStatus: participant.status,
         hasManagedOrder: !!orderId,
@@ -8835,7 +8839,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         // Better-only continuation was replaced by the authenticated bounded
         // catch-up path above. Snapshot reconciliation must never resurrect it.
         enabled: false,
-        showcaseTradeOpen: abandon.reason === 'MISSED_SHOWCASE_FILL' && !!showcasePosition,
+        showcaseTradeOpen: !!showcasePosition,
         participantStatus: participant.status,
         hasManagedOrder: !!orderId,
       });
