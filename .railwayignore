@@ -1,0 +1,5 @@
+# Railway's upload process otherwise inherits the broad `vault/` ignore rule
+# from .gitignore.  This folder is TypeScript application source, not the
+# external secrets vault, and is required by apps/api/src/app.module.ts.
+!apps/api/src/vault/
+!apps/api/src/vault/**
