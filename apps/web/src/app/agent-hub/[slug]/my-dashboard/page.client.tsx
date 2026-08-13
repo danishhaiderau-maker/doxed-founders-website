@@ -140,6 +140,7 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
                   onStop={handleStopRelay}
                   onStart={handleStartRelay}
                   showSelector={false}
+                  relayLastTransition={data.instance.relayLastTransition}
                 />
               </div>
             )}

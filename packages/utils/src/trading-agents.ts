@@ -78,8 +78,24 @@ export type AgentLiveTradeRow = {
   exitReason?: string | null;
 };
 
+/** Durable, user-visible provenance for the last relay start/stop decision. */
+export type RelayTransitionAudit = {
+  at: string;
+  actor: 'USER' | 'SYSTEM' | 'ADMIN';
+  action: 'STARTED' | 'STOPPED' | 'SAFETY_PAUSED' | 'EMERGENCY_FLATTENED';
+  /** Machine-readable cause; it must describe what actually initiated the transition. */
+  reason: string;
+  /** Count of confirmed copy-side pending orders cancelled as part of the transition. */
+  cancelledPendingOrders: number;
+  /** A normal Stop never closes an existing Bitfinex position. */
+  openPositionsLeftOnExchange: boolean;
+  relayEntryPolicy?: string | null;
+};
+
 export type TradingAgentDashboardState = {
   currentPrice: number;
+  /** Last user/system relay transition, retained for the live-control audit panel. */
+  relayLastTransition?: RelayTransitionAudit | null;
   regime: string;
   support: number;
   resistance: number;
