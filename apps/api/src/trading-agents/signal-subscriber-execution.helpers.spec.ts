@@ -31,6 +31,7 @@ import {
   partialEntryFillDisposition,
   finalizedEntryFillQty,
   protectiveStopReferencePrice,
+  mirrorDiffPriceDeltaIsWithinSignedRepriceGrace,
   flatSignedFastPathPreflight,
   sameDirectionPendingSignedFastPathPreflight,
   readPersistedRelayExecutorHealth,
@@ -3523,6 +3524,20 @@ test('snapshot missed-fill fallback defers while its exact signed source-fill wa
 
   assert.equal(detectCalls, 0);
   assert.equal(cancelCalls, 0);
+});
+
+test('mirror diff gives a just-acknowledged signed reprice time to reach the display snapshot', () => {
+  const acknowledgedAtMs = 10_000;
+  assert.equal(
+    mirrorDiffPriceDeltaIsWithinSignedRepriceGrace(acknowledgedAtMs, acknowledgedAtMs + 4_999),
+    true,
+  );
+  assert.equal(
+    mirrorDiffPriceDeltaIsWithinSignedRepriceGrace(acknowledgedAtMs, acknowledgedAtMs + 5_001),
+    false,
+  );
+  assert.equal(mirrorDiffPriceDeltaIsWithinSignedRepriceGrace(acknowledgedAtMs, acknowledgedAtMs - 1), false);
+  assert.equal(mirrorDiffPriceDeltaIsWithinSignedRepriceGrace(undefined, acknowledgedAtMs + 1), false);
 });
 
 test('monitor yields its participant lane to an exact authenticated Bitfinex fill before snapshot work', async () => {
