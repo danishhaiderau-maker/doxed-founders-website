@@ -4173,6 +4173,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       || !meta.direction
     ) return false;
 
+    // The authenticated POSITION_OPENED wake marks this exact participant
+    // before any bounded/deferred exchange action. A later reconciliation may
+    // legitimately lack that wake payload, but it must still preserve the
+    // source-owned continuation rather than re-enter the legacy
+    // missed-fill/phantom-cancel path. Source POSITION_CLOSED and TTL retain
+    // their dedicated exact-order terminal authority.
+    if (shouldRetainActiveAggressiveCatchup({
+      enabled: aggressiveCatchupEnabled(),
+      catchupActive: meta.aggressiveCatchupActive === true,
+      showcaseTradeOpen: false,
+      participantStatus: freshParticipant.status,
+      hasManagedOrder: !!meta.bitfinexOrderId,
+    })) return true;
+
     // A source fill normally retires the exact resting copy immediately. The
     // sole opt-in exception is a bounded catch-up: use a marketable LIMIT at
     // most 5 bps worse than this exact source fill, never an unbounded market
@@ -8839,6 +8853,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (this.priorityWsFillParticipants?.has(participant.id)) return;
 
     let retainLateEntry = false;
+    // An authenticated POSITION_OPENED wake can durably mark this exact
+    // participant as an active bounded/deferred catch-up before a later tick
+    // reaches the optional dashboard bridge.  That marker is sufficient
+    // source-owned authority on its own: a temporary bridge outage must never
+    // let the legacy missed-fill/phantom-cancel branch erase the live source
+    // trade.  POSITION_CLOSED and source TTL use their separate exact-order
+    // terminal paths and remain able to retire this continuation.
+    if (shouldRetainActiveAggressiveCatchup({
+      enabled: aggressiveCatchupEnabled(),
+      catchupActive: meta.aggressiveCatchupActive === true,
+      showcaseTradeOpen: false,
+      participantStatus: participant.status,
+      hasManagedOrder: !!orderId,
+    })) {
+      this.logger.log(
+        `Aggressive catch-up durable fence ${userId} cycle=${cycle.id}: retaining managed order ${orderId} while source bridge is optional`,
+      );
+      return;
+    }
     if (this.botBridge.isEnabled() && cycle.tradeId) {
       const botState = await this.fetchExecutionBotState();
       const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId;

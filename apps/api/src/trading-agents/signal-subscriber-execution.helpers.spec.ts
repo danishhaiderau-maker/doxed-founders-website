@@ -3614,6 +3614,75 @@ test('canonical open position retains deferred catch-up even when the auxiliary 
   }
 });
 
+test('durable deferred catch-up survives a temporary dashboard-bridge outage', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
+  try {
+    const intent = { action: 'ENTER', trade_id: 'cont-deferred-bridge-outage', risk: {}, context: {} };
+    const cycle = {
+      id: 'cycle-deferred-bridge-outage', tradeId: 'cont-deferred-bridge-outage',
+      intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.PENDING_ENTRY,
+    };
+    const participant = { id: 'participant-deferred-bridge-outage', status: SignalCycleStatus.PENDING_ENTRY };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.priorityWsFillParticipants = new Set();
+    service.botBridge = { isEnabled: () => false };
+    service.cancelAbsurdPendingOrders = async () => undefined;
+    service.cancelManagedOrderGone = async () => assert.fail('durable catch-up must not fall through to missed-fill cancellation during bridge outage');
+    service.cancelPhantomShowcasePosition = async () => assert.fail('durable catch-up must never phantom-cancel the source trade during bridge outage');
+    service.prisma = {
+      signalCycleParticipant: { findUnique: async () => participant },
+      signalCycle: { findUnique: async () => cycle },
+    };
+    service.loadExecutionMeta = async () => ({
+      direction: 'SHORT', bitfinexOrderId: 6602, limitPrice: 64_000, qty: 0.03,
+      aggressiveCatchupActive: true, aggressiveCatchupSourceFill: 64_000,
+    });
+    service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
+
+    await service.monitorEntry('agent', 'user', cycle, participant, {}, {}, new Set<number>([6602]), false);
+  } finally {
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
+  }
+});
+
+test('durable deferred catch-up survives an immediate reconcile without the original signed wake', async () => {
+  const previous = process.env.AGGRESSIVE_CATCHUP_ENABLED;
+  process.env.AGGRESSIVE_CATCHUP_ENABLED = 'true';
+  try {
+    const cycle = {
+      id: 'cycle-deferred-immediate-reconcile', tradeId: 'cont-deferred-immediate-reconcile',
+      status: SignalCycleStatus.PENDING_ENTRY, intentEnvelope: {},
+    };
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    service.participantMoneyLane = new Map();
+    service.prisma = { signalCycleParticipant: {
+      findMany: async () => [{ id: 'participant-deferred-immediate-reconcile', status: SignalCycleStatus.PENDING_ENTRY, cycle }],
+      findUnique: async () => ({ id: 'participant-deferred-immediate-reconcile', status: SignalCycleStatus.PENDING_ENTRY, cycle }),
+    } };
+    service.exchanges = { getUserCredentials: async () => ({}) };
+    service.loadExecutionMeta = async () => ({
+      direction: 'SHORT', bitfinexOrderId: 6603, limitPrice: 64_000, qty: 0.03,
+      aggressiveCatchupActive: true, aggressiveCatchupSourceFill: 64_000,
+    });
+    service.cancelManagedOrderGone = async () => assert.fail('durable catch-up must not cancel without a fresh signed wake');
+    service.cancelPhantomShowcasePosition = async () => assert.fail('durable catch-up must not phantom-cancel without a fresh signed wake');
+
+    const handled = await service.tryImmediateShowcaseFillReconcile(
+      'agent',
+      { userId: 'user', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+      'cont-deferred-immediate-reconcile',
+      new Date().toISOString(),
+    );
+    assert.equal(handled, true);
+  } finally {
+    if (previous === undefined) delete process.env.AGGRESSIVE_CATCHUP_ENABLED;
+    else process.env.AGGRESSIVE_CATCHUP_ENABLED = previous;
+  }
+});
+
 test('showcase catch-up cannot clear or duplicate-enter after hidden replacement NOT_FOUND', async () => {
   const events: string[] = [];
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
