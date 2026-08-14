@@ -19257,7 +19257,10 @@ def _pending_limit_ready_for_fill(
         # durably acknowledged. Complete the deterministic paper fill after
         # the bounded relay dwell even if the next public tick has moved away.
         return True
-    if VENUE_EXECUTABLE_SHOWCASE_FILL_GATE and venue_snapshot is not None:
+    # Isolated contract tests compile this helper without the module-level
+    # feature configuration.  Default off only in that test harness; the
+    # production module explicitly enables the gate above.
+    if globals().get("VENUE_EXECUTABLE_SHOWCASE_FILL_GATE", False) and venue_snapshot is not None:
         executable, evidence = _venue_executable_showcase_fill(
             order,
             bid=float(bid or 0),
