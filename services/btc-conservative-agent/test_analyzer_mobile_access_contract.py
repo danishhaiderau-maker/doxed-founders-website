@@ -28,16 +28,43 @@ def test_expired_order_hint_explains_zero_age_duplicate_rejection():
     assert "no paper or exchange order was cancelled" in SOURCE
 
 
-def test_continuous_duplicate_band_uses_the_original_shared_cluster_guard():
-    helper = _route("_limit_prices_near", "def _signal_direction")
+def test_duplicate_suppression_requires_canonical_intent_not_price_proximity():
+    canonical = _route("_canonical_duplicate_intent", "def _find_duplicate_limit_exposure")
     duplicate_scan = _route("_find_duplicate_limit_exposure", "def _reject_duplicate_limit_order")
-    assert "RESEARCH_LANE_CONTINUOUS: 15.0" in SOURCE
-    assert "CLUSTER_MIN_DIST_PCT" in helper
-    assert "allow_percentage_fallback" not in helper
-    # Restore the earlier shared cluster behavior so near-identical signals
-    # are rejected instead of mounting multiple same-direction limits.
-    assert "continuous_pair = lane == RESEARCH_LANE_CONTINUOUS" not in duplicate_scan
-    assert "allow_percentage_fallback" not in duplicate_scan
+    assert "CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC" in canonical
+    assert 'incoming.get("shared_ai_call_id")' in canonical
+    assert "price_distance > 0.01" in canonical
+    assert "_limit_prices_near" not in duplicate_scan
+    assert "duplicate_price_distance_usd" in SOURCE
+    assert "duplicate_lifecycle_distance_sec" in SOURCE
+
+
+def test_canonical_duplicate_match_rejects_only_a_replayed_intent():
+    namespace = {"CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC": 5.0}
+    function_source = "def _canonical_duplicate_intent(" + _route(
+        "_canonical_duplicate_intent", "def _find_duplicate_limit_exposure"
+    )
+    exec(function_source, namespace)
+    matcher = namespace["_canonical_duplicate_intent"]
+    incoming = {
+        "trade_id": "cont-new",
+        "shared_ai_call_id": "scan-one",
+        "created_ts_ts": 100.0,
+    }
+    replay = {
+        "trade_id": "cont-old",
+        "shared_ai_call_id": "scan-one",
+        "created_ts_ts": 103.0,
+    }
+    assert matcher(incoming, replay, incoming_limit=63000.00, existing_limit=63000.00) == {
+        "shared_ai_call_id": "scan-one",
+        "lifecycle_distance_sec": 3.0,
+        "price_distance_usd": 0.0,
+    }
+    # Nearby but independent signals are allowed; the broad price band must
+    # not turn them into duplicates.
+    independent = {**replay, "shared_ai_call_id": "scan-two"}
+    assert matcher(incoming, independent, incoming_limit=63000.00, existing_limit=63000.01) == {}
 
 
 def test_final_hard_stop_is_thirteen_percent_margin_loss():

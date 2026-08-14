@@ -6380,6 +6380,7 @@ TP_EMERGENCY_MARGIN_PCT = 150.0
 MAX_LONGS = 3
 MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
+CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC = 5.0
 _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_CONTINUOUS: 15.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 15.0,
@@ -17649,8 +17650,54 @@ def _signal_planned_limit(sig: dict) -> float:
     return 0.0
 
 
-def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_trade_id: str = None, lane: str = None) -> dict:
-    """Return metadata for an active same-direction limit at/near limit_price, else {}."""
+def _canonical_duplicate_intent(
+    incoming: dict,
+    existing: dict,
+    *,
+    incoming_limit: float,
+    existing_limit: float,
+) -> dict:
+    """Return auditable evidence only when two records are the same live intent.
+
+    Price proximity alone is intentionally not evidence of duplication.  Two
+    independent approved signals may legitimately be close in price and must
+    be governed by capacity/risk controls rather than silently suppressed.
+    """
+    incoming_id = str(incoming.get("trade_id") or "")
+    existing_id = str(existing.get("trade_id") or "")
+    if not incoming_id or not existing_id or incoming_id == existing_id:
+        return {}
+    incoming_call = str(incoming.get("shared_ai_call_id") or incoming.get("source_trade_id") or "")
+    existing_call = str(existing.get("shared_ai_call_id") or existing.get("source_trade_id") or "")
+    if not incoming_call or incoming_call != existing_call:
+        return {}
+    try:
+        incoming_created = float(
+            incoming.get("created_ts_ts") or incoming.get("signal_created_ts") or incoming.get("created_ts") or 0
+        )
+        existing_created = float(
+            existing.get("created_ts_ts") or existing.get("signal_created_ts") or existing.get("created_ts") or 0
+        )
+        lifecycle_distance = abs(incoming_created - existing_created)
+    except (TypeError, ValueError):
+        return {}
+    if lifecycle_distance > CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC:
+        return {}
+    try:
+        price_distance = abs(float(incoming_limit) - float(existing_limit))
+    except (TypeError, ValueError):
+        return {}
+    if price_distance > 0.01:
+        return {}
+    return {
+        "shared_ai_call_id": incoming_call,
+        "lifecycle_distance_sec": round(lifecycle_distance, 3),
+        "price_distance_usd": round(price_distance, 4),
+    }
+
+
+def _find_duplicate_limit_exposure(signal: dict, direction: str, limit_price: float, lane: str = None) -> dict:
+    """Return evidence for a replay of the same canonical live intent only."""
     direction = str(direction or "").upper()
     if direction not in ("LONG", "SHORT") or limit_price <= 0:
         return {}
@@ -17662,7 +17709,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if o.get("status") != "PENDING":
                 continue
             tid = o.get("trade_id")
-            if not tid or tid == exclude_trade_id:
+            if not tid:
                 continue
             odir = _normalize_order_side_to_dir(o.get("signal_dir") or o.get("side"))
             if odir != direction:
@@ -17671,18 +17718,19 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if same_lane_only and o_lane and o_lane != lane:
                 continue
             ref = o.get("planned_limit_price") or o.get("limit_price")
-            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(o_lane))
-            if _limit_prices_near(limit_price, ref, tolerance=tol):
+            intent = _canonical_duplicate_intent(signal, o, incoming_limit=limit_price, existing_limit=ref)
+            if intent:
                 return {
                     "trade_id": tid,
                     "source": "pending_order",
                     "limit_price": ref,
                     "research_lane": o.get("research_lane"),
                     "status": "PENDING",
+                    **intent,
                 }
         for p in open_positions:
             tid = p.get("trade_id")
-            if not tid or tid == exclude_trade_id:
+            if not tid:
                 continue
             if p.get("dir") != direction:
                 continue
@@ -17690,21 +17738,22 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if same_lane_only and p_lane and p_lane != lane:
                 continue
             ref = p.get("entry") or 0
-            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(p_lane))
-            if _limit_prices_near(limit_price, ref, tolerance=tol):
+            intent = _canonical_duplicate_intent(signal, p, incoming_limit=limit_price, existing_limit=ref)
+            if intent:
                 return {
                     "trade_id": tid,
                     "source": "open_position",
                     "limit_price": ref,
                     "research_lane": p.get("research_lane"),
                     "status": "FILLED",
+                    **intent,
                 }
         for entry in trades_map.values():
             sig = entry.get("signal_ref") or {}
             if not isinstance(sig, dict):
                 continue
             tid = sig.get("trade_id")
-            if not tid or tid == exclude_trade_id:
+            if not tid:
                 continue
             if is_terminal_signal(sig):
                 continue
@@ -17723,8 +17772,10 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if same_lane_only and sig_lane and sig_lane != lane:
                 continue
             ref = _signal_planned_limit(sig)
-            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(sig_lane))
-            if ref <= 0 or not _limit_prices_near(limit_price, ref, tolerance=tol):
+            if ref <= 0:
+                continue
+            intent = _canonical_duplicate_intent(signal, sig, incoming_limit=limit_price, existing_limit=ref)
+            if not intent:
                 continue
             return {
                 "trade_id": tid,
@@ -17732,6 +17783,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 "limit_price": ref,
                 "research_lane": sig.get("research_lane"),
                 "status": st,
+                **intent,
             }
     return {}
 
@@ -17742,7 +17794,7 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         return False
     direction = _signal_direction(signal)
     tid = signal.get("trade_id")
-    dup = _find_duplicate_limit_exposure(direction, limit_price, exclude_trade_id=tid, lane=signal.get("research_lane"))
+    dup = _find_duplicate_limit_exposure(signal, direction, limit_price, lane=signal.get("research_lane"))
     if not dup:
         return False
     reason = "DUPLICATE_LIMIT_PRICE"
@@ -17757,6 +17809,9 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         master["duplicate_existing_lane"] = dup.get("research_lane")
         master["duplicate_existing_status"] = dup.get("status")
         master["duplicate_existing_source"] = dup.get("source")
+        master["duplicate_shared_ai_call_id"] = dup.get("shared_ai_call_id")
+        master["duplicate_price_distance_usd"] = dup.get("price_distance_usd")
+        master["duplicate_lifecycle_distance_sec"] = dup.get("lifecycle_distance_sec")
         master["order_placed"] = False
         master["await_micro_confirm"] = False
         master["await_5m_confirm"] = False
@@ -17767,6 +17822,12 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         "order_placed": False,
         "await_micro_confirm": False,
         "await_5m_confirm": False,
+        "duplicate_of_trade_id": dup.get("trade_id"),
+        "duplicate_existing_limit": dup.get("limit_price"),
+        "duplicate_existing_source": dup.get("source"),
+        "duplicate_shared_ai_call_id": dup.get("shared_ai_call_id"),
+        "duplicate_price_distance_usd": dup.get("price_distance_usd"),
+        "duplicate_lifecycle_distance_sec": dup.get("lifecycle_distance_sec"),
     })
     _record_expired_order(signal, reason)
     _funnel_signal_expired(signal, reason)
@@ -17775,7 +17836,9 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         f"entry_mode={entry_mode} lane={signal.get('research_lane')} "
         f"existing_trade_id={dup.get('trade_id')} existing_limit={fmt(dup.get('limit_price'))} "
         f"existing_lane={dup.get('research_lane')} existing_status={dup.get('status')} "
-        f"source={dup.get('source')} reason={reason} [PIPELINE ENFORCEMENT]"
+        f"source={dup.get('source')} shared_ai_call_id={dup.get('shared_ai_call_id')} "
+        f"distance_usd={dup.get('price_distance_usd')} lifecycle_sec={dup.get('lifecycle_distance_sec')} "
+        f"reason={reason} [PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
     return True
@@ -17870,6 +17933,10 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "status": "PENDING",
         "created_ts": order_created_ts,
         "signal_created_ts": signal.get("created_ts_ts") or (signal.get("timing") or {}).get("signal_ts"),
+        # Preserve canonical-intent identity through the pending/open lifecycle
+        # so a callback replay can be distinguished from a nearby new signal.
+        "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
+        "shared_ai_call_ts": signal.get("shared_ai_call_ts"),
         "entry_type": "SIM_LIMIT",
         "signal_price": signal.get("signal_price"),
         "fee_type": "MAKER",
@@ -21824,6 +21891,15 @@ def _record_expired_order(source: dict, reason: str):
         "min_price_since_order": fill_metrics.get("min_price_since_order"),
         "max_price_since_order": fill_metrics.get("max_price_since_order"),
         "touched_limit": fill_metrics.get("touched_limit"),
+        # Duplicate suppression must be analyzable as a capacity-aware
+        # counterfactual.  Keep the matched canonical intent evidence with
+        # the expired candidate instead of reducing it to a generic reason.
+        "duplicate_of_trade_id": source.get("duplicate_of_trade_id") or master.get("duplicate_of_trade_id"),
+        "duplicate_existing_limit": source.get("duplicate_existing_limit") or master.get("duplicate_existing_limit"),
+        "duplicate_existing_source": source.get("duplicate_existing_source") or master.get("duplicate_existing_source"),
+        "duplicate_shared_ai_call_id": source.get("duplicate_shared_ai_call_id") or master.get("duplicate_shared_ai_call_id"),
+        "duplicate_price_distance_usd": source.get("duplicate_price_distance_usd") or master.get("duplicate_price_distance_usd"),
+        "duplicate_lifecycle_distance_sec": source.get("duplicate_lifecycle_distance_sec") or master.get("duplicate_lifecycle_distance_sec"),
         "shared_ai_call_id": (
             source.get("shared_ai_call_id")
             or master.get("shared_ai_call_id")
