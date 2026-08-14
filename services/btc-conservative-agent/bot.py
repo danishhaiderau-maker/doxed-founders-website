@@ -21811,7 +21811,9 @@ def _record_expired_order(source: dict, reason: str):
         "signal_price": signal_price,
         "created_ts": created,
         "expired_ts": now,
-        "age_min": int(age / 60),
+        # Preserve sub-minute lifetime.  Integer truncation made genuine short
+        # rests indistinguishable from a candidate rejected before placement.
+        "age_min": round(age / 60.0, 2),
         "conf": conf,
         "mode": state.get("strategy_mode"),
         "reason": reason,
@@ -22149,6 +22151,22 @@ def refresh_shadow_vs_live_entry_report(cwd: str = None) -> dict:
 
 def _expired_order_api_row(row: dict) -> dict:
     out = dict(row) if isinstance(row, dict) else {}
+    try:
+        created_ts = float(out.get("created_ts") or 0)
+        expired_ts = float(out.get("expired_ts") or 0)
+        if created_ts > 0 and expired_ts >= created_ts:
+            out["age_min"] = round((expired_ts - created_ts) / 60.0, 2)
+    except (TypeError, ValueError):
+        pass
+    immediate_candidate_reasons = {
+        "DUPLICATE_LIMIT_PRICE",
+        "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY",
+        "STALE_NO_EXPOSURE",
+    }
+    out["never_placed"] = bool(
+        str(out.get("reason") or "") in immediate_candidate_reasons
+        and float(out.get("age_min") or 0) < 0.05
+    )
     if not out.get("time"):
         ts = out.get("expired_ts") or out.get("created_ts")
         if ts:
@@ -27911,18 +27929,22 @@ DASHBOARD_JS = """(function () {
             </tr>
           `;
         }).join(''));
-        safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
+        safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => {
+          const ageText = e.age_min != null
+            ? Number(e.age_min).toFixed(2) + (e.never_placed ? ' (not placed)' : '')
+            : '-';
+          return `
           <tr>
             <td>${e.time_melbourne || formatMelbourneDateTime(e.time || e.expired_ts || e.created_ts)}</td>
             <td>${laneBadge(e.research_lane, e.research_model)}</td>
             <td>${e.dir || '-'}</td>
             <td>${e.limit_price?.toFixed(2)||'-'}</td>
-            <td>${e.age_min?.toFixed(1)||'-'}</td>
+            <td>${ageText}</td>
             <td>${e.reason||'-'}</td>
             <td>${e.conf||'-'}</td>
             <td>${e.mode||'-'}</td>
-          </tr>
-        `).join(''));
+          </tr>`;
+        }).join(''));
         const expiredHint = document.getElementById('expiredOrdersTableHint');
         if (expiredHint) {
           const shown = (d.expired_orders || []).length;
