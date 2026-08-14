@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+Refactor managed stop ownership reconciliation (#86)
 
 ## Last Activity
 
