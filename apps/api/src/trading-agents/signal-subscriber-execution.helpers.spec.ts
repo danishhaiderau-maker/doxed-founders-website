@@ -2401,11 +2401,11 @@ test('replacement stop remains owned until its predecessor is confirmed cleared'
   const meta = {
     stopOrderId: 202,
     supersededStopOrderId: 201,
-    partialFillStopOrderId: null,
-    supersededPartialStopOrderId: null,
+    partialFillStopOrderId: 203,
+    supersededPartialStopOrderId: 204,
   };
-  assert.deepEqual(ownedStopOrderIds(meta), [202, 201]);
-  assert.deepEqual(untrackedActiveOrderIds([201, 202], [meta]), []);
+  assert.deepEqual(ownedStopOrderIds(meta), [202, 203, 204, 201]);
+  assert.deepEqual(untrackedActiveOrderIds([201, 202, 203, 204], [meta]), []);
 });
 
 test('generic stop rearm persists replacement ownership before clearing a missing predecessor', async () => {

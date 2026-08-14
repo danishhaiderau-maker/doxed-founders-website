@@ -544,12 +544,23 @@ export function shouldRetryImmediateFlatReconcile(input: {
  */
 export function untrackedActiveOrderIds(
   activeOrderIds: Iterable<number>,
-  liveLotMeta: Iterable<Pick<ExecutionPayload, 'bitfinexOrderId' | 'stopOrderId' | 'supersededStopOrderId'>>,
+  liveLotMeta: Iterable<Pick<
+    ExecutionPayload,
+    | 'bitfinexOrderId'
+    | 'stopOrderId'
+    | 'partialFillStopOrderId'
+    | 'supersededPartialStopOrderId'
+    | 'supersededStopOrderId'
+  >>,
 ): number[] {
   const untracked = new Set(activeOrderIds);
   for (const meta of liveLotMeta) {
     if (meta.bitfinexOrderId != null) untracked.delete(meta.bitfinexOrderId);
     if (meta.stopOrderId != null) untracked.delete(meta.stopOrderId);
+    if (meta.partialFillStopOrderId != null) untracked.delete(meta.partialFillStopOrderId);
+    if (meta.supersededPartialStopOrderId != null) {
+      untracked.delete(meta.supersededPartialStopOrderId);
+    }
     if (meta.supersededStopOrderId != null) untracked.delete(meta.supersededStopOrderId);
   }
   return [...untracked];
@@ -5342,6 +5353,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       execMetaById.set(p.id, m);
       if (m.bitfinexOrderId) managedOrderIds.add(m.bitfinexOrderId);
       if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
+      // A PENDING_ENTRY can be partially filled.  In that short handoff the
+      // entry remainder and its reduce-only partial stop are both legitimate
+      // exchange rows.  Omitting the partial stop here made the reconciliation
+      // pass label our own protection as FOREIGN_ACTIVE_ORDER and pause the
+      // relay while the full fill was being promoted to OPEN.
+      if (m.partialFillStopOrderId) managedOrderIds.add(m.partialFillStopOrderId);
+      if (m.supersededPartialStopOrderId) {
+        managedOrderIds.add(m.supersededPartialStopOrderId);
+      }
       if (m.supersededStopOrderId) managedOrderIds.add(m.supersededStopOrderId);
     }
 
