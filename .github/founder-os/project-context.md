@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fix partial fill stop reconciliation ownership (#85)
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
