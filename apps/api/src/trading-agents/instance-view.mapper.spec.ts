@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  activeLiveRelayArmForSessionReset,
   applyInstanceDashboardPatch,
   readInstanceScope,
   readRelayFidelitySessionStart,
@@ -34,6 +35,36 @@ test('active instance telemetry preserves its current live arm epoch', () => {
   assert.equal(next.relayExecutionMode, 'LIVE');
   assert.equal(next.relayArmedAt, armedAt);
   assert.equal(next.realTradingConfirmedAt, armedAt);
+});
+
+test('fresh collection preserves an explicit ACTIVE live arm but never invents one', () => {
+  const armedAt = '2026-08-14T00:10:00.000Z';
+  const preserved = activeLiveRelayArmForSessionReset('ACTIVE', {
+    relayExecutionMode: 'LIVE',
+    relayArmedAt: armedAt,
+    realTradingConfirmedAt: armedAt,
+    liveDeskSessionStartedAt: '2026-08-13T23:00:00.000Z',
+    relayEntryPolicy: 'NEXT_FRESH_ONLY',
+    relayPolicyVersion: 'continuous_only_v5',
+    relayLastTransition: { action: 'STARTED' },
+  });
+  assert.equal(preserved.relayExecutionMode, 'LIVE');
+  assert.equal(preserved.relayArmedAt, armedAt);
+  assert.equal(preserved.realTradingConfirmedAt, armedAt);
+  assert.equal(preserved.liveDeskSessionStartedAt, '2026-08-13T23:00:00.000Z');
+  assert.deepEqual(preserved.relayLastTransition, { action: 'STARTED' });
+
+  assert.deepEqual(
+    activeLiveRelayArmForSessionReset('ACTIVE', { relayExecutionMode: 'LIVE' }),
+    {},
+  );
+  assert.deepEqual(
+    activeLiveRelayArmForSessionReset('PAUSED', {
+      relayExecutionMode: 'LIVE',
+      relayArmedAt: armedAt,
+    }),
+    {},
+  );
 });
 
 test('live fidelity has no epoch before explicit NEXT_FRESH_ONLY arm', () => {
