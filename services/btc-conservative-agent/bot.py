@@ -4460,6 +4460,11 @@ orderflow = {"buy_volume": 0.0, "sell_volume": 0.0, "delta": 0.0, "imbalance": 0
 volume_buffer = deque(maxlen=200)
 price_buffer = deque(maxlen=200)
 recent_trades = deque(maxlen=50)
+# Public Bitfinex executions used only to validate a paper fill.  This is a
+# bounded in-memory tape; it never blocks order placement, cancellation, or
+# the WebSocket handler with an HTTP call.
+venue_fill_trade_tape = deque(maxlen=256)
+venue_fill_trade_tape_lock = threading.Lock()
 ret_1m_buffer = deque(maxlen=20)
 ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
@@ -4593,6 +4598,13 @@ MAX_BOOK_LEVELS = 100
 # root cause. force=True now means "refresh if older than this floor", not
 # "refresh no matter what".
 BOOK_FORCE_MIN_SEC = 1.5
+# A Showcase paper limit may only become FILLED when the cached venue book and
+# the live public execution tape both support that exact price and quantity.
+# This deliberately removes the old historical-price-touch fallback that could
+# create a paper fill after Bitfinex had already moved away.
+VENUE_EXECUTABLE_SHOWCASE_FILL_GATE = True
+VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
+VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
@@ -6368,6 +6380,7 @@ TP_EMERGENCY_MARGIN_PCT = 150.0
 MAX_LONGS = 3
 MAX_SHORTS = 3
 CLUSTER_MIN_DIST_PCT = 0.0025
+CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC = 5.0
 _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_CONTINUOUS: 15.0,
     RESEARCH_LANE_HIGH_EDGE_RUNNER: 15.0,
@@ -17637,8 +17650,54 @@ def _signal_planned_limit(sig: dict) -> float:
     return 0.0
 
 
-def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_trade_id: str = None, lane: str = None) -> dict:
-    """Return metadata for an active same-direction limit at/near limit_price, else {}."""
+def _canonical_duplicate_intent(
+    incoming: dict,
+    existing: dict,
+    *,
+    incoming_limit: float,
+    existing_limit: float,
+) -> dict:
+    """Return auditable evidence only when two records are the same live intent.
+
+    Price proximity alone is intentionally not evidence of duplication.  Two
+    independent approved signals may legitimately be close in price and must
+    be governed by capacity/risk controls rather than silently suppressed.
+    """
+    incoming_id = str(incoming.get("trade_id") or "")
+    existing_id = str(existing.get("trade_id") or "")
+    if not incoming_id or not existing_id or incoming_id == existing_id:
+        return {}
+    incoming_call = str(incoming.get("shared_ai_call_id") or incoming.get("source_trade_id") or "")
+    existing_call = str(existing.get("shared_ai_call_id") or existing.get("source_trade_id") or "")
+    if not incoming_call or incoming_call != existing_call:
+        return {}
+    try:
+        incoming_created = float(
+            incoming.get("created_ts_ts") or incoming.get("signal_created_ts") or incoming.get("created_ts") or 0
+        )
+        existing_created = float(
+            existing.get("created_ts_ts") or existing.get("signal_created_ts") or existing.get("created_ts") or 0
+        )
+        lifecycle_distance = abs(incoming_created - existing_created)
+    except (TypeError, ValueError):
+        return {}
+    if lifecycle_distance > CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC:
+        return {}
+    try:
+        price_distance = abs(float(incoming_limit) - float(existing_limit))
+    except (TypeError, ValueError):
+        return {}
+    if price_distance > 0.01:
+        return {}
+    return {
+        "shared_ai_call_id": incoming_call,
+        "lifecycle_distance_sec": round(lifecycle_distance, 3),
+        "price_distance_usd": round(price_distance, 4),
+    }
+
+
+def _find_duplicate_limit_exposure(signal: dict, direction: str, limit_price: float, lane: str = None) -> dict:
+    """Return evidence for a replay of the same canonical live intent only."""
     direction = str(direction or "").upper()
     if direction not in ("LONG", "SHORT") or limit_price <= 0:
         return {}
@@ -17650,7 +17709,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if o.get("status") != "PENDING":
                 continue
             tid = o.get("trade_id")
-            if not tid or tid == exclude_trade_id:
+            if not tid:
                 continue
             odir = _normalize_order_side_to_dir(o.get("signal_dir") or o.get("side"))
             if odir != direction:
@@ -17659,18 +17718,31 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if same_lane_only and o_lane and o_lane != lane:
                 continue
             ref = o.get("planned_limit_price") or o.get("limit_price")
-            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(o_lane))
-            if _limit_prices_near(limit_price, ref, tolerance=tol):
+            if str(tid) == str(signal.get("trade_id") or ""):
                 return {
                     "trade_id": tid,
                     "source": "pending_order",
                     "limit_price": ref,
                     "research_lane": o.get("research_lane"),
                     "status": "PENDING",
+                    "same_trade_replay": True,
+                    "shared_ai_call_id": o.get("shared_ai_call_id") or o.get("source_trade_id"),
+                    "price_distance_usd": 0.0,
+                    "lifecycle_distance_sec": 0.0,
+                }
+            intent = _canonical_duplicate_intent(signal, o, incoming_limit=limit_price, existing_limit=ref)
+            if intent:
+                return {
+                    "trade_id": tid,
+                    "source": "pending_order",
+                    "limit_price": ref,
+                    "research_lane": o.get("research_lane"),
+                    "status": "PENDING",
+                    **intent,
                 }
         for p in open_positions:
             tid = p.get("trade_id")
-            if not tid or tid == exclude_trade_id:
+            if not tid:
                 continue
             if p.get("dir") != direction:
                 continue
@@ -17678,21 +17750,34 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if same_lane_only and p_lane and p_lane != lane:
                 continue
             ref = p.get("entry") or 0
-            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(p_lane))
-            if _limit_prices_near(limit_price, ref, tolerance=tol):
+            if str(tid) == str(signal.get("trade_id") or ""):
                 return {
                     "trade_id": tid,
                     "source": "open_position",
                     "limit_price": ref,
                     "research_lane": p.get("research_lane"),
                     "status": "FILLED",
+                    "same_trade_replay": True,
+                    "shared_ai_call_id": p.get("shared_ai_call_id") or p.get("source_trade_id"),
+                    "price_distance_usd": 0.0,
+                    "lifecycle_distance_sec": 0.0,
+                }
+            intent = _canonical_duplicate_intent(signal, p, incoming_limit=limit_price, existing_limit=ref)
+            if intent:
+                return {
+                    "trade_id": tid,
+                    "source": "open_position",
+                    "limit_price": ref,
+                    "research_lane": p.get("research_lane"),
+                    "status": "FILLED",
+                    **intent,
                 }
         for entry in trades_map.values():
             sig = entry.get("signal_ref") or {}
             if not isinstance(sig, dict):
                 continue
             tid = sig.get("trade_id")
-            if not tid or tid == exclude_trade_id:
+            if not tid:
                 continue
             if is_terminal_signal(sig):
                 continue
@@ -17711,8 +17796,22 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
             if same_lane_only and sig_lane and sig_lane != lane:
                 continue
             ref = _signal_planned_limit(sig)
-            tol = max(_lane_duplicate_tolerance(lane), _lane_duplicate_tolerance(sig_lane))
-            if ref <= 0 or not _limit_prices_near(limit_price, ref, tolerance=tol):
+            if ref <= 0:
+                continue
+            if str(tid) == str(signal.get("trade_id") or ""):
+                return {
+                    "trade_id": tid,
+                    "source": "signal",
+                    "limit_price": ref,
+                    "research_lane": sig.get("research_lane"),
+                    "status": st,
+                    "same_trade_replay": True,
+                    "shared_ai_call_id": sig.get("shared_ai_call_id") or sig.get("source_trade_id"),
+                    "price_distance_usd": 0.0,
+                    "lifecycle_distance_sec": 0.0,
+                }
+            intent = _canonical_duplicate_intent(signal, sig, incoming_limit=limit_price, existing_limit=ref)
+            if not intent:
                 continue
             return {
                 "trade_id": tid,
@@ -17720,6 +17819,7 @@ def _find_duplicate_limit_exposure(direction: str, limit_price: float, exclude_t
                 "limit_price": ref,
                 "research_lane": sig.get("research_lane"),
                 "status": st,
+                **intent,
             }
     return {}
 
@@ -17730,9 +17830,16 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         return False
     direction = _signal_direction(signal)
     tid = signal.get("trade_id")
-    dup = _find_duplicate_limit_exposure(direction, limit_price, exclude_trade_id=tid, lane=signal.get("research_lane"))
+    dup = _find_duplicate_limit_exposure(signal, direction, limit_price, lane=signal.get("research_lane"))
     if not dup:
         return False
+    if dup.get("same_trade_replay"):
+        logger.info(
+            f"[SIM] CANONICAL_SIGNAL_REPLAY no-op trade_id={tid} dir={direction} "
+            f"limit={fmt(limit_price)} source={dup.get('source')} "
+            f"shared_ai_call_id={dup.get('shared_ai_call_id')} [PIPELINE ENFORCEMENT]"
+        )
+        return True
     reason = "DUPLICATE_LIMIT_PRICE"
     with trade_lock:
         master = trades_map.get(tid, {}).get("signal_ref", signal)
@@ -17745,6 +17852,9 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         master["duplicate_existing_lane"] = dup.get("research_lane")
         master["duplicate_existing_status"] = dup.get("status")
         master["duplicate_existing_source"] = dup.get("source")
+        master["duplicate_shared_ai_call_id"] = dup.get("shared_ai_call_id")
+        master["duplicate_price_distance_usd"] = dup.get("price_distance_usd")
+        master["duplicate_lifecycle_distance_sec"] = dup.get("lifecycle_distance_sec")
         master["order_placed"] = False
         master["await_micro_confirm"] = False
         master["await_5m_confirm"] = False
@@ -17755,6 +17865,12 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         "order_placed": False,
         "await_micro_confirm": False,
         "await_5m_confirm": False,
+        "duplicate_of_trade_id": dup.get("trade_id"),
+        "duplicate_existing_limit": dup.get("limit_price"),
+        "duplicate_existing_source": dup.get("source"),
+        "duplicate_shared_ai_call_id": dup.get("shared_ai_call_id"),
+        "duplicate_price_distance_usd": dup.get("price_distance_usd"),
+        "duplicate_lifecycle_distance_sec": dup.get("lifecycle_distance_sec"),
     })
     _record_expired_order(signal, reason)
     _funnel_signal_expired(signal, reason)
@@ -17763,7 +17879,9 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
         f"entry_mode={entry_mode} lane={signal.get('research_lane')} "
         f"existing_trade_id={dup.get('trade_id')} existing_limit={fmt(dup.get('limit_price'))} "
         f"existing_lane={dup.get('research_lane')} existing_status={dup.get('status')} "
-        f"source={dup.get('source')} reason={reason} [PIPELINE ENFORCEMENT]"
+        f"source={dup.get('source')} shared_ai_call_id={dup.get('shared_ai_call_id')} "
+        f"distance_usd={dup.get('price_distance_usd')} lifecycle_sec={dup.get('lifecycle_distance_sec')} "
+        f"reason={reason} [PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
     return True
@@ -17858,6 +17976,10 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "status": "PENDING",
         "created_ts": order_created_ts,
         "signal_created_ts": signal.get("created_ts_ts") or (signal.get("timing") or {}).get("signal_ts"),
+        # Preserve canonical-intent identity through the pending/open lifecycle
+        # so a callback replay can be distinguished from a nearby new signal.
+        "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
+        "shared_ai_call_ts": signal.get("shared_ai_call_ts"),
         "entry_type": "SIM_LIMIT",
         "signal_price": signal.get("signal_price"),
         "fee_type": "MAKER",
@@ -18424,6 +18546,86 @@ def _marketable_limit_full_depth_available(
     if not levels:
         available = bbo_size
     return available + 1e-12 >= requested_qty, round(available, 8)
+
+
+def _venue_executable_showcase_fill(
+    order: dict,
+    *,
+    bid: float,
+    ask: float,
+    venue_snapshot: dict,
+    recent_market_trades: list,
+    now: float,
+) -> tuple[bool, dict]:
+    """Prove a paper limit is executable on current Bitfinex public data.
+
+    The gate is intentionally read-only and cache-only.  It validates a source
+    fill *after* an order is already resting, so it adds no network round trip
+    to placement, repricing, or cancellation.  It is conservative: public
+    depth and prints cannot prove private queue priority, but both must support
+    the full requested quantity at the hard limit before the Showcase fills.
+    """
+    direction = _normalize_order_side_to_dir(
+        order.get("signal_dir") or order.get("dir") or order.get("side")
+    )
+    limit = float(order.get("limit_price") or 0)
+    qty = float(order.get("qty") or 0)
+    book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
+    evidence = {
+        "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
+        "checked_at_ts": round(float(now), 3),
+        "limit_price": round(limit, 2),
+        "requested_qty": round(qty, 8),
+        "book_age_sec": round(max(0.0, float(now) - book_ts), 3) if book_ts else None,
+        "best_bid": round(float(bid or 0), 2),
+        "best_ask": round(float(ask or 0), 2),
+    }
+    if direction not in ("LONG", "SHORT") or limit <= 0 or qty <= 0:
+        evidence["reason"] = "INVALID_ORDER"
+        return False, evidence
+    if not book_ts or float(now) - book_ts > VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC:
+        evidence["reason"] = "BOOK_STALE"
+        return False, evidence
+    book = (venue_snapshot or {}).get("order_book") or {}
+    levels = list(book.get("asks") or []) if direction == "LONG" else list(book.get("bids") or [])
+    quote_executable = (ask > 0 and ask <= limit) if direction == "LONG" else (bid > 0 and bid >= limit)
+    available = 0.0
+    for level in levels:
+        try:
+            level_price, level_size = float(level[0]), max(0.0, float(level[2]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        if (direction == "LONG" and level_price > limit) or (direction == "SHORT" and level_price < limit):
+            break
+        available += level_size
+        if available + 1e-12 >= qty:
+            break
+    evidence["visible_executable_qty"] = round(available, 8)
+    if not quote_executable or available + 1e-12 < qty:
+        evidence["reason"] = "INSUFFICIENT_EXECUTABLE_DEPTH"
+        return False, evidence
+    # A resting BUY fills when a sell aggressor hits its bid; a resting SELL
+    # fills when a buy aggressor lifts its ask.
+    expected_aggressor = "Sell" if direction == "LONG" else "Buy"
+    printed_qty = 0.0
+    for trade in recent_market_trades or []:
+        try:
+            trade_ts = float(trade.get("received_ts") or 0)
+            trade_px = float(trade.get("p") or 0)
+            trade_qty = max(0.0, float(trade.get("v") or 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if float(now) - trade_ts > VENUE_EXECUTABLE_TRADE_WINDOW_SEC:
+            continue
+        at_limit = trade_px <= limit if direction == "LONG" else trade_px >= limit
+        if str(trade.get("S") or "") == expected_aggressor and at_limit:
+            printed_qty += trade_qty
+    evidence["recent_executable_trade_qty"] = round(printed_qty, 8)
+    if printed_qty + 1e-12 < qty:
+        evidence["reason"] = "INSUFFICIENT_RECENT_EXECUTION"
+        return False, evidence
+    evidence["reason"] = "EXECUTABLE"
+    return True, evidence
 
 
 def _is_static_no_chase_order(order: dict) -> bool:
@@ -19034,6 +19236,8 @@ def _pending_limit_ready_for_fill(
     *,
     bid: float | None = None,
     ask: float | None = None,
+    venue_snapshot: dict | None = None,
+    recent_market_trades: list | None = None,
     now: float | None = None,
 ) -> bool:
     """Honor relay settlement before a terminal marketable source fill."""
@@ -19053,6 +19257,17 @@ def _pending_limit_ready_for_fill(
         # durably acknowledged. Complete the deterministic paper fill after
         # the bounded relay dwell even if the next public tick has moved away.
         return True
+    if VENUE_EXECUTABLE_SHOWCASE_FILL_GATE and venue_snapshot is not None:
+        executable, evidence = _venue_executable_showcase_fill(
+            order,
+            bid=float(bid or 0),
+            ask=float(ask or 0),
+            venue_snapshot=venue_snapshot,
+            recent_market_trades=recent_market_trades or [],
+            now=now,
+        )
+        order["venue_fill_gate"] = evidence
+        return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
 
 def process_pending_orders():
@@ -19087,6 +19302,12 @@ def process_pending_orders():
     with state_lock:
         fill_bid = float(state.get("bid") or 0)
         fill_ask = float(state.get("ask") or 0)
+        venue_snapshot = {
+            "book_ts": state.get("book_ts"),
+            "order_book": copy.deepcopy(state.get("order_book") or {}),
+        }
+    with venue_fill_trade_tape_lock:
+        recent_market_trades = list(venue_fill_trade_tape)
     with trade_lock:
         for order in list(pending_orders):
             if order.get("status") != "PENDING":
@@ -19106,6 +19327,8 @@ def process_pending_orders():
                 price,
                 bid=fill_bid,
                 ask=fill_ask,
+                venue_snapshot=venue_snapshot,
+                recent_market_trades=recent_market_trades,
             ):
                 continue
             if not chase_bucket_allowed(order.get("limit_chase_count") or 0):
@@ -20604,6 +20827,13 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     tick_now = time.time()
     _last_ws_trade_fp = trade_fp
     _last_ws_trade_fp_ts = tick_now
+    with venue_fill_trade_tape_lock:
+        venue_fill_trade_tape.append({
+            "p": price,
+            "v": size,
+            "S": str(trade.get("S") or ""),
+            "received_ts": tick_now,
+        })
     with state_lock:
         prev_price = nz(state.get("price"))
         state["price"] = price
@@ -21691,7 +21921,9 @@ def _record_expired_order(source: dict, reason: str):
         "signal_price": signal_price,
         "created_ts": created,
         "expired_ts": now,
-        "age_min": int(age / 60),
+        # Preserve sub-minute lifetime.  Integer truncation made genuine short
+        # rests indistinguishable from a candidate rejected before placement.
+        "age_min": round(age / 60.0, 2),
         "conf": conf,
         "mode": state.get("strategy_mode"),
         "reason": reason,
@@ -21702,6 +21934,15 @@ def _record_expired_order(source: dict, reason: str):
         "min_price_since_order": fill_metrics.get("min_price_since_order"),
         "max_price_since_order": fill_metrics.get("max_price_since_order"),
         "touched_limit": fill_metrics.get("touched_limit"),
+        # Duplicate suppression must be analyzable as a capacity-aware
+        # counterfactual.  Keep the matched canonical intent evidence with
+        # the expired candidate instead of reducing it to a generic reason.
+        "duplicate_of_trade_id": source.get("duplicate_of_trade_id") or master.get("duplicate_of_trade_id"),
+        "duplicate_existing_limit": source.get("duplicate_existing_limit") or master.get("duplicate_existing_limit"),
+        "duplicate_existing_source": source.get("duplicate_existing_source") or master.get("duplicate_existing_source"),
+        "duplicate_shared_ai_call_id": source.get("duplicate_shared_ai_call_id") or master.get("duplicate_shared_ai_call_id"),
+        "duplicate_price_distance_usd": source.get("duplicate_price_distance_usd") or master.get("duplicate_price_distance_usd"),
+        "duplicate_lifecycle_distance_sec": source.get("duplicate_lifecycle_distance_sec") or master.get("duplicate_lifecycle_distance_sec"),
         "shared_ai_call_id": (
             source.get("shared_ai_call_id")
             or master.get("shared_ai_call_id")
@@ -22029,6 +22270,22 @@ def refresh_shadow_vs_live_entry_report(cwd: str = None) -> dict:
 
 def _expired_order_api_row(row: dict) -> dict:
     out = dict(row) if isinstance(row, dict) else {}
+    try:
+        created_ts = float(out.get("created_ts") or 0)
+        expired_ts = float(out.get("expired_ts") or 0)
+        if created_ts > 0 and expired_ts >= created_ts:
+            out["age_min"] = round((expired_ts - created_ts) / 60.0, 2)
+    except (TypeError, ValueError):
+        pass
+    immediate_candidate_reasons = {
+        "DUPLICATE_LIMIT_PRICE",
+        "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY",
+        "STALE_NO_EXPOSURE",
+    }
+    out["never_placed"] = bool(
+        str(out.get("reason") or "") in immediate_candidate_reasons
+        and float(out.get("age_min") or 0) < 0.05
+    )
     if not out.get("time"):
         ts = out.get("expired_ts") or out.get("created_ts")
         if ts:
@@ -27791,18 +28048,22 @@ DASHBOARD_JS = """(function () {
             </tr>
           `;
         }).join(''));
-        safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => `
+        safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => {
+          const ageText = e.age_min != null
+            ? Number(e.age_min).toFixed(2) + (e.never_placed ? ' (not placed)' : '')
+            : '-';
+          return `
           <tr>
             <td>${e.time_melbourne || formatMelbourneDateTime(e.time || e.expired_ts || e.created_ts)}</td>
             <td>${laneBadge(e.research_lane, e.research_model)}</td>
             <td>${e.dir || '-'}</td>
             <td>${e.limit_price?.toFixed(2)||'-'}</td>
-            <td>${e.age_min?.toFixed(1)||'-'}</td>
+            <td>${ageText}</td>
             <td>${e.reason||'-'}</td>
             <td>${e.conf||'-'}</td>
             <td>${e.mode||'-'}</td>
-          </tr>
-        `).join(''));
+          </tr>`;
+        }).join(''));
         const expiredHint = document.getElementById('expiredOrdersTableHint');
         if (expiredHint) {
           const shown = (d.expired_orders || []).length;
