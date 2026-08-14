@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: harden Founder remote and Second Brain diagnostics
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
