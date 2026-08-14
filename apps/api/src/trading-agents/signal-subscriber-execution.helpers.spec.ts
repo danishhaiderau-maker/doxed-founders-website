@@ -92,6 +92,7 @@ import {
   pollForVerifiedEntryFill,
   shouldRunLocalRealSideSafetyNet,
   resolveExactShowcaseEntryQty,
+  copyFirstScenarioCEligible,
 } from './signal-subscriber-execution.service';
 
 test('decimal-like terminal fill prices remain finite for partial-close P&L accounting', () => {
@@ -99,6 +100,36 @@ test('decimal-like terminal fill prices remain finite for partial-close P&L acco
   assert.equal(finiteDecimalLikeNumber({ toNumber: () => Number.NaN }), null);
   assert.equal(finiteDecimalLikeNumber(63_642), 63_642);
   assert.equal(finiteDecimalLikeNumber(null), null);
+});
+
+test('copy-first Scenario C is limited to an exchange fill before its source trade opens', () => {
+  assert.equal(
+    copyFirstScenarioCEligible({
+      mirrorOnly: true,
+      simActive: false,
+      sourcePositionOpen: false,
+      sourceStillPending: true,
+    }),
+    true,
+  );
+  assert.equal(
+    copyFirstScenarioCEligible({
+      mirrorOnly: true,
+      simActive: false,
+      sourcePositionOpen: true,
+      sourceStillPending: true,
+    }),
+    false,
+  );
+  assert.equal(
+    copyFirstScenarioCEligible({
+      mirrorOnly: false,
+      simActive: false,
+      sourcePositionOpen: false,
+      sourceStillPending: true,
+    }),
+    false,
+  );
 });
 
 test('exact showcase quantity is preserved below the subscriber cap', () => {

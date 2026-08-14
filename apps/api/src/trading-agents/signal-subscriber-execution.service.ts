@@ -2505,6 +2505,15 @@ const TERMINAL_PARTICIPANT_STATUSES = new Set<SignalCycleStatus>([
 ]);
 
 /** Effective stop-loss margin % — wide disaster stop in mirror+convergence mode. */
+export function copyFirstScenarioCEligible(input: {
+  mirrorOnly: boolean;
+  simActive: boolean;
+  sourcePositionOpen: boolean;
+  sourceStillPending: boolean;
+}): boolean {
+  return input.mirrorOnly && !input.simActive && !input.sourcePositionOpen && input.sourceStillPending;
+}
+
 function resolveEffectiveStopLossMarginPct(
   intentStopLoss?: number,
   opts?: { mirrorMode?: boolean; simActive?: boolean },
@@ -13793,12 +13802,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   private async trackShowcaseVanished(
     participantId: string,
     tradeId: string | null,
+    cachedBot?: BotApiState | null,
   ): Promise<boolean> {
     if (!tradeId || tradeId.startsWith('adopt:')) {
       this.showcaseVanishedMisses.delete(participantId);
       return false;
     }
-    const bot = await this.fetchExecutionBotState();
+    const bot = cachedBot ?? await this.fetchExecutionBotState();
     if (!bot) return false; // canonical unreachable — do not count failed fetches
 
     const inPositions = (bot.positions ?? []).some(
@@ -13884,10 +13894,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       (meta.limitPrice && meta.limitPrice > 0 ? meta.limitPrice : 0);
     if (!fillPrice || fillPrice <= 0) return;
 
+    // A real Bitfinex fill can precede the corresponding Showcase fill.  In
+    // that narrow window this leg needs local Scenario C protection: waiting
+    // for the source would leave an already-real position with only the wide
+    // mirror disaster stop.  Once the source opens, normal source-led mirror
+    // behaviour resumes; this flag never changes or closes the Showcase.
+    const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
+    const canonicalBot = await this.fetchExecutionBotState();
+    const sourcePositionOpen = Boolean(
+      showcaseTradeId &&
+        (canonicalBot?.positions ?? []).some(
+          (row) => row.trade_id && tradeIdsMatch(row.trade_id, showcaseTradeId),
+        ),
+    );
+    const sourceStillPending = Boolean(
+      showcaseTradeId &&
+        [
+          ...(canonicalBot?.orders ?? []),
+          ...(canonicalBot?.signal_info?.signals ?? []),
+        ].some((row) => row.trade_id && tradeIdsMatch(row.trade_id, showcaseTradeId)),
+    );
+    const copyFirstScenarioC = copyFirstScenarioCEligible({
+      mirrorOnly: isShowcaseMirrorOnlyMode(),
+      simActive,
+      sourcePositionOpen,
+      sourceStillPending,
+    });
+
     const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
       intent.risk.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode(), simActive },
+      { mirrorMode: isShowcaseMirrorOnlyMode() && !copyFirstScenarioC, simActive },
     );
     const mark = await this.activeTrading.getMarkPrice();
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
@@ -13921,8 +13958,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // `relink:…` / `adopt:…` after Cure 1. Exact === against the raw string
     // false-vanished cont-e549 at noon 2026-08-08 (COPY_POSITION_NO_SHOWCASE
     // → SHOWCASE_VANISHED $0 while Fly still held the short until +$1.18).
-    const showcaseTradeIdForVanish = this.resolveShowcaseMirrorTradeId(cycle, meta);
-    if (await this.trackShowcaseVanished(participant.id, showcaseTradeIdForVanish)) {
+    const showcaseTradeIdForVanish = showcaseTradeId;
+    if (await this.trackShowcaseVanished(participant.id, showcaseTradeIdForVanish, canonicalBot)) {
       this.logger.warn(
         `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${showcaseTradeIdForVanish} (cycle.tradeId=${cycle.tradeId}) — absent from canonical positions/trades for ${SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive fresh states; market-closing copy lot`,
       );
@@ -13944,7 +13981,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       peakMarginPct: runtime.peakMarginPct,
       stopLossMarginPct,
       // Relay sim: per-lot Scenario C exits (profit lock / thesis) for realistic soak tests.
-      showcaseMirrorOnly: simActive ? false : isShowcaseMirrorOnlyMode(),
+      showcaseMirrorOnly: simActive ? false : isShowcaseMirrorOnlyMode() && !copyFirstScenarioC,
     });
 
     if (exitReason) {
@@ -13957,6 +13994,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         peakMarginPct: runtime.peakMarginPct,
         unrealMarginPct,
         stopLossMarginPct,
+        copyFirstScenarioC,
       });
       if (closed) this.positionRuntime.delete(participant.id);
       return;
@@ -14294,6 +14332,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       unrealMarginPct: number;
       lockFloor?: number;
       stopLossMarginPct: number;
+      /** Local Scenario C protected a venue fill before the Showcase filled. */
+      copyFirstScenarioC?: boolean;
     },
   ): Promise<boolean> {
     if (!meta.qty || !meta.direction || !opts.reason) return false;
@@ -14312,6 +14352,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // tracked id is the authoritative live stop (meta.stopOrderId can lag by
       // a tick). Showcase EXIT is authoritative — never let a stale protective
       // stop fire mid-close and realize the wrong rung.
+      // A local protective exit must also remove any linked maker remainder.
+      // Otherwise a partial entry can refill after this cycle is terminal.
+      await this.cancelLinkedPendingLimits(creds, meta);
       const runtimeTrack = this.positionRuntime.get(participantId);
       const trackedStopId = runtimeTrack?.currentStopOrderId;
       if (trackedStopId) stopIdsToCancel.add(trackedStopId);
@@ -14399,7 +14442,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
       venue: 'bitfinex',
       exit_price: opts.mark,
-      exit_reason: exitReasonMap[opts.reason],
+      exit_reason: opts.copyFirstScenarioC
+        ? `COPY_SCENARIO_C_${exitReasonMap[opts.reason]}`
+        : exitReasonMap[opts.reason],
+      source_exit_reason: opts.copyFirstScenarioC ? 'SOURCE_PENDING' : undefined,
+      copy_first_scenario_c: opts.copyFirstScenarioC === true,
       peak_margin_pct: opts.peakMarginPct,
       lock_floor_margin_pct: opts.lockFloor,
       unreal_margin_pct: opts.unrealMarginPct,

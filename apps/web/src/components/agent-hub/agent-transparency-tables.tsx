@@ -128,6 +128,9 @@ export function displayExitCause(reason: string | null | undefined): string {
     SHOWCASE_CLOSED: 'Showcase closed',
     EXCHANGE_STOP: 'Exchange protective stop',
     EXCHANGE_ALREADY_FLAT: 'Already flat on exchange',
+    COPY_SCENARIO_C_PROFIT_LOCK: 'Copy profit lock (before Showcase fill)',
+    COPY_SCENARIO_C_THESIS_FAST_CUT: 'Copy thesis cut (before Showcase fill)',
+    COPY_SCENARIO_C_HARD_STOP: 'Copy safety stop (before Showcase fill)',
   };
   return labels[raw.toUpperCase()] ?? raw.replace(/_/g, ' ');
 }
