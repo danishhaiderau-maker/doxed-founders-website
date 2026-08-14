@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Prioritize Bitfinex order mutations over reads
+fix: harden Founder remote and Second Brain diagnostics
 
 ## Last Activity
 
