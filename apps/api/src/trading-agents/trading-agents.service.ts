@@ -1439,6 +1439,7 @@ export class TradingAgentsService implements OnModuleInit {
     let tradeLifecycleIntegrity: TradeLifecycleIntegritySnapshot | null = null;
     let relaySimParticipantStats: RelaySimParticipantStats | null = null;
     let relayFidelity = null;
+    let relayLastTransition: TradingAgentDashboardState['relayLastTransition'] = null;
 
     if (userId && agentRowId) {
       const inst = await this.prisma.tradingAgentInstance.findUnique({
@@ -1446,6 +1447,8 @@ export class TradingAgentsService implements OnModuleInit {
       });
       if (inst && inst.exchangeProvider === 'bitfinex') {
         const instDash = (inst.dashboardState ?? {}) as Record<string, unknown>;
+        relayLastTransition =
+          (instDash.relayLastTransition as TradingAgentDashboardState['relayLastTransition']) ?? null;
         copyRelaySim = readCopyRelaySimState(instDash);
         copyRelayReconcile =
           (instDash.copyRelayReconcile as CopyRelayReconcileSnapshot | undefined) ??
@@ -1529,6 +1532,10 @@ export class TradingAgentsService implements OnModuleInit {
 
     return {
       ...rest,
+      dashboard: {
+        ...rest.dashboard,
+        relayLastTransition,
+      },
       // When state is stale but Fly itself responds to the lightweight health
       // probe, expose that fact so the frontend's relay-sync alert can
       // distinguish "Fly truly offline" from "Fly online but state stale".

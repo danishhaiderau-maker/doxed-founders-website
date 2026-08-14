@@ -1,6 +1,6 @@
 {
   "policyVersion": 5,
-  "updatedAt": "2026-08-13T11:44:08.981Z",
+  "updatedAt": "2026-08-14T00:05:40.626Z",
   "files": [
     {
       "path": "packages/utils/src/bitfinex-copy-policy.ts",
@@ -24,7 +24,7 @@
     },
     {
       "path": "apps/api/src/trading-agents/signal-subscriber-execution.service.ts",
-      "sha256": "95b3359ccf8d910aedac75264fa5f4012d830e967ce0375284e778a4c74b99ce"
+      "sha256": "b21d33472bdecb47e340c88d25502d692a0dde72079d2e12b4a2f2fe14c08f01"
     }
   ]
 }

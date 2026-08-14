@@ -24,3 +24,30 @@ test('active Bitfinex relay identifies Continuous as the only live lane', () => 
   assert.equal(html.includes('Continuous + Type B'), false);
   assert.match(html, /Type B remains paper\/research-only/);
 });
+
+test('renders the durable relay transition without claiming an open position was closed', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ExchangeRelayControl, {
+      slug: 'conservative-btc',
+      signedIn: true,
+      exchange: 'bitfinex',
+      exchangeLabel: 'Bitfinex',
+      exchangeConnected: true,
+      relayState: 'paused',
+      relayLastTransition: {
+        at: '2026-08-14T00:00:00.000Z',
+        actor: 'USER',
+        action: 'STOPPED',
+        reason: 'USER_REQUEST_STOP',
+        cancelledPendingOrders: 2,
+        openPositionsLeftOnExchange: true,
+        relayEntryPolicy: 'NEXT_FRESH_ONLY',
+      },
+    }),
+  );
+
+  assert.match(html, /Latest relay transition/);
+  assert.match(html, /STOPPED by user/);
+  assert.match(html, /Pending copy orders cancelled: 2/);
+  assert.match(html, /Open Bitfinex positions were left protected on the exchange/);
+});

@@ -4678,6 +4678,7 @@ export interface PrivateAgentDashboard {
     hiredAt: string;
     activatedAt: string | null;
     lastError: string | null;
+    relayLastTransition?: import('@dcf/utils').RelayTransitionAudit | null;
   };
   exchange: {
     connected: boolean;

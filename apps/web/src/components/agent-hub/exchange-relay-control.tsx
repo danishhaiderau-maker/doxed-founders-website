@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { EXCHANGE_PROVIDER_LABELS, type ExchangeProvider } from '@dcf/utils';
+import { EXCHANGE_PROVIDER_LABELS, type ExchangeProvider, type RelayTransitionAudit } from '@dcf/utils';
 
 type RelayState = 'idle' | 'active' | 'paused' | 'copy' | 'sim';
 
@@ -35,6 +35,7 @@ export function ExchangeRelayControl({
   rentalExpired,
   providers,
   onExchangeChange,
+  relayLastTransition,
 }: {
   slug: string;
   signedIn: boolean;
@@ -50,6 +51,7 @@ export function ExchangeRelayControl({
   rentalExpired?: boolean;
   providers?: { id: string; label: string; available: boolean }[];
   onExchangeChange?: (id: string) => void;
+  relayLastTransition?: RelayTransitionAudit | null;
 }) {
   const isLiveRelay = relayState === 'active' || relayState === 'paused';
   const canToggle =
@@ -92,6 +94,22 @@ export function ExchangeRelayControl({
       )}
 
       <p className="text-xs text-zinc-500">{relayLabel(relayState, exchangeLabel)}</p>
+
+      {relayLastTransition && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950/65 px-3 py-2 text-[11px] text-zinc-400">
+          <p className="font-semibold uppercase tracking-wide text-zinc-300">Latest relay transition</p>
+          <p className="mt-1">
+            {relayLastTransition.action.replaceAll('_', ' ')} by {relayLastTransition.actor.toLowerCase()} ·{' '}
+            {new Date(relayLastTransition.at).toLocaleString()} · {relayLastTransition.reason.replaceAll('_', ' ')}
+          </p>
+          <p className="mt-0.5 text-zinc-500">
+            Pending copy orders cancelled: {relayLastTransition.cancelledPendingOrders}.{' '}
+            {relayLastTransition.openPositionsLeftOnExchange
+              ? 'Open Bitfinex positions were left protected on the exchange.'
+              : 'No open exchange positions were closed by this transition.'}
+          </p>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-end gap-2">
         {showSelector && providers && providers.length > 0 ? (

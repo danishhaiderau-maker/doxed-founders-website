@@ -51,6 +51,7 @@ export function ExchangeHirePanel({
   syncInput,
   onSyncProtectionBreach,
   syncProtectionBusy,
+  relayLastTransition,
 }: {
   slug: string;
   signedIn: boolean;
@@ -69,6 +70,7 @@ export function ExchangeHirePanel({
   syncInput?: ShowcaseSyncScoreInput;
   onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
   syncProtectionBusy?: boolean;
+  relayLastTransition?: import('@dcf/utils').RelayTransitionAudit | null;
 }) {
   const [exchange, setExchange] = useState<ExchangeProvider>(
     (exchangeProvider as ExchangeProvider) || 'bitfinex',
@@ -179,6 +181,7 @@ export function ExchangeHirePanel({
               showSelector={!isLiveHired}
               providers={sorted}
               onExchangeChange={(id) => setExchange(id as ExchangeProvider)}
+              relayLastTransition={relayLastTransition}
             />
           </div>
         </div>

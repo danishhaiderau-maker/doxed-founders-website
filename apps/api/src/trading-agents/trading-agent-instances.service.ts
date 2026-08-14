@@ -247,6 +247,8 @@ export class TradingAgentInstancesService {
         activatedAt: instance.activatedAt?.toISOString() ?? null,
         expiresAt: instance.expiresAt?.toISOString() ?? null,
         lastError: instance.lastError,
+        relayLastTransition:
+          (dashState.relayLastTransition as Record<string, unknown> | undefined) ?? null,
         instanceMode: (dashState.instanceMode as string) ?? (isCopy ? 'copy' : 'live'),
         paperAllocationUsd: dashState.paperAllocationUsd as number | undefined,
         startingBalanceUsd: scope.startingBalanceUsd,
@@ -448,8 +450,20 @@ export class TradingAgentInstancesService {
       !paused && instance.exchangeProvider !== 'paper'
         ? new Date().toISOString()
         : null;
+    const relayLastTransition = {
+      at: new Date().toISOString(),
+      actor: 'USER' as const,
+      action: paused ? ('STOPPED' as const) : ('STARTED' as const),
+      reason: paused ? 'USER_REQUEST_STOP' : 'USER_REQUEST_START',
+      cancelledPendingOrders: relayAction?.cancelledOrders ?? 0,
+      // Stop severs future entries only; existing exchange positions remain
+      // protected and must not be reported as closed by the control action.
+      openPositionsLeftOnExchange: paused,
+      relayEntryPolicy: 'NEXT_FRESH_ONLY',
+    };
     const relayDashboardState = {
       ...dash,
+      relayLastTransition,
       relayExecutionMode:
         paused ? 'PAUSED' : instance.exchangeProvider === 'paper' ? 'PAPER' : 'LIVE',
       relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,

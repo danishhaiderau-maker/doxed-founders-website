@@ -209,6 +209,7 @@ function HireSidebar({
   tradeLifecycleIntegrity,
   onSyncProtectionBreach,
   syncProtectionBusy,
+  relayLastTransition,
 }: {
   slug: string;
   agent: TradingAgentSummary;
@@ -237,6 +238,7 @@ function HireSidebar({
   tradeLifecycleIntegrity?: TradeLifecycleIntegritySnapshot | null;
   onSyncProtectionBreach?: (opts?: { flatten?: boolean }) => void;
   syncProtectionBusy?: boolean;
+  relayLastTransition?: TradingAgentDashboardState['relayLastTransition'];
 }) {
   const isLiveHired = hired && instanceMode === 'live';
   const rentalExpired =
@@ -331,6 +333,7 @@ function HireSidebar({
         }}
         onSyncProtectionBreach={onSyncProtectionBreach}
         syncProtectionBusy={syncProtectionBusy}
+        relayLastTransition={relayLastTransition}
       />
 
       {isLiveHired && (
@@ -977,6 +980,7 @@ export function AgentPublicProfile({
           tradeLifecycleIntegrity={tradeLifecycleIntegrity}
           onSyncProtectionBreach={onSyncProtectionBreach}
           syncProtectionBusy={syncProtectionBusy}
+          relayLastTransition={dashboard.relayLastTransition}
         />
       </div>
     </div>

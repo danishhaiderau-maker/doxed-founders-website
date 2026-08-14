@@ -3158,6 +3158,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             relayExecutionMode: 'PAUSED',
             relayArmedAt: null,
             realTradingConfirmedAt: null,
+            relayLastTransition: {
+              at: nowIso,
+              actor: 'SYSTEM',
+              action: 'SAFETY_PAUSED',
+              reason: 'EXECUTOR_WATCHDOG_STUCK',
+              cancelledPendingOrders: 0,
+              openPositionsLeftOnExchange: true,
+              relayEntryPolicy: 'NEXT_FRESH_ONLY',
+            },
             relayExecutor: {
               ...this.getHealthSnapshot(),
               healthy: false,
@@ -3168,8 +3177,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           }) as unknown as Prisma.InputJsonValue,
         },
       });
+      let cancelledPendingOrders = 0;
       try {
-        await Promise.race([
+        cancelledPendingOrders = await Promise.race([
           this.cancelVerifiedUnfilledPendingEntries(
             agent.id,
             instance,
@@ -3191,6 +3201,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           }`,
         );
       }
+      const after = await this.prisma.tradingAgentInstance.findUnique({
+        where: { id: instance.id },
+        select: { dashboardState: true },
+      });
+      const afterDash = (after?.dashboardState ?? dash) as Record<string, unknown>;
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          dashboardState: applyDashboardPatch(afterDash, {
+            relayLastTransition: {
+              at: nowIso,
+              actor: 'SYSTEM',
+              action: 'SAFETY_PAUSED',
+              reason: 'EXECUTOR_WATCHDOG_STUCK',
+              cancelledPendingOrders,
+              openPositionsLeftOnExchange: true,
+              relayEntryPolicy: 'NEXT_FRESH_ONLY',
+            },
+          }) as unknown as Prisma.InputJsonValue,
+        },
+      });
     }
     return instances.length;
   }
@@ -6564,6 +6595,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           relayExecutionMode: 'PAUSED',
           relayArmedAt: null,
           realTradingConfirmedAt: null,
+          relayLastTransition: {
+            at: new Date().toISOString(),
+            actor: 'SYSTEM',
+            action: 'SAFETY_PAUSED',
+            reason: 'LIVE_FIDELITY_GUARD',
+            cancelledPendingOrders: 0,
+            openPositionsLeftOnExchange: true,
+            relayEntryPolicy: 'NEXT_FRESH_ONLY',
+          },
           liveFidelityGuard: trippedState,
         }) as unknown as Prisma.InputJsonValue,
       },
@@ -6610,6 +6650,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           ? `${reason} Pending cleanup incomplete: ${pendingEntryCleanupError}`.slice(0, 500)
           : reason.slice(0, 500),
         dashboardState: applyDashboardPatch(afterDash, {
+          relayLastTransition: {
+            at: new Date().toISOString(),
+            actor: 'SYSTEM',
+            action: 'SAFETY_PAUSED',
+            reason: pendingEntryCleanupError
+              ? 'LIVE_FIDELITY_GUARD_PENDING_CLEANUP_INCOMPLETE'
+              : 'LIVE_FIDELITY_GUARD',
+            cancelledPendingOrders: pendingEntriesCancelled,
+            openPositionsLeftOnExchange: true,
+            relayEntryPolicy: 'NEXT_FRESH_ONLY',
+          },
           liveFidelityGuard: finalState,
         }) as unknown as Prisma.InputJsonValue,
       },
@@ -8683,6 +8734,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           positionMismatchDetectedAt: new Date().toISOString(),
           positionMismatchAlert: truncated,
           positionMismatchAlertAcked: false,
+          relayLastTransition: {
+            at: new Date().toISOString(),
+            actor: 'SYSTEM',
+            action: 'SAFETY_PAUSED',
+            reason: 'POSITION_MISMATCH',
+            cancelledPendingOrders: 0,
+            openPositionsLeftOnExchange: true,
+            relayEntryPolicy: 'NEXT_FRESH_ONLY',
+          },
         }) as unknown as Prisma.InputJsonValue,
       },
     });
