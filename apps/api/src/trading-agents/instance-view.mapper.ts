@@ -187,6 +187,55 @@ export function buildFreshInstanceDashboardState(
   };
 }
 
+/**
+ * A Showcase fresh-collection reset intentionally clears session counters, but
+ * it is not a user Stop. Preserve a previously explicit live arm so an ACTIVE
+ * relay cannot become a misleading "ACTIVE but relay-not-armed" instance.
+ *
+ * This deliberately never manufactures an arm from status alone: the arm must
+ * already be a parseable timestamp written by an explicit Start action.
+ */
+export function activeLiveRelayArmForSessionReset(
+  status: string,
+  dashboardState: Record<string, unknown>,
+): Record<string, unknown> {
+  if (status !== 'ACTIVE' || dashboardState.relayExecutionMode !== 'LIVE') return {};
+
+  const validIso = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    return Number.isFinite(Date.parse(value)) ? value : null;
+  };
+  const relayArmedAt = validIso(dashboardState.relayArmedAt);
+  if (!relayArmedAt) return {};
+
+  const realTradingConfirmedAt = validIso(dashboardState.realTradingConfirmedAt) ?? relayArmedAt;
+  const liveDeskSessionStartedAt =
+    validIso(dashboardState.liveDeskSessionStartedAt) ?? relayArmedAt;
+
+  return {
+    relayExecutionMode: 'LIVE',
+    relayArmedAt,
+    realTradingConfirmedAt,
+    liveDeskSessionStartedAt,
+    relayEntryPolicy:
+      typeof dashboardState.relayEntryPolicy === 'string'
+        ? dashboardState.relayEntryPolicy
+        : 'NEXT_FRESH_ONLY',
+    ...(dashboardState.relayPolicyVersion != null
+      ? { relayPolicyVersion: dashboardState.relayPolicyVersion }
+      : {}),
+    ...(dashboardState.relayMirrorLanes != null
+      ? { relayMirrorLanes: dashboardState.relayMirrorLanes }
+      : {}),
+    ...(dashboardState.relayExecutorAtArm != null
+      ? { relayExecutorAtArm: dashboardState.relayExecutorAtArm }
+      : {}),
+    ...(dashboardState.relayLastTransition != null
+      ? { relayLastTransition: dashboardState.relayLastTransition }
+      : {}),
+  };
+}
+
 /** Merge a partial dashboard patch without clobbering nested relay-sim fields. */
 export function applyDashboardPatch(
   dash: Record<string, unknown>,

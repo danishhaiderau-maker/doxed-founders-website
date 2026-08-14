@@ -32,6 +32,7 @@ import {
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
   buildFreshInstanceDashboardState,
+  activeLiveRelayArmForSessionReset,
   readInstanceScope,
   USER_INSTANCE_STARTING_BALANCE,
 } from './instance-view.mapper';
@@ -629,6 +630,10 @@ export class TradingAgentInstancesService {
       if (mode === 'live') {
         fresh.liveSessionStartingBalanceUsd = startingUsd;
       }
+      const preservedLiveArm =
+        mode === 'live'
+          ? activeLiveRelayArmForSessionReset(instance.status, dash)
+          : {};
 
       const simWasActive = Boolean(
         dash.copyRelaySim && typeof dash.copyRelaySim === 'object' && (dash.copyRelaySim as { active?: boolean }).active,
@@ -669,6 +674,7 @@ export class TradingAgentInstancesService {
         data: {
           dashboardState: {
             ...fresh,
+            ...preservedLiveArm,
             copyRelaySim: nextSim,
             copyRelayReconcile: null,
             copyRelayCapacity: null,
