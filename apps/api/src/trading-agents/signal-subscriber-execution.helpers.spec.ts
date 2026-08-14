@@ -22,6 +22,7 @@ import {
   SignalSubscriberExecutionService,
   finiteDecimalLikeNumber,
   canonicalPendingIntentCycles,
+  signedCanonicalPendingIntentCycles,
   buildRelayExecutorHealth,
   capRelayLimitAtShowcaseFill,
   aggressiveCatchupEnabled,
@@ -4283,6 +4284,37 @@ test('ignores stale intents and selects only trades resting in the canonical ord
     ],
   });
   assert.deepEqual(result, [live]);
+});
+
+test('live polling backstop requires a fresh signed envelope as well as a canonical order', () => {
+  const now = Date.now();
+  const unsigned = {
+    tradeId: 'cont-unsigned',
+    createdAt: new Date(now),
+    intentEnvelope: {
+      action: 'ENTER', signalId: 'cont-unsigned', trade_id: 'cont-unsigned',
+      direction: 'SHORT',
+      entry: { mode: 'EXACT_LIMIT', reference: 'SHOWCASE_EXACT_LIMIT', exact_limit_price: 64_000, exact_qty_btc: 0.03 },
+      context: { signed_showcase_event: false, showcase_event: 'ORDER_PLACED', platform_received_at: new Date(now).toISOString(), entry_limit_policy: 'deterministic_0.1pct_offset_v1' },
+    },
+  };
+  const signed = {
+    tradeId: 'cont-signed',
+    createdAt: new Date(now),
+    intentEnvelope: {
+      action: 'ENTER', signalId: 'cont-signed', trade_id: 'cont-signed',
+      direction: 'SHORT',
+      entry: { mode: 'EXACT_LIMIT', reference: 'SHOWCASE_EXACT_LIMIT', exact_limit_price: 64_010, exact_qty_btc: 0.03 },
+      context: { signed_showcase_event: true, showcase_event: 'ORDER_PLACED', platform_received_at: new Date(now).toISOString(), entry_limit_policy: 'deterministic_0.1pct_offset_v1' },
+    },
+  };
+  const result = signedCanonicalPendingIntentCycles([unsigned, signed], {
+    orders: [
+      { trade_id: 'cont-unsigned', status: 'PENDING', limit_price: 64_000, entry_limit_policy: 'deterministic_0.1pct_offset_v1' },
+      { trade_id: 'cont-signed', status: 'PENDING', limit_price: 64_010, entry_limit_policy: 'deterministic_0.1pct_offset_v1' },
+    ],
+  });
+  assert.deepEqual(result, [signed]);
 });
 
 test('rejects terminal or price-less canonical orders', () => {
