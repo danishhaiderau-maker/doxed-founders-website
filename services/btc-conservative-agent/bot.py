@@ -26485,7 +26485,7 @@ __ADMIN_ACCESS_CONTROLS__
 
 <h2>Pending Orders</h2>
 <table>
-    <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th></tr></thead>
+    <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th><th>Venue fill gate</th></tr></thead>
     <tbody id="ordersTable"></tbody>
 </table>
 
@@ -28025,6 +28025,13 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('ordersTable', (d.orders||[]).map(o => {
           let st = o.status || '-';
+          const gate = o.venue_fill_gate || null;
+          const gateReason = gate && gate.reason ? String(gate.reason) : 'NOT CHECKED';
+          const gateQty = gate && gate.visible_executable_qty != null && gate.requested_qty != null
+            ? (' ' + Number(gate.visible_executable_qty).toFixed(5) + '/' + Number(gate.requested_qty).toFixed(5))
+            : '';
+          const gateAge = gate && gate.book_age_sec != null ? (' · book ' + Number(gate.book_age_sec).toFixed(1) + 's') : '';
+          const gateColor = gateReason === 'EXECUTABLE' ? '#3fb950' : (gateReason === 'NOT CHECKED' ? '#8b949e' : '#f0c14b');
           if (o.limit_touched && st === 'PENDING') st += ' (TOUCHED)';
           const chaseN = o.limit_chase_count || 0;
           if (chaseN > 0 && st === 'PENDING') st += ' (CHASING)';
@@ -28041,6 +28048,7 @@ DASHBOARD_JS = """(function () {
             <td>${o.original_limit_price?.toFixed(2)||'-'}</td>
             <td>${chaseCell}</td>
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
+            <td style="color:${gateColor};font-size:0.82em;">${gateReason}${gateQty}${gateAge}</td>
           </tr>`;
         }).join(''));
         safeHTML('positionsTable', (d.positions||[]).map(l => {
