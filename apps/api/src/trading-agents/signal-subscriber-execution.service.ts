@@ -1290,6 +1290,26 @@ export function readFreshSignedShowcaseExactLimit(
   };
 }
 
+/**
+ * Live Bitfinex placement has two execution routes: the fast signed wake and
+ * the durable polling backstop. Both must select the same authenticated
+ * envelope. A canonical Fly order is useful corroboration, but is not an
+ * authorization token on its own.
+ */
+export function signedCanonicalPendingIntentCycles<
+  T extends { tradeId: string; createdAt: Date; intentEnvelope: unknown },
+>(
+  cycles: T[],
+  bot: Pick<BotApiState, 'orders'> | null,
+): T[] {
+  return canonicalPendingIntentCycles(
+    cycles.filter((cycle) =>
+      readFreshSignedShowcaseExactLimit(cycle.tradeId, cycle.intentEnvelope) != null,
+    ),
+    bot,
+  );
+}
+
 export function readSignedShowcaseClose(envelopeJson: unknown): {
   exitPrice?: number;
   exitReason?: string;
@@ -5577,10 +5597,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     // Pass 2 — virtual lot ledger: multiple same-direction legs on merged Bitfinex position.
     const canonicalEntryBook = canonicalSignedBook;
-    const intentCycles = canonicalPendingIntentCycles(
-      entryCycles.filter((c) => c.status === SignalCycleStatus.INTENT),
-      canonicalEntryBook,
-    );
+    // The polling backstop must not recreate the legacy unsigned entry path.
+    // A canonical source order narrows *which* signed cycle may run; only the
+    // fresh HMAC-authenticated envelope authorizes real Bitfinex placement.
+    const intentCycles = simActive || instance.exchangeProvider === 'paper'
+      ? canonicalPendingIntentCycles(
+          entryCycles.filter((c) => c.status === SignalCycleStatus.INTENT),
+          canonicalEntryBook,
+        )
+      : signedCanonicalPendingIntentCycles(
+          entryCycles.filter((c) => c.status === SignalCycleStatus.INTENT),
+          canonicalEntryBook,
+        );
     let entriesThisTick = 0;
     let entryDirectionThisTick: 'LONG' | 'SHORT' | null = null;
     for (const cycle of intentCycles) {
@@ -13339,7 +13367,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     // §8 #2 — only INTENT cycles. PENDING_ENTRY means a hire limit is already
     // resting; re-entering risks a duplicate order on top of it.
-    const intentCycles = canonicalPendingIntentCycles(
+    const intentCycles = signedCanonicalPendingIntentCycles(
       cycles
         .filter((c) => c.status === SignalCycleStatus.INTENT)
         .filter((c) => !c.expiresAt || c.expiresAt.getTime() > Date.now()),

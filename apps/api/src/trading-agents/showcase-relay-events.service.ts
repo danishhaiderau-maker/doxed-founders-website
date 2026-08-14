@@ -692,18 +692,9 @@ export class ShowcaseRelayEventsService {
       );
     }
 
-    if (!signedLifecycleEvent) {
-      if (event === 'ORDER_PLACED') {
-        intentCreated = await this.cycles.wakeFromShowcase({
-          intents: true,
-          closures: false,
-        });
-      } else if (event === 'POSITION_CLOSED') {
-        await this.cycles.wakeFromShowcase({ intents: false, closures: true });
-      } else {
-        await this.cycles.wakeFromShowcase({ intents: true, closures: true });
-      }
-    }
+    // Retain unsigned messages for observability, but never use them to wake
+    // execution.  Otherwise a polling/reconciliation fallback could turn an
+    // unauthenticated canonical snapshot into a real exchange order.
 
     // [SHOWCASE_RELAY_PERSIST_2026-07-08] Persist the inbound relay event as
     // a signalCycleEvent row so the cycle audit trail reflects every webhook
@@ -721,7 +712,7 @@ export class ShowcaseRelayEventsService {
         // Canonical signed state is committed before this callback. Start the
         // private executor wake while audit-row idempotency is persisted so
         // bookkeeping never sits in front of the exchange path.
-        if (event !== 'APPROVE_PENDING') {
+        if (signedLifecycleEvent && event !== 'APPROVE_PENDING') {
           this.queueExecutionWake(
             event,
             body.trade_id ?? null,
@@ -744,7 +735,7 @@ export class ShowcaseRelayEventsService {
 
     // Return the webhook response without waiting for exchange reconciliation.
     // The durable cycle plus the normal 2s runner remain the crash backstop.
-    if (event !== 'APPROVE_PENDING' && !executionWakeQueued) {
+    if (signedLifecycleEvent && event !== 'APPROVE_PENDING' && !executionWakeQueued) {
       this.queueExecutionWake(
         event,
         body.trade_id ?? null,

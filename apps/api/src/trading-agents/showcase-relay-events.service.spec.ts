@@ -595,7 +595,7 @@ test('rejects a signed executable order that omits exact showcase quantity', asy
   );
 });
 
-test('persists and enriches before waking subscriber execution', async () => {
+test('unsigned lifecycle is persisted for audit but cannot wake subscriber execution', async () => {
   const trace: string[] = [];
   const service = createService('dashboard-active', undefined, { trace });
   await service.ingest('conservative-btc', {
@@ -606,7 +606,7 @@ test('persists and enriches before waking subscriber execution', async () => {
     dashboard_port: 7002,
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(trace, ['cycles', 'persist', 'execution']);
+  assert.deepEqual(trace, ['persist']);
 });
 
 test('showcase ORDER_PLACED remains an audit event and does not pre-claim the subscriber cycle', async () => {
