@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Refactor managed stop ownership reconciliation (#86)
+Prioritize Bitfinex order mutations over reads
 
 ## Last Activity
 
