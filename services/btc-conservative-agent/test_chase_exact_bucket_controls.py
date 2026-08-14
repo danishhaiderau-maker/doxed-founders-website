@@ -293,10 +293,18 @@ def test_durable_relay_receipt_requires_persistence_and_platform_timestamp():
 
 def test_marketable_fallback_waits_for_relay_settlement_and_is_terminal():
     touched_calls = []
+    gate_calls = []
     ready = _compile_function(
         "_pending_limit_ready_for_fill",
         {
             "time": type("Clock", (), {"time": staticmethod(lambda: 110.0)}),
+            "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE": True,
+            "_venue_executable_showcase_fill": (
+                lambda *_args, **kwargs: (
+                    gate_calls.append(kwargs.get("venue_snapshot")) or True,
+                    {"reason": "VENUE_EXECUTABLE"},
+                )
+            ),
             "_pending_limit_touched": lambda *_args, **_kwargs: touched_calls.append(True)
             or False,
         },
@@ -307,7 +315,19 @@ def test_marketable_fallback_waits_for_relay_settlement_and_is_terminal():
         "relay_event_durable_ack": True,
     }
     assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=110.0) is False
-    assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=115.0) is True
+    # A durable relay receipt is not executable-venue evidence.  The fallback
+    # must remain pending without a fresh order-book snapshot.
+    assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=115.0) is False
+    assert gate_calls == []
+    assert ready(
+        order,
+        63154.44,
+        bid=63167.0,
+        ask=63177.0,
+        now=115.0,
+        venue_snapshot={"asks": [[63154.44, 1.0]]},
+    ) is True
+    assert order["venue_fill_gate"]["entry_path"] == "MARKETABLE_FALLBACK"
     order["relay_event_durable_ack"] = False
     assert ready(order, 63154.44, bid=63167.0, ask=63177.0, now=120.0) is False
     assert touched_calls == []
@@ -399,6 +419,11 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
         "_pending_limit_ready_for_fill",
         {
             "time": types.SimpleNamespace(time=lambda: 100.5),
+            "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE": True,
+            "_venue_executable_showcase_fill": lambda *_args, **_kwargs: (
+                True,
+                {"reason": "VENUE_EXECUTABLE"},
+            ),
             "_pending_limit_touched": (
                 lambda *_args, **_kwargs: touch_checks.append(True) or True
             ),
@@ -496,11 +521,12 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
         pending_limit_ready_for_fill(
             concurrent_order,
             63167.0,
-            bid=63167.0,
-            ask=63177.0,
-            now=115.0,
-        )
-        is True
+                bid=63167.0,
+                ask=63177.0,
+                now=115.0,
+                venue_snapshot={"asks": [[63167.0, 1.0]]},
+            )
+            is True
     )
 
     failed_order = {

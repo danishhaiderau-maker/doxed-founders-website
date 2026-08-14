@@ -19253,10 +19253,24 @@ def _pending_limit_ready_for_fill(
     if order.get("marketable_fallback") and settle_not_before > 0:
         if order.get("relay_event_durable_ack") is not True:
             return False
-        # The order was marketable on the source book when LIMIT_UPDATED was
-        # durably acknowledged. Complete the deterministic paper fill after
-        # the bounded relay dwell even if the next public tick has moved away.
-        return True
+        # A relay receipt is proof that the replacement was delivered, not
+        # proof that the full quantity was executable on Bitfinex.  The old
+        # fallback returned True here and could therefore create a Showcase
+        # paper fill after the venue had moved away.  Every source fill,
+        # including a terminal reprice, must pass the same live venue gate.
+        if globals().get("VENUE_EXECUTABLE_SHOWCASE_FILL_GATE", False) and venue_snapshot is not None:
+            executable, evidence = _venue_executable_showcase_fill(
+                order,
+                bid=float(bid or 0),
+                ask=float(ask or 0),
+                venue_snapshot=venue_snapshot,
+                recent_market_trades=recent_market_trades or [],
+                now=now,
+            )
+            evidence["entry_path"] = "MARKETABLE_FALLBACK"
+            order["venue_fill_gate"] = evidence
+            return executable
+        return False
     # Isolated contract tests compile this helper without the module-level
     # feature configuration.  Default off only in that test harness; the
     # production module explicitly enables the gate above.
@@ -32095,6 +32109,48 @@ def api_close_showcase_position():
         "trade_id": trade_id,
         "scope": "showcase_paper_only",
     })
+
+
+@app.route('/api/orders/cancel', methods=['POST'])
+def api_cancel_showcase_pending_order():
+    """Cancel one exact pending Showcase order without wiping research history.
+
+    This is intentionally narrower than ``/api/reset``: it is an authenticated
+    deployment-boundary recovery tool.  It refuses an unknown or ambiguous
+    trade ID and uses the normal confirmed-cancellation primitive so the
+    expired-order audit remains truthful.
+    """
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    with trade_lock:
+        matches = [
+            order for order in pending_orders
+            if str(order.get("trade_id") or "") == trade_id
+            and str(order.get("status") or "").upper()
+            not in ("CANCELLED", "EXPIRED", "REJECTED", "FILLED", "OPEN", "CLOSED")
+        ]
+    if not matches:
+        return jsonify({"error": "pending showcase order not found", "trade_id": trade_id}), 404
+    if len(matches) != 1:
+        logger.error("[ADMIN] Refusing ambiguous pending cancel trade_id=%s matches=%s", trade_id, len(matches))
+        return jsonify({"error": "ambiguous pending showcase order", "trade_id": trade_id}), 409
+    result = _cancel_pending_order_confirmed(
+        matches[0],
+        "ADMIN_FORCE_FLAT",
+        record_expired=True,
+        expire_signal=True,
+        final_status="CANCELLED",
+    )
+    if not result.get("finalized"):
+        return jsonify({"error": "pending cancel unconfirmed", "trade_id": trade_id, "result": result}), 409
+    with trade_lock:
+        paper_orders = copy.deepcopy(pending_orders)
+        paper_positions = copy.deepcopy(open_positions)
+    _patch_api_state_cache_fields(orders=paper_orders, positions=paper_positions)
+    logger.warning("[ADMIN] Showcase pending order cancelled trade_id=%s", trade_id)
+    return jsonify({"status": "cancelled", "trade_id": trade_id, "result": result})
 
 
 # ---------------------------------------------------------------------------
