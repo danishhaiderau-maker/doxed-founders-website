@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Merge pull request #84 from danishhaiderau-maker/codex/readiness-latch
+Fix partial fill stop reconciliation ownership (#85)
 
 ## Last Activity
 
