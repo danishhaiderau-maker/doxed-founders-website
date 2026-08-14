@@ -44,3 +44,30 @@ test('Second Brain defaults to a live Gemini Flash model and never calls DeepSee
     else process.env.SECOND_BRAIN_PRIMARY_MODEL = originalPrimary;
   }
 });
+
+test('Second Brain returns a safe provider diagnostic when Gemini rejects a request', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalGemini = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'test-gemini-key';
+  globalThis.fetch = (async () => new Response('quota exceeded', { status: 429 })) as typeof fetch;
+
+  try {
+    const service = new SecondBrainService(
+      { resolveApiKey: async () => null } as never,
+      {
+        getDecryptedPlatformGeminiKey: async () => null,
+        getDecryptedPlatformGlmKey: async () => null,
+      } as never,
+    );
+    const result = await service.critique({ agentOutput: 'A proposed implementation.' });
+    assert.deepEqual(result, {
+      text: null,
+      provider: null,
+      diagnostic: 'gemini-flash returned HTTP 429',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalGemini === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalGemini;
+  }
+});

@@ -8,6 +8,13 @@ export type SecondBrainProviderLabel = 'gemini-flash' | 'openai-mini' | 'glm-las
 export type SecondBrainCritiqueResult = {
   text: string | null;
   provider: SecondBrainProviderLabel | null;
+  /** Safe provider outcome for desktop recovery UI; never contains secrets. */
+  diagnostic?: string;
+};
+
+type SecondBrainAttempt = {
+  text: string | null;
+  diagnostic?: string;
 };
 
 export type SecondBrainKeyStatus = {
@@ -100,11 +107,12 @@ export class SecondBrainService {
       system,
       user,
     });
-    if (gemini) return { text: gemini, provider: 'gemini-flash' };
+    if (gemini.text) return { text: gemini.text, provider: 'gemini-flash' };
 
     const openaiKey = process.env.OPENAI_API_KEY?.trim() || null;
+    let openai: SecondBrainAttempt | null = null;
     if (openaiKey) {
-      const openai = await this.tryOpenAiCompat({
+      openai = await this.tryOpenAiCompat({
         label: 'openai-mini',
         apiKey: openaiKey,
         baseUrl: 'https://api.openai.com/v1',
@@ -112,14 +120,20 @@ export class SecondBrainService {
         system,
         user,
       });
-      if (openai) return { text: openai, provider: 'openai-mini' };
+      if (openai.text) return { text: openai.text, provider: 'openai-mini' };
     }
 
     if (!input.allowGlmSpend) {
       this.logger.warn(
         'second_brain.critique: cheap cascade exhausted; GLM skipped (allowGlmSpend=false).',
       );
-      return { text: null, provider: null };
+      return {
+        text: null,
+        provider: null,
+        diagnostic: openaiKey
+          ? (openai?.diagnostic ?? gemini.diagnostic)
+          : gemini.diagnostic,
+      };
     }
 
     const glmKey =
@@ -127,7 +141,7 @@ export class SecondBrainService {
       (await this.founderPromo.getDecryptedPlatformGlmKey());
     if (!glmKey) {
       this.logger.warn('second_brain.critique skipped — no cheap path and no GLM key');
-      return { text: null, provider: null };
+      return { text: null, provider: null, diagnostic: gemini.diagnostic };
     }
 
     const glm = await this.tryOpenAiCompat({
@@ -138,7 +152,11 @@ export class SecondBrainService {
       system,
       user,
     });
-    return { text: glm, provider: glm ? 'glm-last-resort' : null };
+    return {
+      text: glm.text,
+      provider: glm.text ? 'glm-last-resort' : null,
+      diagnostic: glm.text ? undefined : glm.diagnostic,
+    };
   }
 
   /** Admin / health smoke: tiny critique proving cascade (never DeepSeek). */
@@ -204,11 +222,11 @@ export class SecondBrainService {
     model: string;
     system: string;
     user: string;
-  }): Promise<string | null> {
-    if (!opts.apiKey) return null;
+  }): Promise<SecondBrainAttempt> {
+    if (!opts.apiKey) return { text: null, diagnostic: `${opts.label} is not configured` };
     if (opts.baseUrl.toLowerCase().includes('deepseek')) {
       this.logger.error('second_brain refused DeepSeek path — Builder/Platform Brain only');
-      return null;
+      return { text: null, diagnostic: `${opts.label} is not allowed` };
     }
     try {
       const res = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/chat/completions`, {
@@ -233,17 +251,20 @@ export class SecondBrainService {
         this.logger.warn(
           `second_brain.critique ${opts.label} non-OK ${res.status}: ${body.slice(0, 200)}`,
         );
-        return null;
+        return { text: null, diagnostic: `${opts.label} returned HTTP ${res.status}` };
       }
       const data = (await res.json()) as {
         choices?: Array<{ message?: { content?: string } }>;
       };
-      return data?.choices?.[0]?.message?.content?.trim() ?? null;
+      const text = data?.choices?.[0]?.message?.content?.trim() ?? null;
+      return text
+        ? { text }
+        : { text: null, diagnostic: `${opts.label} returned no review text` };
     } catch (err) {
       this.logger.warn(
         `second_brain.critique ${opts.label} error: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return null;
+      return { text: null, diagnostic: `${opts.label} request failed` };
     }
   }
 }

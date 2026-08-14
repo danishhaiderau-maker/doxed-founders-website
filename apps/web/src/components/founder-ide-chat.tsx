@@ -27,8 +27,8 @@ type ChatMsg = {
 };
 
 /**
- * Options shown in the AI dropdown. "Auto", "Free", "Founder AI" stay in-chat
- * (no navigation). "Local" and "BYOK" navigate to dedicated routes.
+ * Keep remote routing deliberately simple: Auto chooses an available hosted
+ * route, while Local and BYOK take the founder to their explicit setup pages.
  *
  * HARD COST RULE: GLM is never selectable here. GLM is cost-prohibitive and
  * is reserved exclusively for the Second Brain critical-review surface.
@@ -43,10 +43,8 @@ type AiOption = {
 };
 
 const AI_OPTIONS: AiOption[] = [
-  { key: 'auto', label: 'Auto', kind: 'chat', blurb: 'Founder IDE picks the best model for the task' },
-  { key: 'free', label: 'Free', kind: 'chat', blurb: 'Daily free cloud quota + unlimited local' },
-  { key: 'founder-ai', label: 'Founder AI', kind: 'chat', blurb: 'Founder Brain routed model (DeepSeek text + Gemini vision)' },
-  { key: 'local', label: 'Local', kind: 'nav', href: '/founder-ide/local', blurb: 'Pair a local llama.cpp / Ollama model' },
+  { key: 'auto', label: 'Auto', kind: 'chat', blurb: 'Uses the available approved route and reports what replied' },
+  { key: 'local', label: 'Local', kind: 'nav', href: '/founder-ide/local', blurb: 'Use a model running on your paired computer' },
   { key: 'byok', label: 'BYOK', kind: 'nav', href: '/founder-ide/byok', blurb: 'Connect your own cloud API keys' },
 ];
 
@@ -69,6 +67,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
   const [sessions, setSessions] = useState<BridgeSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -198,6 +197,11 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
+  const selectedWorkspace = useMemo(
+    () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
+    [selectedWorkspaceId, workspaces],
+  );
+  const selectedTargetTitle = selectedSession?.title ?? selectedWorkspace?.title ?? null;
 
   // ── Dispatch poll ────────────────────────────────────────────────────────
   const pollDispatch = useCallback(
@@ -267,7 +271,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
       setError(
         projects.length === 0
           ? 'No project is open in your Founder IDE yet — open a workspace on your laptop, then try again.'
-          : 'Pick a project on the left to dispatch to your Founder IDE.',
+          : 'This project has no active Founder chat session yet. Open its chat in Founder IDE first, then send from Remote Access.',
       );
       return;
     }
@@ -286,7 +290,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     const pendingMsg: ChatMsg = {
       id: dispatchId,
       role: 'assistant',
-      text: `Dispatching to ${selectedSession.title}…`,
+      text: `Dispatching to ${selectedTargetTitle}…`,
       at: new Date().toISOString(),
       pending: true,
       status: 'PENDING',
@@ -315,7 +319,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [accessToken, input, isOnline, pollDispatch, projects.length, selectedSession, voice]);
+  }, [accessToken, input, isOnline, pollDispatch, projects.length, selectedSession, selectedWorkspace, voice]);
 
   /** Second Brain: cheap expert critique of the latest assistant reply (never DeepSeek). */
   const handleSecondBrainReview = useCallback(async () => {
@@ -415,27 +419,10 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
       return;
     }
 
-    // Probe the permission first so a denial flips micDenied and shows the
-    // friendly prompt. The actual SpeechRecognition call still happens after.
-    if (navigator.mediaDevices?.getUserMedia) {
-      navigator.mediaDevices
-        .getUserMedia({ audio: true })
-        .then((stream) => {
-          // Chrome Web Speech opens its own mic handle — release this probe.
-          stream.getTracks().forEach((t) => t.stop());
-          voice.start(input);
-        })
-        .catch((e: DOMException) => {
-          if (e.name === 'NotAllowedError' || e.name === 'SecurityError') {
-            setMicDenied(true);
-            setNotice('Microphone blocked. Click here to allow in browser settings.');
-          } else {
-            setError(`Microphone error: ${e.message}`);
-          }
-        });
-    } else {
-      voice.start(input);
-    }
+    // Web Speech owns the capture session. A separate getUserMedia() probe
+    // races for the same microphone and can stop recognition before it emits
+    // a transcript. The recognizer surfaces permission errors itself.
+    voice.start(input);
   }, [input, micDenied, voice]);
 
   function handleAiSelect(opt: AiOption) {
@@ -508,10 +495,17 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                 <button
                   key={id}
                   type='button'
-                  onClick={() => setSelectedSessionId(group.sessions[0]?.id ?? null)}
+                  onClick={() => {
+                    setSelectedWorkspaceId(group.workspace?.id ?? null);
+                    setSelectedSessionId(group.sessions[0]?.id ?? null);
+                    setMessages([]);
+                    setError(null);
+                    setNotice(null);
+                  }}
                   className={
                     'block w-full rounded-xl px-3 py-2 text-left transition ' +
-                    (selectedSessionId && group.sessions.some((s) => s.id === selectedSessionId)
+                    ((group.workspace?.id === selectedWorkspaceId) ||
+                    (selectedSessionId && group.sessions.some((s) => s.id === selectedSessionId))
                       ? 'bg-violet-500/10 ring-1 ring-violet-400/30'
                       : 'hover:bg-white/5')
                   }
@@ -540,10 +534,10 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
           <div className='flex items-center justify-between gap-4 border-b border-zinc-800 px-5 py-3'>
             <div className='min-w-0'>
               <p className='truncate text-sm font-semibold text-white'>
-                {selectedSession?.title ?? (projects.length ? 'Select a project' : 'No project selected')}
+                {selectedTargetTitle ?? (projects.length ? 'Select a project' : 'No project selected')}
               </p>
-              {selectedSession?.repository && (
-                <p className='truncate text-[0.65rem] text-zinc-500'>{selectedSession.repository}</p>
+              {(selectedSession?.repository ?? selectedWorkspace?.repository) && (
+                <p className='truncate text-[0.65rem] text-zinc-500'>{selectedSession?.repository ?? selectedWorkspace?.repository}</p>
               )}
             </div>
             {/* AI dropdown */}
@@ -612,7 +606,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                     ))}
                   </div>
                   <div className='border-t border-zinc-800 px-3 py-2 text-[10px] text-zinc-600'>
-                    Auto / Free / Founder AI stay in this chat. Local &amp; BYOK open setup pages.
+                    Auto chooses an approved route. Local and BYOK open their explicit setup pages.
                   </div>
                 </div>
               )}
