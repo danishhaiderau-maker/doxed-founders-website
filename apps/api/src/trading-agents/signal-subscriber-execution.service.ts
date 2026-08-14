@@ -5352,17 +5352,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const m = await this.loadExecutionMeta(p.id);
       execMetaById.set(p.id, m);
       if (m.bitfinexOrderId) managedOrderIds.add(m.bitfinexOrderId);
-      if (m.stopOrderId) managedOrderIds.add(m.stopOrderId);
-      // A PENDING_ENTRY can be partially filled.  In that short handoff the
-      // entry remainder and its reduce-only partial stop are both legitimate
-      // exchange rows.  Omitting the partial stop here made the reconciliation
-      // pass label our own protection as FOREIGN_ACTIVE_ORDER and pause the
-      // relay while the full fill was being promoted to OPEN.
-      if (m.partialFillStopOrderId) managedOrderIds.add(m.partialFillStopOrderId);
-      if (m.supersededPartialStopOrderId) {
-        managedOrderIds.add(m.supersededPartialStopOrderId);
-      }
-      if (m.supersededStopOrderId) managedOrderIds.add(m.supersededStopOrderId);
+      // A PENDING_ENTRY can be partially filled.  In that handoff the entry
+      // remainder and every current/replacing reduce-only stop are owned
+      // exchange rows.  Keep this reconciliation set tied to the same helper
+      // used by orphan detection so a newly added stop generation cannot be
+      // classified as FOREIGN_ACTIVE_ORDER here.
+      for (const orderId of ownedStopOrderIds(m)) managedOrderIds.add(orderId);
     }
 
     // Refresh the active-order book before ledger reconcile. The early-tick
