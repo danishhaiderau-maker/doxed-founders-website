@@ -117,19 +117,62 @@ function signBitfinex(secret: string, payload: string): string {
 
 type NonceLane = {
   lastNonce: bigint;
-  tail: Promise<unknown>;
+  running: boolean;
+  mutations: Array<QueuedAuthRequest<unknown>>;
+  reads: Array<QueuedAuthRequest<unknown>>;
 };
 
-/** Per API key: monotonic nonce + serialized auth calls (parallel ticks caused nonce: small). */
+type QueuedAuthRequest<T> = {
+  run: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+};
+
+/**
+ * Per API key: monotonic nonce + serialized auth calls (parallel ticks caused
+ * nonce: small). Queued order mutations take priority over queued reads: a
+ * reconciliation poll must never delay a new entry, stop, cancel, or exit.
+ */
 const nonceLanes = new Map<string, NonceLane>();
 
 function nonceLaneFor(apiKey: string): NonceLane {
   let lane = nonceLanes.get(apiKey);
   if (!lane) {
-    lane = { lastNonce: 0n, tail: Promise.resolve() };
+    lane = { lastNonce: 0n, running: false, mutations: [], reads: [] };
     nonceLanes.set(apiKey, lane);
   }
   return lane;
+}
+
+function isBitfinexOrderMutation(apiPath: string): boolean {
+  return /^v2\/auth\/w\/order\//.test(apiPath);
+}
+
+function drainNonceLane(lane: NonceLane): void {
+  if (lane.running) return;
+  const next = lane.mutations.shift() ?? lane.reads.shift();
+  if (!next) return;
+  lane.running = true;
+  void Promise.resolve()
+    .then(next.run)
+    .then(next.resolve, next.reject)
+    .finally(() => {
+      lane.running = false;
+      drainNonceLane(lane);
+    });
+}
+
+function enqueueNonceLane<T>(
+  lane: NonceLane,
+  mutation: boolean,
+  run: () => Promise<T>,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const queued: QueuedAuthRequest<T> = { run, resolve, reject };
+    if (mutation) lane.mutations.push(queued as QueuedAuthRequest<unknown>);
+    else lane.reads.push(queued as QueuedAuthRequest<unknown>);
+    drainNonceLane(lane);
+  });
 }
 
 function allocMonotonicNonce(lane: NonceLane): string {
@@ -250,11 +293,7 @@ export async function bitfinexAuthPost<T = unknown>(
     throw new Error(`Bitfinex ${apiPath}: nonce retry exhausted`);
   };
 
-  const result = lane.tail.then(run, run);
-  lane.tail = result.then(
-    () => undefined,
-    () => undefined,
-  );
+  const result = enqueueNonceLane(lane, isBitfinexOrderMutation(apiPath), run);
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
     expiryTimer = setTimeout(() => {

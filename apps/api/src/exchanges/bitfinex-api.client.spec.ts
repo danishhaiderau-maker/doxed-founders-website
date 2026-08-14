@@ -159,6 +159,55 @@ test('authenticated nonce lane bounds queue wait and never sends expired queued 
   }
 });
 
+test('queued order mutation takes priority over queued reconciliation reads', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  let releaseFirstRead: (() => void) | undefined;
+  let markFirstReadStarted: (() => void) | undefined;
+  const firstReadFinished = new Promise<void>((resolve) => {
+    releaseFirstRead = resolve;
+  });
+  const firstReadStarted = new Promise<void>((resolve) => {
+    markFirstReadStarted = resolve;
+  });
+  globalThis.fetch = (async (url) => {
+    const path = new URL(String(url)).pathname;
+    calls.push(path);
+    if (path.endsWith('/r/positions')) {
+      markFirstReadStarted?.();
+      await firstReadFinished;
+    }
+    return new Response('[]', { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const firstRead = bitfinexAuthPost(testCreds, 'v2/auth/r/positions', {}, 1_000);
+    await firstReadStarted;
+    const queuedRead = bitfinexAuthPost(testCreds, 'v2/auth/r/orders', {}, 1_000);
+    const queuedMutation = bitfinexAuthPost(
+      testCreds,
+      'v2/auth/w/order/submit',
+      { type: 'LIMIT' },
+      1_000,
+    );
+
+    releaseFirstRead?.();
+    await Promise.all([firstRead, queuedMutation]);
+    assert.deepEqual(calls.slice(0, 2), [
+      '/v2/auth/r/positions',
+      '/v2/auth/w/order/submit',
+    ]);
+    await queuedRead;
+    assert.deepEqual(calls, [
+      '/v2/auth/r/positions',
+      '/v2/auth/w/order/submit',
+      '/v2/auth/r/orders',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('native limit update keeps the existing order id and sends only the in-place amend request', async () => {
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
