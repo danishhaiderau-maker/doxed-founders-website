@@ -113,6 +113,10 @@ export function canonicalTradeIdForDisplay(tradeId: string | null | undefined): 
 export function displayExitCause(reason: string | null | undefined): string {
   const raw = String(reason ?? '').trim();
   if (!raw) return 'Not recorded';
+  const sourceConfirmedPrefix = 'SOURCE_CONFIRMED_';
+  if (raw.toUpperCase().startsWith(sourceConfirmedPrefix)) {
+    return `Source-confirmed: ${displayExitCause(raw.slice(sourceConfirmedPrefix.length))}`;
+  }
   const labels: Record<string, string> = {
     PROFIT_LOCK_LADDER: 'Profit lock (trailing)',
     TAKE_PROFIT: 'Take profit',
@@ -125,6 +129,7 @@ export function displayExitCause(reason: string | null | undefined): string {
     USER_RELAY_STOP: 'Relay stopped by user',
     CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat',
     SHOWCASE_MIRROR: 'Showcase exit mirrored',
+    SOURCE_ABSENCE_FALLBACK: 'Source snapshot absence fallback',
     SHOWCASE_CLOSED: 'Showcase closed',
     EXCHANGE_STOP: 'Exchange protective stop',
     EXCHANGE_ALREADY_FLAT: 'Already flat on exchange',

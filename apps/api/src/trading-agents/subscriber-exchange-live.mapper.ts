@@ -29,6 +29,8 @@ export type SubscriberCycleRow = {
   stopLoss?: number | null;
   takeProfit?: number | null;
   terminalReason?: string | null;
+  /** Distinguishes a signed Showcase terminal event from a guarded fallback. */
+  exitProvenance?: string | null;
   exchangeProven?: boolean;
   /** Explicitly distinguishes an enabled same-trade late-entry from a normal pending copy. */
   lateEntryContinuation?: boolean;
@@ -337,7 +339,12 @@ export function mapSubscriberExchangeLiveBook(input: {
         grossUsd: Number(row.pnlUsd),
         tradeFeesUsd: 0,
         fundingUsd: 0,
-        exitReason: row.lateEntryContinuation
+        exitReason: row.exitProvenance === 'SHOWCASE_POSITION_ABSENT'
+          ? 'SOURCE_ABSENCE_FALLBACK'
+          : row.exitProvenance === 'SHOWCASE_CLOSED_WEBHOOK' ||
+              row.exitProvenance === 'ORIGIN_SHOWCASE_CLOSED_WEBHOOK'
+            ? `SOURCE_CONFIRMED_${row.cycle.showcaseExitReason ?? row.terminalReason ?? 'EXIT'}`
+            : row.lateEntryContinuation
           ? lateEntryLifecycleLabel(row.cycle.showcaseExitReason ?? row.terminalReason)
           : row.cycle.showcaseExitReason ?? row.terminalReason ?? null,
         aiBand: row.exchangeProven === true ? 'EXCHANGE_VERIFIED' : 'NEON_CLOSED',

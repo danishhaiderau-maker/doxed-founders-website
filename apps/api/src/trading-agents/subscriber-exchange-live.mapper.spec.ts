@@ -497,6 +497,68 @@ test('renders Neon CLOSED live-copy rows when Bitfinex close ledger is empty', (
   assert.equal(book.trades[0]?.aiBand, 'NEON_CLOSED');
 });
 
+test('labels a source-absence fallback instead of presenting it as a confirmed Showcase exit', () => {
+  const closedAt = new Date('2026-08-15T05:00:00.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [{
+      status: SignalCycleStatus.CLOSED,
+      fillPrice: 64_100,
+      exitPrice: 64_080,
+      pnlUsd: -0.62,
+      pnlMarginPct: -3.1,
+      qty: 0.031,
+      terminalReason: 'SHOWCASE_MIRROR',
+      exitProvenance: 'SHOWCASE_POSITION_ABSENT',
+      exchangeProven: true,
+      createdAt: new Date('2026-08-15T04:50:00.000Z'),
+      updatedAt: closedAt,
+      cycle: {
+        tradeId: 'source-absence-fallback',
+        status: SignalCycleStatus.CLOSED,
+        intentEnvelope: { direction: 'SHORT' },
+        showcaseExitReason: 'THESIS_FAST_CUT',
+        createdAt: new Date('2026-08-15T04:50:00.000Z'),
+      },
+    }],
+    ledgerCloses: [],
+  });
+
+  assert.equal(book.trades[0]?.exitReason, 'SOURCE_ABSENCE_FALLBACK');
+});
+
+test('labels a signed Showcase-close mirror as source-confirmed', () => {
+  const closedAt = new Date('2026-08-15T05:00:00.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [{
+      status: SignalCycleStatus.CLOSED,
+      fillPrice: 64_100,
+      exitPrice: 64_080,
+      pnlUsd: -0.62,
+      pnlMarginPct: -3.1,
+      qty: 0.031,
+      terminalReason: 'SHOWCASE_MIRROR',
+      exitProvenance: 'SHOWCASE_CLOSED_WEBHOOK',
+      exchangeProven: true,
+      createdAt: new Date('2026-08-15T04:50:00.000Z'),
+      updatedAt: closedAt,
+      cycle: {
+        tradeId: 'source-confirmed-exit',
+        status: SignalCycleStatus.CLOSED,
+        intentEnvelope: { direction: 'SHORT' },
+        showcaseExitReason: 'PROFIT_LOCK_LADDER',
+        createdAt: new Date('2026-08-15T04:50:00.000Z'),
+      },
+    }],
+    ledgerCloses: [],
+  });
+
+  assert.equal(book.trades[0]?.exitReason, 'SOURCE_CONFIRMED_PROFIT_LOCK_LADDER');
+});
+
 test('does not render a virtual-only participant close as a Bitfinex completed trade', () => {
   const now = new Date('2026-07-25T09:36:18.000Z');
   const book = mapSubscriberExchangeLiveBook({

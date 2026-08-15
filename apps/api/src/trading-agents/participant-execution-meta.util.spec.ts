@@ -30,6 +30,21 @@ test('participant execution metadata does not mark virtual-only events as exchan
   assert.equal(meta.exchangeProven, false);
 });
 
+test('participant execution metadata preserves source-absence fallback provenance', () => {
+  const meta = foldParticipantExecutionMeta([
+    {
+      eventType: 'EXIT',
+      payload: {
+        reason: 'SHOWCASE_MIRROR',
+        mirror_trigger: 'SHOWCASE_POSITION_ABSENT',
+      },
+    },
+  ]);
+
+  assert.equal(meta.terminalReason, 'SHOWCASE_MIRROR');
+  assert.equal(meta.exitProvenance, 'SHOWCASE_POSITION_ABSENT');
+});
+
 test('participant execution metadata folds the newest camel-case Bitfinex replacement over the original order', () => {
   const meta = foldParticipantExecutionMeta([
     {

@@ -6,6 +6,8 @@ export type ParticipantExecutionMeta = {
   profitLockFloor: number | null;
   direction: 'LONG' | 'SHORT' | null;
   terminalReason: string | null;
+  /** How the terminal action was authorised; kept separate from the source exit reason. */
+  exitProvenance: string | null;
   exchangeProven: boolean;
   /** An opt-in, source-owned better-or-equal entry continuation is active. */
   lateEntryContinuation: boolean;
@@ -32,6 +34,7 @@ function impliedHardStopPrice(
 export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExecutionMeta {
   const merged: Record<string, unknown> = {};
   let terminalReason: string | null = null;
+  let exitProvenance: string | null = null;
   let exchangeProven = false;
   for (const e of events) {
     if (e.payload && typeof e.payload === 'object') {
@@ -55,6 +58,10 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
       if (e.eventType === 'EXPIRED' || e.eventType === 'EXIT') {
         const reason = payload.reason ?? payload.exit_reason ?? payload.event;
         if (typeof reason === 'string' && reason.trim()) terminalReason = reason.trim();
+        const provenance = payload.mirror_trigger ?? payload.mirrorTrigger;
+        if (typeof provenance === 'string' && provenance.trim()) {
+          exitProvenance = provenance.trim();
+        }
       }
     }
   }
@@ -95,6 +102,7 @@ export function foldParticipantExecutionMeta(events: EventRow[]): ParticipantExe
     profitLockFloor,
     direction,
     terminalReason,
+    exitProvenance,
     exchangeProven,
     lateEntryContinuation,
   };

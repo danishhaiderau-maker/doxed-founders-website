@@ -25,6 +25,11 @@ test('dashboard displays canonical showcase ids for adopted and relinked exchang
 test('completed trade exit causes use a readable label without hiding unknown audit codes', () => {
   assert.equal(displayExitCause('PROFIT_LOCK_LADDER'), 'Profit lock (trailing)');
   assert.equal(displayExitCause('THESIS_FAST_CUT'), 'Thesis fast cut');
+  assert.equal(displayExitCause('SOURCE_ABSENCE_FALLBACK'), 'Source snapshot absence fallback');
+  assert.equal(
+    displayExitCause('SOURCE_CONFIRMED_PROFIT_LOCK_LADDER'),
+    'Source-confirmed: Profit lock (trailing)',
+  );
   assert.equal(displayExitCause('CUSTOM_FUTURE_EXIT'), 'CUSTOM FUTURE EXIT');
   assert.equal(displayExitCause(null), 'Not recorded');
 });
