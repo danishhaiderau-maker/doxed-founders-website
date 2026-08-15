@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: preserve source lifecycle in live copy
+fix: cancel showcase orders during paper force flat
 
 ## Last Activity
 
