@@ -76,3 +76,19 @@ test('mirror diff followed by stale-no-exposure is immutable excluded evidence',
   assert.match(source, /event: 'MIRROR_DIFF_STALE_NO_EXPOSURE'/);
   assert.match(source, /analysis_exclusion_reasons: \['MIRROR_DIFF_STALE_NO_EXPOSURE'\]/);
 });
+
+test('profit-lock stop replacement preserves continuous exact-quantity protection', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  const start = source.indexOf('// Submit-new-before-cancel-old.');
+  const end = source.indexOf('// Option A', start);
+  assert.ok(start >= 0 && end > start, 'profit-lock replacement block must exist');
+  const replacement = source.slice(start, end);
+
+  const submitAt = replacement.indexOf('submitStopOrder');
+  const persistAt = replacement.indexOf('PROFIT_LOCK_STOP_REPLACEMENT_ACKNOWLEDGED');
+  const cancelOldAt = replacement.indexOf('Profit-lock supersede old stop');
+  assert.ok(submitAt >= 0 && persistAt > submitAt && cancelOldAt > persistAt);
+  assert.match(replacement, /qty: exchangeProtectedQty/);
+  assert.match(source, /const exchangeProtectedQty = Math\.abs\(position\.amount\)/);
+  assert.doesNotMatch(replacement.slice(0, submitAt), /cancelManagedOrderGone/);
+});

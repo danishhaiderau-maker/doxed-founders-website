@@ -14376,6 +14376,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       position &&
       ((expectedLong && position.amount > 0) || (!expectedLong && position.amount < 0));
     if (!hasExpected) return;
+    const exchangeProtectedQty = Math.abs(position.amount);
+    if (btcToSats(exchangeProtectedQty) <= 0) return;
 
     const fillPrice =
       finiteDecimalLikeNumber(participant.fillPrice) ??
@@ -14563,7 +14565,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
       const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
         positionDirection: meta.direction,
-      qty: meta.qty,
+        qty: exchangeProtectedQty,
         stopPrice,
         leverage,
       }).catch(() => null);
@@ -14571,10 +14573,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
           venue: 'bitfinex',
           stop_price: stopPrice,
-      stopOrderId,
-          qty: meta.qty,
-      source: 'hire',
-    });
+          stopOrderId,
+          qty: exchangeProtectedQty,
+          source: 'hire',
+        });
         // Option A — seed tracked stop state so the never-loosen / SKIP_SAME
         // checks have a baseline on the very first trail tick. Initial rung
         // is the disaster stop (no Scenario C rung yet).
@@ -14584,7 +14586,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         runtime.consecutiveStopFailures = 0;
         this.stopManagerCircuitOpen.delete(participant.id);
         this.positionRuntime.set(participant.id, runtime);
-        this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${meta.qty}`);
+        this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${exchangeProtectedQty}`);
       }
     } else if (meta.stopOrderId && fillPrice > 0) {
       const armed = await this.prisma.signalCycleEvent.count({
@@ -14720,16 +14722,54 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         } else {
           const isInitial = prevStopOrderId == null;
           try {
-            // Cancel-then-replace (skip the cancel on INITIAL — nothing to remove).
-            if (!isInitial && prevStopOrderId != null) {
-              await this.activeTrading.cancelOrder(creds, prevStopOrderId);
-            }
+            // Submit-new-before-cancel-old. Both orders are reduce-only, so a
+            // short overlap cannot reverse the position and avoids any window
+            // where a ladder promotion leaves real exposure unprotected.
             const newStopId = await this.activeTrading.submitStopOrder(creds, {
               positionDirection: meta.direction,
-              qty: meta.qty,
+              qty: exchangeProtectedQty,
               stopPrice: trailStop,
               leverage,
             });
+            let supersededStopOrderId = !isInitial ? prevStopOrderId : undefined;
+            try {
+              await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
+                venue: 'bitfinex',
+                event: 'PROFIT_LOCK_STOP_REPLACEMENT_ACKNOWLEDGED',
+                lock_floor_margin_pct: lockFloorTrail,
+                profitLockFloor: lockFloorTrail,
+                peak_margin_pct: runtime.peakMarginPct,
+                stop_price: trailStop,
+                stopOrderId: newStopId,
+                supersededStopOrderId,
+                qty: exchangeProtectedQty,
+                protected_exchange_qty: exchangeProtectedQty,
+                source: 'hire',
+              });
+            } catch (persistError) {
+              // The old stop is still live. Retire the unpersisted replacement
+              // so a restart cannot inherit an unowned exchange order.
+              await this.cancelManagedOrderGone(
+                creds,
+                newStopId,
+                `Profit-lock persistence failed cycle=${cycle.id}: retire unowned replacement ${newStopId}`,
+              ).catch(() => ({ gone: false, attempts: 0, reason: 'CANCEL_FAILED' }));
+              throw persistError;
+            }
+            if (supersededStopOrderId != null) {
+              const oldGone = await this.cancelManagedOrderGone(
+                creds,
+                supersededStopOrderId,
+                `Profit-lock supersede old stop ${supersededStopOrderId} with ${newStopId}`,
+              );
+              if (oldGone.gone) {
+                supersededStopOrderId = undefined;
+              } else {
+                const message = `PROFIT_LOCK_SUPERSEDED_STOP_STILL_LIVE cycle=${cycle.id}; old=${supersededStopOrderId} new=${newStopId}`;
+                await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+                await this.setInstanceLastError(userId, agentId, message).catch(() => {});
+              }
+            }
             // Option A — update tracked state (per-account via participantId key).
             runtime.lastProfitLockFloor = lockFloorTrail;
             runtime.currentStopOrderId = newStopId;
@@ -14746,7 +14786,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               peak_margin_pct: runtime.peakMarginPct,
               stop_price: trailStop,
               stopOrderId: newStopId,
-              qty: meta.qty,
+              supersededStopOrderId,
+              qty: exchangeProtectedQty,
+              protected_exchange_qty: exchangeProtectedQty,
               source: 'hire',
             });
             this.appendExchangeStopAudit({
@@ -14765,7 +14807,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               action: isInitial ? 'INITIAL' : 'REPLACE',
             });
             this.logger.log(
-              `Hire trail stop lot ${userId} cycle=${cycle.id} floor=${lockFloorTrail}% stop=${trailStop.toFixed(2)} qty=${meta.qty} action=${isInitial ? 'INITIAL' : 'REPLACE'}`,
+              `Hire trail stop lot ${userId} cycle=${cycle.id} floor=${lockFloorTrail}% stop=${trailStop.toFixed(2)} qty=${exchangeProtectedQty} action=${isInitial ? 'INITIAL' : 'REPLACE'}`,
             );
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
