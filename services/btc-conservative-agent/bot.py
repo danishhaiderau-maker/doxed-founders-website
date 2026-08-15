@@ -6707,6 +6707,7 @@ CSV_DECISIONS = "decisions_3factor.csv"
 CSV_TRADES = "trades_3factor.csv"
 CSV_EXPIRED = "expired_orders_3factor.csv"
 FILL_QUALITY_FILE = "fill_quality.jsonl"
+DUPLICATE_INTENT_AUDIT_FILE = "duplicate_intent_audit.jsonl"
 SHADOW_VS_LIVE_ENTRY_FILE = "shadow_vs_live_entry.jsonl"
 SHADOW_VS_LIVE_ENTRY_REPORT = "shadow_vs_live_entry_report.json"
 CSV_BLOCKS = "blocked_signals_3factor.csv"
@@ -17824,22 +17825,133 @@ def _find_duplicate_limit_exposure(signal: dict, direction: str, limit_price: fl
     return {}
 
 
+def _nearest_same_direction_exposure(signal: dict, direction: str, limit_price: float, lane: str = None) -> dict:
+    """Return the nearest live same-direction intent for research only.
+
+    This never decides whether to suppress an order.  It gives the research
+    stream a complete denominator: genuinely independent nearby orders need
+    to be compared with canonical replays, rather than disappearing behind a
+    price-only "duplicate" label.
+    """
+    direction = str(direction or "").upper()
+    if direction not in ("LONG", "SHORT") or limit_price <= 0:
+        return {}
+    incoming_id = str(signal.get("trade_id") or "")
+    lane = str(lane or "").upper() or None
+    same_lane_only = research_lanes_independent() and bool(lane)
+    candidates = []
+
+    def add_candidate(record: dict, source: str, status: str, price) -> None:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return
+        if price <= 0:
+            return
+        trade_id = str(record.get("trade_id") or "")
+        if not trade_id or trade_id == incoming_id:
+            return
+        if _normalize_order_side_to_dir(
+            record.get("signal_dir") or record.get("side") or record.get("final_direction") or record.get("dir")
+        ) != direction:
+            return
+        record_lane = str(record.get("research_lane") or "").upper() or None
+        if same_lane_only and record_lane and record_lane != lane:
+            return
+        candidates.append({
+            "trade_id": trade_id,
+            "source": source,
+            "status": status,
+            "limit_price": price,
+            "research_lane": record_lane,
+            "shared_ai_call_id": record.get("shared_ai_call_id") or record.get("source_trade_id"),
+            "created_ts": record.get("created_ts_ts") or record.get("signal_created_ts") or record.get("created_ts"),
+        })
+
+    now = time.time()
+    with trade_lock:
+        for order in pending_orders:
+            if order.get("status") == "PENDING":
+                add_candidate(order, "pending_order", "PENDING", order.get("planned_limit_price") or order.get("limit_price"))
+        for position in open_positions:
+            add_candidate(position, "open_position", "FILLED", position.get("entry"))
+        for entry in trades_map.values():
+            record = entry.get("signal_ref") or {}
+            if not isinstance(record, dict) or is_terminal_signal(record):
+                continue
+            expires_ts = record.get("expires_ts") or (record.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+            if expires_ts and now > expires_ts:
+                continue
+            add_candidate(record, "signal", str(record.get("status") or "UNKNOWN"), _signal_planned_limit(record))
+    if not candidates:
+        return {}
+    nearest = min(candidates, key=lambda item: abs(limit_price - item["limit_price"]))
+    try:
+        incoming_created = float(signal.get("created_ts_ts") or signal.get("signal_created_ts") or signal.get("created_ts") or 0)
+        existing_created = float(nearest.get("created_ts") or 0)
+        lifecycle_distance = abs(incoming_created - existing_created) if incoming_created and existing_created else None
+    except (TypeError, ValueError):
+        lifecycle_distance = None
+    nearest["price_distance_usd"] = round(abs(limit_price - nearest["limit_price"]), 4)
+    nearest["same_shared_ai_call"] = bool(
+        signal.get("shared_ai_call_id")
+        and signal.get("shared_ai_call_id") == nearest.get("shared_ai_call_id")
+    )
+    nearest["lifecycle_distance_sec"] = round(lifecycle_distance, 3) if lifecycle_distance is not None else None
+    return nearest
+
+
+def _record_duplicate_intent_audit(signal: dict, direction: str, limit_price: float, decision: str, nearest: dict = None) -> None:
+    """Persist the evidence needed to evaluate duplicate suppression safely."""
+    nearest = nearest or {}
+    with trade_lock:
+        pending_count = sum(1 for order in pending_orders if order.get("status") == "PENDING")
+        open_count = len(open_positions)
+    _safe_append_jsonl(DUPLICATE_INTENT_AUDIT_FILE, {
+        "schema": "duplicate_intent_audit_v1",
+        "ts": utc_iso(),
+        "decision": decision,
+        "trade_id": signal.get("trade_id"),
+        "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
+        "created_ts": signal.get("created_ts_ts") or signal.get("signal_created_ts") or signal.get("created_ts"),
+        "direction": direction,
+        "limit_price": limit_price,
+        "research_lane": signal.get("research_lane"),
+        "nearest_trade_id": nearest.get("trade_id"),
+        "nearest_source": nearest.get("source"),
+        "nearest_status": nearest.get("status"),
+        "nearest_limit_price": nearest.get("limit_price"),
+        "nearest_shared_ai_call_id": nearest.get("shared_ai_call_id"),
+        "price_distance_usd": nearest.get("price_distance_usd"),
+        "same_shared_ai_call": nearest.get("same_shared_ai_call"),
+        "lifecycle_distance_sec": nearest.get("lifecycle_distance_sec"),
+        "pending_count": pending_count,
+        "open_count": open_count,
+        "max_pending_orders": MAX_PENDING_ORDERS,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }, label="DUPLICATE_INTENT_AUDIT")
+
+
 def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
     """Expire incoming signal when same direction+limit already active. Returns True if rejected."""
     if not duplicate_limit_block_enabled():
         return False
     direction = _signal_direction(signal)
     tid = signal.get("trade_id")
+    nearest = _nearest_same_direction_exposure(signal, direction, limit_price, lane=signal.get("research_lane"))
     dup = _find_duplicate_limit_exposure(signal, direction, limit_price, lane=signal.get("research_lane"))
     if not dup:
+        _record_duplicate_intent_audit(signal, direction, limit_price, "ALLOW_DISTINCT", nearest)
         return False
     if dup.get("same_trade_replay"):
+        _record_duplicate_intent_audit(signal, direction, limit_price, "NO_OP_SAME_TRADE_REPLAY", dup)
         logger.info(
             f"[SIM] CANONICAL_SIGNAL_REPLAY no-op trade_id={tid} dir={direction} "
             f"limit={fmt(limit_price)} source={dup.get('source')} "
             f"shared_ai_call_id={dup.get('shared_ai_call_id')} [PIPELINE ENFORCEMENT]"
         )
         return True
+    _record_duplicate_intent_audit(signal, direction, limit_price, "SUPPRESS_CANONICAL_INTENT", dup)
     reason = "DUPLICATE_LIMIT_PRICE"
     with trade_lock:
         master = trades_map.get(tid, {}).get("signal_ref", signal)

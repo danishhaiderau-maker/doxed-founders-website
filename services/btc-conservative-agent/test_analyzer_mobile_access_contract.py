@@ -69,6 +69,21 @@ def test_canonical_duplicate_match_rejects_only_a_replayed_intent():
     assert matcher(incoming, independent, incoming_limit=63000.00, existing_limit=63000.01) == {}
 
 
+def test_duplicate_audit_keeps_allowed_nearby_intents_in_the_denominator():
+    audit = _route("_nearest_same_direction_exposure", "def _record_duplicate_intent_audit")
+    recorder = _route("_record_duplicate_intent_audit", "def _reject_duplicate_limit_order")
+    rejection = _route("_reject_duplicate_limit_order", "def _place_simulated_limit_order")
+    assert '"price_distance_usd"' in audit
+    assert '"same_shared_ai_call"' in audit
+    assert '"lifecycle_distance_sec"' in audit
+    assert '"pending_count"' in recorder
+    assert '"open_count"' in recorder
+    assert 'DUPLICATE_INTENT_AUDIT_FILE' in recorder
+    assert '"ALLOW_DISTINCT"' in rejection
+    assert '"NO_OP_SAME_TRADE_REPLAY"' in rejection
+    assert '"SUPPRESS_CANONICAL_INTENT"' in rejection
+
+
 def test_final_hard_stop_is_thirteen_percent_margin_loss():
     assert "MAX_SL_MARGIN_PCT = 13.0" in SOURCE
     helper = _route("sl_price_pct", "SL_PCT = sl_price_pct")
