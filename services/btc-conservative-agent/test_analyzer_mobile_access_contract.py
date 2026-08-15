@@ -10,7 +10,11 @@ ANALYZER_SOURCES = [
     Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
     (Path(__file__).with_name("research") / "analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
 ]
+CANONICAL_ANALYZER_SOURCE = ANALYZER_SOURCES[0]
 LEGACY_ANALYZER_SOURCE = ANALYZER_SOURCES[1]
+DEMO_HARNESS_SOURCE = (
+    Path(__file__).parents[2] / "scripts" / "demo-harness.mjs"
+).read_text(encoding="utf-8")
 
 
 def _route(name: str, next_marker: str) -> str:
@@ -120,6 +124,24 @@ def test_legacy_analyzer_fails_closed_and_imports_shared_cohort_contract():
     assert 'from analysis_eligibility import (' in LEGACY_ANALYZER_SOURCE
     assert 'Legacy research analyzer is disabled fail-closed.' in LEGACY_ANALYZER_SOURCE
     assert 'Run ../analyzer_research_engine_v62.py' in LEGACY_ANALYZER_SOURCE
+
+
+def test_report_manifest_exposes_cohort_provenance_and_revision():
+    manifest = CANONICAL_ANALYZER_SOURCE.split(
+        "def write_report_manifest(", 1
+    )[1].split("def _manifest_category", 1)[0]
+    assert '"cohort_schema": "analysis_cohorts_v1"' in manifest
+    assert '"generation_revision": generation_revision' in manifest
+    assert '"included_row_count": len(eligible)' in manifest
+    assert '"exclusion_reason_counts": exclusions' in manifest
+    assert '"analysis_provenance": analysis_provenance' in manifest
+
+
+def test_demo_harness_runs_canonical_analyzer_and_propagates_failure():
+    assert "join(BOT_DIR, 'analyzer_research_engine_v62.py')" in DEMO_HARNESS_SOURCE
+    assert "join(BOT_DIR, 'research', 'analyzer_research_engine_v62.py')" not in DEMO_HARNESS_SOURCE
+    assert "[analyzerPath, '--once']" in DEMO_HARNESS_SOURCE
+    assert "canonical analyzer failed" in DEMO_HARNESS_SOURCE
 
 
 def test_analyzer_session_is_opaque_and_narrowly_scoped():

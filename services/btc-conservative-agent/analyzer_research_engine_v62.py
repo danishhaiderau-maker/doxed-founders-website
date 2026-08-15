@@ -59,6 +59,7 @@ import itertools
 import zipfile
 from pathlib import Path
 from research.analysis_eligibility import (
+    BITFINEX_COPY_FIDELITY,
     SHOWCASE_STRATEGY,
     REAL_COPY_PARAMETER_OPTIMISATION,
     eligible_trade_ids as _cohort_eligible_trade_ids,
@@ -17115,6 +17116,29 @@ def _mirror_reports_to_dir():
 
 def write_report_manifest(payload=None):
     """Manifest for research dashboard — no hardcoded report list in UI."""
+    cohort_summary = {}
+    for cohort in (
+        SHOWCASE_STRATEGY,
+        BITFINEX_COPY_FIDELITY,
+        REAL_COPY_PARAMETER_OPTIMISATION,
+    ):
+        eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)
+        cohort_summary[cohort] = {
+            "included_row_count": len(eligible),
+            "evidence_row_count": evidence_rows,
+            "exclusion_reason_counts": exclusions,
+        }
+    generation_revision = (
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    analysis_provenance = {
+        "cohort_schema": "analysis_cohorts_v1",
+        "generation_revision": generation_revision,
+        "cohorts": cohort_summary,
+    }
     reports = []
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
         if os.path.isfile(fname):
@@ -17127,6 +17151,7 @@ def write_report_manifest(payload=None):
                 "modified_at": datetime.fromtimestamp(
                     os.path.getmtime(fname), tz=timezone.utc
                 ).isoformat(),
+                "analysis_provenance": analysis_provenance,
             })
     manifest = {
         "schema": "report_manifest_v1",
@@ -17134,6 +17159,7 @@ def write_report_manifest(payload=None):
         "analyzer_version": ANALYZER_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "expected_bot_version": EXPECTED_BOT_VERSION,
+        "analysis_provenance": analysis_provenance,
         "data_scope": (payload or {}).get("data_scope"),
         "session_scope": (payload or {}).get("session_scope"),
         "performance": (payload or {}).get("performance"),

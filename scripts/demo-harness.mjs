@@ -312,14 +312,25 @@ async function replayRelayCassettes() {
 }
 
 async function triggerAnalyzer() {
-  const analyzerPath = join(BOT_DIR, 'research', 'analyzer_research_engine_v62.py');
+  const analyzerPath = join(BOT_DIR, 'analyzer_research_engine_v62.py');
   if (!existsSync(analyzerPath)) { console.log(`[demo-harness] analyzer not found at ${analyzerPath}`); return; }
   console.log(`[demo-harness] running analyzer (timeout 90s) — this generates reports/*`);
-  await new Promise((resolveFn) => {
-    const child = spawn('python', [analyzerPath], { cwd: BOT_DIR, env, stdio: 'ignore', windowsHide: true });
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} resolveFn(); }, 90_000);
-    child.on('exit', () => { clearTimeout(timer); resolveFn(); });
+  const outcome = await new Promise((resolveFn) => {
+    const child = spawn('python', [analyzerPath, '--once'], { cwd: BOT_DIR, env, stdio: 'ignore', windowsHide: true });
+    const timer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch {}
+      resolveFn({ ok: false, reason: 'timeout' });
+    }, 90_000);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      resolveFn({ ok: false, reason: error?.message ?? 'spawn failed' });
+    });
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolveFn({ ok: code === 0, reason: code === 0 ? null : `exit=${code} signal=${signal ?? 'none'}` });
+    });
   });
+  if (!outcome.ok) throw new Error(`[demo-harness] canonical analyzer failed: ${outcome.reason}`);
   console.log('[demo-harness] analyzer run complete');
 }
 
