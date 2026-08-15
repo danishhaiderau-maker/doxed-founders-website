@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: cancel showcase orders during paper force flat
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
