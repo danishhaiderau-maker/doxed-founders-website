@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Merge pull request #90 from danishhaiderau-maker/codex/venue-gate-evidence
+fix: enforce copy hard stop at scenario c ceiling
 
 ## Last Activity
 
