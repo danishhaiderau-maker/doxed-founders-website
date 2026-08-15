@@ -4200,13 +4200,17 @@ def get_display_balance():
 
 def _pending_trade_ids():
     with trade_lock:
-        return {
+        pending = {
             o.get("trade_id")
             for o in pending_orders
             if o.get("trade_id")
             and str(o.get("status") or "").upper()
             in ("PENDING", "CANCEL_PENDING_LIVE")
         }
+        # A natural fill has a short but important handoff: the pending order
+        # is removed before the OPEN lifecycle is committed.  Cleanup must not
+        # mistake that atomic transition for a stale signal with no exposure.
+        return pending | set(fill_handoff_trade_ids)
 
 def is_terminal_signal(sig: dict) -> bool:
     if not isinstance(sig, dict):
@@ -19475,11 +19479,21 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
+            order["fill_handoff_in_progress"] = True
+            if order.get("trade_id"):
+                fill_handoff_trade_ids.add(order["trade_id"])
             fills.append(order)
     for order in fills:
         fill_order(order)
 
 def fill_order(order):
+    def clear_fill_handoff():
+        tid = order.get("trade_id")
+        with trade_lock:
+            if tid:
+                fill_handoff_trade_ids.discard(tid)
+            order.pop("fill_handoff_in_progress", None)
+
     if manual_admin_pause_active():
         lane_unregister_pending_order(order)
         order["status"] = "CANCELLED"
@@ -19489,6 +19503,7 @@ def fill_order(order):
             f"[ADMIN PAUSE] suppressed raced fill trade_id={order.get('trade_id')} "
             f"[PIPELINE ENFORCEMENT]"
         )
+        clear_fill_handoff()
         pipeline_state_sync()
         return None
     direction = _normalize_order_side_to_dir(
@@ -19536,6 +19551,7 @@ def fill_order(order):
         _ftid = order.get("trade_id")
         if _ftid and any(p.get("trade_id") == _ftid and p.get("status") != "CLOSED" for p in open_positions):
             logger.warning(f"[FILL GUARD] Duplicate fill suppressed for trade_id={_ftid} — position already open")
+            clear_fill_handoff()
             return
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
@@ -19568,7 +19584,9 @@ def fill_order(order):
             "[FILL GUARD] terminal close won before OPEN commit "
             f"trade_id={order.get('trade_id')} — suppressing all late fill events"
         )
+        clear_fill_handoff()
         return
+    clear_fill_handoff()
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     persist_signal(fill_snapshot, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
@@ -23563,6 +23581,10 @@ trade_lock = threading.RLock()
 position_close_lock = threading.RLock()
 position_evaluation_lock = threading.Lock()
 _live_control_lock = threading.RLock()
+# Trade IDs moving from a filled limit into an OPEN position.  Protected by
+# trade_lock and intentionally included in _pending_trade_ids() until the
+# OPEN lifecycle commit has won or the handoff has been abandoned.
+fill_handoff_trade_ids = set()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
 _API_STATE_REFRESH_INTERVAL_SEC = max(

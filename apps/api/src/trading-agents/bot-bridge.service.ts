@@ -382,11 +382,16 @@ export class BotBridgeService {
       return pushed;
     }
     const data = await this.fetchShowcaseState(
-      ['/api/relay-execution-state', '/api/relay-state'],
+      // A stale dashboard relay-state can legitimately predate a just-filled
+      // Showcase position.  It is useful for display and rolling deployment
+      // diagnostics, but it is not strong enough to prove that a live source
+      // position vanished.  Execution therefore accepts only the bounded
+      // execution snapshot; an unavailable snapshot makes the relay hold.
+      ['/api/relay-execution-state'],
       {
         // The signed webhook is the primary money-path transport. Canonical
-        // polling is its fail-closed backstop. Prefer the bounded execution
-        // snapshot; retain /api/relay-state only as a rolling-deploy fallback.
+        // polling is its fail-closed backstop and must not fall through to a
+        // presentation cache for entry, abandon, or source-absence decisions.
         relayTimeout: this.executionRelayTimeoutMs,
         stateTimeout: this.executionRelayTimeoutMs,
         userAgent: 'doxxedcrypto-relay/1.0',

@@ -317,7 +317,7 @@ test('backs off after HTTP 429 instead of falling through into another request',
   }
 });
 
-test('execution polling fails closed after bounded execution and rolling-deploy relay fallbacks', async () => {
+test('execution polling fails closed without accepting a stale relay-state fallback', async () => {
   const originalFetch = globalThis.fetch;
   const urls: string[] = [];
   globalThis.fetch = async (input) => {
@@ -330,7 +330,6 @@ test('execution polling fails closed after bounded execution and rolling-deploy 
     assert.equal(await bridge.fetchStateForExecution(true), null);
     assert.deepEqual(urls, [
       'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
-      'https://doxed-btc-bot.fly.dev/api/relay-state',
     ]);
   } finally {
     globalThis.fetch = originalFetch;
