@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: settle exchange-first partial copy lifecycles
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
