@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: enforce copy hard stop at scenario c ceiling
+fix: hold source lifecycle during fill handoff
 
 ## Last Activity
 
