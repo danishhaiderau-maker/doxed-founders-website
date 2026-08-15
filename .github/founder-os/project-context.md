@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: align relay policy telemetry
+fix: package shared analyzer contract on Fly
 
 ## Last Activity
 
