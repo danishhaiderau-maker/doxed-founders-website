@@ -145,9 +145,56 @@ def test_ddollar_gate_summary_cannot_invent_passed_value() -> None:
         )
 
 
+def test_execution_snapshot_publisher_assigns_one_monotonic_sequence() -> None:
+    """Every immutable execution payload needs a durable audit sequence."""
+    func = _function("_publish_relay_execution_snapshot")
+    body_src = ast.get_source_segment(BOT_SOURCE, func)
+    assert body_src is not None
+
+    assert "global _RELAY_EXECUTION_SNAPSHOT_SEQ" in body_src
+    assert "_RELAY_EXECUTION_SNAPSHOT_SEQ += 1" in body_src
+    assert 'payload["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ' in body_src
+    assert 'integrity["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ' in body_src
+    assert body_src.index('_RELAY_EXECUTION_SNAPSHOT_SEQ += 1') < body_src.index('json.dumps('), (
+        "snapshot sequence must be embedded before the immutable response body is serialized"
+    )
+
+
+def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:
+    """Optimization evidence must carry immutable policy and completion proof."""
+    policy_func = _function("get_exit_config_snapshot")
+    policy_src = ast.get_source_segment(BOT_SOURCE, policy_func)
+    assert policy_src is not None
+    for field in (
+        '"policy_snapshot_schema"',
+        '"policy_version"',
+        '"hard_stop_margin_pct"',
+        '"thesis_fast_exit_unreal_pct"',
+        '"thesis_mfe_protect_pct"',
+        '"trail_ladder"',
+    ):
+        assert field in policy_src
+
+    replay_func = _function("dump_replay")
+    replay_src = ast.get_source_segment(BOT_SOURCE, replay_func)
+    assert replay_src is not None
+    assert '"replay_complete": replay_complete' in replay_src
+    assert '"post_exit_complete": post_exit_complete' in replay_src
+    assert '"terminal_provenance"' in replay_src
+    assert "and post_exit_ticks" in replay_src
+
+    evidence_func = _function("build_counterfactual_observability_fields")
+    evidence_src = ast.get_source_segment(BOT_SOURCE, evidence_func)
+    assert evidence_src is not None
+    assert 'replay.get("replay_complete") is True' in evidence_src
+    assert '"analysis_eligible": not exclusion_reasons' in evidence_src
+    assert '"ACTUAL_BITFINEX_PNL_MISSING"' in evidence_src
+
+
 if __name__ == "__main__":
     test_relay_execution_state_snapshot_surfaces_relay_push_summary()
     test_relay_execution_state_snapshot_surfaces_ddollar_gate_state()
     test_relay_push_summary_is_read_only()
     test_ddollar_gate_summary_cannot_invent_passed_value()
+    test_execution_snapshot_publisher_assigns_one_monotonic_sequence()
     print("Relay-execution-state telemetry contract checks passed")

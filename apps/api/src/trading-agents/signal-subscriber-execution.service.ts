@@ -2505,15 +2505,6 @@ const TERMINAL_PARTICIPANT_STATUSES = new Set<SignalCycleStatus>([
 ]);
 
 /** Effective stop-loss margin % — wide disaster stop in mirror+convergence mode. */
-export function copyFirstScenarioCEligible(input: {
-  mirrorOnly: boolean;
-  simActive: boolean;
-  sourcePositionOpen: boolean;
-  sourceStillPending: boolean;
-}): boolean {
-  return input.mirrorOnly && !input.simActive && !input.sourcePositionOpen && input.sourceStillPending;
-}
-
 export function resolveEffectiveStopLossMarginPct(
   intentStopLoss?: number,
   opts?: { mirrorMode?: boolean; simActive?: boolean },
@@ -2598,7 +2589,7 @@ const SHOWCASE_VANISHED_CONSECUTIVE_MISSES = 3;
  *  open positions for repeated fresh bot states and the bounded convergence
  *  grace is market-closed (SHOWCASE_POSITION_ABSENT). Unlike
  *  SHOWCASE_VANISHED, this only checks positions — trades_map may still list
- *  PENDING/VIRTUAL_CHASE for a trade the copy filled but showcase never opened.
+ *  absent everywhere for a trade the copy filled but Showcase never opened.
  *  Fail-closed on unreachable fetch. */
 const SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES = 2;
 
@@ -2610,6 +2601,35 @@ const SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES = 2;
  * is still closed after both the miss-count and elapsed-time gates pass.
  */
 const SHOWCASE_POSITION_ABSENT_GRACE_MS = 60_000;
+const SHOWCASE_ABSENCE_MAX_SNAPSHOT_AGE_SEC = 15;
+
+export type ShowcasePositionAbsenceEvidence = {
+  schema: 'source_absence_evidence_v1';
+  absenceScope: 'POSITION' | 'EVERYWHERE';
+  verdict: 'PRESENT' | 'UNKNOWN' | 'ABSENT_WAITING' | 'ABSENT_ACTIONABLE';
+  canonicalTradeId: string;
+  sourceGitRev: string | null;
+  snapshotSeq: number | null;
+  snapshotTs: string | null;
+  snapshotAgeSec: number | null;
+  maxSnapshotAgeSec: number;
+  positionsSynced: boolean | null;
+  ordersSynced: boolean | null;
+  tradesSynced: boolean | null;
+  sourcePositionPresent: boolean;
+  sourceOrderPresent: boolean;
+  sourceSignalPresent: boolean;
+  sourceTradePresent: boolean;
+  sourceTradesMapPresent: boolean;
+  misses: number;
+  requiredMisses: number;
+  firstAbsentAtMs: number | null;
+  observedAtMs: number;
+  elapsedMs: number;
+  graceMs: number;
+  missingEvidence: string[];
+  actionable: boolean;
+};
 
 export function showcasePositionAbsenceActionable(input: {
   misses: number;
@@ -2627,6 +2647,138 @@ export function showcasePositionAbsenceActionable(input: {
     input.misses >= missesRequired &&
     input.nowMs - input.firstAbsentAtMs >= graceMs
   );
+}
+
+/**
+ * Build the immutable proof used by the source-position absence fallback.
+ * Missing/incomplete synchronization evidence is explicitly UNKNOWN and can
+ * never become actionable, regardless of the in-memory miss count.
+ */
+export function buildShowcasePositionAbsenceEvidence(input: {
+  bot: BotApiState;
+  tradeId: string;
+  misses: number;
+  firstAbsentAtMs: number | null;
+  nowMs: number;
+  absenceScope?: 'POSITION' | 'EVERYWHERE';
+  requiredMisses?: number;
+  graceMs?: number;
+}): ShowcasePositionAbsenceEvidence {
+  const { bot, tradeId, nowMs } = input;
+  const integrity = bot.state_integrity;
+  const snapshotSeq = Number.isFinite(integrity?.snapshot_seq)
+    ? Number(integrity?.snapshot_seq)
+    : null;
+  const snapshotTs = typeof integrity?.snapshot_ts === 'string'
+    ? integrity.snapshot_ts
+    : null;
+  const reportedSnapshotAgeSec = Number.isFinite(integrity?.snapshot_age_sec)
+    ? Number(integrity?.snapshot_age_sec)
+    : null;
+  const snapshotTsMs = snapshotTs ? Date.parse(snapshotTs) : Number.NaN;
+  const timestampAgeSec = Number.isFinite(snapshotTsMs)
+    ? (nowMs - snapshotTsMs) / 1000
+    : null;
+  const snapshotAgeSec = reportedSnapshotAgeSec == null || timestampAgeSec == null
+    ? null
+    : Math.max(reportedSnapshotAgeSec, timestampAgeSec, 0);
+  const missingEvidence: string[] = [];
+  if (!bot.source_git_rev?.trim()) missingEvidence.push('source_git_rev');
+  if (snapshotSeq == null) missingEvidence.push('state_integrity.snapshot_seq');
+  if (!snapshotTs || !Number.isFinite(snapshotTsMs)) {
+    missingEvidence.push('state_integrity.snapshot_ts');
+  } else if (timestampAgeSec != null && timestampAgeSec < -5) {
+    missingEvidence.push('state_integrity.snapshot_ts_future');
+  }
+  if (snapshotAgeSec == null || reportedSnapshotAgeSec == null || reportedSnapshotAgeSec < 0) {
+    missingEvidence.push('state_integrity.snapshot_age_sec');
+  } else if (snapshotAgeSec > SHOWCASE_ABSENCE_MAX_SNAPSHOT_AGE_SEC) {
+    missingEvidence.push('state_integrity.snapshot_stale');
+  }
+  if (integrity?.positions_synced !== true) missingEvidence.push('state_integrity.positions_synced');
+  if (integrity?.orders_synced !== true) missingEvidence.push('state_integrity.orders_synced');
+  if (integrity?.trades_synced !== true) missingEvidence.push('state_integrity.trades_synced');
+  if (!Array.isArray(bot.positions)) missingEvidence.push('positions');
+  if (!Array.isArray(bot.orders)) missingEvidence.push('orders');
+  if (!Array.isArray(bot.trades)) missingEvidence.push('trades');
+  if (!Array.isArray(bot.signal_info?.signals)) missingEvidence.push('signal_info.signals');
+  if (bot.trades_map == null || typeof bot.trades_map !== 'object') missingEvidence.push('trades_map');
+
+  const sourcePositionPresent = (bot.positions ?? []).some(
+    (row) => row.trade_id != null && tradeIdsMatch(row.trade_id, tradeId),
+  );
+  const sourceOrderPresent = (bot.orders ?? []).some(
+    (row) => row.trade_id != null && tradeIdsMatch(row.trade_id, tradeId),
+  );
+  const sourceSignalPresent = (bot.signal_info?.signals ?? []).some(
+    (row) => row.trade_id != null && tradeIdsMatch(String(row.trade_id), tradeId),
+  );
+  const sourceTradePresent = (bot.trades ?? []).some(
+    (row) => row.trade_id != null && tradeIdsMatch(row.trade_id, tradeId),
+  );
+  const sourceTradesMapPresent = Object.keys(bot.trades_map ?? {}).some((key) =>
+    tradeIdsMatch(key, tradeId),
+  );
+  const absenceScope = input.absenceScope ?? 'POSITION';
+  const requiredMisses = Math.max(
+    1,
+    input.requiredMisses ?? SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES,
+  );
+  const graceMs = Math.max(0, input.graceMs ?? SHOWCASE_POSITION_ABSENT_GRACE_MS);
+  // A copy-first exchange fill is not evidence that the source lifecycle is
+  // absent. If the canonical ID remains anywhere in the source snapshot, keep
+  // the real lot protected and wait for a source terminal event.
+  const absentForScope = !sourcePositionPresent
+    && !sourceOrderPresent
+    && !sourceSignalPresent
+    && !sourceTradePresent
+    && !sourceTradesMapPresent;
+  const presentForScope = !absentForScope;
+  const firstAbsentAtMs = input.firstAbsentAtMs;
+  const elapsedMs = firstAbsentAtMs == null ? 0 : Math.max(0, nowMs - firstAbsentAtMs);
+  const complete = missingEvidence.length === 0;
+  const actionable = Boolean(
+    complete
+      && absentForScope
+      && firstAbsentAtMs != null
+      && input.misses >= requiredMisses
+      && elapsedMs >= graceMs,
+  );
+  const verdict: ShowcasePositionAbsenceEvidence['verdict'] = presentForScope
+    ? 'PRESENT'
+    : !complete
+      ? 'UNKNOWN'
+      : actionable
+        ? 'ABSENT_ACTIONABLE'
+        : 'ABSENT_WAITING';
+
+  return {
+    schema: 'source_absence_evidence_v1',
+    absenceScope,
+    verdict,
+    canonicalTradeId: tradeId,
+    sourceGitRev: bot.source_git_rev?.trim() || null,
+    snapshotSeq,
+    snapshotTs,
+    snapshotAgeSec,
+    maxSnapshotAgeSec: SHOWCASE_ABSENCE_MAX_SNAPSHOT_AGE_SEC,
+    positionsSynced: integrity?.positions_synced ?? null,
+    ordersSynced: integrity?.orders_synced ?? null,
+    tradesSynced: integrity?.trades_synced ?? null,
+    sourcePositionPresent,
+    sourceOrderPresent,
+    sourceSignalPresent,
+    sourceTradePresent,
+    sourceTradesMapPresent,
+    misses: input.misses,
+    requiredMisses,
+    firstAbsentAtMs,
+    observedAtMs: nowMs,
+    elapsedMs,
+    graceMs,
+    missingEvidence,
+    actionable,
+  };
 }
 
 /** Belt-and-suspenders: OPEN copy lot while showcase is flat/closed for this long
@@ -2838,6 +2990,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   /** Fix B — participantId → consecutive fresh canonical states missing its showcase trade.
    *  In-memory by design: resets on process restart (the count simply restarts). */
   private readonly showcaseVanishedMisses = new Map<string, number>();
+  /** participantId → first complete snapshot where the source trade vanished everywhere. */
+  private readonly showcaseVanishedSince = new Map<string, number>();
   /** participantId → consecutive fresh states where showcase has no OPEN position
    *  for this lot's trade_id (cross-ID / ghost-fill exit). In-memory; resets on restart. */
   private readonly showcasePositionAbsentMisses = new Map<string, number>();
@@ -12054,23 +12208,42 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         mirrorTrigger = mirrorRelinked
           ? `ORIGIN_SHOWCASE_CLOSED_${wakeSource}`
           : `SHOWCASE_CLOSED_${wakeSource}`;
-      } else if (
-        bot &&
-        this.trackShowcasePositionAbsent(participant.id, showcaseTradeId, bot)
-      ) {
-        // Copy OPEN but this trade_id is not in showcase open positions.
-        // Covers cross-ID ghost fills (showcase trade still PENDING in trades_map)
-        // where SHOWCASE_VANISHED never fires because the trade is still "known".
-        closed = true;
-        showcaseExitReason = 'SHOWCASE_POSITION_ABSENT';
-        mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
-        this.consumeWakeTrigger();
-        this.logger.warn(
-          `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId} — ` +
-            `market-closing copy lot after ${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} ` +
-            `consecutive fresh states and ${SHOWCASE_POSITION_ABSENT_GRACE_MS}ms convergence grace`,
-        );
       } else {
+        const absenceEvidence = bot
+          ? this.trackShowcasePositionAbsent(participant.id, showcaseTradeId, bot)
+          : null;
+        if (absenceEvidence) {
+          // Persistence is part of the exit proof, not best-effort telemetry.
+          // If this write fails, no fallback close is allowed on this tick.
+          await this.cycles.recordHireExecutionEvent(
+            userId,
+            agentId,
+            cycle.id,
+            'SOURCE_ABSENCE_OBSERVED',
+            {
+              venue: 'bitfinex',
+              source: 'hire',
+              participant_id: participant.id,
+              ...absenceEvidence,
+            },
+          );
+          if (absenceEvidence.actionable) {
+            closed = true;
+            showcaseExitReason = 'SHOWCASE_POSITION_ABSENT';
+            mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
+            this.logger.warn(
+              `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId}; ` +
+                `market-closing copy lot after persisted snapshot seq=${absenceEvidence.snapshotSeq}, ` +
+                `${absenceEvidence.misses} consecutive fresh states and ` +
+                `${absenceEvidence.elapsedMs}ms convergence grace`,
+            );
+          } else if (absenceEvidence.verdict === 'UNKNOWN') {
+            this.logger.warn(
+              `Showcase position state UNKNOWN ${userId} cycle=${cycle.id} trade=${showcaseTradeId}; ` +
+                `holding protected copy; missing=${absenceEvidence.missingEvidence.join(',')}`,
+            );
+          }
+        }
         this.consumeWakeTrigger();
       }
     } else {
@@ -13740,54 +13913,64 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
-   * Cross-ID / ghost-fill tracker. Returns true when the participant's
-   * showcase trade_id is absent from open positions for
+   * Cross-ID / ghost-fill tracker. Returns actionable evidence only when the
+   * canonical trade_id is absent from every source book for
    * {@link SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES} consecutive fresh bot
-   * states and {@link SHOWCASE_POSITION_ABSENT_GRACE_MS} has elapsed. Unlike
-   * {@link trackShowcaseVanished}, this does NOT require the trade to be wiped
-   * from trades_map — a PENDING/VIRTUAL_CHASE entry that never became an open
-   * showcase position still counts as absent.
+   * states and {@link SHOWCASE_POSITION_ABSENT_GRACE_MS} has elapsed. Pending
+   * and virtual-chase rows count as PRESENT and keep the protected copy open.
    * Fail-closed: caller must pass a successfully-fetched bot state.
    */
   private trackShowcasePositionAbsent(
     participantId: string,
     tradeId: string,
     bot: BotApiState,
-  ): boolean {
+  ): ShowcasePositionAbsenceEvidence | null {
     if (!tradeId || tradeId.startsWith('adopt:')) {
       this.showcasePositionAbsentMisses.delete(participantId);
       this.showcasePositionAbsentSince.delete(participantId);
-      return false;
-    }
-    const inPositions = (bot.positions ?? []).some(
-      (p) => p.trade_id && tradeIdsMatch(p.trade_id, tradeId),
-    );
-    if (inPositions) {
-      this.showcasePositionAbsentMisses.delete(participantId);
-      this.showcasePositionAbsentSince.delete(participantId);
-      return false;
+      return null;
     }
     const nowMs = Date.now();
+    const initialEvidence = buildShowcasePositionAbsenceEvidence({
+      bot,
+      tradeId,
+      misses: 0,
+      firstAbsentAtMs: null,
+      nowMs,
+    });
+    if (initialEvidence.verdict === 'PRESENT') {
+      this.showcasePositionAbsentMisses.delete(participantId);
+      this.showcasePositionAbsentSince.delete(participantId);
+      return null;
+    }
+    if (initialEvidence.verdict === 'UNKNOWN') {
+      // An incomplete source snapshot breaks the consecutive-fresh-state chain.
+      // It is durable evidence of uncertainty, never evidence of absence.
+      this.showcasePositionAbsentMisses.delete(participantId);
+      this.showcasePositionAbsentSince.delete(participantId);
+      return initialEvidence;
+    }
     const firstAbsentAtMs =
       this.showcasePositionAbsentSince.get(participantId) ?? nowMs;
     this.showcasePositionAbsentSince.set(participantId, firstAbsentAtMs);
     const misses = (this.showcasePositionAbsentMisses.get(participantId) ?? 0) + 1;
     this.showcasePositionAbsentMisses.set(participantId, misses);
-    if (
-      !showcasePositionAbsenceActionable({
-        misses,
-        firstAbsentAtMs,
-        nowMs,
-      })
-    ) {
+    const evidence = buildShowcasePositionAbsenceEvidence({
+      bot,
+      tradeId,
+      misses,
+      firstAbsentAtMs,
+      nowMs,
+    });
+    if (!evidence.actionable) {
       this.logger.warn(
-        `Showcase position absent ${tradeId} (participant=${participantId}) — ` +
+        `Showcase position absent ${tradeId} (participant=${participantId}); ` +
           `miss ${misses}/${SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES}, ` +
-          `elapsed=${nowMs - firstAbsentAtMs}ms/${SHOWCASE_POSITION_ABSENT_GRACE_MS}ms`,
+          `elapsed=${evidence.elapsedMs}ms/${SHOWCASE_POSITION_ABSENT_GRACE_MS}ms, ` +
+          `snapshot_seq=${evidence.snapshotSeq}`,
       );
-      return false;
     }
-    return true;
+    return evidence;
   }
 
   /**
@@ -13805,45 +13988,65 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     participantId: string,
     tradeId: string | null,
     cachedBot?: BotApiState | null,
-  ): Promise<boolean> {
+  ): Promise<ShowcasePositionAbsenceEvidence | null> {
     if (!tradeId || tradeId.startsWith('adopt:')) {
       this.showcaseVanishedMisses.delete(participantId);
-      return false;
+      this.showcaseVanishedSince.delete(participantId);
+      return null;
     }
     const bot = cachedBot ?? await this.fetchExecutionBotState();
-    if (!bot) return false; // canonical unreachable — do not count failed fetches
+    if (!bot) return null; // canonical unreachable — do not count failed fetches
 
-    const inPositions = (bot.positions ?? []).some(
-      (p) => p.trade_id != null && tradeIdsMatch(p.trade_id, tradeId),
-    );
-    const inTrades = (bot.trades ?? []).some(
-      (t) => t.trade_id != null && tradeIdsMatch(t.trade_id, tradeId),
-    );
-    const inTradesMap =
-      bot.trades_map != null &&
-      Object.keys(bot.trades_map).some((key) => tradeIdsMatch(key, tradeId));
-    // Defensive: a trade still pending/known as a signal is NOT vanished.
-    const inOrders = (bot.orders ?? []).some(
-      (o) => o.trade_id != null && tradeIdsMatch(o.trade_id, tradeId),
-    );
-    const inSignals = (bot.signal_info?.signals ?? []).some(
-      (s) => tradeIdsMatch(String(s.trade_id ?? ''), tradeId),
-    );
-
-    if (inPositions || inTrades || inTradesMap || inOrders || inSignals) {
+    const nowMs = Date.now();
+    const initialEvidence = buildShowcasePositionAbsenceEvidence({
+      bot,
+      tradeId,
+      misses: 0,
+      firstAbsentAtMs: null,
+      nowMs,
+      absenceScope: 'EVERYWHERE',
+      requiredMisses: SHOWCASE_VANISHED_CONSECUTIVE_MISSES,
+      graceMs: 0,
+    });
+    if (
+      initialEvidence.sourcePositionPresent
+      || initialEvidence.sourceTradePresent
+      || initialEvidence.sourceTradesMapPresent
+      || initialEvidence.sourceOrderPresent
+      || initialEvidence.sourceSignalPresent
+    ) {
       this.showcaseVanishedMisses.delete(participantId);
-      return false;
+      this.showcaseVanishedSince.delete(participantId);
+      return null;
+    }
+    if (initialEvidence.verdict === 'UNKNOWN') {
+      this.showcaseVanishedMisses.delete(participantId);
+      this.showcaseVanishedSince.delete(participantId);
+      return initialEvidence;
     }
 
+    const firstAbsentAtMs = this.showcaseVanishedSince.get(participantId) ?? nowMs;
+    this.showcaseVanishedSince.set(participantId, firstAbsentAtMs);
     const misses = (this.showcaseVanishedMisses.get(participantId) ?? 0) + 1;
     this.showcaseVanishedMisses.set(participantId, misses);
-    if (misses < SHOWCASE_VANISHED_CONSECUTIVE_MISSES) {
+    const evidence = buildShowcasePositionAbsenceEvidence({
+      bot,
+      tradeId,
+      misses,
+      firstAbsentAtMs,
+      nowMs,
+      absenceScope: 'EVERYWHERE',
+      requiredMisses: SHOWCASE_VANISHED_CONSECUTIVE_MISSES,
+      graceMs: 0,
+    });
+    if (!evidence.actionable) {
       this.logger.warn(
-        `Showcase trade missing ${tradeId} (participant=${participantId}) — miss ${misses}/${SHOWCASE_VANISHED_CONSECUTIVE_MISSES}`,
+        `Showcase trade missing ${tradeId} (participant=${participantId}); ` +
+          `miss ${misses}/${SHOWCASE_VANISHED_CONSECUTIVE_MISSES}, ` +
+          `snapshot_seq=${evidence.snapshotSeq}`,
       );
-      return false;
     }
-    return true;
+    return evidence;
   }
 
   private async monitorOpenPosition(
@@ -13896,37 +14099,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       (meta.limitPrice && meta.limitPrice > 0 ? meta.limitPrice : 0);
     if (!fillPrice || fillPrice <= 0) return;
 
-    // A real Bitfinex fill can precede the corresponding Showcase fill.  In
-    // that narrow window this leg needs local Scenario C protection: waiting
-    // for the source would leave an already-real position with only the wide
-    // mirror disaster stop.  Once the source opens, normal source-led mirror
-    // behaviour resumes; this flag never changes or closes the Showcase.
+    // A real Bitfinex fill can precede the corresponding Showcase fill. Strict
+    // copy mode must not run an independent profit/thesis lifecycle in that
+    // window: the exchange hard stop protects the real lot while the relay
+    // waits for a source-confirmed terminal event.
     const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
     const canonicalBot = await this.fetchExecutionBotState();
-    const sourcePositionOpen = Boolean(
-      showcaseTradeId &&
-        (canonicalBot?.positions ?? []).some(
-          (row) => row.trade_id && tradeIdsMatch(row.trade_id, showcaseTradeId),
-        ),
-    );
-    const sourceStillPending = Boolean(
-      showcaseTradeId &&
-        [
-          ...(canonicalBot?.orders ?? []),
-          ...(canonicalBot?.signal_info?.signals ?? []),
-        ].some((row) => row.trade_id && tradeIdsMatch(row.trade_id, showcaseTradeId)),
-    );
-    const copyFirstScenarioC = copyFirstScenarioCEligible({
-      mirrorOnly: isShowcaseMirrorOnlyMode(),
-      simActive,
-      sourcePositionOpen,
-      sourceStillPending,
-    });
-
     const leverage = resolveSubscriberLeverage(intent);
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
       intent.risk.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode() && !copyFirstScenarioC, simActive },
+      { mirrorMode: isShowcaseMirrorOnlyMode(), simActive },
     );
     const mark = await this.activeTrading.getMarkPrice();
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, meta.direction, leverage);
@@ -13961,9 +14143,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // false-vanished cont-e549 at noon 2026-08-08 (COPY_POSITION_NO_SHOWCASE
     // → SHOWCASE_VANISHED $0 while Fly still held the short until +$1.18).
     const showcaseTradeIdForVanish = showcaseTradeId;
-    if (await this.trackShowcaseVanished(participant.id, showcaseTradeIdForVanish, canonicalBot)) {
+    const vanishedEvidence = await this.trackShowcaseVanished(
+      participant.id,
+      showcaseTradeIdForVanish,
+      canonicalBot,
+    );
+    if (vanishedEvidence) {
+      // As with position-only absence, persistence is a precondition of action.
+      // A database failure leaves the protected lot open and retries next tick.
+      await this.cycles.recordHireExecutionEvent(
+        userId,
+        agentId,
+        cycle.id,
+        'SOURCE_ABSENCE_OBSERVED',
+        {
+          venue: 'bitfinex',
+          source: 'hire',
+          participant_id: participant.id,
+          ...vanishedEvidence,
+        },
+      );
+    }
+    if (vanishedEvidence?.actionable) {
       this.logger.warn(
-        `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${showcaseTradeIdForVanish} (cycle.tradeId=${cycle.tradeId}) — absent from canonical positions/trades for ${SHOWCASE_VANISHED_CONSECUTIVE_MISSES} consecutive fresh states; market-closing copy lot`,
+        `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${showcaseTradeIdForVanish} ` +
+          `(cycle.tradeId=${cycle.tradeId}); persisted snapshot seq=${vanishedEvidence.snapshotSeq}, ` +
+          `absent everywhere for ${vanishedEvidence.misses} consecutive fresh states; ` +
+          `market-closing copy lot`,
       );
       const closed = await this.closeVirtualLot(agentId, userId, cycle.id, participant.id, meta, creds, {
         reason: 'SHOWCASE_VANISHED',
@@ -13983,7 +14189,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       peakMarginPct: runtime.peakMarginPct,
       stopLossMarginPct,
       // Relay sim: per-lot Scenario C exits (profit lock / thesis) for realistic soak tests.
-      showcaseMirrorOnly: simActive ? false : isShowcaseMirrorOnlyMode() && !copyFirstScenarioC,
+      showcaseMirrorOnly: simActive ? false : isShowcaseMirrorOnlyMode(),
     });
 
     if (exitReason) {
@@ -13996,7 +14202,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         peakMarginPct: runtime.peakMarginPct,
         unrealMarginPct,
         stopLossMarginPct,
-        copyFirstScenarioC,
       });
       if (closed) this.positionRuntime.delete(participant.id);
       return;
@@ -14334,8 +14539,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       unrealMarginPct: number;
       lockFloor?: number;
       stopLossMarginPct: number;
-      /** Local Scenario C protected a venue fill before the Showcase filled. */
-      copyFirstScenarioC?: boolean;
     },
   ): Promise<boolean> {
     if (!meta.qty || !meta.direction || !opts.reason) return false;
@@ -14444,11 +14647,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
       venue: 'bitfinex',
       exit_price: opts.mark,
-      exit_reason: opts.copyFirstScenarioC
-        ? `COPY_SCENARIO_C_${exitReasonMap[opts.reason]}`
-        : exitReasonMap[opts.reason],
-      source_exit_reason: opts.copyFirstScenarioC ? 'SOURCE_PENDING' : undefined,
-      copy_first_scenario_c: opts.copyFirstScenarioC === true,
+      exit_reason: exitReasonMap[opts.reason],
       peak_margin_pct: opts.peakMarginPct,
       lock_floor_margin_pct: opts.lockFloor,
       unreal_margin_pct: opts.unrealMarginPct,

@@ -1642,6 +1642,11 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
     pnl_min_peak = peak_never_loser_min_peak_for_lane(lane)
     pnl_floor = peak_never_loser_floor_for_lane(lane)
     return {
+        "policy_snapshot_schema": "exit_policy_v1",
+        "policy_source": "btc-conservative-agent",
+        "policy_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "hard_stop_margin_pct": -float(MAX_SL_MARGIN_PCT),
         "trail_ladder": ladder,
         "ladder_first_trigger_pct": ladder[0][0],
         "ladder_first_lock_pct": ladder[0][1],
@@ -30216,6 +30221,7 @@ _RELAY_EXECUTION_REFRESH_LOCK = threading.Lock()
 _RELAY_EXECUTION_CACHE_PAYLOAD = None
 _RELAY_EXECUTION_CACHE_BODY = None
 _RELAY_EXECUTION_CACHE_AT = 0.0
+_RELAY_EXECUTION_SNAPSHOT_SEQ = 0
 _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
     0.05,
     float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "0.20")),
@@ -30238,15 +30244,19 @@ def _publish_relay_execution_snapshot() -> dict:
     global _RELAY_EXECUTION_CACHE_PAYLOAD
     global _RELAY_EXECUTION_CACHE_BODY
     global _RELAY_EXECUTION_CACHE_AT
+    global _RELAY_EXECUTION_SNAPSHOT_SEQ
     if not _RELAY_EXECUTION_REFRESH_LOCK.acquire(blocking=False):
         return None
     try:
         started = time.perf_counter()
         payload = _build_relay_execution_state_snapshot()
+        _RELAY_EXECUTION_SNAPSHOT_SEQ += 1
+        payload["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ
         payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
         payload["snapshot_age_sec"] = 0
         integrity = payload.get("state_integrity")
         if isinstance(integrity, dict):
+            integrity["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ
             integrity["snapshot_age_sec"] = 0
         body = json.dumps(
             payload,
@@ -35553,6 +35563,21 @@ def dump_replay(trade_id: str):
         try:
             post_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_block"]
             post_exit_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_exit"]
+            now = time.time()
+            lane = str(buf.get("lane") or "")
+            is_executed = lane == "executed"
+            post_exit_deadline = _buf_float(buf.get("post_exit_deadline_ts"), 0)
+            post_exit_complete = bool(
+                buf.get("post_exit")
+                and post_exit_deadline > 0
+                and now >= post_exit_deadline
+                and post_exit_ticks
+            )
+            replay_complete = bool(
+                buf.get("closed")
+                and buf.get("ticks")
+                and (not is_executed or post_exit_complete)
+            )
             replay = {
                 "schema": "signal_replay_v4",
                 "trade_id": trade_id,
@@ -35566,6 +35591,20 @@ def dump_replay(trade_id: str):
                 "post_block_tick_count": len(post_ticks),
                 "post_exit_tick_count": len(post_exit_ticks),
                 "post_exit_sec": POST_EXIT_REPLAY_SEC if buf.get("post_exit") or post_exit_ticks else 0,
+                "post_exit_complete": post_exit_complete,
+                "replay_complete": replay_complete,
+                "replay_completion_reason": (
+                    "POST_EXIT_HORIZON_COMPLETE"
+                    if post_exit_complete
+                    else "BUFFER_CLOSED"
+                    if replay_complete
+                    else "INCOMPLETE_EXECUTED_POST_EXIT"
+                    if is_executed
+                    else "INCOMPLETE_BUFFER"
+                ),
+                "terminal_provenance": (
+                    "SHOWCASE_STRATEGY_EXIT" if is_executed else "COUNTERFACTUAL_ONLY"
+                ),
                 "exit_t_rel": buf.get("exit_t_rel"),
                 "exit_reason": buf.get("exit_reason"),
                 "virtual_entry": buf.get("virtual_entry"),
@@ -35789,6 +35828,65 @@ def analytics_loop():
         logger.exception("[CRITICAL] Analytics loop crash")
         set_execution_paused("THREAD_CRASH")
 
+_COUNTERFACTUAL_REQUIRED_POLICY_KEYS = (
+    "policy_snapshot_schema",
+    "policy_version",
+    "hard_stop_margin_pct",
+    "thesis_fast_exit_unreal_pct",
+    "thesis_mfe_protect_pct",
+    "trail_ladder",
+    "exit_profile_id",
+)
+
+
+def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
+    """Immutable policy and conservative analysis-eligibility metadata."""
+    policy_snapshot = copy.deepcopy(buf.get("exit_config") or {})
+    missing_policy = [
+        key for key in _COUNTERFACTUAL_REQUIRED_POLICY_KEYS
+        if policy_snapshot.get(key) is None
+    ]
+    exit_provenance = (
+        snapshot.get("exit_provenance")
+        or snapshot.get("terminal_provenance")
+        or replay.get("exit_provenance")
+        or replay.get("terminal_provenance")
+    )
+    replay_complete = replay.get("replay_complete") is True
+    actual_realized_pnl = (
+        snapshot.get("actual_bitfinex_realized_pnl_usd")
+        if snapshot.get("actual_bitfinex_realized_pnl_usd") is not None
+        else replay.get("actual_bitfinex_realized_pnl_usd")
+    )
+    exclusion_reasons = []
+    if missing_policy:
+        exclusion_reasons.append("POLICY_SNAPSHOT_INCOMPLETE")
+    if not exit_provenance:
+        exclusion_reasons.append("TERMINAL_PROVENANCE_MISSING")
+    elif str(exit_provenance).upper() in {
+        "SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED",
+        "ADMIN_MANUAL_CLOSE", "MANUAL_CLOSE", "EMERGENCY_ACTION",
+        "SHOWCASE_UNREACHABLE_OPEN_LOT",
+    }:
+        exclusion_reasons.append("TERMINAL_PROVENANCE_EXCLUDED")
+    if not replay_complete:
+        exclusion_reasons.append("REPLAY_INCOMPLETE_OR_UNPROVEN")
+    if bool(snapshot.get("executed")) and actual_realized_pnl is None:
+        exclusion_reasons.append("ACTUAL_BITFINEX_PNL_MISSING")
+    return {
+        "policy_snapshot": policy_snapshot,
+        "policy_snapshot_complete": not missing_policy,
+        "policy_snapshot_missing": missing_policy,
+        "terminal_provenance": exit_provenance,
+        "actual_bitfinex_realized_pnl_usd": actual_realized_pnl,
+        "replay_complete": replay_complete,
+        "replay_tick_count": len(replay.get("ticks") or []),
+        "analysis_eligible": not exclusion_reasons,
+        "analysis_exclusion_reasons": exclusion_reasons,
+        "analysis_eligibility_schema": "analysis_eligibility_v1",
+    }
+
+
 def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_file=SIGNAL_REPLAY_FILE, output_file=COUNTERFACTUAL_FILE):
     global write_counter, _sim_processed_trade_ids
     if not os.path.exists(signal_snapshot_file) or not os.path.exists(signal_replay_file):
@@ -35861,6 +35959,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
             "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
             "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+            **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
         }
         try:
             rotate_log(output_file)
@@ -36030,6 +36129,7 @@ def _run_counterfactual_catchup():
                 "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
                 "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
                 "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+                **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
                 "catchup": True,
             }
             try:

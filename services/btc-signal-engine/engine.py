@@ -36,6 +36,7 @@ import signal
 import ssl
 import hashlib
 import hmac
+from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
 import numpy as np
@@ -1641,6 +1642,11 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
     pnl_min_peak = peak_never_loser_min_peak_for_lane(lane)
     pnl_floor = peak_never_loser_floor_for_lane(lane)
     return {
+        "policy_snapshot_schema": "exit_policy_v1",
+        "policy_source": "btc-conservative-agent",
+        "policy_version": EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "hard_stop_margin_pct": -float(MAX_SL_MARGIN_PCT),
         "trail_ladder": ladder,
         "ladder_first_trigger_pct": ladder[0][0],
         "ladder_first_lock_pct": ladder[0][1],
@@ -4199,13 +4205,17 @@ def get_display_balance():
 
 def _pending_trade_ids():
     with trade_lock:
-        return {
+        pending = {
             o.get("trade_id")
             for o in pending_orders
             if o.get("trade_id")
             and str(o.get("status") or "").upper()
             in ("PENDING", "CANCEL_PENDING_LIVE")
         }
+        # A natural fill has a short but important handoff: the pending order
+        # is removed before the OPEN lifecycle is committed.  Cleanup must not
+        # mistake that atomic transition for a stale signal with no exposure.
+        return pending | set(fill_handoff_trade_ids)
 
 def is_terminal_signal(sig: dict) -> bool:
     if not isinstance(sig, dict):
@@ -4525,7 +4535,9 @@ def compute_exposure():
 FIXED_MARGIN_USDT = 20.0
 # v79: always deploy full $20 margin — conviction/regime/ADX scaling disabled (logged for analyzer)
 FLAT_MARGIN_EVERY_TRADE = True
-MAX_SL_MARGIN_PCT = 30.0
+# Final fail-safe loss cap for every Continuous position.  Thesis/ladder exits
+# may close earlier, but no trade may remain open beyond this margin loss.
+MAX_SL_MARGIN_PCT = 13.0
 
 def sl_price_pct(leverage: int = None) -> float:
     lev = max(int(leverage or _state_leverage()), 1)
@@ -6414,7 +6426,7 @@ THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
 # Stage 1 Fix #5 (2026-08-06): raised from 2.0% to 5.0%. A +2% MFE spike is
 # chop noise (the 3 recent losers each spiked +2% early as fakeout breakouts
 # then bled to -$6). When 2% triggered, the -12% fast-cut was bypassed and
-# the position ran to the hard SL at -30%. A +5% MFE is a real move, so the
+# the position ran to the final hard stop. A +5% MFE is a real move, so the
 # fast-cut actually fires when a trade goes bad.
 THESIS_MFE_PROTECT_PCT = 5.0  # v1.1.21 Scenario C: skip fast-cut if peak ever >= 5% margin
 
@@ -6663,6 +6675,13 @@ def research_dashboard_public_url() -> str:
     custom = (os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL") or "").strip()
     if custom:
         return custom if custom.endswith("/") else custom + "/"
+    # Fly does not run the heavyweight analyzer process on :9001.  It serves
+    # the uploaded, read-only analyzer mirror at this same-origin route.  A
+    # relative URL also continues to work when Fly is reached through a custom
+    # domain, and prevents mobile clients from being sent to their own
+    # (unrelated) 127.0.0.1.
+    if (os.getenv("FLY_APP_NAME") or "").strip():
+        return "/analysis"
     # Analyzer dashboard (research_dashboard.py) binds :9001 by default.
     # Previous default :9500 was wrong — nothing listens there.
     return "http://127.0.0.1:9001/"
@@ -6697,6 +6716,7 @@ CSV_DECISIONS = "decisions_3factor.csv"
 CSV_TRADES = "trades_3factor.csv"
 CSV_EXPIRED = "expired_orders_3factor.csv"
 FILL_QUALITY_FILE = "fill_quality.jsonl"
+DUPLICATE_INTENT_AUDIT_FILE = "duplicate_intent_audit.jsonl"
 SHADOW_VS_LIVE_ENTRY_FILE = "shadow_vs_live_entry.jsonl"
 SHADOW_VS_LIVE_ENTRY_REPORT = "shadow_vs_live_entry_report.json"
 CSV_BLOCKS = "blocked_signals_3factor.csv"
@@ -6725,6 +6745,7 @@ def _load_local_dotenv():
     secret_keys = frozenset({
         "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
         "OPENROUTER_API_KEY", "BITFINEX_API_KEY", "BITFINEX_API_SECRET",
+        "BOT_CONTROL_SECRET", "SHOWCASE_WEBHOOK_SECRET",
         "BYBIT_API_KEY", "BYBIT_SECRET", "BINANCE_API_KEY", "BINANCE_API_SECRET",
         "OKX_API_KEY", "OKX_API_SECRET", "OKX_PASSPHRASE",
         "HYPERLIQUID_WALLET_ADDRESS", "HYPERLIQUID_PRIVATE_KEY",
@@ -7416,6 +7437,39 @@ _relay_http_session.mount("https://", _relay_http_adapter)
 _relay_http_session.mount("http://", _relay_http_adapter)
 
 
+def _platform_relay_keepalive_url() -> str:
+    """Return a health-only URL on the exact relay origin."""
+    raw = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except Exception:
+        return ""
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}/api/health"
+
+
+def _platform_relay_connection_keepalive_loop():
+    """Keep Fly -> platform DNS/TLS/HTTP transport warm without mutations."""
+    url = _platform_relay_keepalive_url()
+    if not url:
+        return
+    while not shutdown_event.is_set():
+        try:
+            response = _relay_http_session.get(
+                url,
+                headers={"Accept": "application/json"},
+                timeout=1.5,
+            )
+            response.close()
+        except Exception:
+            # Relay POST durability and retries remain authoritative. Warm-up
+            # failure is intentionally silent and never changes bot state.
+            pass
+        if shutdown_event.wait(3.0):
+            return
+
+
 def _relay_delivery_lag_ms(source_ts, platform_received_at):
     try:
         source_dt = datetime.fromisoformat(str(source_ts).replace("Z", "+00:00"))
@@ -7674,7 +7728,7 @@ def _push_showcase_relay_event(
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
-    if event in ("LIMIT_UPDATED", "POSITION_CLOSED"):
+    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED"):
         relay_lane = _platform_relay_lane_for_event(
             trade_id,
             payload.get("research_lane"),
@@ -7698,18 +7752,28 @@ def _push_showcase_relay_event(
     # only when this canonical owner also HMAC-signs the payload.
     if (
         webhook_secret
-        and event in ("LIMIT_UPDATED", "POSITION_CLOSED")
+        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED")
         and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
         and (
             (
                 event == "LIMIT_UPDATED"
                 and isinstance(payload.get("limit_price"), (int, float))
+                and isinstance(payload.get("qty"), (int, float))
+                and float(payload.get("qty") or 0) > 0
                 and payload.get("entry_limit_policy") in EXECUTABLE_ENTRY_POLICY_VERSIONS
                 and payload.get("executable") is True
             )
             or (
+                event == "POSITION_OPENED"
+                and isinstance(payload.get("fill_price"), (int, float))
+            )
+            or (
                 event == "POSITION_CLOSED"
                 and isinstance(payload.get("exit_price"), (int, float))
+            )
+            or (
+                event == "ORDER_EXPIRED"
+                and isinstance(payload.get("source_expires_at"), str)
             )
         )
     ):
@@ -7721,8 +7785,8 @@ def _push_showcase_relay_event(
         # POSITION_CLOSED must not drop on a 2.5s Railway blip — exits are
         # latency-critical and the poll backstop is slower. Allow a longer
         # client timeout plus a couple of tight retries for that event only.
-        post_timeout = 8.0 if event == "POSITION_CLOSED" else 2.5
-        attempts = 3 if event == "POSITION_CLOSED" else 1
+        post_timeout = 8.0 if event in ("POSITION_CLOSED", "ORDER_EXPIRED") else 2.5
+        attempts = 3 if event in ("POSITION_CLOSED", "ORDER_EXPIRED") else 1
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -7846,6 +7910,10 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         or 0
     )
     margin_usdt = float(sig.get("margin_usdt") or FIXED_MARGIN_USDT)
+    try:
+        exact_qty = float(sig.get("qty"))
+    except (TypeError, ValueError):
+        exact_qty = 0.0
     win_prob = ai_dict.get("win_prob") if isinstance(ai_dict.get("win_prob"), (int, float)) else None
     edge_score = sig.get("edge_score_at_entry")
     eff_thr = sig.get("effective_threshold_at_entry")
@@ -7872,12 +7940,13 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         direction not in ("LONG", "SHORT")
         or not limit_price
         or limit_price <= 0
+        or (event == "ORDER_PLACED" and exact_qty <= 0)
         or not is_executable_entry_policy(entry_limit_policy)
     ):
         logger.warning(
             f"[INTENT WEBHOOK] blocked inexact lifecycle event={event} "
             f"trade={trade_id} direction={direction or 'MISSING'} "
-            f"limit={limit_price} policy={entry_limit_policy or 'MISSING'}"
+            f"limit={limit_price} qty={exact_qty} policy={entry_limit_policy or 'MISSING'}"
         )
         return
 
@@ -7901,6 +7970,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "direction": direction or None,
         "signal_price": signal_price if signal_price > 0 else None,
         "limit_price": limit_price if limit_price and limit_price > 0 else None,
+        "qty": exact_qty if exact_qty > 0 else None,
         "margin_usdt": margin_usdt,
         "leverage": leverage,
         "win_prob": win_prob,
@@ -9945,7 +10015,7 @@ def persist_signal(signal, stage="UNKNOWN"):
         if not signal or not signal.get("trade_id"):
             return
         row = {
-            "ts": utc_iso(),
+            "ts": signal.get("_persist_ts") or utc_iso(),
             "trade_id": signal.get("trade_id"),
             "stage": stage,
             "direction": signal.get("final_direction"),
@@ -9963,6 +10033,99 @@ def persist_signal(signal, stage="UNKNOWN"):
 
 def persist_signal_close(trade_id, status):
     logger.info(f"[PERSIST CLOSE] trade_id={trade_id} status={status} [PIPELINE ENFORCEMENT]")
+
+
+def _position_open_relay_allowed(pos, master=None):
+    """Refuse to publish or re-persist an OPEN after terminal close won.
+
+    ``fill_order`` performs persistence and analytics after registering the
+    in-memory position. A strategy/admin close may legitimately win during
+    those slower steps. Terminal state must dominate that late fill thread.
+    """
+    if not isinstance(pos, dict):
+        return False
+    if (
+        pos.get("status") == "CLOSED"
+        or pos.get("_close_in_progress")
+        or pos.get("exit_reason")
+    ):
+        return False
+    if isinstance(master, dict) and is_terminal_signal(master):
+        return False
+    return True
+
+
+def _commit_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
+    """Atomically commit OPEN or yield to a concurrent terminal close."""
+    with position_close_lock:
+        if not _position_open_relay_allowed(pos, master):
+            return None
+        if isinstance(master, dict):
+            master.update({
+                "status": "FILLED",
+                "filled_ts": time.time(),
+                "fill_price": fill_px,
+                "planned_limit_price": order.get("planned_limit_price"),
+                "outcome": "OPEN",
+            })
+        snapshot = copy.deepcopy(master or signal or {})
+        snapshot["_persist_ts"] = opened_ts
+        return snapshot
+
+
+def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
+    """Publish only after OPEN won the terminal-state commit race.
+
+    External/local callbacks remain outside ``position_close_lock`` so a slow
+    analytics bridge cannot delay a risk-reducing close. Their immutable
+    source timestamp still records the causal OPEN commit before that close.
+    """
+    snapshot = _commit_position_open_lifecycle(
+        pos, master, signal, order, fill_px, opened_ts
+    )
+    if snapshot is None:
+        return None
+    _emit_genome_execution_event("ORDER_FILLED", {
+        "trade_id": order.get("trade_id"),
+        "fill_price": fill_px,
+        "direction": order.get("signal_dir"),
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+        "chase_count": int(order.get("limit_chase_count") or 0),
+    })
+    _emit_genome_execution_event("POSITION_OPENED", {
+        "trade_id": pos.get("trade_id"),
+        "entry_price": fill_px,
+        "direction": pos.get("dir"),
+        "qty": pos.get("qty"),
+        "research_lane": pos.get("research_lane"),
+        "stop_loss": pos.get("sl"),
+    })
+    _push_showcase_relay_event(
+        "POSITION_OPENED",
+        order.get("trade_id"),
+        {
+            "ts": opened_ts,
+            "direction": order.get("signal_dir"),
+            "fill_price": fill_px,
+            "qty": order.get("qty"),
+            "research_lane": (signal or {}).get("research_lane")
+            or order.get("research_lane"),
+        },
+    )
+    _relay_mirror(
+        "FILLED",
+        {
+            "trade_id": order.get("trade_id"),
+            "direction": order.get("signal_dir"),
+            "qty": order.get("qty"),
+            "fill_price": fill_px,
+            "entry": fill_px,
+            "research_lane": (signal or {}).get("research_lane"),
+        },
+        source_ts=time.time(),
+    )
+    return snapshot
+
 
 def validate_startup():
     required = ["reset_all_csv","update_logger_level","prune_signals","process_signal","evaluate_signal_with_ai","execute_order","pipeline_state_sync","persist_signal","compute_edge_score","update_debug_state_always"]
@@ -17671,22 +17834,133 @@ def _find_duplicate_limit_exposure(signal: dict, direction: str, limit_price: fl
     return {}
 
 
+def _nearest_same_direction_exposure(signal: dict, direction: str, limit_price: float, lane: str = None) -> dict:
+    """Return the nearest live same-direction intent for research only.
+
+    This never decides whether to suppress an order.  It gives the research
+    stream a complete denominator: genuinely independent nearby orders need
+    to be compared with canonical replays, rather than disappearing behind a
+    price-only "duplicate" label.
+    """
+    direction = str(direction or "").upper()
+    if direction not in ("LONG", "SHORT") or limit_price <= 0:
+        return {}
+    incoming_id = str(signal.get("trade_id") or "")
+    lane = str(lane or "").upper() or None
+    same_lane_only = research_lanes_independent() and bool(lane)
+    candidates = []
+
+    def add_candidate(record: dict, source: str, status: str, price) -> None:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            return
+        if price <= 0:
+            return
+        trade_id = str(record.get("trade_id") or "")
+        if not trade_id or trade_id == incoming_id:
+            return
+        if _normalize_order_side_to_dir(
+            record.get("signal_dir") or record.get("side") or record.get("final_direction") or record.get("dir")
+        ) != direction:
+            return
+        record_lane = str(record.get("research_lane") or "").upper() or None
+        if same_lane_only and record_lane and record_lane != lane:
+            return
+        candidates.append({
+            "trade_id": trade_id,
+            "source": source,
+            "status": status,
+            "limit_price": price,
+            "research_lane": record_lane,
+            "shared_ai_call_id": record.get("shared_ai_call_id") or record.get("source_trade_id"),
+            "created_ts": record.get("created_ts_ts") or record.get("signal_created_ts") or record.get("created_ts"),
+        })
+
+    now = time.time()
+    with trade_lock:
+        for order in pending_orders:
+            if order.get("status") == "PENDING":
+                add_candidate(order, "pending_order", "PENDING", order.get("planned_limit_price") or order.get("limit_price"))
+        for position in open_positions:
+            add_candidate(position, "open_position", "FILLED", position.get("entry"))
+        for entry in trades_map.values():
+            record = entry.get("signal_ref") or {}
+            if not isinstance(record, dict) or is_terminal_signal(record):
+                continue
+            expires_ts = record.get("expires_ts") or (record.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
+            if expires_ts and now > expires_ts:
+                continue
+            add_candidate(record, "signal", str(record.get("status") or "UNKNOWN"), _signal_planned_limit(record))
+    if not candidates:
+        return {}
+    nearest = min(candidates, key=lambda item: abs(limit_price - item["limit_price"]))
+    try:
+        incoming_created = float(signal.get("created_ts_ts") or signal.get("signal_created_ts") or signal.get("created_ts") or 0)
+        existing_created = float(nearest.get("created_ts") or 0)
+        lifecycle_distance = abs(incoming_created - existing_created) if incoming_created and existing_created else None
+    except (TypeError, ValueError):
+        lifecycle_distance = None
+    nearest["price_distance_usd"] = round(abs(limit_price - nearest["limit_price"]), 4)
+    nearest["same_shared_ai_call"] = bool(
+        signal.get("shared_ai_call_id")
+        and signal.get("shared_ai_call_id") == nearest.get("shared_ai_call_id")
+    )
+    nearest["lifecycle_distance_sec"] = round(lifecycle_distance, 3) if lifecycle_distance is not None else None
+    return nearest
+
+
+def _record_duplicate_intent_audit(signal: dict, direction: str, limit_price: float, decision: str, nearest: dict = None) -> None:
+    """Persist the evidence needed to evaluate duplicate suppression safely."""
+    nearest = nearest or {}
+    with trade_lock:
+        pending_count = sum(1 for order in pending_orders if order.get("status") == "PENDING")
+        open_count = len(open_positions)
+    _safe_append_jsonl(DUPLICATE_INTENT_AUDIT_FILE, {
+        "schema": "duplicate_intent_audit_v1",
+        "ts": utc_iso(),
+        "decision": decision,
+        "trade_id": signal.get("trade_id"),
+        "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
+        "created_ts": signal.get("created_ts_ts") or signal.get("signal_created_ts") or signal.get("created_ts"),
+        "direction": direction,
+        "limit_price": limit_price,
+        "research_lane": signal.get("research_lane"),
+        "nearest_trade_id": nearest.get("trade_id"),
+        "nearest_source": nearest.get("source"),
+        "nearest_status": nearest.get("status"),
+        "nearest_limit_price": nearest.get("limit_price"),
+        "nearest_shared_ai_call_id": nearest.get("shared_ai_call_id"),
+        "price_distance_usd": nearest.get("price_distance_usd"),
+        "same_shared_ai_call": nearest.get("same_shared_ai_call"),
+        "lifecycle_distance_sec": nearest.get("lifecycle_distance_sec"),
+        "pending_count": pending_count,
+        "open_count": open_count,
+        "max_pending_orders": MAX_PENDING_ORDERS,
+        "bot_version": EXECUTION_FIX_VERSION,
+    }, label="DUPLICATE_INTENT_AUDIT")
+
+
 def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: str) -> bool:
     """Expire incoming signal when same direction+limit already active. Returns True if rejected."""
     if not duplicate_limit_block_enabled():
         return False
     direction = _signal_direction(signal)
     tid = signal.get("trade_id")
+    nearest = _nearest_same_direction_exposure(signal, direction, limit_price, lane=signal.get("research_lane"))
     dup = _find_duplicate_limit_exposure(signal, direction, limit_price, lane=signal.get("research_lane"))
     if not dup:
+        _record_duplicate_intent_audit(signal, direction, limit_price, "ALLOW_DISTINCT", nearest)
         return False
     if dup.get("same_trade_replay"):
+        _record_duplicate_intent_audit(signal, direction, limit_price, "NO_OP_SAME_TRADE_REPLAY", dup)
         logger.info(
             f"[SIM] CANONICAL_SIGNAL_REPLAY no-op trade_id={tid} dir={direction} "
             f"limit={fmt(limit_price)} source={dup.get('source')} "
             f"shared_ai_call_id={dup.get('shared_ai_call_id')} [PIPELINE ENFORCEMENT]"
         )
         return True
+    _record_duplicate_intent_audit(signal, direction, limit_price, "SUPPRESS_CANONICAL_INTENT", dup)
     reason = "DUPLICATE_LIMIT_PRICE"
     with trade_lock:
         master = trades_map.get(tid, {}).get("signal_ref", signal)
@@ -18586,6 +18860,68 @@ def _compute_limit_chase_target(
     return round(new_limit, 2), "LIMIT_CHASE"
 
 
+def _commit_relay_limit_chase(
+    order: dict,
+    signal: dict,
+    *,
+    direction: str,
+    old_limit: float,
+    new_limit: float,
+    chase_count: int,
+    now: float,
+    tier: str = None,
+    urgent_marketable: bool = False,
+) -> dict | None:
+    """Atomically commit a still-pending chase and snapshot its causal event.
+
+    A fill may win after a chase decision is calculated but before the
+    fire-and-forget relay POST is built.  Do not mutate or emit a LIMIT_UPDATED
+    in that case.  If the chase wins, capture its source timestamp while the
+    pending generation is still current so an asynchronously delivered update
+    can never claim to be newer than a later POSITION_OPENED.
+    """
+    with trade_lock:
+        trade_id = order.get("trade_id")
+        if (
+            order not in pending_orders
+            or order.get("status") != "PENDING"
+            or not trade_id
+            or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
+            or int(order.get("limit_chase_count") or 0) != chase_count - 1
+            or any(
+                p.get("trade_id") == trade_id and p.get("status") != "CLOSED"
+                for p in open_positions
+            )
+        ):
+            return None
+        order["limit_price"] = new_limit
+        order["limit_chase_count"] = chase_count
+        order["last_chase_ts"] = now
+        if tier:
+            order["urgent_chase_tier"] = tier
+        if urgent_marketable:
+            order["urgent_marketable_chase"] = True
+        order["fill_model"] = _resolve_fill_model(signal, order)
+        if signal:
+            signal["limit_price"] = new_limit
+            signal["limit_chase_count"] = chase_count
+            signal["last_chase_ts"] = now
+            if tier:
+                signal["urgent_chase_tier"] = tier
+            signal["fill_model"] = order["fill_model"]
+        return {
+            "ts": utc_iso(),
+            "limit_price": new_limit,
+            "qty": float(order.get("qty") or 0),
+            "direction": direction,
+            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+            "event_seq": chase_count,
+            "executable": True,
+        }
+
+
 def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now: float, tier: str = "extreme") -> bool:
     """URGENT_CHASE_ALPHA extreme tier — immediate marketable limit (no 10m wait)."""
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
@@ -18613,18 +18949,13 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         )
         _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
         return False
-    order["limit_price"] = new_limit
-    order["limit_chase_count"] = chase_count
-    order["last_chase_ts"] = now
-    order["urgent_chase_tier"] = tier
-    order["urgent_marketable_chase"] = True
-    order["fill_model"] = _resolve_fill_model(signal, order)
-    if signal:
-        signal["limit_price"] = new_limit
-        signal["limit_chase_count"] = chase_count
-        signal["last_chase_ts"] = now
-        signal["urgent_chase_tier"] = tier
-        signal["fill_model"] = order["fill_model"]
+    relay_event = _commit_relay_limit_chase(
+        order, signal, direction=direction, old_limit=old_limit,
+        new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
+        urgent_marketable=True,
+    )
+    if relay_event is None:
+        return False
     logger.info(
         f"[SIM] URGENT_MARKETABLE_CHASE trade_id={order.get('trade_id')} dir={direction} tier={tier} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
@@ -18647,15 +18978,7 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {
-            "limit_price": new_limit,
-            "direction": direction,
-            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
-            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
-            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-            "event_seq": chase_count,
-            "executable": True,
-        },
+        relay_event,
     )
     return True
 
@@ -18696,19 +19019,12 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = next_chase_count
-    order["limit_price"] = new_limit
-    order["limit_chase_count"] = chase_count
-    order["last_chase_ts"] = now
-    order["fill_model"] = _resolve_fill_model(signal, order)
-    if tier:
-        order["urgent_chase_tier"] = tier
-    if signal:
-        signal["limit_price"] = new_limit
-        signal["limit_chase_count"] = chase_count
-        signal["last_chase_ts"] = now
-        signal["fill_model"] = order["fill_model"]
-        if tier:
-            signal["urgent_chase_tier"] = tier
+    relay_event = _commit_relay_limit_chase(
+        order, signal, direction=direction, old_limit=old_limit,
+        new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
+    )
+    if relay_event is None:
+        return False
     tier_note = f" tier={tier}" if tier else ""
     logger.info(
         f"[SIM] LIMIT_CHASE trade_id={order.get('trade_id')} dir={direction} "
@@ -18731,15 +19047,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
-        {
-            "limit_price": new_limit,
-            "direction": direction,
-            "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
-            "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
-            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-            "event_seq": chase_count,
-            "executable": True,
-        },
+        relay_event,
     )
     return True
 
@@ -18823,6 +19131,7 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
             {
                 "event_id": transition_id,
                 "limit_price": new_limit,
+                "qty": float(order.get("qty") or 0),
                 "direction": direction,
                 "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
                 "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
@@ -19065,11 +19374,28 @@ def _pending_limit_ready_for_fill(
     if order.get("marketable_fallback") and settle_not_before > 0:
         if order.get("relay_event_durable_ack") is not True:
             return False
-        # The order was marketable on the source book when LIMIT_UPDATED was
-        # durably acknowledged. Complete the deterministic paper fill after
-        # the bounded relay dwell even if the next public tick has moved away.
-        return True
-    if VENUE_EXECUTABLE_SHOWCASE_FILL_GATE and venue_snapshot is not None:
+        # A relay receipt is proof that the replacement was delivered, not
+        # proof that the full quantity was executable on Bitfinex.  The old
+        # fallback returned True here and could therefore create a Showcase
+        # paper fill after the venue had moved away.  Every source fill,
+        # including a terminal reprice, must pass the same live venue gate.
+        if globals().get("VENUE_EXECUTABLE_SHOWCASE_FILL_GATE", False) and venue_snapshot is not None:
+            executable, evidence = _venue_executable_showcase_fill(
+                order,
+                bid=float(bid or 0),
+                ask=float(ask or 0),
+                venue_snapshot=venue_snapshot,
+                recent_market_trades=recent_market_trades or [],
+                now=now,
+            )
+            evidence["entry_path"] = "MARKETABLE_FALLBACK"
+            order["venue_fill_gate"] = evidence
+            return executable
+        return False
+    # Isolated contract tests compile this helper without the module-level
+    # feature configuration.  Default off only in that test harness; the
+    # production module explicitly enables the gate above.
+    if globals().get("VENUE_EXECUTABLE_SHOWCASE_FILL_GATE", False) and venue_snapshot is not None:
         executable, evidence = _venue_executable_showcase_fill(
             order,
             bid=float(bid or 0),
@@ -19158,11 +19484,21 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
+            order["fill_handoff_in_progress"] = True
+            if order.get("trade_id"):
+                fill_handoff_trade_ids.add(order["trade_id"])
             fills.append(order)
     for order in fills:
         fill_order(order)
 
 def fill_order(order):
+    def clear_fill_handoff():
+        tid = order.get("trade_id")
+        with trade_lock:
+            if tid:
+                fill_handoff_trade_ids.discard(tid)
+            order.pop("fill_handoff_in_progress", None)
+
     if manual_admin_pause_active():
         lane_unregister_pending_order(order)
         order["status"] = "CANCELLED"
@@ -19172,6 +19508,7 @@ def fill_order(order):
             f"[ADMIN PAUSE] suppressed raced fill trade_id={order.get('trade_id')} "
             f"[PIPELINE ENFORCEMENT]"
         )
+        clear_fill_handoff()
         pipeline_state_sync()
         return None
     direction = _normalize_order_side_to_dir(
@@ -19219,9 +19556,13 @@ def fill_order(order):
         _ftid = order.get("trade_id")
         if _ftid and any(p.get("trade_id") == _ftid and p.get("status") != "CLOSED" for p in open_positions):
             logger.warning(f"[FILL GUARD] Duplicate fill suppressed for trade_id={_ftid} — position already open")
+            clear_fill_handoff()
             return
         pos = _build_open_position(order, signal, ai)
         lane_register_open_position(pos)
+        # Bind relay chronology to the actual position registration, not to
+        # the end of slower persistence/analytics work below.
+        position_opened_relay_ts = utc_iso()
     fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
     if fill_lane:
         log_lane_opportunity_event(
@@ -19234,49 +19575,30 @@ def fill_order(order):
             block_reason="PENDING_LIMIT_TOUCHED",
         )
     fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
-    _emit_genome_execution_event("ORDER_FILLED", {
-        "trade_id": order.get("trade_id"),
-        "fill_price": fill_px,
-        "direction": order.get("signal_dir"),
-        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
-        "chase_count": int(order.get("limit_chase_count") or 0),
-    })
-    _emit_genome_execution_event("POSITION_OPENED", {
-        "trade_id": pos.get("trade_id"),
-        "entry_price": fill_px,
-        "direction": pos.get("dir"),
-        "qty": pos.get("qty"),
-        "research_lane": pos.get("research_lane"),
-        "stop_loss": pos.get("sl"),
-    })
-    mark_approve_research_executed(pos.get("trade_id"), fill_px)
     master = trades_map.get(order["trade_id"], {}).get("signal_ref")
-    if master:
-        master.update({
-            "status": "FILLED",
-            "filled_ts": time.time(),
-            "fill_price": fill_px,
-            "planned_limit_price": order.get("planned_limit_price"),
-            "outcome": "OPEN",
-        })
-    persist_signal(master or signal, "FILLED")
+    fill_snapshot = _finalize_position_open_lifecycle(
+        pos,
+        master,
+        signal,
+        order,
+        fill_px,
+        position_opened_relay_ts,
+    )
+    if fill_snapshot is None:
+        logger.warning(
+            "[FILL GUARD] terminal close won before OPEN commit "
+            f"trade_id={order.get('trade_id')} — suppressing all late fill events"
+        )
+        clear_fill_handoff()
+        return
+    clear_fill_handoff()
+    mark_approve_research_executed(pos.get("trade_id"), fill_px)
+    persist_signal(fill_snapshot, "FILLED")
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
     # C3 fix: persist the newly-opened position to disk immediately so a crash between
     # this fill and the next save never loses an open position (was only saved on close
     # or graceful shutdown — a non-graceful crash orphaned every open position).
     save_positions()
-    _relay_mirror(
-        "FILLED",
-        {
-            "trade_id": order.get("trade_id"),
-            "direction": order.get("signal_dir"),
-            "qty": order.get("qty"),
-            "fill_price": fill_px,
-            "entry": fill_px,
-            "research_lane": (signal or {}).get("research_lane"),
-        },
-        source_ts=time.time(),
-    )
     pipeline_state_sync()
 
 def _observable_exit_price() -> float:
@@ -21650,6 +21972,23 @@ def _expired_already_recorded(trade_id: str) -> bool:
         return any(e.get("trade_id") == trade_id for e in expired_orders)
 
 
+def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
+    """Only a real, previously-resting source limit may drive copy cancellation."""
+    return bool(
+        str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
+        # Continuous creates real paper resting orders with entry_type LIMIT,
+        # while legacy/simulation paths use SIM_LIMIT.  Both represent an
+        # already-published, executable source order; excluding LIMIT made a
+        # genuine Continuous TTL fall back to the slow relay poll instead of
+        # emitting the signed, exact-generation ORDER_EXPIRED wake.
+        and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
+        and str(source.get("status") or "").upper() == "PENDING"
+        and source.get("created_ts")
+        and isinstance(limit_price, (int, float))
+        and limit_price > 0
+    )
+
+
 def _record_expired_order(source: dict, reason: str):
     """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
     if source.get("bitfinex_order_id"):
@@ -21772,6 +22111,30 @@ def _record_expired_order(source: dict, reason: str):
         {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
         source_ts=float(now),
     )
+    if (
+        _is_executable_order_expiry(source, reason, limit_price)
+        and _platform_relay_lane_for_event(tid, row.get("research_lane"))
+        in PLATFORM_RELAY_ELIGIBLE_LANES
+    ):
+        # The expired resting order itself is authoritative. Never borrow a
+        # newer master/signal revision and pair it with this older limit.
+        generation = int(source.get("event_seq") or source.get("limit_chase_count") or 0)
+        _push_showcase_relay_event(
+            "ORDER_EXPIRED", tid, {
+                "direction": row.get("dir"), "reason": reason,
+                "event_seq": generation, "limit_price": limit_price,
+                "event_id": f"{tid}:ORDER_EXPIRED:{generation}:{row['time']}",
+                "source_created_at": datetime.fromtimestamp(created, timezone.utc).isoformat() if created else None,
+                "source_expires_at": row["time"],
+                "research_lane": row.get("research_lane"),
+            },
+            # An expiry retires real exchange exposure.  Unlike a cosmetic
+            # update, it must not be left on a daemon thread where the source
+            # loop can continue and the relay has to discover it by polling.
+            # The platform acknowledgement is idempotent and also gives this
+            # path an explicit retry/failure signal.
+            wait_for_durable_receipt=True,
+        )
     log_expired_order(row)
     if row.get("research_lane") == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
         lifecycle_event = (
@@ -23087,6 +23450,31 @@ def _admin_authed_strict() -> bool:
     return False
 
 
+def _analyzer_view_cookie_value() -> str:
+    """Return an opaque, revocable session value for the read-only analyzer.
+
+    The browser never receives BOT_ADMIN_TOKEN as a cookie on this path.  A
+    token rotation invalidates this derived value automatically, while the
+    cookie cannot authorize any trading or settings endpoint.
+    """
+    if not _BOT_ADMIN_TOKEN:
+        return ""
+    return hmac.new(
+        _BOT_ADMIN_TOKEN.encode("utf-8"),
+        b"doxxed-analyzer-view-v1",
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _analyzer_view_authed() -> bool:
+    """Accept full admin auth or the narrower analyzer-only browser session."""
+    if _admin_authed_strict():
+        return True
+    expected = _analyzer_view_cookie_value()
+    presented = request.cookies.get("analyzer_view_session", "")
+    return bool(expected and presented and hmac.compare_digest(presented, expected))
+
+
 @app.before_request
 def _emergency_api_guard():
     path = request.path or ""
@@ -23198,6 +23586,10 @@ trade_lock = threading.RLock()
 position_close_lock = threading.RLock()
 position_evaluation_lock = threading.Lock()
 _live_control_lock = threading.RLock()
+# Trade IDs moving from a filled limit into an OPEN position.  Protected by
+# trade_lock and intentionally included in _pending_trade_ids() until the
+# OPEN lifecycle commit has won or the handoff has been abandoned.
+fill_handoff_trade_ids = set()
 # Coalesce dashboard polls — many tabs/Agent Hub hits were each deep-copying 10k+ trades.
 _API_STATE_CACHE_TTL_SEC = 2.5
 _API_STATE_REFRESH_INTERVAL_SEC = max(
@@ -23778,6 +24170,7 @@ def _scenario_c_exit_spec(research_lane: str = None):
         "profile": "Scenario C",
         "ladder": ladder_label,
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
@@ -23790,6 +24183,7 @@ def _runner_exit_spec():
         "profile": "Scenario C Runner Variant",
         "ladder": "18→14, 25→18, 40→28, 55→38",
         "thesis_stop_margin_pct": THESIS_FAST_EXIT_UNREAL_PCT,
+        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
         "mfe_protect_margin_pct": THESIS_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
@@ -23802,6 +24196,7 @@ def _recovery_monster_exit_spec():
         "profile": "Recovery Monster v1",
         "ladder": "18→14, 25→18, 40→28, 55→38",
         "thesis_stop_margin_pct": RECOVERY_MONSTER_THESIS_PCT,
+        "hard_stop_margin_pct": -MAX_SL_MARGIN_PCT,
         "mfe_protect_margin_pct": RECOVERY_MONSTER_MFE_PROTECT_PCT,
         "thesis_pause_above_margin_pct": THESIS_EXIT_IF_ABOVE_UNREAL_PCT,
         "type_a_stall": "OFF",
@@ -23840,6 +24235,7 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
         f"AI cadence: {entry.get('ai_cadence') or shared['ai_scan_cadence_label']}",
         f"Exit: {exit.get('profile')} · ladder {exit.get('ladder')}",
         f"Thesis stop: {exit.get('thesis_stop_margin_pct')}% margin unreal",
+        f"Final hard stop: {exit.get('hard_stop_margin_pct')}% margin unreal",
         f"MFE protect: peak ≥{exit.get('mfe_protect_margin_pct')}% margin → skip fast thesis cut",
         f"Thesis pause above: +{exit.get('thesis_pause_above_margin_pct')}% unreal",
         f"Time cap: {exit.get('fixed_time_exit')}",
@@ -26228,12 +26624,12 @@ __ADMIN_ACCESS_CONTROLS__
 
 <h2>Pending Orders</h2>
 <table>
-    <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th></tr></thead>
+    <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th><th>Venue fill gate</th></tr></thead>
     <tbody id="ordersTable"></tbody>
 </table>
 
 <h2>Expired Orders</h2>
-<p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv.</p>
+<p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv. Age 0.0 with DUPLICATE_LIMIT_PRICE means a duplicate candidate was rejected before placement; no paper or exchange order was cancelled.</p>
 <table>
     <thead><tr><th>Expired Time (Melbourne)</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
@@ -26242,7 +26638,7 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -26270,6 +26666,22 @@ __ADMIN_ACCESS_CONTROLS__
 
 DASHBOARD_JS = """(function () {
   try {
+    function displayExitCause(reason) {
+      const raw = String(reason || '').trim();
+      if (!raw) return 'Not recorded';
+      const labels = {
+        PROFIT_LOCK_LADDER: 'Profit lock (trailing)',
+        TAKE_PROFIT: 'Take profit',
+        THESIS_FAST_CUT: 'Thesis fast cut',
+        EARLY_FAIL: 'Early thesis failure',
+        STOP_LOSS: 'Stop loss',
+        HARD_STOP: 'Safety stop',
+        TIME_EXIT: 'Maximum-hold exit',
+        ADMIN_MANUAL_CLOSE: 'Manual close',
+        CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
+      };
+      return labels[raw.toUpperCase()] || raw.replace(/_/g, ' ');
+    }
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
       const s = String(ts).trim();
@@ -27752,6 +28164,13 @@ DASHBOARD_JS = """(function () {
         `).join(''));
         safeHTML('ordersTable', (d.orders||[]).map(o => {
           let st = o.status || '-';
+          const gate = o.venue_fill_gate || null;
+          const gateReason = gate && gate.reason ? String(gate.reason) : 'NOT CHECKED';
+          const gateQty = gate && gate.visible_executable_qty != null && gate.requested_qty != null
+            ? (' ' + Number(gate.visible_executable_qty).toFixed(5) + '/' + Number(gate.requested_qty).toFixed(5))
+            : '';
+          const gateAge = gate && gate.book_age_sec != null ? (' · book ' + Number(gate.book_age_sec).toFixed(1) + 's') : '';
+          const gateColor = gateReason === 'EXECUTABLE' ? '#3fb950' : (gateReason === 'NOT CHECKED' ? '#8b949e' : '#f0c14b');
           if (o.limit_touched && st === 'PENDING') st += ' (TOUCHED)';
           const chaseN = o.limit_chase_count || 0;
           if (chaseN > 0 && st === 'PENDING') st += ' (CHASING)';
@@ -27768,6 +28187,7 @@ DASHBOARD_JS = """(function () {
             <td>${o.original_limit_price?.toFixed(2)||'-'}</td>
             <td>${chaseCell}</td>
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
+            <td style="color:${gateColor};font-size:0.82em;">${gateReason}${gateQty}${gateAge}</td>
           </tr>`;
         }).join(''));
         safeHTML('positionsTable', (d.positions||[]).map(l => {
@@ -27864,6 +28284,7 @@ DASHBOARD_JS = """(function () {
             <td>${t.entry != null ? t.entry.toFixed(2) : '-'}</td>
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
             <td>${t.dur_min != null ? t.dur_min.toFixed(1) : '-'}</td>
+            <td>${displayExitCause(t.exit_reason)}</td>
             <td>${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
             <td>$${t.net_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>
@@ -29800,6 +30221,7 @@ _RELAY_EXECUTION_REFRESH_LOCK = threading.Lock()
 _RELAY_EXECUTION_CACHE_PAYLOAD = None
 _RELAY_EXECUTION_CACHE_BODY = None
 _RELAY_EXECUTION_CACHE_AT = 0.0
+_RELAY_EXECUTION_SNAPSHOT_SEQ = 0
 _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
     0.05,
     float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "0.20")),
@@ -29822,15 +30244,19 @@ def _publish_relay_execution_snapshot() -> dict:
     global _RELAY_EXECUTION_CACHE_PAYLOAD
     global _RELAY_EXECUTION_CACHE_BODY
     global _RELAY_EXECUTION_CACHE_AT
+    global _RELAY_EXECUTION_SNAPSHOT_SEQ
     if not _RELAY_EXECUTION_REFRESH_LOCK.acquire(blocking=False):
         return None
     try:
         started = time.perf_counter()
         payload = _build_relay_execution_state_snapshot()
+        _RELAY_EXECUTION_SNAPSHOT_SEQ += 1
+        payload["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ
         payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
         payload["snapshot_age_sec"] = 0
         integrity = payload.get("state_integrity")
         if isinstance(integrity, dict):
+            integrity["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ
             integrity["snapshot_age_sec"] = 0
         body = json.dumps(
             payload,
@@ -31837,6 +32263,48 @@ def api_close_showcase_position():
     })
 
 
+@app.route('/api/orders/cancel', methods=['POST'])
+def api_cancel_showcase_pending_order():
+    """Cancel one exact pending Showcase order without wiping research history.
+
+    This is intentionally narrower than ``/api/reset``: it is an authenticated
+    deployment-boundary recovery tool.  It refuses an unknown or ambiguous
+    trade ID and uses the normal confirmed-cancellation primitive so the
+    expired-order audit remains truthful.
+    """
+    body = request.get_json(silent=True) or {}
+    trade_id = str(body.get("trade_id") or "").strip()
+    if not trade_id:
+        return jsonify({"error": "trade_id is required"}), 400
+    with trade_lock:
+        matches = [
+            order for order in pending_orders
+            if str(order.get("trade_id") or "") == trade_id
+            and str(order.get("status") or "").upper()
+            not in ("CANCELLED", "EXPIRED", "REJECTED", "FILLED", "OPEN", "CLOSED")
+        ]
+    if not matches:
+        return jsonify({"error": "pending showcase order not found", "trade_id": trade_id}), 404
+    if len(matches) != 1:
+        logger.error("[ADMIN] Refusing ambiguous pending cancel trade_id=%s matches=%s", trade_id, len(matches))
+        return jsonify({"error": "ambiguous pending showcase order", "trade_id": trade_id}), 409
+    result = _cancel_pending_order_confirmed(
+        matches[0],
+        "ADMIN_FORCE_FLAT",
+        record_expired=True,
+        expire_signal=True,
+        final_status="CANCELLED",
+    )
+    if not result.get("finalized"):
+        return jsonify({"error": "pending cancel unconfirmed", "trade_id": trade_id, "result": result}), 409
+    with trade_lock:
+        paper_orders = copy.deepcopy(pending_orders)
+        paper_positions = copy.deepcopy(open_positions)
+    _patch_api_state_cache_fields(orders=paper_orders, positions=paper_positions)
+    logger.warning("[ADMIN] Showcase pending order cancelled trade_id=%s", trade_id)
+    return jsonify({"status": "cancelled", "trade_id": trade_id, "result": result})
+
+
 # ---------------------------------------------------------------------------
 # Cure 2 — Phantom paper position cancellation (Railway-initiated).
 #
@@ -33253,15 +33721,89 @@ def api_analyzer_mirror_status():
 
 @app.route('/analysis')
 def analyzer_mirror_dashboard():
-    if not _admin_authed_strict():
-        return jsonify({"error": "admin token required"}), 401
+    if not _analyzer_view_authed():
+        resp = make_response('', 303)
+        resp.headers['Location'] = '/analysis/login'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
     report = _analyzer_mirror_dir() / "analysis_dashboard.html"
     if not report.is_file():
         return jsonify({
             "error": "no analyzer mirror is available yet",
             "next": "run the local sync/analyzer publisher while the PC is online",
         }), 404
-    return send_file(report, mimetype="text/html")
+    resp = make_response(send_file(report, mimetype="text/html"))
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'DENY'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    return resp
+
+
+@app.route('/analysis/login', methods=['GET', 'POST'])
+def analyzer_mirror_login():
+    """Mobile-friendly, read-only analyzer authentication.
+
+    The owner token is accepted only in a POST body and exchanged for a
+    derived HttpOnly cookie which is deliberately ignored by every mutation
+    endpoint.
+    """
+    if request.method == 'GET':
+        return render_template_string("""
+<!doctype html>
+<html lang="en"><head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BTC Analyzer Access</title>
+  <style>
+    body{background:#0b0f14;color:#e5e7eb;font-family:system-ui;margin:0;padding:32px 18px}
+    main{max-width:420px;margin:12vh auto;background:#111827;padding:24px;border-radius:14px}
+    input,button{box-sizing:border-box;width:100%;padding:13px;margin-top:12px;border-radius:8px}
+    input{background:#030712;color:#fff;border:1px solid #374151}
+    button{background:#2563eb;color:#fff;border:0;font-weight:700}
+    p{color:#9ca3af;line-height:1.45}
+  </style>
+</head><body><main>
+  <h2>Read-only analyzer</h2>
+  <p>Enter the owner token once. This creates an analyzer-only session; it cannot change trading settings or place orders.</p>
+  <form method="post" action="/analysis/login" autocomplete="on">
+    <label for="analyzerUsername">Account</label>
+    <input id="analyzerUsername" name="username" type="text" value="bot-analyzer" readonly autocomplete="username">
+    <label for="analyzerToken">Owner token</label>
+    <input id="analyzerToken" name="token" type="password" required autofocus placeholder="Owner token" autocomplete="current-password">
+    <button type="submit">Open analyzer</button>
+  </form>
+</main></body></html>
+        """), 200, {'Cache-Control': 'no-store'}
+
+    token = request.form.get('token', '')
+    if not _BOT_ADMIN_TOKEN or not hmac.compare_digest(token, _BOT_ADMIN_TOKEN):
+        return 'Invalid owner token', 401, {'Cache-Control': 'no-store'}
+
+    resp = make_response('', 303)
+    resp.headers['Location'] = '/analysis'
+    forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    secure = bool(request.is_secure or forwarded_proto == 'https')
+    resp.set_cookie(
+        'analyzer_view_session', _analyzer_view_cookie_value(),
+        httponly=True, samesite='Lax', path='/analysis',
+        max_age=60 * 60 * 24 * 30, secure=secure,
+    )
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/analysis/logout', methods=['POST'])
+def analyzer_mirror_logout():
+    resp = make_response('', 303)
+    resp.headers['Location'] = '/analysis/login'
+    forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+    secure = bool(request.is_secure or forwarded_proto == 'https')
+    resp.delete_cookie(
+        'analyzer_view_session', httponly=True, samesite='Lax',
+        path='/analysis', secure=secure,
+    )
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 def _read_log_tail(path, max_lines=400):
@@ -35021,6 +35563,21 @@ def dump_replay(trade_id: str):
         try:
             post_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_block"]
             post_exit_ticks = [t for t in buf.get("ticks", []) if t.get("phase") == "post_exit"]
+            now = time.time()
+            lane = str(buf.get("lane") or "")
+            is_executed = lane == "executed"
+            post_exit_deadline = _buf_float(buf.get("post_exit_deadline_ts"), 0)
+            post_exit_complete = bool(
+                buf.get("post_exit")
+                and post_exit_deadline > 0
+                and now >= post_exit_deadline
+                and post_exit_ticks
+            )
+            replay_complete = bool(
+                buf.get("closed")
+                and buf.get("ticks")
+                and (not is_executed or post_exit_complete)
+            )
             replay = {
                 "schema": "signal_replay_v4",
                 "trade_id": trade_id,
@@ -35034,6 +35591,20 @@ def dump_replay(trade_id: str):
                 "post_block_tick_count": len(post_ticks),
                 "post_exit_tick_count": len(post_exit_ticks),
                 "post_exit_sec": POST_EXIT_REPLAY_SEC if buf.get("post_exit") or post_exit_ticks else 0,
+                "post_exit_complete": post_exit_complete,
+                "replay_complete": replay_complete,
+                "replay_completion_reason": (
+                    "POST_EXIT_HORIZON_COMPLETE"
+                    if post_exit_complete
+                    else "BUFFER_CLOSED"
+                    if replay_complete
+                    else "INCOMPLETE_EXECUTED_POST_EXIT"
+                    if is_executed
+                    else "INCOMPLETE_BUFFER"
+                ),
+                "terminal_provenance": (
+                    "SHOWCASE_STRATEGY_EXIT" if is_executed else "COUNTERFACTUAL_ONLY"
+                ),
                 "exit_t_rel": buf.get("exit_t_rel"),
                 "exit_reason": buf.get("exit_reason"),
                 "virtual_entry": buf.get("virtual_entry"),
@@ -35257,6 +35828,65 @@ def analytics_loop():
         logger.exception("[CRITICAL] Analytics loop crash")
         set_execution_paused("THREAD_CRASH")
 
+_COUNTERFACTUAL_REQUIRED_POLICY_KEYS = (
+    "policy_snapshot_schema",
+    "policy_version",
+    "hard_stop_margin_pct",
+    "thesis_fast_exit_unreal_pct",
+    "thesis_mfe_protect_pct",
+    "trail_ladder",
+    "exit_profile_id",
+)
+
+
+def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
+    """Immutable policy and conservative analysis-eligibility metadata."""
+    policy_snapshot = copy.deepcopy(buf.get("exit_config") or {})
+    missing_policy = [
+        key for key in _COUNTERFACTUAL_REQUIRED_POLICY_KEYS
+        if policy_snapshot.get(key) is None
+    ]
+    exit_provenance = (
+        snapshot.get("exit_provenance")
+        or snapshot.get("terminal_provenance")
+        or replay.get("exit_provenance")
+        or replay.get("terminal_provenance")
+    )
+    replay_complete = replay.get("replay_complete") is True
+    actual_realized_pnl = (
+        snapshot.get("actual_bitfinex_realized_pnl_usd")
+        if snapshot.get("actual_bitfinex_realized_pnl_usd") is not None
+        else replay.get("actual_bitfinex_realized_pnl_usd")
+    )
+    exclusion_reasons = []
+    if missing_policy:
+        exclusion_reasons.append("POLICY_SNAPSHOT_INCOMPLETE")
+    if not exit_provenance:
+        exclusion_reasons.append("TERMINAL_PROVENANCE_MISSING")
+    elif str(exit_provenance).upper() in {
+        "SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED",
+        "ADMIN_MANUAL_CLOSE", "MANUAL_CLOSE", "EMERGENCY_ACTION",
+        "SHOWCASE_UNREACHABLE_OPEN_LOT",
+    }:
+        exclusion_reasons.append("TERMINAL_PROVENANCE_EXCLUDED")
+    if not replay_complete:
+        exclusion_reasons.append("REPLAY_INCOMPLETE_OR_UNPROVEN")
+    if bool(snapshot.get("executed")) and actual_realized_pnl is None:
+        exclusion_reasons.append("ACTUAL_BITFINEX_PNL_MISSING")
+    return {
+        "policy_snapshot": policy_snapshot,
+        "policy_snapshot_complete": not missing_policy,
+        "policy_snapshot_missing": missing_policy,
+        "terminal_provenance": exit_provenance,
+        "actual_bitfinex_realized_pnl_usd": actual_realized_pnl,
+        "replay_complete": replay_complete,
+        "replay_tick_count": len(replay.get("ticks") or []),
+        "analysis_eligible": not exclusion_reasons,
+        "analysis_exclusion_reasons": exclusion_reasons,
+        "analysis_eligibility_schema": "analysis_eligibility_v1",
+    }
+
+
 def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_file=SIGNAL_REPLAY_FILE, output_file=COUNTERFACTUAL_FILE):
     global write_counter, _sim_processed_trade_ids
     if not os.path.exists(signal_snapshot_file) or not os.path.exists(signal_replay_file):
@@ -35329,6 +35959,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
             "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
             "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+            **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
         }
         try:
             rotate_log(output_file)
@@ -35498,6 +36129,7 @@ def _run_counterfactual_catchup():
                 "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
                 "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
                 "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+                **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
                 "catchup": True,
             }
             try:
@@ -36723,6 +37355,10 @@ def main():
     threading.Thread(target=safe_thread(periodic_pipeline_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bitfinex_live_reconcile_loop), daemon=True).start()
+    threading.Thread(
+        target=safe_thread(_platform_relay_connection_keepalive_loop),
+        daemon=True,
+    ).start()
     update_logger_level()
     while True:
         try:

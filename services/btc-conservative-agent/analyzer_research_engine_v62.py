@@ -2058,6 +2058,62 @@ def research_jsonl_summary(datasets=None):
         print(f"  trade_lifecycle regimes={sorted(x for x in regimes if x)} trend_health={sorted(x for x in trends if x)} {PIPELINE_ENFORCEMENT_TAG}")
 
 
+def _analysis_eligible_trade_ids():
+    """Canonical allow-list for every policy/exit optimizer.
+
+    Legacy rows fail closed. A row is usable only when its counterfactual_v2
+    evidence explicitly proves complete policy, complete replay, and a clean
+    terminal provenance. This prevents manual/emergency/source-absence or
+    mixed-policy lifecycles from silently influencing parameter decisions.
+    """
+    rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    eligible = set()
+    exclusions = defaultdict(int)
+    for trade_id, row in rows.items():
+        reasons = row.get("analysis_exclusion_reasons") or []
+        valid = (
+            row.get("analysis_eligibility_schema") == "analysis_eligibility_v1"
+            and row.get("analysis_eligible") is True
+            and row.get("policy_snapshot_complete") is True
+            and row.get("replay_complete") is True
+            and not reasons
+        )
+        if valid:
+            eligible.add(str(trade_id))
+            continue
+        if not reasons:
+            reasons = ["ELIGIBILITY_EVIDENCE_MISSING"]
+        for reason in reasons:
+            exclusions[str(reason)] += 1
+    return eligible, dict(exclusions), len(rows)
+
+
+def _filter_policy_analysis_df(df, label="policy analysis"):
+    if df is None or df.empty:
+        return df
+    eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids()
+    if "trade_id" not in df.columns:
+        print(f"  {label}: blocked — trade_id missing; no policy conclusions allowed. {PIPELINE_ENFORCEMENT_TAG}")
+        return df.iloc[0:0].copy()
+    before = len(df)
+    filtered = df[df["trade_id"].astype(str).isin(eligible)].copy()
+    print(
+        f"  {label}: eligibility {len(filtered)}/{before} rows "
+        f"(evidence={evidence_rows}, exclusions={exclusions}). {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return filtered
+
+
+def _filter_policy_analysis_replays(replays, label="policy replay analysis"):
+    eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids()
+    filtered = {str(tid): row for tid, row in (replays or {}).items() if str(tid) in eligible}
+    print(
+        f"  {label}: eligibility {len(filtered)}/{len(replays or {})} replays "
+        f"(evidence={evidence_rows}, exclusions={exclusions}). {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return filtered
+
+
 def _load_shadow_outcome_df(session: dict = None):
     """Load shadow_outcome.jsonl (fallback counterfactual.jsonl) with optional session filter."""
     shadow = _load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE)
@@ -2076,7 +2132,7 @@ def _load_shadow_outcome_df(session: dict = None):
                 f"   No shadow rows in current session (file has {before} all-time rows). "
                 f"Run bot longer or disable session filter for all-time shadow review. {PIPELINE_ENFORCEMENT_TAG}"
             )
-    return df
+    return _filter_policy_analysis_df(df, "shadow/counterfactual analysis")
 
 
 def historical_trade_cohort_report():
@@ -3017,7 +3073,10 @@ def stop_thesis_wide_sweep_all_replays(trades_df=None):
         f"Sweep: {len(sweep_levels)} levels from -6% to -{int(STOP_THESIS_SWEEP_MAX_MARGIN_PCT):.0f}% margin. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
-    replays = _cap_replays_for_sweep(_load_jsonl_replays(), "thesis stop wide sweep")
+    replays = _filter_policy_analysis_replays(
+        _cap_replays_for_sweep(_load_jsonl_replays(), "thesis stop wide sweep"),
+        "thesis stop wide sweep",
+    )
     if not replays:
         print(f"No {SIGNAL_REPLAY_FILE} — run bot longer to collect APPROVE replays. {PIPELINE_ENFORCEMENT_TAG}")
         return None
@@ -3215,7 +3274,10 @@ def stop_ladder_2d_grid_sweep_all_replays(trades_df=None, top_n=10):
         f"Grid: {len(stop_levels)} stops × {len(ladder_candidates)} ladders = {n_cells} cells. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
-    replays = _cap_replays_for_sweep(_load_jsonl_replays(), "stop x ladder 2D sweep")
+    replays = _filter_policy_analysis_replays(
+        _cap_replays_for_sweep(_load_jsonl_replays(), "stop x ladder 2D sweep"),
+        "stop x ladder 2D sweep",
+    )
     if not replays:
         print(f"No {SIGNAL_REPLAY_FILE} — run bot longer to collect APPROVE replays. {PIPELINE_ENFORCEMENT_TAG}")
         return None
@@ -3375,7 +3437,9 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
         f"Grid: {len(stop_levels)}×{len(ladder_candidates)}×{len(mfe_levels)} = {n_cells} cells. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
-    replays = _load_jsonl_replays()
+    replays = _filter_policy_analysis_replays(
+        _load_jsonl_replays(), "stop x ladder x MFE 3D sweep"
+    )
     if not replays:
         print(f"No {SIGNAL_REPLAY_FILE}. {PIPELINE_ENFORCEMENT_TAG}")
         return None
@@ -4590,6 +4654,7 @@ def thesis_fast_cut_optimization(df):
     """Sweep THESIS_FAST_EXIT_UNREAL_PCT to find sweet spot (max sum PnL / win rate)."""
     print("\n=== THESIS FAST-CUT SWEET SPOT (THESIS_FAST_EXIT_UNREAL_PCT) ===")
     print(f"Current default: {THESIS_FAST_EXIT_DEFAULT}% margin | Ladder arms at peak >= {TRAIL_LADDER[0][0]}% {PIPELINE_ENFORCEMENT_TAG}")
+    df = _filter_policy_analysis_df(df, "thesis fast-cut optimization")
     if df.empty:
         print(f"No trades. {PIPELINE_ENFORCEMENT_TAG}")
         return None
@@ -4671,6 +4736,7 @@ def ladder_first_rung_optimization(df):
     """Sweep ladder first trigger (default 12%) / lock (default 8%) for max captured profit."""
     print("\n=== LADDER FIRST-RUNG SWEET SPOT (peak trigger → lock floor) ===")
     print(f"Current first rung: peak >= {TRAIL_LADDER[0][0]}% → lock {TRAIL_LADDER[0][1]}% {PIPELINE_ENFORCEMENT_TAG}")
+    df = _filter_policy_analysis_df(df, "ladder first-rung optimization")
     if df.empty:
         return None
     work = df.copy()
@@ -4724,6 +4790,7 @@ def thesis_exit_above_optimization(df):
     """Sweep THESIS_EXIT_IF_ABOVE_UNREAL_PCT — profit level that pauses thesis checks."""
     print("\n=== THESIS EXIT-ABOVE SWEET SPOT (pause thesis when unreal > X%) ===")
     print(f"Current: thesis checks skipped while unreal > {THESIS_EXIT_ABOVE_DEFAULT}% {PIPELINE_ENFORCEMENT_TAG}")
+    df = _filter_policy_analysis_df(df, "thesis exit-above optimization")
     if df.empty:
         return None
     work = df.copy()
@@ -13263,7 +13330,10 @@ def fast_cut_survivor_report(trades=None, session=None):
     scope = _shadow_scope_label(session)
     print(f"\n=== FAST CUT SURVIVOR REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
-    replays = _load_jsonl_replays()
+    replays = _filter_policy_analysis_replays(
+        _load_jsonl_replays(), "fast-cut survivor report"
+    )
+    trades = _filter_policy_analysis_df(trades, "fast-cut survivor report")
     if trades is None or trades.empty:
         payload = {
             "schema": "fast_cut_survivor_v1",
@@ -14254,6 +14324,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT COMBINATIONS — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
+    trades = _filter_policy_analysis_df(trades, "exit combinations report")
     work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
     if work.empty:
         payload = {"schema": "exit_combinations_v1", "top": [], "worst_leakage": [], "session_scope": scope}
@@ -14419,6 +14490,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LEAKAGE BY REASON — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
+    trades = _filter_policy_analysis_df(trades, "exit leakage report")
     if trades is None or trades.empty:
         payload = {
             "schema": "exit_leakage_by_reason_v1",
@@ -14545,7 +14617,10 @@ def exit_ladder_simulator_report(trades=None, session=None):
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LADDER SIMULATOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
-    replays = _load_jsonl_replays()
+    trades = _filter_policy_analysis_df(trades, "exit ladder simulator")
+    replays = _filter_policy_analysis_replays(
+        _load_jsonl_replays(), "exit ladder simulator"
+    )
     executed_ids = set()
     actual_sum = 0.0
     actual_n = 0
@@ -16260,7 +16335,10 @@ def fast_cut_sweep_report(trades=None, session=None):
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== FAST CUT SWEEP REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    replays = _load_jsonl_replays()
+    trades = _filter_policy_analysis_df(trades, "fast-cut sweep report")
+    replays = _filter_policy_analysis_replays(
+        _load_jsonl_replays(), "fast-cut sweep report"
+    )
     sweep_levels = list(FAST_CUT_SWEEP_LEVELS) + [THESIS_FAST_EXIT_DEFAULT]
     sweep_levels = sorted(set(round(float(x), 1) for x in sweep_levels))
     current_label = round(float(THESIS_FAST_EXIT_DEFAULT), 1)

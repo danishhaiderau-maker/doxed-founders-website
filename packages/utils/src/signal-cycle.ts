@@ -177,6 +177,10 @@ export type SignalCycleEventType =
   // Cancel-race / exit fail-safe observability (no status transition on their own).
   | 'STALE_EXIT_SUPERSEDED'
   | 'MIRROR_EXIT_FAILSAFE_ALERT'
+  // Immutable source-absence decision evidence. Emitted for every canonical
+  // snapshot that observes an OPEN copy lot without its source position,
+  // including UNKNOWN / grace-wait observations before any fallback exit.
+  | 'SOURCE_ABSENCE_OBSERVED'
   // F2 (2026-07-07 incident) � Showcase-unreachable orphan kill. Emitted when
   // the relay market-closes an OPEN copy lot because the showcase has been
   // unreachable past SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS. Distinct from

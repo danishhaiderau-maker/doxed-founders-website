@@ -46,6 +46,7 @@ import {
   pendingEntryMayOwnExchangePosition,
   pendingFillReconcileDecision,
   showcasePositionAbsenceActionable,
+  buildShowcasePositionAbsenceEvidence,
   pendingCopyShowcaseDisposition,
   shouldRetainLateEntryContinuation,
   shouldRetainActiveAggressiveCatchup,
@@ -92,7 +93,6 @@ import {
   pollForVerifiedEntryFill,
   shouldRunLocalRealSideSafetyNet,
   resolveExactShowcaseEntryQty,
-  copyFirstScenarioCEligible,
   resolveEffectiveStopLossMarginPct,
 } from './signal-subscriber-execution.service';
 
@@ -108,36 +108,6 @@ test('decimal-like terminal fill prices remain finite for partial-close P&L acco
   assert.equal(finiteDecimalLikeNumber({ toNumber: () => Number.NaN }), null);
   assert.equal(finiteDecimalLikeNumber(63_642), 63_642);
   assert.equal(finiteDecimalLikeNumber(null), null);
-});
-
-test('copy-first Scenario C is limited to an exchange fill before its source trade opens', () => {
-  assert.equal(
-    copyFirstScenarioCEligible({
-      mirrorOnly: true,
-      simActive: false,
-      sourcePositionOpen: false,
-      sourceStillPending: true,
-    }),
-    true,
-  );
-  assert.equal(
-    copyFirstScenarioCEligible({
-      mirrorOnly: true,
-      simActive: false,
-      sourcePositionOpen: true,
-      sourceStillPending: true,
-    }),
-    false,
-  );
-  assert.equal(
-    copyFirstScenarioCEligible({
-      mirrorOnly: false,
-      simActive: false,
-      sourcePositionOpen: false,
-      sourceStillPending: true,
-    }),
-    false,
-  );
 });
 
 test('exact showcase quantity is preserved below the subscriber cap', () => {
@@ -2056,6 +2026,257 @@ test('showcase position absence needs both repeated misses and a 60-second conve
     }),
     true,
   );
+});
+
+test('source-absence fallback cannot close unless its immutable evidence event persists first', async () => {
+  let closeCalls = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async () => { throw new Error('database unavailable'); } } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).fetchExecutionBotState = async () => ({});
+  (service as any).detectShowcaseTradeClosed = () => ({ closed: false });
+  (service as any).trackShowcasePositionAbsent = () => ({
+    schema: 'source_absence_evidence_v1',
+    absenceScope: 'POSITION',
+    verdict: 'ABSENT_ACTIONABLE',
+    canonicalTradeId: 'cont-absence',
+    sourceGitRev: 'revision-proof',
+    snapshotSeq: 900,
+    snapshotTs: '2026-08-15T01:00:00.000Z',
+    snapshotAgeSec: 0.1,
+    maxSnapshotAgeSec: 15,
+    positionsSynced: true,
+    ordersSynced: true,
+    tradesSynced: true,
+    sourcePositionPresent: false,
+    sourceOrderPresent: false,
+    sourceSignalPresent: false,
+    sourceTradePresent: false,
+    sourceTradesMapPresent: false,
+    misses: 2,
+    requiredMisses: 2,
+    firstAbsentAtMs: 1_000,
+    observedAtMs: 61_000,
+    elapsedMs: 60_000,
+    graceMs: 60_000,
+    missingEvidence: [],
+    actionable: true,
+  });
+  (service as any).executeShowcaseMirrorClose = async () => {
+    closeCalls += 1;
+    return true;
+  };
+  const priorMirror = process.env.SHOWCASE_MIRROR_ONLY;
+  const priorConvergence = process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+  process.env.SHOWCASE_MIRROR_ONLY = 'true';
+  process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = 'true';
+  try {
+    await assert.rejects(
+      () => (service as any).tryImmediateShowcaseMirrorExit(
+        'agent', 'user',
+        { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-absence', intentEnvelope: {} },
+        { id: 'participant', fillPrice: 64_500 },
+        { direction: 'SHORT', qty: 0.01 },
+        { apiKey: 'k', apiSecret: 's' },
+      ),
+      /database unavailable/,
+    );
+    assert.equal(closeCalls, 0);
+  } finally {
+    if (priorMirror == null) delete process.env.SHOWCASE_MIRROR_ONLY;
+    else process.env.SHOWCASE_MIRROR_ONLY = priorMirror;
+    if (priorConvergence == null) delete process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+    else process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = priorConvergence;
+  }
+});
+
+test('source-position absence evidence is UNKNOWN when canonical snapshot proof is incomplete', () => {
+  const observedAtMs = Date.parse('2026-08-15T01:00:00.000Z');
+  const evidence = buildShowcasePositionAbsenceEvidence({
+    bot: {
+      source_git_rev: 'revision-a',
+      positions: [],
+      orders: [],
+      trades: [],
+      trades_map: {},
+      signal_info: { signals: [] },
+    },
+    tradeId: 'cont-evidence',
+    misses: 100,
+    firstAbsentAtMs: observedAtMs - 120_000,
+    nowMs: observedAtMs,
+  });
+  assert.equal(evidence.verdict, 'UNKNOWN');
+  assert.equal(evidence.actionable, false);
+  assert.equal(evidence.misses, 100);
+  assert.equal(evidence.sourceOrderPresent, false);
+  assert.equal(evidence.sourceTradesMapPresent, false);
+  assert.ok(evidence.missingEvidence.includes('state_integrity.snapshot_seq'));
+  assert.ok(evidence.missingEvidence.includes('state_integrity.positions_synced'));
+});
+
+test('complete source-position evidence treats a pending canonical lifecycle as PRESENT', () => {
+  const firstAbsentAtMs = Date.parse('2026-08-15T01:00:00.000Z');
+  const evidence = buildShowcasePositionAbsenceEvidence({
+    bot: {
+      source_git_rev: 'revision-b',
+      positions: [],
+      orders: [{ trade_id: 'cont-evidence', status: 'PENDING' }],
+      trades: [],
+      trades_map: { 'cont-evidence': {} },
+      signal_info: { signals: [{ trade_id: 'cont-evidence', status: 'PENDING' }] },
+      state_integrity: {
+        snapshot_seq: 731,
+        snapshot_ts: '2026-08-15T01:01:00.000Z',
+        snapshot_age_sec: 0.2,
+        positions_synced: true,
+        orders_synced: true,
+        trades_synced: true,
+      },
+    },
+    tradeId: 'cont-evidence',
+    misses: 2,
+    firstAbsentAtMs,
+    nowMs: firstAbsentAtMs + 60_000,
+  });
+  assert.equal(evidence.verdict, 'PRESENT');
+  assert.equal(evidence.actionable, false);
+  assert.equal(evidence.snapshotSeq, 731);
+  assert.equal(evidence.snapshotAgeSec, 0.2);
+  assert.equal(evidence.sourceGitRev, 'revision-b');
+  assert.equal(evidence.sourceOrderPresent, true);
+  assert.equal(evidence.sourceSignalPresent, true);
+  assert.equal(evidence.sourceTradesMapPresent, true);
+  assert.equal(evidence.elapsedMs, 60_000);
+  assert.deepEqual(evidence.missingEvidence, []);
+});
+
+test('complete fresh evidence is actionable only when the canonical ID is absent everywhere', () => {
+  const nowMs = Date.parse('2026-08-15T01:02:00.000Z');
+  const evidence = buildShowcasePositionAbsenceEvidence({
+    bot: {
+      source_git_rev: 'revision-absent',
+      positions: [],
+      orders: [],
+      trades: [],
+      trades_map: {},
+      signal_info: { signals: [] },
+      state_integrity: {
+        snapshot_seq: 735,
+        snapshot_ts: '2026-08-15T01:02:00.000Z',
+        snapshot_age_sec: 0.1,
+        positions_synced: true,
+        orders_synced: true,
+        trades_synced: true,
+      },
+    },
+    tradeId: 'cont-absent',
+    misses: 2,
+    firstAbsentAtMs: nowMs - 60_000,
+    nowMs,
+  });
+  assert.equal(evidence.verdict, 'ABSENT_ACTIONABLE');
+  assert.equal(evidence.actionable, true);
+  assert.equal(evidence.sourcePositionPresent, false);
+  assert.equal(evidence.sourceOrderPresent, false);
+  assert.equal(evidence.sourceSignalPresent, false);
+  assert.equal(evidence.sourceTradePresent, false);
+  assert.equal(evidence.sourceTradesMapPresent, false);
+});
+
+test('a source position present in a complete snapshot can never be absence-actionable', () => {
+  const nowMs = Date.parse('2026-08-15T01:01:00.000Z');
+  const evidence = buildShowcasePositionAbsenceEvidence({
+    bot: {
+      source_git_rev: 'revision-c',
+      positions: [{ trade_id: 'cont-present' }],
+      orders: [],
+      trades: [],
+      trades_map: {},
+      signal_info: { signals: [] },
+      state_integrity: {
+        snapshot_seq: 732,
+        snapshot_ts: '2026-08-15T01:01:00.000Z',
+        snapshot_age_sec: 0.1,
+        positions_synced: true,
+        orders_synced: true,
+        trades_synced: true,
+      },
+    },
+    tradeId: 'cont-present',
+    misses: 99,
+    firstAbsentAtMs: nowMs - 120_000,
+    nowMs,
+  });
+  assert.equal(evidence.verdict, 'PRESENT');
+  assert.equal(evidence.actionable, false);
+  assert.equal(evidence.sourcePositionPresent, true);
+});
+
+test('an internally valid but stale source snapshot is UNKNOWN and cannot close a copy', () => {
+  const nowMs = Date.parse('2026-08-15T01:01:30.000Z');
+  const evidence = buildShowcasePositionAbsenceEvidence({
+    bot: {
+      source_git_rev: 'revision-stale',
+      positions: [],
+      orders: [],
+      trades: [],
+      trades_map: {},
+      signal_info: { signals: [] },
+      state_integrity: {
+        snapshot_seq: 733,
+        snapshot_ts: '2026-08-15T01:01:00.000Z',
+        snapshot_age_sec: 0,
+        positions_synced: true,
+        orders_synced: true,
+        trades_synced: true,
+      },
+    },
+    tradeId: 'cont-stale',
+    misses: 99,
+    firstAbsentAtMs: nowMs - 120_000,
+    nowMs,
+  });
+  assert.equal(evidence.verdict, 'UNKNOWN');
+  assert.equal(evidence.actionable, false);
+  assert.equal(evidence.snapshotAgeSec, 30);
+  assert.ok(evidence.missingEvidence.includes('state_integrity.snapshot_stale'));
+});
+
+test('everywhere-absence proof does not count a trade that remains pending or known', () => {
+  const nowMs = Date.parse('2026-08-15T01:01:00.000Z');
+  const evidence = buildShowcasePositionAbsenceEvidence({
+    bot: {
+      source_git_rev: 'revision-known',
+      positions: [],
+      orders: [{ trade_id: 'cont-known', status: 'PENDING' }],
+      trades: [],
+      trades_map: { 'cont-known': {} },
+      signal_info: { signals: [{ trade_id: 'cont-known', status: 'PENDING' }] },
+      state_integrity: {
+        snapshot_seq: 734,
+        snapshot_ts: '2026-08-15T01:01:00.000Z',
+        snapshot_age_sec: 0.1,
+        positions_synced: true,
+        orders_synced: true,
+        trades_synced: true,
+      },
+    },
+    tradeId: 'cont-known',
+    misses: 3,
+    firstAbsentAtMs: nowMs,
+    nowMs,
+    absenceScope: 'EVERYWHERE',
+    requiredMisses: 3,
+    graceMs: 0,
+  });
+  assert.equal(evidence.absenceScope, 'EVERYWHERE');
+  assert.equal(evidence.actionable, false);
+  assert.equal(evidence.verdict, 'PRESENT');
+  assert.equal(evidence.sourceOrderPresent, true);
+  assert.equal(evidence.sourceTradesMapPresent, true);
 });
 
 test('pending fill grace treats resting managed entry + exchange qty as fill-in-flight', () => {
