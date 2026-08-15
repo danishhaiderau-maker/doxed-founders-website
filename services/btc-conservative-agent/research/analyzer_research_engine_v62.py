@@ -673,6 +673,7 @@ PEAK_NEVER_LOSER_MIN_PEAK = 40.0
 PEAK_NEVER_LOSER_FLOOR = 10.0
 DEFAULT_PULLBACK_THRESHOLDS = [0.0, 0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.006]
 THESIS_FAST_EXIT_DEFAULT = -12.0
+HARD_STOP_MARGIN_PCT = 13.0
 DEFAULT_PULLBACK_PCT = 0.001
 THESIS_EXIT_ABOVE_DEFAULT = 8.0
 THESIS_FAST_CUT_CANDIDATES = [-6, -8, -10, -12, -14, -16, -18, -20, -25, -30, -40, -50, -60, -80, -100, -120, -150, -180]
@@ -2948,7 +2949,7 @@ def stop_thesis_wide_sweep_all_replays(trades_df=None):
     print(
         "This is the THESIS STOP (margin %), NOT entry pullback %. "
         f"Current bot default: {THESIS_FAST_EXIT_DEFAULT}% margin. "
-        f"Hard SL margin cap: 30% at 100x. "
+        f"Hard SL margin cap: {HARD_STOP_MARGIN_PCT:g}% at 100x. "
         f"Sweep: {len(sweep_levels)} levels from -6% to -{int(STOP_THESIS_SWEEP_MAX_MARGIN_PCT):.0f}% margin. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )

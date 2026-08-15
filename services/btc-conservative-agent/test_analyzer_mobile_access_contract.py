@@ -1,7 +1,15 @@
 from pathlib import Path
+import re
 
 
 SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+ENGINE_SOURCE = (
+    Path(__file__).parents[1] / "btc-signal-engine" / "engine.py"
+).read_text(encoding="utf-8")
+ANALYZER_SOURCES = [
+    Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
+    (Path(__file__).with_name("research") / "analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
+]
 
 
 def _route(name: str, next_marker: str) -> str:
@@ -91,6 +99,20 @@ def test_final_hard_stop_is_thirteen_percent_margin_loss():
     strategy_lines = _route("_strategy_detail_lines", "def _annotate_lanes_with_exec_mode")
     assert "Final hard stop:" in strategy_lines
     assert "hard_stop_margin_pct" in strategy_lines
+
+
+def test_execution_and_research_hard_stop_policy_stay_in_parity():
+    def assigned_value(source: str, name: str) -> float:
+        match = re.search(rf"^{name}\s*=\s*([0-9.]+)\s*$", source, re.MULTILINE)
+        assert match is not None, f"missing {name}"
+        return float(match.group(1))
+
+    expected = assigned_value(SOURCE, "MAX_SL_MARGIN_PCT")
+    assert expected == 13.0
+    assert assigned_value(ENGINE_SOURCE, "MAX_SL_MARGIN_PCT") == expected
+    for analyzer_source in ANALYZER_SOURCES:
+        assert assigned_value(analyzer_source, "HARD_STOP_MARGIN_PCT") == expected
+        assert "Hard SL margin cap: 30%" not in analyzer_source
 
 
 def test_analyzer_session_is_opaque_and_narrowly_scoped():

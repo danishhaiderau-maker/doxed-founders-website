@@ -205,11 +205,16 @@ async function main() {
           `cancelled=${payload.cancelledOrderId ?? payload.cancelled_order_id ?? ''} ` +
           `limit=${payload.limit_price ?? payload.limitPrice ?? ''} qty=${payload.qty ?? ''}`,
       );
-      if (event.eventType === 'ORDER_PLACED' && payload.platformToExchangeAckMs != null) {
+      if (
+        ['ORDER_PLACED', 'UPDATE_STOPS'].includes(event.eventType)
+        && payload.platformToExchangeAckMs != null
+      ) {
+        const totalMs = payload.sourceToExchangeAckMs;
         console.log(
           `      latency source->platform=${payload.sourceToPlatformMs ?? 'n/a'}ms ` +
             `platform->exchangeAck=${payload.platformToExchangeAckMs}ms ` +
-            `source->exchangeAck=${payload.sourceToExchangeAckMs ?? 'n/a'}ms`,
+            `source->exchangeAck=${totalMs ?? 'n/a'}ms ` +
+            `sla3s=${typeof totalMs === 'number' ? (totalMs <= 3_000 ? 'PASS' : 'MISS') : 'UNKNOWN'}`,
         );
       }
     }
