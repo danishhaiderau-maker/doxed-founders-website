@@ -13,6 +13,12 @@
 !research_genome/
 !research_genome/**
 
+# Shared fail-closed cohort contract imported by the canonical analyzer during
+# bot startup. Keep the rest of the large research tree outside the Fly image.
+!research/
+research/*
+!research/analysis_eligibility.py
+
 # 4. Re-include deploy + Python dependency manifests.
 !requirements.txt
 !fly-entrypoint.sh
@@ -27,6 +33,6 @@
 !*.yaml
 !*.yml
 
-# Explicitly keep excluded (do NOT re-include): research/, research_accumulator/,
+# Explicitly keep excluded (apart from research/analysis_eligibility.py): research/, research_accumulator/,
 # research_archive/, logs/, .git/, node_modules/, .next/, dist/, .turbo/, .cursor/,
 # and any home-stack markers / local secrets (.home-*, *-home.env, .openai_*, .anthropic_*).

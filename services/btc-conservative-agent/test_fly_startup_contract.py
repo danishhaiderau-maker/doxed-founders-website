@@ -73,6 +73,15 @@ def test_fly_image_does_not_bake_laptop_runtime_json():
         assert f"!{runtime_name}" not in DOCKERIGNORE
 
 
+def test_fly_image_includes_shared_analysis_eligibility_contract():
+    assert "!research/" in DOCKERIGNORE
+    assert "research/*" in DOCKERIGNORE
+    assert "!research/analysis_eligibility.py" in DOCKERIGNORE
+    assert "from research.analysis_eligibility import" in (
+        ROOT / "analyzer_research_engine_v62.py"
+    ).read_text(encoding="utf-8")
+
+
 def test_fly_has_strict_readiness_and_restart_contract():
     assert "@app.route('/ready')" in BOT
     assert '"force_paper_mode": force_paper_mode' in BOT
@@ -101,6 +110,7 @@ if __name__ == "__main__":
     test_fly_standby_has_no_implicit_production_relay()
     test_fly_refuses_missing_control_secrets_or_direct_live_mode()
     test_fly_image_does_not_bake_laptop_runtime_json()
+    test_fly_image_includes_shared_analysis_eligibility_contract()
     test_fly_has_strict_readiness_and_restart_contract()
     test_fly_publishes_one_authenticated_canonical_snapshot()
     print("Fly startup contract checks passed")
