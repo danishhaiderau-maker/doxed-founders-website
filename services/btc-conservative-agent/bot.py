@@ -6813,6 +6813,9 @@ FIRST_CHASE_DELAY_SEC = 0  # v1.1.38: immediate re-anchor at order create (resea
 LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 60
 LIMIT_CHASE_HOLD_SEC = 0  # v1.1.23: no post-submit hold before chase
 MARKETABLE_CHASE_SEC = 600  # v1.1.23: marketable limit fallback at 10m
+PROMOTION_IN_PROGRESS_GRACE_SEC = max(
+    5.0, float(os.getenv("PROMOTION_IN_PROGRESS_GRACE_SEC", "15"))
+)
 MARKETABLE_CHASE_DISTANCE_USD = 10.0
 # A marketable fallback must be visible to the relay long enough for the
 # signed LIMIT_UPDATED event to be persisted and cancel/replaced at Bitfinex.
@@ -8700,14 +8703,18 @@ def _defer_dashboard_virtual_chase(signal: dict) -> bool:
     price = float(state.get("price") or signal.get("signal_price") or 0)
     if price <= 0:
         return False
-    if signal.get("status") not in VIRTUAL_CHASE_AWAITING_STATUSES:
-        _init_chase_3plus_virtual_state(signal, price)
-        signal["dashboard_virtual_chase_count"] = 0
-        signal["dashboard_virtual_started_ts"] = time.time()
-        signal["dashboard_virtual_limit"] = signal.get("chase_3plus_virtual_limit")
-    signal["status"] = SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE
-    signal["awaiting_dashboard_chase_since"] = time.time()
-    signal["order_placed"] = False
+    with trade_lock:
+        if signal.get("status") not in VIRTUAL_CHASE_AWAITING_STATUSES:
+            _init_chase_3plus_virtual_state(signal, price)
+            signal["dashboard_virtual_chase_count"] = 0
+            signal["dashboard_virtual_started_ts"] = time.time()
+            signal["dashboard_virtual_limit"] = signal.get("chase_3plus_virtual_limit")
+            signal["promotion_lifecycle_generation"] = int(
+                signal.get("promotion_lifecycle_generation") or 0
+            ) + 1
+        signal["status"] = SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE
+        signal["awaiting_dashboard_chase_since"] = time.time()
+        signal["order_placed"] = False
     mn = min_enabled_chase_count()
     logger.info(
         f"[DASHBOARD GATE] virtual defer trade_id={signal.get('trade_id')} "
@@ -8722,6 +8729,88 @@ def _tick_dashboard_virtual_chase(signal: dict, market_price: float, now: float)
     count = _tick_chase_3plus_virtual_chase(signal, market_price, now)
     signal["dashboard_virtual_chase_count"] = count
     return count
+
+
+def _claim_signal_promotion(signal: dict) -> dict | None:
+    """Atomically claim one canonical signal generation for order promotion."""
+    if not isinstance(signal, dict):
+        return None
+    tid = str(signal.get("trade_id") or "")
+    if not tid:
+        return None
+    now = time.time()
+    with trade_lock:
+        master = trades_map.get(tid, {}).get("signal_ref")
+        generation = int(signal.get("promotion_lifecycle_generation") or 0)
+        if (
+            master is not signal
+            or is_terminal_signal(signal)
+            or signal.get("status") not in VIRTUAL_CHASE_AWAITING_STATUSES
+            or signal.get("order_placed")
+            or any(
+                str(order.get("trade_id") or "") == tid
+                and str(order.get("status") or "").upper()
+                in ("PENDING", "CANCEL_PENDING_LIVE")
+                for order in pending_orders
+            )
+            or any(
+                str(position.get("trade_id") or "") == tid
+                and str(position.get("status") or "").upper() not in ("CLOSED", "EXPIRED")
+                for position in open_positions
+            )
+        ):
+            return None
+        active_token = signal.get("promotion_claim_token")
+        active_at = float(signal.get("promotion_in_progress_at") or 0)
+        if active_token and now - active_at <= PROMOTION_IN_PROGRESS_GRACE_SEC:
+            return None
+        token = uuid.uuid4().hex
+        signal["promotion_claim_token"] = token
+        signal["promotion_claim_generation"] = generation
+        signal["promotion_in_progress_at"] = now
+        return {"trade_id": tid, "token": token, "generation": generation}
+
+
+def _signal_promotion_claim_valid(signal: dict, claim: dict) -> bool:
+    """Revalidate identity, generation and no-exposure immediately before creation."""
+    if not isinstance(signal, dict) or not isinstance(claim, dict):
+        return False
+    tid = str(claim.get("trade_id") or "")
+    with trade_lock:
+        return bool(
+            tid
+            and trades_map.get(tid, {}).get("signal_ref") is signal
+            and signal.get("promotion_claim_token") == claim.get("token")
+            and int(signal.get("promotion_lifecycle_generation") or 0)
+            == int(claim.get("generation") or 0)
+            and int(signal.get("promotion_claim_generation") or 0)
+            == int(claim.get("generation") or 0)
+            and not is_terminal_signal(signal)
+            and signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES
+            and not signal.get("order_placed")
+            and not any(
+                str(order.get("trade_id") or "") == tid
+                and str(order.get("status") or "").upper()
+                in ("PENDING", "CANCEL_PENDING_LIVE")
+                for order in pending_orders
+            )
+            and not any(
+                str(position.get("trade_id") or "") == tid
+                and str(position.get("status") or "").upper() not in ("CLOSED", "EXPIRED")
+                for position in open_positions
+            )
+        )
+
+
+def _release_signal_promotion_claim(signal: dict, claim: dict) -> None:
+    if not isinstance(signal, dict) or not isinstance(claim, dict):
+        return
+    with trade_lock:
+        if signal.get("promotion_claim_token") != claim.get("token"):
+            return
+        signal.pop("promotion_claim_token", None)
+        signal.pop("promotion_claim_generation", None)
+        signal.pop("promotion_in_progress_at", None)
 
 
 def _virtual_limit_would_fill(signal: dict, market_price: float) -> bool:
@@ -9912,6 +10001,12 @@ def reconcile_stale_signals():
             expires_ts = sig.get("expires_ts") or (sig.get("created_ts_ts", 0) + SIGNAL_TTL_SEC)
             ttl_expired = expires_ts and now > expires_ts
             missing_exposure = tid not in pending_ids and tid not in open_ids
+            promotion_at = float(sig.get("promotion_in_progress_at") or 0)
+            promotion_in_progress = bool(
+                sig.get("promotion_claim_token")
+                and promotion_at > 0
+                and now - promotion_at <= PROMOTION_IN_PROGRESS_GRACE_SEC
+            )
             if st in ("ORDERED", "ACTIVE", "PENDING") and (missing_exposure or ttl_expired):
                 if ttl_expired:
                     sig["status"] = "EXPIRED"
@@ -9922,7 +10017,7 @@ def reconcile_stale_signals():
                     _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
                     if _remove_pending_for_trade(tid, sig["outcome"]):
                         orphans_removed += 1
-                elif sig.get("order_placed") and missing_exposure:
+                elif sig.get("order_placed") and missing_exposure and not promotion_in_progress:
                     sig["status"] = "EXPIRED"
                     sig["outcome"] = "STALE_NO_EXPOSURE"
                     sig["exit_reason"] = sig["outcome"]
@@ -18070,6 +18165,14 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     price = state.get("price")
     if not price or price <= 0:
         return False
+    promotion_claim = signal.get("_promotion_claim_context")
+    if promotion_claim and not _signal_promotion_claim_valid(signal, promotion_claim):
+        logger.warning(
+            f"[PROMOTION CLAIM] stale/duplicate promotion refused immediately before create "
+            f"trade_id={signal.get('trade_id')} generation={promotion_claim.get('generation')} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return False
     pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.001))
     signal_price = signal.get("signal_price", price)
     margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
@@ -18373,6 +18476,25 @@ def process_awaiting_5m_entries():
 
 def _promote_signal_to_limit_order(signal: dict, skip_virtual_defer: bool = False) -> bool:
     """Resolve limit at submit time (smart submit), then place or defer to micro/5m."""
+    promotion_claim = None
+    if skip_virtual_defer:
+        promotion_claim = _claim_signal_promotion(signal)
+        if promotion_claim is None:
+            return False
+        signal["_promotion_claim_context"] = promotion_claim
+    try:
+        return _promote_signal_to_limit_order_claimed(
+            signal,
+            skip_virtual_defer=skip_virtual_defer,
+        )
+    finally:
+        signal.pop("_promotion_claim_context", None)
+        if promotion_claim is not None:
+            _release_signal_promotion_claim(signal, promotion_claim)
+
+
+def _promote_signal_to_limit_order_claimed(signal: dict, skip_virtual_defer: bool = False) -> bool:
+    """Promotion implementation executed under a generation-bound claim when required."""
     if _manual_pause_block_entry(signal, "SIGNAL_PROMOTE"):
         return False
     price = state.get("price")

@@ -99,6 +99,30 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
         frame = pd.DataFrame([{"net_pnl_usd": 1.0}])
         self.assertTrue(analyzer._filter_policy_analysis_df(frame, "test").empty)
 
+    def test_mirror_diff_stale_no_exposure_is_excluded_negative_evidence(self):
+        row = {
+            "trade_id": "cont-negative-evidence",
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "replay_complete": True,
+            "terminal_provenance": "STALE_NO_EXPOSURE",
+            "lifecycle_events": [
+                {"event_type": "MIRROR_DIFF"},
+                {"event_type": "STALE_NO_EXPOSURE"},
+            ],
+        }
+        result = classify_row(row)
+        for cohort in (
+            SHOWCASE_STRATEGY,
+            BITFINEX_COPY_FIDELITY,
+            REAL_COPY_PARAMETER_OPTIMISATION,
+        ):
+            self.assertFalse(result["eligible"][cohort])
+            self.assertIn(
+                "MIRROR_DIFF_STALE_NO_EXPOSURE",
+                result["exclusion_reasons"][cohort],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

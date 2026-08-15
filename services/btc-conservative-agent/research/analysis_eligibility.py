@@ -25,6 +25,8 @@ _EXCLUDED_PROVENANCE = {
     "EMERGENCY_ACTION",
     "EMERGENCY_CLOSE",
     "SHOWCASE_UNREACHABLE_OPEN_LOT",
+    "STALE_NO_EXPOSURE",
+    "MIRROR_DIFF_STALE_NO_EXPOSURE",
 }
 
 
@@ -49,6 +51,33 @@ def classify_row(row):
         row.get("mixed_policy") is True
         or "MIXED_POLICY" in set(row.get("analysis_exclusion_reasons") or [])
     )
+    lifecycle_events = {
+        str(event.get("event_type") or event.get("event") or "").upper()
+        for event in (row.get("lifecycle_events") or [])
+        if isinstance(event, dict)
+    }
+    mirror_stale_lifecycle = bool(
+        row.get("mirror_diff_stale_no_exposure") is True
+        or (
+            "MIRROR_DIFF" in lifecycle_events
+            and (
+                provenance == "STALE_NO_EXPOSURE"
+                or "STALE_NO_EXPOSURE" in lifecycle_events
+            )
+        )
+    )
+
+    def append_provenance_exclusion(target):
+        if mirror_stale_lifecycle:
+            target.append("MIRROR_DIFF_STALE_NO_EXPOSURE")
+        elif provenance in {"STALE_NO_EXPOSURE", "MIRROR_DIFF_STALE_NO_EXPOSURE"}:
+            target.append("STALE_NO_EXPOSURE")
+        elif provenance in {"SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED"}:
+            target.append("SOURCE_ABSENCE_FALLBACK")
+        elif provenance in {"EMERGENCY_ACTION", "EMERGENCY_CLOSE"}:
+            target.append("EMERGENCY_CLOSE")
+        else:
+            target.append("MANUAL_CLOSE")
 
     showcase = reasons[SHOWCASE_STRATEGY]
     if not _present(row.get("trade_id")):
@@ -64,13 +93,7 @@ def classify_row(row):
     if not provenance:
         showcase.append("TERMINAL_PROVENANCE_MISSING")
     elif provenance in _EXCLUDED_PROVENANCE:
-        showcase.append(
-            "SOURCE_ABSENCE_FALLBACK"
-            if provenance in {"SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED"}
-            else "EMERGENCY_CLOSE"
-            if provenance in {"EMERGENCY_ACTION", "EMERGENCY_CLOSE"}
-            else "MANUAL_CLOSE"
-        )
+        append_provenance_exclusion(showcase)
 
     evidence = _evidence(row)
     fidelity = reasons[BITFINEX_COPY_FIDELITY]
@@ -94,13 +117,7 @@ def classify_row(row):
     if not provenance:
         fidelity.append("TERMINAL_PROVENANCE_MISSING")
     elif provenance in _EXCLUDED_PROVENANCE:
-        fidelity.append(
-            "SOURCE_ABSENCE_FALLBACK"
-            if provenance in {"SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED"}
-            else "EMERGENCY_CLOSE"
-            if provenance in {"EMERGENCY_ACTION", "EMERGENCY_CLOSE"}
-            else "MANUAL_CLOSE"
-        )
+        append_provenance_exclusion(fidelity)
 
     optimisation = reasons[REAL_COPY_PARAMETER_OPTIMISATION]
     optimisation.extend(showcase)

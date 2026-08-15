@@ -30,6 +30,7 @@ import {
   aggressiveCatchupIsWithinBound,
   mirrorPositionQuantityDelta,
   partialEntryFillDisposition,
+  entryTtlPartialFillDisposition,
   finalizedEntryFillQty,
   protectiveStopReferencePrice,
   mirrorDiffPriceDeltaIsWithinSignedRepriceGrace,
@@ -439,6 +440,36 @@ test('partial entry lifecycle retains only a live nonterminal remainder', () => 
       terminalSource: true,
     }),
     'FINALIZE_FILL',
+  );
+});
+
+test('entry TTL cancels only a partial remainder and keeps authenticated exposure open', () => {
+  assert.equal(
+    entryTtlPartialFillDisposition({
+      context: 'SIGNAL_TTL_EXPIRED',
+      intendedQty: 0.03,
+      filledQty: 0.018,
+      orderResting: true,
+    }),
+    'CANCEL_REMAINDER_AND_OPEN',
+  );
+  assert.equal(
+    entryTtlPartialFillDisposition({
+      context: 'SHOWCASE_ORDER_EXPIRED',
+      intendedQty: 0.03,
+      filledQty: 0.018,
+      orderResting: true,
+    }),
+    'CANCEL_REMAINDER_AND_OPEN',
+  );
+  assert.equal(
+    entryTtlPartialFillDisposition({
+      context: 'SHOWCASE_CYCLE_CLOSED',
+      intendedQty: 0.03,
+      filledQty: 0.018,
+      orderResting: true,
+    }),
+    'NORMAL_FILL_PATH',
   );
 });
 
@@ -1034,16 +1065,17 @@ test('source-fill wake polling stays fail-closed when Bitfinex has no fill', asy
   assert.equal(waits, 6);
 });
 
-test('authenticated direct wake queues instead of returning busy', async () => {
+test('independent authenticated direct wakes start on separate trade lanes', async () => {
   const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
   const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
   process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
   process.env.RELAY_EXECUTOR_WORKER = 'true';
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-    service.fastWakeRunning = true;
-    service.activeDirectWake = null;
-    service.pendingDirectWakes = [];
+    service.activeDirectWakes = new Map();
+    service.pendingDirectWakes = new Map();
+    const launched: unknown[] = [];
+    service.startDirectExecutorWake = (candidate: unknown) => { launched.push(candidate); };
     const wake = {
       trigger: 'ORDER_PLACED',
       tradeId: 'cont-queued-direct',
@@ -1051,18 +1083,7 @@ test('authenticated direct wake queues instead of returning busy', async () => {
     };
 
     assert.equal(await service.acceptDirectExecutorWake(wake), true);
-    assert.deepEqual(service.pendingDirectWakes, [wake]);
-    assert.equal(await service.acceptDirectExecutorWake(wake), true);
-    assert.equal(service.pendingDirectWakes.length, 1);
-
-    let launched: unknown = null;
-    service.fastWakeRunning = false;
-    service.startDirectExecutorWake = (candidate: unknown) => {
-      launched = candidate;
-    };
-    service.drainQueuedDirectWake();
-    assert.equal(launched, wake);
-    assert.equal(service.pendingDirectWakes.length, 0);
+    assert.deepEqual(launched, [wake]);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
     else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
@@ -1078,17 +1099,16 @@ test('post-commit ORDER_PLACED does not queue behind its running pre-wake', asyn
   process.env.RELAY_EXECUTOR_WORKER = 'true';
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-    service.fastWakeRunning = true;
-    service.pendingDirectWakes = [];
-    service.activeDirectWake = {
+    service.pendingDirectWakes = new Map();
+    service.activeDirectWakes = new Map([['trade:cont-same', {
       trigger: 'ORDER_PLACED', tradeId: 'cont-same', at: '2026-08-11T04:35:00.000Z',
-    };
+    }]]);
     const postCommit = {
       trigger: 'ORDER_PLACED', tradeId: 'cont-same', at: '2026-08-11T04:35:00.250Z',
     };
 
     assert.equal(await service.acceptDirectExecutorWake(postCommit), true);
-    assert.deepEqual(service.pendingDirectWakes, []);
+    assert.equal(service.pendingDirectWakes.size, 0);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
     else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
@@ -1104,15 +1124,16 @@ test('post-commit POSITION_OPENED does not duplicate its running pre-wake', asyn
   process.env.RELAY_EXECUTOR_WORKER = 'true';
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-    service.fastWakeRunning = true;
-    service.pendingDirectWakes = [];
-    service.activeDirectWake = {
+    service.pendingDirectWakes = new Map();
+    service.activeDirectWakes = new Map([['trade:cont-fill', {
       trigger: 'POSITION_OPENED', tradeId: 'cont-fill', at: '2026-08-11T06:59:32.389Z',
-    };
+    }]]);
+    service.prioritySourceFillWakes = new Set(['POSITION_OPENED:cont-fill']);
+    service.startPrioritySourceFillWake = () => undefined;
     assert.equal(await service.acceptDirectExecutorWake({
       trigger: 'POSITION_OPENED', tradeId: 'cont-fill', at: '2026-08-11T06:59:32.500Z',
     }), true);
-    assert.deepEqual(service.pendingDirectWakes, []);
+    assert.equal(service.pendingDirectWakes.size, 0);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
     else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
@@ -1121,20 +1142,19 @@ test('post-commit POSITION_OPENED does not duplicate its running pre-wake', asyn
   }
 });
 
-test('source fill starts beside an unrelated running reprice but keeps its duplicate suppressed', async () => {
+test('source fill starts beside an unrelated running reprice on its own trade lane', async () => {
   const previousExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
   const previousWorker = process.env.RELAY_EXECUTOR_WORKER;
   process.env.SUBSCRIBER_EXECUTION_ENABLED = 'true';
   process.env.RELAY_EXECUTOR_WORKER = 'true';
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-    service.fastWakeRunning = true;
     service.running = true;
     service.wakeQueued = false;
-    service.activeDirectWake = {
+    service.activeDirectWakes = new Map([['trade:cont-unrelated-reprice', {
       trigger: 'LIMIT_UPDATED', tradeId: 'cont-unrelated-reprice', at: '2026-08-12T00:00:00.000Z',
-    };
-    service.pendingDirectWakes = [];
+    }]]);
+    service.pendingDirectWakes = new Map();
     service.prioritySourceFillWakes = new Set<string>();
     service.completedDirectWakeAt = new Map<string, number>();
     service.logger = { warn: () => undefined };
@@ -1152,15 +1172,13 @@ test('source fill starts beside an unrelated running reprice but keeps its dupli
     assert.equal(await service.acceptDirectExecutorWake(fillWake), true);
     assert.equal(await service.acceptDirectExecutorWake({ ...fillWake, at: '2026-08-12T00:00:01.200Z' }), true);
     assert.deepEqual(launched, [fillWake]);
-    assert.equal(service.pendingDirectWakes.length, 0);
-    assert.equal(service.prioritySourceFillWakes.has('POSITION_OPENED:cont-exact-fill'), true);
-    // The regular reconciliation must also see this side-lane wake.  It is
-    // not activeDirectWake because the unrelated reprice owns that slot.
+    assert.equal(service.pendingDirectWakes.size, 0);
+    assert.equal(service.activeDirectWakes.has('trade:cont-exact-fill'), true);
     assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-exact-fill'), true);
 
     resolveExecution();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(service.prioritySourceFillWakes.size, 0);
+    assert.equal(service.activeDirectWakes.has('trade:cont-exact-fill'), false);
     assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-exact-fill'), false);
     assert.equal(service.wakeQueued, true);
   } finally {
@@ -1171,14 +1189,12 @@ test('source fill starts beside an unrelated running reprice but keeps its dupli
   }
 });
 
-test('queued source fill preempts a queued reprice and coalesces its durable duplicate', () => {
+test('same-trade source fill is retained as the next wake while another trade is independent', () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-  service.activeDirectWake = {
+  service.activeDirectWakes = new Map([['trade:cont-priority-fill', {
     trigger: 'LIMIT_UPDATED', tradeId: 'cont-priority-fill', at: '2026-08-11T20:43:22.070Z',
-  };
-  service.pendingDirectWakes = [{
-    trigger: 'LIMIT_UPDATED', tradeId: 'cont-other', at: '2026-08-11T20:43:22.200Z',
-  }];
+  }]]);
+  service.pendingDirectWakes = new Map();
   const preWake = {
     trigger: 'POSITION_OPENED', tradeId: 'cont-priority-fill', at: '2026-08-11T20:43:23.114Z',
   };
@@ -1189,19 +1205,17 @@ test('queued source fill preempts a queued reprice and coalesces its durable dup
   service.enqueueDirectWake(preWake);
   service.enqueueDirectWake(postCommit);
 
-  assert.deepEqual(service.pendingDirectWakes, [preWake, {
-    trigger: 'LIMIT_UPDATED', tradeId: 'cont-other', at: '2026-08-11T20:43:22.200Z',
-  }]);
+  assert.equal(service.pendingDirectWakes.get('trade:cont-priority-fill'), preWake);
   assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-priority-fill'), true);
   assert.equal(service.hasQueuedOrActiveSourceFillWake('cont-other'), false);
 });
 
 test('queued LIMIT_UPDATED burst coalesces to newest exact revision', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-  service.activeDirectWake = {
+  service.activeDirectWakes = new Map([['trade:cont-burst', {
     trigger: 'ORDER_PLACED', tradeId: 'cont-burst', at: '2026-08-11T04:35:00.000Z',
-  };
-  service.pendingDirectWakes = [];
+  }]]);
+  service.pendingDirectWakes = new Map();
   const oldWake = {
     trigger: 'LIMIT_UPDATED', tradeId: 'cont-burst', at: '2026-08-11T04:35:01.000Z',
   };
@@ -1211,21 +1225,21 @@ test('queued LIMIT_UPDATED burst coalesces to newest exact revision', async () =
 
   service.enqueueDirectWake(oldWake);
   service.enqueueDirectWake(newWake);
-  assert.deepEqual(service.pendingDirectWakes, [newWake]);
+  assert.equal(service.pendingDirectWakes.get('trade:cont-burst'), newWake);
 });
 
 test('new LIMIT_UPDATED queues behind an in-flight older revision', () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-  service.activeDirectWake = {
+  service.activeDirectWakes = new Map([['trade:cont-active-chase', {
     trigger: 'LIMIT_UPDATED', tradeId: 'cont-active-chase', at: '2026-08-11T04:35:01.000Z',
-  };
-  service.pendingDirectWakes = [];
+  }]]);
+  service.pendingDirectWakes = new Map();
   const newest = {
     trigger: 'LIMIT_UPDATED', tradeId: 'cont-active-chase', at: '2026-08-11T04:35:02.000Z',
   };
 
   service.enqueueDirectWake(newest);
-  assert.deepEqual(service.pendingDirectWakes, [newest]);
+  assert.equal(service.pendingDirectWakes.get('trade:cont-active-chase'), newest);
 });
 
 test('signed LIMIT_UPDATED fast wake reprices only its exact owned pending order', async () => {
@@ -3213,7 +3227,7 @@ test('rapid signed reprices execute only against the newest durable order genera
     },
   );
 
-  assert.equal(ownedArgs.length, 8, 'the latest signed revision must replace after the prior generation persists');
+  assert.equal(ownedArgs.length, 9, 'the latest signed revision must replace after the prior generation persists');
   assert.equal(ownedArgs[4].bitfinexOrderId, 9002, 'never operate on stale order 9001');
   assert.equal(ownedArgs[4].limitPrice, 64_010);
   assert.equal(ownedArgs[7].newLimit, 64_050, 'use the newest signed source limit, not the stale wake target');
@@ -3758,12 +3772,13 @@ test('snapshot missed-fill fallback defers while its exact signed source-fill wa
   let cancelCalls = 0;
   const intent = { action: 'ENTER', trade_id: 'cont-fill-priority', risk: {}, context: {} };
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-  service.pendingDirectWakes = [{
+  service.pendingDirectWakes = new Map([['trade:cont-fill-priority', {
     trigger: 'POSITION_OPENED', tradeId: 'cont-fill-priority', at: new Date().toISOString(),
-  }];
-  service.activeDirectWake = {
+  }]]);
+  service.activeDirectWakes = new Map([['trade:cont-fill-priority', {
     trigger: 'LIMIT_UPDATED', tradeId: 'cont-fill-priority', at: new Date().toISOString(),
-  };
+  }]]);
+  service.prioritySourceFillWakes = new Set<string>();
   service.loadExecutionMeta = async () => ({
     direction: 'SHORT', bitfinexOrderId: 6002, limitPrice: 64_000, qty: 0.03,
   });
@@ -5215,15 +5230,14 @@ test('duplicate pre/post POSITION_CLOSED wake cannot queue a second close', asyn
   process.env.RELAY_EXECUTOR_WORKER = 'true';
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-    service.fastWakeRunning = true;
-    service.pendingDirectWakes = [];
-    service.activeDirectWake = {
+    service.pendingDirectWakes = new Map();
+    service.activeDirectWakes = new Map([['trade:cont-close-one', {
       trigger: 'POSITION_CLOSED', tradeId: 'cont-close-one', at: '2026-08-11T12:09:56.107Z',
-    };
+    }]]);
     assert.equal(await service.acceptDirectExecutorWake({
       trigger: 'POSITION_CLOSED', tradeId: 'cont-close-one', at: '2026-08-11T12:09:56.107Z',
     }), true);
-    assert.deepEqual(service.pendingDirectWakes, []);
+    assert.equal(service.pendingDirectWakes.size, 0);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
     else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;
@@ -5317,22 +5331,21 @@ test('duplicate pre/post ORDER_EXPIRED wake cannot queue a second cancellation',
   process.env.RELAY_EXECUTOR_WORKER = 'true';
   try {
     const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
-    service.fastWakeRunning = true;
-    service.pendingDirectWakes = [];
-    service.activeDirectWake = {
+    service.pendingDirectWakes = new Map();
+    service.activeDirectWakes = new Map([['trade:cont-expiry-one', {
       trigger: 'ORDER_EXPIRED', tradeId: 'cont-expiry-one', at: '2026-08-11T13:14:25.652Z',
       signedExpiry: { sourceExpiresAtMs:1,sourceEventAtMs:2,platformReceivedAtMs:3,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED' },
-    };
+    }]]);
     assert.equal(await service.acceptDirectExecutorWake({
       trigger: 'ORDER_EXPIRED', tradeId: 'cont-expiry-one', at: '2026-08-11T13:14:25.652Z',
       signedExpiry: { sourceExpiresAtMs:1,sourceEventAtMs:2,platformReceivedAtMs:3,eventSeq:1,limitPrice:64000,eventId:'expiry-1',reason:'SIGNAL_TTL_EXPIRED' },
     }), true);
-    assert.deepEqual(service.pendingDirectWakes, []);
+    assert.equal(service.pendingDirectWakes.size, 0);
     assert.equal(await service.acceptDirectExecutorWake({
       trigger: 'ORDER_EXPIRED', tradeId: 'cont-expiry-one', at: '2026-08-11T13:14:26.652Z',
       signedExpiry: { sourceExpiresAtMs:4,sourceEventAtMs:5,platformReceivedAtMs:6,eventSeq:2,limitPrice:63990,eventId:'expiry-2',reason:'SIGNAL_TTL_EXPIRED' },
     }), true);
-    assert.equal(service.pendingDirectWakes.length, 1);
+    assert.equal(service.pendingDirectWakes.size, 1);
   } finally {
     if (previousExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
     else process.env.SUBSCRIBER_EXECUTION_ENABLED = previousExecution;

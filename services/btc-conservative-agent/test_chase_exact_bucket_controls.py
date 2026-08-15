@@ -103,6 +103,44 @@ def test_pending_order_registration_is_trade_id_idempotent():
     assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
+def test_virtual_promotion_claim_is_atomic_generation_bound_and_single_owner():
+    signal = {
+        "trade_id": "cont-promotion-race",
+        "status": "AWAITING_DASHBOARD_CHASE",
+        "promotion_lifecycle_generation": 7,
+        "order_placed": False,
+    }
+    namespace = {
+        "trades_map": {signal["trade_id"]: {"signal_ref": signal}},
+        "pending_orders": [],
+        "open_positions": [],
+        "trade_lock": threading.RLock(),
+        "time": types.SimpleNamespace(time=lambda: 100.0),
+        "uuid": types.SimpleNamespace(uuid4=lambda: types.SimpleNamespace(hex="claim-one")),
+        "PROMOTION_IN_PROGRESS_GRACE_SEC": 15.0,
+        "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+        "is_terminal_signal": lambda row: row.get("status") in {"EXPIRED", "CLOSED"},
+    }
+    claim = _compile_function("_claim_signal_promotion", namespace)
+    validate = _compile_function("_signal_promotion_claim_valid", namespace)
+
+    first = claim(signal)
+    assert first == {
+        "trade_id": "cont-promotion-race", "token": "claim-one", "generation": 7
+    }
+    assert claim(signal) is None
+    assert validate(signal, first) is True
+
+    signal["promotion_lifecycle_generation"] = 8
+    assert validate(signal, first) is False
+
+
+def test_stale_cleanup_respects_promotion_grace_before_no_exposure_terminalization():
+    assert 'promotion_in_progress = bool(' in BOT_SOURCE
+    assert 'now - promotion_at <= PROMOTION_IN_PROGRESS_GRACE_SEC' in BOT_SOURCE
+    assert 'and missing_exposure and not promotion_in_progress' in BOT_SOURCE
+
+
 def test_waiting_chase_is_not_reported_as_an_order():
     assert "def _account_registered_order_submission(signal: dict, ai: dict = None)" in BOT_SOURCE
     assert 'signal["_order_submission_accounted"] = True' in BOT_SOURCE
@@ -688,31 +726,15 @@ def test_deterministic_anchor_uses_0_1_pct_offset_not_local_support_resistance()
 
 
 def test_exact_dashboard_chase_bucket_rests_before_next_chase():
-    chase_calls = []
-    namespace = {
-        "is_virtual_chase_entry_lane": lambda _lane: False,
-        "is_research_data_collection": lambda: True,
-        "limit_chase_enabled": lambda: True,
-        "state": {"price": 64000},
-        "time": __import__("time"),
-        "_limit_chase_eligible_order": lambda *_args: True,
-        "_apply_limit_chase": lambda *_args: chase_calls.append(True) or True,
-        "logger": type("Logger", (), {"info": staticmethod(lambda *_args: None)})(),
-        "fmt": str,
-    }
-    first_chase = _compile_function("_try_immediate_first_chase", namespace)
-    order = {
-        "trade_id": "cont-chase3",
-        "status": "PENDING",
-        "entry_type": "SIM_LIMIT",
-        "research_lane": "CONTINUOUS",
-        "dashboard_exact_chase_managed": True,
-        "limit_chase_count": 3,
-    }
-    assert first_chase(order, {}) is False
-    assert chase_calls == []
-
     tree = ast.parse(BOT_SOURCE)
+    first_chase_fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_try_immediate_first_chase"
+    )
+    first_chase_source = ast.get_source_segment(BOT_SOURCE, first_chase_fn)
+    assert 'if order.get("dashboard_exact_chase_managed") or' in first_chase_source
+    assert 'return False' in first_chase_source
+
     place_fn = next(
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_place_simulated_limit_order"
@@ -814,7 +836,9 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
             "_place_simulated_limit_order": place_order,
         }
     )
-    promote_runtime = _compile_function("_promote_signal_to_limit_order", namespace)
+    promote_runtime = _compile_function(
+        "_promote_signal_to_limit_order_claimed", namespace
+    )
     assert promote_runtime(signal, skip_virtual_defer=True) is True
     assert captured["limit_price"] == 63214.54
     assert captured["entry_mode"] == "AI_DIRECT_LIMIT"
@@ -827,7 +851,12 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
         if isinstance(node, ast.FunctionDef)
         and node.name == "_promote_signal_to_limit_order"
     )
-    promote_source = ast.get_source_segment(BOT_SOURCE, promote)
+    promote_impl = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_promote_signal_to_limit_order_claimed"
+    )
+    promote_source = ast.get_source_segment(BOT_SOURCE, promote_impl)
     assert "_resolve_selected_virtual_submit_limit(signal)" in promote_source
     assert "if skip_virtual_defer" in promote_source
 

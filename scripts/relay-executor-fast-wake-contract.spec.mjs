@@ -14,7 +14,8 @@ test('direct executor wake acknowledges before exchange execution completes', as
     source.indexOf('private executorWakeKey(', source.indexOf('async acceptDirectExecutorWake(')),
   );
 
-  assert.match(method, /setImmediate\(\(\) => \{/);
+  assert.match(method, /this\.activeDirectWakes\.set\(laneKey, wake\)/);
+  assert.match(method, /this\.executorWakeLaneKey\(wake\)/);
   assert.match(method, /void this\.executePersistedFastWake\(wake\)/);
   assert.match(method, /return true;/);
   assert.doesNotMatch(method, /await this\.executePersistedFastWake\(wake\)/);
@@ -46,8 +47,32 @@ test('signed fast entry reuses same-invocation price and balance preflight', asy
   const source = await readFile(executionPath, 'utf8');
 
   assert.match(source, /this\.activeTrading\.getMarkPrice\(\)\.catch\(\(\) => null\)/);
-  assert.match(source, /\{ availableUsd, markPrice \},/);
-  assert.match(source, /fastPreflight\?: \{ availableUsd: number; markPrice: number \}/);
+  assert.match(source, /availableUsd,\s+markPrice,\s+exchangeBookProvenEmpty: flatPreflight,/);
+  assert.match(source, /fastPreflight\?: \{[\s\S]*availableUsd: number;[\s\S]*markPrice: number;/);
   assert.match(source, /fastPreflight\?\.markPrice \?\? await this\.activeTrading\.getMarkPrice\(\)/);
   assert.match(source, /let available = fastPreflight\?\.availableUsd \?\? 0;/);
+});
+
+test('entry and reprice persist complete stage timing around the exchange action', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  for (const stage of [
+    'queueEnteredAtMs',
+    'executorStartedAtMs',
+    'databasePreflightStartedAtMs',
+    'databasePreflightCompletedAtMs',
+    'bitfinexRequestStartedAtMs',
+    'exchangeAckAtMs',
+    'persistenceStartedAtMs',
+    'persistenceCompletedAtMs',
+  ]) assert.match(source, new RegExp(stage));
+  assert.match(source, /'EXECUTION_TIMING'/);
+  assert.match(source, /schema: 'relay_execution_timing_v1'/);
+});
+
+test('mirror diff followed by stale-no-exposure is immutable excluded evidence', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  assert.match(source, /eventType: 'MIRROR_DIFF'/);
+  assert.match(source, /'NEGATIVE_EVIDENCE'/);
+  assert.match(source, /event: 'MIRROR_DIFF_STALE_NO_EXPOSURE'/);
+  assert.match(source, /analysis_exclusion_reasons: \['MIRROR_DIFF_STALE_NO_EXPOSURE'\]/);
 });

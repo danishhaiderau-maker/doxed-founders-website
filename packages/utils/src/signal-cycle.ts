@@ -181,6 +181,11 @@ export type SignalCycleEventType =
   // snapshot that observes an OPEN copy lot without its source position,
   // including UNKNOWN / grace-wait observations before any fallback exit.
   | 'SOURCE_ABSENCE_OBSERVED'
+  // Immutable performance and negative-lifecycle evidence. These events do
+  // not transition participant state; they make queue/API timing and a
+  // MIRROR_DIFF -> STALE_NO_EXPOSURE sequence reportable without inference.
+  | 'EXECUTION_TIMING'
+  | 'NEGATIVE_EVIDENCE'
   // F2 (2026-07-07 incident) � Showcase-unreachable orphan kill. Emitted when
   // the relay market-closes an OPEN copy lot because the showcase has been
   // unreachable past SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS. Distinct from
