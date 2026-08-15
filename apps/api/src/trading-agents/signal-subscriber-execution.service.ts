@@ -2402,7 +2402,7 @@ export function shouldRunLocalRealSideSafetyNet(input: {
  * "true": the relay un-gates PROFIT_LOCK_TRAIL so the protective stop on
  * Bitfinex is kept synced to the current Scenario C ladder rung, even in
  * showcase-mirror-only mode (the showcase bot remains the decision maker for
- * EXIT, but the exchange stop advances through 10→6, 19→17, 40→28, ... as
+ * EXIT, but the exchange stop advances through 4→2, 5→3, 8→5, 12→10, ... as
  * unrealized margin grows, so a sudden reverse actually realizes the rung's
  * protected % instead of the initial wide stop). When unset / not "true":
  * behavior is unchanged (Phase 2 exit convergence — wide disaster stop only,
@@ -2411,7 +2411,7 @@ export function shouldRunLocalRealSideSafetyNet(input: {
  *
  * Per-account isolation: state (peak MFE, current rung, current stop order
  * id) is keyed by participantId, which is unique per (userId, cycleId).
- * Never-loosen, cancel-then-replace, idempotent on restart, audit-logged,
+ * Never-loosen, submit-new-before-cancel-old, idempotent on restart, audit-logged,
  * circuit-broken after 3 consecutive failures.
  */
 function exchangeDynamicStopsEnabled(): boolean {
@@ -2449,8 +2449,8 @@ function realSideSafetyNetEnabled(): boolean {
 
 /**
  * The hard-stop margin % used by the real-side safety net. Defaults to the
- * intent's own stop_loss_margin_pct ceiling (-18), independent of the wider
- * MIRROR_DISASTER_STOP_MARGIN_PCT. Override per deployment via env if a
+ * intent's own stop_loss_margin_pct, with the canonical -13% fallback,
+ * independent of MIRROR_DISASTER_STOP_MARGIN_PCT. Override via env if a
  * tighter floor is required. Negative number.
  */
 function realSideSafetyNetHardStopMarginPct(intentStopLoss?: number): number {
@@ -2459,12 +2459,12 @@ function realSideSafetyNetHardStopMarginPct(intentStopLoss?: number): number {
     const n = Number(env);
     if (Number.isFinite(n) && n < 0) return n;
   }
-  // Honour a tighter intent stop if the strategy specified one; -18 is the
-  // canonical showcase default and the historical relay fallback.
+  // Honour the immutable per-trade policy when present. Missing legacy data
+  // fails to the canonical Showcase hard stop; it must never widen risk.
   if (intentStopLoss != null && Number.isFinite(intentStopLoss) && intentStopLoss < 0) {
     return intentStopLoss;
   }
-  return -18;
+  return -13;
 }
 
 /** Exact-copy entries never use the legacy market catch-up path. */

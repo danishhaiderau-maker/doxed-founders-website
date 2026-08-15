@@ -92,3 +92,13 @@ test('profit-lock stop replacement preserves continuous exact-quantity protectio
   assert.match(source, /const exchangeProtectedQty = Math\.abs\(position\.amount\)/);
   assert.doesNotMatch(replacement.slice(0, submitAt), /cancelManagedOrderGone/);
 });
+
+test('real-side hard-stop fallback cannot widen beyond the canonical policy', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  const start = source.indexOf('function realSideSafetyNetHardStopMarginPct(');
+  const end = source.indexOf('/** Exact-copy entries', start);
+  assert.ok(start >= 0 && end > start, 'hard-stop fallback function must exist');
+  const hardStop = source.slice(start, end);
+  assert.match(hardStop, /return -13;/);
+  assert.doesNotMatch(hardStop, /return -18;/);
+});
