@@ -57,6 +57,17 @@ import csv
 import io
 import zipfile
 from pathlib import Path
+from analysis_eligibility import (
+    SHOWCASE_STRATEGY,
+    REAL_COPY_PARAMETER_OPTIMISATION,
+    eligible_trade_ids as _cohort_eligible_trade_ids,
+)
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "Legacy research analyzer is disabled fail-closed. "
+        "Run ../analyzer_research_engine_v62.py so every report uses the shared cohort gate."
+    )
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")

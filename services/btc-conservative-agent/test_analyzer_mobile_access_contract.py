@@ -10,6 +10,7 @@ ANALYZER_SOURCES = [
     Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
     (Path(__file__).with_name("research") / "analyzer_research_engine_v62.py").read_text(encoding="utf-8"),
 ]
+LEGACY_ANALYZER_SOURCE = ANALYZER_SOURCES[1]
 
 
 def _route(name: str, next_marker: str) -> str:
@@ -113,6 +114,12 @@ def test_execution_and_research_hard_stop_policy_stay_in_parity():
     for analyzer_source in ANALYZER_SOURCES:
         assert assigned_value(analyzer_source, "HARD_STOP_MARGIN_PCT") == expected
         assert "Hard SL margin cap: 30%" not in analyzer_source
+
+
+def test_legacy_analyzer_fails_closed_and_imports_shared_cohort_contract():
+    assert 'from analysis_eligibility import (' in LEGACY_ANALYZER_SOURCE
+    assert 'Legacy research analyzer is disabled fail-closed.' in LEGACY_ANALYZER_SOURCE
+    assert 'Run ../analyzer_research_engine_v62.py' in LEGACY_ANALYZER_SOURCE
 
 
 def test_analyzer_session_is_opaque_and_narrowly_scoped():

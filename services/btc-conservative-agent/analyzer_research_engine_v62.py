@@ -58,6 +58,11 @@ import io
 import itertools
 import zipfile
 from pathlib import Path
+from research.analysis_eligibility import (
+    SHOWCASE_STRATEGY,
+    REAL_COPY_PARAMETER_OPTIMISATION,
+    eligible_trade_ids as _cohort_eligible_trade_ids,
+)
 from research_opportunity_v2 import (
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
     REPORT_FILE as TYPE_B_RESEARCH_V2_REPORT_NAME,
@@ -2059,57 +2064,42 @@ def research_jsonl_summary(datasets=None):
         print(f"  trade_lifecycle regimes={sorted(x for x in regimes if x)} trend_health={sorted(x for x in trends if x)} {PIPELINE_ENFORCEMENT_TAG}")
 
 
-def _analysis_eligible_trade_ids():
-    """Canonical allow-list for every policy/exit optimizer.
-
-    Legacy rows fail closed. A row is usable only when its counterfactual_v2
-    evidence explicitly proves complete policy, complete replay, and a clean
-    terminal provenance. This prevents manual/emergency/source-absence or
-    mixed-policy lifecycles from silently influencing parameter decisions.
-    """
+def _analysis_eligible_trade_ids(cohort=REAL_COPY_PARAMETER_OPTIMISATION):
+    """Canonical cohort allow-list for research and policy optimizers."""
     rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
-    eligible = set()
-    exclusions = defaultdict(int)
-    for trade_id, row in rows.items():
-        reasons = row.get("analysis_exclusion_reasons") or []
-        valid = (
-            row.get("analysis_eligibility_schema") == "analysis_eligibility_v1"
-            and row.get("analysis_eligible") is True
-            and row.get("policy_snapshot_complete") is True
-            and row.get("replay_complete") is True
-            and not reasons
-        )
-        if valid:
-            eligible.add(str(trade_id))
-            continue
-        if not reasons:
-            reasons = ["ELIGIBILITY_EVIDENCE_MISSING"]
-        for reason in reasons:
-            exclusions[str(reason)] += 1
-    return eligible, dict(exclusions), len(rows)
+    eligible, exclusions = _cohort_eligible_trade_ids(rows, cohort)
+    return eligible, exclusions, len(rows)
 
 
-def _filter_policy_analysis_df(df, label="policy analysis"):
+def _filter_policy_analysis_df(
+    df,
+    label="policy analysis",
+    cohort=REAL_COPY_PARAMETER_OPTIMISATION,
+):
     if df is None or df.empty:
         return df
-    eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids()
+    eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)
     if "trade_id" not in df.columns:
         print(f"  {label}: blocked — trade_id missing; no policy conclusions allowed. {PIPELINE_ENFORCEMENT_TAG}")
         return df.iloc[0:0].copy()
     before = len(df)
     filtered = df[df["trade_id"].astype(str).isin(eligible)].copy()
     print(
-        f"  {label}: eligibility {len(filtered)}/{before} rows "
+        f"  {label}: {cohort} eligibility {len(filtered)}/{before} rows "
         f"(evidence={evidence_rows}, exclusions={exclusions}). {PIPELINE_ENFORCEMENT_TAG}"
     )
     return filtered
 
 
-def _filter_policy_analysis_replays(replays, label="policy replay analysis"):
-    eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids()
+def _filter_policy_analysis_replays(
+    replays,
+    label="policy replay analysis",
+    cohort=REAL_COPY_PARAMETER_OPTIMISATION,
+):
+    eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)
     filtered = {str(tid): row for tid, row in (replays or {}).items() if str(tid) in eligible}
     print(
-        f"  {label}: eligibility {len(filtered)}/{len(replays or {})} replays "
+        f"  {label}: {cohort} eligibility {len(filtered)}/{len(replays or {})} replays "
         f"(evidence={evidence_rows}, exclusions={exclusions}). {PIPELINE_ENFORCEMENT_TAG}"
     )
     return filtered
@@ -2133,7 +2123,11 @@ def _load_shadow_outcome_df(session: dict = None):
                 f"   No shadow rows in current session (file has {before} all-time rows). "
                 f"Run bot longer or disable session filter for all-time shadow review. {PIPELINE_ENFORCEMENT_TAG}"
             )
-    return _filter_policy_analysis_df(df, "shadow/counterfactual analysis")
+    return _filter_policy_analysis_df(
+        df,
+        "shadow/counterfactual analysis",
+        cohort=SHOWCASE_STRATEGY,
+    )
 
 
 def historical_trade_cohort_report():
