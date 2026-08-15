@@ -63,7 +63,7 @@ test('paper force-flat pauses first, closes exact trades, and proves the final b
       return reads === 1
         ? {
             positions: [{ trade_id: 'paper-1' }, { trade_id: 'paper-2' }],
-            orders: [],
+            orders: [{ trade_id: 'order-1' }, { trade_id: 'order-2' }],
           }
         : { positions: [], orders: [] };
     },
@@ -78,11 +78,14 @@ test('paper force-flat pauses first, closes exact trades, and proves the final b
   const result = await service.forceFlatShowcasePaper();
   assert.equal(result.ok, true);
   assert.equal(result.paused, true);
+  assert.equal(result.cancelledOrders, 2);
   assert.equal(result.closedPositions, 2);
   assert.equal(result.remainingPositions, 0);
   assert.equal(result.remainingOrders, 0);
   assert.deepEqual(calls, [
     { path: '/api/pause', body: {} },
+    { path: '/api/orders/cancel', body: { trade_id: 'order-1' } },
+    { path: '/api/orders/cancel', body: { trade_id: 'order-2' } },
     { path: '/api/positions/close', body: { trade_id: 'paper-1' } },
     { path: '/api/positions/close', body: { trade_id: 'paper-2' } },
   ]);

@@ -237,14 +237,28 @@ export class AdminControlService {
       };
     }
 
-    const tradeIds = Array.from(
+      const tradeIds = Array.from(
       new Set(
         (before.positions ?? [])
           .map((position) => String(position.trade_id ?? '').trim())
           .filter(Boolean),
       ),
-    );
-    let closedPositions = 0;
+      );
+      const orderTradeIds = Array.from(
+        new Set(
+          (before.orders ?? [])
+            .map((order) => String(order.trade_id ?? '').trim())
+            .filter(Boolean),
+        ),
+      );
+      let cancelledOrders = 0;
+      for (const tradeId of orderTradeIds) {
+        const cancel = await this.botBridge.proxyBotPost('/api/orders/cancel', {
+          trade_id: tradeId,
+        });
+        if (cancel.ok) cancelledOrders += 1;
+      }
+      let closedPositions = 0;
     for (const tradeId of tradeIds) {
       const close = await this.botBridge.proxyBotPost('/api/positions/close', {
         trade_id: tradeId,
@@ -259,12 +273,13 @@ export class AdminControlService {
     const flat = remainingPositions === 0 && remainingOrders === 0;
     return {
       ok: flat,
-      paused: true,
-      closedPositions,
+        paused: true,
+        cancelledOrders,
+        closedPositions,
       remainingPositions,
       remainingOrders,
       message: flat
-        ? `Paper book is flat and paused; closed ${closedPositions} position(s).`
+          ? `Paper book is flat and paused; cancelled ${cancelledOrders} order(s) and closed ${closedPositions} position(s).`
         : 'Paper book is still not provably flat; keep trading paused and inspect the remaining rows.',
     };
   }
