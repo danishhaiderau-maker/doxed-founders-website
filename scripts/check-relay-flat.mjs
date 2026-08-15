@@ -161,9 +161,13 @@ async function fetchOwnerState() {
   }
   let lastError = null;
   for (const baseUrl of [...new Set(botUrls)]) {
-    const stateUrl = `${baseUrl}/api/state`;
+    // This is a money-path deployment gate.  It must read the same bounded,
+    // authenticated execution authority used by the relay, never the heavy
+    // presentation snapshot (or the legacy relay-state cache) which can lag
+    // a fill / handoff and falsely look flat.
+    const stateUrl = `${baseUrl}/api/relay-execution-state`;
     try {
-      let bot = await fetchOwnerJson(stateUrl);
+      const bot = await fetchOwnerJson(stateUrl);
       if (bot?.dashboard_owner === true) {
         if (
           requireCanonicalFlyOwner
@@ -179,28 +183,12 @@ async function fetchOwnerState() {
             `${baseUrl} did not return the authenticated owner order state`,
           );
         }
-        // /api/state is a presentation snapshot and can legitimately lag a
-        // successful Pause/cancel by one refresh. The lightweight relay-state
-        // endpoint is rebuilt from the current in-memory execution book, so it
-        // is the authoritative paper exposure boundary for deployment.
-        const relayStateUrl = `${baseUrl}/api/relay-state`;
-        try {
-          const relayState = await fetchOwnerJson(relayStateUrl);
-          if (!hasCurrentOwnerExposureState(relayState)) {
-            throw new Error('relay-state omitted current orders or positions');
-          }
-          bot = {
-            ...bot,
-            orders: relayState.orders,
-            positions: relayState.positions,
-            flat_state_source: 'authenticated_relay_state',
-          };
-        } catch (error) {
-          if (process.env.REQUIRE_BOT_ADMIN_TOKEN === 'YES') {
-            throw error;
-          }
+        if (!hasCurrentOwnerExposureState(bot)) {
+          throw new Error(
+            `${baseUrl} execution snapshot omitted current orders or positions`,
+          );
         }
-        return { bot, baseUrl };
+        return { bot: { ...bot, flat_state_source: 'authenticated_execution_snapshot' }, baseUrl };
       }
       lastError = new Error(`${baseUrl} is not the dashboard owner`);
     } catch (error) {

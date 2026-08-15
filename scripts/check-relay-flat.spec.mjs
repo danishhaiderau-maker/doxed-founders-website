@@ -97,11 +97,11 @@ test('owner timeout explains Fly routing and health-check failure', () => {
   error.name = 'TimeoutError';
   const described = describeOwnerFetchError(
     error,
-    'https://doxed-btc-bot.fly.dev/api/state',
+    'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
     15_000,
   );
   assert.match(described.message, /timed out after 15000ms/);
-  assert.match(described.message, /doxed-btc-bot\.fly\.dev\/api\/state/);
+  assert.match(described.message, /doxed-btc-bot\.fly\.dev\/api\/relay-execution-state/);
   assert.match(described.message, /critical service check removed public routing/);
 });
 
@@ -109,7 +109,7 @@ test('owner non-timeout failure retains URL and original diagnosis', () => {
   const error = new Error('showcase HTTP 503');
   const described = describeOwnerFetchError(
     error,
-    'https://doxed-btc-bot.fly.dev/api/state',
+    'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
     15_000,
   );
   assert.match(described.message, /request failed/);
@@ -125,7 +125,7 @@ test('owner fetch diagnosis includes nested undici socket cause and attempts', (
   assert.match(ownerFetchErrorChain(outer), /UND_ERR_SOCKET/);
   const described = describeOwnerFetchError(
     outer,
-    'https://doxed-btc-bot.fly.dev/api/relay-state',
+    'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
     15_000,
     3,
   );
