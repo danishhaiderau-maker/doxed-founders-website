@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: hold source lifecycle during fill handoff
+fix: expose relay exit provenance
 
 ## Last Activity
 
