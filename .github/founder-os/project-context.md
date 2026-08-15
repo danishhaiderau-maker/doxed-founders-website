@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: package shared analyzer contract on Fly
+fix: settle exchange-first partial copy lifecycles
 
 ## Last Activity
 
