@@ -23602,7 +23602,14 @@ _API_STATE_LOCK_TIMEOUT_SEC = max(
 )
 _RELAY_EXECUTION_LOCK_TIMEOUT_SEC = max(
     0.05,
-    float(os.getenv("RELAY_EXECUTION_LOCK_TIMEOUT_SEC", "0.25")),
+    # The engine may briefly hold trade_lock while committing a fill/close or
+    # reconciling restored evidence.  A 250ms acquisition budget caused the
+    # immutable source cache to miss several consecutive refreshes even though
+    # the owner was healthy, producing avoidable UNKNOWN windows downstream.
+    # One second remains bounded and never blocks an HTTP request (only this
+    # single publisher), while giving the money-path snapshot priority over
+    # presentation/research work once the current commit completes.
+    float(os.getenv("RELAY_EXECUTION_LOCK_TIMEOUT_SEC", "1.0")),
 )
 _DASHBOARD_TRADES_MAX = 5
 _DASHBOARD_HISTORY_MAX = 5  # AI history + expired orders (trades use _DASHBOARD_TRADES_MAX)
@@ -30228,7 +30235,11 @@ _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
 )
 _RELAY_EXECUTION_MAX_STALE_SEC = max(
     _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,
-    float(os.getenv("RELAY_EXECUTION_MAX_STALE_SEC", "2.0")),
+    # A successful build currently takes roughly 0.4-0.7s on the 1x Fly VM.
+    # Permit one bounded lock wait plus one missed refresh without declaring
+    # the signed owner unavailable.  Age remains explicit and downstream
+    # source-absence logic still treats snapshots beyond this bound as UNKNOWN.
+    float(os.getenv("RELAY_EXECUTION_MAX_STALE_SEC", "4.0")),
 )
 
 
