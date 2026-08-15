@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: replace profit-lock stops without protection gap
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
