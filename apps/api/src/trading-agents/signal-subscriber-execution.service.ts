@@ -19,7 +19,6 @@ import {
   SHOWCASE_DETERMINISTIC_ENTRY_POLICY_VERSION,
   isExecutableEntryPolicy,
   resolveMaxConcurrentCopySignals,
-  resolveMirrorDisasterStopMarginPct,
   isCopyRelaySimActive,
   readCopyRelaySimState,
   btcToSats,
@@ -42,6 +41,7 @@ import {
   getProfitLockFloor,
   solveScenarioCRung,
   SCENARIO_C_LADDER,
+  SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
   buildCopyRelayCapacity,
   isPaperLaneTradeId,
   isMirrorableLaneTradeId,
@@ -2514,20 +2514,22 @@ export function copyFirstScenarioCEligible(input: {
   return input.mirrorOnly && !input.simActive && !input.sourcePositionOpen && input.sourceStillPending;
 }
 
-function resolveEffectiveStopLossMarginPct(
+export function resolveEffectiveStopLossMarginPct(
   intentStopLoss?: number,
   opts?: { mirrorMode?: boolean; simActive?: boolean },
 ): number {
-  if (
-    opts?.mirrorMode !== false &&
-    !opts?.simActive &&
-    isShowcaseMirrorOnlyMode() &&
-    mirrorExitConvergenceEnabled()
-  ) {
+  const policyHardStop = SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
+  const requested =
+    intentStopLoss != null && Number.isFinite(intentStopLoss) && intentStopLoss < 0
+      ? intentStopLoss
+      : policyHardStop;
+  // Counterfactual simulation does not submit an exchange stop.
+  if (opts?.simActive) {
     // Crash/disconnect insurance only — must never front-run showcase thesis exits.
-    return resolveMirrorDisasterStopMarginPct();
+    return requested;
   }
-  return intentStopLoss ?? -18;
+  // A real exchange stop must never be wider than Scenario C's -13% ceiling.
+  return Math.max(requested, policyHardStop);
 }
 
 /** Two copy/showcase limits within this many USD are "the same book entry"

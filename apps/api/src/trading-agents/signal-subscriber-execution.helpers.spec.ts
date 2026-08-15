@@ -93,7 +93,15 @@ import {
   shouldRunLocalRealSideSafetyNet,
   resolveExactShowcaseEntryQty,
   copyFirstScenarioCEligible,
+  resolveEffectiveStopLossMarginPct,
 } from './signal-subscriber-execution.service';
+
+test('mirror-mode exchange protection never widens the Scenario C -13% hard stop', () => {
+  assert.equal(resolveEffectiveStopLossMarginPct(-40, { mirrorMode: true, simActive: false }), -13);
+  assert.equal(resolveEffectiveStopLossMarginPct(-10, { mirrorMode: true, simActive: false }), -10);
+  assert.equal(resolveEffectiveStopLossMarginPct(-40, { mirrorMode: false, simActive: false }), -13);
+  assert.equal(resolveEffectiveStopLossMarginPct(-40, { mirrorMode: true, simActive: true }), -40);
+});
 
 test('decimal-like terminal fill prices remain finite for partial-close P&L accounting', () => {
   assert.equal(finiteDecimalLikeNumber({ toNumber: () => 63_642 }), 63_642);
