@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix: expose relay exit provenance
+fix: preserve source lifecycle in live copy
 
 ## Last Activity
 
