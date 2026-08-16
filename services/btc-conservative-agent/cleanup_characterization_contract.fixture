@@ -86,6 +86,53 @@
     "bitfinex_live_reconcile_loop",
     "_platform_relay_connection_keepalive_loop"
   ],
+  "worker_start_contract": [
+    {"target": "run_flask", "safe_thread": false, "daemon": true},
+    {"target": "start_websocket", "safe_thread": true, "daemon": true},
+    {"target": "state_monitor_loop", "safe_thread": true, "daemon": true},
+    {"target": "engine_loop", "safe_thread": true, "daemon": true},
+    {"target": "tick_execution_engine", "safe_thread": true, "daemon": true},
+    {"target": "ws_watchdog", "safe_thread": true, "daemon": true},
+    {"target": "analytics_loop", "safe_thread": true, "daemon": true},
+    {"target": "position_manager", "safe_thread": true, "daemon": true},
+    {"target": "ttl_monitor", "safe_thread": true, "daemon": true},
+    {"target": "heartbeat_loop", "safe_thread": true, "daemon": true},
+    {"target": "periodic_pipeline_loop", "safe_thread": true, "daemon": true},
+    {"target": "watchdog_loop", "safe_thread": true, "daemon": true},
+    {"target": "bitfinex_live_reconcile_loop", "safe_thread": true, "daemon": true},
+    {"target": "_platform_relay_connection_keepalive_loop", "safe_thread": true, "daemon": true}
+  ],
+  "import_side_effect_calls": [
+    "requests.Session",
+    "_bitfinex_http_session.headers.update",
+    "_load_spread_gate_config",
+    "_load_local_dotenv",
+    "requests.Session",
+    "_relay_http_session.mount",
+    "_relay_http_session.mount",
+    "Queue",
+    "Queue",
+    "Flask",
+    "ccxt.bitfinex",
+    "_load_markets_with_retry",
+    "ccxt.bitfinex",
+    "logger.setLevel",
+    "logging.StreamHandler",
+    "stream_handler.setFormatter",
+    "SafeRotatingFileHandler",
+    "file_handler.setFormatter",
+    "file_handler.setLevel",
+    "logger.handlers.clear",
+    "logger.addHandler",
+    "logger.addHandler",
+    "signal.signal",
+    "signal.signal"
+  ],
+  "state_schema": {
+    "key_count": 178,
+    "ordered_key_sha256": "afa5caae7e6fd531c87ef64c6ad3f96156123e9ee25a3875cb21a5391a300475",
+    "duplicate_keys": ["edge_threshold"]
+  },
   "critical_state_keys": [
     "strategy_mode",
     "live_armed",
@@ -101,7 +148,12 @@
     "orders"
   ],
   "known_nested_lock_exception": [
-    ["_adopt_from_rebuild", "trade_lock", "state_lock"]
+    ["_adopt_from_rebuild", "trade_lock", "state_lock"],
+    ["_arm_live_control", "_live_control_lock", "state_lock"],
+    ["_disarm_live_control", "_live_control_lock", "state_lock"],
+    ["process_signal", "lane_lock", "state_lock"],
+    ["refresh_bbo_state", "_bbo_refresh_lock", "state_lock"],
+    ["refresh_order_book_state", "_book_refresh_lock", "state_lock"]
   ],
   "historical_ui_tile_candidates": [
     {"name": "Edge Acceleration", "status": "legacy-disabled-no-pathway-tile", "action": "inventory-only"},

@@ -116,6 +116,10 @@ from research.platform_relay_evidence import (
     _snapshot_with_platform_relay_evidence as _pure_snapshot_with_platform_relay_evidence,
     _validate_platform_relay_evidence_payload as _pure_validate_platform_relay_evidence_payload,
 )
+from research.counterfactual_normalization import (
+    policy_comparability_key as _pure_policy_comparability_key,
+    horizons as _pure_counterfactual_horizons,
+)
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
 from sr_micro_tile_v2 import (
@@ -14927,11 +14931,6 @@ def spawn_experimental_disagreement_replay(ctx, ai, edge_score, features, source
     )
 
 
-def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target_lane: str, trigger_reason: str):
-    """Legacy spawn — disabled; old pathway lanes are DATA_RETIRED."""
-    return
-
-
 def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
     """Shadow-only horizon study — no orders submitted."""
     if ai.get("decision") != "APPROVE":
@@ -15697,47 +15696,10 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
     Paper-only until its reconciled filled-sample gate is met.
     """
 
-    return  # SR_MICRO_TILE_V2_STATIC retired 2026-07-30
-def maybe_tick_a160_v2_research():
-    """Phase-shifted V2 AI tick — independent of AI_SCAN / CONTINUOUS order path.
-
-    Schedule: last_ai_call_ts + 90s, then every ~180s on v2_last_ai_call_ts.
-    Never concurrent with AI_SCAN. Never updates last_ai_call_ts.
-    On accept: paper orders when tile ON; shadow Scenario C replay when tile OFF.
-    """
-
-    return  # A160 retired
-def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Legacy alias — CONTINUOUS spawn handled by spawn_continuous_lane_from_ai_scan."""
-    spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane)
-
-
-def spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Independent PROFIT_GATES lane — hard post-AI filters on spawn (never blocks other lanes)."""
-    if not profit_gates_lane_enabled() or not is_research_data_collection():
+    lane = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    if is_research_lane_retired(lane):
         return
-    if source_lane == RESEARCH_LANE_PROFIT_GATES:
-        return
-    if ai.get("decision") != "APPROVE":
-        return
-    pg_ctx = copy.deepcopy(ctx)
-    pg_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_PROFIT_GATES)
-    logger.info(
-        f"[PROFIT_GATES LANE] spawn execution from {source_lane} trade_id={pg_ctx['trade_id']} "
-        f"[PIPELINE ENFORCEMENT]"
-    )
-    process_signal({
-        "event_trigger": True,
-        "research_lane": RESEARCH_LANE_PROFIT_GATES,
-        "edge_trigger_reason": f"PROFIT_GATES_FROM_{source_lane}",
-        "edge_score": round(float(edge_score), 1),
-        "price": nz(state.get("price")),
-        "timestamp": utc_iso(),
-        "features": features or {},
-        "skip_ai": True,
-        "pre_ai": copy.deepcopy(ai),
-        "pre_ctx": pg_ctx,
-    })
+    return  # Fail closed if retirement metadata is ever inconsistent.
 
 
 def evaluate_signal_with_ai(
@@ -16971,10 +16933,6 @@ def hash_context(ctx):
         ))
     except:
         return hash(str(ctx))
-
-def should_call_ai(ctx, event_trigger):
-    """Legacy alias — use should_invoke_ai for edge-gated AI."""
-    return should_invoke_ai(ctx, state.get("last_edge", 0), event_trigger)
 
 def log_setup(signal):
     try:
@@ -28544,49 +28502,6 @@ DASHBOARD_JS = """(function () {
         } else {
           safeText('laneOpportunity', 'collecting…');
         }
-        // Section 2: Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel metrics.
-        // Renders the full Section 2 metric set on the dashboard tile footer.
-        const t2 = d.tile2_counters || {};
-        if (t2 && t2.lane) {
-          const t2Txt = [
-            'bracket evals=' + (t2.bracket_evals || 0),
-            'eligible L/S=' + (t2.eligible_long || 0) + '/' + (t2.eligible_short || 0),
-            'paper limits=' + (t2.paper_limits || 0),
-            'filled closes=' + (t2.filled_closes || 0),
-            'TTL exp=' + (t2.ttl_expiries || 0),
-            'cancels=' + (t2.cancellations || 0),
-            'pending=' + (t2.pending_orders || 0),
-            'restored=' + (t2.restored_pending_orders || 0),
-            'orphaned=' + (t2.orphaned_orders || 0),
-            'fill%=' + ((t2.fill_rate != null) ? (t2.fill_rate * 100).toFixed(1) : '0.0'),
-            'paper P&L=$' + (t2.paper_pnl_usd || 0).toFixed(2),
-            'EV/elig=$' + (t2.ev_per_eligible_opportunity || 0).toFixed(3),
-            'EV/fill=$' + (t2.ev_per_filled_close || 0).toFixed(3),
-            'episodes=' + (t2.independent_episodes || 0),
-            'cohort=' + (t2.cohort_label || '-')
-          ].join(' · ');
-          safeText('tile2Metrics', t2Txt);
-          const t2Eval = t2.last_evaluation || {};
-          const t2Details = t2Eval.details || {};
-          const t2Reason = t2Eval.block_reason || 'NO_EVALUATION';
-          const t2Adx = Number(t2Details.adx_normalized);
-          const t2Vol = Number(t2Details.volatility_percentile);
-          const t2Cap = Number((d.tile2_policy || {}).adx_cap || 40);
-          const t2State = t2Details.armed && !t2Details.in_midpoint_zone ? 'ELIGIBLE' : 'WAITING';
-          const t2When = t2Eval.observed_ts ? formatMelbourneDateTime(t2Eval.observed_ts) : '-';
-          const t2AdxText = Number.isFinite(t2Adx)
-            ? ('ADX ' + t2Adx.toFixed(2) + (t2Adx > t2Cap ? ' > ' : ' ≤ ') + t2Cap)
-            : 'ADX unavailable';
-          const t2VolText = Number.isFinite(t2Vol) ? ('volatility ' + t2Vol.toFixed(1)) : 'volatility unavailable';
-          safeText(
-            'tile2DecisionSummary',
-            'Tile 2 deterministic gate · ' + t2State + ' · ' + t2Reason +
-              ' · ' + t2AdxText + ' · ' + t2VolText + ' · checked ' + t2When
-          );
-        } else {
-          safeText('tile2Metrics', 'Tile 2 counters not yet collected');
-          safeText('tile2DecisionSummary', 'Tile 2 deterministic gate · collecting…');
-        }
         safeText('lastAICall', dbg.last_ai_call || '-');
         safeText('aiScore', dbg.last_ai_score || '-');
         safeText('signalCooldown', dbg.signal_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_signal + 's)' : 'READY');
@@ -32761,27 +32676,11 @@ def toggle_invert_signal():
 
 @app.route('/api/toggle_profit_gates', methods=['POST'])
 def toggle_profit_gates():
-    with state_lock:
-        enabled = not bool(
-            state.get(
-                "profit_gates_lane_enabled",
-                state.get("profit_gates_enforced", PROFIT_GATES_LANE_DEFAULT_ENABLED),
-            )
-        )
-        state["profit_gates_lane_enabled"] = enabled
-        state["profit_gates_enforced"] = enabled
-        save_persistent_config()
-        mode = "PROFIT_GATES_SPAWN" if enabled else "INDEPENDENT_LANES"
-        logger.info(
-            f"[PROFIT_GATES] spawn lane toggled {'ON' if enabled else 'OFF'} "
-            f"mode={mode} [PIPELINE ENFORCEMENT]"
-        )
     return jsonify({
-        "profit_gates_lane_enabled": state["profit_gates_lane_enabled"],
-        "profit_gates_enforced": state["profit_gates_enforced"],
-        "research_lanes_independent": research_lanes_independent(),
-        "research_execution_mode": mode,
-    })
+        "status": "RETIRED_RESEARCH_CONTROL",
+        "mutable": False,
+        "message": "Profit Gates is retired historical research and cannot be enabled.",
+    }), 410
 
 # Section 8/9: explicit operator action that starts the fresh independent
 # Tile 2 holdout cohort. Zeros out the funnel counters (NOT automatic on
@@ -32793,23 +32692,24 @@ def api_tile2_reset_counters():
             "status": "auth_required",
             "message": "Tile 2 counter reset is admin-only — present X-Bot-Admin-Token",
         }), 401
-    metrics = reset_tile2_counters_for_fresh_holdout()
-    logger.warning(
-        f"[ADMIN] Tile 2 counters RESET via /api/tile2/reset_counters "
-        f"cohort={TILE2_POLICY_ID} [PIPELINE ENFORCEMENT]"
-    )
     return jsonify({
-        "status": "reset",
+        "status": "RETIRED_RESEARCH_CONTROL",
+        "mutable": False,
         "policy_id": TILE2_POLICY_ID,
         "exit_profile_id": TILE2_EXIT_PROFILE_ID,
-        "metrics": metrics,
-    })
+        "message": "Tile 2 is retired historical research; its evidence cannot be reset.",
+    }), 410
 
 
 @app.route('/api/tile2/metrics', methods=['GET'])
 def api_tile2_metrics():
-    """Section 2: public read-only endpoint for Tile 2 funnel metrics."""
-    return jsonify(tile2_dashboard_metrics())
+    """Read-only historical evidence for the retired Tile 2 cohort."""
+    metrics = tile2_dashboard_metrics()
+    metrics.update({
+        "research_surface_status": "RETIRED_HISTORICAL",
+        "mutable": False,
+    })
+    return jsonify(metrics)
 
 
 @app.route('/api/toggle_duplicate_limit_block', methods=['POST'])
@@ -36569,130 +36469,24 @@ _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC = {
 }
 
 
+# Compatibility wrappers keep the established bot API while the implementation
+# lives in an import-side-effect-free research module.
 def _counterfactual_policy_comparability_key(policy_snapshot: dict, buf: dict, snapshot: dict):
-    """Hash only a complete, canonical policy/execution-cost identity."""
-    exchange_evidence = (
-        snapshot.get("bitfinex_evidence")
-        if isinstance(snapshot.get("bitfinex_evidence"), dict)
-        else {}
-    )
-    fee_model = (
-        snapshot.get("fee_model")
-        or (snapshot.get("config") or {}).get("fee_model")
-        or exchange_evidence.get("fee_model")
-    )
-    execution_profile = (
-        snapshot.get("execution_profile")
-        or (snapshot.get("config") or {}).get("execution_profile")
-        or exchange_evidence.get("execution_profile")
-    )
-    leverage = buf.get("leverage")
-    if (
-        any(policy_snapshot.get(key) is None for key in _COUNTERFACTUAL_REQUIRED_POLICY_KEYS)
-        or leverage is None
-        or not fee_model
-        or not execution_profile
-    ):
-        return None
-    comparable = {
-        "schema": "policy_comparability_v1",
-        "policy_version": policy_snapshot.get("policy_version"),
-        "hard_stop_margin_pct": policy_snapshot.get("hard_stop_margin_pct"),
-        "thesis_fast_exit_unreal_pct": policy_snapshot.get("thesis_fast_exit_unreal_pct"),
-        "thesis_mfe_protect_pct": policy_snapshot.get("thesis_mfe_protect_pct"),
-        "trail_ladder": policy_snapshot.get("trail_ladder"),
-        "exit_profile_id": policy_snapshot.get("exit_profile_id"),
-        "leverage": leverage,
-        "fee_model": fee_model,
-        "execution_profile": execution_profile,
-    }
-    digest = hashlib.sha256(
-        json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return f"policy_comparability_v1:{digest}"
+    return _pure_policy_comparability_key(policy_snapshot, buf, snapshot)
 
 
 def _counterfactual_post_exit_horizons(replay: dict) -> dict:
-    """Materialize truthful post-exit horizons; never substitute the last tick."""
-    exit_t = _buf_float(replay.get("exit_t_rel"), -1)
-    ticks = sorted(
-        (row for row in (replay.get("ticks") or []) if isinstance(row, dict)),
-        key=lambda row: _buf_float(row.get("t"), 0),
+    return _pure_counterfactual_horizons(
+        replay, post_exit=True,
+        required_horizons=_COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC,
     )
-    values = {}
-    executable_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
-    for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
-        target_t = exit_t + seconds
-        observed = next(
-            (
-                row for row in ticks
-                if str(row.get("phase") or "") == "post_exit"
-                and _buf_float(row.get("t"), -1) >= target_t
-                and _buf_float(row.get(executable_key), 0) > 0
-            ),
-            None,
-        )
-        values[label] = {
-            "required_sec": seconds,
-            "observed": observed is not None,
-            "tick_t_rel": observed.get("t") if observed else None,
-            "price": observed.get(executable_key) if observed else None,
-            "unreal_pct": observed.get("unreal_pct") if observed else None,
-            "best_bid": observed.get("best_bid") if observed else None,
-            "best_ask": observed.get("best_ask") if observed else None,
-            "observed_ts": observed.get("observed_ts") if observed else None,
-        }
-    complete = bool(
-        replay.get("post_exit_complete") is True
-        and exit_t >= 0
-        and all(row["observed"] for row in values.values())
-    )
-    return {
-        "schema": "post_exit_horizons_v1",
-        "required": values,
-        "complete": complete,
-    }
 
 
 def _counterfactual_entry_horizons(replay: dict) -> dict:
-    """Materialize exact entry-relative horizons; absent future ticks stay UNKNOWN."""
-    fill_t = replay.get("virtual_fill_t")
-    has_fill_origin = fill_t is not None and _buf_float(fill_t, -1) >= 0
-    origin_t = _buf_float(fill_t, 0) if has_fill_origin else None
-    ticks = sorted(
-        (row for row in (replay.get("ticks") or []) if isinstance(row, dict)),
-        key=lambda row: _buf_float(row.get("t"), 0),
+    return _pure_counterfactual_horizons(
+        replay, post_exit=False,
+        required_horizons=_COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC,
     )
-    values = {}
-    executable_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
-    for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
-        target_t = origin_t + seconds if origin_t is not None else None
-        observed = (
-            next(
-                (row for row in ticks
-                 if _buf_float(row.get("t"), -1) >= target_t
-                 and _buf_float(row.get(executable_key), 0) > 0),
-                None,
-            )
-            if target_t is not None
-            else None
-        )
-        values[label] = {
-            "required_sec": seconds,
-            "observed": observed is not None,
-            "tick_t_rel": observed.get("t") if observed else None,
-            "price": observed.get(executable_key) if observed else None,
-            "unreal_pct": observed.get("unreal_pct") if observed else None,
-            "best_bid": observed.get("best_bid") if observed else None,
-            "best_ask": observed.get("best_ask") if observed else None,
-            "observed_ts": observed.get("observed_ts") if observed else None,
-        }
-    return {
-        "schema": "entry_horizons_v1",
-        "origin_t_rel": origin_t,
-        "required": values,
-        "complete": bool(has_fill_origin and all(row["observed"] for row in values.values())),
-    }
 
 
 def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
@@ -37982,9 +37776,6 @@ def periodic_pipeline_loop():
         if event and event.get("event_trigger"):
             process_signal(event)
 
-def ai_loop():
-    pass
-
 def engine_loop():
     global last_engine_run
     try:
@@ -38344,9 +38135,9 @@ def main():
     )
     if profit_gates_lane_enabled():
         logger.warning(
-            f"[PROFIT_GATES LANE] ON - spawn experiment with hard post-AI filters "
-            f"(edge>={get_edge_threshold()} AI>={get_ai_threshold()}%) on parent APPROVE "
-            f"[PIPELINE ENFORCEMENT]"
+            "[PROFIT_GATES LANE] RETIRED - legacy enabled flag is preserved for "
+            "historical decoding but has no spawn or mutation authority "
+            "[PIPELINE ENFORCEMENT]"
         )
     if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
         logger.warning(

@@ -1,4 +1,4 @@
-"""Pt 6: Complete toggle test matrix for the toggle contract.
+"""Pt 6: Complete Cheetah/CONTINUOUS toggle matrix for the relay contract.
 
 Tests all 11 scenarios from the toggle contract spec. Uses an in-process
 mock of the Bitfinex exchange object so NO real orders are ever placed.
@@ -11,9 +11,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Boot safe: paper mode + research mode (no real Bitfinex calls)
-os.environ.setdefault("FORCE_PAPER_MODE", "1")
-os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
-os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
+os.environ["FORCE_PAPER_MODE"] = "1"
+os.environ["RESEARCH_DATA_COLLECTION"] = "1"
+os.environ["SKIP_EXCHANGE_MARKET_LOAD"] = "1"
 
 import bot
 # The matrix deliberately simulates LIVE and OFF transitions. Keep all of
@@ -35,18 +35,19 @@ from bot import (
     EXEC_MODE_PAPER,
     EXEC_MODE_LIVE,
     EXEC_MODE_EXIT_ONLY,
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_CONTINUOUS,
 )
 import bitfinex_live_executor as bx
 
-LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
+LANE = RESEARCH_LANE_CONTINUOUS
 passed = 0
 failed = 0
 
 
 def set_lane(on):
     with bot.state_lock:
+        if LANE == RESEARCH_LANE_CONTINUOUS:
+            bot.state["continuous_ai_research_enabled"] = bool(on)
         m = dict(bot.state.get("research_lane_enabled") or {})
         m[LANE] = bool(on)
         bot.state["research_lane_enabled"] = m
@@ -76,7 +77,7 @@ def check(name, cond, detail=""):
 
 
 print("=" * 72)
-print("Pt 6 toggle test matrix -- TYPE_B_HUNTER_V1")
+print("Pt 6 toggle test matrix -- CONTINUOUS / Cheetah source")
 print("=" * 72)
 
 # === 1. Tile OFF + Bitfinex OFF: LAB shadow, zero orders, zero exchange calls
@@ -167,10 +168,14 @@ fake_order = {
 with bot.trade_lock:
     bot.pending_orders.append(fake_order)
     bot.lane_register_pending_order(fake_order) if hasattr(bot, "lane_register_pending_order") else None
-# Suspend lane -> should remove local order and try Bitfinex cancel
+# Suspend lane -> cancellation uncertainty must retain ownership and try again.
 result = suspend_lane_trading(LANE, reason="TEST_TILE_OFF")
-check("local pending removed", "test-tid-1" in result.get("expired_awaiting", []) or
-      "test-tid-1" in [str(x) for x in result.get("cancelled_pending", [])],
+check("unconfirmed pending remains owned", any(
+          o.get("trade_id") == "test-tid-1" for o in bot.pending_orders
+      ) and any(
+          row.get("trade_id") == "test-tid-1" and row.get("reason") == "CANCEL_UNCONFIRMED"
+          for row in result.get("bitfinex_failed", [])
+      ),
       f"result={result}")
 # Bitfinex cancel will fail because we don't have keys, but the attempt is recorded
 check("Bitfinex cancel attempted (best-effort)",
@@ -191,6 +196,7 @@ fake_pos = {
     "side": "buy",
     "entry_price": 64000.0,
     "qty": 0.001,
+    "bitfinex_order_id": "BF-FILLED-EXIT-ONLY",
 }
 with bot.trade_lock:
     bot.open_positions.append(fake_pos)
@@ -217,6 +223,7 @@ fake_pos = {
     "side": "buy",
     "entry_price": 64000.0,
     "qty": 0.001,
+    "bitfinex_order_id": "BF-FILLED-EXIT-ONLY",
 }
 with bot.trade_lock:
     bot.open_positions.append(fake_pos)

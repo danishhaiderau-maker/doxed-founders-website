@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = (ROOT / "bot.py").read_text(encoding="utf-8")
+NORMALIZATION_SOURCE = (ROOT / "research" / "counterfactual_normalization.py").read_text(encoding="utf-8")
 
 
 def _function_source(name):
@@ -44,10 +45,11 @@ def test_missing_future_horizons_are_unknown_not_last_tick_substitutions():
     assert "last_unreal" not in compute
     entry = _function_source("_counterfactual_entry_horizons")
     post = _function_source("_counterfactual_post_exit_horizons")
-    assert '"observed": observed is not None' in entry
-    assert '"observed": observed is not None' in post
-    assert '"best_bid"' in entry and '"best_ask"' in post
-    assert "executable_key" in entry and "executable_key" in post
+    assert "_pure_counterfactual_horizons" in entry
+    assert "_pure_counterfactual_horizons" in post
+    assert '"observed": observed is not None' in NORMALIZATION_SOURCE
+    assert '"best_bid"' in NORMALIZATION_SOURCE and '"best_ask"' in NORMALIZATION_SOURCE
+    assert 'executable_key = (' in NORMALIZATION_SOURCE
 
 
 if __name__ == "__main__":

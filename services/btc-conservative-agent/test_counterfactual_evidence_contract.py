@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 from research import platform_relay_evidence as pure_relay
+from research import counterfactual_normalization as pure_counterfactual
 
 
 ROOT = Path(__file__).resolve().parent
@@ -58,6 +59,8 @@ def _load_evidence_functions():
         "_pure_platform_relay_evidence_index": pure_relay._platform_relay_evidence_index,
         "_pure_normalize_platform_bitfinex_evidence": pure_relay._normalize_platform_bitfinex_evidence,
         "_pure_snapshot_with_platform_relay_evidence": pure_relay._snapshot_with_platform_relay_evidence,
+        "_pure_policy_comparability_key": pure_counterfactual.policy_comparability_key,
+        "_pure_counterfactual_horizons": pure_counterfactual.horizons,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace
