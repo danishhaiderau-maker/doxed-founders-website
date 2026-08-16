@@ -451,26 +451,33 @@ test('runtime resting dedupe suppresses a same-trade reprice but allows equal-pr
   assert.equal(distinctEqualPrice, null);
 });
 
-test('correlated exposure ceiling allows the third same-direction leg and blocks the fourth', () => {
-  const leg = (n: number, direction: 'LONG' | 'SHORT' = 'SHORT') => ({
-    participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction,
-    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.01, marginUsd: 20,
+test('correlated exposure uses an inclusive normalized 9 bps boundary', () => {
+  const candidate = {
+    participantId: 'candidate', cycleId: 'candidate-cycle', tradeId: 'cont-candidate',
+    direction: 'SHORT' as const, limitPrice: 100_000, createdAtMs: 2_000,
+    qty: 0.01, marginUsd: 20,
+  };
+  const assessDistance = (distanceUsd: number) => assessCorrelatedExposureCluster({
+    candidate,
+    active: [candidate, {
+      participantId: 'existing', cycleId: 'existing-cycle', tradeId: 'cont-existing',
+      direction: 'SHORT', limitPrice: 100_000 + distanceUsd, createdAtMs: 1_000,
+      qty: 0.02, marginUsd: 30,
+    }],
+    riskStateAvailable: true,
   });
-  const third = assessCorrelatedExposureCluster({
-    candidate: leg(3), active: [leg(1), leg(2), leg(3)], riskStateAvailable: true,
-  });
-  assert.equal(third.allowed, true);
-  assert.equal(third.sameDirectionCount, 3);
-  const fourth = assessCorrelatedExposureCluster({
-    candidate: leg(4), active: [leg(1), leg(2), leg(3), leg(4)], riskStateAvailable: true,
-  });
-  assert.equal(fourth.allowed, false);
-  assert.equal(fourth.reason, 'SAME_DIRECTION_CEILING');
-  assert.equal(fourth.aggregateQty, 0.04);
-  assert.equal(fourth.aggregateMarginUsd, 80);
+  assert.equal(assessDistance(89.9).allowed, false); // 0.0899%
+  const inclusive = assessDistance(90); // exactly 0.09% / 9 bps
+  assert.equal(inclusive.allowed, false);
+  assert.equal(inclusive.reason, 'SAME_DIRECTION_PRICE_CLUSTER');
+  assert.equal(inclusive.nearest?.priceDistanceUsd, 90);
+  assert.equal(inclusive.nearest?.priceDistanceFraction, 0.0009);
+  assert.equal(inclusive.aggregateQty, 0.03);
+  assert.equal(inclusive.aggregateMarginUsd, 50);
+  assert.equal(assessDistance(90.1).allowed, true); // 0.0901%
 });
 
-test('correlated exposure ceiling ignores opposite direction and fails closed without risk state', () => {
+test('correlated exposure boundary ignores opposite direction and fails closed without risk state', () => {
   const candidate = {
     participantId: 'p4', cycleId: 'c4', tradeId: 'cont-4', direction: 'LONG' as const,
     limitPrice: 64_000, createdAtMs: 4_000, qty: 0.01, marginUsd: 20,
@@ -487,7 +494,7 @@ test('correlated exposure ceiling ignores opposite direction and fails closed wi
   assert.equal(unknown.reason, 'RISK_STATE_UNAVAILABLE');
 });
 
-test('entry claim and correlated ceiling snapshot are serialized by one database transaction', () => {
+test('entry claim and correlated boundary snapshot are serialized by one database transaction', () => {
   const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
   const transactionAt = source.indexOf('const claimedAndAssessed = await this.prisma.$transaction');
   const lockAt = source.indexOf('pg_advisory_xact_lock', transactionAt);
@@ -500,7 +507,9 @@ test('entry claim and correlated ceiling snapshot are serialized by one database
   const clusterEnd = source.indexOf('claimParticipantId = claimedAndAssessed', returnAt);
   const clusterTxn = source.slice(transactionAt, clusterEnd);
   assert.match(clusterTxn, /participantId: null,[\s\S]*signalCycleParticipant\.delete/);
-  assert.match(clusterTxn, /eventType: 'CORRELATED_EXPOSURE_CLUSTER'[\s\S]*status: SignalCycleStatus\.EXPIRED[\s\S]*eventType: 'EXPIRED'/);
+  assert.match(clusterTxn, /eventType: 'CORRELATED_CLUSTER_BLOCKED'[\s\S]*status: SignalCycleStatus\.EXPIRED[\s\S]*eventType: 'EXPIRED'/);
+  assert.match(clusterTxn, /price_boundary_bps:[\s\S]*nearest_price_distance_usd:[\s\S]*nearest_price_distance_bps:/);
+  assert.match(clusterTxn, /analysis_eligible: false[\s\S]*CORRELATED_CLUSTER_BLOCKED/);
   assert.doesNotMatch(source, /mirrorConvergenceEnabled\(\) && !fastPreflight\?\.exchangeBookProvenEmpty/);
 });
 
@@ -515,7 +524,7 @@ test('entry submission fence retains ownership after request start and records U
   assert.match(source.slice(catchAt, unknownAt), /claimParticipantId && entrySubmitStarted/);
 });
 
-test('four concurrent serialized same-direction claims cannot exceed three allowed legs', async () => {
+test('concurrent serialized nearby claims reserve the lane before exchange submission', async () => {
   const active: Array<{
     participantId: string; cycleId: string; tradeId: string; direction: 'SHORT';
     limitPrice: number; createdAtMs: number; qty: number; marginUsd: number;
@@ -534,7 +543,7 @@ test('four concurrent serialized same-direction claims cannot exceed three allow
     return run;
   };
   const results = await Promise.all([claim(1), claim(2), claim(3), claim(4)]);
-  assert.deepEqual(results.map((result) => result.allowed), [true, true, true, false]);
+  assert.deepEqual(results.map((result) => result.allowed), [true, false, false, false]);
 });
 
 test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {

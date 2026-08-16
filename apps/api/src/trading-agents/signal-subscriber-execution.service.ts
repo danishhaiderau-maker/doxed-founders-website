@@ -2897,7 +2897,9 @@ export function resolveEffectiveStopLossMarginPct(
 /** Price equality is supporting evidence only; canonical source identity owns dedupe. */
 const DUPLICATE_LIMIT_EPSILON_USD = 0.01;
 const CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_MS = 5_000;
-const CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS = 3;
+/** Temporary live-copy boundary: a distinct same-direction lifecycle may not
+ * enter within (inclusive) 9 bps of the candidate/reference entry price. */
+const CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION = 0.0009;
 
 type CorrelatedExposureCandidate = {
   participantId: string;
@@ -2958,9 +2960,10 @@ export function assessCorrelatedExposureCluster(input: {
   candidate: CorrelatedExposureCandidate;
   active: CorrelatedExposureCandidate[];
   riskStateAvailable: boolean;
-  ceiling?: number;
+  priceBoundaryFraction?: number;
 }) {
-  const ceiling = input.ceiling ?? CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS;
+  const priceBoundaryFraction = input.priceBoundaryFraction
+    ?? CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION;
   if (!input.riskStateAvailable) {
     return {
       allowed: false, reason: 'RISK_STATE_UNAVAILABLE', sameDirectionCount: null,
@@ -2968,31 +2971,46 @@ export function assessCorrelatedExposureCluster(input: {
     };
   }
   const sameDirection = input.active.filter(
-    (row) => row.direction === input.candidate.direction,
+    (row) => row.direction === input.candidate.direction
+      && row.participantId !== input.candidate.participantId,
   );
   const nearest = sameDirection
-    .filter((row) => row.participantId !== input.candidate.participantId)
     .map((row) => ({
       ...row,
       priceDistanceUsd:
         row.limitPrice != null && input.candidate.limitPrice != null
           ? Math.abs(row.limitPrice - input.candidate.limitPrice)
           : null,
+      priceDistanceFraction:
+        row.limitPrice != null && input.candidate.limitPrice != null && input.candidate.limitPrice > 0
+          ? Math.abs(row.limitPrice - input.candidate.limitPrice) / input.candidate.limitPrice
+          : null,
       lifecycleDistanceSec:
         row.createdAtMs != null && input.candidate.createdAtMs != null
           ? Math.abs(row.createdAtMs - input.candidate.createdAtMs) / 1_000
           : null,
     }))
-    .sort((a, b) => (a.priceDistanceUsd ?? Number.POSITIVE_INFINITY) - (b.priceDistanceUsd ?? Number.POSITIVE_INFINITY))[0] ?? null;
+    .sort((a, b) => (a.priceDistanceFraction ?? Number.POSITIVE_INFINITY) - (b.priceDistanceFraction ?? Number.POSITIVE_INFINITY))[0] ?? null;
+  // Missing prices make the risk state incomplete. Never guess that a live
+  // participant is safely outside the boundary.
+  if (sameDirection.some((row) => row.limitPrice == null) || input.candidate.limitPrice == null) {
+    return {
+      allowed: false, reason: 'RISK_STATE_UNAVAILABLE', sameDirectionCount: sameDirection.length,
+      aggregateQty: null, aggregateMarginUsd: null, nearest,
+    };
+  }
+  const blocked = nearest != null
+    && nearest.priceDistanceFraction != null
+    && nearest.priceDistanceFraction <= priceBoundaryFraction;
   return {
-    allowed: sameDirection.length <= ceiling,
-    reason: sameDirection.length <= ceiling ? null : 'SAME_DIRECTION_CEILING',
+    allowed: !blocked,
+    reason: blocked ? 'SAME_DIRECTION_PRICE_CLUSTER' : null,
     sameDirectionCount: sameDirection.length,
-    aggregateQty: sameDirection.every((row) => row.qty != null)
-      ? sameDirection.reduce((sum, row) => sum + Number(row.qty), 0)
+    aggregateQty: [input.candidate, ...sameDirection].every((row) => row.qty != null)
+      ? [input.candidate, ...sameDirection].reduce((sum, row) => sum + Number(row.qty), 0)
       : null,
-    aggregateMarginUsd: sameDirection.every((row) => row.marginUsd != null)
-      ? sameDirection.reduce((sum, row) => sum + Number(row.marginUsd), 0)
+    aggregateMarginUsd: [input.candidate, ...sameDirection].every((row) => row.marginUsd != null)
+      ? [input.candidate, ...sameDirection].reduce((sum, row) => sum + Number(row.marginUsd), 0)
       : null,
     nearest,
   };
@@ -8758,8 +8776,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }, tx);
         if (!assessment.allowed) {
           const evidence = {
-            schema: 'correlated_exposure_cluster_v1',
-            event: 'CORRELATED_EXPOSURE_CLUSTER',
+            schema: 'correlated_exposure_cluster_v2',
+            event: assessment.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
+              ? 'CORRELATED_CLUSTER_BLOCKED'
+              : 'CORRELATED_EXPOSURE_CLUSTER',
             reason: assessment.reason,
             candidate_trade_id: tradeId,
             candidate_cycle_id: cycleId,
@@ -8768,16 +8788,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             candidate_limit_price: limitPrice,
             candidate_qty_btc: qty,
             candidate_margin_usd: marginUsd,
-            same_direction_open_pending_intent_count: assessment.sameDirectionCount,
-            ceiling: CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS,
+            same_direction_managed_or_reserved_count: assessment.sameDirectionCount,
+            reference_price_usd: limitPrice,
+            price_boundary_fraction: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION,
+            price_boundary_pct: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 100,
+            price_boundary_bps: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 10_000,
+            price_boundary_inclusive: true,
             aggregate_qty_btc: assessment.aggregateQty,
             aggregate_margin_usd: assessment.aggregateMarginUsd,
             nearest_trade_id: assessment.nearest?.tradeId ?? null,
             nearest_cycle_id: assessment.nearest?.cycleId ?? null,
             nearest_participant_id: assessment.nearest?.participantId ?? null,
             nearest_price_distance_usd: assessment.nearest?.priceDistanceUsd ?? null,
+            nearest_price_distance_fraction: assessment.nearest?.priceDistanceFraction ?? null,
+            nearest_price_distance_pct:
+              assessment.nearest?.priceDistanceFraction != null
+                ? assessment.nearest.priceDistanceFraction * 100
+                : null,
+            nearest_price_distance_bps:
+              assessment.nearest?.priceDistanceFraction != null
+                ? assessment.nearest.priceDistanceFraction * 10_000
+                : null,
             nearest_lifecycle_distance_sec: assessment.nearest?.lifecycleDistanceSec ?? null,
             risk_state_available: assessment.reason !== 'RISK_STATE_UNAVAILABLE',
+            analysis_eligible: false,
+            analysis_exclusion_reasons: [
+              assessment.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
+                ? 'CORRELATED_CLUSTER_BLOCKED'
+                : 'CORRELATED_CLUSTER_RISK_STATE_UNAVAILABLE',
+            ],
           };
           if (assessment.reason === 'RISK_STATE_UNAVAILABLE') {
             await tx.signalCycleEvent.create({
@@ -8795,7 +8834,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             data: {
               cycleId,
               participantId: claimed.id,
-              eventType: 'CORRELATED_EXPOSURE_CLUSTER',
+              eventType: 'CORRELATED_CLUSTER_BLOCKED',
               payload: evidence as Prisma.InputJsonValue,
             },
           });
@@ -8810,7 +8849,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               cycleId,
               participantId: claimed.id,
               eventType: 'EXPIRED',
-              payload: { ...evidence, event: 'CORRELATED_EXPOSURE_CLUSTER' } as Prisma.InputJsonValue,
+              payload: { ...evidence, event: 'CORRELATED_CLUSTER_BLOCKED' } as Prisma.InputJsonValue,
             },
           });
           return { claimed, assessment, evidence };
@@ -8829,13 +8868,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       throw err;
     }
       // Phase 1 — book-state dedupe (flag-gated). If the copy already has a
-      // real resting order at this limit price (any lane/participant), do NOT
-      // place a second: the earlier participant is the mirror owner of this
-      // book entry. Expire this claim ledger-side WITHOUT touching the
-      // exchange (mirrors the showcase book's own DUPLICATE_LIMIT_PRICE).
+      // Correlated price risk is independent of canonical replay identity.
+      // Equal price alone must never redefine two source lifecycles as one.
       if (!cluster.allowed) {
         this.logger.warn(
-          `[CORRELATED-CLUSTER] held ${instance.userId} cycle=${cycleId} trade=${tradeId} reason=${cluster.reason} sameDirection=${cluster.sameDirectionCount ?? 'UNKNOWN'} ceiling=${CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS}`,
+          `[CORRELATED-CLUSTER] held ${instance.userId} cycle=${cycleId} trade=${tradeId} reason=${cluster.reason} sameDirection=${cluster.sameDirectionCount ?? 'UNKNOWN'} boundaryBps=${CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION * 10_000}`,
         );
         return false;
       }
