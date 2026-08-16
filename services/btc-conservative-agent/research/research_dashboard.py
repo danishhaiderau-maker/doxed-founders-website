@@ -1611,6 +1611,13 @@ def _decision_readiness_payload():
     qualified_n = int(real_copy.get("included_row_count") or 0)
     exclusions = real_copy.get("exclusion_reason_counts") or {}
     revision = provenance.get("generation_revision") or manifest.get("generation_revision")
+    evidence_inputs = provenance.get("evidence_inputs") or {}
+    counterfactual_available = bool(
+        (evidence_inputs.get("counterfactual.jsonl") or {}).get("available")
+    )
+    manifest_files = {
+        row.get("file") for row in (manifest.get("reports") or []) if isinstance(row, dict)
+    }
     cluster = _read_json("correlated_price_cluster_report.json")
     ladder = _read_json("exit_ladder_simulator_report.json")
     fast_cut = _read_json("fast_cut_sweep_report.json")
@@ -1618,7 +1625,13 @@ def _decision_readiness_payload():
     policy_grid = _read_json("qualified_exit_policy_grid_report.json")
     grid_ready = bool(policy_grid.get("live_policy_change_allowed"))
 
-    def question(key, text, report, ready, qualified_detail):
+    def question(key, text, report, ready, qualified_detail, extra_blockers=None):
+        blockers = list(extra_blockers or [])
+        if not counterfactual_available:
+            blockers.append("COUNTERFACTUAL_EVIDENCE_MISSING")
+        if report not in manifest_files:
+            blockers.append("REPORT_NOT_CURRENT_MANIFEST")
+        ready = bool(ready and counterfactual_available and report in manifest_files)
         return {
             "key": key,
             "question": text,
@@ -1629,6 +1642,7 @@ def _decision_readiness_payload():
             "report": report,
             "detail": qualified_detail if ready else "No question-specific qualified holdout; live changes remain fail-closed.",
             "exclusion_reason_counts": exclusions,
+            "blockers": sorted(set(blockers)),
         }
 
     questions = [
@@ -1652,6 +1666,15 @@ def _decision_readiness_payload():
             "real_copy_rows": qualified_n,
             "showcase_strategy_rows": showcase_n,
             "live_policy_changes_allowed": bool(questions) and all(q["status"] == "QUALIFIED" for q in questions),
+        },
+        "fresh_epoch": manifest.get("fresh_epoch") or {
+            "status": "UNAVAILABLE", "epoch_id": None, "cutoff_utc": None,
+        },
+        "evidence_availability": {
+            "counterfactual_jsonl": counterfactual_available,
+            "relay_lifecycle_evidence_v1": bool(
+                (evidence_inputs.get("relay_lifecycle_evidence_v1.json") or {}).get("available")
+            ),
         },
         "legacy_historical": {
             "status": "DESCRIPTIVE_ONLY",
@@ -3256,13 +3279,16 @@ async function loadDecisionReadiness() {
       + `<div class="val ${cls}">${q.status}</div>`
       + `<div class="note">Current qualified: ${q.current_epoch_qualified_rows || 0}`
       + ` · Historical Showcase: ${q.historical_showcase_rows || 0}</div>`
+      + `<div class="note">Blockers: ${(q.blockers || []).join(', ') || 'none'}</div>`
       + `<div class="note">${q.detail || ''}</div></div>`;
   }).join('');
   const epoch = d.current_qualified_epoch || {};
+  const fresh = d.fresh_epoch || {};
   document.getElementById('decision-readiness-provenance').textContent =
     `Current qualified epoch: ${epoch.real_copy_rows || 0} real-copy rows · `
     + `Legacy/historical: ${(d.legacy_historical || {}).status || 'DESCRIPTIVE_ONLY'} · `
-    + `Revision: ${d.generation_revision || 'UNKNOWN'} · Cohort: ${d.cohort_schema || 'UNKNOWN'}`;
+    + `Revision: ${d.generation_revision || 'UNKNOWN'} · Cohort: ${d.cohort_schema || 'UNKNOWN'} · `
+    + `Fresh epoch: ${fresh.epoch_id || 'UNAVAILABLE'} from ${fresh.cutoff_utc || 'unknown cutoff'}`;
 }
 
 async function loadFindings() {

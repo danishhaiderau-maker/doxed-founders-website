@@ -115,6 +115,7 @@ def create_archive(
     analyzer_revision = str(provenance.get("generation_revision") or "").strip()
     source_data_revision = str(provenance.get("source_data_revision") or "").strip()
     cohort_schema = str(provenance.get("cohort_schema") or "").strip()
+    fresh_epoch = report_manifest.get("fresh_epoch") or {}
     if not re.fullmatch(r"[0-9a-fA-F]{40}", analyzer_revision):
         raise ValueError("archive requires a full analyzer Git revision")
     if not re.fullmatch(r"[0-9a-fA-F]{64}", source_data_revision):
@@ -161,6 +162,13 @@ def create_archive(
             "analyzer_revision": analyzer_revision.lower(),
             "source_data_revision": source_data_revision.lower(),
             "cohort_schema": cohort_schema,
+            "fresh_epoch": {
+                "schema": fresh_epoch.get("schema"),
+                "status": fresh_epoch.get("status") or "UNAVAILABLE",
+                "epoch_id": fresh_epoch.get("epoch_id"),
+                "cutoff_utc": fresh_epoch.get("cutoff_utc"),
+                "kind": fresh_epoch.get("kind"),
+            },
             "report_manifest_sha256": _sha256(staging / "report_manifest.json"),
             "files": files,
             "evidence": evidence,

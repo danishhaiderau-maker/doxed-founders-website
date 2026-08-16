@@ -11746,6 +11746,8 @@ def chase_attribution_report(trades=None, session=None):
     trade_pnl = {}
     trade_wr = {}
     trade_chase = {}
+    trade_lane = {}
+    trade_hold = {}
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         work = trades.copy()
         if "trade_id" in work.columns:
@@ -11761,8 +11763,6 @@ def chase_attribution_report(trades=None, session=None):
                 if pd.notna(pnl):
                     trade_pnl[tid] = float(pnl)
                     trade_wr[tid] = float(pnl) > 0
-        trade_lane = {}
-        trade_hold = {}
         if "limit_chase_count" in work.columns:
             for _, t in work.iterrows():
                 tid = str(t.get("trade_id") or "")
@@ -17784,6 +17784,44 @@ def _report_source_evidence_provenance():
     }
 
 
+def _fresh_epoch_provenance():
+    """Return one stable collection epoch identity without mutating data."""
+    session = load_research_session()
+    cutoff = None
+    kind = None
+    if session.get("fresh_collection_start_iso") or session.get("fresh_collection_start_time"):
+        start = _session_start_ts(session)
+        if start is not None and not pd.isna(start):
+            cutoff = start.isoformat()
+            kind = "SHOWCASE_FRESH_COLLECTION"
+    if cutoff is None:
+        status_path = Path("research_accumulator") / "research_accumulator_status.json"
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8-sig"))
+            cutoff = str(status.get("epoch_start_iso") or "").strip() or None
+            if cutoff:
+                cutoff = pd.to_datetime(cutoff, utc=True, errors="raise").isoformat()
+                kind = "NO_BACKFILL_RESEARCH_ACCUMULATOR"
+        except (OSError, ValueError, TypeError):
+            cutoff = None
+    if cutoff is None:
+        return {
+            "fresh_epoch_schema": "fresh_research_epoch_v1",
+            "fresh_epoch_status": "UNAVAILABLE",
+            "fresh_epoch_id": None,
+            "fresh_epoch_cutoff_utc": None,
+            "fresh_epoch_kind": None,
+        }
+    material = f"fresh_research_epoch_v1|{kind}|{cutoff}"
+    return {
+        "fresh_epoch_schema": "fresh_research_epoch_v1",
+        "fresh_epoch_status": "BOUND",
+        "fresh_epoch_id": "epoch-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24],
+        "fresh_epoch_cutoff_utc": cutoff,
+        "fresh_epoch_kind": kind,
+    }
+
+
 def _stamp_report_analysis_provenance(path, analysis_provenance):
     """Make each derived JSON report self-describing and fail closed."""
     with open(path, "r", encoding="utf-8-sig") as handle:
@@ -17871,12 +17909,22 @@ def write_report_manifest(payload=None):
         or os.getenv("GIT_REVISION")
         or "UNKNOWN"
     )
+    # This grid must belong to this run or be explicitly absent. A stale file
+    # from an earlier revision must never appear current merely because it is
+    # still on disk.
+    qualified_grid_error = None
+    try:
+        qualified_exit_policy_grid_report()
+    except Exception as exc:
+        qualified_grid_error = f"{type(exc).__name__}: {exc}"
     source_provenance = _report_source_evidence_provenance()
+    epoch_provenance = _fresh_epoch_provenance()
     analysis_provenance = {
         "cohort_schema": "analysis_cohorts_v1",
         "generation_revision": generation_revision,
         "cohorts": cohort_summary,
         **source_provenance,
+        **epoch_provenance,
     }
     reports = []
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
@@ -17912,6 +17960,22 @@ def write_report_manifest(payload=None):
         "policy_comparability_key": analysis_provenance["policy_comparability_key"],
         "policy_comparability_status": analysis_provenance["policy_comparability_status"],
         "cohorts": analysis_provenance["cohorts"],
+        "fresh_epoch": {
+            "schema": analysis_provenance["fresh_epoch_schema"],
+            "status": analysis_provenance["fresh_epoch_status"],
+            "epoch_id": analysis_provenance["fresh_epoch_id"],
+            "cutoff_utc": analysis_provenance["fresh_epoch_cutoff_utc"],
+            "kind": analysis_provenance["fresh_epoch_kind"],
+        },
+        "required_report_status": {
+            QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": qualified_grid_error,
+            },
+        },
         "data_scope": (payload or {}).get("data_scope"),
         "session_scope": (payload or {}).get("session_scope"),
         "performance": (payload or {}).get("performance"),

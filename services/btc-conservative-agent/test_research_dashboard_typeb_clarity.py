@@ -148,6 +148,10 @@ def main() -> None:
             assert all(row["status"] == "BLOCKED" for row in readiness["questions"])
             assert all(row["current_epoch_qualified_rows"] == 0 for row in readiness["questions"])
             assert all(row["historical_showcase_rows"] == 7 for row in readiness["questions"])
+            assert all("COUNTERFACTUAL_EVIDENCE_MISSING" in row["blockers"] for row in readiness["questions"])
+            hard_stop = next(row for row in readiness["questions"] if row["key"] == "hard_stop")
+            assert "REPORT_NOT_CURRENT_MANIFEST" in hard_stop["blockers"]
+            assert readiness["evidence_availability"]["counterfactual_jsonl"] is False
             assert readiness["current_qualified_epoch"]["live_policy_changes_allowed"] is False
             with research_dashboard.app.test_client() as client:
                 response = client.get("/api/decision-readiness")

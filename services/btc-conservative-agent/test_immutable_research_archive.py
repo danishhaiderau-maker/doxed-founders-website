@@ -32,6 +32,13 @@ def _fixture(root: Path):
             "source_data_revision": "3" * 64,
             "cohort_schema": "analysis_cohorts_v1",
         },
+        "fresh_epoch": {
+            "schema": "fresh_research_epoch_v1",
+            "status": "BOUND",
+            "epoch_id": "epoch-fixture",
+            "cutoff_utc": "2026-08-16T00:00:00+00:00",
+            "kind": "NO_BACKFILL_RESEARCH_ACCUMULATOR",
+        },
     }
     (root / "report_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (root / "relay_lifecycle_evidence_v1.json").write_text('{"schema":"relay_lifecycle_evidence_v1"}', encoding="utf-8")
@@ -59,6 +66,8 @@ def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
     assert manifest["complete"] is True
     assert manifest["analyzer_revision"] == "2" * 40
     assert manifest["source_data_revision"] == "3" * 64
+    assert manifest["fresh_epoch"]["epoch_id"] == "epoch-fixture"
+    assert manifest["fresh_epoch"]["cutoff_utc"] == "2026-08-16T00:00:00+00:00"
     paths = {row["path"] for row in manifest["files"]}
     assert "reports/qualified_report.json" in paths
     assert "reports/stale_report.json" not in paths

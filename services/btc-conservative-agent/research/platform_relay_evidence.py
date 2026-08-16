@@ -211,6 +211,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
     negative_types = {
         "MIRROR_DIFF", "STALE_NO_EXPOSURE", "NEGATIVE_EVIDENCE",
         "RECONCILE_CANCEL_FAILED", "EXPIRED", "BLOCKED",
+        "CORRELATED_CLUSTER_BLOCKED",
     }
     unsupported_exit_markers = {
         "SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED",
@@ -560,9 +561,17 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                         "payload": copy.deepcopy(payload),
                     }.items() if value is not None
                 })
+                nested_exclusion_reasons = payload.get("analysis_exclusion_reasons")
+                if isinstance(nested_exclusion_reasons, (list, tuple, set)):
+                    for reason in nested_exclusion_reasons:
+                        normalized_reason = str(reason or "").strip().upper()
+                        if normalized_reason:
+                            evidence["analysis_exclusion_reasons"].append(normalized_reason)
                 if event_name in unsupported_exit_markers:
                     evidence["analysis_exclusion_reasons"].append(event_name)
                 if event_name == "COPY_ORDER_NO_SHOWCASE":
+                    evidence["analysis_exclusion_reasons"].append(event_name)
+                if event_name == "CORRELATED_CLUSTER_BLOCKED":
                     evidence["analysis_exclusion_reasons"].append(event_name)
 
             # Producer assertions are necessary but never sufficient. They

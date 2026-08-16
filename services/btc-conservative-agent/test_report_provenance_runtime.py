@@ -1,5 +1,7 @@
 import json
 
+import pandas as pd
+
 import analyzer_research_engine_v62 as analyzer
 
 
@@ -114,3 +116,39 @@ def test_report_stamp_normalizes_report_specific_showcase_counts(tmp_path):
     assert eligibility["included_row_count"] == 5
     assert eligibility["evidence_row_count"] == 44
     assert eligibility["excluded_row_count"] == 39
+
+
+def test_fresh_epoch_identity_is_stable_and_cutoff_bound(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    status_dir = tmp_path / "research_accumulator"
+    status_dir.mkdir()
+    (status_dir / "research_accumulator_status.json").write_text(json.dumps({
+        "epoch_start_iso": "2026-08-16T13:12:49.657003+00:00",
+        "backfill_policy": "none — only trades after epoch",
+    }), encoding="utf-8")
+    monkeypatch.setattr(analyzer, "load_research_session", lambda: {})
+
+    first = analyzer._fresh_epoch_provenance()
+    second = analyzer._fresh_epoch_provenance()
+
+    assert first == second
+    assert first["fresh_epoch_status"] == "BOUND"
+    assert first["fresh_epoch_kind"] == "NO_BACKFILL_RESEARCH_ACCUMULATOR"
+    assert first["fresh_epoch_cutoff_utc"] == "2026-08-16T13:12:49.657003+00:00"
+    assert first["fresh_epoch_id"].startswith("epoch-")
+
+
+def test_chase_attribution_without_trade_rows_keeps_unknown_hold_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [{
+        "trade_id": "cont-no-trade-row",
+        "stage": "ORDER_SUBMITTED",
+        "research_lane": "BASE",
+        "limit_price": 63_000,
+    }])
+    monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda _name: str(tmp_path / "chase.json"))
+
+    report = analyzer.chase_attribution_report(trades=pd.DataFrame(), session={})
+
+    assert report["trades"][0]["trade_id"] == "cont-no-trade-row"
+    assert report["trades"][0]["avg_hold_min"] is None

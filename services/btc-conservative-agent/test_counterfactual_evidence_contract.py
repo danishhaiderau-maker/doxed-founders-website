@@ -146,6 +146,43 @@ def test_copy_order_without_showcase_is_explicit_negative_copy_evidence():
     assert assessment["eligible"][REAL_COPY_PARAMETER_OPTIMISATION] is False
 
 
+def test_correlated_policy_block_is_preserved_as_excluded_negative_opportunity():
+    evidence = pure_relay._normalize_platform_bitfinex_evidence([{
+        "canonicalTradeId": "cont-cluster-blocked",
+        "participantId": "participant-cluster",
+        "events": [{
+            "id": "cluster-1",
+            "eventType": "CORRELATED_CLUSTER_BLOCKED",
+            "createdAt": "2026-08-16T00:00:01Z",
+            "payload": {
+                "event": "CORRELATED_CLUSTER_BLOCKED",
+                "reason": "SAME_DIRECTION_PRICE_CLUSTER",
+                "candidate_trade_id": "cont-cluster-blocked",
+                "nearest_trade_id": "cont-owner",
+                "nearest_price_distance_bps": 4.5,
+            },
+        }],
+    }], "cont-cluster-blocked")
+    assert evidence["negative_events"][0]["event"] == "CORRELATED_CLUSTER_BLOCKED"
+    assert "CORRELATED_CLUSTER_BLOCKED" in evidence["analysis_exclusion_reasons"]
+
+
+def test_meta_qty_repair_cannot_manufacture_stop_evidence_or_completeness():
+    evidence = pure_relay._normalize_platform_bitfinex_evidence([{
+        "canonicalTradeId": "cont-terminal",
+        "participantId": "participant-terminal",
+        "events": [{
+            "id": "repair-after-terminal",
+            "eventType": "UPDATE_STOPS",
+            "createdAt": "2026-08-16T00:00:02Z",
+            "payload": {"event": "META_QTY_REPAIR", "qty": 0.02, "direction": "SHORT"},
+        }],
+    }], "cont-terminal")
+    assert evidence["stop_chain"] == []
+    assert evidence["stop_evidence_complete"] is False
+    assert evidence["protected_quantity"] is None
+
+
 def test_pure_relay_module_import_has_no_runtime_side_effects(tmp_path):
     code = (
         "import pathlib,threading; before=set(pathlib.Path('.').iterdir()); "
@@ -346,6 +383,36 @@ def test_platform_event_normalizer_keeps_concurrent_participants_separate():
     assert evidence["participants"]["part-b"]["client_order_id"] == 502
     assert evidence["bitfinex_order_ids"] == [101, 102]
     assert evidence["quantity_evidence_complete"] is False
+
+
+def test_negative_evidence_lifts_nested_analysis_exclusion_reasons():
+    normalize = _load_evidence_functions()["_normalize_platform_bitfinex_evidence"]
+    records = [{
+        "participantId": "part-incident",
+        "lifecycleId": "cycle-incident",
+        "events": [{
+            "id": "negative-incident",
+            "eventType": "NEGATIVE_EVIDENCE",
+            "payload": {
+                "event": "UNATTRIBUTED_PARTIAL_EMERGENCY_CLOSE",
+                "analysis_eligible": False,
+                "analysis_exclusion_reasons": [
+                    "UNATTRIBUTED_PARTIAL_FILL",
+                    "PROTECTION_FAILURE_EMERGENCY_CLOSE",
+                    "RECONCILIATION_INCOMPLETE",
+                ],
+            },
+        }],
+    }]
+
+    evidence = normalize(records, "cont-incident")
+
+    assert evidence["analysis_exclusion_reasons"] == [
+        "PROTECTION_FAILURE_EMERGENCY_CLOSE",
+        "RECONCILIATION_INCOMPLETE",
+        "UNATTRIBUTED_PARTIAL_FILL",
+    ]
+    assert evidence["negative_events"][0]["event"] == "UNATTRIBUTED_PARTIAL_EMERGENCY_CLOSE"
 
 
 def _complete_fixture():
