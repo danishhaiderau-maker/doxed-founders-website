@@ -120,6 +120,9 @@ function Test-CompleteAnalyzerArchive {
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
     $archive = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     if ($archive.schema -ne "research_session_archive_v2" -or $archive.complete -ne $true) { return $false }
+    if ([string]$archive.analyzer_revision -notmatch '^[0-9a-fA-F]{40}$') { return $false }
+    if ([string]$archive.source_data_revision -notmatch '^[0-9a-fA-F]{64}$') { return $false }
+    if (-not [string]$archive.cohort_schema) { return $false }
     if (-not $archive.report_manifest_sha256 -or $null -eq $archive.files) { return $false }
     $declared = @{}
     foreach ($row in @($archive.files)) {

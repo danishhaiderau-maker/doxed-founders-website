@@ -5368,6 +5368,49 @@ test('terminal authority validation accepts complete signed and persisted absenc
   assert.equal(validateTerminalCloseAuthority({ ...signed, evidence: { ...signed.evidence, exit_price: 0 } }, now), false);
   assert.equal(validateTerminalCloseAuthority({ ...signed, evidence: { ...signed.evidence, platform_received_at_ms: now - 300_001 } }, now), false);
 
+  const canonical = {
+    kind: 'CANONICAL_TERMINAL_RECORD' as const,
+    canonicalTradeId: 'cont-canonical', lifecycleGeneration: 'seq:9',
+    evidence: {
+      trade_id: 'cont-canonical', exit_price: 64_400, exit_reason: 'PROFIT_LOCK',
+      exit_at: new Date(now - 2_000).toISOString(), observed_at_ms: now - 500,
+      source_snapshot_evidence: {
+        source_git_rev: 'abc123', sequence: 91,
+        captured_at: new Date(now - 1_000).toISOString(), snapshot_age_sec: 1,
+        positions_synced: true, orders_synced: true, trades_synced: true,
+      },
+    },
+  };
+  assert.equal(validateTerminalCloseAuthority(canonical, now), true);
+  assert.equal(validateTerminalCloseAuthority({
+    ...canonical,
+    evidence: { ...canonical.evidence, trade_id: 'cont-wrong' },
+  }, now), false);
+  assert.equal(validateTerminalCloseAuthority({
+    ...canonical,
+    evidence: { ...canonical.evidence, source_snapshot_evidence: undefined },
+  }, now), false);
+  assert.equal(validateTerminalCloseAuthority({
+    ...canonical,
+    evidence: {
+      ...canonical.evidence,
+      source_snapshot_evidence: {
+        ...canonical.evidence.source_snapshot_evidence,
+        captured_at: new Date(now - 16_000).toISOString(), snapshot_age_sec: 16,
+      },
+    },
+  }, now), false);
+  assert.equal(validateTerminalCloseAuthority({
+    ...canonical,
+    evidence: {
+      ...canonical.evidence,
+      source_snapshot_evidence: {
+        ...canonical.evidence.source_snapshot_evidence,
+        trades_synced: false,
+      },
+    },
+  }, now), false);
+
   const absence = {
     kind: 'SOURCE_ABSENCE_ACTIONABLE' as const,
     canonicalTradeId: 'cont-absent', lifecycleGeneration: 'seq:4',
@@ -6107,13 +6150,19 @@ test('signed expiry cancels only current exact pending generation before termina
     intentEnvelope: { action: 'ENTER', entry: { exact_limit_price: 64_400 }, context: { showcase_event_seq: 3 } },
   };
   const participant = { id: 'participant-expiry', status: SignalCycleStatus.PENDING_ENTRY, cycle };
-  service.prisma = { signalCycleParticipant: {
-    findMany: async () => [participant], findUnique: async () => participant,
-  }};
+  service.prisma = {
+    signalCycleParticipant: {
+      findMany: async () => [participant], findUnique: async () => participant,
+    },
+    tradingAgentInstance: { update: async () => ({}) },
+  };
   service.exchanges = { getUserCredentials: async () => ({ apiKey: 'k', apiSecret: 's' }) };
   service.loadExecutionMeta = async () => ({ bitfinexOrderId: 7001, direction: 'SHORT', qty: 0.01, limitPrice: 64_400 });
   service.detectEntryFillBeforeCancel = async () => null;
-  service.bitfinex = { fetchOrderTrades: async () => [] };
+  service.bitfinex = {
+    fetchOrderTrades: async () => [],
+    fetchOrderHistoryEvidence: async () => ({ terminal: true, filledQty: 0 }),
+  };
   service.activeTrading = { getOpenPositionDetail: async () => null };
   const order: string[] = [];
   service.cancelManagedOrderGone = async (_c:unknown,_o:unknown,_l:unknown,onTiming?:(v:unknown)=>void) => {
@@ -6206,8 +6255,18 @@ test('post-cancel expiry proof distinguishes zero-flat, NOT_FOUND proof, and unk
   service.activeTrading={getOpenPositionDetail:async()=>null};
   assert.deepEqual(await service.classifyPostCancelEntry({},meta,'CANCELLED'),{kind:'PROVEN_UNFILLED'});
   assert.deepEqual(await service.classifyPostCancelEntry({},meta,'NOT_FOUND'),{kind:'PROVEN_UNFILLED'});
+  assert.deepEqual(
+    await service.classifyPostCancelEntry({}, {...meta,replacementExchangeAckAtMs:undefined},'NOT_FOUND'),
+    {kind:'PROVEN_UNFILLED'},
+  );
   service.bitfinex.fetchOrderHistoryEvidence=async()=>{throw new Error('history unavailable')};
   assert.deepEqual(await service.classifyPostCancelEntry({},meta,'NOT_FOUND'),{kind:'UNKNOWN',reason:'ORDER_HISTORY_UNAVAILABLE'});
+  assert.deepEqual(await service.classifyPostCancelEntry({},meta,'CANCELLED'),{kind:'UNKNOWN',reason:'ORDER_HISTORY_UNAVAILABLE'});
+  service.bitfinex.fetchOrderHistoryEvidence=async()=>({terminal:true,filledQty:.001});
+  assert.deepEqual(
+    await service.classifyPostCancelEntry({},meta,'CANCELLED'),
+    {kind:'UNKNOWN',reason:'ORDER_HISTORY_NOT_TERMINAL_UNFILLED'},
+  );
   service.bitfinex.fetchOrderHistoryEvidence=async()=>({terminal:true,filledQty:0});
   service.activeTrading.getOpenPositionDetail=async()=>{throw new Error('position unavailable')};
   assert.deepEqual(await service.classifyPostCancelEntry({},meta,'CANCELLED'),{kind:'UNKNOWN',reason:'POSITION_UNAVAILABLE'});
@@ -6215,7 +6274,7 @@ test('post-cancel expiry proof distinguishes zero-flat, NOT_FOUND proof, and unk
 
 test('post-cancel position proof treats every attributable partial delta as a fill', async () => {
   const service = new SignalSubscriberExecutionService({} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never,{} as never) as any;
-  service.bitfinex={fetchOrderTrades:async()=>[]};
+  service.bitfinex={fetchOrderTrades:async()=>[],fetchOrderHistoryEvidence:async()=>({terminal:true,filledQty:0})};
   const meta={bitfinexOrderId:7,direction:'SHORT',qty:.01,limitPrice:64000};
   service.activeTrading={getOpenPositionDetail:async()=>({amount:-.000001,basePrice:64001})};
   let result=await service.classifyPostCancelEntry({},meta,'CANCELLED');

@@ -140,6 +140,9 @@ def test_report_manifest_exposes_cohort_provenance_and_revision():
     assert '"analysis_provenance": analysis_provenance' in manifest
     assert '"cohort_schema": analysis_provenance["cohort_schema"]' in manifest
     assert '"generation_revision": analysis_provenance["generation_revision"]' in manifest
+    assert '"source_data_revision": analysis_provenance["source_data_revision"]' in manifest
+    assert '"policy_comparability_key": analysis_provenance["policy_comparability_key"]' in manifest
+    assert '"policy_comparability_status": analysis_provenance["policy_comparability_status"]' in manifest
     assert '"cohorts": analysis_provenance["cohorts"]' in manifest
     assert "def _stamp_report_analysis_provenance(" in CANONICAL_ANALYZER_SOURCE
     assert '"classification": "DESCRIPTIVE_UNQUALIFIED"' in CANONICAL_ANALYZER_SOURCE

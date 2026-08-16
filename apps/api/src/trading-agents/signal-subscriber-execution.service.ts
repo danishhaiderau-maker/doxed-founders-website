@@ -1326,8 +1326,26 @@ export function validateTerminalCloseAuthority(
     case 'CANONICAL_TERMINAL_RECORD': {
       const exitAt = terminalEvidenceTimeMs(evidence.exit_at);
       const observedAt = finite('observed_at_ms');
-      return positive('exit_price') && Boolean(text('exit_reason')) && exitAt != null && observedAt != null &&
-        exitAt <= observedAt + TERMINAL_EVIDENCE_CLOCK_SKEW_MS && observedAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS;
+      const snapshot = evidence.source_snapshot_evidence;
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+      const snapshotEvidence = snapshot as Record<string, unknown>;
+      const snapshotAt = terminalEvidenceTimeMs(snapshotEvidence.captured_at);
+      const snapshotSeq = terminalEvidenceNumber(snapshotEvidence.sequence);
+      const snapshotAgeSec = terminalEvidenceNumber(snapshotEvidence.snapshot_age_sec);
+      return Boolean(
+        text('trade_id') === authority.canonicalTradeId &&
+        positive('exit_price') && text('exit_reason') && exitAt != null && observedAt != null &&
+        exitAt <= observedAt + TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        observedAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        terminalEvidenceString(snapshotEvidence.source_git_rev) &&
+        snapshotSeq != null && Number.isInteger(snapshotSeq) && snapshotSeq >= 0 &&
+        snapshotAt != null && snapshotAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        snapshotAgeSec != null && snapshotAgeSec >= 0 && snapshotAgeSec <= 15 &&
+        Math.max((nowMs - snapshotAt) / 1000, snapshotAgeSec, 0) <= 15 &&
+        snapshotEvidence.positions_synced === true &&
+        snapshotEvidence.orders_synced === true &&
+        snapshotEvidence.trades_synced === true
+      );
     }
     case 'SOURCE_ABSENCE_ACTIONABLE': {
       const firstAbsentAt = finite('firstAbsentAtMs');
@@ -4758,15 +4776,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         } };
       }
     }
-    if (cancelReason === 'NOT_FOUND' && managedOrderExchangeAckAtMs(meta)) {
-      try {
-        const history = await this.bitfinex.fetchOrderHistoryEvidence(creds, orderId);
-        if (!history || history.terminal !== true || history.filledQty !== 0) {
-          return { kind: 'UNKNOWN', reason: 'ORDER_HISTORY_NOT_TERMINAL_UNFILLED' };
-        }
-      } catch {
-        return { kind: 'UNKNOWN', reason: 'ORDER_HISTORY_UNAVAILABLE' };
+    // Active-book disappearance plus a momentarily empty trades response is
+    // not sufficient no-fill proof: Bitfinex private views can converge at
+    // different times after either CANCELLED or NOT_FOUND. Require the exact
+    // order-history row to be terminal with zero cumulative fill before any
+    // caller may write EXPIRED. This also covers legacy rows without an ACK
+    // timestamp; weaker metadata must never authorize weaker evidence.
+    try {
+      const history = await this.bitfinex.fetchOrderHistoryEvidence(creds, orderId);
+      if (!history || history.terminal !== true || history.filledQty !== 0) {
+        return { kind: 'UNKNOWN', reason: 'ORDER_HISTORY_NOT_TERMINAL_UNFILLED' };
       }
+    } catch {
+      return { kind: 'UNKNOWN', reason: 'ORDER_HISTORY_UNAVAILABLE' };
     }
     return { kind: 'PROVEN_UNFILLED' };
   }
@@ -13824,6 +13846,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           canonicalTradeId: showcaseTradeId,
           lifecycleGeneration,
           evidence: {
+            trade_id: showcaseTradeId,
             exit_price: det.exitPrice,
             exit_reason: det.exitReason,
             exit_at: det.exitAt,

@@ -27,7 +27,11 @@ def _fixture(root: Path):
         "report_count": 1,
         "text_artifacts": ["analysis_dashboard.html", "executive_summary.txt"],
         "reports": [{"file": report.name, "size_bytes": report.stat().st_size}],
-        "analysis_provenance": {"generation_revision": "272c88c0", "cohort_schema": "analysis_cohorts_v1"},
+        "analysis_provenance": {
+            "generation_revision": "2" * 40,
+            "source_data_revision": "3" * 64,
+            "cohort_schema": "analysis_cohorts_v1",
+        },
     }
     (root / "report_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (root / "relay_lifecycle_evidence_v1.json").write_text('{"schema":"relay_lifecycle_evidence_v1"}', encoding="utf-8")
@@ -53,6 +57,8 @@ def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
     manifest = json.loads((archive / "archive_manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema"] == "research_session_archive_v2"
     assert manifest["complete"] is True
+    assert manifest["analyzer_revision"] == "2" * 40
+    assert manifest["source_data_revision"] == "3" * 64
     paths = {row["path"] for row in manifest["files"]}
     assert "reports/qualified_report.json" in paths
     assert "reports/stale_report.json" not in paths
@@ -65,6 +71,26 @@ def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
     assert _publisher_accepts(archive, tmp_path)
     index = json.loads((root / "research_session_index.json").read_text(encoding="utf-8"))
     assert index["sessions"][0]["session_id"] == archive.name
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("generation_revision", "UNKNOWN", "full analyzer Git revision"),
+        ("source_data_revision", "", "complete source-data revision"),
+    ],
+)
+def test_archive_rejects_unqualified_provenance(tmp_path, field, value, message):
+    root = tmp_path / "run"
+    root.mkdir()
+    _fixture(root)
+    manifest_path = root / "report_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["analysis_provenance"][field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        immutable_archive.create_archive(root, {}, tmp_path / "archives")
 
 
 def test_archive_reads_evidence_from_canonical_data_root(tmp_path):

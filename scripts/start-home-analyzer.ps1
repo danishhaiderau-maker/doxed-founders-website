@@ -72,11 +72,9 @@ function Test-AnalyzerEngineAlive {
   try {
     $enginePid = [int](Get-Content -LiteralPath $pidFile -Raw)
     if ($enginePid -le 0) { return $false }
-    $engine = Get-CimInstance Win32_Process -Filter "ProcessId = $enginePid" -ErrorAction Stop
-    return [bool](
-      $engine -and
-      [string]$engine.CommandLine -match '(^|[\\/\s])analyzer_research_engine_v62\.py(\s|$)'
-    )
+    if (-not (Test-ProcessAliveFast -ProcessId $enginePid)) { return $false }
+    $commandLine = [string](Get-ProcessCommandLineFast -ProcessId $enginePid)
+    return [bool]($commandLine -match '(^|[\\/\s])analyzer_research_engine_v62\.py(\s|$)')
   } catch {
     return $false
   }

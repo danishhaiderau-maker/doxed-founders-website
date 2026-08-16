@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -110,6 +111,17 @@ def create_archive(
     if missing:
         raise FileNotFoundError(f"required archive artifacts missing: {', '.join(missing)}")
 
+    provenance = report_manifest.get("analysis_provenance") or {}
+    analyzer_revision = str(provenance.get("generation_revision") or "").strip()
+    source_data_revision = str(provenance.get("source_data_revision") or "").strip()
+    cohort_schema = str(provenance.get("cohort_schema") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", analyzer_revision):
+        raise ValueError("archive requires a full analyzer Git revision")
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", source_data_revision):
+        raise ValueError("archive requires a complete source-data revision")
+    if not cohort_schema:
+        raise ValueError("archive requires a cohort schema")
+
     archive_root.mkdir(parents=True, exist_ok=True)
     nonce = uuid.uuid4().hex
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -146,8 +158,9 @@ def create_archive(
             "session_id": final.name,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
-            "analyzer_revision": (report_manifest.get("analysis_provenance") or {}).get("generation_revision"),
-            "cohort_schema": (report_manifest.get("analysis_provenance") or {}).get("cohort_schema"),
+            "analyzer_revision": analyzer_revision.lower(),
+            "source_data_revision": source_data_revision.lower(),
+            "cohort_schema": cohort_schema,
             "report_manifest_sha256": _sha256(staging / "report_manifest.json"),
             "files": files,
             "evidence": evidence,
