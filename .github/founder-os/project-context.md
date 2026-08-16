@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Require stable position proof for emergency close
+Space emergency position confirmation reads
 
 ## Last Activity
 
