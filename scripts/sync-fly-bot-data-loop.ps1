@@ -279,19 +279,26 @@ try {
         }
       }
       if ($currentSignal -gt $lastSeenSignal) {
-        Write-Host "[FRESH COLLECTION] Signal received ($currentSignal > $lastSeenSignal). Wiping local mirror before sync."
+        Write-Host "[FRESH COLLECTION] Signal received ($currentSignal > $lastSeenSignal). Quarantining local mirror before sync."
         Add-Content -LiteralPath $logFile -Value (
-          "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tlocal mirror wipe signalled ($currentSignal > $lastSeenSignal)"
+          "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tlocal mirror quarantine signalled ($currentSignal > $lastSeenSignal)"
         )
         if (Test-Path -LiteralPath $mirrorDir) {
-          Get-ChildItem -LiteralPath $mirrorDir -File -Force -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-          # Drop the per-file sync state too so the next pass re-pulls every
-          # file from offset 0 against the freshly-wiped Fly volume.
-          $syncStatePath = Join-Path $mirrorDir ".fly-sync-state.json"
-          if (Test-Path -LiteralPath $syncStatePath) {
-            Remove-Item -LiteralPath $syncStatePath -Force -ErrorAction SilentlyContinue
+          $cutoff = (Get-Date).ToUniversalTime().ToString('o')
+          $epochName = 'epoch_' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffffffZ')
+          $quarantineDir = Join-Path (Split-Path -Parent $mirrorDir) ('fly-data-quarantine\' + $epochName)
+          New-Item -ItemType Directory -Path $quarantineDir -Force | Out-Null
+          $preserved = @()
+          foreach ($file in @(Get-ChildItem -LiteralPath $mirrorDir -File -Force -ErrorAction Stop)) {
+            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $target = Join-Path $quarantineDir $file.Name
+            Move-Item -LiteralPath $file.FullName -Destination $target -ErrorAction Stop
+            $preserved += [ordered]@{ path = $file.Name; size_bytes = $file.Length; sha256 = $hash }
           }
+          [ordered]@{ schema = 'fly_mirror_epoch_quarantine_v1'; complete = $true;
+            cutoff_utc = $cutoff; fresh_collection_signal_ts = $currentSignal;
+            file_count = $preserved.Count; files = $preserved } |
+            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $quarantineDir 'quarantine_manifest.json') -Encoding UTF8
         }
         @{$signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
           ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8

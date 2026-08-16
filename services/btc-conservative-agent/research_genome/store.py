@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import sqlite3
@@ -89,24 +90,42 @@ class ResearchStore:
             self._conn.commit()
 
     def reset(self) -> Dict[str, int]:
-        """Atomically replace the current research epoch with an empty schema."""
+        """Start an empty epoch while retaining the prior SQLite files."""
         removed_bytes = 0
         with self._lock:
             if self._conn is not None:
                 self._conn.commit()
                 self._conn.close()
                 self._conn = None
+            quarantine = os.path.join(
+                os.path.dirname(self.db_path), "epoch_quarantine",
+                datetime.now(timezone.utc).strftime("epoch_%Y%m%dT%H%M%S_%fZ"),
+            )
+            os.makedirs(quarantine, exist_ok=False)
+            preserved = []
             for suffix in ("", "-wal", "-shm", "-journal"):
                 path = self.db_path + suffix
                 try:
                     if os.path.isfile(path):
-                        removed_bytes += int(os.path.getsize(path))
-                        os.remove(path)
+                        size = int(os.path.getsize(path))
+                        removed_bytes += size
+                        target = os.path.join(quarantine, os.path.basename(path))
+                        os.replace(path, target)
+                        digest = hashlib.sha256()
+                        with open(target, "rb") as source:
+                            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                                digest.update(chunk)
+                        preserved.append({"path": os.path.basename(path), "size_bytes": size,
+                                          "sha256": digest.hexdigest()})
                 except OSError:
                     self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
                     self._conn.executescript(DDL)
                     self._conn.commit()
                     raise
+            with open(os.path.join(quarantine, "quarantine_manifest.json"), "w", encoding="utf-8") as handle:
+                json.dump({"schema": "research_genome_epoch_quarantine_v1", "complete": True,
+                           "cutoff_utc": datetime.now(timezone.utc).isoformat(),
+                           "files": preserved}, handle, indent=2)
             self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self._conn.executescript(DDL)
             self._conn.commit()
