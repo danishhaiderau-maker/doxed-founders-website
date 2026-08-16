@@ -7757,7 +7757,7 @@ test('account emergency residual close is durably fenced before exchange submiss
   ), 'utf8');
   const methodAt = source.indexOf('async emergencyFlattenOpenCopyLots');
   const cancelAt = source.indexOf('emergency-account-flat:', methodAt);
-  const positionAt = source.indexOf('readStableAuthenticatedPosition(creds)', cancelAt);
+  const positionAt = source.indexOf('readStableAuthenticatedPosition(', cancelAt);
   const persistSubmittingAt = source.indexOf('acquireAccountEmergencyCloseFence({', positionAt);
   const submitAt = source.indexOf('submitMarketClose(creds', persistSubmittingAt);
   const acknowledgeAt = source.indexOf("to: 'ACKNOWLEDGED'", submitAt);
@@ -7779,6 +7779,7 @@ function accountEmergencyServiceFixture(options: {
   submitThrows?: boolean;
   submitError?: string;
   positionReads?: Array<number | null>;
+  reconciledAmount?: number;
 } = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.emergencyPositionReadWait = async () => {};
@@ -7824,7 +7825,14 @@ function accountEmergencyServiceFixture(options: {
     tradingAgentInstance: {
       findUnique: async () => ({
         id: 'instance-a', exchangeProvider: 'bitfinex',
-        status: TradingAgentInstanceStatus.PAUSED, dashboardState: {},
+        status: TradingAgentInstanceStatus.PAUSED,
+        dashboardState: options.reconciledAmount == null ? {} : {
+          copyRelayReconcile: {
+            signedExchangePositionQty: options.reconciledAmount,
+            signedLedgerOpenQty: options.reconciledAmount,
+            updatedAt: new Date().toISOString(),
+          },
+        },
       }),
       update: async () => ({}),
     },
@@ -8100,7 +8108,20 @@ test('account emergency ignores one transient flat read and requires stable exac
 
 test('account emergency fails closed on oscillating private position reads', async () => {
   const fx = accountEmergencyServiceFixture({
-    positionReads: [null, -0.01, null, -0.01, null],
+    positionReads: Array.from({ length: 15 }, (_, index) => index % 2 === 0 ? null : -0.01),
+  });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /position preflight is UNKNOWN/,
+  );
+  assert.equal(fx.getSubmits(), 0);
+  assert.equal(fx.durable.terminalCloseRequestId, null);
+});
+
+test('fresh reconciled nonzero exposure forbids flat inference from empty private reads', async () => {
+  const fx = accountEmergencyServiceFixture({
+    reconciledAmount: -0.01,
+    positionReads: Array.from({ length: 15 }, () => null),
   });
   await assert.rejects(
     fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),

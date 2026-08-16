@@ -19237,6 +19237,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   /** Emergency flatten all OPEN copy lots (sync protection breach). */
   private async readStableAuthenticatedPosition(
     creds: ExchangeCredentials,
+    requiredNonzeroAmount?: number,
   ): Promise<{
     known: boolean;
     position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
@@ -19246,7 +19247,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     let priorKey: string | null = null;
     let consecutive = 0;
     let latest: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> = null;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 15; attempt += 1) {
       try {
         latest = await this.activeTrading.getOpenPositionDetail(creds);
       } catch {
@@ -19254,7 +19255,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
       const amount = latest?.amount ?? null;
       samples.push(amount);
-      const key = amount == null ? 'FLAT' : String(btcToSats(amount));
+      const requiredSats = requiredNonzeroAmount == null
+        ? null
+        : btcToSats(requiredNonzeroAmount);
+      const amountSats = amount == null ? 0 : btcToSats(amount);
+      if (requiredSats != null && requiredSats !== 0 && amountSats !== requiredSats) {
+        priorKey = null;
+        consecutive = 0;
+        if (attempt < 14) await this.emergencyPositionReadWait(750);
+        continue;
+      }
+      const key = amount == null ? 'FLAT' : String(amountSats);
       if (key === priorKey) consecutive += 1;
       else {
         priorKey = key;
@@ -19264,7 +19275,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // flat or submit branch. Require three consecutive byte-equivalent
       // authenticated observations; bounded retries also reject oscillation.
       if (consecutive >= 3) return { known: true, position: latest, samples };
-      if (attempt < 4) await this.emergencyPositionReadWait(750);
+      if (attempt < 14) await this.emergencyPositionReadWait(750);
     }
     return { known: false, position: latest, samples };
   }
@@ -19494,7 +19505,34 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
       }
 
-      const stableBefore = await this.readStableAuthenticatedPosition(creds);
+      const instanceDash = instance.dashboardState && typeof instance.dashboardState === 'object'
+        && !Array.isArray(instance.dashboardState)
+        ? instance.dashboardState as Record<string, unknown>
+        : {};
+      const reconcile = instanceDash.copyRelayReconcile
+        && typeof instanceDash.copyRelayReconcile === 'object'
+        && !Array.isArray(instanceDash.copyRelayReconcile)
+        ? instanceDash.copyRelayReconcile as Record<string, unknown>
+        : null;
+      const reconciledExchange = finiteDecimalLikeNumber(reconcile?.signedExchangePositionQty);
+      const reconciledLedger = finiteDecimalLikeNumber(reconcile?.signedLedgerOpenQty);
+      const reconciledAtMs = typeof reconcile?.updatedAt === 'string'
+        ? Date.parse(reconcile.updatedAt)
+        : Number.NaN;
+      const requiredReconciledAmount =
+        reconciledExchange != null
+        && reconciledLedger != null
+        && btcToSats(reconciledExchange) !== 0
+        && btcToSats(reconciledExchange) === btcToSats(reconciledLedger)
+        && Number.isFinite(reconciledAtMs)
+        && Date.now() - reconciledAtMs >= 0
+        && Date.now() - reconciledAtMs <= 30_000
+          ? reconciledExchange
+          : undefined;
+      const stableBefore = await this.readStableAuthenticatedPosition(
+        creds,
+        requiredReconciledAmount,
+      );
       if (!stableBefore.known) {
         throw new Error(
           `Emergency pending-residual position preflight is UNKNOWN; samples=${JSON.stringify(stableBefore.samples)}; no close submit`,
@@ -19563,6 +19601,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
 
         let closeOrderId = fence.exchangeOrderId;
+        // A recovered request may already have reached its flat target; allow
+        // stable flat here, then require exact CID/history evidence below.
         const stableCurrent = await this.readStableAuthenticatedPosition(creds);
         if (!stableCurrent.known) {
           throw new Error(
@@ -19709,7 +19749,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               );
             }
           }
-          const stableAtSubmit = await this.readStableAuthenticatedPosition(creds);
+          const stableAtSubmit = await this.readStableAuthenticatedPosition(creds, beforeAmount);
           const positionAtSubmit = stableAtSubmit.position;
           if (
             !stableAtSubmit.known
