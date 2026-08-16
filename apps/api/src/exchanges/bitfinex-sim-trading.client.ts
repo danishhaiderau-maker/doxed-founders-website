@@ -278,8 +278,10 @@ export class BitfinexSimTradingClient {
       positionDirection: 'LONG' | 'SHORT';
       qty: number;
       leverage?: number;
+      clientOrderId?: number;
     },
   ): Promise<number> {
+    void input.clientOrderId;
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
     const mark = await this.getMarkPrice(symbol);
     const closeQty = Math.min(input.qty, Math.abs(this.ledger.position?.amount ?? input.qty));

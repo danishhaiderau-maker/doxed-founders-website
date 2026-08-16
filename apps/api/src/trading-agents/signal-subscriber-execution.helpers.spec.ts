@@ -7598,20 +7598,164 @@ test('account emergency residual close is durably fenced before exchange submiss
   const methodAt = source.indexOf('async emergencyFlattenOpenCopyLots');
   const cancelAt = source.indexOf('emergency-account-flat:', methodAt);
   const positionAt = source.indexOf('getOpenPositionDetail(creds)', cancelAt);
-  const persistSubmittingAt = source.indexOf('persistAccountEmergencyFence(submittingFence)', positionAt);
+  const persistSubmittingAt = source.indexOf('acquireAccountEmergencyCloseFence({', positionAt);
   const submitAt = source.indexOf('submitMarketClose(creds', persistSubmittingAt);
-  const acknowledgeAt = source.indexOf("phase: 'ACKNOWLEDGED'", submitAt);
+  const acknowledgeAt = source.indexOf("to: 'ACKNOWLEDGED'", submitAt);
   const confirmAt = source.indexOf('waitForMarketCloseConfirmation', acknowledgeAt);
   const cleanupAt = source.indexOf('emergency-post-flat-owned-order:', confirmAt);
-  const persistConfirmedAt = source.indexOf("phase: 'CONFIRMED'", cleanupAt);
+  const persistConfirmedAt = source.indexOf("to: 'CONFIRMED'", cleanupAt);
   const expireAt = source.indexOf("'EXPIRED'", persistConfirmedAt);
   assert.ok(methodAt >= 0);
   assert.ok(cancelAt > methodAt && positionAt > cancelAt);
   assert.ok(persistSubmittingAt > positionAt && submitAt > persistSubmittingAt);
   assert.ok(acknowledgeAt > submitAt && confirmAt > acknowledgeAt);
   assert.ok(cleanupAt > confirmAt && persistConfirmedAt > cleanupAt && expireAt > persistConfirmedAt);
-  assert.match(source.slice(positionAt, submitAt), /automatic resubmission is prohibited/);
+  assert.match(source.slice(positionAt, submitAt), /no resubmit/);
+  assert.match(source.slice(submitAt, acknowledgeAt), /clientOrderId: fence\.clientOrderId/);
   assert.match(source.slice(confirmAt, expireAt), /remainingOwnedOrderIds/);
+});
+
+function accountEmergencyServiceFixture(options: { submitThrows?: boolean } = {}) {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const durable: any = {
+    terminalCloseClaimToken: null, terminalCloseRequestId: null,
+    terminalCloseGeneration: null, terminalCloseAuthority: null,
+    terminalClosePhase: null, terminalCloseBeforeAmount: null,
+    terminalCloseTargetAmount: null, terminalCloseQty: null,
+    terminalCloseExchangeOrderId: null,
+  };
+  const events: any[] = [];
+  let positionAmount = -0.01;
+  let submits = 0;
+  const participant = {
+    id: 'participant-a', cycleId: 'cycle-a', createdAt: new Date(0),
+    status: SignalCycleStatus.PENDING_ENTRY, cycle: { tradeId: 'cont-a' },
+  };
+  const tx: any = {
+    tradingAgentInstance: {
+      findFirst: async () => ({ id: 'instance-a' }),
+    },
+    signalCycleParticipant: {
+      updateMany: async ({ where, data }: any) => {
+        if (where.terminalCloseClaimToken === null && durable.terminalCloseClaimToken !== null) {
+          return { count: 0 };
+        }
+        if (typeof where.terminalCloseClaimToken === 'string'
+          && where.terminalCloseClaimToken !== durable.terminalCloseClaimToken) return { count: 0 };
+        if (typeof where.terminalCloseRequestId === 'string'
+          && where.terminalCloseRequestId !== durable.terminalCloseRequestId) return { count: 0 };
+        Object.assign(durable, data);
+        return { count: 1 };
+      },
+    },
+    signalCycleEvent: { create: async ({ data }: any) => { events.push(data); } },
+  };
+  service.prisma = {
+    $transaction: async (fn: any) => fn(tx),
+    tradingAgent: { findUnique: async () => ({ id: 'agent-a' }) },
+    tradingAgentInstance: {
+      findUnique: async () => ({
+        id: 'instance-a', exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.PAUSED, dashboardState: {},
+      }),
+      update: async () => ({}),
+    },
+    signalCycleParticipant: {
+      findMany: async ({ where }: any) => where.status === SignalCycleStatus.OPEN ? [] : [participant],
+      findFirst: async () => durable.terminalCloseClaimToken ? { ...durable } : null,
+    },
+    signalCycleEvent: { findMany: async () => [] },
+  };
+  service.exchanges = { getUserCredentials: async () => ({ key: 'x', secret: 'y' }) };
+  service.botBridge = { fetchStateForExecution: async () => ({ price: 60_000 }) };
+  service.cycles = { recordHireExecutionEvent: async () => undefined };
+  service.loadExecutionMeta = async () => ({
+    bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT', leverage: 10,
+  });
+  service.cancelManagedOrderGone = async () => ({ gone: true });
+  service.waitForMarketCloseConfirmation = async () => positionAmount === 0;
+  service.bitfinex = {
+    getMarkPrice: async () => 60_000,
+    getOpenPositionDetail: async () => positionAmount === 0 ? null : ({ amount: positionAmount, basePrice: 60_000 }),
+    submitMarketClose: async (_creds: unknown, input: any) => {
+      submits += 1;
+      assert.equal(durable.terminalClosePhase, 'SUBMITTING');
+      assert.equal(input.clientOrderId, durable.terminalCloseAuthority.client_order_id);
+      if (options.submitThrows) throw new Error('transport lost');
+      positionAmount = 0;
+      return 9001;
+    },
+    listActiveOrders: async () => [],
+    findOrderHistoryByClientOrderId: async (_creds: unknown, cid: number) => options.submitThrows && positionAmount === 0 ? ({
+      id: 9001, cid, symbol: 'tBTCF0:USTF0', amount: 0,
+      amountOrig: 0.01, price: 0, status: 'EXECUTED', orderType: 'MARKET',
+      flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }) : null,
+  };
+  return {
+    service, durable, events, getSubmits: () => submits,
+    setPositionAmount: (amount: number) => { positionAmount = amount; },
+  };
+}
+
+test('account emergency close persists immutable CID, submits once, and confirms before EXPIRED', async () => {
+  const fx = accountEmergencyServiceFixture();
+  const result = await fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah');
+  assert.equal(result.flattened, 1);
+  assert.equal(fx.getSubmits(), 1);
+  assert.equal(fx.durable.terminalClosePhase, 'CONFIRMED');
+  assert.equal(fx.durable.terminalCloseExchangeOrderId, 9001n);
+  assert.ok(Number.isSafeInteger(fx.durable.terminalCloseAuthority.client_order_id));
+  assert.deepEqual(
+    fx.events.map((event) => event.eventType),
+    ['ACCOUNT_EMERGENCY_CLOSE_SUBMITTING', 'ACCOUNT_EMERGENCY_CLOSE_ACKNOWLEDGED', 'ACCOUNT_EMERGENCY_CLOSE_CONFIRMED'],
+  );
+});
+
+test('concurrent account emergency claimants produce one durable SUBMITTING owner', async () => {
+  const fx = accountEmergencyServiceFixture();
+  const input = {
+    instanceId: 'instance-a', cycleId: 'cycle-a', participantId: 'participant-a',
+    generation: 'generation-a', participantIds: ['participant-a'],
+    beforeAmount: -0.01, closeQty: 0.01, direction: 'SHORT' as const,
+  };
+  const claims = await Promise.all([
+    fx.service.acquireAccountEmergencyCloseFence(input),
+    fx.service.acquireAccountEmergencyCloseFence(input),
+  ]);
+  assert.equal(claims.filter(Boolean).length, 1);
+  assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
+  assert.equal(fx.events.filter((event) => event.eventType === 'ACCOUNT_EMERGENCY_CLOSE_SUBMITTING').length, 1);
+});
+
+test('account emergency UNKNOWN submit survives restart and never resubmits on timeout alone', async () => {
+  const fx = accountEmergencyServiceFixture({ submitThrows: true });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /submit result UNKNOWN; no automatic resubmit/,
+  );
+  assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
+  assert.equal(fx.getSubmits(), 1);
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /recovery is UNKNOWN;.*no resubmit/,
+  );
+  assert.equal(fx.getSubmits(), 1);
+  assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
+});
+
+test('account emergency restart confirms only exact CID plus authenticated flat target', async () => {
+  const fx = accountEmergencyServiceFixture({ submitThrows: true });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /submit result UNKNOWN/,
+  );
+  fx.setPositionAmount(0);
+  const result = await fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah');
+  assert.equal(result.flattened, 1);
+  assert.equal(fx.getSubmits(), 1);
+  assert.equal(fx.durable.terminalClosePhase, 'CONFIRMED');
+  assert.equal(fx.durable.terminalCloseExchangeOrderId, 9001n);
 });
 
 test('partial emergency fence closes only its attributable leg and preserves merged peer exposure', async () => {

@@ -1291,6 +1291,19 @@ type TerminalCloseClaim = {
   recovered: boolean;
 };
 
+type AccountEmergencyCloseFence = {
+  ownerToken: string;
+  requestId: string;
+  clientOrderId: number;
+  phase: 'SUBMITTING' | 'ACKNOWLEDGED' | 'CONFIRMED';
+  beforeAmount: number;
+  targetAmount: 0;
+  closeQty: number;
+  direction: 'LONG' | 'SHORT';
+  exchangeOrderId?: number;
+  recovered: boolean;
+};
+
 const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
 const SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS = 5 * 60_000;
 const TERMINAL_EVIDENCE_CLOCK_SKEW_MS = 5_000;
@@ -3335,6 +3348,23 @@ function computeClientOrderId(
     .update(`${cycleId}|${participantId}|${tradeId ?? ''}`)
     .digest('hex');
   return parseInt(digest.slice(0, 8), 16) & 0x7fffffff;
+}
+
+function computeAccountEmergencyClientOrderId(requestId: string): number {
+  const digest = createHash('sha256').update(`account-emergency|${requestId}`).digest('hex');
+  return (parseInt(digest.slice(0, 8), 16) & 0x7fffffff) || 1;
+}
+
+export function accountEmergencyOrderMatchesFence(
+  order: BitfinexActiveOrder | null | undefined,
+  fence: Pick<AccountEmergencyCloseFence, 'clientOrderId' | 'closeQty' | 'direction'>,
+): boolean {
+  if (!order || order.symbol !== BITFINEX_BTC_PERP_SYMBOL
+    || order.cid !== fence.clientOrderId || !order.orderType.toUpperCase().includes('MARKET')) return false;
+  const expectedSign = fence.direction === 'LONG' ? -1 : 1;
+  return Math.sign(order.amountOrig) === expectedSign
+    && btcToSats(Math.abs(order.amountOrig)) === btcToSats(fence.closeQty)
+    && ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0;
 }
 
 type EntryEligibility = {
@@ -18622,6 +18652,170 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     return meta;
   }
 
+  /**
+   * Own the one account-level emergency request in the participant row before
+   * touching Bitfinex. The immutable request id/CID survive process restart;
+   * SUBMITTING is deliberately not lease-recoverable.
+   */
+  private async acquireAccountEmergencyCloseFence(input: {
+    instanceId: string;
+    cycleId: string;
+    participantId: string;
+    generation: string;
+    participantIds: string[];
+    beforeAmount: number;
+    closeQty: number;
+    direction: 'LONG' | 'SHORT';
+  }): Promise<AccountEmergencyCloseFence | null> {
+    const ownerToken = randomUUID();
+    const requestId = randomUUID();
+    const clientOrderId = computeAccountEmergencyClientOrderId(requestId);
+    const claimedAt = new Date();
+    return this.prisma.$transaction(async (tx) => {
+      const instance = await tx.tradingAgentInstance.findFirst({
+        where: { id: input.instanceId, status: TradingAgentInstanceStatus.PAUSED },
+        select: { id: true },
+      });
+      if (!instance) throw new Error('Emergency account close fence requires a paused instance');
+      const claimed = await tx.signalCycleParticipant.updateMany({
+        where: {
+          id: input.participantId,
+          cycleId: input.cycleId,
+          status: SignalCycleStatus.PENDING_ENTRY,
+          terminalCloseClaimToken: null,
+          terminalClosePhase: null,
+          terminalCloseRequestId: null,
+        },
+        data: {
+          terminalCloseClaimToken: ownerToken,
+          terminalCloseClaimedAt: claimedAt,
+          terminalCloseGeneration: input.generation,
+          terminalCloseRequestId: requestId,
+          terminalClosePhase: 'SUBMITTING',
+          terminalCloseBeforeAmount: input.beforeAmount,
+          terminalCloseTargetAmount: 0,
+          terminalCloseQty: input.closeQty,
+          terminalCloseAuthority: {
+            schema: 'account_emergency_close_v2',
+            kind: 'AUTHENTICATED_ACCOUNT_EMERGENCY',
+            request_id: requestId,
+            client_order_id: clientOrderId,
+            lifecycle_generation: input.generation,
+            participant_ids: input.participantIds,
+            before_amount: input.beforeAmount,
+            target_amount: 0,
+            close_qty: input.closeQty,
+            direction: input.direction,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      if (claimed.count !== 1) return null;
+      await tx.signalCycleEvent.create({
+        data: {
+          cycleId: input.cycleId,
+          participantId: input.participantId,
+          eventType: 'ACCOUNT_EMERGENCY_CLOSE_SUBMITTING',
+          payload: {
+            schema: 'account_emergency_close_v2', request_id: requestId,
+            client_order_id: clientOrderId, owner_token: ownerToken,
+            phase: 'SUBMITTING', lifecycle_generation: input.generation,
+            participant_ids: input.participantIds, before_amount: input.beforeAmount,
+            target_amount: 0, close_qty: input.closeQty, direction: input.direction,
+            persisted_before_submit: true, observed_at: claimedAt.toISOString(),
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return {
+        ownerToken, requestId, clientOrderId, phase: 'SUBMITTING' as const,
+        beforeAmount: input.beforeAmount, targetAmount: 0 as const,
+        closeQty: input.closeQty, direction: input.direction, recovered: false,
+      };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
+  private async readAccountEmergencyCloseFence(input: {
+    cycleId: string;
+    participantId: string;
+    generation: string;
+  }): Promise<AccountEmergencyCloseFence | null> {
+    const row = await this.prisma.signalCycleParticipant.findFirst({
+      where: { id: input.participantId, cycleId: input.cycleId },
+      select: {
+        terminalCloseClaimToken: true, terminalCloseRequestId: true,
+        terminalCloseGeneration: true, terminalCloseAuthority: true,
+        terminalClosePhase: true, terminalCloseBeforeAmount: true,
+        terminalCloseTargetAmount: true, terminalCloseQty: true,
+        terminalCloseExchangeOrderId: true,
+      },
+    });
+    if (!row?.terminalCloseClaimToken || !row.terminalCloseRequestId
+      || row.terminalCloseGeneration !== input.generation
+      || !['SUBMITTING', 'ACKNOWLEDGED', 'CONFIRMED'].includes(row.terminalClosePhase ?? '')) return null;
+    const authority = row.terminalCloseAuthority as Record<string, unknown> | null;
+    const clientOrderId = Number(authority?.client_order_id);
+    const beforeAmount = finiteDecimalLikeNumber(row.terminalCloseBeforeAmount);
+    const targetAmount = finiteDecimalLikeNumber(row.terminalCloseTargetAmount);
+    const closeQty = finiteDecimalLikeNumber(row.terminalCloseQty);
+    const direction = authority?.direction;
+    if (authority?.schema !== 'account_emergency_close_v2'
+      || authority.request_id !== row.terminalCloseRequestId
+      || authority.lifecycle_generation !== input.generation
+      || !Number.isSafeInteger(clientOrderId) || clientOrderId <= 0
+      || beforeAmount == null || targetAmount !== 0 || closeQty == null || closeQty <= 0
+      || (direction !== 'LONG' && direction !== 'SHORT')) return null;
+    return {
+      ownerToken: row.terminalCloseClaimToken, requestId: row.terminalCloseRequestId,
+      clientOrderId, phase: row.terminalClosePhase as AccountEmergencyCloseFence['phase'],
+      beforeAmount, targetAmount: 0, closeQty, direction,
+      exchangeOrderId: row.terminalCloseExchangeOrderId != null
+        ? Number(row.terminalCloseExchangeOrderId) : undefined,
+      recovered: true,
+    };
+  }
+
+  private async advanceAccountEmergencyCloseFence(input: {
+    cycleId: string;
+    participantId: string;
+    fence: AccountEmergencyCloseFence;
+    from: AccountEmergencyCloseFence['phase'][];
+    to: 'ACKNOWLEDGED' | 'CONFIRMED';
+    exchangeOrderId?: number;
+    reconciliation?: Record<string, unknown>;
+  }): Promise<AccountEmergencyCloseFence> {
+    const now = new Date();
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.signalCycleParticipant.updateMany({
+        where: {
+          id: input.participantId, cycleId: input.cycleId,
+          terminalCloseClaimToken: input.fence.ownerToken,
+          terminalCloseRequestId: input.fence.requestId,
+          terminalClosePhase: { in: input.from },
+        },
+        data: {
+          terminalClosePhase: input.to,
+          ...(input.exchangeOrderId != null
+            ? { terminalCloseExchangeOrderId: BigInt(Math.trunc(input.exchangeOrderId)) } : {}),
+          ...(input.to === 'ACKNOWLEDGED' ? { terminalCloseAcknowledgedAt: now } : {}),
+          ...(input.to === 'CONFIRMED' ? { terminalCloseConfirmedAt: now } : {}),
+        },
+      });
+      if (result.count !== 1) return false;
+      await tx.signalCycleEvent.create({ data: {
+        cycleId: input.cycleId, participantId: input.participantId,
+        eventType: `ACCOUNT_EMERGENCY_CLOSE_${input.to}`,
+        payload: {
+          schema: 'account_emergency_close_v2', request_id: input.fence.requestId,
+          client_order_id: input.fence.clientOrderId, phase: input.to,
+          exchange_order_id: input.exchangeOrderId != null ? String(input.exchangeOrderId) : undefined,
+          reconciliation: input.reconciliation, observed_at: now.toISOString(),
+        } as Prisma.InputJsonValue,
+      }});
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    if (!updated) throw new Error(`ACCOUNT_EMERGENCY_CLOSE_${input.to}_REFUSED`);
+    return { ...input.fence, phase: input.to, exchangeOrderId: input.exchangeOrderId ?? input.fence.exchangeOrderId };
+  }
+
   /** Emergency flatten all OPEN copy lots (sync protection breach). */
   async emergencyFlattenOpenCopyLots(userId: string, agentSlug: string): Promise<{ flattened: number }> {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
@@ -18718,55 +18912,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const pendingMeta = await Promise.all(
         pendingRows.map(async (row) => ({ row, meta: await this.loadExecutionMeta(row.id) })),
       );
-      type AccountEmergencyFence = {
-        schema: 'relay_account_emergency_close_v1';
-        phase: 'SUBMITTING' | 'ACKNOWLEDGED' | 'CONFIRMED';
-        requestId: string;
-        beforeAmount: number;
-        targetAmount: 0;
-        closeQty: number;
-        direction: 'LONG' | 'SHORT';
-        orderId?: number;
-        submittedAt: string;
-        acknowledgedAt?: string;
-        confirmedAt?: string;
-      };
-      const readAccountEmergencyFence = (value: unknown): AccountEmergencyFence | null => {
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-        const candidate = (value as Record<string, unknown>).accountEmergencyClose;
-        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
-        const fence = candidate as Partial<AccountEmergencyFence>;
-        if (
-          fence.schema !== 'relay_account_emergency_close_v1'
-          || !['SUBMITTING', 'ACKNOWLEDGED', 'CONFIRMED'].includes(String(fence.phase))
-          || typeof fence.requestId !== 'string'
-          || !Number.isFinite(fence.beforeAmount)
-          || !Number.isFinite(fence.closeQty)
-          || !['LONG', 'SHORT'].includes(String(fence.direction))
-        ) return null;
-        return fence as AccountEmergencyFence;
-      };
-      const persistAccountEmergencyFence = async (fence: AccountEmergencyFence) => {
-        const fresh = await this.prisma.tradingAgentInstance.findUnique({
-          where: { id: instance.id },
-          select: { status: true, dashboardState: true },
-        });
-        if (!fresh || fresh.status !== TradingAgentInstanceStatus.PAUSED) {
-          throw new Error('Emergency account close fence requires a paused instance');
-        }
-        const dash = fresh.dashboardState && typeof fresh.dashboardState === 'object'
-          ? fresh.dashboardState as Record<string, unknown>
-          : {};
-        await this.prisma.tradingAgentInstance.update({
-          where: { id: instance.id },
-          data: {
-            dashboardState: {
-              ...dash,
-              accountEmergencyClose: fence,
-            } as Prisma.InputJsonValue,
-          },
-        });
-      };
       for (const { row, meta } of pendingMeta) {
         if (!meta.bitfinexOrderId) {
           throw new Error(`Emergency flatten refused: missing managed entry order for ${row.cycle.tradeId}`);
@@ -18784,20 +18929,42 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
 
       const before = await this.activeTrading.getOpenPositionDetail(creds);
-      const existingFence = readAccountEmergencyFence(instance.dashboardState);
-      const recoveringFence = existingFence;
-      if (recoveringFence && before && btcToSats(Math.abs(before.amount)) > 0) {
-        throw new Error(
-          `Emergency account close ${recoveringFence.requestId} is ${recoveringFence.phase}; `
-          + 'position remains non-flat, so automatic resubmission is prohibited',
-        );
+      const coordinator = pendingRows[0]!;
+      const participantIds = pendingRows.map((row) => row.id);
+      const generation = createHash('sha256').update(JSON.stringify({
+        agentId: agent.id,
+        participantIds,
+        entryOrderIds: pendingMeta.map(({ meta }) => meta.bitfinexOrderId),
+      })).digest('hex');
+      let fence = await this.readAccountEmergencyCloseFence({
+        cycleId: coordinator.cycleId,
+        participantId: coordinator.id,
+        generation,
+      });
+      if (!fence && before && btcToSats(Math.abs(before.amount)) > 0) {
+        fence = await this.acquireAccountEmergencyCloseFence({
+          instanceId: instance.id,
+          cycleId: coordinator.cycleId,
+          participantId: coordinator.id,
+          generation,
+          participantIds,
+          beforeAmount: before.amount,
+          closeQty: Math.abs(before.amount),
+          direction: before.amount > 0 ? 'LONG' : 'SHORT',
+        });
+        // A concurrent request may have won the unique atomic claim. Read its
+        // immutable identity; never submit under a newly invented identity.
+        if (!fence) fence = await this.readAccountEmergencyCloseFence({
+          cycleId: coordinator.cycleId,
+          participantId: coordinator.id,
+          generation,
+        });
       }
-      if ((before && btcToSats(Math.abs(before.amount)) > 0) || recoveringFence) {
-        const beforeAmount = recoveringFence?.beforeAmount ?? before!.amount;
-        const closeQty = recoveringFence?.closeQty ?? Math.abs(beforeAmount);
-        const direction: 'LONG' | 'SHORT' = recoveringFence?.direction
-          ?? (beforeAmount > 0 ? 'LONG' : 'SHORT');
-        const incidentId = recoveringFence?.requestId ?? `account-emergency-${randomUUID()}`;
+      if (fence) {
+        const beforeAmount = fence.beforeAmount;
+        const closeQty = fence.closeQty;
+        const direction = fence.direction;
+        const incidentId = fence.requestId;
         for (const { row, meta } of pendingMeta) {
           await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'NEGATIVE_EVIDENCE', {
             venue: 'bitfinex', source: 'hire',
@@ -18821,30 +18988,47 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           });
         }
 
-        let closeOrderId = recoveringFence?.orderId;
-        let confirmed = recoveringFence != null;
-        if (!recoveringFence) {
-          const submittingFence: AccountEmergencyFence = {
-            schema: 'relay_account_emergency_close_v1',
-            phase: 'SUBMITTING',
-            requestId: incidentId,
-            beforeAmount,
-            targetAmount: 0,
-            closeQty,
-            direction,
-            submittedAt: new Date().toISOString(),
-          };
-          await persistAccountEmergencyFence(submittingFence);
-          closeOrderId = await this.activeTrading.submitMarketClose(creds, {
+        let closeOrderId = fence.exchangeOrderId;
+        const currentPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        let confirmed = btcToSats(currentPosition?.amount ?? 0) === 0;
+        if (fence.recovered && fence.phase !== 'CONFIRMED') {
+          // Authenticated CID lookup distinguishes a live/settled original
+          // request from an unknown transport result. Neither case authorizes
+          // a second market close: only target-position reconciliation can.
+          const activeByCid = (await this.bitfinex.listActiveOrders(creds))
+            .find((order) => order.cid === fence!.clientOrderId) ?? null;
+          const historyByCid = activeByCid
+            ? null
+            : await this.bitfinex.findOrderHistoryByClientOrderId(creds, fence.clientOrderId);
+          const exactOrder = activeByCid ?? historyByCid;
+          const exactOrderValid = accountEmergencyOrderMatchesFence(exactOrder, fence);
+          if (!confirmed || !exactOrderValid) {
+            throw new Error(
+              `Emergency account close ${incidentId} recovery is UNKNOWN; `
+              + `position_target_confirmed=${confirmed} exact_cid_order=${exactOrderValid ? exactOrder!.id : 'absent_or_invalid'}; no resubmit`,
+            );
+          }
+          closeOrderId = exactOrder!.id;
+        }
+        if (!fence.recovered) {
+          try {
+            closeOrderId = await this.activeTrading.submitMarketClose(creds, {
             positionDirection: direction,
             qty: closeQty,
             leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
-          });
-          await persistAccountEmergencyFence({
-            ...submittingFence,
-            phase: 'ACKNOWLEDGED',
-            orderId: closeOrderId,
-            acknowledgedAt: new Date().toISOString(),
+              clientOrderId: fence.clientOrderId,
+            });
+          } catch (error) {
+            // SUBMITTING remains durable. A retry must reconcile this exact CID
+            // and the authenticated position; it must never submit again.
+            throw new Error(
+              `Emergency account close ${incidentId} submit result UNKNOWN; no automatic resubmit: ${String(error)}`,
+            );
+          }
+          fence = await this.advanceAccountEmergencyCloseFence({
+            cycleId: coordinator.cycleId, participantId: coordinator.id,
+            fence, from: ['SUBMITTING'], to: 'ACKNOWLEDGED',
+            exchangeOrderId: closeOrderId,
           });
           confirmed = await this.waitForMarketCloseConfirmation(
             creds,
@@ -18863,7 +19047,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         // Flat first, then remove only still-active orders whose ids are
         // durably owned by the affected participants. Foreign orders are never
         // touched and reduce-only orders cannot reverse the now-flat account.
-        const participantIds = pendingRows.map((row) => row.id);
         const ownedEvents = await this.prisma.signalCycleEvent.findMany({
           where: { participantId: { in: participantIds } },
           select: { payload: true },
@@ -18910,19 +19093,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             `Emergency flat confirmed but owned orders remain active: ${remainingOwnedOrderIds.join(',')}`,
           );
         }
-        await persistAccountEmergencyFence({
-          schema: 'relay_account_emergency_close_v1',
-          phase: 'CONFIRMED',
-          requestId: incidentId,
-          beforeAmount,
-          targetAmount: 0,
-          closeQty,
-          direction,
-          orderId: closeOrderId,
-          submittedAt: recoveringFence?.submittedAt ?? new Date().toISOString(),
-          acknowledgedAt: recoveringFence?.acknowledgedAt,
-          confirmedAt: new Date().toISOString(),
-        });
+        if (fence.phase !== 'CONFIRMED') {
+          fence = await this.advanceAccountEmergencyCloseFence({
+            cycleId: coordinator.cycleId, participantId: coordinator.id,
+            fence, from: ['SUBMITTING', 'ACKNOWLEDGED'], to: 'CONFIRMED',
+            exchangeOrderId: closeOrderId,
+            reconciliation: {
+              authenticated_position_amount: finalPosition?.amount ?? 0,
+              target_amount: 0,
+              exact_client_order_id: fence.clientOrderId,
+              remaining_owned_order_ids: remainingOwnedOrderIds,
+            },
+          });
+        }
         for (const { row, meta } of pendingMeta) {
           await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'EXPIRED', {
             venue: 'bitfinex', source: 'hire',

@@ -806,6 +806,7 @@ export class BitfinexTradingClient {
       positionDirection: 'LONG' | 'SHORT';
       qty: number;
       leverage?: number;
+      clientOrderId?: number;
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
@@ -821,6 +822,7 @@ export class BitfinexTradingClient {
       lev,
       // Partial virtual-lot exits share one merged BTC-PERP position.
       flags: BITFINEX_REDUCE_ONLY_FLAG,
+      ...(input.clientOrderId != null ? { cid: input.clientOrderId & 0x7fffffff } : {}),
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);
