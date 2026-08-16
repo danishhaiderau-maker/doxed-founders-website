@@ -17625,6 +17625,124 @@ def _mirror_reports_to_dir():
         return False
 
 
+def _report_source_evidence_provenance():
+    """Fingerprint the exact immutable evidence inputs used by this run."""
+    data_root = os.path.realpath(os.getenv("BTC_AGENT_DATA_DIR") or os.getcwd())
+    evidence = {}
+    policy_keys = set()
+    for name in ("relay_lifecycle_evidence_v1.json", "counterfactual.jsonl"):
+        path = os.path.join(data_root, name)
+        row = {"available": False, "path_label": name}
+        if os.path.isfile(path):
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            row.update({
+                "available": True,
+                "size_bytes": os.path.getsize(path),
+                "sha256": digest.hexdigest(),
+            })
+            if name == "relay_lifecycle_evidence_v1.json":
+                try:
+                    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+                    row.update({
+                        "schema": payload.get("schema"),
+                        "generated_at": payload.get("generatedAt"),
+                        "generating_revision": payload.get("generatingRevision"),
+                        "run_identity": payload.get("runIdentity"),
+                    })
+                except (OSError, ValueError, TypeError):
+                    row["qualification_error"] = "INVALID_RELAY_EVIDENCE_PAYLOAD"
+            else:
+                try:
+                    with open(path, "r", encoding="utf-8-sig") as handle:
+                        for line in handle:
+                            try:
+                                item = json.loads(line)
+                            except (ValueError, TypeError):
+                                continue
+                            key = item.get("policy_comparability_key") if isinstance(item, dict) else None
+                            if isinstance(key, str) and key.strip():
+                                policy_keys.add(key.strip())
+                except OSError:
+                    row["qualification_error"] = "COUNTERFACTUAL_READ_FAILED"
+        evidence[name] = row
+    revision_material = "|".join(
+        evidence[name].get("sha256", "MISSING")
+        for name in ("relay_lifecycle_evidence_v1.json", "counterfactual.jsonl")
+    )
+    return {
+        "data_root_kind": "CANONICAL_LOCAL_FLY_MIRROR",
+        "source_data_revision": hashlib.sha256(revision_material.encode("utf-8")).hexdigest(),
+        "evidence_inputs": evidence,
+        "policy_comparability_key": next(iter(policy_keys)) if len(policy_keys) == 1 else None,
+        "policy_comparability_key_count": len(policy_keys),
+        "policy_comparability_status": (
+            "SINGLE_COMPARABLE_POLICY" if len(policy_keys) == 1
+            else "MISSING" if not policy_keys
+            else "MIXED_POLICY_FAIL_CLOSED"
+        ),
+    }
+
+
+def _stamp_report_analysis_provenance(path, analysis_provenance):
+    """Make each derived JSON report self-describing and fail closed."""
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        report = json.load(handle)
+    if not isinstance(report, dict):
+        raise ValueError(f"report must be a JSON object: {path}")
+    report.setdefault("schema", "analyzer_report_v1")
+    report["analysis_provenance"] = analysis_provenance
+    report["cohort_schema"] = analysis_provenance["cohort_schema"]
+    report["generation_revision"] = analysis_provenance["generation_revision"]
+    report["source_data_revision"] = analysis_provenance["source_data_revision"]
+    report["policy_comparability_key"] = report.get(
+        "selected_policy_comparability_key",
+        analysis_provenance.get("policy_comparability_key"),
+    )
+    report["cohorts"] = report.get("cohorts") or analysis_provenance["cohorts"]
+
+    declared_cohort = report.get("cohort")
+    if declared_cohort in analysis_provenance["cohorts"]:
+        cohort_row = analysis_provenance["cohorts"][declared_cohort]
+        report["report_eligibility"] = {
+            "classification": "COHORT_GATED",
+            **cohort_row,
+            "excluded_row_count": max(
+                0,
+                int(cohort_row.get("evidence_row_count", 0))
+                - int(cohort_row.get("included_row_count", 0)),
+            ),
+        }
+    elif isinstance(report.get("showcase_cohort"), dict):
+        cohort_row = report["showcase_cohort"]
+        included = int(cohort_row.get("included_row_count", 0) or 0)
+        evidence_rows = int(cohort_row.get("evidence_row_count", 0) or 0)
+        report["report_eligibility"] = {
+            "classification": "REPORT_SPECIFIC_SHOWCASE_GATE",
+            **cohort_row,
+            "excluded_row_count": max(0, evidence_rows - included),
+        }
+    else:
+        evidence_rows = int(
+            analysis_provenance["cohorts"][SHOWCASE_STRATEGY].get("evidence_row_count", 0)
+            or 0
+        )
+        report["report_eligibility"] = {
+            "classification": "DESCRIPTIVE_UNQUALIFIED",
+            "included_row_count": 0,
+            "evidence_row_count": evidence_rows,
+            "excluded_row_count": evidence_rows,
+            "exclusion_reason_counts": {"REPORT_NOT_COHORT_GATED": evidence_rows},
+        }
+    report.setdefault("live_policy_change_allowed", False)
+    temp = f"{path}.provenance.tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    os.replace(temp, path)
+
+
 def write_report_manifest(payload=None):
     manifest_generated_at = datetime.now(timezone.utc)
     current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
@@ -17647,10 +17765,12 @@ def write_report_manifest(payload=None):
         or os.getenv("GIT_REVISION")
         or "UNKNOWN"
     )
+    source_provenance = _report_source_evidence_provenance()
     analysis_provenance = {
         "cohort_schema": "analysis_cohorts_v1",
         "generation_revision": generation_revision,
         "cohorts": cohort_summary,
+        **source_provenance,
     }
     reports = []
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
@@ -17658,6 +17778,7 @@ def write_report_manifest(payload=None):
         # cannot regenerate that report. Keep them for local history, but do
         # not qualify them as members of this immutable generation.
         if os.path.isfile(fname) and os.path.getmtime(fname) >= current_run_cutoff:
+            _stamp_report_analysis_provenance(fname, analysis_provenance)
             os.makedirs(REPORTS_DIR, exist_ok=True)
             mirrored_report = os.path.join(REPORTS_DIR, os.path.basename(fname))
             shutil.copy2(fname, mirrored_report)

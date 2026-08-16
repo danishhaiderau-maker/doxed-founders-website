@@ -141,6 +141,11 @@ def test_report_manifest_exposes_cohort_provenance_and_revision():
     assert '"cohort_schema": analysis_provenance["cohort_schema"]' in manifest
     assert '"generation_revision": analysis_provenance["generation_revision"]' in manifest
     assert '"cohorts": analysis_provenance["cohorts"]' in manifest
+    assert "def _stamp_report_analysis_provenance(" in CANONICAL_ANALYZER_SOURCE
+    assert '"classification": "DESCRIPTIVE_UNQUALIFIED"' in CANONICAL_ANALYZER_SOURCE
+    assert '"REPORT_NOT_COHORT_GATED"' in CANONICAL_ANALYZER_SOURCE
+    assert 'report["source_data_revision"] = analysis_provenance["source_data_revision"]' in CANONICAL_ANALYZER_SOURCE
+    assert 'report.setdefault("live_policy_change_allowed", False)' in CANONICAL_ANALYZER_SOURCE
 
 
 def test_demo_harness_runs_canonical_analyzer_and_propagates_failure():
