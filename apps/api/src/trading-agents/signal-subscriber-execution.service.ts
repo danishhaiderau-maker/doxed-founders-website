@@ -18650,6 +18650,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     });
 
     let flattened = 0;
+    let allOpenClosesConfirmed = true;
     for (const row of openRows) {
       const meta = await this.loadExecutionMeta(row.id);
       if (!meta.qty || !meta.direction) continue;
@@ -18687,6 +18688,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         },
       });
       if (closed) flattened += 1;
+      else allOpenClosesConfirmed = false;
     }
 
     // A protection failure can deliberately leave an authenticated exchange
@@ -18704,9 +18706,67 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       orderBy: { createdAt: 'asc' },
     });
     if (pendingRows.length > 0) {
+      // Never let the account-level residual close race an OPEN-lot close whose
+      // durable terminal fence is still SUBMITTING/ACKNOWLEDGED or otherwise
+      // unconfirmed. A second account close after an inconclusive first submit
+      // would violate the no-resubmit-without-reconciliation contract.
+      if (!allOpenClosesConfirmed) {
+        throw new Error(
+          'Emergency pending-residual flatten refused: an OPEN-lot close is not confirmed',
+        );
+      }
       const pendingMeta = await Promise.all(
         pendingRows.map(async (row) => ({ row, meta: await this.loadExecutionMeta(row.id) })),
       );
+      type AccountEmergencyFence = {
+        schema: 'relay_account_emergency_close_v1';
+        phase: 'SUBMITTING' | 'ACKNOWLEDGED' | 'CONFIRMED';
+        requestId: string;
+        beforeAmount: number;
+        targetAmount: 0;
+        closeQty: number;
+        direction: 'LONG' | 'SHORT';
+        orderId?: number;
+        submittedAt: string;
+        acknowledgedAt?: string;
+        confirmedAt?: string;
+      };
+      const readAccountEmergencyFence = (value: unknown): AccountEmergencyFence | null => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+        const candidate = (value as Record<string, unknown>).accountEmergencyClose;
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+        const fence = candidate as Partial<AccountEmergencyFence>;
+        if (
+          fence.schema !== 'relay_account_emergency_close_v1'
+          || !['SUBMITTING', 'ACKNOWLEDGED', 'CONFIRMED'].includes(String(fence.phase))
+          || typeof fence.requestId !== 'string'
+          || !Number.isFinite(fence.beforeAmount)
+          || !Number.isFinite(fence.closeQty)
+          || !['LONG', 'SHORT'].includes(String(fence.direction))
+        ) return null;
+        return fence as AccountEmergencyFence;
+      };
+      const persistAccountEmergencyFence = async (fence: AccountEmergencyFence) => {
+        const fresh = await this.prisma.tradingAgentInstance.findUnique({
+          where: { id: instance.id },
+          select: { status: true, dashboardState: true },
+        });
+        if (!fresh || fresh.status !== TradingAgentInstanceStatus.PAUSED) {
+          throw new Error('Emergency account close fence requires a paused instance');
+        }
+        const dash = fresh.dashboardState && typeof fresh.dashboardState === 'object'
+          ? fresh.dashboardState as Record<string, unknown>
+          : {};
+        await this.prisma.tradingAgentInstance.update({
+          where: { id: instance.id },
+          data: {
+            dashboardState: {
+              ...dash,
+              accountEmergencyClose: fence,
+            } as Prisma.InputJsonValue,
+          },
+        });
+      };
       for (const { row, meta } of pendingMeta) {
         if (!meta.bitfinexOrderId) {
           throw new Error(`Emergency flatten refused: missing managed entry order for ${row.cycle.tradeId}`);
@@ -18724,11 +18784,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
 
       const before = await this.activeTrading.getOpenPositionDetail(creds);
-      if (before && btcToSats(Math.abs(before.amount)) > 0) {
-        const beforeAmount = before.amount;
-        const closeQty = Math.abs(beforeAmount);
-        const direction: 'LONG' | 'SHORT' = beforeAmount > 0 ? 'LONG' : 'SHORT';
-        const incidentId = `account-emergency-${randomUUID()}`;
+      const existingFence = readAccountEmergencyFence(instance.dashboardState);
+      const recoveringFence = existingFence;
+      if (recoveringFence && before && btcToSats(Math.abs(before.amount)) > 0) {
+        throw new Error(
+          `Emergency account close ${recoveringFence.requestId} is ${recoveringFence.phase}; `
+          + 'position remains non-flat, so automatic resubmission is prohibited',
+        );
+      }
+      if ((before && btcToSats(Math.abs(before.amount)) > 0) || recoveringFence) {
+        const beforeAmount = recoveringFence?.beforeAmount ?? before!.amount;
+        const closeQty = recoveringFence?.closeQty ?? Math.abs(beforeAmount);
+        const direction: 'LONG' | 'SHORT' = recoveringFence?.direction
+          ?? (beforeAmount > 0 ? 'LONG' : 'SHORT');
+        const incidentId = recoveringFence?.requestId ?? `account-emergency-${randomUUID()}`;
         for (const { row, meta } of pendingMeta) {
           await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'NEGATIVE_EVIDENCE', {
             venue: 'bitfinex', source: 'hire',
@@ -18752,20 +18821,41 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           });
         }
 
-        const closeOrderId = await this.activeTrading.submitMarketClose(creds, {
-          positionDirection: direction,
-          qty: closeQty,
-          leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
-        });
-        const confirmed = await this.waitForMarketCloseConfirmation(
-          creds,
-          direction,
-          closeQty,
-          closeQty,
-        ).catch(() => false);
+        let closeOrderId = recoveringFence?.orderId;
+        let confirmed = recoveringFence != null;
+        if (!recoveringFence) {
+          const submittingFence: AccountEmergencyFence = {
+            schema: 'relay_account_emergency_close_v1',
+            phase: 'SUBMITTING',
+            requestId: incidentId,
+            beforeAmount,
+            targetAmount: 0,
+            closeQty,
+            direction,
+            submittedAt: new Date().toISOString(),
+          };
+          await persistAccountEmergencyFence(submittingFence);
+          closeOrderId = await this.activeTrading.submitMarketClose(creds, {
+            positionDirection: direction,
+            qty: closeQty,
+            leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
+          });
+          await persistAccountEmergencyFence({
+            ...submittingFence,
+            phase: 'ACKNOWLEDGED',
+            orderId: closeOrderId,
+            acknowledgedAt: new Date().toISOString(),
+          });
+          confirmed = await this.waitForMarketCloseConfirmation(
+            creds,
+            direction,
+            closeQty,
+            closeQty,
+          ).catch(() => false);
+        }
         if (!confirmed) {
           throw new Error(
-            `Emergency account close ${closeOrderId} was acknowledged but flatness is not confirmed`,
+            `Emergency account close ${closeOrderId ?? incidentId} was acknowledged but flatness is not confirmed`,
           );
         }
         flattened += 1;
@@ -18811,6 +18901,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         if (finalPosition && btcToSats(Math.abs(finalPosition.amount)) > 0) {
           throw new Error('Emergency close did not produce a flat private position');
         }
+        const finalActiveOrders = await this.activeTrading.listActiveOrders(creds);
+        const remainingOwnedOrderIds = finalActiveOrders
+          .filter((order) => ownedOrderIds.has(order.id))
+          .map((order) => order.id);
+        if (remainingOwnedOrderIds.length > 0) {
+          throw new Error(
+            `Emergency flat confirmed but owned orders remain active: ${remainingOwnedOrderIds.join(',')}`,
+          );
+        }
+        await persistAccountEmergencyFence({
+          schema: 'relay_account_emergency_close_v1',
+          phase: 'CONFIRMED',
+          requestId: incidentId,
+          beforeAmount,
+          targetAmount: 0,
+          closeQty,
+          direction,
+          orderId: closeOrderId,
+          submittedAt: recoveringFence?.submittedAt ?? new Date().toISOString(),
+          acknowledgedAt: recoveringFence?.acknowledgedAt,
+          confirmedAt: new Date().toISOString(),
+        });
         for (const { row, meta } of pendingMeta) {
           await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'EXPIRED', {
             venue: 'bitfinex', source: 'hire',
@@ -18832,6 +18944,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             ],
           });
         }
+      } else {
+        // This can mean the cancel race filled and another exchange mechanism
+        // flattened before our close, or that the account was already flat.
+        // Without exact per-order settlement provenance it is unsafe to stamp
+        // every pending participant EXPIRED or claim the emergency action
+        // completed successfully.
+        throw new Error(
+          'Emergency pending-residual flatten found the account flat after managed cancels; exact terminal attribution is required',
+        );
       }
     }
 

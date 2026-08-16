@@ -7590,6 +7590,30 @@ test('watchdog and partial-protection source retain fail-closed ownership invari
   assert.match(source, /'CLAIMED',\s*'SUBMITTING'/);
 });
 
+test('account emergency residual close is durably fenced before exchange submission', () => {
+  const source = readFileSync(resolve(
+    __dirname,
+    'signal-subscriber-execution.service.ts',
+  ), 'utf8');
+  const methodAt = source.indexOf('async emergencyFlattenOpenCopyLots');
+  const cancelAt = source.indexOf('emergency-account-flat:', methodAt);
+  const positionAt = source.indexOf('getOpenPositionDetail(creds)', cancelAt);
+  const persistSubmittingAt = source.indexOf('persistAccountEmergencyFence(submittingFence)', positionAt);
+  const submitAt = source.indexOf('submitMarketClose(creds', persistSubmittingAt);
+  const acknowledgeAt = source.indexOf("phase: 'ACKNOWLEDGED'", submitAt);
+  const confirmAt = source.indexOf('waitForMarketCloseConfirmation', acknowledgeAt);
+  const cleanupAt = source.indexOf('emergency-post-flat-owned-order:', confirmAt);
+  const persistConfirmedAt = source.indexOf("phase: 'CONFIRMED'", cleanupAt);
+  const expireAt = source.indexOf("'EXPIRED'", persistConfirmedAt);
+  assert.ok(methodAt >= 0);
+  assert.ok(cancelAt > methodAt && positionAt > cancelAt);
+  assert.ok(persistSubmittingAt > positionAt && submitAt > persistSubmittingAt);
+  assert.ok(acknowledgeAt > submitAt && confirmAt > acknowledgeAt);
+  assert.ok(cleanupAt > confirmAt && persistConfirmedAt > cleanupAt && expireAt > persistConfirmedAt);
+  assert.match(source.slice(positionAt, submitAt), /automatic resubmission is prohibited/);
+  assert.match(source.slice(confirmAt, expireAt), /remainingOwnedOrderIds/);
+});
+
 test('partial emergency fence closes only its attributable leg and preserves merged peer exposure', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   let submittedQty = 0;
