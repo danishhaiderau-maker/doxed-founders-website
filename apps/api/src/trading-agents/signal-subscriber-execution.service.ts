@@ -1163,7 +1163,7 @@ type ExecutionPayload = {
   aggressiveCatchupStartedAtMs?: number;
 };
 
-type TerminalCloseAuthorityKind =
+export type TerminalCloseAuthorityKind =
   | 'SIGNED_POSITION_CLOSED'
   | 'CANONICAL_TERMINAL_RECORD'
   | 'SOURCE_ABSENCE_ACTIONABLE'
@@ -1173,7 +1173,7 @@ type TerminalCloseAuthorityKind =
   | 'LATE_FILL_CLEANUP'
   | 'AUTHENTICATED_MANUAL_OR_EMERGENCY';
 
-type TerminalCloseAuthority = {
+export type TerminalCloseAuthority = {
   kind: TerminalCloseAuthorityKind;
   canonicalTradeId: string;
   lifecycleGeneration: string;
@@ -1189,6 +1189,115 @@ type TerminalCloseClaim = {
 };
 
 const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
+const SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS = 5 * 60_000;
+const TERMINAL_EVIDENCE_CLOCK_SKEW_MS = 5_000;
+
+function terminalEvidenceString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function terminalEvidenceNumber(value: unknown): number | null {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function terminalEvidenceTimeMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Date.parse(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Fail-closed, exhaustive terminal authority contract. This is deliberately
+ * pure so both first-submit and crash-recovery paths can apply the identical
+ * proof rules before any exchange-side action.
+ */
+export function validateTerminalCloseAuthority(
+  authority: TerminalCloseAuthority | null | undefined,
+  nowMs = Date.now(),
+): boolean {
+  if (
+    !authority ||
+    !terminalEvidenceString(authority.canonicalTradeId) ||
+    !terminalEvidenceString(authority.lifecycleGeneration) ||
+    !authority.evidence ||
+    typeof authority.evidence !== 'object' ||
+    Array.isArray(authority.evidence)
+  ) return false;
+  const evidence = authority.evidence;
+  const finite = (key: string) => terminalEvidenceNumber(evidence[key]);
+  const positive = (key: string) => (finite(key) ?? 0) > 0;
+  const text = (key: string) => terminalEvidenceString(evidence[key]);
+
+  switch (authority.kind) {
+    case 'SIGNED_POSITION_CLOSED': {
+      const sourceAt = terminalEvidenceTimeMs(evidence.source_event_at_ms);
+      const receiptAt = terminalEvidenceTimeMs(evidence.platform_received_at_ms);
+      const eventSeq = finite('event_seq');
+      return Boolean(
+        text('trade_id') === authority.canonicalTradeId &&
+        text('event_id') && text('event_id')!.length <= 255 &&
+        eventSeq != null && Number.isInteger(eventSeq) && eventSeq >= 0 &&
+        authority.lifecycleGeneration === `seq:${eventSeq}` &&
+        positive('exit_price') && text('exit_reason') &&
+        sourceAt != null && receiptAt != null &&
+        receiptAt >= sourceAt - TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        sourceAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        receiptAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        nowMs - receiptAt <= SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS
+      );
+    }
+    case 'CANONICAL_TERMINAL_RECORD': {
+      const exitAt = terminalEvidenceTimeMs(evidence.exit_at);
+      const observedAt = finite('observed_at_ms');
+      return positive('exit_price') && Boolean(text('exit_reason')) && exitAt != null && observedAt != null &&
+        exitAt <= observedAt + TERMINAL_EVIDENCE_CLOCK_SKEW_MS && observedAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS;
+    }
+    case 'SOURCE_ABSENCE_ACTIONABLE': {
+      const firstAbsentAt = finite('firstAbsentAtMs');
+      const observedAt = finite('observedAtMs');
+      const snapshotAt = terminalEvidenceTimeMs(evidence.snapshotTs);
+      const misses = finite('misses');
+      const requiredMisses = finite('requiredMisses');
+      const elapsed = finite('elapsedMs');
+      const grace = finite('graceMs');
+      const missingEvidence = evidence.missingEvidence;
+      return Boolean(
+        evidence.schema === 'source_absence_evidence_v1' &&
+        evidence.verdict === 'ABSENT_ACTIONABLE' && evidence.actionable === true &&
+        text('canonicalTradeId') && tradeIdsMatch(text('canonicalTradeId')!, authority.canonicalTradeId) &&
+        text('sourceGitRev') && finite('snapshotSeq') != null && snapshotAt != null &&
+        finite('snapshotAgeSec') != null && (finite('snapshotAgeSec') ?? Infinity) >= 0 &&
+        (finite('snapshotAgeSec') ?? Infinity) <= SHOWCASE_ABSENCE_MAX_SNAPSHOT_AGE_SEC &&
+        snapshotAt <= nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS &&
+        nowMs - snapshotAt <= SHOWCASE_ABSENCE_MAX_SNAPSHOT_AGE_SEC * 1000 &&
+        evidence.positionsSynced === true && evidence.ordersSynced === true && evidence.tradesSynced === true &&
+        evidence.sourcePositionPresent === false && evidence.sourceOrderPresent === false &&
+        evidence.sourceSignalPresent === false && evidence.sourceTradePresent === false &&
+        evidence.sourceTradesMapPresent === false &&
+        misses != null && requiredMisses != null && Number.isInteger(misses) && Number.isInteger(requiredMisses) &&
+        requiredMisses >= SHOWCASE_POSITION_ABSENT_CONSECUTIVE_MISSES && misses >= requiredMisses &&
+        firstAbsentAt != null && observedAt != null && observedAt >= firstAbsentAt &&
+        elapsed != null && grace != null && grace >= SHOWCASE_POSITION_ABSENT_GRACE_MS && elapsed >= grace &&
+        Array.isArray(missingEvidence) && missingEvidence.length === 0 && text('persistedEventId')
+      );
+    }
+    case 'SCENARIO_C_PROFIT_LOCK':
+      return finite('peak_margin_pct') != null && finite('unreal_margin_pct') != null && finite('lock_floor_margin_pct') != null;
+    case 'THESIS_FAST_CUT':
+      return finite('peak_margin_pct') != null && finite('unreal_margin_pct') != null && finite('stop_loss_margin_pct') != null;
+    case 'HARD_STOP':
+      return finite('unreal_margin_pct') != null && finite('stop_loss_margin_pct') != null;
+    case 'LATE_FILL_CLEANUP':
+      return text('policy') === 'EXCHANGE_ONLY_PARTIAL_FILL_TERMINAL_CLEANUP' && Boolean(text('cancel_context')) && Boolean(text('fill_source')) && positive('filled_qty');
+    case 'AUTHENTICATED_MANUAL_OR_EMERGENCY':
+      return Boolean(text('actor_user_id')) && text('actor_type') === 'AUTHENTICATED_ACCOUNT_OWNER' && Boolean(text('action'));
+    default: {
+      const exhaustive: never = authority.kind;
+      return exhaustive;
+    }
+  }
+}
 
 type RepairableLotMeta = Pick<ExecutionPayload, 'qty' | 'direction'>;
 
@@ -1368,42 +1477,74 @@ export function signedCanonicalPendingIntentCycles<
   );
 }
 
-export function readSignedShowcaseClose(envelopeJson: unknown): {
-  exitPrice?: number;
-  exitReason?: string;
-  sourceEventAtMs?: number;
-  platformReceivedAtMs?: number;
+export function readSignedShowcaseClose(
+  envelopeJson: unknown,
+  expectedTradeId?: string,
+  nowMs = Date.now(),
+): {
+  tradeId: string;
+  eventId: string;
+  eventSeq: number;
+  exitPrice: number;
+  exitReason: string;
+  sourceEventAtMs: number;
+  platformReceivedAtMs: number;
 } | null {
-  const context = (
-    envelopeJson as {
+  const intent = envelopeJson as {
+      action?: string;
+      signalId?: string;
+      trade_id?: string;
       context?: {
         signed_showcase_event?: boolean;
         showcase_event?: string;
         showcase_event_at?: string;
+        showcase_event_id?: string;
+        showcase_event_seq?: number;
         platform_received_at?: string;
         showcase_exit_price?: number;
         showcase_exit_reason?: string;
       };
-    } | null
-  )?.context;
+    } | null;
+  const context = intent?.context;
+  const tradeId = terminalEvidenceString(intent?.trade_id ?? intent?.signalId);
+  const eventId = terminalEvidenceString(context?.showcase_event_id);
+  const eventSeq = terminalEvidenceNumber(context?.showcase_event_seq);
+  const rawExitPrice = terminalEvidenceNumber(context?.showcase_exit_price);
+  const exitReason = terminalEvidenceString(context?.showcase_exit_reason);
+  const sourceEventAtMs = terminalEvidenceTimeMs(context?.showcase_event_at);
+  const platformReceivedAtMs = terminalEvidenceTimeMs(context?.platform_received_at);
   if (
-    context?.signed_showcase_event !== true
+    intent?.action !== 'ENTER'
+    || !tradeId
+    || (expectedTradeId != null && tradeId !== expectedTradeId)
+    || (intent?.signalId != null && intent.signalId !== tradeId)
+    || context?.signed_showcase_event !== true
     || context.showcase_event !== 'POSITION_CLOSED'
+    || !eventId
+    || eventId.length > 255
+    || eventSeq == null
+    || !Number.isInteger(eventSeq)
+    || eventSeq < 0
+    || rawExitPrice == null
+    || rawExitPrice <= 0
+    || !exitReason
+    || sourceEventAtMs == null
+    || platformReceivedAtMs == null
+    || platformReceivedAtMs < sourceEventAtMs - TERMINAL_EVIDENCE_CLOCK_SKEW_MS
+    || sourceEventAtMs > nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS
+    || platformReceivedAtMs > nowMs + TERMINAL_EVIDENCE_CLOCK_SKEW_MS
+    || nowMs - platformReceivedAtMs > SIGNED_SHOWCASE_TERMINAL_MAX_AGE_MS
   ) {
     return null;
   }
-  const rawExitPrice = Number(context.showcase_exit_price ?? 0);
-  const sourceEventAtMs = Date.parse(String(context.showcase_event_at ?? ''));
-  const platformReceivedAtMs = Date.parse(String(context.platform_received_at ?? ''));
   return {
-    ...(Number.isFinite(rawExitPrice) && rawExitPrice > 0
-      ? { exitPrice: rawExitPrice }
-      : {}),
-    ...(Number.isFinite(sourceEventAtMs) ? { sourceEventAtMs } : {}),
-    ...(Number.isFinite(platformReceivedAtMs) ? { platformReceivedAtMs } : {}),
-    ...(context.showcase_exit_reason
-      ? { exitReason: context.showcase_exit_reason }
-      : {}),
+    tradeId,
+    eventId,
+    eventSeq,
+    exitPrice: rawExitPrice,
+    exitReason,
+    sourceEventAtMs,
+    platformReceivedAtMs,
   };
 }
 
@@ -1975,10 +2116,13 @@ export type RelayExecutorWakeRequest = {
   tradeId?: string | null;
   /** HMAC-verified close evidence carried by the latency-only private prewake. */
   signedClose?: {
-    exitPrice?: number;
-    exitReason?: string;
-    sourceEventAtMs?: number;
-    platformReceivedAtMs?: number;
+    tradeId: string;
+    eventId: string;
+    eventSeq: number;
+    exitPrice: number;
+    exitReason: string;
+    sourceEventAtMs: number;
+    platformReceivedAtMs: number;
   };
   /** HMAC-verified source-fill evidence carried by a POSITION_OPENED wake. */
   signedOpen?: {
@@ -12399,48 +12543,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       ? fillEvidence.fillPrice
       : meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
-    const partialStopClientOrderId = (
-      parseInt(
-        createHash('sha256')
-          .update(`partial-stop:${participantId}:${meta.bitfinexOrderId}:${btcToSats(filledQty)}`)
-          .digest('hex')
-          .slice(0, 8),
-        16,
-      ) & 0x7fffffff
-    ) || 1;
-
     let newStopId: number;
     const stopSubmitStartedAtMs = Date.now();
     let stopExchangeAckAtMs = 0;
-    let activeOrdersForRecovery: Awaited<ReturnType<ExecutionTradingClient['listActiveOrders']>>;
     try {
-      activeOrdersForRecovery = await this.activeTrading.listActiveOrders(creds);
-    } catch (err) {
-      const message = `PARTIAL_FILL_STOP_RECOVERY_BOOK_UNKNOWN cycle=${cycleId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`;
-      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
-      throw new Error(message);
-    }
-    try {
-      const recoveryCandidate = activeOrdersForRecovery.find(
-        (order) => order.cid === partialStopClientOrderId,
-      );
-      const stopInput = {
+      const protectedStop = await this.ensureDurableProtectiveStop({
+        participantId,
+        purpose: 'PARTIAL_FILL',
+        creds,
         positionDirection: meta.direction,
         qty: filledQty,
         stopPrice,
         leverage,
-        clientOrderId: partialStopClientOrderId,
-      } as const;
-      const verified = recoveryCandidate
-        ? await this.authenticateExactProtectiveStop(creds, recoveryCandidate.id, stopInput)
-        : await this.submitVerifiedProtectiveStop(creds, stopInput);
-      if (!verified.ok) throw new Error(verified.reason);
-      newStopId = verified.orderId;
-      stopExchangeAckAtMs = 'submitAckAtMs' in verified
-        ? Number(verified.submitAckAtMs)
-        : Date.now();
+        predecessorOrderId: priorStopId,
+      });
+      if (!protectedStop.ok) throw new Error(protectedStop.reason);
+      newStopId = protectedStop.orderId;
+      stopExchangeAckAtMs = protectedStop.exchangeAckAtMs;
     } catch (err) {
       const message = `PARTIAL_FILL_PROTECTION_FAILED cycle=${cycleId}: ${
         err instanceof Error ? err.message : String(err)
@@ -13169,6 +13288,182 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
+   * One durable exchange-write fence shared by every protective-stop path.
+   * A request identity and deterministic CID are persisted before submission.
+   * Once SUBMITTING, absence from a single exchange view is UNKNOWN and can
+   * never authorize a second submit. A later invocation recovers the exact
+   * active/history order by CID and persists ownership before returning it.
+   */
+  private async ensureDurableProtectiveStop(input: {
+    participantId: string;
+    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT';
+    creds: ExchangeCredentials;
+    positionDirection: 'LONG' | 'SHORT';
+    qty: number;
+    stopPrice: number;
+    leverage: number;
+    predecessorOrderId?: number;
+  }): Promise<
+    | { ok: true; orderId: number; clientOrderId: number; recovered: boolean; exchangeAckAtMs: number }
+    | { ok: false; unknown: true; reason: string; clientOrderId: number }
+  > {
+    const identity = [
+      'protective-stop-v1',
+      input.participantId,
+      input.purpose,
+      btcToSats(input.qty),
+      Math.round(input.stopPrice * 100),
+      input.predecessorOrderId ?? 0,
+    ].join(':');
+    const digest = createHash('sha256').update(identity).digest('hex');
+    const requestId = `ps:${digest.slice(0, 32)}`;
+    const clientOrderId = (parseInt(digest.slice(0, 8), 16) & 0x7fffffff) || 1;
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: input.participantId },
+      select: {
+        status: true,
+        protectiveStopRequestId: true,
+        protectiveStopPhase: true,
+        protectiveStopClientId: true,
+        protectiveStopOrderId: true,
+      },
+    });
+    if (
+      !participant
+      || (participant.status !== SignalCycleStatus.PENDING_ENTRY && participant.status !== SignalCycleStatus.OPEN)
+    ) {
+      return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_PARTICIPANT_NOT_ACTIVE', clientOrderId };
+    }
+
+    const sameRequest = participant.protectiveStopRequestId === requestId;
+    if (!sameRequest && ['SUBMITTING', 'ACKNOWLEDGED'].includes(participant.protectiveStopPhase ?? '')) {
+      return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_OTHER_REQUEST_IN_FLIGHT', clientOrderId };
+    }
+    const expected = {
+      positionDirection: input.positionDirection,
+      qty: input.qty,
+      stopPrice: input.stopPrice,
+      leverage: input.leverage,
+      clientOrderId,
+    };
+    if (
+      !sameRequest
+      && participant.protectiveStopPhase === 'OWNED'
+      && participant.protectiveStopOrderId != null
+    ) {
+      const existingOrderId = Number(participant.protectiveStopOrderId);
+      const existing = await this.authenticateExactProtectiveStop(input.creds, existingOrderId, expected);
+      if (existing.ok) {
+        return {
+          ok: true,
+          orderId: existingOrderId,
+          clientOrderId: participant.protectiveStopClientId ?? clientOrderId,
+          recovered: true,
+          exchangeAckAtMs: Date.now(),
+        };
+      }
+      // A changed quantity/price is a legitimate replacement only when the
+      // caller explicitly names the currently owned predecessor. A generic
+      // metadata repair must not create a second stop beside an unknown one.
+      if (input.predecessorOrderId !== existingOrderId) {
+        return {
+          ok: false,
+          unknown: true,
+          reason: `PROTECTIVE_STOP_EXISTING_OWNERSHIP_UNKNOWN:${existing.reason}`,
+          clientOrderId,
+        };
+      }
+    }
+    if (sameRequest && participant.protectiveStopOrderId != null) {
+      const orderId = Number(participant.protectiveStopOrderId);
+      const authenticated = await this.authenticateExactProtectiveStop(input.creds, orderId, expected);
+      if (authenticated.ok) {
+        return { ok: true, orderId, clientOrderId, recovered: true, exchangeAckAtMs: Date.now() };
+      }
+      return { ok: false, unknown: true, reason: authenticated.reason, clientOrderId };
+    }
+    if (sameRequest && ['SUBMITTING', 'ACKNOWLEDGED'].includes(participant.protectiveStopPhase ?? '')) {
+      let candidate: BitfinexActiveOrder | null = null;
+      try {
+        const active = await this.activeTrading.listActiveOrders(input.creds);
+        candidate = active.find((order) => order.cid === clientOrderId) ?? null;
+        if (!candidate && this.activeTrading instanceof BitfinexTradingClient) {
+          candidate = await this.activeTrading.findOrderHistoryByClientOrderId(input.creds, clientOrderId);
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          unknown: true,
+          reason: `PROTECTIVE_STOP_RECOVERY_READ_FAILED:${err instanceof Error ? err.message : String(err)}`,
+          clientOrderId,
+        };
+      }
+      if (!candidate || !candidate.status.toUpperCase().includes('ACTIVE')) {
+        return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_SUBMIT_RESULT_UNKNOWN', clientOrderId };
+      }
+      const authenticated = await this.authenticateExactProtectiveStop(input.creds, candidate.id, expected);
+      if (!authenticated.ok) {
+        return { ok: false, unknown: true, reason: authenticated.reason, clientOrderId };
+      }
+      const owned = await this.prisma.signalCycleParticipant.updateMany({
+        where: { id: input.participantId, protectiveStopRequestId: requestId, protectiveStopPhase: { in: ['SUBMITTING', 'ACKNOWLEDGED'] } },
+        data: { protectiveStopPhase: 'OWNED', protectiveStopOrderId: BigInt(candidate.id) },
+      });
+      if (owned.count !== 1) {
+        return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_RECOVERY_PERSIST_FAILED', clientOrderId };
+      }
+      return {
+        ok: true,
+        orderId: candidate.id,
+        clientOrderId,
+        recovered: true,
+        exchangeAckAtMs: Date.now(),
+      };
+    }
+
+    const claimed = await this.prisma.signalCycleParticipant.updateMany({
+      where: {
+        id: input.participantId,
+        status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        protectiveStopRequestId: participant.protectiveStopRequestId,
+        protectiveStopPhase: participant.protectiveStopPhase,
+      },
+      data: {
+        protectiveStopRequestId: requestId,
+        protectiveStopPhase: 'SUBMITTING',
+        protectiveStopClaimedAt: new Date(),
+        protectiveStopPurpose: input.purpose,
+        protectiveStopClientId: clientOrderId,
+        protectiveStopOrderId: null,
+        protectiveStopQty: input.qty,
+        protectiveStopPrice: input.stopPrice,
+        protectiveStopPredecessorId: input.predecessorOrderId == null ? null : BigInt(input.predecessorOrderId),
+      },
+    });
+    if (claimed.count !== 1) {
+      return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_CLAIM_LOST', clientOrderId };
+    }
+    const submitted = await this.submitVerifiedProtectiveStop(input.creds, expected);
+    if (!submitted.ok) {
+      return { ok: false, unknown: true, reason: submitted.reason, clientOrderId };
+    }
+    const owned = await this.prisma.signalCycleParticipant.updateMany({
+      where: { id: input.participantId, protectiveStopRequestId: requestId, protectiveStopPhase: 'SUBMITTING' },
+      data: { protectiveStopPhase: 'OWNED', protectiveStopOrderId: BigInt(submitted.orderId) },
+    });
+    if (owned.count !== 1) {
+      return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_OWNERSHIP_PERSIST_FAILED', clientOrderId };
+    }
+    return {
+      ok: true,
+      orderId: submitted.orderId,
+      clientOrderId,
+      recovered: false,
+      exchangeAckAtMs: submitted.submitAckAtMs,
+    };
+  }
+
+  /**
    * Submit a protective stop and authenticate the exact live exchange order
    * before any fill is allowed to promote the participant to OPEN.  A submit
    * response containing an id is only an acknowledgement of the write; it is
@@ -13314,7 +13609,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // be written by TTL, cleanup, or an incomplete source snapshot. Require an
     // exact signed close, a complete canonical terminal record, or persisted
     // actionable absence evidence below.
-    const signedClose = preWakeSignedClose ?? readSignedShowcaseClose(cycle.intentEnvelope);
+    const expectedTradeId = showcaseTradeId ?? cycle.tradeId ?? undefined;
+    const signedClose = preWakeSignedClose ?? readSignedShowcaseClose(cycle.intentEnvelope, expectedTradeId);
     let closed = signedClose != null;
     let showcaseExitPrice: number | undefined;
     let showcaseExitReason: string | undefined;
@@ -13335,9 +13631,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         : 'SHOWCASE_CLOSED_WEBHOOK';
       terminalAuthority = {
         kind: 'SIGNED_POSITION_CLOSED',
-        canonicalTradeId: showcaseTradeId ?? cycle.tradeId ?? cycle.id,
-        lifecycleGeneration,
+        canonicalTradeId: signedClose.tradeId,
+        lifecycleGeneration: `seq:${signedClose.eventSeq}`,
         evidence: {
+          trade_id: signedClose.tradeId,
+          event_id: signedClose.eventId,
+          event_seq: signedClose.eventSeq,
           source_event_at_ms: signedClose.sourceEventAtMs,
           platform_received_at_ms: signedClose.platformReceivedAtMs,
           exit_price: signedClose.exitPrice,
@@ -13368,6 +13667,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           evidence: {
             exit_price: det.exitPrice,
             exit_reason: det.exitReason,
+            exit_at: det.exitAt,
             observed_at_ms: Date.now(),
           },
         };
@@ -13378,7 +13678,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         if (absenceEvidence) {
           // Persistence is part of the exit proof, not best-effort telemetry.
           // If this write fails, no fallback close is allowed on this tick.
-          await this.cycles.recordHireExecutionEvent(
+          const persistedAbsence = await this.cycles.recordHireExecutionEvent(
             userId,
             agentId,
             cycle.id,
@@ -13390,7 +13690,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               ...absenceEvidence,
             },
           );
-          if (absenceEvidence.actionable) {
+          if (absenceEvidence.actionable && persistedAbsence.eventId) {
             closed = true;
             showcaseExitReason = 'SHOWCASE_POSITION_ABSENT';
             mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
@@ -13398,7 +13698,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               kind: 'SOURCE_ABSENCE_ACTIONABLE',
               canonicalTradeId: showcaseTradeId,
               lifecycleGeneration,
-              evidence: { ...absenceEvidence },
+              evidence: { ...absenceEvidence, persistedEventId: persistedAbsence.eventId },
             };
             this.logger.warn(
               `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId}; ` +
@@ -13840,6 +14140,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     meta: ExecutionPayload;
     authority: TerminalCloseAuthority;
   }): Promise<TerminalCloseClaim | null> {
+    if (!validateTerminalCloseAuthority(input.authority)) return null;
     const ownerToken = randomUUID();
     const newRequestId = randomUUID();
     const claimedAt = new Date();
@@ -14069,6 +14370,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     creds: ExchangeCredentials;
     authority: TerminalCloseAuthority;
   }): Promise<TerminalCloseClaim | null> {
+    if (!validateTerminalCloseAuthority(input.authority)) return null;
     const row = await this.prisma.signalCycleParticipant.findFirst({
       where: {
         id: input.participantId,
@@ -14095,6 +14397,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const storedAuthority = row.terminalCloseAuthority as TerminalCloseAuthority | null;
     if (
       !storedAuthority ||
+      !validateTerminalCloseAuthority(storedAuthority) ||
       storedAuthority.kind !== input.authority.kind ||
       !tradeIdsMatch(storedAuthority.canonicalTradeId, input.authority.canonicalTradeId) ||
       storedAuthority.lifecycleGeneration !== input.authority.lifecycleGeneration
@@ -15629,7 +15932,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       nowMs,
       absenceScope: 'EVERYWHERE',
       requiredMisses: SHOWCASE_VANISHED_CONSECUTIVE_MISSES,
-      graceMs: 0,
+      graceMs: SHOWCASE_POSITION_ABSENT_GRACE_MS,
     });
     if (
       initialEvidence.sourcePositionPresent
@@ -15660,7 +15963,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       nowMs,
       absenceScope: 'EVERYWHERE',
       requiredMisses: SHOWCASE_VANISHED_CONSECUTIVE_MISSES,
-      graceMs: 0,
+      graceMs: SHOWCASE_POSITION_ABSENT_GRACE_MS,
     });
     if (!evidence.actionable) {
       this.logger.warn(
@@ -15773,10 +16076,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       showcaseTradeIdForVanish,
       canonicalBot,
     );
+    let persistedVanishedEventId: string | null = null;
     if (vanishedEvidence) {
       // As with position-only absence, persistence is a precondition of action.
       // A database failure leaves the protected lot open and retries next tick.
-      await this.cycles.recordHireExecutionEvent(
+      const persistedAbsence = await this.cycles.recordHireExecutionEvent(
         userId,
         agentId,
         cycle.id,
@@ -15788,8 +16092,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           ...vanishedEvidence,
         },
       );
+      persistedVanishedEventId = persistedAbsence.eventId ?? null;
     }
-    if (vanishedEvidence?.actionable && showcaseTradeIdForVanish) {
+    if (vanishedEvidence?.actionable && showcaseTradeIdForVanish && persistedVanishedEventId) {
       this.logger.warn(
         `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${showcaseTradeIdForVanish} ` +
           `(cycle.tradeId=${cycle.tradeId}); persisted snapshot seq=${vanishedEvidence.snapshotSeq}, ` +
@@ -15809,7 +16114,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           canonicalTradeId: showcaseTradeIdForVanish,
           lifecycleGeneration:
             showcaseIntentRevision(cycle.intentEnvelope) ?? `legacy:${showcaseTradeIdForVanish}`,
-          evidence: { ...vanishedEvidence },
+          evidence: { ...vanishedEvidence, persistedEventId: persistedVanishedEventId },
         },
       });
       if (closed) this.positionRuntime.delete(participant.id);
@@ -15949,13 +16254,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     if (!meta.stopOrderId && fillPrice > 0) {
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
-      const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
+      const protectedStop = await this.ensureDurableProtectiveStop({
+        participantId: participant.id,
+        purpose: 'OPEN_REPAIR',
+        creds,
         positionDirection: meta.direction,
         qty: exchangeProtectedQty,
         stopPrice,
         leverage,
-      }).catch(() => null);
-      if (stopOrderId != null) {
+      }).catch((err) => ({
+        ok: false as const,
+        unknown: true as const,
+        reason: err instanceof Error ? err.message : String(err),
+        clientOrderId: 0,
+      }));
+      if (protectedStop.ok) {
+        const stopOrderId = protectedStop.orderId;
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
           venue: 'bitfinex',
           stop_price: stopPrice,
@@ -15973,6 +16287,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         this.stopManagerCircuitOpen.delete(participant.id);
         this.positionRuntime.set(participant.id, runtime);
         this.logger.log(`Hire stop ${userId} lot cycle=${cycle.id} @ ${stopPrice.toFixed(2)} qty=${exchangeProtectedQty}`);
+      } else {
+        const message = `OPEN_STOP_REPAIR_UNKNOWN cycle=${cycle.id}: ${protectedStop.reason}`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        await this.setInstanceLastError(userId, agentId, message).catch(() => {});
       }
     } else if (meta.stopOrderId && fillPrice > 0) {
       const armed = await this.prisma.signalCycleEvent.count({
@@ -16111,12 +16429,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             // Submit-new-before-cancel-old. Both orders are reduce-only, so a
             // short overlap cannot reverse the position and avoids any window
             // where a ladder promotion leaves real exposure unprotected.
-            const newStopId = await this.activeTrading.submitStopOrder(creds, {
+            const protectedStop = await this.ensureDurableProtectiveStop({
+              participantId: participant.id,
+              purpose: 'SCENARIO_C_REPLACEMENT',
+              creds,
               positionDirection: meta.direction,
               qty: exchangeProtectedQty,
               stopPrice: trailStop,
               leverage,
+              predecessorOrderId: prevStopOrderId,
             });
+            if (!protectedStop.ok) throw new Error(protectedStop.reason);
+            const newStopId = protectedStop.orderId;
             let supersededStopOrderId = !isInitial ? prevStopOrderId : undefined;
             try {
               await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
@@ -16133,13 +16457,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                 source: 'hire',
               });
             } catch (persistError) {
-              // The old stop is still live. Retire the unpersisted replacement
-              // so a restart cannot inherit an unowned exchange order.
-              await this.cancelManagedOrderGone(
-                creds,
-                newStopId,
-                `Profit-lock persistence failed cycle=${cycle.id}: retire unowned replacement ${newStopId}`,
-              ).catch(() => ({ gone: false, attempts: 0, reason: 'CANCEL_FAILED' }));
+              // The shared fence already durably owns the authenticated new
+              // stop. Keep both reduce-only orders and pause; a restart can
+              // recover the request without resubmitting or losing protection.
+              const message = `PROFIT_LOCK_STOP_EVENT_PERSIST_UNKNOWN cycle=${cycle.id} stop=${newStopId}`;
+              await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+              await this.setInstanceLastError(userId, agentId, message).catch(() => {});
               throw persistError;
             }
             if (supersededStopOrderId != null) {

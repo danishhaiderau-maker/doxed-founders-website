@@ -33822,6 +33822,79 @@ def api_data_sync_ack():
     })
 
 
+_PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _validate_platform_relay_evidence_payload(payload: dict) -> tuple[bool, str]:
+    """Validate the immutable platform export before making it visible to research."""
+    if not isinstance(payload, dict) or payload.get("schema") != "relay_lifecycle_evidence_v1":
+        return False, "SCHEMA_INVALID"
+    if not all(payload.get(key) for key in ("generatedAt", "generatingRevision", "runIdentity")):
+        return False, "PROVENANCE_INCOMPLETE"
+    if payload.get("agentSlug") != "conservative-btc" or not payload.get("userId"):
+        return False, "SCOPE_INVALID"
+    records = payload.get("records")
+    if not isinstance(records, list):
+        return False, "RECORDS_INVALID"
+    event_ids = set()
+    for record in records:
+        if not isinstance(record, dict) or not all(
+            record.get(key) for key in ("canonicalTradeId", "lifecycleId", "participantId")
+        ) or not isinstance(record.get("events"), list):
+            return False, "RECORD_INVALID"
+        for event in record["events"]:
+            if not isinstance(event, dict) or not all(
+                event.get(key) for key in ("id", "eventType", "createdAt")
+            ):
+                return False, "EVENT_INVALID"
+            event_id = str(event["id"])
+            if event_id in event_ids:
+                return False, "DUPLICATE_EVENT"
+            event_ids.add(event_id)
+    return True, "OK"
+
+
+@app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])
+def api_data_sync_platform_relay_evidence():
+    """Install a validated Neon/Bitfinex evidence snapshot for the bot's
+    append-derived counterfactual join. The data-sync namespace is protected by
+    the strict admin-token middleware; no trading state is mutated here."""
+    raw = request.get_data(cache=False)
+    if not raw or len(raw) > _PLATFORM_RELAY_EVIDENCE_MAX_BYTES:
+        return jsonify({"ok": False, "errorCode": "SIZE_INVALID"}), 413
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return jsonify({"ok": False, "errorCode": "JSON_INVALID"}), 400
+    valid, code = _validate_platform_relay_evidence_payload(payload)
+    if not valid:
+        return jsonify({"ok": False, "errorCode": code}), 400
+    destination = Path(PLATFORM_RELAY_EVIDENCE_FILE)
+    if not destination.is_absolute():
+        destination = _data_sync_volume_root() / destination.name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        with temp.open("wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, destination)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return jsonify({
+        "ok": True,
+        "schema": payload["schema"],
+        "sha256": digest,
+        "records": len(payload["records"]),
+        "generatingRevision": payload["generatingRevision"],
+    })
+
+
 def _analyzer_mirror_dir() -> Path:
     return _data_sync_volume_root() / "analyzer_mirror"
 

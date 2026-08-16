@@ -872,7 +872,12 @@ export class SignalCyclesService implements OnModuleInit {
     cycleId: string,
     event: SignalCycleEventType,
     body: Record<string, unknown>,
-  ) {
+  ): Promise<{
+    ok: true;
+    participantId: string;
+    eventId?: string;
+    duplicateTerminal?: boolean;
+  }> {
     // Cycle ownership and participant identity are independent reads. Running
     // them serially put two Neon round trips in front of every durable event;
     // on the strict mirror EXIT path that alone consumed ~137 ms after the
@@ -950,7 +955,7 @@ export class SignalCyclesService implements OnModuleInit {
       return { ok: true, participantId: participant.id, duplicateTerminal: !wonTerminalClaim };
     }
 
-    await this.prisma.signalCycleEvent.create({
+    const recordedEvent = await this.prisma.signalCycleEvent.create({
       data: {
         cycleId,
         participantId: participant.id,
@@ -1007,7 +1012,7 @@ export class SignalCyclesService implements OnModuleInit {
       }
     }
 
-    return { ok: true, participantId: participant.id };
+    return { ok: true, participantId: participant.id, eventId: recordedEvent.id };
   }
 
   /**

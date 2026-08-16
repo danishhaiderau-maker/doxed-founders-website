@@ -26,8 +26,14 @@ $heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
 $logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
 $freshSignalFile = Join-Path $repoRoot ".fly-data-sync-loop.last-fresh.json"
 $mirrorDir = Get-DoxxedFlyMirrorDir
+$relayEvidenceDestination = Join-Path $mirrorDir "relay_lifecycle_evidence_v1.json"
 $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
 $growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
+$relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf) {
+  (Get-Item -LiteralPath $relayEvidenceDestination).LastWriteTimeUtc.ToString("o")
+} else { $null }
+$env:PLATFORM_RELAY_EVIDENCE_FILE = $relayEvidenceDestination
+$env:PLATFORM_SOURCE_BOT_URL = $SourceUrl
 
 # Growth trigger (default 50 MB). Override with FLY_VOLUME_SYNC_THRESHOLD_MB.
 # Poll cadence is faster than the force-sync interval so large jsonl growth is
@@ -128,11 +134,20 @@ try {
 Set-Content -LiteralPath $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 
 if (Test-Path -LiteralPath $vaultEnv) {
-  $tokenLine = Get-Content -LiteralPath $vaultEnv | Where-Object {
-    $_ -match '^\s*BOT_ADMIN_TOKEN='
-  } | Select-Object -Last 1
-  if ($tokenLine -match '^\s*BOT_ADMIN_TOKEN=(.*)$') {
-    $env:BOT_ADMIN_TOKEN = $matches[1].Trim().Trim('"').Trim("'")
+  foreach ($configName in @(
+    "BOT_ADMIN_TOKEN", "PLATFORM_API_BASE_URL",
+    "PLATFORM_RELAY_AGENT_SLUG", "PLATFORM_RELAY_USER_ID"
+  )) {
+    $configLine = Get-Content -LiteralPath $vaultEnv | Where-Object {
+      $_ -match "^\s*$([regex]::Escape($configName))="
+    } | Select-Object -Last 1
+    $shouldLoad = $configName -eq "BOT_ADMIN_TOKEN" -or
+      -not [Environment]::GetEnvironmentVariable($configName, 'Process')
+    if ($configLine -match '^\s*[^=]+=(.*)$' -and $shouldLoad) {
+      [Environment]::SetEnvironmentVariable(
+        $configName, $matches[1].Trim().Trim('"').Trim("'"), 'Process'
+      )
+    }
   }
 }
 if (-not $env:BOT_ADMIN_TOKEN) {
@@ -164,7 +179,36 @@ try {
   while ($true) {
     $started = Get-Date
     $didSync = $false
+    $relayEvidenceStatus = [ordered]@{
+      ok = $false
+      errorCode = "CONFIG_MISSING"
+      lastSuccessAt = $relayEvidenceLastSuccessAt
+    }
     try {
+      # This poll is independent of Fly volume growth. A failure preserves the
+      # previous qualified artifact and never blocks the canonical Fly mirror.
+      if ($env:PLATFORM_API_BASE_URL -and $env:PLATFORM_RELAY_AGENT_SLUG -and $env:PLATFORM_RELAY_USER_ID) {
+        try {
+          $relayEvidencePath = & (Join-Path $scriptDir "sync-platform-relay-evidence.ps1")
+          if ($relayEvidencePath -and (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf)) {
+            $relayEvidenceLastSuccessAt = [DateTimeOffset]::UtcNow.ToString("o")
+            $relayEvidenceStatus = [ordered]@{
+              ok = $true
+              errorCode = $null
+              lastSuccessAt = $relayEvidenceLastSuccessAt
+            }
+          } else {
+            $relayEvidenceStatus.errorCode = "ARTIFACT_MISSING"
+          }
+        } catch {
+          $safeCode = "SYNC_FAILED"
+          if ($_.Exception.Message -match '^\[RELAY_EVIDENCE_([A-Z_]+)\]$') { $safeCode = $matches[1] }
+          $relayEvidenceStatus.errorCode = $safeCode
+          Add-Content -LiteralPath $logFile -Value (
+            "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`trelay-evidence=$safeCode"
+          )
+        }
+      }
       $headers = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
       $manifest = Invoke-RestMethod `
         -Uri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest") `
@@ -239,6 +283,7 @@ try {
           currentTotalBytes = $currentTotalBytes
           lastSyncedTotalBytes = $lastSyncedTotalBytes
           elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
+          relayEvidence = $relayEvidenceStatus
         }
         $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
         Add-Content -LiteralPath $logFile -Value (
@@ -297,6 +342,7 @@ try {
         bytes = $result.Bytes
         sourceRevision = $result.SourceRevision
         analyzerPublished = $result.AnalyzerPublished
+        relayEvidence = $relayEvidenceStatus
         prunedRotations = $result.PrunedRotations
         growthBytes = $growthBytes
         thresholdMb = $thresholdMb
@@ -312,6 +358,7 @@ try {
         syncedAt = (Get-Date).ToUniversalTime().ToString("o")
         source = $SourceUrl
         error = $_.Exception.Message
+        relayEvidence = $relayEvidenceStatus
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
       }
       Add-Content -LiteralPath $logFile -Value (

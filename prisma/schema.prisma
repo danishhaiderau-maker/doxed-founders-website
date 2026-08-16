@@ -2678,6 +2678,15 @@ model SignalCycleParticipant {
   partialEmergencyOrderId      BigInt?
   partialEmergencyBeforeAmount Decimal?  @db.Decimal(20, 8)
   partialEmergencyTargetAmount Decimal?  @db.Decimal(20, 8)
+  protectiveStopRequestId      String?   @unique
+  protectiveStopPhase          String?
+  protectiveStopClaimedAt      DateTime?
+  protectiveStopPurpose        String?
+  protectiveStopClientId       Int?
+  protectiveStopOrderId        BigInt?
+  protectiveStopQty            Decimal?  @db.Decimal(20, 8)
+  protectiveStopPrice          Decimal?  @db.Decimal(20, 8)
+  protectiveStopPredecessorId  BigInt?
   createdAt           DateTime                    @default(now())
   updatedAt           DateTime                    @updatedAt
 

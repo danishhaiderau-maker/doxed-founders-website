@@ -37,17 +37,23 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
     if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
     if (!raw.signedClose || typeof raw.signedClose !== 'object' || Array.isArray(raw.signedClose)) return null;
     const close = raw.signedClose as Record<string, unknown>;
-    if (close.exitPrice != null && (typeof close.exitPrice !== 'number' || !Number.isFinite(close.exitPrice) || close.exitPrice <= 0)) return null;
-    if (close.exitReason != null && (typeof close.exitReason !== 'string' || close.exitReason.length > 255)) return null;
+    if (typeof close.tradeId !== 'string' || close.tradeId !== raw.tradeId) return null;
+    if (typeof close.eventId !== 'string' || !close.eventId.trim() || close.eventId.length > 255) return null;
+    if (typeof close.eventSeq !== 'number' || !Number.isInteger(close.eventSeq) || close.eventSeq < 0) return null;
+    if (typeof close.exitPrice !== 'number' || !Number.isFinite(close.exitPrice) || close.exitPrice <= 0) return null;
+    if (typeof close.exitReason !== 'string' || !close.exitReason.trim() || close.exitReason.length > 255) return null;
     if (typeof close.sourceEventAtMs !== 'number' || !Number.isFinite(close.sourceEventAtMs)) return null;
     if (typeof close.platformReceivedAtMs !== 'number' || !Number.isFinite(close.platformReceivedAtMs)) return null;
     if (close.sourceEventAtMs > close.platformReceivedAtMs || close.platformReceivedAtMs > atMs) return null;
     if (atMs - close.sourceEventAtMs > 300_000 || atMs - close.platformReceivedAtMs > 5_000) return null;
     signedClose = {
-      ...(typeof close.exitPrice === 'number' ? { exitPrice: close.exitPrice } : {}),
-      ...(typeof close.exitReason === 'string' ? { exitReason: close.exitReason } : {}),
-      ...(typeof close.sourceEventAtMs === 'number' ? { sourceEventAtMs: close.sourceEventAtMs } : {}),
-      ...(typeof close.platformReceivedAtMs === 'number' ? { platformReceivedAtMs: close.platformReceivedAtMs } : {}),
+      tradeId: close.tradeId,
+      eventId: close.eventId.trim(),
+      eventSeq: close.eventSeq,
+      exitPrice: close.exitPrice,
+      exitReason: close.exitReason.trim(),
+      sourceEventAtMs: close.sourceEventAtMs,
+      platformReceivedAtMs: close.platformReceivedAtMs,
     };
   } else if (raw.signedClose != null) return null;
   let signedOpen: RelayExecutorWakeRequest['signedOpen'];

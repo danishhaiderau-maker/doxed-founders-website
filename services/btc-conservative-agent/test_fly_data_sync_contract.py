@@ -62,6 +62,39 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "_data_sync_rotation_parts(resolved.name) is not None" in BOT
     assert 'path.startswith("/api/data-sync/")' in BOT
     assert "and not is_authenticated_data_sync" in BOT
+    assert "@app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])" in BOT
+    assert "def _validate_platform_relay_evidence_payload" in BOT
+    assert "os.replace(temp, destination)" in BOT
+
+
+def test_platform_relay_evidence_validation_rejects_wrong_scope_and_duplicate_events():
+    validate = _load_bot_functions("_validate_platform_relay_evidence_payload")[
+        "_validate_platform_relay_evidence_payload"
+    ]
+    base = {
+        "schema": "relay_lifecycle_evidence_v1",
+        "generatedAt": "2026-08-16T00:00:00Z",
+        "generatingRevision": "a" * 40,
+        "runIdentity": "run-1",
+        "agentSlug": "conservative-btc",
+        "userId": "user-1",
+        "records": [{
+            "canonicalTradeId": "cont-1",
+            "lifecycleId": "cycle-1",
+            "participantId": "participant-1",
+            "events": [{"id": "event-1", "eventType": "FILLED", "createdAt": "2026-08-16T00:00:01Z"}],
+        }],
+    }
+    assert validate(base) == (True, "OK")
+    wrong = json.loads(json.dumps(base))
+    wrong["agentSlug"] = "other-agent"
+    assert validate(wrong) == (False, "SCOPE_INVALID")
+    duplicate = json.loads(json.dumps(base))
+    duplicate["records"].append({
+        "canonicalTradeId": "cont-2", "lifecycleId": "cycle-2", "participantId": "participant-2",
+        "events": [{"id": "event-1", "eventType": "EXIT", "createdAt": "2026-08-16T00:00:02Z"}],
+    })
+    assert validate(duplicate) == (False, "DUPLICATE_EVENT")
 
 
 def test_local_sync_has_fail_closed_30_gib_admission_guard():

@@ -20,7 +20,10 @@ import {
 } from '@dcf/utils';
 import { BotBridgeService } from './bot-bridge.service';
 import { SignalCyclesService } from './signal-cycles.service';
-import { SignalSubscriberExecutionService } from './signal-subscriber-execution.service';
+import {
+  SignalSubscriberExecutionService,
+  type RelayExecutorWakeRequest,
+} from './signal-subscriber-execution.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type ShowcaseRelayEventType =
@@ -477,11 +480,9 @@ export class ShowcaseRelayEventsService {
     event: ShowcaseRelayEventType,
     tradeId?: string | null,
     receivedAt?: string,
-    signedTerminal?: {
-      exitPrice?: number; exitReason?: string;
-      sourceEventAtMs?: number; platformReceivedAtMs?: number;
-      sourceExpiresAtMs?: number;
-    },
+    signedTerminal?: RelayExecutorWakeRequest['signedClose']
+      | RelayExecutorWakeRequest['signedOpen']
+      | RelayExecutorWakeRequest['signedExpiry'],
   ): void {
     // Start the private-network dispatch in the current event-loop turn. The
     // method remains non-blocking (the promise is intentionally not awaited),
@@ -621,16 +622,33 @@ export class ShowcaseRelayEventsService {
       );
     }
 
-    const signedCloseEvidence = event === 'POSITION_CLOSED' && body.ts
+    const signedCloseEvidence = event === 'POSITION_CLOSED' && signedLifecycleEvent && body.ts
       && Number.isFinite(Date.parse(body.ts)) && persistBody.platform_received_at
+      && Number.isFinite(Date.parse(persistBody.platform_received_at))
+      && typeof body.trade_id === 'string' && body.trade_id.trim()
+      && typeof body.event_id === 'string' && body.event_id.trim() && body.event_id.trim().length <= 255
+      && typeof body.event_seq === 'number' && Number.isInteger(body.event_seq) && body.event_seq >= 0
+      && typeof body.exit_price === 'number' && Number.isFinite(body.exit_price) && body.exit_price > 0
+      && typeof body.exit_reason === 'string' && body.exit_reason.trim()
+      && Date.parse(persistBody.platform_received_at) >= Date.parse(body.ts) - 5_000
+      && Date.parse(body.ts) <= Date.now() + 5_000
+      && Date.parse(persistBody.platform_received_at) <= Date.now() + 5_000
+      && Date.now() - Date.parse(persistBody.platform_received_at) <= 5 * 60_000
       ? {
-          ...(typeof body.exit_price === 'number' && Number.isFinite(body.exit_price)
-            ? { exitPrice: body.exit_price } : {}),
-          ...(body.exit_reason ? { exitReason: body.exit_reason } : {}),
+          tradeId: body.trade_id.trim(),
+          eventId: body.event_id.trim(),
+          eventSeq: body.event_seq,
+          exitPrice: body.exit_price,
+          exitReason: body.exit_reason.trim(),
           sourceEventAtMs: Date.parse(body.ts),
           platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
         }
       : undefined;
+    if (event === 'POSITION_CLOSED' && signedLifecycleEvent && !signedCloseEvidence) {
+      throw new BadRequestException(
+        'Signed position close requires exact identity, sequence, price, reason, and fresh source/receipt timestamps',
+      );
+    }
     const signedOpenEvidence = event === 'POSITION_OPENED' && body.ts
       && typeof body.fill_price === 'number' && Number.isFinite(body.fill_price) && body.fill_price > 0
       && persistBody.platform_received_at

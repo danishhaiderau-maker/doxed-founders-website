@@ -72,6 +72,7 @@ import {
   ownedStopOrderIds,
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
+  validateTerminalCloseAuthority,
   relayArmTimestampMs,
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
@@ -101,6 +102,28 @@ import {
   resolveExactShowcaseEntryQty,
   resolveEffectiveStopLossMarginPct,
 } from './signal-subscriber-execution.service';
+
+function protectiveStopFencePrisma(status: SignalCycleStatus = SignalCycleStatus.PENDING_ENTRY) {
+  const row: Record<string, any> = {
+    status,
+    protectiveStopRequestId: null,
+    protectiveStopPhase: null,
+    protectiveStopClientId: null,
+    protectiveStopOrderId: null,
+  };
+  return {
+    row,
+    prisma: {
+      signalCycleParticipant: {
+        findUnique: async () => ({ ...row }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          Object.assign(row, data);
+          return { count: 1 };
+        },
+      },
+    },
+  };
+}
 
 test('mirror-mode exchange protection never widens the Scenario C -13% hard stop', () => {
   assert.equal(resolveEffectiveStopLossMarginPct(-40, { mirrorMode: true, simActive: false }), -13);
@@ -668,8 +691,9 @@ test('service money path protects a partial fill without cancelling its entry re
   const originalNow = Date.now;
   const timestamps = [1_000, 1_100, 1_400];
   Date.now = () => timestamps.shift() ?? 1_400;
+  const fence = protectiveStopFencePrisma();
   const service = new SignalSubscriberExecutionService(
-    {} as never,
+    fence.prisma as never,
     {} as never,
     {
       recordHireExecutionEvent: async (
@@ -751,8 +775,9 @@ test('service money path protects a partial fill without cancelling its entry re
 test('service persists replacement stop ownership before cancelling the old partial stop', async () => {
   const order: string[] = [];
   let replacementStopPrice = 0;
+  const fence = protectiveStopFencePrisma();
   const service = new SignalSubscriberExecutionService(
-    {} as never,
+    fence.prisma as never,
     {} as never,
     { recordHireExecutionEvent: async () => order.push('persist') } as never,
     {} as never,
@@ -5131,18 +5156,27 @@ test('rejects a signed exact limit whose envelope identity does not match the cy
 });
 
 test('reads a signed showcase close without another canonical-state fetch', () => {
+  const now = Date.parse('2026-08-10T18:46:48.000Z');
   assert.deepEqual(
     readSignedShowcaseClose({
+      action: 'ENTER',
+      signalId: 'cont-close',
+      trade_id: 'cont-close',
       context: {
         signed_showcase_event: true,
         showcase_event: 'POSITION_CLOSED',
+        showcase_event_id: 'close-event-1',
+        showcase_event_seq: 7,
         showcase_event_at: '2026-08-10T18:46:47.476Z',
         platform_received_at: '2026-08-10T18:46:47.584Z',
         showcase_exit_price: 64_444.25,
         showcase_exit_reason: 'PROFIT_LOCK_LADDER',
       },
-    }),
+    }, 'cont-close', now),
     {
+      tradeId: 'cont-close',
+      eventId: 'close-event-1',
+      eventSeq: 7,
       exitPrice: 64_444.25,
       exitReason: 'PROFIT_LOCK_LADDER',
       sourceEventAtMs: Date.parse('2026-08-10T18:46:47.476Z'),
@@ -5155,9 +5189,71 @@ test('reads a signed showcase close without another canonical-state fetch', () =
         signed_showcase_event: false,
         showcase_event: 'POSITION_CLOSED',
       },
-    }),
+    }, undefined, now),
     null,
   );
+});
+
+test('signed showcase close parser rejects every incomplete or incoherent proof', () => {
+  const now = Date.parse('2026-08-10T18:46:48.000Z');
+  const base = {
+    action: 'ENTER', signalId: 'cont-close', trade_id: 'cont-close',
+    context: {
+      signed_showcase_event: true, showcase_event: 'POSITION_CLOSED',
+      showcase_event_id: 'close-event-1', showcase_event_seq: 7,
+      showcase_event_at: new Date(now - 1_000).toISOString(),
+      platform_received_at: new Date(now - 900).toISOString(),
+      showcase_exit_price: 64_444.25, showcase_exit_reason: 'PROFIT_LOCK_LADDER',
+    },
+  };
+  assert.equal(readSignedShowcaseClose(base, 'cont-close', now)?.eventSeq, 7);
+  for (const key of [
+    'showcase_event_id', 'showcase_event_seq', 'showcase_event_at',
+    'platform_received_at', 'showcase_exit_price', 'showcase_exit_reason',
+  ]) {
+    assert.equal(readSignedShowcaseClose({ ...base, context: { ...base.context, [key]: undefined } }, 'cont-close', now), null, key);
+  }
+  assert.equal(readSignedShowcaseClose({ ...base, trade_id: 'cont-other' }, 'cont-close', now), null);
+  assert.equal(readSignedShowcaseClose({ ...base, context: { ...base.context, showcase_event_seq: -1 } }, 'cont-close', now), null);
+  assert.equal(readSignedShowcaseClose({ ...base, context: { ...base.context, showcase_exit_price: 0 } }, 'cont-close', now), null);
+  assert.equal(readSignedShowcaseClose({ ...base, context: { ...base.context, platform_received_at: new Date(now - 300_001).toISOString() } }, 'cont-close', now), null);
+});
+
+test('terminal authority validation accepts complete signed and persisted absence evidence only', () => {
+  const now = Date.parse('2026-08-10T18:47:00.000Z');
+  const signed = {
+    kind: 'SIGNED_POSITION_CLOSED' as const,
+    canonicalTradeId: 'cont-close',
+    lifecycleGeneration: 'seq:7',
+    evidence: {
+      trade_id: 'cont-close', event_id: 'close-event-1', event_seq: 7,
+      exit_price: 64_444.25, exit_reason: 'PROFIT_LOCK_LADDER',
+      source_event_at_ms: now - 1_000, platform_received_at_ms: now - 900,
+    },
+  };
+  assert.equal(validateTerminalCloseAuthority(signed, now), true);
+  assert.equal(validateTerminalCloseAuthority({ ...signed, lifecycleGeneration: 'seq:8' }, now), false);
+  assert.equal(validateTerminalCloseAuthority({ ...signed, evidence: { ...signed.evidence, exit_price: 0 } }, now), false);
+  assert.equal(validateTerminalCloseAuthority({ ...signed, evidence: { ...signed.evidence, platform_received_at_ms: now - 300_001 } }, now), false);
+
+  const absence = {
+    kind: 'SOURCE_ABSENCE_ACTIONABLE' as const,
+    canonicalTradeId: 'cont-absent', lifecycleGeneration: 'seq:4',
+    evidence: {
+      schema: 'source_absence_evidence_v1', absenceScope: 'EVERYWHERE', verdict: 'ABSENT_ACTIONABLE',
+      canonicalTradeId: 'cont-absent', sourceGitRev: 'abc123', snapshotSeq: 11,
+      snapshotTs: new Date(now - 2_000).toISOString(), snapshotAgeSec: 2, maxSnapshotAgeSec: 15,
+      positionsSynced: true, ordersSynced: true, tradesSynced: true,
+      sourcePositionPresent: false, sourceOrderPresent: false, sourceSignalPresent: false,
+      sourceTradePresent: false, sourceTradesMapPresent: false,
+      misses: 2, requiredMisses: 2, firstAbsentAtMs: now - 60_000, observedAtMs: now,
+      elapsedMs: 60_000, graceMs: 60_000, missingEvidence: [], actionable: true,
+      persistedEventId: 'absence-event-row',
+    },
+  };
+  assert.equal(validateTerminalCloseAuthority(absence, now), true);
+  assert.equal(validateTerminalCloseAuthority({ ...absence, evidence: { ...absence.evidence, graceMs: 0 } }, now), false);
+  assert.equal(validateTerminalCloseAuthority({ ...absence, evidence: { ...absence.evidence, persistedEventId: '' } }, now), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -5620,6 +5716,7 @@ test('private wake parser preserves only bounded POSITION_CLOSED evidence', () =
   const wake = parseExecutorWakeRequest({
     trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
     signedClose: {
+      tradeId: 'cont-c105efa5', eventId: 'close-c105efa5-4', eventSeq: 4,
       exitPrice: 64_400, exitReason: 'PROFIT_LOCK',
       sourceEventAtMs: now - 1_200, platformReceivedAtMs: now,
     },
@@ -6243,6 +6340,24 @@ test('monitorExit delegates an EXPIRED lifecycle to the exact-evidence gate only
   assert.deepEqual(calls, ['authority-gate']);
 });
 
+function validSignedCloseAuthority(tradeId: string, eventSeq: number) {
+  const now = Date.now();
+  return {
+    kind: 'SIGNED_POSITION_CLOSED' as const,
+    canonicalTradeId: tradeId,
+    lifecycleGeneration: `seq:${eventSeq}`,
+    evidence: {
+      trade_id: tradeId,
+      event_id: `close-${tradeId}-${eventSeq}`,
+      event_seq: eventSeq,
+      exit_price: 64_000,
+      exit_reason: 'PROFIT_LOCK_LADDER',
+      source_event_at_ms: now - 200,
+      platform_received_at_ms: now - 100,
+    },
+  };
+}
+
 test('terminal close claim atomically persists exact authority before ownership is returned', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   const order: string[] = [];
@@ -6282,12 +6397,7 @@ test('terminal close claim atomically persists exact authority before ownership 
     $transaction: async (run: (client: any) => Promise<unknown>) => run(tx),
   };
 
-  const authority = {
-    kind: 'SIGNED_POSITION_CLOSED',
-    canonicalTradeId: 'cont-claim',
-    lifecycleGeneration: 'seq:7',
-    evidence: { signed: true },
-  };
+  const authority = validSignedCloseAuthority('cont-claim', 7);
   const claim = await service.acquireTerminalCloseClaim({
     agentId: 'agent',
     userId: 'user',
@@ -6340,15 +6450,24 @@ test('concurrent terminal close claimant cannot create a second immutable claim 
     cycleId: 'cycle-claim',
     participantId: 'participant-claim',
     meta: { direction: 'SHORT', qty: 0.01 },
-    authority: {
-      kind: 'SIGNED_POSITION_CLOSED',
-      canonicalTradeId: 'cont-claim',
-      lifecycleGeneration: 'seq:7',
-      evidence: {},
-    },
+    authority: validSignedCloseAuthority('cont-claim', 7),
   });
   assert.equal(result, null);
   assert.equal(events, 0);
+});
+
+test('invalid terminal authority is rejected before a claim can touch the database', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let databaseTouches = 0;
+  service.prisma = { $transaction: async () => { databaseTouches += 1; } };
+  const invalid = validSignedCloseAuthority('cont-invalid', 3);
+  invalid.evidence.event_id = '';
+  const result = await service.acquireTerminalCloseClaim({
+    agentId: 'agent', userId: 'user', cycleId: 'cycle-invalid', participantId: 'participant-invalid',
+    meta: { direction: 'SHORT', qty: 0.01 }, authority: invalid,
+  });
+  assert.equal(result, null);
+  assert.equal(databaseTouches, 0);
 });
 
 test('timeout cannot steal a SUBMITTING terminal close fence', async () => {
@@ -6378,10 +6497,7 @@ test('timeout cannot steal a SUBMITTING terminal close fence', async () => {
   const result = await service.acquireTerminalCloseClaim({
     agentId: 'agent', userId: 'user', cycleId: 'cycle-submitting',
     participantId: 'participant-submitting', meta: { direction: 'SHORT', qty: 0.01 },
-    authority: {
-      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont-submitting',
-      lifecycleGeneration: 'seq:11', evidence: {},
-    },
+    authority: validSignedCloseAuthority('cont-submitting', 11),
   });
   assert.equal(result, null);
   assert.equal(events, 0);
@@ -6427,10 +6543,7 @@ test('SUBMITTING recovery needs exact authenticated exchange target and never re
   let exchangeSubmits = 0;
   const row = {
     terminalCloseClaimToken: 'owner-old', terminalCloseRequestId: 'request-fixed',
-    terminalCloseGeneration: 'seq:4', terminalCloseAuthority: {
-      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont',
-      lifecycleGeneration: 'seq:4', evidence: {},
-    },
+    terminalCloseGeneration: 'seq:4', terminalCloseAuthority: validSignedCloseAuthority('cont', 4),
     terminalClosePhase: 'SUBMITTING', terminalCloseTargetAmount: { toNumber: () => -0.02 },
     cycle: { agentId: 'agent' },
   };
@@ -6448,10 +6561,7 @@ test('SUBMITTING recovery needs exact authenticated exchange target and never re
   const recovered = await service.recoverSettledTerminalCloseFence({
     agentId: 'agent', userId: 'user', cycleId: 'cycle', participantId: 'participant',
     meta: { direction: 'SHORT', qty: 0.01 }, creds: {},
-    authority: {
-      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont',
-      lifecycleGeneration: 'seq:4', evidence: {},
-    },
+    authority: row.terminalCloseAuthority,
   });
   assert.equal(recovered?.phase, 'CONFIRMED');
   assert.equal(recovered?.requestId, 'request-fixed');
@@ -6654,4 +6764,133 @@ test('partial emergency SUBMITTING recovery confirms target without duplicate ma
   });
   assert.equal(recovered, true);
   assert.equal(submits, 0);
+});
+
+test('durable protective-stop SUBMITTING timeout cannot resubmit an invisible accepted request', async () => {
+  const fence = protectiveStopFencePrisma();
+  const service = new SignalSubscriberExecutionService(
+    fence.prisma as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  );
+  let submits = 0;
+  (service as any).activeTrading = {
+    submitStopOrder: async () => {
+      submits += 1;
+      throw new Error('accepted but response timed out');
+    },
+    listActiveOrders: async () => [],
+  };
+  const request = {
+    participantId: 'participant-timeout', purpose: 'PARTIAL_FILL', creds: {},
+    positionDirection: 'SHORT', qty: 0.01, stopPrice: 65_000, leverage: 4,
+  };
+  const first = await (service as any).ensureDurableProtectiveStop(request);
+  const second = await (service as any).ensureDurableProtectiveStop(request);
+  assert.equal(first.ok, false);
+  assert.equal(second.ok, false);
+  assert.equal(submits, 1);
+  assert.equal(fence.row.protectiveStopPhase, 'SUBMITTING');
+});
+
+test('durable protective-stop restart recovers exact active CID and persists ownership without resubmit', async () => {
+  const fence = protectiveStopFencePrisma();
+  const service = new SignalSubscriberExecutionService(
+    fence.prisma as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  );
+  let submits = 0;
+  let cid = 0;
+  const active = () => ({
+    id: 7701, cid, symbol: 'tBTCF0:USTF0', amount: 0.01, amountOrig: 0.01,
+    price: 65_000, status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+  });
+  (service as any).activeTrading = {
+    submitStopOrder: async (_creds: unknown, input: any) => {
+      submits += 1;
+      cid = input.clientOrderId;
+      throw new Error('accepted but response timed out');
+    },
+    listActiveOrders: async () => submits ? [active()] : [],
+    findOrder: async () => active(),
+  };
+  const request = {
+    participantId: 'participant-restart', purpose: 'PARTIAL_FILL', creds: {},
+    positionDirection: 'SHORT', qty: 0.01, stopPrice: 65_000, leverage: 4,
+  };
+  assert.equal((await (service as any).ensureDurableProtectiveStop(request)).ok, false);
+  const recovered = await (service as any).ensureDurableProtectiveStop(request);
+  assert.equal(recovered.ok, true);
+  assert.equal(recovered.orderId, 7701);
+  assert.equal(recovered.recovered, true);
+  assert.equal(submits, 1);
+  assert.equal(fence.row.protectiveStopPhase, 'OWNED');
+  assert.equal(Number(fence.row.protectiveStopOrderId), 7701);
+});
+
+test('generic OPEN repair adopts an exact durably owned stop instead of duplicating it', async () => {
+  const fence = protectiveStopFencePrisma(SignalCycleStatus.OPEN);
+  Object.assign(fence.row, {
+    protectiveStopRequestId: 'older-request', protectiveStopPhase: 'OWNED',
+    protectiveStopClientId: 444, protectiveStopOrderId: BigInt(7702),
+  });
+  const service = new SignalSubscriberExecutionService(
+    fence.prisma as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  );
+  let submits = 0;
+  (service as any).activeTrading = {
+    submitStopOrder: async () => { submits += 1; return 9999; },
+    findOrder: async () => ({
+      id: 7702, cid: 444, symbol: 'tBTCF0:USTF0', amount: 0.02, amountOrig: 0.02,
+      price: 65_000, status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }),
+  };
+  const result = await (service as any).ensureDurableProtectiveStop({
+    participantId: 'participant-open', purpose: 'OPEN_REPAIR', creds: {},
+    positionDirection: 'SHORT', qty: 0.02, stopPrice: 65_000, leverage: 4,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.orderId, 7702);
+  assert.equal(submits, 0);
+});
+
+test('multi-slice partial protection grows exact coverage before TTL retires only the remainder', async () => {
+  const fence = protectiveStopFencePrisma();
+  const events: Array<Record<string, any>> = [];
+  const service = new SignalSubscriberExecutionService(
+    fence.prisma as never, {} as never,
+    { recordHireExecutionEvent: async (...args: any[]) => events.push(args.at(-1)) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  let nextStop = 7800;
+  let lastInput: any;
+  (service as any).activeTrading = {
+    submitStopOrder: async (_creds: unknown, input: any) => { lastInput = input; return ++nextStop; },
+    listActiveOrders: async () => [],
+    findOrder: async (_creds: unknown, id: number) => ({
+      id, cid: lastInput.clientOrderId, symbol: 'tBTCF0:USTF0',
+      amount: 0.01 === lastInput.qty ? 0.01 : 0.018,
+      amountOrig: lastInput.qty, price: lastInput.stopPrice,
+      status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }),
+    getMarkPrice: async () => 64_000,
+  };
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  const base = { direction: 'SHORT', qty: 0.03, bitfinexOrderId: 6001, limitPrice: 64_000 };
+  await (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant', base, {}, { risk: { stop_loss_margin_pct: 13 } }, 0.01,
+  );
+  await (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant',
+    { ...base, partialFillQty: 0.01, partialFillStopOrderId: 7801 },
+    {}, { risk: { stop_loss_margin_pct: 13 } }, 0.018,
+  );
+  const retained = events.filter((row) => row.event === 'PARTIAL_FILL_REMAINDER_RETAINED');
+  assert.equal(retained.length, 2);
+  assert.equal(retained[0].partialFillQty, 0.01);
+  assert.equal(retained[1].partialFillQty, 0.018);
+  assert.ok(Math.abs(Number(retained[1].remaining_qty) - 0.012) < 1e-9);
+  assert.equal(entryTtlPartialFillDisposition({
+    context: 'SIGNAL_TTL_EXPIRED', intendedQty: 0.03, filledQty: 0.018, orderResting: true,
+  }), 'CANCEL_REMAINDER_AND_OPEN');
 });

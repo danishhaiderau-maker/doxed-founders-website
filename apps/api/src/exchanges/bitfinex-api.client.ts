@@ -916,6 +916,23 @@ export class BitfinexTradingClient {
     return parseOrderHistoryEvidence(rows, orderId);
   }
 
+  /** Recover an acknowledged request whose response/order id was lost.
+   * The deterministic CID is persisted before submit; history is read-only
+   * and therefore safe to consult after a process restart. */
+  async findOrderHistoryByClientOrderId(
+    creds: ExchangeCredentials,
+    clientOrderId: number,
+    symbol = BITFINEX_BTC_PERP_SYMBOL,
+  ): Promise<BitfinexActiveOrder | null> {
+    const rows = await bitfinexAuthPost<unknown[][]>(
+      creds,
+      'v2/auth/r/orders/hist',
+      { limit: 250 },
+    );
+    const orders = parseActiveOrdersPayload(rows, symbol);
+    return orders.find((order) => order.cid === (clientOrderId & 0x7fffffff)) ?? null;
+  }
+
   async listActiveOrders(
     creds: ExchangeCredentials,
     symbol = BITFINEX_BTC_PERP_SYMBOL,
