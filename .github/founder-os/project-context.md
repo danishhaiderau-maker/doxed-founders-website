@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Exclude stale reports from analyzer bundles
+Harden clustered entry risk and qualified replay evidence
 
 ## Last Activity
 
