@@ -7693,6 +7693,155 @@ test('multi-slice partial protection grows exact coverage before TTL retires onl
   }), 'CANCEL_REMAINDER_AND_OPEN');
 });
 
+test('normal close evidence emits exact fills and uniquely attributable ledger PnL for one lot', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.prisma = { signalCycleParticipant: { count: async (query: any) => query.where.id ? 0 : 1 } };
+  service.resolveExchangeTradesFillEvidence = async (_c: unknown, id: number) => ({
+    price: id === 101 ? 64_500 : 64_400, qty: 0.01,
+    fillIds: id === 101 ? [1001] : [2001, 2002],
+    fees: [{ fillId: id === 101 ? 1001 : 2001, amount: 0, currency: 'UST' }],
+    firstExecutedAtMs: id === 101 ? 10_500 : 20_500, lastExecutedAtMs: id === 101 ? 10_500 : 20_500,
+  });
+  service.resolveLotEntryMs = async () => 10_000;
+  service.activeTrading = {
+    getPositionCloseLedgerEntries: async () => [{
+      ledgerId: 'ledger-close-1', closedAt: new Date(20_500), pnlUsd: 1.25, description: 'position close',
+    }],
+    getLedgerFeesSince: async () => ({
+      tradingFeesUsd: 0, fundingFeesUsd: 0.02, realizedPnlUsd: 1.25, positionCloseRows: 1,
+    }),
+  };
+  const evidence = await service.resolveNormalCloseExchangeEvidence({
+    agentId: 'agent', userId: 'user', participantId: 'participant', creds: {},
+    meta: { bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT',
+      entryBbo: { bid: 64_490, ask: 64_510, observedAtMs: 10_000, source: 'BITFINEX_PUBLIC_TICKER' } },
+    closeTarget: { ok: true, currentAmount: -0.01, targetAmount: 0, closeQty: 0.01,
+      finalAccountFlatten: true, closeExchangeOrderId: 202,
+      closeSubmitStartedAtMs: 20_000, closeConfirmedAtMs: 21_000,
+      closeBbo: { bid: 64_390, ask: 64_410, observedAtMs: 20_000, source: 'BITFINEX_PUBLIC_TICKER' } },
+    showcaseExitPrice: 64_390,
+  });
+  assert.equal(evidence.actual_bitfinex_realized_pnl_usd, 1.25);
+  assert.equal(evidence.realized_pnl_ledger_id, 'ledger-close-1');
+  assert.deepEqual(evidence.entry_fill_ids, ['1001']);
+  assert.deepEqual(evidence.exit_fill_ids, ['2001', '2002']);
+  assert.equal(evidence.trading_fee_usd, 0);
+  assert.equal(evidence.funding_fee_usd, 0.02);
+  assert.equal(evidence.spread_cost_usd, 0.2);
+  assert.equal(evidence.slippage_usd, 0);
+  assert.equal(evidence.copy_exit_slippage_usd, 0.1);
+});
+
+test('normal close evidence never attributes account ledger PnL across concurrent legs', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  // Only the current lot remains OPEN now, but durable FILLED/EXIT history
+  // proves another participant overlapped its entry-to-close interval.
+  service.prisma = { signalCycleParticipant: { count: async (query: any) => query.where.id ? 1 : 1 } };
+  service.resolveLotEntryMs = async () => 10_000;
+  service.resolveExchangeTradesFillEvidence = async (_c: unknown, id: number) => ({
+    price: 64_000, qty: 0.01, fillIds: [id],
+    fees: [{ fillId: id, amount: 0, currency: 'UST' }], firstExecutedAtMs: 1, lastExecutedAtMs: 2,
+  });
+  let ledgerReads = 0;
+  service.activeTrading = { getPositionCloseLedgerEntries: async () => { ledgerReads += 1; return []; } };
+  const evidence = await service.resolveNormalCloseExchangeEvidence({
+    agentId: 'agent', userId: 'user', participantId: 'participant', creds: {},
+    meta: { bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT' },
+    closeTarget: { ok: true, currentAmount: -0.02, targetAmount: -0.01, closeQty: 0.01,
+      finalAccountFlatten: false, closeExchangeOrderId: 202,
+      closeSubmitStartedAtMs: 20_000, closeConfirmedAtMs: 21_000 },
+  });
+  assert.equal(evidence.actual_bitfinex_realized_pnl_usd, undefined);
+  assert.equal(ledgerReads, 0);
+  assert.deepEqual(evidence.exit_fill_ids, ['202']);
+});
+
+test('normal close evidence remains unknown when exact trades or bounded ledger proof are missing', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.prisma = { signalCycleParticipant: { count: async (query: any) => query.where.id ? 0 : 1 } };
+  service.resolveExchangeTradesFillEvidence = async (_c: unknown, id: number) => id === 101 ? null : ({
+    price: 64_000, qty: 0.01, fillIds: [2], fees: [], firstExecutedAtMs: 1, lastExecutedAtMs: 2,
+  });
+  service.activeTrading = { getPositionCloseLedgerEntries: async () => [] };
+  service.resolveLotEntryMs = async () => 0;
+  const input = { agentId: 'agent', userId: 'user', participantId: 'participant', creds: {},
+    meta: { bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT' },
+    closeTarget: { ok: true, currentAmount: -0.01, targetAmount: 0, closeQty: 0.01,
+      finalAccountFlatten: true, closeExchangeOrderId: 202,
+      closeSubmitStartedAtMs: 20_000, closeConfirmedAtMs: 21_000 } };
+  assert.deepEqual(await service.resolveNormalCloseExchangeEvidence(input), {});
+  service.resolveExchangeTradesFillEvidence = async (_c: unknown, id: number) => ({
+    price: 64_000, qty: 0.01, fillIds: [id], fees: [], firstExecutedAtMs: 1, lastExecutedAtMs: 2,
+  });
+  const evidence = await service.resolveNormalCloseExchangeEvidence(input);
+  assert.equal(evidence.actual_bitfinex_realized_pnl_usd, undefined);
+});
+
+test('normal close evidence rejects malformed or non-USD attributable fees', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.prisma = { signalCycleParticipant: { count: async () => 1 } };
+  service.resolveExchangeTradesFillEvidence = async (_c: unknown, id: number) => ({
+    price: 64_000, qty: 0.01, fillIds: [id],
+    fees: [{ fillId: id, amount: Number.NaN, currency: 'UST' }],
+    firstExecutedAtMs: 1, lastExecutedAtMs: 2,
+  });
+  service.activeTrading = { getPositionCloseLedgerEntries: async () => [] };
+  const evidence = await service.resolveNormalCloseExchangeEvidence({
+    agentId: 'agent', userId: 'user', participantId: 'participant', creds: {},
+    meta: { bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT' },
+    closeTarget: { ok: true, currentAmount: -0.01, targetAmount: 0, closeQty: 0.01,
+      finalAccountFlatten: true, closeExchangeOrderId: 202,
+      closeSubmitStartedAtMs: 20_000, closeConfirmedAtMs: 21_000 },
+  });
+  assert.deepEqual(evidence, {});
+});
+
+test('normal close cost vector fails closed when BBO or bounded funding proof is missing', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.prisma = { signalCycleParticipant: { count: async (query: any) => query.where.id ? 0 : 1 } };
+  service.resolveLotEntryMs = async () => 10_000;
+  service.resolveExchangeTradesFillEvidence = async (_c: unknown, id: number) => ({
+    price: id === 101 ? 64_500 : 64_400, qty: 0.01, fillIds: [id],
+    fees: [{ fillId: id, amount: 0, currency: 'UST' }],
+    firstExecutedAtMs: id === 101 ? 10_500 : 20_500,
+    lastExecutedAtMs: id === 101 ? 10_500 : 20_500,
+  });
+  let fundingProof = { tradingFeesUsd: 0, fundingFeesUsd: 0, realizedPnlUsd: 1, positionCloseRows: 1 };
+  service.activeTrading = {
+    getPositionCloseLedgerEntries: async () => [{
+      ledgerId: 'ledger', closedAt: new Date(20_500), pnlUsd: 1, description: 'position close',
+    }],
+    getLedgerFeesSince: async () => fundingProof,
+  };
+  const base = {
+    agentId: 'agent', userId: 'user', participantId: 'participant', creds: {},
+    meta: { bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT' as const,
+      entryBbo: { bid: 64_490, ask: 64_510, observedAtMs: 10_000, source: 'BITFINEX_PUBLIC_TICKER' } },
+    closeTarget: { ok: true, currentAmount: -0.01, targetAmount: 0, closeQty: 0.01,
+      finalAccountFlatten: true, closeExchangeOrderId: 202,
+      closeSubmitStartedAtMs: 20_000, closeConfirmedAtMs: 21_000 },
+    showcaseExitPrice: 64_390,
+  };
+  const noBbo = await service.resolveNormalCloseExchangeEvidence(base);
+  assert.equal(noBbo.actual_bitfinex_realized_pnl_usd, 1);
+  assert.equal(noBbo.trading_fee_usd, undefined);
+  assert.equal(noBbo.funding_fee_usd, undefined);
+  assert.equal(noBbo.spread_cost_usd, undefined);
+  assert.equal(noBbo.slippage_usd, undefined);
+
+  fundingProof = { ...fundingProof, positionCloseRows: 2 };
+  const noFunding = await service.resolveNormalCloseExchangeEvidence({
+    ...base,
+    closeTarget: { ...base.closeTarget,
+      closeBbo: { bid: 64_390, ask: 64_410, observedAtMs: 20_000, source: 'BITFINEX_PUBLIC_TICKER' } },
+  });
+  assert.equal(noFunding.actual_bitfinex_realized_pnl_usd, 1);
+  assert.equal(noFunding.trading_fee_usd, undefined);
+  assert.equal(noFunding.funding_fee_usd, undefined);
+  assert.equal(noFunding.spread_cost_usd, undefined);
+  assert.equal(noFunding.slippage_usd, undefined);
+});
+
 test('service lifecycle settles a late TTL cancellation-race slice behind exact replacement protection', async () => {
   const fence = protectiveStopFencePrisma();
   const events: Array<{ type: string; payload: Record<string, any> }> = [];
@@ -7788,6 +7937,7 @@ test('service lifecycle settles a late TTL cancellation-race slice behind exact 
   assert.ok(firstRetained);
   assert.equal(firstRetained?.payload.partialFillQty, 0.01);
   assert.equal(firstRetained?.payload.partialFillStopOrderId, 7801);
+  assert.equal(firstRetained?.payload.stopClientOrderId, stopInputs.get(7801)?.clientOrderId);
 
   const promoted = await (service as any).recordCancelRaceFillOwned(
     'agent',
@@ -7809,6 +7959,8 @@ test('service lifecycle settles a late TTL cancellation-race slice behind exact 
   const filled = events.find((event) => event.type === 'FILLED')?.payload;
   const armed = events.find((event) => event.type === 'STOP_LOSS_ARMED')?.payload;
   const ttl = events.find((event) => event.payload.event === 'PARTIAL_FILL_TTL_EXPIRED')?.payload;
+  const replacement = events.find((event) =>
+    event.payload.event === 'FULL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED')?.payload;
   assert.equal(filled?.qty, 0.018);
   assert.equal(filled?.entry_completion, 'PARTIAL_FILL_TTL_EXPIRED');
   assert.deepEqual(filled?.exchange_fill_ids, ['8101', '8102']);
@@ -7816,6 +7968,10 @@ test('service lifecycle settles a late TTL cancellation-race slice behind exact 
   assert.equal(ttl?.final_filled_qty, 0.018);
   assert.ok(Math.abs(Number(ttl?.unfilled_qty_cancelled) - 0.012) < 1e-9);
   assert.equal(ttl?.remaining_entry_order_live, false);
+  assert.equal(ttl?.remaining_qty, 0);
+  assert.ok(Math.abs(Number(ttl?.cancelled_qty) - 0.012) < 1e-9);
+  assert.equal(replacement?.stopClientOrderId, stopInputs.get(7802)?.clientOrderId);
+  assert.equal(filled?.stopClientOrderId, replacement?.stopClientOrderId);
   const replacementAck = trace.indexOf('event:UPDATE_STOPS:FULL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED');
   const oldStopCancel = trace.indexOf('cancel:7801');
   const filledPersist = trace.indexOf('event:FILLED:CANCEL_RACE_FILL');

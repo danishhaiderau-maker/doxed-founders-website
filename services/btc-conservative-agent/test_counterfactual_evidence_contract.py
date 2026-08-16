@@ -211,20 +211,35 @@ def test_platform_event_normalizer_keeps_missing_ids_and_completeness_missing():
 def test_platform_event_normalizer_preserves_partial_fill_stop_chain_and_excludes_unsupported_exit():
     normalize = _load_evidence_functions()["_normalize_platform_bitfinex_evidence"]
     evidence = normalize([{"participantId": "part-partial", "events": [
+        {"id": "order", "eventType": "ORDER_PLACED", "payload": {
+            "bitfinexOrderId": 101, "clientOrderId": 501,
+            "source_exact_qty_btc": 0.03, "venue_qty_btc": 0.03,
+            "entryExchangeAckAtMs": 1_000,
+        }},
         {"id": "f1", "eventType": "FILLED", "payload": {
             "bitfinexOrderId": 101, "fillId": 201, "partialFillQty": 0.01,
         }},
         {"id": "s1", "eventType": "UPDATE_STOPS", "payload": {
             "event": "PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED", "partialFillStopOrderId": 301,
-            "partialFillQty": 0.01, "stop_exchange_ack_at": "2026-08-16T00:00:02Z",
+            "stopClientOrderId": 601, "bitfinexOrderId": 101,
+            "partialFillQty": 0.01, "remaining_qty": 0.02,
+            "stop_exchange_ack_at": "2026-08-16T00:00:02Z",
         }},
         {"id": "f2", "eventType": "FILLED", "payload": {
-            "bitfinexOrderId": 101, "fillId": 202, "partialFillQty": 0.018,
+            "bitfinexOrderId": 101, "exchange_fill_ids": [202, 203], "qty": 0.018,
+            "fill_detection_path": "POSITION_DELTA", "fill_detection_context": "SIGNAL_TTL_EXPIRED",
+            "entry_completion": "PARTIAL_FILL_TTL_EXPIRED", "unfilled_qty_cancelled": 0.012,
         }},
         {"id": "s2", "eventType": "UPDATE_STOPS", "payload": {
             "event": "PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED", "partialFillStopOrderId": 302,
-            "partialFillQty": 0.018, "supersededPartialStopOrderId": 301,
+            "stopClientOrderId": 602, "partialFillQty": 0.018, "supersededPartialStopOrderId": 301,
             "stop_exchange_ack_at": "2026-08-16T00:00:03Z",
+        }},
+        {"id": "ttl", "eventType": "UPDATE_STOPS", "payload": {
+            "event": "PARTIAL_FILL_TTL_EXPIRED", "stopOrderId": 302,
+            "protected_qty": 0.018, "final_filled_qty": 0.018,
+            "unfilled_qty_cancelled": 0.012, "remaining_qty": 0,
+            "remaining_entry_order_live": False,
         }},
         {"id": "x", "eventType": "EXIT", "payload": {
             "exit_reason": "PROTECTION_FAILURE_EMERGENCY_CLOSE", "exit_price": 63_100,
@@ -232,9 +247,18 @@ def test_platform_event_normalizer_preserves_partial_fill_stop_chain_and_exclude
     ]}], "cont-partial")
     assert evidence["filled_quantity"] == 0.018
     assert evidence["protected_quantity"] == 0.018
-    assert evidence["fill_ids"] == [201, 202]
+    assert evidence["fill_ids"] == [201, 202, 203]
+    assert evidence["client_order_ids"] == [501, 601, 602]
+    assert evidence["bitfinex_order_ids"] == [101, 301, 302]
     assert [row["order_id"] for row in evidence["stop_chain"]] == [301, 302]
     assert evidence["stop_chain"][1]["predecessor_order_id"] == 301
+    assert evidence["stop_chain"][0]["client_order_id"] == 601
+    assert evidence["remaining_quantity"] == 0.0
+    assert evidence["cancelled_quantity"] == 0.012
+    assert evidence["fills"][1]["fill_ids"] == [202, 203]
+    assert evidence["fills"][1]["detection_context"] == "SIGNAL_TTL_EXPIRED"
+    assert evidence["fills"][1]["entry_completion"] == "PARTIAL_FILL_TTL_EXPIRED"
+    assert any(row["order_id"] == 301 for row in evidence["ack_history"])
     assert "PROTECTION_FAILURE_EMERGENCY_CLOSE" in evidence["analysis_exclusion_reasons"]
     assert "TERMINAL_PROVENANCE_EXCLUDED" in evidence["analysis_exclusion_reasons"]
     assert evidence["reconciliation_complete"] is False
@@ -305,6 +329,9 @@ def _complete_fixture():
         "stop_evidence_complete": True,
         "source_snapshot_evidence_complete": True,
         "reconciliation_complete": True,
+        "cost_evidence_complete": True,
+        "cost_evidence": {"trading_fee_usd": 0.0, "funding_fee_usd": 0.0,
+                          "spread_cost_usd": 0.0, "slippage_usd": 0.0},
     }
     exit_t = 100.0
     ticks = [
@@ -402,6 +429,7 @@ def test_semantic_profiles_are_stable_and_sensitive_to_execution_facts():
     )
     assert one == reordered
     assert one != changed
+    assert max(pure_counterfactual.REQUIRED_HORIZONS_SEC.values()) == 7200
 
 
 def test_execution_timing_projects_only_explicit_stages_and_reports_sla():
@@ -542,3 +570,107 @@ def test_platform_profile_fields_are_carried_without_default_invention():
     )
     assert missing["fee_model"] is None
     assert missing["execution_profile"] is None
+
+
+def test_canonical_terminal_snapshot_is_projected_and_incomplete_signed_proof_is_not_upgraded():
+    snapshot = {
+        "source_git_rev": "6f279cc7", "sequence": 91,
+        "captured_at": "2026-08-16T00:01:00Z", "snapshot_age_sec": 1.2,
+        "positions_synced": True, "orders_synced": True, "trades_synced": True,
+    }
+    canonical = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": [{
+            "id": "exit-canonical", "eventType": "EXIT",
+            "payload": {"terminal_authority_kind": "CANONICAL_TERMINAL_RECORD",
+                        "terminal_authority_evidence": {
+                "trade_id": "cont-canonical", "source_snapshot_evidence": snapshot,
+            }},
+        }]}],
+        "cont-canonical",
+    )
+    assert canonical["source_snapshot_evidence"]["authority_kind"] == "CANONICAL_TERMINAL_RECORD"
+    assert canonical["source_snapshot_evidence"]["source_snapshot_evidence"] == snapshot
+    assert canonical["source_snapshot_evidence_complete"] is True
+
+    signed = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": [{
+            "id": "exit-signed", "eventType": "EXIT",
+            "payload": {"terminal_authority_kind": "SIGNED_POSITION_CLOSED",
+                        "terminal_authority_evidence": {
+                "trade_id": "cont-signed", "event_id": "close-7", "event_seq": 7,
+            }},
+        }]}],
+        "cont-signed",
+    )
+    assert signed["source_snapshot_evidence"]["event_id"] == "close-7"
+    assert signed["source_snapshot_evidence_complete"] is False
+
+
+def test_signed_terminal_and_final_reconciliation_complete_future_copy_evidence():
+    event = {"id": "exit", "eventType": "EXIT", "createdAt": "2026-08-16T00:01:00Z",
+             "payload": {
+                 "exit_reason": "SHOWCASE_MIRROR",
+                 "terminal_authority_kind": "SIGNED_POSITION_CLOSED",
+                 "terminal_authority_evidence": {
+                     "trade_id": "cont-clean", "event_id": "close-7", "event_seq": 7,
+                     "source_event_at_ms": 1000, "platform_received_at_ms": 1100,
+                     "exit_price": 63000, "exit_reason": "PROFIT_LOCK",
+                 },
+                 "trading_fee_usd": 0.0, "funding_fee_usd": 0.02,
+                 "spread_cost_usd": 0.11, "slippage_usd": 0.03,
+                 "copy_exit_slippage_usd": 0.07,
+                 "final_reconciliation": {
+                     "schema": "relay_final_reconciliation_v1", "complete": True,
+                     "position_reconciled": True, "exchange_vs_ledger_delta_sats": 0,
+                     "order_delta": 0, "orphan_order_count": 0, "foreign_order_count": 0,
+                 },
+             }}
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": [event]}], "cont-clean"
+    )
+    assert evidence["source_snapshot_evidence_complete"] is True
+    assert evidence["source_snapshot_evidence"]["event_id"] == "close-7"
+    assert evidence["reconciliation_complete"] is True
+    assert evidence["cost_evidence_complete"] is True
+    assert evidence["cost_evidence"]["spread_cost_usd"] == 0.11
+    assert evidence["cost_evidence"]["slippage_usd"] == 0.03
+    assert evidence["cost_evidence"]["copy_exit_slippage_usd"] == 0.07
+
+    evidence.update({
+        "client_order_id": 501,
+        "client_order_ids": [501, 601],
+        "bitfinex_order_ids": [101, 301],
+        "fill_ids": [201],
+        "source_quantity": 0.03,
+        "normalized_quantity": 0.03,
+        "filled_quantity": 0.018,
+        "protected_quantity": 0.018,
+        "remaining_quantity": 0.0,
+        "cancelled_quantity": 0.012,
+        "ack_history": [{"order_id": 101, "ack_at": 1000}],
+        "stop_chain": [{"order_id": 301, "protected_quantity": 0.018, "ack_at": 1200}],
+        "quantity_evidence_complete": True,
+        "order_ack_history_complete": True,
+        "stop_evidence_complete": True,
+    })
+    normalized = _load_evidence_functions()["_counterfactual_bitfinex_evidence"](
+        {}, {"bitfinex_evidence": evidence}, {}, {}
+    )
+    assert normalized["source_snapshot_evidence_complete"] is True
+    assert normalized["reconciliation_complete"] is True
+    assert normalized["linkage_complete"] is True
+    assert normalized["client_order_ids"] == [501, 601]
+    assert normalized["quantities"]["cancelled_quantity"] == 0.012
+
+
+def test_incomplete_account_wide_reconciliation_never_qualifies():
+    event = {"id": "exit", "eventType": "EXIT", "createdAt": "2026-08-16T00:01:00Z",
+             "payload": {"final_reconciliation": {
+                 "schema": "relay_final_reconciliation_v1", "complete": False,
+                 "position_reconciled": True, "exchange_vs_ledger_delta_sats": 0,
+                 "order_delta": 0, "orphan_order_count": None, "foreign_order_count": None,
+             }}}
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": [event]}], "cont-incomplete"
+    )
+    assert evidence["reconciliation_complete"] is False

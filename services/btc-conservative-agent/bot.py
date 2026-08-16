@@ -36446,7 +36446,6 @@ _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC = {
     "60m": 3600,
     "120m": 7200,
     "1h": 3600,
-    "4h": 14400,
 }
 
 
@@ -36523,6 +36522,7 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "filled_quantity": first("filled_quantity", "filled_qty"),
         "protected_quantity": first("protected_quantity", "protected_qty"),
         "remaining_quantity": first("remaining_quantity", "remaining_qty"),
+        "cancelled_quantity": first("cancelled_quantity", "cancelled_qty", "unfilled_qty_cancelled"),
     }
     ack_history = rows("ack_history", "order_ack_history")
     stop_chain = rows("stop_chain", "stop_replacements", "protective_stops")
@@ -36559,18 +36559,50 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         and (row.get("ack_at") or row.get("placed_at") or row.get("timestamp"))
         for row in stop_chain
     )
+    canonical_source_snapshot = (
+        source_snapshot.get("source_snapshot_evidence")
+        if isinstance(source_snapshot, dict)
+        and isinstance(source_snapshot.get("source_snapshot_evidence"), dict)
+        else source_snapshot
+    )
     source_snapshot_fields_complete = bool(
         isinstance(source_snapshot, dict)
-        and (source_snapshot.get("sequence") is not None or source_snapshot.get("snapshot_sequence") is not None)
-        and (source_snapshot.get("captured_at") or source_snapshot.get("snapshot_time"))
-        and source_snapshot.get("fresh") is True
-        and source_snapshot.get("complete") is True
+        and (
+            (
+                str(source_snapshot.get("authority_kind") or "").upper() == "SIGNED_POSITION_CLOSED"
+                and source_snapshot.get("trade_id") and source_snapshot.get("event_id")
+                and source_snapshot.get("event_seq") is not None
+                and source_snapshot.get("source_event_at_ms") is not None
+                and source_snapshot.get("platform_received_at_ms") is not None
+                and source_snapshot.get("exit_price") is not None
+                and source_snapshot.get("exit_reason")
+            )
+            or (
+                isinstance(canonical_source_snapshot, dict)
+                and (canonical_source_snapshot.get("sequence") is not None
+                     or canonical_source_snapshot.get("snapshot_sequence") is not None)
+                and (canonical_source_snapshot.get("captured_at")
+                     or canonical_source_snapshot.get("snapshot_time"))
+                and (
+                    canonical_source_snapshot.get("complete") is True
+                    or (
+                        canonical_source_snapshot.get("positions_synced") is True
+                        and canonical_source_snapshot.get("orders_synced") is True
+                        and canonical_source_snapshot.get("trades_synced") is True
+                    )
+                )
+            )
+        )
     )
+    reconciliation_position_delta = reconciliation.get("position_delta")
+    if reconciliation_position_delta is None:
+        reconciliation_position_delta = reconciliation.get("exchange_vs_ledger_delta_sats")
     reconciliation_values_complete = bool(
         isinstance(reconciliation, dict)
         and reconciliation.get("complete") is True
-        and finite_number(reconciliation.get("position_delta"))
-        and abs(float(reconciliation.get("position_delta"))) <= 1e-12
+        and reconciliation.get("position_reconciled", True) is True
+        and finite_number(reconciliation_position_delta)
+        and abs(float(reconciliation_position_delta)) <= 1e-12
         and finite_number(reconciliation.get("order_delta"))
         and abs(float(reconciliation.get("order_delta"))) <= 1e-12
         and finite_number(reconciliation.get("orphan_order_count", 0))
@@ -36583,6 +36615,7 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "participant_id": first("participant_id"),
         "source_lifecycle_id": first("source_lifecycle_id", "lifecycle_id"),
         "client_order_id": first("client_order_id", "cid"),
+        "client_order_ids": first("client_order_ids") or [],
         "fee_model": first("fee_model"),
         "execution_profile": first("execution_profile"),
         "bitfinex_order_ids": order_ids,
@@ -36619,6 +36652,12 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
     evidence["reconciliation_complete"] = bool(
         explicit.get("reconciliation_complete") is True
         and reconciliation_values_complete
+    )
+    evidence["cost_evidence_complete"] = bool(
+        explicit.get("cost_evidence_complete") is True
+        and all(key in evidence["cost_evidence"] for key in (
+            "trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"
+        ))
     )
     evidence["linkage_complete"] = bool(
         evidence["participant_id"]

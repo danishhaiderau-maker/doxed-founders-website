@@ -785,6 +785,9 @@ export type RelayLotExitTarget = {
   closeExchangeAckAtMs?: number;
   /** Wall-clock time when the exchange position read confirmed the reduction. */
   closeConfirmedAtMs?: number;
+  /** Authenticated Bitfinex order id returned for this exact reduce-only close. */
+  closeExchangeOrderId?: number;
+  closeBbo?: { bid: number; ask: number; observedAtMs: number; source: string };
   confirmedExchangeAmount?: number;
   remainingManagedOrderIds?: number[];
   accountWideActiveOrderIds?: number[];
@@ -1194,6 +1197,7 @@ type ExecutionPayload = {
   limitPrice?: number;
   originalLimitPrice?: number;
   localMark?: number;
+  entryBbo?: { bid: number; ask: number; observedAtMs: number; source: string };
   qty?: number;
   direction?: 'LONG' | 'SHORT';
   /** Exchange merged position qty (BTC) captured at ORDER_PLACED — avoids false fills. */
@@ -8817,6 +8821,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
       }
 
+    const entryBboPromise = Promise.race([
+      Promise.resolve().then(async (): Promise<{
+        bid: number; ask: number; observedAtMs: number; source: string;
+      } | null> => this.activeTrading.getBestBidAsk()).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+    ]);
     let prePosition: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>>;
     let latestGate: { status: TradingAgentInstanceStatus; dashboardState: unknown } | null = null;
     let latestCycle: { createdAt: Date } | null = null;
@@ -8851,6 +8861,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return false;
     }
     const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
+    const entryBbo = await entryBboPromise;
 
     // Re-read the account-holder gate immediately before the exchange write.
     // A Stop click racing an already-running executor tick must win; the
@@ -8925,6 +8936,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       limitPrice,
         originalLimitPrice: limitPrice,
       localMark: mark,
+      entryBbo: entryBbo ?? undefined,
       qty,
       direction: intent.direction,
       exchangeQtyAtOrder,
@@ -8966,6 +8978,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       fee_model: stableRelayFeeModel(),
       execution_profile: stableRelayExecutionProfile(),
       local_mark_at_signal: mark,
+      entry_bbo: entryBbo ?? undefined,
       limit_price: limitPrice,
         original_limit_price: limitPrice,
       qty,
@@ -9643,6 +9656,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         source: 'hire',
         event: 'FULL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED',
         stopOrderId,
+        stopClientOrderId: promotion.stopClientOrderId,
         partialFillStopOrderId: stopOrderId,
         partialFillQty: qty,
         supersededPartialStopOrderId: meta.partialFillStopOrderId,
@@ -9731,6 +9745,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       stop_loss_placed: stopOrderId != null,
       stop_loss_margin_pct: stopLossMarginPct,
       stopOrderId: stopOrderId ?? undefined,
+      clientOrderId: meta.clientOrderId,
+      stopClientOrderId: promotion.stopClientOrderId,
       partialFillQty: null,
       partialFillStopOrderId: null,
       supersededPartialStopOrderId,
@@ -9777,6 +9793,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         venue: 'bitfinex',
         stop_price: stopPrice,
         stopOrderId,
+        stopClientOrderId: promotion.stopClientOrderId,
         qty,
         fill_detection_path: fill.source,
         stop_submit_started_at: new Date(stopSubmitStartedAtMs).toISOString(),
@@ -9811,6 +9828,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         intended_qty: intendedQty,
         final_filled_qty: ttlRemainderSettlement.finalFilledQty,
         unfilled_qty_cancelled: ttlRemainderSettlement.cancelledQty,
+        cancelled_qty: ttlRemainderSettlement.cancelledQty,
+        remaining_qty: 0,
         fill_ratio: intendedQty > 0
           ? ttlRemainderSettlement.finalFilledQty / intendedQty
           : 1,
@@ -12870,6 +12889,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     let newStopId: number;
+    let stopClientOrderId: number;
     const stopSubmitStartedAtMs = Date.now();
     let stopExchangeAckAtMs = 0;
     try {
@@ -12885,6 +12905,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       });
       if (!protectedStop.ok) throw new Error(protectedStop.reason);
       newStopId = protectedStop.orderId;
+      stopClientOrderId = protectedStop.clientOrderId;
       stopExchangeAckAtMs = protectedStop.exchangeAckAtMs;
     } catch (err) {
       const message = `PARTIAL_FILL_PROTECTION_FAILED cycle=${cycleId}: ${
@@ -12988,6 +13009,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       participant_id: participantId,
       bitfinexOrderId: meta.bitfinexOrderId,
       stopOrderId: newStopId,
+      stopClientOrderId,
       partialFillStopOrderId: newStopId,
       partialFillQty: filledQty,
       supersededPartialStopOrderId: supersededStopId,
@@ -13046,6 +13068,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       participant_id: participantId,
       bitfinexOrderId: meta.bitfinexOrderId,
       stopOrderId: newStopId,
+      stopClientOrderId,
       partialFillStopOrderId: newStopId,
       partialFillQty: filledQty,
       supersededPartialStopOrderId: supersededStopId,
@@ -14426,6 +14449,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // Always read the position immediately before stop cancellation and close
     // submission. An earlier observation may be stale if the protective stop
     // filled while the public mark / ledger target was being resolved.
+    const closeBboPromise = Promise.race([
+      Promise.resolve().then(async (): Promise<{
+        bid: number; ask: number; observedAtMs: number; source: string;
+      } | null> => this.activeTrading.getBestBidAsk()).catch(() => null),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 100)),
+    ]);
     const position = await this.activeTrading.getOpenPositionDetail(creds);
     const target = relayLotExitTarget({
       currentAmount: position?.amount ?? 0,
@@ -14484,6 +14513,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     if (!terminalFence) throw new Error('TERMINAL_CLOSE_FENCE_REQUIRED');
+    // Finish the bounded advisory BBO observation while the fence is still
+    // CLAIMED. SUBMITTING must mean the exchange write is immediately next;
+    // otherwise a crash during telemetry could create an unrecoverable
+    // no-submit SUBMITTING fence.
+    const closeBbo = await closeBboPromise;
     terminalFence.claim = await this.advanceTerminalCloseFence({
       cycleId: terminalFence.cycleId,
       participantId,
@@ -14591,6 +14625,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       closeSubmitStartedAtMs,
       closeExchangeAckAtMs,
       closeConfirmedAtMs: Date.now(),
+      closeExchangeOrderId,
+      closeBbo: closeBbo ?? undefined,
       confirmedExchangeAmount,
       remainingManagedOrderIds,
       },
@@ -15281,6 +15317,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           : undefined;
       const closeExchangeAckAtMs = closeTarget.closeExchangeAckAtMs;
       const closeConfirmedAtMs = closeTarget.closeConfirmedAtMs;
+      const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
+        agentId, userId, participantId: participant.id, creds, meta, closeTarget,
+        showcaseExitPrice: opts?.showcaseExitPrice,
+      }).catch((err) => {
+        this.logger.warn(
+          `Normal close evidence unavailable ${participant.id}: ${err instanceof Error ? err.message : err}`,
+        );
+        return {} as Record<string, unknown>;
+      });
 
       const exitPersistenceCorrelationId = randomUUID();
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
@@ -15334,6 +15379,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         pnl_usd: Math.round(pnlUsd * 100) / 100,
         pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
         pnl_source: 'open_position',
+        ...authenticatedCloseEvidence,
         final_reconciliation: terminalFinalReconciliation(closeTarget),
         source: 'hire',
       });
@@ -17461,6 +17507,139 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     return { pnlUsd: reconstructed, pnlSource: 'reconstructed' };
+  }
+
+  /**
+   * Produce per-order evidence for a normal relay close without allocating an
+   * account-level result across merged legs. Realized P&L is emitted only when
+   * this is the sole OPEN relay lot, both exact order histories cover the lot,
+   * and exactly one authenticated position-close ledger row falls inside the
+   * bounded submit/confirmation window. Missing or malformed evidence is
+   * UNKNOWN and leaves optimisation fail-closed.
+   */
+  private async resolveNormalCloseExchangeEvidence(input: {
+    agentId: string;
+    userId: string;
+    participantId: string;
+    creds: ExchangeCredentials;
+    meta: ExecutionPayload;
+    closeTarget: RelayLotExitTarget;
+    showcaseExitPrice?: number;
+  }): Promise<Record<string, unknown>> {
+    const entryOrderId = input.meta.bitfinexOrderId;
+    const closeOrderId = input.closeTarget.closeExchangeOrderId;
+    const qty = input.meta.qty ?? 0;
+    if (!entryOrderId || !closeOrderId || btcToSats(qty) === 0) return {};
+    const [entry, exit] = await Promise.all([
+      this.resolveExchangeTradesFillEvidence(input.creds, entryOrderId),
+      this.resolveExchangeTradesFillEvidence(input.creds, closeOrderId),
+    ]);
+    if (!entry || !exit || btcToSats(entry.qty) !== btcToSats(qty) || btcToSats(exit.qty) !== btcToSats(qty)) {
+      return {};
+    }
+    const allFees = [...entry.fees, ...exit.fees];
+    const feesValid = allFees.every((fee) =>
+      Number.isSafeInteger(fee.fillId) && Number.isFinite(fee.amount) &&
+      (fee.amount === 0 || /^(?:USD|UST|USDT)$/i.test(fee.currency ?? '')),
+    );
+    if (!feesValid) return {};
+    const evidence: Record<string, unknown> = {
+      close_exchange_order_id: closeOrderId,
+      exchange_order_id: closeOrderId,
+      bitfinex_order_ids: [entryOrderId, closeOrderId],
+      fill_ids: [...entry.fillIds, ...exit.fillIds].map(String),
+      entry_fill_ids: entry.fillIds.map(String),
+      exit_fill_ids: exit.fillIds.map(String),
+      entry_exchange_fees: entry.fees,
+      exit_exchange_fees: exit.fees,
+      entry_exchange_fill_price: entry.price,
+      exit_exchange_fill_price: exit.price,
+      authenticated_matched_quantity: qty,
+      entry_bbo: input.meta.entryBbo,
+      close_bbo: input.closeTarget.closeBbo,
+    };
+    if (input.showcaseExitPrice && input.showcaseExitPrice > 0) {
+      evidence.copy_exit_slippage_usd = Number(
+        (Math.abs(exit.price - input.showcaseExitPrice) * qty).toFixed(8),
+      );
+    }
+    const entryMs = await this.resolveLotEntryMs(input.participantId);
+    const openLotCount = await this.prisma.signalCycleParticipant.count({
+      where: { userId: input.userId, status: SignalCycleStatus.OPEN, cycle: { agentId: input.agentId } },
+    });
+    if (openLotCount !== 1 || entryMs <= 0 || !input.closeTarget.closeSubmitStartedAtMs || !input.closeTarget.closeConfirmedAtMs) {
+      return evidence;
+    }
+    const overlapCount = await this.prisma.signalCycleParticipant.count({
+      where: {
+        id: { not: input.participantId }, userId: input.userId,
+        cycle: { agentId: input.agentId },
+        events: { some: { eventType: 'FILLED', createdAt: { lte: new Date(input.closeTarget.closeConfirmedAtMs) } } },
+        NOT: { events: { some: { eventType: 'EXIT', createdAt: { lt: new Date(entryMs) } } } },
+      },
+    });
+    if (overlapCount !== 0) return evidence;
+    const rows = await this.activeTrading.getPositionCloseLedgerEntries(
+      input.creds,
+      input.closeTarget.closeSubmitStartedAtMs,
+    );
+    const bounded = rows.filter((row) => {
+      const at = row.closedAt.getTime();
+      return at >= input.closeTarget.closeSubmitStartedAtMs! &&
+        at <= input.closeTarget.closeConfirmedAtMs! + 30_000;
+    });
+    if (bounded.length === 1 && Number.isFinite(bounded[0].pnlUsd)) {
+      evidence.actual_bitfinex_realized_pnl_usd = bounded[0].pnlUsd;
+      evidence.realized_pnl_ledger_id = bounded[0].ledgerId;
+      evidence.realized_pnl_observed_at = bounded[0].closedAt.toISOString();
+    }
+    const ledgerCosts = await this.activeTrading.getLedgerFeesSince(input.creds, entryMs);
+    const entryBbo = input.meta.entryBbo;
+    const closeBbo = input.closeTarget.closeBbo;
+    const bboValid = (bbo: typeof entryBbo, executionAt: number | null) => Boolean(
+      bbo && bbo.source === 'BITFINEX_PUBLIC_TICKER' && bbo.bid > 0 && bbo.ask >= bbo.bid &&
+      executionAt != null && bbo.observedAtMs <= executionAt && executionAt - bbo.observedAtMs <= 30_000,
+    );
+    const exactTradingFees = Number(allFees.reduce((sum, fee) => sum + Math.abs(fee.amount), 0).toFixed(8));
+    if (
+      bounded.length === 1 && ledgerCosts?.positionCloseRows === 1 &&
+      Math.abs(ledgerCosts.tradingFeesUsd - exactTradingFees) <= 0.0001 &&
+      Number.isFinite(ledgerCosts.fundingFeesUsd) &&
+      bboValid(entryBbo, entry.firstExecutedAtMs) && bboValid(closeBbo, exit.firstExecutedAtMs)
+    ) {
+      const entryReference = input.meta.direction === 'LONG' ? entryBbo!.ask : entryBbo!.bid;
+      const exitReference = input.meta.direction === 'LONG' ? closeBbo!.bid : closeBbo!.ask;
+      const entryExecutionSlip = input.meta.direction === 'LONG'
+        ? Math.max(0, entry.price - entryReference)
+        : Math.max(0, entryReference - entry.price);
+      const exitExecutionSlip = input.meta.direction === 'LONG'
+        ? Math.max(0, exitReference - exit.price)
+        : Math.max(0, exit.price - exitReference);
+      evidence.trading_fee_usd = exactTradingFees;
+      evidence.funding_fee_usd = Number(ledgerCosts.fundingFeesUsd.toFixed(8));
+      evidence.spread_cost_usd = Number(
+        ((((entryBbo!.ask - entryBbo!.bid) + (closeBbo!.ask - closeBbo!.bid)) / 2) * qty).toFixed(8),
+      );
+      evidence.slippage_usd = Number(((entryExecutionSlip + exitExecutionSlip) * qty).toFixed(8));
+      // Source-vs-copy exit slippage is fidelity evidence, separate from the
+      // execution-cost slippage measured against each side-correct touch.
+      if (input.showcaseExitPrice && input.showcaseExitPrice > 0) {
+        evidence.copy_exit_slippage_usd = Number(
+          (Math.abs(exit.price - input.showcaseExitPrice) * qty).toFixed(8),
+        );
+      } else {
+        delete evidence.trading_fee_usd;
+        delete evidence.funding_fee_usd;
+        delete evidence.spread_cost_usd;
+        delete evidence.slippage_usd;
+      }
+    } else {
+      // A partial cost vector is not a complete research fact. Preserve raw
+      // fills/fees but omit the four optimisation cost fields together.
+      delete evidence.trading_fee_usd;
+      delete evidence.slippage_usd;
+    }
+    return evidence;
   }
 
   /** Lot entry timestamp — from the FILLED event, falling back to the participant claim time. */

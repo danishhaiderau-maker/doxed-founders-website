@@ -135,6 +135,8 @@ def classify_row(row):
         optimisation.append("POLICY_COMPARABILITY_KEY_MISSING")
     if row.get("actual_bitfinex_realized_pnl_usd") is None:
         optimisation.append("BITFINEX_ACTUAL_PNL_MISSING")
+    if evidence.get("cost_evidence_complete") is not True:
+        optimisation.append("EXECUTION_COST_EVIDENCE_MISSING")
     if row.get("required_post_exit_horizons_complete") is not True:
         optimisation.append("REQUIRED_POST_EXIT_HORIZON_INCOMPLETE")
     if row.get("required_entry_horizons_complete") is not True:

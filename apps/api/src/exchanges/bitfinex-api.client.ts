@@ -679,6 +679,16 @@ export class BitfinexTradingClient {
     throw new Error(`Bitfinex ticker returned invalid mark for ${symbol}`);
   }
 
+  async getBestBidAsk(symbol = BITFINEX_BTC_PERP_SYMBOL): Promise<{
+    bid: number; ask: number; observedAtMs: number; source: 'BITFINEX_PUBLIC_TICKER';
+  }> {
+    const ticker = await bitfinexPublicGet<number[]>(`v2/ticker/${symbol}`);
+    const bid = Number(ticker[0]);
+    const ask = Number(ticker[2]);
+    if (!(bid > 0) || !(ask >= bid)) throw new Error(`Bitfinex ticker returned invalid BBO for ${symbol}`);
+    return { bid, ask, observedAtMs: Date.now(), source: 'BITFINEX_PUBLIC_TICKER' };
+  }
+
   async submitLimitOrder(
     creds: ExchangeCredentials,
     input: {

@@ -126,6 +126,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             "stop_evidence_complete": False,
             "source_snapshot_evidence_complete": False,
             "reconciliation_complete": False,
+            "cost_evidence_complete": False,
         }
 
     evidence = {
@@ -134,6 +135,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "participant_id": None,
         "source_lifecycle_id": None,
         "client_order_id": None,
+        "client_order_ids": [],
         "bitfinex_order_ids": [],
         "fill_ids": [],
         "source_quantity": None,
@@ -141,15 +143,18 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "filled_quantity": None,
         "protected_quantity": None,
         "remaining_quantity": None,
+        "cancelled_quantity": None,
         "fills": [],
         "reprices": [],
         "ack_history": [],
         "stop_chain": [],
         "exit_evidence": {},
         "cost_evidence": {},
+        "cost_evidence_complete": False,
         "fee_model": None,
         "execution_profile": None,
         "reconciliation": {},
+        "source_snapshot_evidence": {},
         "negative_events": [],
         "execution_timing": [],
         "analysis_exclusion_reasons": [],
@@ -240,6 +245,9 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             cid = explicit(payload, "client_order_id", "clientOrderId", "cid")
             if evidence["client_order_id"] is None and cid is not None:
                 evidence["client_order_id"] = cid
+            append_unique("client_order_ids", cid)
+            stop_cid = explicit(payload, "stop_client_order_id", "stopClientOrderId")
+            append_unique("client_order_ids", stop_cid)
             order_id = explicit(
                 payload, "bitfinex_order_id", "bitfinexOrderId",
                 "exchange_order_id", "order_id", "orderId",
@@ -251,6 +259,11 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             append_unique("bitfinex_order_ids", order_id)
             append_unique("bitfinex_order_ids", stop_id)
             append_unique("bitfinex_order_ids", explicit(payload, "bitfinex_order_ids", "exchange_order_ids"))
+            predecessor_stop_id = explicit(
+                payload, "superseded_stop_order_id", "supersededStopOrderId",
+                "supersededPartialStopOrderId", "protectiveStopPredecessorId",
+            )
+            append_unique("bitfinex_order_ids", predecessor_stop_id)
             fill_id = explicit(payload, "fill_id", "fillId", "bitfinex_fill_id", "exchange_fill_id")
             append_unique("fill_ids", fill_id)
             append_unique("fill_ids", explicit(payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids"))
@@ -273,6 +286,13 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     evidence[key] = max(number, finite(evidence.get(key)) or 0.0)
                 else:
                     evidence[key] = number
+            cancelled = finite(explicit(
+                payload, "cancelled_quantity", "cancelled_qty", "unfilled_qty_cancelled"
+            ))
+            if cancelled is not None:
+                evidence["cancelled_quantity"] = cancelled
+            if payload.get("remaining_entry_order_live") is False:
+                evidence["remaining_quantity"] = 0.0
 
             if event_type == "FILLED" and (fill_id is not None or quantity_fields["filled_quantity"] is not None):
                 fill_row = {
@@ -282,6 +302,11 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     "quantity": finite(quantity_fields["filled_quantity"]),
                     "price": finite(explicit(payload, "fill_price", "fillPrice", "exchange_fill_price")),
                     "filled_at": explicit(payload, "exchange_fill_received_at", "fill_at", "filled_at"),
+                    "fill_ids": explicit(payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids"),
+                    "detection_path": explicit(payload, "fill_detection_path", "fill_source"),
+                    "detection_context": explicit(payload, "fill_detection_context", "cancel_context"),
+                    "entry_completion": explicit(payload, "entry_completion"),
+                    "unfilled_quantity_cancelled": finite(explicit(payload, "unfilled_qty_cancelled")),
                 }
                 append_row("fills", {key: value for key, value in fill_row.items() if value is not None})
 
@@ -373,9 +398,12 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     "missing_stages": [key for key in close_stages if key not in present],
                     "complete": all(key in present for key in close_stages),
                 })
-            if order_id is not None and ack_at is not None and event_type in {"ORDER_PLACED", "UPDATE_STOPS", "EXECUTION_TIMING"}:
+            ack_order_id = stop_id if stop_id is not None and explicit(
+                payload, "stop_exchange_ack_at"
+            ) is not None else order_id
+            if ack_order_id is not None and ack_at is not None and event_type in {"ORDER_PLACED", "UPDATE_STOPS", "EXECUTION_TIMING"}:
                 append_row("ack_history", {
-                    "event_id": event_id, "order_id": order_id, "ack_at": ack_at,
+                    "event_id": event_id, "order_id": ack_order_id, "ack_at": ack_at,
                     "operation": explicit(payload, "operation", "event") or event_type,
                 })
 
@@ -389,15 +417,16 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     "ack_at": ack_at,
                 })
 
-            if event_type in {"STOP_LOSS_ARMED", "UPDATE_STOPS"} and stop_id is not None:
+            if (
+                event_type in {"STOP_LOSS_ARMED", "UPDATE_STOPS"}
+                and stop_id is not None
+                and (event_type == "STOP_LOSS_ARMED" or ack_at is not None)
+            ):
                 protected = finite(explicit(
                     payload, "protected_quantity", "protected_qty", "protected_exchange_qty",
                     "partial_fill_qty", "partialFillQty", "qty", "quantity",
                 ))
-                predecessor = explicit(
-                    payload, "superseded_stop_order_id", "supersededStopOrderId",
-                    "supersededPartialStopOrderId", "protectiveStopPredecessorId",
-                )
+                predecessor = predecessor_stop_id
                 append_row("stop_chain", {
                     key: value for key, value in {
                         "event_id": event_id,
@@ -406,6 +435,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                         "stop_price": finite(explicit(payload, "stop_price", "stopPrice")),
                         "ack_at": ack_at,
                         "predecessor_order_id": predecessor,
+                        "client_order_id": stop_cid,
                         "event": explicit(payload, "event") or event_type,
                     }.items() if value is not None
                 })
@@ -433,10 +463,39 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 ))
                 if actual_pnl is not None:
                     evidence["actual_bitfinex_realized_pnl_usd"] = actual_pnl
+                authority_kind = str(explicit(payload, "terminal_authority_kind") or "").upper()
+                authority = explicit(payload, "terminal_authority_evidence")
+                if isinstance(authority, dict):
+                    source_proof = {"authority_kind": authority_kind, **authority}
+                    evidence["source_snapshot_evidence"] = source_proof
+                    if authority_kind == "SIGNED_POSITION_CLOSED":
+                        evidence["source_snapshot_evidence_complete"] = bool(
+                            authority.get("trade_id") and authority.get("event_id")
+                            and authority.get("event_seq") is not None
+                            and authority.get("source_event_at_ms") is not None
+                            and authority.get("platform_received_at_ms") is not None
+                            and authority.get("exit_price") is not None
+                            and authority.get("exit_reason")
+                        )
+                    elif authority_kind == "CANONICAL_TERMINAL_RECORD":
+                        snapshot = authority.get("source_snapshot_evidence")
+                        evidence["source_snapshot_evidence_complete"] = bool(
+                            isinstance(snapshot, dict)
+                            and snapshot.get("source_git_rev")
+                            and snapshot.get("sequence") is not None
+                            and snapshot.get("captured_at")
+                            and snapshot.get("snapshot_age_sec") is not None
+                            and snapshot.get("positions_synced") is True
+                            and snapshot.get("orders_synced") is True
+                            and snapshot.get("trades_synced") is True
+                        )
                 for key in ("trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"):
                     value = finite(payload.get(key)) if key in payload else None
                     if value is not None:
                         evidence["cost_evidence"][key] = value
+                copy_slippage = finite(payload.get("copy_exit_slippage_usd"))
+                if copy_slippage is not None:
+                    evidence["cost_evidence"]["copy_exit_slippage_usd"] = copy_slippage
                 marker = str(exit_reason or "").upper()
                 if marker in unsupported_exit_markers:
                     evidence["analysis_exclusion_reasons"].append("TERMINAL_PROVENANCE_EXCLUDED")
@@ -501,6 +560,11 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             row["complete"] = not row["missing_stages"]
 
     evidence["analysis_exclusion_reasons"] = sorted(set(evidence["analysis_exclusion_reasons"]))
+    evidence["cost_evidence_complete"] = all(
+        key in evidence["cost_evidence"] for key in (
+            "trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"
+        )
+    )
     quantities_complete = all(
         finite(evidence.get(key)) is not None for key in (
             "source_quantity", "normalized_quantity", "filled_quantity", "protected_quantity"
@@ -521,13 +585,25 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 and row.get("ack_at") is not None for row in evidence["stop_chain"])
     )
     reconciliation = evidence.get("reconciliation") or {}
-    evidence["reconciliation_complete"] = bool(
+    current_reconciliation_complete = bool(
+        reconciliation.get("schema") == "relay_final_reconciliation_v1"
+        and reconciliation.get("complete") is True
+        and reconciliation.get("position_reconciled") is True
+        and finite(reconciliation.get("exchange_vs_ledger_delta_sats")) == 0.0
+        and finite(reconciliation.get("order_delta")) == 0.0
+        and finite(reconciliation.get("orphan_order_count")) == 0.0
+        and finite(reconciliation.get("foreign_order_count")) == 0.0
+    )
+    legacy_asserted_reconciliation_complete = bool(
         "reconciliation_complete" in producer_assertions
         and reconciliation.get("complete") is True
         and finite(reconciliation.get("position_delta")) == 0.0
         and finite(reconciliation.get("order_delta")) == 0.0
-        and finite(reconciliation.get("orphan_order_count", 0)) == 0.0
-        and finite(reconciliation.get("foreign_order_count", 0)) == 0.0
+        and finite(reconciliation.get("orphan_order_count")) == 0.0
+        and finite(reconciliation.get("foreign_order_count")) == 0.0
+    )
+    evidence["reconciliation_complete"] = bool(
+        current_reconciliation_complete or legacy_asserted_reconciliation_complete
     )
     return evidence
 

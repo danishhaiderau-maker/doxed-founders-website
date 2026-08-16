@@ -67,6 +67,13 @@ export class BitfinexSimTradingClient {
     return this.liveMark.getMarkPrice(symbol);
   }
 
+  async getBestBidAsk(symbol = BITFINEX_BTC_PERP_SYMBOL): Promise<{
+    bid: number; ask: number; observedAtMs: number; source: 'SIMULATED_MARK';
+  }> {
+    const mark = await this.getMarkPrice(symbol);
+    return { bid: mark, ask: mark, observedAtMs: Date.now(), source: 'SIMULATED_MARK' };
+  }
+
   async validateCredentials(_creds: ExchangeCredentials) {
     return { ok: true, message: 'Bitfinex sim relay (paper book)' };
   }
@@ -156,6 +163,21 @@ export class BitfinexSimTradingClient {
     _sinceMs: number,
   ): Promise<number> {
     return 0;
+  }
+
+  /** Paper mode has no authenticated exchange ledger rows. */
+  async getPositionCloseLedgerEntries(
+    _creds: ExchangeCredentials,
+    _sinceMs: number,
+  ): Promise<Array<{ ledgerId: string; closedAt: Date; pnlUsd: number; description: string }>> {
+    return [];
+  }
+
+  async getLedgerFeesSince(
+    _creds: ExchangeCredentials,
+    _sinceMs: number,
+  ): Promise<{ tradingFeesUsd: number; fundingFeesUsd: number; realizedPnlUsd: number; positionCloseRows: number }> {
+    return { tradingFeesUsd: 0, fundingFeesUsd: 0, realizedPnlUsd: 0, positionCloseRows: 0 };
   }
 
   async submitLimitOrder(

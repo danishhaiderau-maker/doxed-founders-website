@@ -38,6 +38,7 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
                     "stop_evidence_complete": True,
                     "source_snapshot_evidence_complete": True,
                     "reconciliation_complete": True,
+                    "cost_evidence_complete": True,
                 },
             },
             "absence": {
