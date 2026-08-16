@@ -17730,7 +17730,14 @@ def archive_research_session(payload):
     """Atomically store one exact, hash-bound analyzer generation."""
     try:
         from research.immutable_archive import create_archive
-        return str(create_archive(os.getcwd(), payload, SESSION_ARCHIVE_DIR))
+        return str(
+            create_archive(
+                os.getcwd(),
+                payload,
+                SESSION_ARCHIVE_DIR,
+                evidence_root=os.getenv("BTC_AGENT_DATA_DIR") or os.getcwd(),
+            )
+        )
     except Exception as exc:
         print(f"  ⚠️ Session archive failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
         return None

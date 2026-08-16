@@ -67,6 +67,36 @@ def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
     assert index["sessions"][0]["session_id"] == archive.name
 
 
+def test_archive_reads_evidence_from_canonical_data_root(tmp_path):
+    root = tmp_path / "run"
+    evidence_root = tmp_path / "mirror"
+    archive_root = tmp_path / "archives"
+    root.mkdir()
+    evidence_root.mkdir()
+    _fixture(root)
+    (root / "relay_lifecycle_evidence_v1.json").unlink()
+    (root / "counterfactual.jsonl").unlink()
+    (evidence_root / "relay_lifecycle_evidence_v1.json").write_text(
+        '{"schema":"relay_lifecycle_evidence_v1"}', encoding="utf-8"
+    )
+    (evidence_root / "counterfactual.jsonl").write_text(
+        '{"trade_id":"cont-evidence-root"}\n', encoding="utf-8"
+    )
+
+    archive = immutable_archive.create_archive(
+        root,
+        {},
+        archive_root,
+        evidence_root=evidence_root,
+    )
+    manifest = json.loads((archive / "archive_manifest.json").read_text(encoding="utf-8"))
+    evidence = {row["name"]: row for row in manifest["evidence"]}
+    assert evidence["relay_lifecycle_evidence_v1.json"]["available"] is True
+    assert evidence["counterfactual.jsonl"]["available"] is True
+    assert (archive / "evidence" / "relay_lifecycle_evidence_v1.json").is_file()
+    assert (archive / "evidence" / "counterfactual.jsonl").is_file()
+
+
 def test_interrupted_archive_never_exposes_partial_generation(tmp_path, monkeypatch):
     root = tmp_path / "run"
     archive_root = tmp_path / "archives"

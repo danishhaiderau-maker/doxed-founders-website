@@ -69,8 +69,15 @@ def _preserve_evidence(source: Path, staging: Path, object_root: Path) -> Path:
     return target
 
 
-def create_archive(root: str | Path, payload: dict, archive_root: str | Path) -> Path:
+def create_archive(
+    root: str | Path,
+    payload: dict,
+    archive_root: str | Path,
+    *,
+    evidence_root: str | Path | None = None,
+) -> Path:
     root = Path(root).resolve()
+    evidence_root = Path(evidence_root or root).resolve()
     archive_root = Path(archive_root).resolve()
     report_manifest_path = root / "report_manifest.json"
     report_manifest = json.loads(report_manifest_path.read_text(encoding="utf-8"))
@@ -124,7 +131,7 @@ def create_archive(root: str | Path, payload: dict, archive_root: str | Path) ->
         (staging / "session_meta.json").write_text(json.dumps(session_meta, indent=2), encoding="utf-8")
         evidence = []
         for name in EVIDENCE_NAMES:
-            source = root / name
+            source = evidence_root / name
             if source.is_file():
                 preserved = _preserve_evidence(source, staging, object_root)
                 evidence.append({"name": name, "available": True, "sha256": _sha256(preserved), "size_bytes": preserved.stat().st_size})
