@@ -58,6 +58,14 @@ const botSourcePath = new URL(
   '../services/btc-conservative-agent/bot.py',
   import.meta.url,
 );
+const flyDockerfilePath = new URL(
+  '../services/btc-conservative-agent/Dockerfile',
+  import.meta.url,
+);
+const flyDockerignorePath = new URL(
+  '../services/btc-conservative-agent/.dockerignore',
+  import.meta.url,
+);
 const flyLockHelperPath = new URL('./fly-canonical-lock.ps1', import.meta.url);
 const homeLauncherPath = new URL('./home-stack-launcher.ps1', import.meta.url);
 const fastRecoverPath = new URL('./fast-recover-global.ps1', import.meta.url);
@@ -108,6 +116,21 @@ test('Fly deploy proves a disarmed paper-signal owner, never a direct live execu
   assert.match(workflow, /paper-signal-only/);
   assert.match(workflow, /python test_paper_mode_private_api_isolation\.py/);
   assert.match(workflow, /python test_showcase_manual_close\.py/);
+});
+
+test('Fly image includes and imports every root runtime research module', async () => {
+  const dockerfile = await readFile(flyDockerfilePath, 'utf8');
+  const dockerignore = await readFile(flyDockerignorePath, 'utf8');
+  const requiredModules = [
+    'analysis_eligibility',
+    'platform_relay_evidence',
+    'immutable_archive',
+  ];
+
+  for (const moduleName of requiredModules) {
+    assert.match(dockerignore, new RegExp(`!research/${moduleName}\\.py`));
+    assert.match(dockerfile, new RegExp(`research\\.${moduleName}`));
+  }
 });
 
 test('Fly routes on process liveness while strategy readiness stays separate', async () => {

@@ -18,6 +18,8 @@
 !research/
 research/*
 !research/analysis_eligibility.py
+!research/platform_relay_evidence.py
+!research/immutable_archive.py
 
 # 4. Re-include deploy + Python dependency manifests.
 !requirements.txt
@@ -33,6 +35,6 @@ research/*
 !*.yaml
 !*.yml
 
-# Explicitly keep excluded (apart from research/analysis_eligibility.py): research/, research_accumulator/,
+# Explicitly keep excluded (apart from the three runtime research modules above): research/, research_accumulator/,
 # research_archive/, logs/, .git/, node_modules/, .next/, dist/, .turbo/, .cursor/,
 # and any home-stack markers / local secrets (.home-*, *-home.env, .openai_*, .anthropic_*).
