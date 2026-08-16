@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Release reserved stops only at fenced close submit
+Consume rejected emergency proof into one new fence
 
 ## Last Activity
 
