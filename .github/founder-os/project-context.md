@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Harden catch-up recovery and evidence joins
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
