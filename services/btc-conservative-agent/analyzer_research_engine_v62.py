@@ -17718,11 +17718,19 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
         }
     elif isinstance(report.get("showcase_cohort"), dict):
         cohort_row = report["showcase_cohort"]
-        included = int(cohort_row.get("included_row_count", 0) or 0)
-        evidence_rows = int(cohort_row.get("evidence_row_count", 0) or 0)
+        included = int(
+            cohort_row.get("included_row_count", cohort_row.get("eligible_ids", 0))
+            or 0
+        )
+        evidence_rows = int(
+            cohort_row.get("evidence_row_count", cohort_row.get("evidence_rows", 0))
+            or 0
+        )
         report["report_eligibility"] = {
             "classification": "REPORT_SPECIFIC_SHOWCASE_GATE",
             **cohort_row,
+            "included_row_count": included,
+            "evidence_row_count": evidence_rows,
             "excluded_row_count": max(0, evidence_rows - included),
         }
     else:

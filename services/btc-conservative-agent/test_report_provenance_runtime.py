@@ -68,3 +68,34 @@ def test_report_stamp_marks_ungated_report_descriptive_and_unqualified(tmp_path)
     assert report["report_eligibility"]["included_row_count"] == 0
     assert report["report_eligibility"]["excluded_row_count"] == 10
     assert report["live_policy_change_allowed"] is False
+
+
+def test_report_stamp_normalizes_report_specific_showcase_counts(tmp_path):
+    report_path = tmp_path / "cluster.json"
+    report_path.write_text(json.dumps({
+        "showcase_cohort": {
+            "schema": "analysis_cohorts_v1",
+            "eligible_ids": 5,
+            "evidence_rows": 44,
+            "exclusion_reason_counts": {"REPLAY_INCOMPLETE": 39},
+        }
+    }), encoding="utf-8")
+    cohorts = {
+        analyzer.SHOWCASE_STRATEGY: {"included_row_count": 5, "evidence_row_count": 44, "exclusion_reason_counts": {}},
+        analyzer.BITFINEX_COPY_FIDELITY: {"included_row_count": 0, "evidence_row_count": 44, "exclusion_reason_counts": {}},
+        analyzer.REAL_COPY_PARAMETER_OPTIMISATION: {"included_row_count": 0, "evidence_row_count": 44, "exclusion_reason_counts": {}},
+    }
+    provenance = {
+        "cohort_schema": "analysis_cohorts_v1",
+        "generation_revision": "b" * 40,
+        "source_data_revision": "c" * 64,
+        "policy_comparability_key": None,
+        "cohorts": cohorts,
+    }
+
+    analyzer._stamp_report_analysis_provenance(str(report_path), provenance)
+    eligibility = json.loads(report_path.read_text(encoding="utf-8"))["report_eligibility"]
+
+    assert eligibility["included_row_count"] == 5
+    assert eligibility["evidence_row_count"] == 44
+    assert eligibility["excluded_row_count"] == 39
