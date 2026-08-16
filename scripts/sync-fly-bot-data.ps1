@@ -272,6 +272,11 @@ if ($PublishAnalyzerReport) {
   $bundlePath = Join-Path ([System.IO.Path]::GetTempPath()) "doxxed-analyzer-$PID-$([guid]::NewGuid().ToString('N')).zip"
   $snapshotRoot = Join-Path ([System.IO.Path]::GetTempPath()) "doxxed-analyzer-snapshot-$PID-$([guid]::NewGuid().ToString('N'))"
   New-Item -ItemType Directory -Path $snapshotRoot | Out-Null
+  # Windows PowerShell 5.1 does not always load the base compression assembly
+  # when FileSystem is requested. Load both explicitly before using
+  # ZipArchiveMode so publication behaves the same in the desktop supervisor
+  # and newer PowerShell runtimes.
+  Add-Type -AssemblyName System.IO.Compression
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   try {
     $requiredPaths = [System.Collections.Generic.List[string]]::new()
