@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Represent characterization digest without secret false positive
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
