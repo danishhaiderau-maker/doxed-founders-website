@@ -19235,9 +19235,76 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           );
         })
       : [];
+    const exactReleasedOpenRows = operator && openRows.length === 1
+      ? (await Promise.all(openRows.map(async (row) => {
+          if (row.terminalCloseClaimToken || row.terminalCloseRequestId || row.terminalClosePhase) return null;
+          const rejection = await this.prisma.signalCycleEvent.findFirst({
+            where: {
+              participantId: row.id,
+              eventType: 'ACCOUNT_EMERGENCY_CLOSE_REJECTED',
+              payload: { path: ['safe_for_new_operator_request'], equals: true },
+            },
+            select: { payload: true, createdAt: true },
+            orderBy: { createdAt: 'desc' },
+          });
+          const payload =
+            rejection?.payload && typeof rejection.payload === 'object' && !Array.isArray(rejection.payload)
+              ? rejection.payload as Record<string, unknown>
+              : null;
+          const rejectedRequestId = typeof payload?.request_id === 'string' ? payload.request_id : null;
+          const rejectedCid = Number(payload?.client_order_id);
+          if (
+            payload?.deterministic_exchange_rejection !== true
+            || payload.safe_for_new_operator_request !== true
+            || !rejectedRequestId
+            || !Number.isSafeInteger(rejectedCid)
+          ) return null;
+          const submitted = await this.prisma.signalCycleEvent.findFirst({
+            where: {
+              participantId: row.id,
+              eventType: 'ACCOUNT_EMERGENCY_CLOSE_SUBMITTING',
+              payload: { path: ['request_id'], equals: rejectedRequestId },
+            },
+            select: { payload: true, createdAt: true },
+            orderBy: { createdAt: 'desc' },
+          });
+          const submittedPayload =
+            submitted?.payload && typeof submitted.payload === 'object' && !Array.isArray(submitted.payload)
+              ? submitted.payload as Record<string, unknown>
+              : null;
+          const beforeAmount = finiteDecimalLikeNumber(submittedPayload?.before_amount);
+          const closeQty = finiteDecimalLikeNumber(submittedPayload?.close_qty);
+          const direction = submittedPayload?.direction;
+          const participantIds = Array.isArray(submittedPayload?.participant_ids)
+            ? submittedPayload.participant_ids.map(String)
+            : [];
+          const meta = await this.loadExecutionMeta(row.id);
+          const currentPosition = await this.activeTrading.getOpenPositionDetail(creds);
+          const exactProof =
+            submittedPayload?.schema === 'account_emergency_close_v2'
+            && submittedPayload.request_id === rejectedRequestId
+            && Number(submittedPayload.client_order_id) === rejectedCid
+            && submittedPayload.phase === 'SUBMITTING'
+            && participantIds.length === 1
+            && participantIds[0] === row.id
+            && beforeAmount != null
+            && closeQty != null
+            && btcToSats(Math.abs(beforeAmount)) === btcToSats(closeQty)
+            && direction === (beforeAmount > 0 ? 'LONG' : 'SHORT')
+            && meta.direction === direction
+            && meta.qty != null
+            && btcToSats(meta.qty) === btcToSats(closeQty)
+            && btcToSats(currentPosition?.amount ?? 0) === btcToSats(beforeAmount)
+            && submitted!.createdAt.getTime() <= rejection!.createdAt.getTime();
+          return exactProof ? row : null;
+        }))).filter((row): row is (typeof openRows)[number] => row != null)
+      : [];
     if (
       operator && openRows.length > 0
-      && !(openRows.length === 1 && exactFencedOpenRows.length === 1)
+      && !(
+        openRows.length === 1
+        && (exactFencedOpenRows.length === 1 || exactReleasedOpenRows.length === 1)
+      )
     ) {
       throw new ConflictException(
         'BOT_ADMIN emergency reconcile refuses promoted OPEN lots; use authenticated account-owner recovery',
@@ -19299,7 +19366,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const residualRows = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
-        status: exactFencedOpenRows.length > 0
+        status: exactFencedOpenRows.length > 0 || exactReleasedOpenRows.length > 0
           ? { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] }
           : SignalCycleStatus.PENDING_ENTRY,
         cycle: { agentId: agent.id },
@@ -19307,7 +19374,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       include: { cycle: { select: { tradeId: true } } },
       orderBy: { createdAt: 'asc' },
     });
-    const exactFencedOpenIds = new Set(exactFencedOpenRows.map((row) => row.id));
+    const exactFencedOpenIds = new Set(
+      [...exactFencedOpenRows, ...exactReleasedOpenRows].map((row) => row.id),
+    );
     const pendingRows = residualRows.filter((row) =>
       row.status === SignalCycleStatus.PENDING_ENTRY || exactFencedOpenIds.has(row.id));
     if (pendingRows.length > 0) {
@@ -19441,6 +19510,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             ) {
               throw new Error(
                 `Emergency account close ${incidentId} same-CID recovery was already attempted; no resubmit`,
+              );
+            }
+            const retryClaim = await this.prisma.signalCycleParticipant.updateMany({
+              where: {
+                id: coordinator.id,
+                cycleId: coordinator.cycleId,
+                terminalCloseClaimToken: fence.ownerToken,
+                terminalCloseRequestId: fence.requestId,
+                terminalClosePhase: 'SUBMITTING',
+                terminalCloseAcknowledgedAt: null,
+              },
+              data: { terminalCloseAcknowledgedAt: new Date() },
+            });
+            if (retryClaim.count !== 1) {
+              throw new Error(
+                `Emergency account close ${incidentId} same-CID recovery claim is already owned; no resubmit`,
               );
             }
             // Both authenticated Bitfinex order books prove that this exact CID

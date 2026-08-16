@@ -7808,7 +7808,9 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submi
         return { count: 1 };
       },
     },
-    signalCycleEvent: { create: async ({ data }: any) => { events.push(data); } },
+    signalCycleEvent: {
+      create: async ({ data }: any) => { events.push({ ...data, createdAt: new Date() }); },
+    },
   };
   service.prisma = {
     $transaction: async (fn: any) => fn(tx),
@@ -7823,13 +7825,25 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submi
     signalCycleParticipant: {
       findMany: async ({ where }: any) => where.status === SignalCycleStatus.OPEN ? [] : [participant],
       findFirst: async () => durable.terminalCloseClaimToken ? { ...durable } : null,
+      updateMany: async ({ where, data }: any) => {
+        if (where.terminalCloseClaimToken !== durable.terminalCloseClaimToken
+          || where.terminalCloseRequestId !== durable.terminalCloseRequestId
+          || where.terminalClosePhase !== durable.terminalClosePhase
+          || (where.terminalCloseAcknowledgedAt === null
+            && durable.terminalCloseAcknowledgedAt != null)) return { count: 0 };
+        Object.assign(durable, data);
+        return { count: 1 };
+      },
     },
     signalCycleEvent: {
       findMany: async () => [],
-      findFirst: async ({ where }: any) => events.find((event) =>
-        event.participantId === where.participantId
-        && event.eventType === where.eventType
-        && event.payload?.event === where.payload?.equals) ?? null,
+      findFirst: async ({ where }: any) => {
+        const key = where.payload?.path?.[0];
+        return [...events].reverse().find((event) =>
+          event.participantId === where.participantId
+          && event.eventType === where.eventType
+          && (!key || event.payload?.[key] === where.payload?.equals)) ?? null;
+      },
     },
   };
   service.exchanges = { getUserCredentials: async () => ({ key: 'x', secret: 'y' }) };
@@ -7838,7 +7852,7 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submi
     recordHireExecutionEvent: async (
       _userId: string, _agentId: string, _cycleId: string,
       eventType: string, payload: any,
-    ) => { events.push({ participantId: participant.id, eventType, payload }); },
+    ) => { events.push({ participantId: participant.id, eventType, payload, createdAt: new Date() }); },
   };
   service.loadExecutionMeta = async () => ({
     bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT', leverage: 10,
@@ -8016,6 +8030,67 @@ test('account emergency cancels only exact reserved stops at close-ready and fai
     /position changed before submit/,
   );
   assert.equal(changed.getSubmits(), 0);
+});
+
+test('deterministically rejected OPEN recovery consumes exact proof into one new fenced close', async () => {
+  const rejection = 'Bitfinex v2/auth/w/order/submit: Invalid order: not enough tradable balance';
+  const fx = accountEmergencyServiceFixture({ submitError: rejection });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /deterministically rejected; fence_released=true/,
+  );
+  const rejectedRequest = fx.events.find((event) =>
+    event.eventType === 'ACCOUNT_EMERGENCY_CLOSE_REJECTED').payload.request_id;
+  const openParticipant = {
+    id: 'participant-a', cycleId: 'cycle-a', createdAt: new Date(0),
+    status: SignalCycleStatus.OPEN, cycle: { tradeId: 'cont-a' },
+  };
+  fx.service.prisma.signalCycleParticipant.findMany = async ({ where }: any) => {
+    if (where.status === SignalCycleStatus.OPEN) return [{ ...openParticipant, ...fx.durable }];
+    if (where.status?.in) return [{ ...openParticipant, ...fx.durable }];
+    return [];
+  };
+  fx.service.bitfinex.submitMarketClose = async (_creds: unknown, input: any) => {
+    assert.equal(input.clientOrderId, fx.durable.terminalCloseAuthority.client_order_id);
+    fx.setPositionAmount(0);
+    return 9010;
+  };
+  const result = await fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah', {
+    actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason: 'rejected-proof-reentry',
+  });
+  assert.equal(result.flattened, 1);
+  assert.equal(fx.durable.terminalClosePhase, 'CONFIRMED');
+  assert.notEqual(fx.durable.terminalCloseRequestId, rejectedRequest);
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah', {
+      actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason: 'proof-double-use',
+    }),
+    /refuses promoted OPEN lots/,
+  );
+});
+
+test('deterministic rejection proof rejects wrong participant scope and concurrent same-CID retry', async () => {
+  const fx = accountEmergencyServiceFixture({ submitThrows: true });
+  await assert.rejects(fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'), /submit result UNKNOWN/);
+  const openParticipant = {
+    id: 'participant-a', cycleId: 'cycle-a', createdAt: new Date(0),
+    status: SignalCycleStatus.OPEN, cycle: { tradeId: 'cont-a' },
+  };
+  fx.service.prisma.signalCycleParticipant.findMany = async ({ where }: any) => {
+    if (where.status === SignalCycleStatus.OPEN) return [{ ...openParticipant, ...fx.durable }];
+    if (where.status?.in) return [{ ...openParticipant, ...fx.durable }];
+    return [];
+  };
+  const attempts = await Promise.allSettled([
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah', {
+      actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason: 'concurrent-a',
+    }),
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah', {
+      actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason: 'concurrent-b',
+    }),
+  ]);
+  assert.equal(attempts.filter((result) => result.status === 'rejected').length, 2);
+  assert.equal(fx.getSubmits(), 2);
 });
 
 test('account emergency releases only an explicitly rejected SUBMITTING request', async () => {
