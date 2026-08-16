@@ -187,8 +187,12 @@ def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:
     evidence_src = ast.get_source_segment(BOT_SOURCE, evidence_func)
     assert evidence_src is not None
     assert 'replay.get("replay_complete") is True' in evidence_src
-    assert '"analysis_eligible": not exclusion_reasons' in evidence_src
+    assert 'fields["analysis_cohorts"] = assessment' in evidence_src
+    assert 'REAL_COPY_PARAMETER_OPTIMISATION' in evidence_src
+    assert '"analysis_eligible": False' in evidence_src
     assert '"ACTUAL_BITFINEX_PNL_MISSING"' in evidence_src
+    assert '"bitfinex_evidence": bitfinex_evidence' in evidence_src
+    assert '"required_post_exit_horizons_complete"' in evidence_src
 
 
 if __name__ == "__main__":

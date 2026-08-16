@@ -2652,6 +2652,32 @@ model SignalCycleParticipant {
   feeTxSignature      String?                     @unique
   feeSettlementMethod String?
   settledAt           DateTime?
+  terminalCloseClaimToken      String?   @unique
+  terminalCloseClaimedAt       DateTime?
+  terminalCloseGeneration      String?
+  terminalCloseAuthority       Json?
+  terminalClosePhase           String?
+  terminalCloseRequestId       String?   @unique
+  terminalCloseBeforeAmount    Decimal?  @db.Decimal(18, 8)
+  terminalCloseTargetAmount    Decimal?  @db.Decimal(18, 8)
+  terminalCloseQty             Decimal?  @db.Decimal(18, 8)
+  terminalCloseExchangeOrderId BigInt?
+  terminalCloseAcknowledgedAt  DateTime?
+  terminalCloseConfirmedAt     DateTime?
+  fillPromotionKey             String?   @unique
+  fillPromotionClaimToken      String?   @unique
+  fillPromotionClaimedAt       DateTime?
+  fillPromotionGeneration      String?
+  fillPromotionEntryOrderId    BigInt?
+  fillPromotionStopOrderId     BigInt?
+  fillPromotionStopClientId    Int?
+  fillPromotionPhase           String?
+  partialEmergencyRequestId    String?   @unique
+  partialEmergencyPhase        String?
+  partialEmergencyClaimedAt    DateTime?
+  partialEmergencyOrderId      BigInt?
+  partialEmergencyBeforeAmount Decimal?  @db.Decimal(20, 8)
+  partialEmergencyTargetAmount Decimal?  @db.Decimal(20, 8)
   createdAt           DateTime                    @default(now())
   updatedAt           DateTime                    @updatedAt
 

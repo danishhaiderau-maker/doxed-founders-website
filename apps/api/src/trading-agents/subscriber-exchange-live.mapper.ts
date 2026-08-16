@@ -1,6 +1,6 @@
 import type { SignalCycleStatus } from '@prisma/client';
 import type { TradingAgentDashboardState } from '@dcf/utils';
-import { formatMelbourneDateTime } from '@dcf/utils';
+import { formatMelbourneDateTime, parseMelbourneTimestampMs } from '@dcf/utils';
 import type {
   BitfinexActiveOrder,
   BitfinexPositionCloseLedgerRow,
@@ -38,6 +38,12 @@ export type SubscriberCycleRow = {
   filledAt?: Date | null;
   /** Exchange holding-period boundary, sourced from the first EXIT event. */
   closedAt?: Date | null;
+  sourceSignalAt?: Date | null;
+  sourceFillAt?: Date | null;
+  exchangeOrderAckAt?: Date | null;
+  exchangeFillAt?: Date | null;
+  exchangeExitAt?: Date | null;
+  negativeEvidence?: string | null;
   updatedAt: Date;
   createdAt: Date;
   cycle: {
@@ -348,6 +354,16 @@ export function mapSubscriberExchangeLiveBook(input: {
           ? lateEntryLifecycleLabel(row.cycle.showcaseExitReason ?? row.terminalReason)
           : row.cycle.showcaseExitReason ?? row.terminalReason ?? null,
         aiBand: row.exchangeProven === true ? 'EXCHANGE_VERIFIED' : 'NEON_CLOSED',
+        sourceSignalTime: row.sourceSignalAt ? fmtTime(row.sourceSignalAt) : fmtTime(row.cycle.createdAt),
+        sourceFillTime: row.sourceFillAt ? fmtTime(row.sourceFillAt) : null,
+        exchangeOrderAckTime: row.exchangeOrderAckAt ? fmtTime(row.exchangeOrderAckAt) : null,
+        exchangeFillTime: row.exchangeFillAt ? fmtTime(row.exchangeFillAt) : fmtTime(holdingStartedAt),
+        exchangeExitTime: row.exchangeExitAt ? fmtTime(row.exchangeExitAt) : fmtTime(holdingClosedAt),
+        lifecycleStatus: row.sourceFillAt ? 'SOURCE_AND_COPY' : 'COPY_FIRST_DIVERGENCE',
+        evidenceStatus: row.exchangeProven === true
+          ? 'Exchange-linked participant lifecycle'
+          : 'Neon lifecycle; exchange linkage incomplete',
+        negativeEvidence: row.negativeEvidence ?? null,
       });
     }
   }
@@ -369,19 +385,47 @@ export function mapSubscriberExchangeLiveBook(input: {
       fundingUsd: 0,
       exitReason: null,
       aiBand: 'EXCHANGE',
+      exchangeExitTime: fmtTime(row.closedAt),
+      lifecycleStatus: 'EXCHANGE_ONLY',
+      evidenceStatus: 'Unlinked Bitfinex cash-ledger close',
+      negativeEvidence: 'Canonical trade linkage unavailable',
     });
   }
-  // Ledger rows are authoritative for cash P&L when present. Neon closes only
-  // backfill when the ledger is empty so Completed trades can match Session P&L
-  // without double-counting the same close in the metrics bar sum.
-  if ((input.ledgerCloses?.length ?? 0) === 0) {
-    trades.push(...participantCloseFallbacks);
-  }
+  // Preserve identity-bearing participant lifecycles even when Bitfinex's cash
+  // ledger endpoint also returns rows. Previously any ledger result replaced
+  // every canonical trade with anonymous `bfx-*` rows, making fresh copy fills
+  // disappear from the website. Merge only exchange-proven participants that
+  // can be correlated by terminal time and P&L; retain unmatched ledger rows as
+  // explicit EXCHANGE_ONLY evidence instead of fabricating Showcase activity.
+  const unmatchedLedger = [...trades];
+  const participantRowsForMerge = unmatchedLedger.length > 0
+    ? participantCloseFallbacks.filter((participant) => participant.aiBand === 'EXCHANGE_VERIFIED')
+    : participantCloseFallbacks;
+  const mergedParticipantRows = participantRowsForMerge.map((participant) => {
+    if (participant.aiBand !== 'EXCHANGE_VERIFIED') return participant;
+    const participantCloseMs = parseMelbourneTimestampMs(participant.exchangeExitTime ?? participant.time);
+    const matchIndex = unmatchedLedger.findIndex((ledger) => {
+      const ledgerCloseMs = parseMelbourneTimestampMs(ledger.exchangeExitTime ?? ledger.time);
+      return participantCloseMs != null && ledgerCloseMs != null &&
+        Math.abs(participantCloseMs - ledgerCloseMs) <= 5 * 60_000 &&
+        Math.abs(participant.netUsd - ledger.netUsd) <= 0.05;
+    });
+    if (matchIndex < 0) return participant;
+    const [ledger] = unmatchedLedger.splice(matchIndex, 1);
+    return {
+      ...participant,
+      netUsd: ledger.netUsd,
+      grossUsd: ledger.grossUsd,
+      evidenceStatus: `Exchange-linked lifecycle; cash ledger ${ledger.tradeId}`,
+    };
+  });
+  trades.length = 0;
+  trades.push(...mergedParticipantRows, ...unmatchedLedger);
 
   trades.sort((a, b) => {
-    const ta = Date.parse(String(a.time).replace(' AEST', '+10:00'));
-    const tb = Date.parse(String(b.time).replace(' AEST', '+10:00'));
-    return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+    const ta = parseMelbourneTimestampMs(a.exchangeExitTime ?? a.time) ?? 0;
+    const tb = parseMelbourneTimestampMs(b.exchangeExitTime ?? b.time) ?? 0;
+    return tb - ta;
   });
 
   // Exchange-truth pending limits when Neon participant rows lag or omit qty/price.

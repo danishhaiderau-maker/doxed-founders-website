@@ -26,6 +26,9 @@ def test_unauthenticated_mobile_analysis_redirects_to_login():
     assert "_analyzer_view_authed()" in route
     assert "resp.headers['Location'] = '/analysis/login'" in route
     assert "Cache-Control" in route
+    assert "resp.headers['Location'] = '/analysis/'" in route
+    assert "def analyzer_mirror_dashboard_index" in route
+    assert "def analyzer_mirror_artifact" in route
 
 
 def test_fly_dashboard_link_uses_same_origin_mobile_analysis_route():
@@ -135,6 +138,9 @@ def test_report_manifest_exposes_cohort_provenance_and_revision():
     assert '"included_row_count": len(eligible)' in manifest
     assert '"exclusion_reason_counts": exclusions' in manifest
     assert '"analysis_provenance": analysis_provenance' in manifest
+    assert '"cohort_schema": analysis_provenance["cohort_schema"]' in manifest
+    assert '"generation_revision": analysis_provenance["generation_revision"]' in manifest
+    assert '"cohorts": analysis_provenance["cohorts"]' in manifest
 
 
 def test_demo_harness_runs_canonical_analyzer_and_propagates_failure():
@@ -175,3 +181,25 @@ def test_analysis_response_has_browser_hardening_headers():
     assert "X-Frame-Options" in route
     assert "Referrer-Policy" in route
     assert "Cache-Control" in route
+    assert "Content-Security-Policy" in route
+    assert "default-src 'none'" in route
+
+
+def test_snapshot_routes_resolve_only_the_atomically_selected_generation():
+    resolver = _route("_active_analyzer_mirror_dir", "def _safe_analyzer_bundle_members")
+    routes = _route("api_analyzer_mirror_status", "@app.route('/analysis/login'")
+    assert "analyzer_current.json" in SOURCE
+    assert 'status.get("complete") is True' in SOURCE
+    assert "_recover_latest_analyzer_generation()" in resolver
+    assert "_prune_analyzer_generations(generation)" in SOURCE
+    assert "_active_analyzer_mirror_dir()" in routes
+    assert "mirror = _analyzer_mirror_dir().resolve()" not in routes
+    assert "Cache-Control" in routes
+
+
+def test_mobile_snapshot_is_truthfully_labelled_and_uses_portable_report_links():
+    for analyzer_source in ANALYZER_SOURCES:
+        assert "Local Analyzer Snapshot" in analyzer_source
+        assert "Read-only Fly mirror of the locally generated analyzer" in analyzer_source
+        assert "not the live interactive desktop dashboard" in analyzer_source
+        assert '.replace(os.sep, "/")' in analyzer_source

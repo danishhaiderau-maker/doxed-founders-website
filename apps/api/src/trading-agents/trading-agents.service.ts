@@ -630,6 +630,66 @@ export class TradingAgentsService implements OnModuleInit {
     };
   }
 
+  /**
+   * Read-only append-only evidence export. Payloads are the immutable database
+   * events; consumers derive views without changing prior event truth.
+   */
+  async exportOpsRelayEvidence(
+    slug: string,
+    userId: string | undefined,
+    adminHeader?: string,
+    authorization?: string,
+  ) {
+    // Reuse the constant-time, user-scoped ops authentication contract.
+    await this.getOpsRelayStatus(slug, userId, adminHeader, authorization);
+    const scopedUserId = userId!.trim();
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: { userId: scopedUserId, cycle: { agentId: agent.id } },
+      include: {
+        cycle: {
+          select: {
+            id: true, tradeId: true, status: true, intentEnvelope: true,
+            showcaseExitReason: true, botVersion: true, createdAt: true, closedAt: true,
+          },
+        },
+        events: {
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          select: { id: true, eventType: true, payload: true, createdAt: true },
+        },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    });
+    return {
+      schema: 'relay_lifecycle_evidence_v1',
+      generatedAt: new Date().toISOString(),
+      generatingRevision: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      runIdentity: process.env.RAILWAY_DEPLOYMENT_ID || process.env.FLY_ALLOC_ID || null,
+      agentSlug: slug,
+      userId: scopedUserId,
+      records: participants.map((p) => ({
+        canonicalTradeId: p.cycle.tradeId,
+        lifecycleId: p.cycle.id,
+        participantId: p.id,
+        participantStatus: p.status,
+        venue: p.venue,
+        cycleStatus: p.cycle.status,
+        botVersion: p.cycle.botVersion,
+        intentEnvelope: p.cycle.intentEnvelope,
+        showcaseExitReason: p.cycle.showcaseExitReason,
+        createdAt: p.cycle.createdAt.toISOString(),
+        closedAt: p.cycle.closedAt?.toISOString() ?? null,
+        events: p.events.map((event) => ({
+          id: event.id,
+          eventType: event.eventType,
+          payload: event.payload,
+          createdAt: event.createdAt.toISOString(),
+        })),
+      })),
+    };
+  }
+
   /** Full-session analytics from the research analyzer (:9001), proxied through the bot tunnel.
    *  Returns a normalized envelope the Agent Hub Conservative BTC block renders. */
   async getAnalyzerSummary(slug: string): Promise<{
@@ -1137,10 +1197,46 @@ export class TradingAgentsService implements OnModuleInit {
       take: 100,
     });
 
+    const evidenceDate = (
+      events: Array<{ eventType: string; payload: unknown; createdAt: Date }>,
+      eventType: string,
+      keys: string[],
+      fallbackToEventTime = false,
+    ): Date | null => {
+      const event = events.find((candidate) => candidate.eventType === eventType);
+      if (!event) return null;
+      const payload = event.payload && typeof event.payload === 'object'
+        ? event.payload as Record<string, unknown>
+        : {};
+      for (const key of keys) {
+        const raw = payload[key];
+        const millis = typeof raw === 'number' && Number.isFinite(raw)
+          ? raw
+          : typeof raw === 'string'
+            ? Date.parse(raw)
+            : Number.NaN;
+        if (Number.isFinite(millis)) return new Date(millis);
+      }
+      return fallbackToEventTime ? event.createdAt : null;
+    };
+
     const participants: SubscriberCycleRow[] = rows.map((r) => {
       const meta = foldParticipantExecutionMeta(r.events);
       const filledAt = r.events.find((event) => event.eventType === 'FILLED')?.createdAt ?? null;
       const closedAt = r.events.find((event) => event.eventType === 'EXIT')?.createdAt ?? null;
+      const intent = r.cycle.intentEnvelope && typeof r.cycle.intentEnvelope === 'object'
+        ? r.cycle.intentEnvelope as { context?: Record<string, unknown> }
+        : null;
+      const sourceSignalRaw = intent?.context?.sourceEventAt ??
+        intent?.context?.showcase_event_at ?? intent?.context?.ts;
+      const sourceSignalMs = typeof sourceSignalRaw === 'number'
+        ? sourceSignalRaw
+        : typeof sourceSignalRaw === 'string' ? Date.parse(sourceSignalRaw) : Number.NaN;
+      const negativeEvent = [...r.events].reverse().find((event) =>
+        event.eventType === 'NEGATIVE_EVIDENCE' || event.eventType === 'MIRROR_DIFF');
+      const negativePayload = negativeEvent?.payload && typeof negativeEvent.payload === 'object'
+        ? negativeEvent.payload as Record<string, unknown>
+        : null;
       return {
         status: r.status,
         fillPrice: r.fillPrice != null ? Number(r.fillPrice) : null,
@@ -1157,6 +1253,30 @@ export class TradingAgentsService implements OnModuleInit {
         lateEntryContinuation: meta.lateEntryContinuation,
         filledAt,
         closedAt,
+        sourceSignalAt: Number.isFinite(sourceSignalMs) ? new Date(sourceSignalMs) : r.cycle.createdAt,
+        // Do not infer a Showcase paper fill from Bitfinex. This stays null when
+        // the copy filled first or the source never published POSITION_OPENED.
+        sourceFillAt: evidenceDate(r.events, 'FILLED', ['source_fill_at', 'source_event_at']),
+        exchangeOrderAckAt: evidenceDate(
+          r.events,
+          'ORDER_PLACED',
+          ['entryExchangeAckAtMs', 'exchange_ack_at', 'exchange_order_ack_at'],
+        ),
+        exchangeFillAt: evidenceDate(
+          r.events,
+          'FILLED',
+          ['exchange_fill_last_at', 'exchange_fill_first_at', 'exchange_fill_mts', 'exchange_fill_received_at'],
+          true,
+        ),
+        exchangeExitAt: evidenceDate(
+          r.events,
+          'EXIT',
+          ['close_confirmed_at', 'close_exchange_ack_at', 'exchange_exit_at'],
+          true,
+        ),
+        negativeEvidence: negativeEvent
+          ? String(negativePayload?.event ?? negativePayload?.reason ?? negativeEvent.eventType)
+          : null,
         updatedAt: r.updatedAt,
         createdAt: r.createdAt,
         cycle: {

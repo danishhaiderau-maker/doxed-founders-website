@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   executorWakeAuthorized,
@@ -511,6 +515,7 @@ test('finalized entry quantity snaps only a terminal one-satoshi transport artif
 test('service money path protects a partial fill without cancelling its entry remainder', async () => {
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
   let entryCancelCalls = 0;
+  let partialStopPrice = 0;
   let resolveSubmit!: (id: number) => void;
   const submit = new Promise<number>((resolve) => { resolveSubmit = resolve; });
   const originalNow = Date.now;
@@ -535,7 +540,12 @@ test('service money path protects a partial fill without cancelling its entry re
     {} as never,
   );
   (service as any).activeTrading = {
-    submitStopOrder: async () => submit,
+    submitStopOrder: async (_creds: unknown, input: any) => { partialStopPrice = input.stopPrice; return submit; },
+    listActiveOrders: async () => [],
+    findOrder: async (_creds: unknown, id: number) => ({
+      id, symbol: 'tBTCF0:USTF0', amount: 0.015, amountOrig: 0.015,
+      price: partialStopPrice, status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }),
     getMarkPrice: async () => 64_126.31,
     cancelOrder: async () => {
       entryCancelCalls += 1;
@@ -593,6 +603,7 @@ test('service money path protects a partial fill without cancelling its entry re
 
 test('service persists replacement stop ownership before cancelling the old partial stop', async () => {
   const order: string[] = [];
+  let replacementStopPrice = 0;
   const service = new SignalSubscriberExecutionService(
     {} as never,
     {} as never,
@@ -604,7 +615,12 @@ test('service persists replacement stop ownership before cancelling the old part
     {} as never,
   );
   (service as any).activeTrading = {
-    submitStopOrder: async () => 7002,
+    submitStopOrder: async (_creds: unknown, input: any) => { replacementStopPrice = input.stopPrice; return 7002; },
+    listActiveOrders: async () => [],
+    findOrder: async (_creds: unknown, id: number) => id === 7001 ? null : ({
+      id, symbol: 'tBTCF0:USTF0', amount: 0.015, amountOrig: 0.015,
+      price: replacementStopPrice, status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }),
     getMarkPrice: async () => 64_126.31,
   };
   (service as any).cancelManagedOrderGone = async () => {
@@ -644,13 +660,25 @@ test('verified fill submits protective stop before trade enrichment and persists
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
   const exchangeFillAtMs = Date.now() - 2_000;
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let submittedStop: { positionDirection: 'LONG' | 'SHORT'; qty: number; stopPrice: number } | undefined;
   service.activeTrading = {
-    submitStopOrder: async () => {
+    submitStopOrder: async (_creds: unknown, input: typeof submittedStop) => {
+      submittedStop = input;
       order.push('stop-submit');
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
       order.push('stop-ack');
       return 7003;
     },
+    findOrder: async (_creds: unknown, orderId: number) => ({
+      id: orderId,
+      symbol: 'tBTCF0:USTF0',
+      amount: submittedStop?.qty ?? 0,
+      amountOrig: submittedStop?.qty ?? 0,
+      price: submittedStop?.stopPrice ?? 0,
+      status: 'ACTIVE',
+      orderType: 'STOP',
+      flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }),
   };
   service.cancelManagedOrderGone = async () => {
     order.push('cancel-start');
@@ -684,6 +712,8 @@ test('verified fill submits protective stop before trade enrichment and persists
     signalCycle: { update: async () => ({}) },
   };
   service.healStuckPendingFill = async () => {};
+  service.acquireFillPromotionClaim = async () => ({ token: 'claim', stopClientOrderId: 123 });
+  service.setFillPromotionPhase = async () => true;
   service.executeShowcaseMirrorClose = async () => true;
   service.positionRuntime = new Map();
   service.stopManagerCircuitOpen = new Map();
@@ -728,6 +758,73 @@ test('verified fill submits protective stop before trade enrichment and persists
   assert.ok(Number(filled?.fill_detection_to_stop_ack_ms) >= 12);
   assert.equal(filled?.exchange_fill_to_stop_ack_ms, ackAt - exchangeFillAtMs);
   assert.equal(armed?.stop_exchange_ack_at, filled?.stop_exchange_ack_at);
+});
+
+test('exact stop authentication rejects wrong quantity, type, and reduce-only flags', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeTrading = {
+    submitStopOrder: async () => 7100,
+    findOrder: async () => ({
+      id: 7100, symbol: 'tBTCF0:USTF0', amount: 0.009, amountOrig: 0.009,
+      price: 64_536.62, status: 'ACTIVE', orderType: 'LIMIT', flags: 0,
+    }),
+  };
+  const result = await service.submitVerifiedProtectiveStop({}, {
+    positionDirection: 'SHORT', qty: 0.01, stopPrice: 64_536.62, leverage: 20,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /QTY/);
+  assert.match(result.reason, /TYPE/);
+  assert.match(result.reason, /REDUCE_ONLY/);
+});
+
+test('cancel-race fill remains pending when exact stop authentication fails', async () => {
+  const events: string[] = [];
+  let held = false;
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeTrading = {
+    submitStopOrder: async () => null,
+    getMarkPrice: async () => 64_000,
+  };
+  service.holdUnprotectedFill = async () => { held = true; };
+  service.acquireFillPromotionClaim = async () => ({ token: 'claim', stopClientOrderId: 124 });
+  service.setFillPromotionPhase = async () => true;
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: unknown, _a: unknown, _c: unknown, type: string) => events.push(type),
+  };
+  service.positionRuntime = new Map();
+  service.stopManagerCircuitOpen = new Map();
+  const recorded = await service.recordCancelRaceFillOwned(
+    'agent', 'user',
+    { id: 'cycle-stop-fail', status: SignalCycleStatus.PENDING_ENTRY, tradeId: 'cont-stop-fail' },
+    'participant-stop-fail',
+    { direction: 'SHORT', qty: 0.01, bitfinexOrderId: 6004, limitPrice: 64_000 },
+    {}, { risk: { stop_loss_margin_pct: -13 } },
+    { filledQty: 0.01, fillPrice: 64_000, source: 'POSITION_DELTA', orderResting: false },
+    'BITFINEX_AUTH_WS_TRADE',
+  );
+  assert.equal(recorded, false);
+  assert.equal(held, true);
+  assert.equal(events.includes('FILLED'), false);
+  assert.equal(events.includes('STOP_LOSS_ARMED'), false);
+});
+
+test('all full-fill promotion paths authenticate protection before recording FILLED', () => {
+  for (const [name, method] of [
+    ['cancel-race', (SignalSubscriberExecutionService.prototype as any).recordCancelRaceFillOwned],
+    ['poll', (SignalSubscriberExecutionService.prototype as any).monitorEntry],
+    ['reconcile', (SignalSubscriberExecutionService.prototype as any).reconcileUnattributedExchangeFills],
+  ] as const) {
+    const source = String(method);
+    const verifyAt = source.indexOf('submitVerifiedProtectiveStop');
+    const failureRelative = source.slice(verifyAt).search(/if\s*\(\s*!verifiedStop\.ok\s*\)/);
+    const failureAt = failureRelative < 0 ? -1 : verifyAt + failureRelative;
+    const filledRelative = source.slice(Math.max(0, failureAt)).search(/["']FILLED["']/);
+    const filledAt = filledRelative < 0 ? -1 : failureAt + filledRelative;
+    assert.ok(verifyAt >= 0, `${name}: verifier missing`);
+    assert.ok(failureAt > verifyAt, `${name}: failure gate missing`);
+    assert.ok(filledAt > failureAt, `${name}: FILLED precedes failure gate`);
+  }
 });
 
 test('live close does not await public mark enrichment before reduce-only close submission', () => {
@@ -824,6 +921,117 @@ test('authenticated close prewake uses carried terminal evidence without polling
   }
 });
 
+test('bare CLOSED or EXPIRED cycle status is not terminal authority for a real position', async () => {
+  for (const status of [SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED]) {
+    let closeCalls = 0;
+    const service = new SignalSubscriberExecutionService(
+      {} as never, {} as never, {} as never, {} as never,
+      {} as never, {} as never, {} as never, {} as never,
+    );
+    (service as any).fetchExecutionBotState = async () => ({});
+    (service as any).detectShowcaseTradeClosed = () => ({ closed: false });
+    (service as any).trackShowcasePositionAbsent = () => null;
+    (service as any).executeShowcaseMirrorClose = async () => {
+      closeCalls += 1;
+      return true;
+    };
+    const priorMirror = process.env.SHOWCASE_MIRROR_ONLY;
+    const priorConvergence = process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+    process.env.SHOWCASE_MIRROR_ONLY = 'true';
+    process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = 'true';
+    try {
+      const closed = await (service as any).tryImmediateShowcaseMirrorExit(
+        'agent', 'user',
+        { id: 'cycle', status, tradeId: 'cont-status-only', intentEnvelope: {} },
+        { id: 'participant', fillPrice: 64_500 },
+        { direction: 'SHORT', qty: 0.01 },
+        { apiKey: 'k', apiSecret: 's' },
+      );
+      assert.equal(closed, false);
+      assert.equal(closeCalls, 0);
+    } finally {
+      if (priorMirror == null) delete process.env.SHOWCASE_MIRROR_ONLY;
+      else process.env.SHOWCASE_MIRROR_ONLY = priorMirror;
+      if (priorConvergence == null) delete process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+      else process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = priorConvergence;
+    }
+  }
+});
+
+test('empty Showcase book failsafe pauses entries and cannot close protected exposure', async () => {
+  let closeCalls = 0;
+  let paused = false;
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const service = new SignalSubscriberExecutionService(
+    { signalCycleEvent: { count: async () => 0 } } as never,
+    {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: Record<string, unknown>) => events.push({ type, payload }) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).fetchExecutionBotState = async () => ({ positions: [] });
+  (service as any).detectShowcaseTradeClosed = () => ({ closed: false });
+  (service as any).pauseUserRelayForPositionMismatch = async () => { paused = true; };
+  (service as any).executeShowcaseMirrorClose = async () => {
+    closeCalls += 1;
+    return true;
+  };
+  (service as any).showcaseFlatOpenSince.set('participant', Date.now() - 121_000);
+  const priorMirror = process.env.SHOWCASE_MIRROR_ONLY;
+  const priorConvergence = process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+  process.env.SHOWCASE_MIRROR_ONLY = 'true';
+  process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = 'true';
+  try {
+    const closed = await (service as any).enforceShowcaseFlatOpenFailsafe(
+      'agent', 'user',
+      { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-empty-book', intentEnvelope: {} },
+      { id: 'participant', fillPrice: 64_500 },
+      { direction: 'SHORT', qty: 0.01 },
+      { apiKey: 'k', apiSecret: 's' },
+    );
+    assert.equal(closed, false);
+    assert.equal(closeCalls, 0);
+    assert.equal(paused, true);
+    assert.equal(events[0]?.type, 'MIRROR_EXIT_FAILSAFE_ALERT');
+    assert.equal(events[0]?.payload.verdict, 'UNKNOWN');
+    assert.equal(events[0]?.payload.terminal_authority, false);
+  } finally {
+    if (priorMirror == null) delete process.env.SHOWCASE_MIRROR_ONLY;
+    else process.env.SHOWCASE_MIRROR_ONLY = priorMirror;
+    if (priorConvergence == null) delete process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+    else process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = priorConvergence;
+  }
+});
+
+test('source outage escalation is alert-only and cannot close protected exposure', async () => {
+  let closeCalls = 0;
+  let paused = false;
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: Record<string, unknown>) => events.push({ type, payload }) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).pauseUserRelayForPositionMismatch = async () => { paused = true; };
+  (service as any).executeShowcaseMirrorClose = async () => {
+    closeCalls += 1;
+    return true;
+  };
+  const closed = await (service as any).enforceShowcaseOutageOrphanKill(
+    'agent', 'user', 'instance',
+    { id: 'cycle', tradeId: 'cont-outage', intentEnvelope: {} },
+    { id: 'participant', fillPrice: 64_500 },
+    { direction: 'SHORT', qty: 0.01 },
+    { apiKey: 'k', apiSecret: 's' },
+    180_000,
+  );
+  assert.equal(closed, false);
+  assert.equal(closeCalls, 0);
+  assert.equal(paused, true);
+  assert.equal(events[0]?.type, 'SHOWCASE_OUTAGE_ORPHAN_KILL');
+  assert.equal(events[0]?.payload.verdict, 'UNKNOWN');
+  assert.equal(events[0]?.payload.terminal_authority, false);
+});
+
 test('service protection failure writes terminal state only after confirmed emergency reduction', async () => {
   const types: string[] = [];
   let emergencyCloseQty = 0;
@@ -835,6 +1043,7 @@ test('service protection failure writes terminal state only after confirmed emer
   );
   (service as any).activeTrading = {
     submitStopOrder: async () => { throw new Error('stop rejected'); },
+    listActiveOrders: async () => [],
     getOpenPositionDetail: async () => ({ amount: -0.02 }),
     submitMarketClose: async (_creds: unknown, input: { qty: number }) => {
       emergencyCloseQty = input.qty;
@@ -844,13 +1053,17 @@ test('service protection failure writes terminal state only after confirmed emer
   (service as any).pauseUserRelayForPositionMismatch = async () => {};
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
   (service as any).waitForMarketCloseConfirmation = async () => true;
+  (service as any).emergencyClosePartialWithFence = async (input: { attributableQty: number }) => {
+    emergencyCloseQty = input.attributableQty;
+    return true;
+  };
   await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
     'agent', 'user', 'cycle', 'participant',
     { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31 },
     {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
   ));
-  assert.deepEqual(types, ['EXPIRED']);
-  assert.equal(emergencyCloseQty, 0.02);
+  assert.deepEqual(types, ['NEGATIVE_EVIDENCE', 'EXPIRED']);
+  assert.equal(emergencyCloseQty, 0.015);
 });
 
 test('service protection failure never terminalizes an unconfirmed emergency close', async () => {
@@ -862,12 +1075,14 @@ test('service protection failure never terminalizes an unconfirmed emergency clo
   );
   (service as any).activeTrading = {
     submitStopOrder: async () => { throw new Error('stop rejected'); },
+    listActiveOrders: async () => [],
     getOpenPositionDetail: async () => ({ amount: -0.02 }),
     submitMarketClose: async () => 8001,
   };
   (service as any).pauseUserRelayForPositionMismatch = async () => {};
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
   (service as any).waitForMarketCloseConfirmation = async () => false;
+  (service as any).emergencyClosePartialWithFence = async () => false;
   await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
     'agent', 'user', 'cycle', 'participant',
     { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31 },
@@ -886,6 +1101,7 @@ test('service distinguishes explicit flat from an unknown exchange read during f
     );
     (service as any).activeTrading = {
       submitStopOrder: async () => { throw new Error('stop rejected'); },
+      listActiveOrders: async () => [],
       getOpenPositionDetail: async () => {
         if (scenario === 'unknown') throw new Error('exchange unavailable');
         return null;
@@ -898,7 +1114,9 @@ test('service distinguishes explicit flat from an unknown exchange read during f
       { direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001, limitPrice: 64_126.31 },
       {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
     ));
-    assert.deepEqual(types, [scenario === 'flat' ? 'EXPIRED' : 'RECONCILE_CANCEL_FAILED']);
+    assert.deepEqual(types, scenario === 'flat'
+      ? ['NEGATIVE_EVIDENCE', 'EXPIRED']
+      : ['RECONCILE_CANCEL_FAILED']);
   }
 });
 
@@ -3383,11 +3601,13 @@ test('terminal monitor waits for replacement lane and cancels only the durable c
     replacementExchangeAckAtMs: Date.now(),
   });
   service.detectEntryFillBeforeCancel = async () => null;
+  service.classifyPostCancelEntry = async () => ({ kind: 'PROVEN_UNFILLED' });
   service.cancelManagedOrderGone = async (_creds: unknown, id: number) => {
     cancelled.push(id);
     return { gone: true, reason: 'CANCELLED', attempts: 1 };
   };
   service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.setInstanceLastError = async () => undefined;
   service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
 
   const releaseReplacement = await service.acquireParticipantMoneyLane('participant-terminal-lane');
@@ -3727,6 +3947,7 @@ test('terminal NOT_FOUND cannot expire a hidden replacement without terminal-unf
     signalCycle: { findUnique: async () => ({ id: 'cycle-t', tradeId: 'cont-terminal-hidden', intentEnvelope: intent, expiresAt: null, status: SignalCycleStatus.CLOSED }) },
   };
   service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
+  service.setInstanceLastError = async () => undefined;
   service.logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
   await service.monitorEntry(
     'agent', 'user',
@@ -3735,7 +3956,7 @@ test('terminal NOT_FOUND cannot expire a hidden replacement without terminal-unf
     { direction: 'SHORT', bitfinexOrderId: 5001, limitPrice: 64_000, qty: 0.03, replacementExchangeAckAtMs: Date.now() - 20_000 },
     {}, new Set<number>(), false,
   );
-  assert.deepEqual(events, []);
+  assert.deepEqual(events, ['RECONCILE_CANCEL_FAILED']);
 });
 
 test('missed-showcase-fill NOT_FOUND cannot expire a hidden replacement without terminal history', async () => {
@@ -3974,7 +4195,7 @@ test('showcase catch-up cannot clear or duplicate-enter after hidden replacement
     signalCycle: { findUnique: async () => ({ id: 'cycle-catchup' }) },
   };
   service.cycles = { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, event: string) => events.push(event) };
-  service.logger = { warn: () => undefined };
+  service.logger = { warn: () => undefined, error: () => undefined };
   const cleared = await service.clearPendingForShowcaseCatchup(
     'agent', 'user', { id: 'participant-catchup', cycleId: 'cycle-catchup' }, {},
   );
@@ -4001,7 +4222,7 @@ test('cancel-by-exchange reconcile cannot close a transient-hidden replacement',
     update: async () => { closed = true; },
   } };
   service.cycles = { recordHireExecutionEvent: async () => { closed = true; } };
-  service.logger = { warn: () => undefined };
+  service.logger = { warn: () => undefined, error: () => undefined };
   await service.reconcileCancelByExchange('user', 'agent', {}, new Set(), {}, ['participant-r']);
   assert.equal(closed, false);
 });
@@ -4026,7 +4247,8 @@ test('watchdog NOT_FOUND cannot expire a transient-hidden replacement', async ()
     },
     $transaction: async () => { terminalized = true; },
   };
-  service.logger = { warn: () => undefined };
+  service.logger = { warn: () => undefined, error: () => undefined };
+  service.setInstanceLastError = async () => undefined;
   const count = await service.cancelVerifiedUnfilledPendingEntries(
     'agent', { userId: 'user', exchangeProvider: 'bitfinex' },
     'EXECUTOR_WATCHDOG_CANCELLED_UNFILLED', 'watchdog',
@@ -5695,7 +5917,17 @@ test('actual te socket event reaches exact participant fill funnel immediately',
   service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle})},signalCycleEvent:{count:async()=>0},signalCycle:{update:async()=>({})}};
   service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01,limitPrice:64000});
   const calls:string[]=[]; let filledResolve!:()=>void; const filledDone=new Promise<void>(resolve=>{filledResolve=resolve});
-  service.activeTrading={submitStopOrder:async()=>{calls.push('stop-submit');return 7001},getMarkPrice:async()=>64000};
+  service.acquireFillPromotionClaim=async()=>({token:'ws-claim',stopClientOrderId:771});
+  service.setFillPromotionPhase=async()=>true;
+  let wsStopInput:any;
+  service.activeTrading={
+    submitStopOrder:async(_creds:unknown,input:any)=>{wsStopInput=input;calls.push('stop-submit');return 7001},
+    findOrder:async()=>({
+      id:7001,symbol:'tBTCF0:USTF0',amount:.01,amountOrig:.01,
+      price:wsStopInput?.stopPrice,status:'ACTIVE',orderType:'STOP',flags:BITFINEX_REDUCE_ONLY_FLAG,
+    }),
+    getMarkPrice:async()=>64000,
+  };
   service.cancelManagedOrderGone=async()=>{calls.push('entry-cancel');return{gone:true,attempts:1}};
   service.resolveExchangeTradesFillEvidence=async()=>null; service.healStuckPendingFill=async()=>{}; service.executeShowcaseMirrorClose=async()=>true;
   service.cycles={recordHireExecutionEvent:async(_u:string,_a:string,_c:string,type:string)=>{calls.push(type);if(type==='FILLED')filledResolve()}};
@@ -5795,4 +6027,484 @@ test('fast-wake completion latency excludes dashboard telemetry persistence', as
   assert.equal(persistedPatch.relayExecutorFastWake.completedAt, new Date(2_000).toISOString());
   assert.equal(persistedPatch.relayExecutorFastWake.latencyMs, 1_000);
   assert.equal(persistedPatch.relayExecutorFastWake.outcome, 'ENTRY_PLACED');
+});
+
+test('monitorExit cannot turn a bare CLOSED lifecycle label into exchange-close authority', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let gated = 0;
+  let alerted = 0;
+  let directClose = 0;
+  service.tryImmediateShowcaseMirrorExit = async () => {
+    gated += 1;
+    return false;
+  };
+  service.enforceShowcaseFlatOpenFailsafe = async () => {
+    alerted += 1;
+    return false;
+  };
+  service.executeShowcaseMirrorClose = async () => {
+    directClose += 1;
+    return true;
+  };
+
+  await service.monitorExit(
+    'agent',
+    'user',
+    {
+      id: 'cycle-production-flat-book-regression',
+      tradeId: 'cont-29cabeca24cd',
+      status: SignalCycleStatus.CLOSED,
+      showcasePnlUsd: null,
+      closedAt: new Date(),
+      intentEnvelope: {},
+    },
+    { id: 'participant-production-flat-book-regression', fillPrice: null },
+    { direction: 'SHORT', qty: 0.03, stopOrderId: 7001 },
+    {},
+  );
+
+  assert.equal(gated, 1, 'all terminal labels must pass through the shared evidence gate');
+  assert.equal(alerted, 1, 'UNKNOWN evidence must continue into the alert-only hold path');
+  assert.equal(directClose, 0, 'monitorExit must never submit a close from status alone');
+});
+
+test('monitorExit delegates an EXPIRED lifecycle to the exact-evidence gate only', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const calls: string[] = [];
+  service.tryImmediateShowcaseMirrorExit = async () => {
+    calls.push('authority-gate');
+    return true;
+  };
+  service.enforceShowcaseFlatOpenFailsafe = async () => calls.push('alert');
+
+  await service.monitorExit(
+    'agent',
+    'user',
+    {
+      id: 'cycle-expired-with-signed-terminal',
+      tradeId: 'cont-signed-terminal',
+      status: SignalCycleStatus.EXPIRED,
+      showcasePnlUsd: null,
+      closedAt: new Date(),
+      intentEnvelope: {},
+    },
+    { id: 'participant-signed-terminal', fillPrice: null },
+    { direction: 'SHORT', qty: 0.03 },
+    {},
+  );
+
+  assert.deepEqual(calls, ['authority-gate']);
+});
+
+test('terminal close claim atomically persists exact authority before ownership is returned', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const order: string[] = [];
+  let participantUpdate: any;
+  let eventCreate: any;
+  const tx = {
+    signalCycle: {
+      findFirst: async () => ({
+        id: 'cycle-claim',
+        tradeId: 'cont-claim',
+        intentEnvelope: { context: { showcase_event_seq: 7 } },
+      }),
+    },
+    signalCycleParticipant: {
+      findFirst: async () => ({
+        status: SignalCycleStatus.OPEN,
+        terminalCloseClaimToken: null,
+        terminalCloseClaimedAt: null,
+        terminalClosePhase: null,
+        terminalCloseRequestId: null,
+      }),
+      updateMany: async (input: any) => {
+        order.push('participant-claim');
+        participantUpdate = input;
+        return { count: 1 };
+      },
+    },
+    signalCycleEvent: {
+      create: async (input: any) => {
+        order.push('claim-event');
+        eventCreate = input;
+        return {};
+      },
+    },
+  };
+  service.prisma = {
+    $transaction: async (run: (client: any) => Promise<unknown>) => run(tx),
+  };
+
+  const authority = {
+    kind: 'SIGNED_POSITION_CLOSED',
+    canonicalTradeId: 'cont-claim',
+    lifecycleGeneration: 'seq:7',
+    evidence: { signed: true },
+  };
+  const claim = await service.acquireTerminalCloseClaim({
+    agentId: 'agent',
+    userId: 'user',
+    cycleId: 'cycle-claim',
+    participantId: 'participant-claim',
+    meta: { direction: 'SHORT', qty: 0.01 },
+    authority,
+  });
+
+  assert.ok(claim?.ownerToken);
+  assert.deepEqual(order, ['participant-claim', 'claim-event']);
+  assert.equal(participantUpdate.where.status, SignalCycleStatus.OPEN);
+  assert.equal(participantUpdate.data.terminalCloseGeneration, 'seq:7');
+  assert.equal(participantUpdate.data.terminalClosePhase, 'CLAIMED');
+  assert.ok(participantUpdate.data.terminalCloseRequestId);
+  assert.deepEqual(participantUpdate.data.terminalCloseAuthority, authority);
+  assert.equal(eventCreate.data.eventType, 'TERMINAL_CLOSE_CLAIM');
+  assert.equal(eventCreate.data.payload.phase, 'CLAIMED');
+  assert.equal(eventCreate.data.payload.request_id, participantUpdate.data.terminalCloseRequestId);
+  assert.deepEqual(eventCreate.data.payload.authority, authority);
+});
+
+test('concurrent terminal close claimant cannot create a second immutable claim event', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let events = 0;
+  const tx = {
+    signalCycle: {
+      findFirst: async () => ({
+        id: 'cycle-claim',
+        tradeId: 'cont-claim',
+        intentEnvelope: { context: { showcase_event_seq: 7 } },
+      }),
+    },
+    signalCycleParticipant: {
+      findFirst: async () => ({
+        status: SignalCycleStatus.OPEN,
+        terminalCloseClaimToken: 'other-owner',
+        terminalCloseClaimedAt: new Date(),
+        terminalClosePhase: 'CLAIMED',
+        terminalCloseRequestId: 'request-existing',
+      }),
+      updateMany: async () => ({ count: 0 }),
+    },
+    signalCycleEvent: { create: async () => { events += 1; } },
+  };
+  service.prisma = { $transaction: async (run: (client: any) => Promise<unknown>) => run(tx) };
+  const result = await service.acquireTerminalCloseClaim({
+    agentId: 'agent',
+    userId: 'user',
+    cycleId: 'cycle-claim',
+    participantId: 'participant-claim',
+    meta: { direction: 'SHORT', qty: 0.01 },
+    authority: {
+      kind: 'SIGNED_POSITION_CLOSED',
+      canonicalTradeId: 'cont-claim',
+      lifecycleGeneration: 'seq:7',
+      evidence: {},
+    },
+  });
+  assert.equal(result, null);
+  assert.equal(events, 0);
+});
+
+test('timeout cannot steal a SUBMITTING terminal close fence', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let updateWhere: any;
+  let events = 0;
+  const tx = {
+    signalCycle: {
+      findFirst: async () => ({
+        id: 'cycle-submitting', tradeId: 'cont-submitting',
+        intentEnvelope: { context: { showcase_event_seq: 11 } },
+      }),
+    },
+    signalCycleParticipant: {
+      findFirst: async () => ({
+        status: SignalCycleStatus.OPEN,
+        terminalCloseClaimToken: 'original-owner',
+        terminalCloseClaimedAt: new Date(0),
+        terminalClosePhase: 'SUBMITTING',
+        terminalCloseRequestId: 'immutable-request',
+      }),
+      updateMany: async (input: any) => { updateWhere = input.where; return { count: 0 }; },
+    },
+    signalCycleEvent: { create: async () => { events += 1; } },
+  };
+  service.prisma = { $transaction: async (run: (client: any) => Promise<unknown>) => run(tx) };
+  const result = await service.acquireTerminalCloseClaim({
+    agentId: 'agent', userId: 'user', cycleId: 'cycle-submitting',
+    participantId: 'participant-submitting', meta: { direction: 'SHORT', qty: 0.01 },
+    authority: {
+      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont-submitting',
+      lifecycleGeneration: 'seq:11', evidence: {},
+    },
+  });
+  assert.equal(result, null);
+  assert.equal(events, 0);
+  assert.ok(updateWhere.OR.every((branch: any) =>
+    branch.terminalCloseClaimToken === null || branch.terminalClosePhase == null ||
+    branch.terminalClosePhase.in?.includes('CLAIMED')));
+});
+
+test('terminal close fence persists SUBMITTING before exchange submission', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const order: string[] = [];
+  service.prisma = {
+    $transaction: async (run: (client: any) => Promise<unknown>) => run({
+      signalCycleParticipant: { updateMany: async () => { order.push('persist-SUBMITTING'); return { count: 1 }; } },
+      signalCycleEvent: { create: async () => { order.push('event-SUBMITTING'); } },
+    }),
+  };
+  service.expectedRemainingLedgerAmount = async () => 0;
+  service.activeTrading = {
+    getOpenPositionDetail: async () => ({ amount: -0.01 }),
+    submitPositionFlatten: async () => { order.push('exchange-submit'); },
+  };
+  service.waitForMarketCloseConfirmation = async () => false;
+  service.pauseUserRelayForPositionMismatch = async () => {};
+  const claim = {
+    ownerToken: 'owner', requestId: 'request', phase: 'CLAIMED', recovered: false,
+    authority: {
+      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont',
+      lifecycleGeneration: 'seq:1', evidence: {},
+    },
+  };
+  await assert.rejects(() => service.closeParticipantPositionToLedgerTarget(
+    'agent', 'user', 'participant', { direction: 'SHORT', qty: 0.01 }, {}, 4, [],
+    { remainingLedgerAmount: 0 }, { cycleId: 'cycle', claim },
+  ), /MARKET_CLOSE_NOT_CONFIRMED/);
+  assert.ok(order.indexOf('persist-SUBMITTING') < order.indexOf('exchange-submit'));
+  assert.ok(order.indexOf('event-SUBMITTING') < order.indexOf('exchange-submit'));
+});
+
+test('SUBMITTING recovery needs exact authenticated exchange target and never resubmits', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let writes = 0;
+  let exchangeSubmits = 0;
+  const row = {
+    terminalCloseClaimToken: 'owner-old', terminalCloseRequestId: 'request-fixed',
+    terminalCloseGeneration: 'seq:4', terminalCloseAuthority: {
+      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont',
+      lifecycleGeneration: 'seq:4', evidence: {},
+    },
+    terminalClosePhase: 'SUBMITTING', terminalCloseTargetAmount: { toNumber: () => -0.02 },
+    cycle: { agentId: 'agent' },
+  };
+  service.prisma = {
+    signalCycleParticipant: { findFirst: async () => row },
+    $transaction: async (run: (client: any) => Promise<unknown>) => run({
+      signalCycleParticipant: { updateMany: async () => { writes += 1; return { count: 1 }; } },
+      signalCycleEvent: { create: async () => { writes += 1; } },
+    }),
+  };
+  service.activeTrading = {
+    getOpenPositionDetail: async () => ({ amount: -0.02 }),
+    submitMarketClose: async () => { exchangeSubmits += 1; },
+  };
+  const recovered = await service.recoverSettledTerminalCloseFence({
+    agentId: 'agent', userId: 'user', cycleId: 'cycle', participantId: 'participant',
+    meta: { direction: 'SHORT', qty: 0.01 }, creds: {},
+    authority: {
+      kind: 'SIGNED_POSITION_CLOSED', canonicalTradeId: 'cont',
+      lifecycleGeneration: 'seq:4', evidence: {},
+    },
+  });
+  assert.equal(recovered?.phase, 'CONFIRMED');
+  assert.equal(recovered?.requestId, 'request-fixed');
+  assert.equal(exchangeSubmits, 0);
+  assert.equal(writes, 2);
+
+  service.activeTrading.getOpenPositionDetail = async () => ({ amount: -0.03 });
+  const mismatch = await service.recoverSettledTerminalCloseFence({
+    agentId: 'agent', userId: 'user', cycleId: 'cycle', participantId: 'participant',
+    meta: { direction: 'SHORT', qty: 0.01 }, creds: {},
+    authority: recovered!.authority,
+  });
+  assert.equal(mismatch, null);
+  assert.equal(exchangeSubmits, 0);
+});
+
+test('terminal authority persistence failure holds protection without touching exchange', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.exitingLots = new Set();
+  service.hasParticipantExited = async () => false;
+  service.acquireTerminalCloseClaim = async () => {
+    throw new Error('database unavailable');
+  };
+  let paused = '';
+  service.pauseUserRelayForPositionMismatch = async (_user: string, _agent: string, reason: string) => {
+    paused = reason;
+  };
+  let exchangeTouches = 0;
+  service.cancelLinkedPendingLimits = async () => { exchangeTouches += 1; };
+  service.activeTrading = {
+    getOpenPositionDetail: async () => { exchangeTouches += 1; return null; },
+  };
+
+  const result = await service.executeShowcaseMirrorClose(
+    'agent',
+    'user',
+    { id: 'cycle-persist-fail', intentEnvelope: { context: { showcase_event_seq: 9 } } },
+    { id: 'participant-persist-fail', fillPrice: null },
+    { direction: 'SHORT', qty: 0.01 },
+    {},
+    {
+      trigger: 'SHOWCASE_CLOSED_WEBHOOK',
+      terminalAuthority: {
+        kind: 'SIGNED_POSITION_CLOSED',
+        canonicalTradeId: 'cont-persist-fail',
+        lifecycleGeneration: 'seq:9',
+        evidence: {},
+      },
+    },
+  );
+
+  assert.equal(result, false);
+  assert.equal(exchangeTouches, 0);
+  assert.match(paused, /TERMINAL_CLOSE_CLAIM_PERSIST_FAILED/);
+  assert.match(paused, /protected position held/);
+});
+
+test('fill promotion claim is durable, generation-bound, and single-owner', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const writes: any[] = [];
+  service.prisma = {
+    signalCycleParticipant: {
+      updateMany: async (query: any) => {
+        writes.push(query);
+        return { count: writes.length === 1 ? 1 : 0 };
+      },
+      findUnique: async () => ({
+        status: 'PENDING_ENTRY',
+        fillPromotionKey: 'different-owner',
+        fillPromotionPhase: 'CLAIMED',
+        fillPromotionStopOrderId: null,
+      }),
+    },
+  };
+  const first = await service.acquireFillPromotionClaim({
+    participantId: 'participant-1', entryOrderId: 9001, lifecycleGeneration: 'seq:7',
+  });
+  const second = await service.acquireFillPromotionClaim({
+    participantId: 'participant-1', entryOrderId: 9001, lifecycleGeneration: 'seq:7',
+  });
+  assert.ok(first?.token);
+  assert.equal(second, null);
+  assert.equal(writes[0].where.status, 'PENDING_ENTRY');
+  assert.equal(writes[0].data.fillPromotionEntryOrderId, 9001n);
+  assert.equal(writes[0].data.fillPromotionGeneration, 'seq:7');
+});
+
+test('ownership-blind absurd-order audit never cancels exchange orders', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let cancels = 0;
+  service.logger = { error: () => undefined };
+  service.activeTrading = {
+    getMarkPrice: async () => 60_000,
+    listActiveOrders: async () => [{ id: 77, price: 900 }],
+    cancelOrder: async () => { cancels += 1; },
+  };
+  await service.auditAbsurdPendingOrders({}, 'user');
+  assert.equal(cancels, 0);
+});
+
+test('cancel-and-settle fails closed when pre-cancel evidence is unavailable', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let cancels = 0;
+  service.detectEntryFillBeforeCancel = async () => { throw new Error('private API down'); };
+  service.cancelManagedOrderGone = async () => { cancels += 1; return { gone: true, attempts: 1 }; };
+  const result = await service.cancelAndSettleManagedEntry(
+    {}, { bitfinexOrderId: 88, direction: 'SHORT' }, 'ttl',
+  );
+  assert.equal(result.kind, 'UNKNOWN');
+  assert.equal(result.reason, 'PRE_CANCEL_EVIDENCE_UNAVAILABLE');
+  assert.equal(cancels, 0);
+});
+
+test('timed-out SUBMITTING fill promotion cannot be stolen or resubmitted', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let attemptedClaimWrites = 0;
+  service.prisma = {
+    signalCycleParticipant: {
+      updateMany: async () => { attemptedClaimWrites += 1; return { count: 0 }; },
+      findUnique: async () => ({
+        status: 'PENDING_ENTRY',
+        fillPromotionKey: createHash('sha256').update('p:91:g').digest('hex'),
+        fillPromotionPhase: 'SUBMITTING',
+        fillPromotionClaimToken: 'original-owner',
+        fillPromotionStopOrderId: null,
+        fillPromotionStopClientId: 12345,
+      }),
+    },
+  };
+  const recovered = await service.acquireFillPromotionClaim({
+    participantId: 'p', entryOrderId: 91, lifecycleGeneration: 'g',
+  });
+  assert.equal(attemptedClaimWrites, 1);
+  assert.equal(recovered?.token, 'original-owner');
+  assert.equal(recovered?.recoverSubmitting, true);
+  assert.equal(recovered?.stopClientOrderId, 12345);
+});
+
+test('watchdog and partial-protection source retain fail-closed ownership invariants', () => {
+  const source = readFileSync(resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    'signal-subscriber-execution.service.ts',
+  ), 'utf8');
+  assert.match(source, /cancelVerifiedUnfilledPendingEntries[\s\S]*cancelAndSettleManagedEntry/);
+  assert.match(source, /attributableQty: Math\.min\(beforeQty, filledQty\)/);
+  assert.match(source, /event: 'PROTECTION_FAILURE_EMERGENCY_CLOSE'/);
+  assert.match(source, /PARTIAL_FILL_STOP_OWNERSHIP_PERSIST_UNKNOWN/);
+  assert.match(source, /fillPromotionPhase: phase/);
+  assert.match(source, /'CLAIMED',\s*'SUBMITTING'/);
+});
+
+test('partial emergency fence closes only its attributable leg and preserves merged peer exposure', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let submittedQty = 0;
+  let positionAmount = -0.05;
+  const row: any = { partialEmergencyRequestId: null };
+  service.activeTrading = {
+    getOpenPositionDetail: async () => ({ amount: positionAmount, basePrice: 60_000 }),
+    submitMarketClose: async (_creds: unknown, input: any) => {
+      submittedQty = input.qty;
+      positionAmount += input.qty;
+      return 7001;
+    },
+  };
+  service.waitForMarketCloseConfirmation = async () => true;
+  service.prisma = {
+    signalCycleParticipant: {
+      findUnique: async () => row,
+      updateMany: async ({ data }: any) => { Object.assign(row, data); return { count: 1 }; },
+    },
+  };
+  const closed = await service.emergencyClosePartialWithFence({
+    participantId: 'leg-a', creds: {}, direction: 'SHORT', attributableQty: 0.02, leverage: 10,
+  });
+  assert.equal(closed, true);
+  assert.equal(submittedQty, 0.02);
+  assert.equal(Number(positionAmount.toFixed(8)), -0.03);
+  assert.equal(row.partialEmergencyPhase, 'CONFIRMED');
+});
+
+test('partial emergency SUBMITTING recovery confirms target without duplicate market close', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let submits = 0;
+  service.activeTrading = {
+    getOpenPositionDetail: async () => ({ amount: -0.03, basePrice: 60_000 }),
+    submitMarketClose: async () => { submits += 1; return 1; },
+  };
+  service.prisma = {
+    signalCycleParticipant: {
+      findUnique: async () => ({
+        partialEmergencyRequestId: 'stable-request',
+        partialEmergencyPhase: 'SUBMITTING',
+        partialEmergencyTargetAmount: { toNumber: () => -0.03 },
+      }),
+      updateMany: async () => ({ count: 1 }),
+    },
+  };
+  const recovered = await service.emergencyClosePartialWithFence({
+    participantId: 'leg-a', creds: {}, direction: 'SHORT', attributableQty: 0.02, leverage: 10,
+  });
+  assert.equal(recovered, true);
+  assert.equal(submits, 0);
 });

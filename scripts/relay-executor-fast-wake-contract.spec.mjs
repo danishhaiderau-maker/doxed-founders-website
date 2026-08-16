@@ -102,3 +102,32 @@ test('real-side hard-stop fallback cannot widen beyond the canonical policy', as
   assert.match(hardStop, /return -13;/);
   assert.doesNotMatch(hardStop, /return -18;/);
 });
+
+test('flat-book and outage guards have no independent exchange-close authority', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  const flatStart = source.indexOf('private async enforceShowcaseFlatOpenFailsafe(');
+  const flatEnd = source.indexOf('private async expectedRemainingLedgerAmount(', flatStart);
+  const flatGuard = source.slice(flatStart, flatEnd);
+  assert.match(flatGuard, /ALERT_ONLY_HOLD_PROTECTED_POSITION/);
+  assert.match(flatGuard, /terminal_authority: false/);
+  assert.doesNotMatch(flatGuard, /executeShowcaseMirrorClose/);
+
+  const outageStart = source.indexOf('private async enforceShowcaseOutageOrphanKill(');
+  const outageEnd = source.indexOf('private trackShowcasePositionAbsent(', outageStart);
+  const outageGuard = source.slice(outageStart, outageEnd);
+  assert.match(outageGuard, /verdict: 'UNKNOWN'/);
+  assert.match(outageGuard, /terminal_authority: false/);
+  assert.doesNotMatch(outageGuard, /executeShowcaseMirrorClose/);
+});
+
+test('bare database terminal status cannot authorize a mirror close', async () => {
+  const source = await readFile(executionPath, 'utf8');
+  const start = source.indexOf('private async tryImmediateShowcaseMirrorExit(');
+  const end = source.indexOf('private async enforceShowcaseFlatOpenFailsafe(', start);
+  const mirrorExit = source.slice(start, end);
+  assert.match(mirrorExit, /let closed = signedClose != null/);
+  assert.doesNotMatch(
+    mirrorExit,
+    /cycle\.status === SignalCycleStatus\.(?:CLOSED|EXPIRED)/,
+  );
+});

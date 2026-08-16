@@ -238,30 +238,174 @@ if ($PublishAnalyzerReport) {
   if (-not (Test-Path -LiteralPath $reportPath)) {
     throw "Analyzer report does not exist: $reportPath"
   }
-  $client = [System.Net.Http.HttpClient]::new()
+  $reportRoot = Split-Path -Parent $reportPath
+  $reportManifestPath = Join-Path $reportRoot "report_manifest.json"
+  if (-not (Test-Path -LiteralPath $reportManifestPath)) {
+    throw "Analyzer report manifest does not exist: $reportManifestPath"
+  }
+  $reportManifest = Get-Content -LiteralPath $reportManifestPath -Raw | ConvertFrom-Json
+  if ([string]$reportManifest.schema -ne "report_manifest_v1") {
+    throw "Unsupported analyzer report manifest schema: $($reportManifest.schema)"
+  }
+  $analyzerGeneratedAt = [string]$reportManifest.generated_at
+  $analyzerRunId = [string]$reportManifest.analyzer_sync_id
+  $analyzerRevision = [string]$reportManifest.analysis_provenance.generation_revision
+  $cohortSchema = [string]$reportManifest.analysis_provenance.cohort_schema
+  if (-not $analyzerGeneratedAt -or -not $analyzerRunId -or -not $analyzerRevision -or -not $cohortSchema) {
+    throw "Analyzer report manifest provenance is incomplete; rerun the canonical analyzer before publishing."
+  }
+  if ($analyzerRevision -notmatch '^[0-9a-fA-F]{7,64}$') {
+    throw "Analyzer generation revision is not a verifiable Git revision: $analyzerRevision"
+  }
+  if ($cohortSchema -ne "analysis_cohorts_v1") {
+    throw "Unsupported analyzer cohort schema: $cohortSchema"
+  }
+  try { $analyzerGeneratedAtValue = [DateTimeOffset]::Parse($analyzerGeneratedAt) } catch {
+    throw "Analyzer report manifest generated_at is invalid: $analyzerGeneratedAt"
+  }
+  if (-not [string]$manifest.source_git_rev) {
+    throw "Fly source-data manifest does not identify source_git_rev."
+  }
+  if ([string]$manifest.source_git_rev -notmatch '^[0-9a-fA-F]{7,64}$') {
+    throw "Fly source-data revision is not a verifiable Git revision."
+  }
+  $bundlePath = Join-Path ([System.IO.Path]::GetTempPath()) "doxxed-analyzer-$PID-$([guid]::NewGuid().ToString('N')).zip"
+  $snapshotRoot = Join-Path ([System.IO.Path]::GetTempPath()) "doxxed-analyzer-snapshot-$PID-$([guid]::NewGuid().ToString('N'))"
+  New-Item -ItemType Directory -Path $snapshotRoot | Out-Null
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
   try {
-    $client.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
-    $form = [System.Net.Http.MultipartFormDataContent]::new()
-    $stream = [System.IO.File]::OpenRead($reportPath)
+    $requiredPaths = [System.Collections.Generic.List[string]]::new()
+    $requiredPaths.Add("report_manifest.json")
+    foreach ($rawName in @($reportManifest.text_artifacts)) {
+      $name = [string]$rawName
+      if (-not $name -or $name -ne [System.IO.Path]::GetFileName($name)) {
+        throw "Unsafe analyzer text artifact path in manifest: $name"
+      }
+      $requiredPaths.Add($name)
+    }
+    foreach ($row in @($reportManifest.reports)) {
+      $name = [System.IO.Path]::GetFileName([string]$row.file)
+      if (-not $name -or $name -ne [string]$row.file) {
+        throw "Unsafe analyzer report path in manifest: $($row.file)"
+      }
+      $requiredPaths.Add("reports/$name")
+    }
+    $duplicates = @($requiredPaths | Group-Object { $_.ToLowerInvariant() } | Where-Object Count -gt 1)
+    if ($duplicates.Count -gt 0) {
+      throw "Analyzer report manifest contains duplicate artifact paths."
+    }
+    if (-not ($requiredPaths -contains "analysis_dashboard.html")) {
+      throw "Analyzer report manifest does not require analysis_dashboard.html."
+    }
+    if (@($reportManifest.reports).Count -ne [int]$reportManifest.report_count) {
+      throw "Analyzer report_count does not match the reports array."
+    }
+
+    $bundleFiles = [System.Collections.Generic.List[object]]::new()
+    foreach ($relative in $requiredPaths) {
+      $source = if ($relative.StartsWith("reports/")) {
+        Join-Path (Join-Path $reportRoot "reports") ([System.IO.Path]::GetFileName($relative))
+      } else {
+        Join-Path $reportRoot $relative
+      }
+      if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Required analyzer artifact is missing: $relative"
+      }
+      $destination = Join-Path $snapshotRoot ($relative.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+      $destinationDir = Split-Path -Parent $destination
+      New-Item -ItemType Directory -Path $destinationDir -Force | Out-Null
+      Copy-Item -LiteralPath $source -Destination $destination
+      $item = Get-Item -LiteralPath $destination
+      $artifactModifiedAt = [DateTimeOffset]$item.LastWriteTimeUtc
+      if ($artifactModifiedAt -lt $analyzerGeneratedAtValue.AddMinutes(-15) -or $artifactModifiedAt -gt $analyzerGeneratedAtValue.AddMinutes(5)) {
+        throw "Analyzer artifact is outside the current run window: $relative ($artifactModifiedAt vs $analyzerGeneratedAtValue)"
+      }
+      if ($relative.StartsWith("reports/")) {
+        $reportName = [System.IO.Path]::GetFileName($relative)
+        $reportRow = @($reportManifest.reports | Where-Object { [string]$_.file -eq $reportName })
+        if ($reportRow.Count -ne 1 -or [int64]$reportRow[0].size_bytes -ne [int64]$item.Length) {
+          throw "Analyzer report metadata does not match the snapshotted file: $relative"
+        }
+      }
+      $bundleFiles.Add([ordered]@{
+        path = $relative
+        size_bytes = [int64]$item.Length
+        sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+      })
+    }
+    $snapshotId = "analyzer-$($analyzerGeneratedAt.Replace(':','').Replace('-',''))-$([guid]::NewGuid().ToString('N'))"
+    $bundleManifest = [ordered]@{
+      schema = "analyzer_mirror_bundle_v2"
+      snapshot_id = $snapshotId
+      analyzer_run_id = $analyzerRunId
+      analyzer_version = [string]$reportManifest.analyzer_version
+      analyzer_generated_at = $analyzerGeneratedAt
+      source_data_revision = [string]$manifest.source_git_rev
+      analyzer_generation_revision = $analyzerRevision
+      cohort_schema = $cohortSchema
+      data_scope = [string]$reportManifest.data_scope
+      session_scope = [string]$reportManifest.session_scope
+      source_report_manifest_sha256 = (Get-FileHash -LiteralPath (Join-Path $snapshotRoot "report_manifest.json") -Algorithm SHA256).Hash.ToLowerInvariant()
+      files = @($bundleFiles)
+    }
+    $bundleManifestJson = $bundleManifest | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText(
+      (Join-Path $snapshotRoot "bundle_manifest.json"),
+      $bundleManifestJson,
+      [System.Text.UTF8Encoding]::new($false)
+    )
+
+    $zip = [System.IO.Compression.ZipFile]::Open(
+      $bundlePath,
+      [System.IO.Compression.ZipArchiveMode]::Create
+    )
     try {
-      $content = [System.Net.Http.StreamContent]::new($stream)
-      $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("text/html")
-      $form.Add($content, "report", "analysis_dashboard.html")
-      $form.Add(
-        [System.Net.Http.StringContent]::new([string]$manifest.source_git_rev),
-        "source_git_rev"
-      )
-      $publishResponse = $client.PostAsync(
-        "$base/api/data-sync/analyzer-report",
-        $form
-      ).GetAwaiter().GetResult()
-      $publishResponse.EnsureSuccessStatusCode() | Out-Null
+      foreach ($row in $bundleFiles) {
+        $relative = [string]$row.path
+        $source = Join-Path $snapshotRoot ($relative.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+          $zip,
+          $source,
+          $relative,
+          [System.IO.Compression.CompressionLevel]::Optimal
+        ) | Out-Null
+      }
+      [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+        $zip,
+        (Join-Path $snapshotRoot "bundle_manifest.json"),
+        "bundle_manifest.json",
+        [System.IO.Compression.CompressionLevel]::Optimal
+      ) | Out-Null
     } finally {
-      $stream.Dispose()
-      $form.Dispose()
+      $zip.Dispose()
+    }
+    if ((Get-Item -LiteralPath $bundlePath).Length -gt 50MB) {
+      throw "Analyzer bundle exceeds the 50 MB compressed limit."
+    }
+    $client = [System.Net.Http.HttpClient]::new()
+    $client.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
+    try {
+      $form = [System.Net.Http.MultipartFormDataContent]::new()
+      $stream = [System.IO.File]::OpenRead($bundlePath)
+      try {
+        $content = [System.Net.Http.StreamContent]::new($stream)
+        $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("application/zip")
+        $form.Add($content, "bundle", "analyzer_bundle.zip")
+        $publishResponse = $client.PostAsync(
+          "$base/api/data-sync/analyzer-report",
+          $form
+        ).GetAwaiter().GetResult()
+        $publishResponse.EnsureSuccessStatusCode() | Out-Null
+      } finally {
+        $stream.Dispose()
+        $form.Dispose()
+      }
+    } finally {
+      $client.Dispose()
     }
   } finally {
-    $client.Dispose()
+    Remove-Item -LiteralPath $bundlePath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $snapshotRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
 }
 

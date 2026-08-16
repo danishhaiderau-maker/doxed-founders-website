@@ -182,6 +182,37 @@ test('executionOnly live copy surfaces session-scoped active signals and expired
   assert.match(html, /Completed trades/);
 });
 
+test('labels copy-first exchange evidence without inventing a Showcase fill', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(AgentTransparencyTables, {
+      executionOnly: true,
+      liveBook: {
+        activeSignals: [], positions: [], pendingOrders: [], expiredOrders: [],
+        trades: [{
+          time: '2026-08-15 18:50:13 AEST',
+          tradeId: 'cont-copy-first', direction: 'SHORT', entry: 63060, exit: 63051,
+          durationMin: 1.5, exitReason: 'PROFIT_LOCK', pnlPct: 2.38, netUsd: 0.49,
+          grossUsd: 0.49, tradeFeesUsd: 0, fundingUsd: 0,
+          sourceFillTime: null,
+          exchangeOrderAckTime: '2026-08-15 18:48:03 AEST',
+          exchangeFillTime: '2026-08-15 18:48:43 AEST',
+          exchangeExitTime: '2026-08-15 18:50:13 AEST',
+          lifecycleStatus: 'COPY_FIRST_DIVERGENCE',
+          evidenceStatus: 'Exchange-linked lifecycle',
+          negativeEvidence: 'MIRROR_DIFF preserved',
+        }],
+      },
+    }),
+  );
+
+  assert.match(html, /Source fill \(Melbourne\)/);
+  assert.match(html, /Bitfinex fill \(Melbourne\)/);
+  assert.match(html, /Copy filled first \/ source fill absent/);
+  assert.match(html, /Not recorded/);
+  assert.match(html, /MIRROR_DIFF preserved/);
+  assert.match(html, /never fabricates a Showcase fill/);
+});
+
 test('expired relay orders table computes age from expired-created timestamps, not server ageMin alone', () => {
   // Defect 2: a row whose server-supplied ageMin is missing/0 but whose
   // timestamps clearly span 12 minutes must show 12, not 0. The displayed age

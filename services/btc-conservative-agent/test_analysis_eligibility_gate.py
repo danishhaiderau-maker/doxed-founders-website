@@ -31,6 +31,7 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
                 "actual_bitfinex_realized_pnl_usd": 1.25,
                 "required_post_exit_horizons_complete": True,
                 "bitfinex_evidence": {
+                    "linkage_complete": True,
                     "quantity_evidence_complete": True,
                     "order_ack_history_complete": True,
                     "stop_evidence_complete": True,
@@ -88,11 +89,31 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
             "SOURCE_ABSENCE_FALLBACK",
             "MANUAL_CLOSE",
             "EMERGENCY_CLOSE",
+            "SHOWCASE_FLAT_FAILSAFE",
+            "EXIT_ONLY_PENDING_CANCEL_PARTIAL_FILL",
         ):
             result = classify_row({**base, "terminal_provenance": provenance})
             self.assertFalse(result["eligible"][SHOWCASE_STRATEGY])
             self.assertFalse(result["eligible"][BITFINEX_COPY_FIDELITY])
             self.assertFalse(result["eligible"][REAL_COPY_PARAMETER_OPTIMISATION])
+
+    def test_unsupported_flat_book_and_late_fill_cleanup_have_explicit_reasons(self):
+        base = {
+            "trade_id": "excluded-terminal",
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "replay_complete": True,
+        }
+        flat = classify_row({**base, "terminal_provenance": "SHOWCASE_FLAT_FAILSAFE"})
+        late = classify_row({**base, "terminal_provenance": "LATE_FILL_CLEANUP"})
+        self.assertIn(
+            "UNSUPPORTED_FLAT_BOOK_EXIT",
+            flat["exclusion_reasons"][SHOWCASE_STRATEGY],
+        )
+        self.assertIn(
+            "LATE_FILL_CLEANUP",
+            late["exclusion_reasons"][SHOWCASE_STRATEGY],
+        )
 
     def test_missing_trade_identity_fails_closed(self):
         analyzer._load_jsonl_by_trade_id = lambda _path: {}
@@ -122,6 +143,22 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
                 "MIRROR_DIFF_STALE_NO_EXPOSURE",
                 result["exclusion_reasons"][cohort],
             )
+
+    def test_mirror_diff_stale_is_explicit_without_terminal_provenance(self):
+        result = classify_row({
+            "trade_id": "cont-negative-no-terminal",
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "replay_complete": True,
+            "lifecycle_events": [
+                {"event_type": "MIRROR_DIFF"},
+                {"event_type": "STALE_NO_EXPOSURE"},
+            ],
+        })
+        self.assertIn(
+            "MIRROR_DIFF_STALE_NO_EXPOSURE",
+            result["exclusion_reasons"][BITFINEX_COPY_FIDELITY],
+        )
 
 
 if __name__ == "__main__":

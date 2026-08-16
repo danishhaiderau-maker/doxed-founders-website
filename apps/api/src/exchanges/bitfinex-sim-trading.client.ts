@@ -1,6 +1,7 @@
 import {
   BITFINEX_BTC_PERP_SYMBOL,
   BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE,
+  BITFINEX_REDUCE_ONLY_FLAG,
   type BitfinexActiveOrder,
   type BitfinexPositionDetail,
   BitfinexTradingClient,
@@ -107,6 +108,7 @@ export class BitfinexSimTradingClient {
         price: o.price,
         status: 'ACTIVE',
         orderType: 'LIMIT',
+        flags: 0,
       }));
   }
 
@@ -124,6 +126,7 @@ export class BitfinexSimTradingClient {
       price: o.price,
       status: 'ACTIVE',
       orderType: o.orderType,
+      flags: o.orderType === 'STOP' ? BITFINEX_REDUCE_ONLY_FLAG : 0,
     };
   }
 
@@ -226,6 +229,7 @@ export class BitfinexSimTradingClient {
       qty: number;
       stopPrice: number;
       leverage?: number;
+      clientOrderId?: number;
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;

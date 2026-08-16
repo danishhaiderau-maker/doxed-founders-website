@@ -41,6 +41,10 @@ v63: MFE/MAE, bull/bear spread, structure_score, MTF alignment, contradiction in
 exit forensics, TIME_EXIT deep dive, edge×structure×MTF combos, factor-gate funnel.
 """
 import pandas as pd
+if __name__ != "__main__":
+    raise ImportError(
+        "Legacy research analyzer import is disabled fail-closed; import the canonical ../analyzer_research_engine_v62.py"
+    )
 import numpy as np
 import time
 import threading
@@ -17119,7 +17123,7 @@ def write_analysis_dashboard_html(payload):
     report_links = ""
     for title, fname, _desc in DEEP_DIVE_REPORT_CATALOG[:12]:
         rp = os.path.join(REPORTS_DIR, os.path.basename(fname))
-        href = rp if os.path.isfile(rp) else fname
+        href = (rp if os.path.isfile(rp) else fname).replace(os.sep, "/")
         if os.path.isfile(href):
             report_links += f'<li><a href="{esc(href)}">{esc(title)}</a></li>\n'
     scope_meta = payload.get("session_scope", "ALL-DATA")
@@ -17150,7 +17154,8 @@ def write_analysis_dashboard_html(payload):
   .note {{ color: #8b9aab; font-size: 0.8rem; margin-top: 8px; }}
   a {{ color: #6eb5ff; }}
 </style></head><body>
-<h1>Research Analysis Dashboard</h1>
+<h1>Local Analyzer Snapshot</h1>
+<p class="meta">Read-only Fly mirror of the locally generated analyzer; this is not the live interactive desktop dashboard.</p>
 <p class="meta">{esc(scope_meta)} · {esc(ANALYZER_SYNC_ID)} · confidence: {esc(cov.get('confidence_status', 'n/a'))}</p>
 <div class="kpis">
   <div class="kpi"><div class="lbl">Trades</div><div class="val">{p.get('trades', 0)}</div></div>

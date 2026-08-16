@@ -419,6 +419,53 @@ test('renders one exchange-proven participant close when Bitfinex close ledger i
   assert.equal(book.trades[0]?.netUsd, -1.6);
 });
 
+test('preserves canonical identity and explicit clocks when a cash-ledger close is present', () => {
+  const closedAt = new Date('2026-08-15T08:50:13.000Z');
+  const book = mapSubscriberExchangeLiveBook({
+    orders: [],
+    position: null,
+    participants: [{
+      status: SignalCycleStatus.CLOSED,
+      fillPrice: 63_060,
+      exitPrice: 63_051,
+      pnlUsd: 0.48,
+      pnlMarginPct: 2.38,
+      qty: 0.03172,
+      terminalReason: 'SHOWCASE_MIRROR',
+      exchangeProven: true,
+      createdAt: new Date('2026-08-15T08:48:00.000Z'),
+      updatedAt: closedAt,
+      sourceSignalAt: new Date('2026-08-15T08:47:59.000Z'),
+      sourceFillAt: null,
+      exchangeOrderAckAt: new Date('2026-08-15T08:48:03.000Z'),
+      exchangeFillAt: new Date('2026-08-15T08:48:43.000Z'),
+      exchangeExitAt: closedAt,
+      negativeEvidence: 'MIRROR_DIFF preserved',
+      cycle: {
+        tradeId: 'cont-copy-first',
+        status: SignalCycleStatus.CLOSED,
+        intentEnvelope: { direction: 'SHORT' },
+        showcaseExitReason: 'PROFIT_LOCK',
+        createdAt: new Date('2026-08-15T08:48:00.000Z'),
+      },
+    }],
+    ledgerCloses: [{
+      ledgerId: '241972152606',
+      closedAt,
+      pnlUsd: 0.49,
+      description: 'Position closed',
+    }],
+  });
+
+  assert.equal(book.trades.length, 1);
+  assert.equal(book.trades[0]?.tradeId, 'cont-copy-first');
+  assert.equal(book.trades[0]?.netUsd, 0.49);
+  assert.equal(book.trades[0]?.sourceFillTime, null);
+  assert.equal(book.trades[0]?.lifecycleStatus, 'COPY_FIRST_DIVERGENCE');
+  assert.match(book.trades[0]?.exchangeFillTime ?? '', /18:48:43/);
+  assert.equal(book.trades[0]?.negativeEvidence, 'MIRROR_DIFF preserved');
+});
+
 test('measures a completed live-copy trade from exchange fill to first close', () => {
   const createdAt = new Date('2026-08-11T00:09:05.569Z');
   const filledAt = new Date('2026-08-11T00:21:57.590Z');

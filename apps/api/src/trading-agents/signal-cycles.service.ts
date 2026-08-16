@@ -21,6 +21,7 @@ import {
   resolveSignalCyclePollMs,
   pickCanonicalTradeId,
   isMirrorableLaneTradeId,
+  SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
   type SignalCycleEventType,
 } from '@dcf/utils';
 import { createHash, randomBytes } from 'crypto';
@@ -46,7 +47,12 @@ import {
 } from './signal-envelope.mapper';
 import { loadSubscriberMaxMarginUsd } from './subscriber-margin.util';
 import { normalizeBotSessionTrades } from './bot-state.mapper';
-import { resolveShowcaseTradeDetails, tradeIdsMatch } from './relay-fidelity.mapper';
+import {
+  completeCanonicalTerminalRecord,
+  canonicalTerminalSnapshotComplete,
+  resolveShowcaseTradeDetails,
+  tradeIdsMatch,
+} from './relay-fidelity.mapper';
 
 const DDOLLAR_PER_USD = 100;
 const SIGNAL_POLL_MS = resolveSignalCyclePollMs();
@@ -404,27 +410,23 @@ export class SignalCyclesService implements OnModuleInit {
         !!position.trade_id && tradeIdsMatch(position.trade_id, cycle.tradeId),
       );
       const sigRef = mapEntry?.signal_ref;
-      const mapClosed =
-        sigRef &&
-        String(sigRef.status ?? '') === 'CLOSED' &&
-        (sigRef.exit_price != null || sigRef.closed_ts != null);
-      const listedClosed = trade?.exit != null && trade.pnl != null;
+      const terminal = completeCanonicalTerminalRecord(cycle.tradeId, showcaseDetails);
 
-      if (listedClosed || mapClosed) {
+      if (terminal && canonicalTerminalSnapshotComplete(bot)) {
         const netPnl =
           trade?.net_pnl_usd ??
           (typeof sigRef?.net_pnl_usd === 'number' ? Number(sigRef.net_pnl_usd) : trade?.pnl);
-        const canonicalTradeId = showcaseDetails?.matchedTradeId ?? cycle.tradeId;
         await this.prisma.signalCycle.update({
           where: { id: cycle.id },
           data: {
             status: SignalCycleStatus.CLOSED,
             closedAt: new Date(),
-            tradeId: canonicalTradeId !== cycle.tradeId ? canonicalTradeId : undefined,
+            tradeId: showcaseDetails?.matchedTradeId !== cycle.tradeId
+              ? showcaseDetails?.matchedTradeId
+              : undefined,
             showcasePnlUsd: netPnl ?? undefined,
             showcaseExitReason:
-              trade?.exit_reason ??
-              (typeof sigRef?.exit_reason === 'string' ? sigRef.exit_reason : 'SHOWCASE_CLOSED'),
+              terminal.exitReason,
           },
         });
       } else if (
@@ -741,7 +743,8 @@ export class SignalCyclesService implements OnModuleInit {
         );
       }
       const intent = cycle.intentEnvelope as { risk?: { stop_loss_margin_pct?: number } };
-      const expectedSl = intent?.risk?.stop_loss_margin_pct ?? -18;
+      const expectedSl =
+        intent?.risk?.stop_loss_margin_pct ?? SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
       if (
         body.stop_loss_margin_pct != null &&
         Math.abs(body.stop_loss_margin_pct - expectedSl) > 0.5

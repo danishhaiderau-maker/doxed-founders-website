@@ -1,9 +1,9 @@
 {
   "engine_version": "v15-typeb-opportunity-v2",
-  "combo_version": "2026-08-15",
+  "combo_version": "2026-08-16",
   "exit_version": "scenario-c-v4",
-  "benchmark_lane": "COMBO_65_SP5_CHASE_3PLUS",
-  "signal_hash": "e1efd097d20a",
-  "source": "bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-08-15T13:59:58.659Z"
+  "benchmark_lane": "CONTINUOUS",
+  "signal_hash": "848da6dfc0bd",
+  "source": "services/btc-conservative-agent/bot.py",
+  "updated_at": "2026-08-16T03:35:55.362Z"
 }

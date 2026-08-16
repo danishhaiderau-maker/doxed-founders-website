@@ -309,7 +309,9 @@ export function AgentTransparencyTables({
       o.reason || 'Blocked',
     ]);
 
-  const tradeRows = book.trades.slice(0, cap).map((t) => {
+  // Preserve enough exchange history to make divergence evidence observable.
+  const tradeCap = executionOnly ? Math.max(cap, 20) : cap;
+  const tradeRows = book.trades.slice(0, tradeCap).map((t) => {
     // pnlPct defaults to 0 when the close path didn't record pnl_margin_pct
     // (already-flat / immediate-flat reconciles). Showing "+0.00%" for a trade
     // that actually lost/won cash is misleading — render "—" when the pct is 0
@@ -318,17 +320,31 @@ export function AgentTransparencyTables({
       t.pnlPct === 0 && t.netUsd !== 0
         ? '—'
         : `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(2)}%`;
+    if (executionOnly) {
+      return [
+        canonicalTradeIdForDisplay(t.tradeId),
+        t.direction,
+        t.sourceFillTime ? displayMelbourneTime(t.sourceFillTime) : 'Not recorded',
+        t.exchangeOrderAckTime ? displayMelbourneTime(t.exchangeOrderAckTime) : 'Not recorded',
+        t.exchangeFillTime ? displayMelbourneTime(t.exchangeFillTime) : 'Not recorded',
+        t.exchangeExitTime ? displayMelbourneTime(t.exchangeExitTime) : displayMelbourneTime(t.time),
+        fmtPrice(t.entry), fmtPrice(t.exit), String(t.durationMin),
+        t.lifecycleStatus === 'COPY_FIRST_DIVERGENCE'
+          ? 'Copy filled first / source fill absent'
+          : t.lifecycleStatus === 'SOURCE_AND_COPY'
+            ? 'Source + copy linked'
+            : t.lifecycleStatus === 'EXCHANGE_ONLY'
+              ? 'Exchange-only evidence'
+              : t.lifecycleStatus ?? 'Not classified',
+        displayExitCause(t.exitReason), pnlPctCell, formatUsd(t.netUsd),
+        t.evidenceStatus ?? 'Not recorded', t.negativeEvidence ?? '—',
+      ];
+    }
     return [
-      displayMelbourneTime(t.time),
-      canonicalTradeIdForDisplay(t.tradeId),
-      t.direction,
-      fmtPrice(t.entry),
-      fmtPrice(t.exit),
-      String(t.durationMin),
-      displayExitCause(t.exitReason),
-      pnlPctCell,
-      formatUsd(t.netUsd),
-      ...(executionOnly ? [] : [formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd), formatUsd(t.fundingUsd)]),
+      displayMelbourneTime(t.time), canonicalTradeIdForDisplay(t.tradeId), t.direction,
+      fmtPrice(t.entry), fmtPrice(t.exit), String(t.durationMin), displayExitCause(t.exitReason),
+      pnlPctCell, formatUsd(t.netUsd), formatUsd(t.grossUsd), formatUsd(t.tradeFeesUsd),
+      formatUsd(t.fundingUsd),
     ];
   });
 
@@ -409,17 +425,23 @@ export function AgentTransparencyTables({
         />
         <MiniTable
           title="Completed trades & P/L"
-          subtitle="Realized Bitfinex results — canonical Trade ID matches Showcase; only exchange-filled trades appear here"
+          subtitle="Current relay-session exchange evidence. Source and Bitfinex clocks are separate; a Bitfinex fill never fabricates a Showcase fill. Times are Melbourne local time."
           headers={[
-            'Time (Melbourne)',
             'Trade ID',
             'Direction',
+            'Source fill (Melbourne)',
+            'Bitfinex ACK (Melbourne)',
+            'Bitfinex fill (Melbourne)',
+            'Bitfinex exit (Melbourne)',
             'Entry',
             'Exit',
             'Duration min',
+            'Lifecycle',
             'Exit cause',
             'PnL %',
             'Net USD',
+            'Evidence',
+            'Negative evidence',
           ]}
           rows={tradeRows}
           emptyMessage="No closed trades this session."

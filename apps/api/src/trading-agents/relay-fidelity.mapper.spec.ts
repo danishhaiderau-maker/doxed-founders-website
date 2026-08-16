@@ -1,6 +1,62 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildRelayFidelitySnapshot } from './relay-fidelity.mapper';
+import {
+  buildRelayFidelitySnapshot,
+  completeCanonicalTerminalRecord,
+  canonicalTerminalSnapshotComplete,
+} from './relay-fidelity.mapper';
+
+test('canonical terminal authority requires exact identity, price, reason, and parseable time', () => {
+  const complete = {
+    matchedTradeId: 'cont-terminal-1',
+    matchKind: 'exact' as const,
+    exit: 63_100,
+    exitReason: 'SCENARIO_C_PROFIT_LOCK',
+    exitAt: '2026-08-16T03:00:00.000Z',
+  };
+  assert.deepEqual(completeCanonicalTerminalRecord('cont-terminal-1', complete), {
+    exitPrice: 63_100,
+    exitReason: 'SCENARIO_C_PROFIT_LOCK',
+    exitAt: '2026-08-16T03:00:00.000Z',
+  });
+  assert.equal(completeCanonicalTerminalRecord('cont-wrong', complete), null);
+  assert.equal(completeCanonicalTerminalRecord('cont-terminal-1', { ...complete, matchKind: 'normalized' }), null);
+  assert.equal(completeCanonicalTerminalRecord('cont-terminal-1', { ...complete, exit: undefined }), null);
+  assert.equal(completeCanonicalTerminalRecord('cont-terminal-1', { ...complete, exitReason: '' }), null);
+  assert.equal(completeCanonicalTerminalRecord('cont-terminal-1', { ...complete, exitAt: '' }), null);
+  assert.equal(completeCanonicalTerminalRecord('cont-terminal-1', { ...complete, exitAt: 'not-a-time' }), null);
+});
+
+test('snapshot terminal evidence fails closed when stale, incomplete, or unsynchronised', () => {
+  const now = Date.parse('2026-08-16T03:00:10.000Z');
+  const complete = {
+    source_git_rev: 'abc123',
+    positions: [],
+    orders: [],
+    trades: [],
+    trades_map: {},
+    signal_info: { signals: [] },
+    state_integrity: {
+      snapshot_seq: 5,
+      snapshot_ts: '2026-08-16T03:00:09.000Z',
+      snapshot_age_sec: 1,
+      positions_synced: true,
+      orders_synced: true,
+      trades_synced: true,
+    },
+  };
+  assert.equal(canonicalTerminalSnapshotComplete(complete, now), true);
+  assert.equal(canonicalTerminalSnapshotComplete({ ...complete, source_git_rev: '' }, now), false);
+  assert.equal(canonicalTerminalSnapshotComplete({ ...complete, orders: undefined }, now), false);
+  assert.equal(canonicalTerminalSnapshotComplete({
+    ...complete,
+    state_integrity: { ...complete.state_integrity, trades_synced: false },
+  }, now), false);
+  assert.equal(canonicalTerminalSnapshotComplete({
+    ...complete,
+    state_integrity: { ...complete.state_integrity, snapshot_age_sec: 20 },
+  }, now), false);
+});
 
 test('compact fidelity history reconciles trades beyond the dashboard display cap', () => {
   const startedAt = new Date('2026-07-20T00:00:00.000Z');

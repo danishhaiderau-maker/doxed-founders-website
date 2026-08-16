@@ -26007,6 +26007,9 @@ TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
 SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
 SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
+PLATFORM_RELAY_EVIDENCE_FILE = os.getenv(
+    "PLATFORM_RELAY_EVIDENCE_FILE", "relay_lifecycle_evidence_v1.json"
+)
 _paused_shadow_stats_lock = threading.Lock()
 _paused_shadow_stats_cache = {
     "signature": None,
@@ -33814,8 +33817,348 @@ def _analyzer_mirror_dir() -> Path:
     return _data_sync_volume_root() / "analyzer_mirror"
 
 
+_ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES = 50 * 1024 * 1024
+_ANALYZER_BUNDLE_MAX_EXPANDED_BYTES = 150 * 1024 * 1024
+_ANALYZER_BUNDLE_MAX_MEMBERS = 256
+_ANALYZER_BUNDLE_MAX_MEMBER_BYTES = 50 * 1024 * 1024
+_ANALYZER_BUNDLE_MAX_COMPRESSION_RATIO = 1000
+_ANALYZER_BUNDLE_ALLOWED_SUFFIXES = frozenset((".html", ".txt", ".json", ".log"))
+_ANALYZER_BUNDLE_MANIFEST = "bundle_manifest.json"
+_ANALYZER_BUNDLE_SCHEMA = "analyzer_mirror_bundle_v2"
+_ANALYZER_INSTALL_LOCK = threading.RLock()
+if app.config.get("MAX_CONTENT_LENGTH") is None:
+    # Bound multipart spooling before Flask parses request.files. The analyzer
+    # ZIP is the largest accepted upload in this service.
+    app.config["MAX_CONTENT_LENGTH"] = _ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES + 1024 * 1024
+
+
+def _analyzer_generations_dir() -> Path:
+    return _data_sync_volume_root() / "analyzer_generations"
+
+
+def _analyzer_current_pointer_path() -> Path:
+    return _data_sync_volume_root() / "analyzer_current.json"
+
+
+def _valid_analyzer_generation(candidate: Path) -> bool:
+    try:
+        status = json.loads((candidate / "status.json").read_text(encoding="utf-8"))
+        return bool(
+            candidate.is_dir()
+            and status.get("complete") is True
+            and status.get("schema") == _ANALYZER_BUNDLE_SCHEMA
+            and (candidate / "analysis_dashboard.html").is_file()
+            and (candidate / _ANALYZER_BUNDLE_MANIFEST).is_file()
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _recover_latest_analyzer_generation() -> Path | None:
+    """Recover from a missing/corrupt pointer without selecting staging data."""
+    generations = _analyzer_generations_dir()
+    try:
+        candidates = sorted(
+            (
+                path for path in generations.iterdir()
+                if path.name.startswith("generation-") and _valid_analyzer_generation(path)
+            ),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    return candidates[0] if candidates else None
+
+
+def _active_analyzer_mirror_dir() -> Path:
+    """Resolve only a fully installed generation, else the legacy mirror."""
+    pointer = _analyzer_current_pointer_path()
+    try:
+        row = json.loads(pointer.read_text(encoding="utf-8"))
+        generation = str(row.get("generation") or "")
+        if not generation or generation != Path(generation).name:
+            raise ValueError("invalid analyzer generation pointer")
+        root = _analyzer_generations_dir().resolve()
+        candidate = (_analyzer_generations_dir() / generation).resolve()
+        candidate.relative_to(root)
+        if _valid_analyzer_generation(candidate):
+            return candidate
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    recovered = _recover_latest_analyzer_generation()
+    if recovered is not None:
+        return recovered
+    return _analyzer_mirror_dir()
+
+
+def _prune_analyzer_generations(active_generation: str, keep: int = 3) -> None:
+    """Bound immutable snapshot storage while never deleting the active tree."""
+    root = _analyzer_generations_dir()
+    try:
+        generations = sorted(
+            (path for path in root.iterdir() if path.name.startswith("generation-") and path.is_dir()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        return
+    retained = {path.name for path in generations[:max(1, keep)]}
+    retained.add(active_generation)
+    for path in generations:
+        if path.name not in retained:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _safe_analyzer_bundle_members(archive: zipfile.ZipFile) -> list:
+    """Validate a complete read-only analyzer bundle before extracting it."""
+    members = []
+    expanded = 0
+    infos = archive.infolist()
+    if len(infos) > _ANALYZER_BUNDLE_MAX_MEMBERS:
+        raise ValueError("analyzer bundle contains too many members")
+    seen = set()
+    for info in infos:
+        if info.is_dir():
+            continue
+        raw_name = str(info.filename or "").replace("\\", "/")
+        parts = [part for part in raw_name.split("/") if part]
+        if (
+            not parts
+            or raw_name.startswith("/")
+            or any(part in (".", "..") for part in parts)
+            or ":" in parts[0]
+        ):
+            raise ValueError("analyzer bundle contains an unsafe path")
+        rel = Path(*parts)
+        normalized = str(rel).replace("\\", "/")
+        collision_key = normalized.casefold()
+        if collision_key in seen:
+            raise ValueError(f"analyzer bundle contains a duplicate path: {raw_name}")
+        seen.add(collision_key)
+        if rel.suffix.lower() not in _ANALYZER_BUNDLE_ALLOWED_SUFFIXES:
+            raise ValueError(f"analyzer bundle contains an unsupported file: {raw_name}")
+        # Unix symlinks are not report files and could escape the mirror root.
+        unix_mode = (int(info.external_attr) >> 16) & 0o170000
+        if unix_mode == 0o120000:
+            raise ValueError("analyzer bundle contains a symbolic link")
+        member_size = int(info.file_size or 0)
+        compressed_size = int(info.compress_size or 0)
+        if member_size > _ANALYZER_BUNDLE_MAX_MEMBER_BYTES:
+            raise ValueError(f"analyzer bundle member exceeds 50 MB: {raw_name}")
+        if normalized == _ANALYZER_BUNDLE_MANIFEST and member_size > 2 * 1024 * 1024:
+            raise ValueError("analyzer bundle manifest exceeds 2 MB")
+        if (
+            member_size > 1024 * 1024
+            and compressed_size > 0
+            and member_size / compressed_size > _ANALYZER_BUNDLE_MAX_COMPRESSION_RATIO
+        ):
+            raise ValueError(f"analyzer bundle member has an unsafe compression ratio: {raw_name}")
+        expanded += member_size
+        if expanded > _ANALYZER_BUNDLE_MAX_EXPANDED_BYTES:
+            raise ValueError("analyzer bundle expands beyond the 150 MB limit")
+        members.append((info, rel))
+    paths = {str(rel).replace("\\", "/") for _, rel in members}
+    if _ANALYZER_BUNDLE_MANIFEST not in paths:
+        raise ValueError(f"analyzer bundle is missing {_ANALYZER_BUNDLE_MANIFEST}")
+    return members
+
+
+def _validated_analyzer_bundle_manifest(archive: zipfile.ZipFile, members: list) -> dict:
+    """Require an exact, hash-bound set of files from one analyzer run."""
+    try:
+        manifest = json.loads(archive.read(_ANALYZER_BUNDLE_MANIFEST).decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise ValueError(f"invalid analyzer bundle manifest: {exc}") from exc
+    if manifest.get("schema") != _ANALYZER_BUNDLE_SCHEMA:
+        raise ValueError("unsupported analyzer bundle schema")
+    required_text = (
+        "snapshot_id", "analyzer_run_id", "analyzer_generated_at",
+        "source_data_revision", "analyzer_generation_revision",
+        "analyzer_version", "cohort_schema", "data_scope",
+        "source_report_manifest_sha256",
+    )
+    if any(not str(manifest.get(key) or "").strip() for key in required_text):
+        raise ValueError("analyzer bundle provenance is incomplete")
+    rows = manifest.get("files")
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("analyzer bundle manifest has no files")
+    declared = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("analyzer bundle manifest contains an invalid file row")
+        path = str(row.get("path") or "").replace("\\", "/")
+        key = path.casefold()
+        if not path or key in declared:
+            raise ValueError("analyzer bundle manifest contains a duplicate or empty file path")
+        digest = str(row.get("sha256") or "").lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"analyzer bundle manifest has an invalid hash: {path}")
+        try:
+            size = int(row.get("size_bytes"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"analyzer bundle manifest has an invalid size: {path}") from exc
+        if size < 0 or size > _ANALYZER_BUNDLE_MAX_MEMBER_BYTES:
+            raise ValueError(f"analyzer bundle manifest size is out of bounds: {path}")
+        declared[key] = {"path": path, "sha256": digest, "size_bytes": size}
+    actual = {
+        str(rel).replace("\\", "/").casefold()
+        for _, rel in members
+        if str(rel).replace("\\", "/") != _ANALYZER_BUNDLE_MANIFEST
+    }
+    if actual != set(declared):
+        raise ValueError("analyzer bundle membership does not exactly match its manifest")
+    if "analysis_dashboard.html" not in {row["path"] for row in declared.values()}:
+        raise ValueError("analyzer bundle is missing analysis_dashboard.html")
+    for revision_key in ("source_data_revision", "analyzer_generation_revision"):
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", str(manifest[revision_key])):
+            raise ValueError(f"analyzer bundle has an invalid {revision_key}")
+    try:
+        datetime.fromisoformat(str(manifest["analyzer_generated_at"]).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("analyzer bundle has an invalid analyzer_generated_at") from exc
+    try:
+        report_payload = archive.read("report_manifest.json")
+        report_manifest = json.loads(report_payload.decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, ValueError, TypeError) as exc:
+        raise ValueError(f"invalid source report manifest: {exc}") from exc
+    if hashlib.sha256(report_payload).hexdigest() != str(manifest["source_report_manifest_sha256"]).lower():
+        raise ValueError("source report manifest hash does not match bundle provenance")
+    provenance = report_manifest.get("analysis_provenance") or {}
+    comparisons = {
+        "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
+        "analyzer_version": report_manifest.get("analyzer_version"),
+        "analyzer_generated_at": report_manifest.get("generated_at"),
+        "data_scope": report_manifest.get("data_scope"),
+        "cohort_schema": provenance.get("cohort_schema"),
+        "analyzer_generation_revision": provenance.get("generation_revision"),
+    }
+    if any(str(manifest.get(key)) != str(value) for key, value in comparisons.items()):
+        raise ValueError("bundle provenance does not match the source report manifest")
+    expected_paths = {"report_manifest.json"}
+    for raw_path in report_manifest.get("text_artifacts") or []:
+        path = str(raw_path or "")
+        if not path or path != Path(path).name:
+            raise ValueError("source report manifest contains an unsafe text artifact path")
+        expected_paths.add(path)
+    reports = report_manifest.get("reports") or []
+    try:
+        report_count = int(report_manifest.get("report_count"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("source report manifest has an invalid report_count") from exc
+    if len(reports) != report_count:
+        raise ValueError("source report manifest report_count does not match its reports")
+    for row in reports:
+        path = str((row or {}).get("file") or "")
+        if not path or path != Path(path).name:
+            raise ValueError("source report manifest contains an unsafe report path")
+        expected_paths.add(f"reports/{path}")
+    if expected_paths != {row["path"] for row in declared.values()}:
+        raise ValueError("bundle files do not exactly match the source report manifest")
+    return manifest
+
+
+def _install_analyzer_bundle(payload: bytes, meta: dict) -> dict:
+    """Install an immutable generation, then atomically select it."""
+    generations = _analyzer_generations_dir()
+    generations.mkdir(parents=True, exist_ok=True)
+    nonce = f"{os.getpid()}-{time.time_ns()}"
+    staging = generations / f".staging-{nonce}"
+    pointer_tmp = _analyzer_current_pointer_path().with_name(f"analyzer_current.{nonce}.tmp")
+    with _ANALYZER_INSTALL_LOCK:
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
+                members = _safe_analyzer_bundle_members(archive)
+                manifest = _validated_analyzer_bundle_manifest(archive, members)
+                staging.mkdir(parents=True, exist_ok=False)
+                declared = {
+                    str(row["path"]).replace("\\", "/").casefold(): row
+                    for row in manifest["files"]
+                }
+                extracted = 0
+                for info, rel in members:
+                    rel_text = str(rel).replace("\\", "/")
+                    target = staging / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    digest = hashlib.sha256()
+                    actual_size = 0
+                    with archive.open(info, "r") as source, open(target, "wb") as destination:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            actual_size += len(chunk)
+                            if actual_size > _ANALYZER_BUNDLE_MAX_MEMBER_BYTES:
+                                raise ValueError(f"analyzer bundle member exceeds limit: {rel_text}")
+                            digest.update(chunk)
+                            destination.write(chunk)
+                    if rel_text != _ANALYZER_BUNDLE_MANIFEST:
+                        expected = declared[rel_text.casefold()]
+                        if (
+                            actual_size != int(expected["size_bytes"])
+                            or digest.hexdigest() != expected["sha256"]
+                        ):
+                            raise ValueError(f"analyzer bundle file integrity mismatch: {rel_text}")
+                    extracted += 1
+            bundle_sha = hashlib.sha256(payload).hexdigest()
+            generation = f"generation-{bundle_sha[:20]}-{time.time_ns()}"
+            final_dir = generations / generation
+            status = {
+                **meta,
+                **{key: value for key, value in manifest.items() if key != "files"},
+                "schema": _ANALYZER_BUNDLE_SCHEMA,
+                "complete": True,
+                "file_count": extracted - 1,
+                "bundle_sha256": bundle_sha,
+                "generation": generation,
+            }
+            (staging / "status.json").write_text(
+                json.dumps(status, separators=(",", ":")), encoding="utf-8"
+            )
+            os.replace(staging, final_dir)
+            pointer_tmp.write_text(
+                json.dumps(
+                    {"schema": "analyzer_current_v1", "generation": generation},
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            os.replace(pointer_tmp, _analyzer_current_pointer_path())
+            _prune_analyzer_generations(generation)
+            return status
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+            try:
+                pointer_tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+
 @app.route('/api/data-sync/analyzer-report', methods=['POST'])
 def api_data_sync_analyzer_report():
+    if (
+        request.content_length
+        and request.content_length > _ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES + 1024 * 1024
+    ):
+        return jsonify({"error": "analyzer upload request exceeds 51 MB"}), 413
+    bundle = request.files.get("bundle")
+    if bundle is not None:
+        payload = bundle.read(_ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES + 1)
+        if len(payload) > _ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES:
+            return jsonify({"error": "analyzer bundle exceeds 50 MB"}), 413
+        meta = {
+            "uploaded_at": utc_iso(),
+            "size": len(payload),
+        }
+        try:
+            installed = _install_analyzer_bundle(payload, meta)
+        except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as exc:
+            return jsonify({"error": f"invalid analyzer bundle: {exc}"}), 400
+        return jsonify({"ok": True, **installed})
+
+    # Backward compatibility for an older publisher. The HTML-only upload is
+    # deliberately labelled incomplete so operators cannot mistake broken links
+    # for a complete research mirror.
     upload = request.files.get("report")
     if upload is None:
         return jsonify({"error": "multipart field 'report' is required"}), 400
@@ -33829,6 +34172,8 @@ def api_data_sync_analyzer_report():
     tmp.write_bytes(payload)
     os.replace(tmp, target)
     meta = {
+        "schema": "analyzer_mirror_html_only_v0",
+        "complete": False,
         "uploaded_at": utc_iso(),
         "size": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
@@ -33845,9 +34190,11 @@ def api_data_sync_analyzer_report():
 def api_analyzer_mirror_status():
     try:
         payload = json.loads(
-            (_analyzer_mirror_dir() / "status.json").read_text(encoding="utf-8")
+            (_active_analyzer_mirror_dir() / "status.json").read_text(encoding="utf-8")
         )
-        return jsonify({"available": True, **payload})
+        resp = jsonify({"available": True, **payload})
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
     except (OSError, ValueError, TypeError):
         return jsonify({"available": False, "reason": "no local analyzer report uploaded yet"}), 404
 
@@ -33859,7 +34206,20 @@ def analyzer_mirror_dashboard():
         resp.headers['Location'] = '/analysis/login'
         resp.headers['Cache-Control'] = 'no-store'
         return resp
-    report = _analyzer_mirror_dir() / "analysis_dashboard.html"
+    resp = make_response('', 308)
+    resp.headers['Location'] = '/analysis/'
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/analysis/')
+def analyzer_mirror_dashboard_index():
+    if not _analyzer_view_authed():
+        resp = make_response('', 303)
+        resp.headers['Location'] = '/analysis/login'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    report = _active_analyzer_mirror_dir() / "analysis_dashboard.html"
     if not report.is_file():
         return jsonify({
             "error": "no analyzer mirror is available yet",
@@ -33870,6 +34230,38 @@ def analyzer_mirror_dashboard():
     resp.headers['X-Content-Type-Options'] = 'nosniff'
     resp.headers['X-Frame-Options'] = 'DENY'
     resp.headers['Referrer-Policy'] = 'no-referrer'
+    resp.headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    return resp
+
+
+@app.route('/analysis/<path:artifact_path>')
+def analyzer_mirror_artifact(artifact_path):
+    if not _analyzer_view_authed():
+        resp = make_response('', 303)
+        resp.headers['Location'] = '/analysis/login'
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    mirror = _active_analyzer_mirror_dir().resolve()
+    normalized = str(artifact_path or "").replace("\\", "/")
+    target = (mirror / normalized).resolve()
+    try:
+        target.relative_to(mirror)
+    except ValueError:
+        return jsonify({"error": "invalid analyzer artifact path"}), 400
+    if target.suffix.lower() not in _ANALYZER_BUNDLE_ALLOWED_SUFFIXES or not target.is_file():
+        return jsonify({"error": "analyzer artifact not found"}), 404
+    mimetype = {
+        ".html": "text/html",
+        ".txt": "text/plain",
+        ".json": "application/json",
+        ".log": "text/plain",
+    }.get(target.suffix.lower(), "application/octet-stream")
+    resp = make_response(send_file(target, mimetype=mimetype))
+    resp.headers['Cache-Control'] = 'no-store'
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'DENY'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    resp.headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     return resp
 
 
@@ -33913,7 +34305,7 @@ def analyzer_mirror_login():
         return 'Invalid owner token', 401, {'Cache-Control': 'no-store'}
 
     resp = make_response('', 303)
-    resp.headers['Location'] = '/analysis'
+    resp.headers['Location'] = '/analysis/'
     forwarded_proto = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
     secure = bool(request.is_secure or forwarded_proto == 'https')
     resp.set_cookie(
@@ -35878,6 +36270,11 @@ def run_offline_research_sim():
     """Backfill counterfactual.jsonl from snapshots + replays (deduped by trade_id)."""
     global _sim_processed_trade_ids
     try:
+        platform_revisions = {
+            trade_id: evidence.get("evidence_revision")
+            for trade_id, evidence in _platform_relay_evidence_index().items()
+        }
+        latest_local_revisions = {}
         if os.path.exists(COUNTERFACTUAL_FILE):
             with open(COUNTERFACTUAL_FILE, "r", encoding="utf-8") as f:
                 for line in f:
@@ -35888,9 +36285,19 @@ def run_offline_research_sim():
                         row = json.loads(line)
                         tid = row.get("trade_id")
                         if tid:
+                            latest_local_revisions[str(tid)] = row.get("platform_evidence_revision")
+                        # A changed platform evidence fingerprint produces a new
+                        # append-only derived revision; the older row is retained.
+                        if tid and (
+                            not platform_revisions.get(str(tid))
+                            or row.get("platform_evidence_revision") == platform_revisions.get(str(tid))
+                        ):
                             _sim_processed_trade_ids.add(tid)
                     except Exception:
                         pass
+        for tid, revision in platform_revisions.items():
+            if latest_local_revisions.get(tid) != revision:
+                _sim_processed_trade_ids.discard(tid)
         if os.path.exists(SHADOW_OUTCOME_FILE):
             with open(SHADOW_OUTCOME_FILE, "r", encoding="utf-8") as f:
                 for line in f:
@@ -35900,7 +36307,7 @@ def run_offline_research_sim():
                     try:
                         row = json.loads(line)
                         tid = row.get("trade_id")
-                        if tid:
+                        if tid and not platform_revisions.get(str(tid)):
                             _sim_processed_trade_ids.add(tid)
                     except Exception:
                         pass
@@ -35971,6 +36378,253 @@ _COUNTERFACTUAL_REQUIRED_POLICY_KEYS = (
     "exit_profile_id",
 )
 
+_COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "60m": 3600,
+    "120m": 7200,
+}
+
+
+def _counterfactual_policy_comparability_key(policy_snapshot: dict, buf: dict, snapshot: dict):
+    """Hash only a complete, canonical policy/execution-cost identity."""
+    exchange_evidence = (
+        snapshot.get("bitfinex_evidence")
+        if isinstance(snapshot.get("bitfinex_evidence"), dict)
+        else {}
+    )
+    fee_model = (
+        snapshot.get("fee_model")
+        or (snapshot.get("config") or {}).get("fee_model")
+        or exchange_evidence.get("fee_model")
+    )
+    execution_profile = (
+        snapshot.get("execution_profile")
+        or (snapshot.get("config") or {}).get("execution_profile")
+        or exchange_evidence.get("execution_profile")
+    )
+    leverage = buf.get("leverage")
+    if (
+        any(policy_snapshot.get(key) is None for key in _COUNTERFACTUAL_REQUIRED_POLICY_KEYS)
+        or leverage is None
+        or not fee_model
+        or not execution_profile
+    ):
+        return None
+    comparable = {
+        "schema": "policy_comparability_v1",
+        "policy_version": policy_snapshot.get("policy_version"),
+        "hard_stop_margin_pct": policy_snapshot.get("hard_stop_margin_pct"),
+        "thesis_fast_exit_unreal_pct": policy_snapshot.get("thesis_fast_exit_unreal_pct"),
+        "thesis_mfe_protect_pct": policy_snapshot.get("thesis_mfe_protect_pct"),
+        "trail_ladder": policy_snapshot.get("trail_ladder"),
+        "exit_profile_id": policy_snapshot.get("exit_profile_id"),
+        "leverage": leverage,
+        "fee_model": fee_model,
+        "execution_profile": execution_profile,
+    }
+    digest = hashlib.sha256(
+        json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"policy_comparability_v1:{digest}"
+
+
+def _counterfactual_post_exit_horizons(replay: dict) -> dict:
+    """Materialize truthful post-exit horizons; never substitute the last tick."""
+    exit_t = _buf_float(replay.get("exit_t_rel"), -1)
+    ticks = sorted(
+        (row for row in (replay.get("ticks") or []) if isinstance(row, dict)),
+        key=lambda row: _buf_float(row.get("t"), 0),
+    )
+    values = {}
+    for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
+        target_t = exit_t + seconds
+        observed = next(
+            (
+                row for row in ticks
+                if str(row.get("phase") or "") == "post_exit"
+                and _buf_float(row.get("t"), -1) >= target_t
+            ),
+            None,
+        )
+        values[label] = {
+            "required_sec": seconds,
+            "observed": observed is not None,
+            "tick_t_rel": observed.get("t") if observed else None,
+            "price": observed.get("price") if observed else None,
+            "unreal_pct": observed.get("unreal_pct") if observed else None,
+        }
+    complete = bool(
+        replay.get("post_exit_complete") is True
+        and exit_t >= 0
+        and all(row["observed"] for row in values.values())
+    )
+    return {
+        "schema": "post_exit_horizons_v1",
+        "required": values,
+        "complete": complete,
+    }
+
+
+def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
+    """Normalize supplied exchange evidence without manufacturing completeness."""
+    candidates = [
+        value for value in (
+            buf.get("bitfinex_evidence"),
+            snapshot.get("bitfinex_evidence"),
+            replay.get("bitfinex_evidence"),
+            outcome.get("bitfinex_evidence"),
+        ) if isinstance(value, dict)
+    ]
+
+    def first(*keys):
+        for source in reversed(candidates):
+            for key in keys:
+                value = source.get(key)
+                if value is not None and value != "" and value != [] and value != {}:
+                    return copy.deepcopy(value)
+        for source in (outcome, replay, snapshot, buf):
+            for key in keys:
+                value = source.get(key)
+                if value is not None and value != "" and value != [] and value != {}:
+                    return copy.deepcopy(value)
+        return None
+
+    def rows(*keys):
+        merged = []
+        fingerprints = set()
+        for source in (*candidates, buf, snapshot, replay, outcome):
+            for key in keys:
+                value = source.get(key)
+                values = value if isinstance(value, list) else ([value] if isinstance(value, dict) else [])
+                for row in values:
+                    fingerprint = json.dumps(row, sort_keys=True, default=str, separators=(",", ":"))
+                    if fingerprint not in fingerprints:
+                        fingerprints.add(fingerprint)
+                        merged.append(copy.deepcopy(row))
+        return merged
+
+    order_ids = first("bitfinex_order_ids", "exchange_order_ids", "order_ids") or []
+    if not isinstance(order_ids, list):
+        order_ids = [order_ids]
+    single_order = first("bitfinex_order_id", "exchange_order_id", "order_id")
+    if single_order is not None and single_order not in order_ids:
+        order_ids.append(single_order)
+    fill_ids = first("fill_ids", "bitfinex_fill_ids", "exchange_fill_ids") or []
+    if not isinstance(fill_ids, list):
+        fill_ids = [fill_ids]
+    quantities = {
+        "source_quantity": first("source_quantity", "source_qty"),
+        "normalized_quantity": first("normalized_quantity", "normalized_qty"),
+        "filled_quantity": first("filled_quantity", "filled_qty"),
+        "protected_quantity": first("protected_quantity", "protected_qty"),
+        "remaining_quantity": first("remaining_quantity", "remaining_qty"),
+    }
+    ack_history = rows("ack_history", "order_ack_history")
+    stop_chain = rows("stop_chain", "stop_replacements", "protective_stops")
+    source_observations = rows("source_absence_observations", "source_snapshot_observations")
+    reconciliation = first("reconciliation", "final_reconciliation") or {}
+    source_snapshot = first("source_snapshot_evidence") or {}
+    explicit = candidates[-1] if candidates else {}
+
+    def finite_number(value):
+        try:
+            return math.isfinite(float(value))
+        except (TypeError, ValueError):
+            return False
+
+    quantity_values_complete = all(
+        finite_number(quantities[key]) for key in (
+            "source_quantity", "normalized_quantity", "filled_quantity", "protected_quantity"
+        )
+    )
+    protection_covers_fill = bool(
+        quantity_values_complete
+        and float(quantities["protected_quantity"]) + 1e-12 >= float(quantities["filled_quantity"])
+    )
+    ack_rows_complete = bool(ack_history) and all(
+        isinstance(row, dict)
+        and (row.get("order_id") or row.get("bitfinex_order_id"))
+        and (row.get("ack_at") or row.get("acknowledged_at") or row.get("timestamp"))
+        for row in ack_history
+    )
+    stop_rows_complete = bool(stop_chain) and all(
+        isinstance(row, dict)
+        and (row.get("order_id") or row.get("bitfinex_order_id") or row.get("stop_id"))
+        and finite_number(row.get("protected_quantity") or row.get("quantity"))
+        and (row.get("ack_at") or row.get("placed_at") or row.get("timestamp"))
+        for row in stop_chain
+    )
+    source_snapshot_fields_complete = bool(
+        isinstance(source_snapshot, dict)
+        and (source_snapshot.get("sequence") is not None or source_snapshot.get("snapshot_sequence") is not None)
+        and (source_snapshot.get("captured_at") or source_snapshot.get("snapshot_time"))
+        and source_snapshot.get("fresh") is True
+        and source_snapshot.get("complete") is True
+    )
+    reconciliation_values_complete = bool(
+        isinstance(reconciliation, dict)
+        and reconciliation.get("complete") is True
+        and finite_number(reconciliation.get("position_delta"))
+        and abs(float(reconciliation.get("position_delta"))) <= 1e-12
+        and finite_number(reconciliation.get("order_delta"))
+        and abs(float(reconciliation.get("order_delta"))) <= 1e-12
+        and finite_number(reconciliation.get("orphan_order_count", 0))
+        and float(reconciliation.get("orphan_order_count") or 0) == 0
+        and finite_number(reconciliation.get("foreign_order_count", 0))
+        and float(reconciliation.get("foreign_order_count") or 0) == 0
+    )
+    evidence = {
+        "schema": "bitfinex_lifecycle_evidence_v1",
+        "participant_id": first("participant_id"),
+        "source_lifecycle_id": first("source_lifecycle_id", "lifecycle_id"),
+        "client_order_id": first("client_order_id", "cid"),
+        "fee_model": first("fee_model"),
+        "execution_profile": first("execution_profile"),
+        "bitfinex_order_ids": order_ids,
+        "fill_ids": fill_ids,
+        "quantities": quantities,
+        "fills": rows("fills", "partial_fills"),
+        "reprices": rows("reprices", "reprice_history"),
+        "ack_history": ack_history,
+        "stop_chain": stop_chain,
+        "exit_evidence": first("exit_evidence", "bitfinex_exit") or {},
+        "reconciliation": reconciliation,
+        "source_snapshot_evidence": source_snapshot,
+        "source_absence_observations": source_observations,
+        "manual_or_emergency_actor": first("manual_or_emergency_actor", "actor") or {},
+    }
+    evidence["quantity_evidence_complete"] = bool(
+        explicit.get("quantity_evidence_complete") is True
+        and quantity_values_complete
+        and protection_covers_fill
+    )
+    evidence["order_ack_history_complete"] = bool(
+        explicit.get("order_ack_history_complete") is True
+        and ack_rows_complete
+        and order_ids
+    )
+    evidence["stop_evidence_complete"] = bool(
+        explicit.get("stop_evidence_complete") is True and stop_rows_complete
+    )
+    evidence["source_snapshot_evidence_complete"] = bool(
+        explicit.get("source_snapshot_evidence_complete") is True
+        and source_snapshot_fields_complete
+    )
+    evidence["reconciliation_complete"] = bool(
+        explicit.get("reconciliation_complete") is True
+        and reconciliation_values_complete
+    )
+    evidence["linkage_complete"] = bool(
+        evidence["participant_id"]
+        and evidence["client_order_id"]
+        and order_ids
+        and fill_ids
+    )
+    return evidence
+
 
 def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
     """Immutable policy and conservative analysis-eligibility metadata."""
@@ -35991,6 +36645,9 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         if snapshot.get("actual_bitfinex_realized_pnl_usd") is not None
         else replay.get("actual_bitfinex_realized_pnl_usd")
     )
+    policy_key = _counterfactual_policy_comparability_key(policy_snapshot, buf, snapshot)
+    bitfinex_evidence = _counterfactual_bitfinex_evidence(buf, snapshot, replay, outcome)
+    post_exit_horizons = _counterfactual_post_exit_horizons(replay)
     exclusion_reasons = []
     if missing_policy:
         exclusion_reasons.append("POLICY_SNAPSHOT_INCOMPLETE")
@@ -35999,25 +36656,164 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
     elif str(exit_provenance).upper() in {
         "SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED",
         "ADMIN_MANUAL_CLOSE", "MANUAL_CLOSE", "EMERGENCY_ACTION",
-        "SHOWCASE_UNREACHABLE_OPEN_LOT",
+        "SHOWCASE_UNREACHABLE_OPEN_LOT", "SHOWCASE_FLAT_FAILSAFE",
+        "SHOWCASE_BOOK_FLAT", "EXIT_ONLY_PENDING_CANCEL_PARTIAL_FILL",
+        "LATE_FILL_CLEANUP",
     }:
         exclusion_reasons.append("TERMINAL_PROVENANCE_EXCLUDED")
     if not replay_complete:
         exclusion_reasons.append("REPLAY_INCOMPLETE_OR_UNPROVEN")
     if bool(snapshot.get("executed")) and actual_realized_pnl is None:
         exclusion_reasons.append("ACTUAL_BITFINEX_PNL_MISSING")
-    return {
+    if bool(snapshot.get("executed")) and not bitfinex_evidence.get("linkage_complete"):
+        exclusion_reasons.append("BITFINEX_LINKAGE_MISSING")
+    if not policy_key:
+        exclusion_reasons.append("POLICY_COMPARABILITY_KEY_MISSING")
+    if not post_exit_horizons["complete"]:
+        exclusion_reasons.append("REQUIRED_POST_EXIT_HORIZON_INCOMPLETE")
+    fields = {
+        "evidence_schema": "counterfactual_evidence_v1",
         "policy_snapshot": policy_snapshot,
+        "policy_version": policy_snapshot.get("policy_version"),
+        "policy_comparability_key": policy_key,
         "policy_snapshot_complete": not missing_policy,
         "policy_snapshot_missing": missing_policy,
         "terminal_provenance": exit_provenance,
         "actual_bitfinex_realized_pnl_usd": actual_realized_pnl,
+        "bitfinex_evidence": bitfinex_evidence,
+        "participant_id": bitfinex_evidence.get("participant_id"),
+        "client_order_id": bitfinex_evidence.get("client_order_id"),
+        "bitfinex_order_ids": bitfinex_evidence.get("bitfinex_order_ids"),
+        "fill_ids": bitfinex_evidence.get("fill_ids"),
+        "lifecycle_events": copy.deepcopy(
+            snapshot.get("lifecycle_events")
+            or replay.get("lifecycle_events")
+            or bitfinex_evidence.get("source_absence_observations")
+            or []
+        ),
+        "platform_evidence_revision": snapshot.get("platform_evidence_revision"),
+        "platform_relay_evidence": copy.deepcopy(snapshot.get("platform_relay_evidence")),
+        "post_exit_horizons": post_exit_horizons,
+        "required_post_exit_horizons_complete": post_exit_horizons["complete"],
         "replay_complete": replay_complete,
         "replay_tick_count": len(replay.get("ticks") or []),
-        "analysis_eligible": not exclusion_reasons,
+        "analysis_eligible": False,
         "analysis_exclusion_reasons": exclusion_reasons,
-        "analysis_eligibility_schema": "analysis_eligibility_v1",
+        "analysis_eligibility_schema": "analysis_cohorts_v1",
     }
+    lifecycle_types = {
+        str(event.get("event_type") or event.get("eventType") or event.get("event") or "").upper()
+        for event in fields["lifecycle_events"] if isinstance(event, dict)
+    }
+    fields["mirror_diff_stale_no_exposure"] = (
+        "MIRROR_DIFF" in lifecycle_types and "STALE_NO_EXPOSURE" in lifecycle_types
+    )
+    materialized = {
+        "trade_id": snapshot.get("trade_id") or replay.get("trade_id") or buf.get("trade_id"),
+        **fields,
+    }
+    try:
+        from research.analysis_eligibility import (
+            REAL_COPY_PARAMETER_OPTIMISATION,
+            classify_row,
+        )
+
+        assessment = classify_row(materialized)
+        fields["analysis_cohorts"] = assessment
+        fields["analysis_eligible"] = bool(
+            assessment.get("eligible", {}).get(REAL_COPY_PARAMETER_OPTIMISATION)
+        )
+        fields["analysis_exclusion_reasons"] = sorted(set(
+            exclusion_reasons
+            + assessment.get("exclusion_reasons", {}).get(
+                REAL_COPY_PARAMETER_OPTIMISATION, []
+            )
+        ))
+    except Exception as exc:
+        fields["analysis_cohorts"] = {
+            "schema": "analysis_cohorts_v1",
+            "eligible": {
+                "SHOWCASE_STRATEGY": False,
+                "BITFINEX_COPY_FIDELITY": False,
+                "REAL_COPY_PARAMETER_OPTIMISATION": False,
+            },
+            "exclusion_reasons": {
+                "SHOWCASE_STRATEGY": ["COHORT_ASSESSMENT_UNAVAILABLE"],
+                "BITFINEX_COPY_FIDELITY": ["COHORT_ASSESSMENT_UNAVAILABLE"],
+                "REAL_COPY_PARAMETER_OPTIMISATION": ["COHORT_ASSESSMENT_UNAVAILABLE"],
+            },
+            "error_type": type(exc).__name__,
+        }
+        fields["analysis_exclusion_reasons"] = sorted(set(
+            exclusion_reasons + ["COHORT_ASSESSMENT_UNAVAILABLE"]
+        ))
+    return fields
+
+
+def _platform_relay_evidence_index(path=PLATFORM_RELAY_EVIDENCE_FILE) -> dict:
+    """Load a qualified read-only platform export. Invalid/stale-shaped input
+    returns no evidence, so cohort classification remains fail-closed."""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            export = json.load(handle)
+        if export.get("schema") != "relay_lifecycle_evidence_v1":
+            return {}
+        if not all(export.get(key) for key in ("generatedAt", "generatingRevision", "runIdentity")):
+            return {}
+        records = export.get("records")
+        if not isinstance(records, list):
+            return {}
+        grouped = {}
+        for record in records:
+            trade_id = record.get("canonicalTradeId") if isinstance(record, dict) else None
+            if trade_id:
+                grouped.setdefault(str(trade_id), []).append(copy.deepcopy(record))
+        return {
+            trade_id: {
+                "schema": export["schema"],
+                "generated_at": export["generatedAt"],
+                "generating_revision": export["generatingRevision"],
+                "run_identity": export["runIdentity"],
+                "records": rows,
+                "evidence_revision": hashlib.sha256(json.dumps(
+                    rows, sort_keys=True, separators=(",", ":"), default=str
+                ).encode("utf-8")).hexdigest(),
+            }
+            for trade_id, rows in grouped.items()
+        }
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str) -> dict:
+    joined = _platform_relay_evidence_index().get(str(trade_id))
+    if not joined:
+        return snapshot
+    enriched = copy.deepcopy(snapshot)
+    records = joined["records"]
+    events = []
+    for record in records:
+        participant_id = record.get("participantId")
+        for event in record.get("events") or []:
+            if isinstance(event, dict):
+                normalized = {**copy.deepcopy(event), "participantId": participant_id}
+                normalized["event_type"] = normalized.get("event_type") or normalized.get("eventType")
+                events.append(normalized)
+    enriched["platform_relay_evidence"] = joined
+    enriched["platform_evidence_revision"] = joined["evidence_revision"]
+    enriched["lifecycle_events"] = events
+    # Raw immutable events are authoritative evidence, but unknown producer
+    # payload shapes are never guessed into a completeness=true assertion.
+    evidence = copy.deepcopy(enriched.get("bitfinex_evidence") or {})
+    evidence["platform_records"] = records
+    evidence["participant_id"] = evidence.get("participant_id") or next(
+        (r.get("participantId") for r in records if r.get("participantId")), None
+    )
+    evidence["source_lifecycle_id"] = evidence.get("source_lifecycle_id") or next(
+        (r.get("lifecycleId") for r in records if r.get("lifecycleId")), None
+    )
+    enriched["bitfinex_evidence"] = evidence
+    return enriched
 
 
 def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_file=SIGNAL_REPLAY_FILE, output_file=COUNTERFACTUAL_FILE):
@@ -36059,6 +36855,7 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         replay = replays.get(trade_id)
         if not replay:
             continue
+        snapshot = _snapshot_with_platform_relay_evidence(snapshot, trade_id)
         cfg = snapshot.get("config", {})
         buf = {
             "start_price": replay.get("start_price"),
@@ -36217,6 +37014,7 @@ def _run_counterfactual_catchup():
             snapshot = approve_snaps.get(tid)
             if not snapshot:
                 continue
+            snapshot = _snapshot_with_platform_relay_evidence(snapshot, tid)
             # Pick the earliest shard entry for this trade_id (deterministic).
             locations = sorted(shard_trade_ids.get(tid, []))
             replay = None

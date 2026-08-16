@@ -83,6 +83,62 @@ export type ShowcaseTradeDetails = {
   exitAt?: string;
 };
 
+export type CompleteCanonicalTerminalRecord = {
+  exitPrice: number;
+  exitReason: string;
+  exitAt: string;
+};
+
+/**
+ * A source-side terminal label is not close authority by itself.  Only an
+ * exact canonical identity with complete, parseable terminal evidence may
+ * drive a copied exchange exit or terminalise the shared lifecycle.
+ */
+export function completeCanonicalTerminalRecord(
+  expectedTradeId: string,
+  details: ShowcaseTradeDetails | null,
+): CompleteCanonicalTerminalRecord | null {
+  if (!details || details.matchKind !== 'exact' || details.matchedTradeId !== expectedTradeId) {
+    return null;
+  }
+  const exitPrice = Number(details.exit);
+  const exitReason = String(details.exitReason ?? '').trim();
+  const exitAt = String(details.exitAt ?? '').trim();
+  if (!Number.isFinite(exitPrice) || exitPrice <= 0 || !exitReason || !exitAt) return null;
+  if (Number.isNaN(Date.parse(exitAt))) return null;
+  return { exitPrice, exitReason, exitAt };
+}
+
+/** Complete, fresh canonical-book evidence required for snapshot-driven exits. */
+export function canonicalTerminalSnapshotComplete(
+  bot: BotApiState | null,
+  nowMs = Date.now(),
+  maxAgeSec = 15,
+): boolean {
+  if (!bot?.source_git_rev?.trim()) return false;
+  const integrity = bot.state_integrity;
+  if (
+    !Number.isFinite(integrity?.snapshot_seq) ||
+    typeof integrity?.snapshot_ts !== 'string' ||
+    !Number.isFinite(integrity?.snapshot_age_sec) ||
+    Number(integrity?.snapshot_age_sec) < 0 ||
+    integrity?.positions_synced !== true ||
+    integrity?.orders_synced !== true ||
+    integrity?.trades_synced !== true ||
+    !Array.isArray(bot.positions) ||
+    !Array.isArray(bot.orders) ||
+    !Array.isArray(bot.trades) ||
+    !Array.isArray(bot.signal_info?.signals) ||
+    bot.trades_map == null ||
+    typeof bot.trades_map !== 'object'
+  ) return false;
+  const snapshotMs = Date.parse(integrity.snapshot_ts);
+  if (!Number.isFinite(snapshotMs)) return false;
+  const timestampAgeSec = (nowMs - snapshotMs) / 1000;
+  if (timestampAgeSec < -5) return false;
+  return Math.max(timestampAgeSec, Number(integrity.snapshot_age_sec), 0) <= maxAgeSec;
+}
+
 function pctDelta(showcase: number | null, relay: number | null): number | null {
   if (showcase == null || relay == null || !Number.isFinite(showcase) || showcase <= 0) return null;
   return ((relay - showcase) / showcase) * 100;

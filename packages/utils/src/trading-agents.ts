@@ -62,6 +62,7 @@ export type AgentLiveExpiredOrderRow = {
 };
 
 export type AgentLiveTradeRow = {
+  /** Legacy terminal display time. Prefer the explicit lifecycle clocks below. */
   time: string;
   tradeId: string;
   direction: string;
@@ -74,6 +75,14 @@ export type AgentLiveTradeRow = {
   tradeFeesUsd: number;
   fundingUsd: number;
   aiBand: string;
+  sourceSignalTime?: string | null;
+  sourceFillTime?: string | null;
+  exchangeOrderAckTime?: string | null;
+  exchangeFillTime?: string | null;
+  exchangeExitTime?: string | null;
+  lifecycleStatus?: 'SOURCE_AND_COPY' | 'COPY_FIRST_DIVERGENCE' | 'EXCHANGE_ONLY' | 'SOURCE_ONLY';
+  evidenceStatus?: string | null;
+  negativeEvidence?: string | null;
   /** Canonical source or exchange terminal reason, when it is available. */
   exitReason?: string | null;
 };

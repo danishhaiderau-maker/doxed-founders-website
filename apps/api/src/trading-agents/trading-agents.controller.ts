@@ -105,6 +105,18 @@ export class TradingAgentsController {
     return this.tradingAgents.getOpsRelayStatus(slug, userId, adminHeader, authorization);
   }
 
+  /** Immutable, user-scoped relay evidence for the offline research mirror. */
+  @Public()
+  @Get(':slug/ops/relay-evidence')
+  opsRelayEvidence(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    return this.tradingAgents.exportOpsRelayEvidence(slug, userId, adminHeader, authorization);
+  }
+
   @Public()
   @Get(':slug/analyzer-genome')
   analyzerGenome(@Param('slug') slug: string) {

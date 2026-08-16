@@ -17160,6 +17160,9 @@ def write_report_manifest(payload=None):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "analysis_provenance": analysis_provenance,
+        "cohort_schema": analysis_provenance["cohort_schema"],
+        "generation_revision": analysis_provenance["generation_revision"],
+        "cohorts": analysis_provenance["cohorts"],
         "data_scope": (payload or {}).get("data_scope"),
         "session_scope": (payload or {}).get("session_scope"),
         "performance": (payload or {}).get("performance"),
@@ -17929,7 +17932,7 @@ def write_analysis_dashboard_html(payload):
     report_links = ""
     for title, fname, _desc in DEEP_DIVE_REPORT_CATALOG[:12]:
         rp = os.path.join(REPORTS_DIR, os.path.basename(fname))
-        href = rp if os.path.isfile(rp) else fname
+        href = (rp if os.path.isfile(rp) else fname).replace(os.sep, "/")
         if os.path.isfile(href):
             report_links += f'<li><a href="{esc(href)}">{esc(title)}</a></li>\n'
     scope_meta = payload.get("session_scope", "ALL-DATA")
@@ -17960,7 +17963,8 @@ def write_analysis_dashboard_html(payload):
   .note {{ color: #8b9aab; font-size: 0.8rem; margin-top: 8px; }}
   a {{ color: #6eb5ff; }}
 </style></head><body>
-<h1>Research Analysis Dashboard</h1>
+<h1>Local Analyzer Snapshot</h1>
+<p class="meta">Read-only Fly mirror of the locally generated analyzer; this is not the live interactive desktop dashboard.</p>
 <p class="meta">{esc(scope_meta)} · {esc(ANALYZER_SYNC_ID)} · confidence: {esc(cov.get('confidence_status', 'n/a'))}</p>
 <div class="kpis">
   <div class="kpi"><div class="lbl">Trades</div><div class="val">{p.get('trades', 0)}</div></div>

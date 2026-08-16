@@ -370,6 +370,8 @@ export type BitfinexActiveOrder = {
   price: number;
   status: string;
   orderType: string;
+  /** Raw Bitfinex order flags (v2 order row index 12). */
+  flags?: number;
   /**
    * Bitfinex v2 client order id (`cid`) — int32 positive. Surfaces when the
    * order was submitted with `cid` (Phase 2 placeEntry / replaceRestingLimit
@@ -391,6 +393,7 @@ export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
   const amount = Number(row[6]);
   const amountOrig = Number(row[7]);
   const orderType = String(row[8] ?? '');
+  const flags = Number(row[12] ?? 0);
   const price = Number(row[16] ?? row[14] ?? 0);
   const status = String(row[13] ?? '');
   if (
@@ -401,6 +404,7 @@ export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
     || !Number.isFinite(amountOrig)
     || amountOrig === 0
     || !orderType
+    || !Number.isFinite(flags)
     || !Number.isFinite(price)
     || price < 0
     || !status
@@ -423,6 +427,7 @@ export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
     amount,
     amountOrig,
     orderType,
+    flags,
     price,
     status,
     ...(cid != null ? { cid } : {}),
@@ -749,6 +754,7 @@ export class BitfinexTradingClient {
       qty: number;
       stopPrice: number;
       leverage?: number;
+      clientOrderId?: number;
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
@@ -765,6 +771,7 @@ export class BitfinexTradingClient {
       lev,
       // A stale protective stop must never open the opposite position.
       flags: BITFINEX_REDUCE_ONLY_FLAG,
+      ...(input.clientOrderId != null ? { cid: input.clientOrderId } : {}),
       meta: { aff_code: 'doxxedcrypto' },
     });
     const id = parseBitfinexOrderId(res);

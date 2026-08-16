@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   NotificationType,
   SignalCycleStatus,
@@ -52,6 +52,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { ExchangesService } from '../exchanges/exchanges.service';
 import {
+  BITFINEX_BTC_PERP_SYMBOL,
+  BITFINEX_REDUCE_ONLY_FLAG,
   BitfinexTradingClient,
   type BitfinexActiveOrder,
 } from '../exchanges/bitfinex-api.client';
@@ -81,6 +83,8 @@ import {
 import {
   buildRelayFidelitySnapshot,
   resolveShowcaseTradeDetails,
+  completeCanonicalTerminalRecord,
+  canonicalTerminalSnapshotComplete,
   tradeIdsMatch,
   type RelayFidelitySnapshot,
 } from './relay-fidelity.mapper';
@@ -1158,6 +1162,33 @@ type ExecutionPayload = {
   aggressiveCatchupSourceFill?: number;
   aggressiveCatchupStartedAtMs?: number;
 };
+
+type TerminalCloseAuthorityKind =
+  | 'SIGNED_POSITION_CLOSED'
+  | 'CANONICAL_TERMINAL_RECORD'
+  | 'SOURCE_ABSENCE_ACTIONABLE'
+  | 'SCENARIO_C_PROFIT_LOCK'
+  | 'THESIS_FAST_CUT'
+  | 'HARD_STOP'
+  | 'LATE_FILL_CLEANUP'
+  | 'AUTHENTICATED_MANUAL_OR_EMERGENCY';
+
+type TerminalCloseAuthority = {
+  kind: TerminalCloseAuthorityKind;
+  canonicalTradeId: string;
+  lifecycleGeneration: string;
+  evidence: Record<string, unknown>;
+};
+
+type TerminalCloseClaim = {
+  ownerToken: string;
+  requestId: string;
+  phase: 'CLAIMED' | 'SUBMITTING' | 'ACKNOWLEDGED' | 'CONFIRMED';
+  authority: TerminalCloseAuthority;
+  recovered: boolean;
+};
+
+const TERMINAL_CLOSE_CLAIM_LEASE_MS = 30_000;
 
 type RepairableLotMeta = Pick<ExecutionPayload, 'qty' | 'direction'>;
 
@@ -2808,9 +2839,8 @@ export function buildShowcasePositionAbsenceEvidence(input: {
   };
 }
 
-/** Belt-and-suspenders: OPEN copy lot while showcase is flat/closed for this long
- *  triggers operator alert + forced SHOWCASE_MIRROR close (covers stale EXIT events
- *  or any other idempotency gate that wrongly skips the normal mirror path). */
+/** OPEN copy lot while the source merely appears flat for this long triggers an
+ * operator alert and entry pause. It is deliberately NOT terminal authority. */
 const SHOWCASE_FLAT_OPEN_FAILSAFE_MS = 120_000;
 
 /**
@@ -2827,10 +2857,8 @@ const SHOWCASE_FLAT_OPEN_FAILSAFE_MS = 120_000;
  * These constants implement a per-instance safe mode: after the showcase has
  * been unreachable for SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS, the relay refuses
  * new entries (F1). After SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS, OPEN copy lots
- * are market-closed with exit_reason SHOWCASE_UNREACHABLE_OPEN_LOT (F2). Both
- * fire even though `bot === null` — fail-closed for money already on the
- * table, not just for money we haven't placed yet. F3 surfaces the state to
- * the user as lastError so the dashboard explains the halt.
+ * remain protected and the UNKNOWN condition is escalated (F2). Source
+ * unreachability is never terminal authority. F3 surfaces the state.
  *
  * Override via env without a redeploy:
  *   SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS (default 60000)
@@ -3056,10 +3084,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    *
    * `showcaseUnreachableSince` is set when a fetch returns null AND the bridge
    * is enabled (i.e. we *should* be able to reach the bot but can't). It is
-   * cleared on the first successful fetch. The two thresholds
-   * (ENTRY_BLOCK_MS, ORPHAN_KILL_MS) gate F1 (refuse new entries) and F2
-   * (market-close OPEN orphans) respectively. F3 surfaces the state via
-   * lastError on the instance row.
+   * cleared after a debounced recovery. The two thresholds gate F1 (refuse new
+   * entries) and F2 (alert/hold protected OPEN lots). F3 surfaces the state.
    *
    * Keyed by instanceId — independent per hire, so one user's dark tunnel
    * doesn't trip another's safe mode.
@@ -3489,7 +3515,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }),
         this.prisma.signalCycle.findUnique({
           where: { id: participant.cycleId },
-          select: { id: true },
+          select: { id: true, status: true, tradeId: true, intentEnvelope: true },
         }),
         this.loadExecutionMeta(participant.id),
       ]);
@@ -3511,20 +3537,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         );
         continue;
       }
-      const cancelled = await this.cancelManagedOrderGone(
+      const settlement = await this.cancelAndSettleManagedEntry(
         creds,
-        orderId,
+        meta,
         `${logLabel} cancel verified-unfilled entry ${orderId} participant=${participant.id}`,
       );
-      if (!cancelled.gone) {
-        throw new Error(
-          `CANCEL_FAILED_ORDER_STILL_LIVE order=${orderId} participant=${participant.id}`,
+      if (settlement.kind === 'FILL') {
+        await this.recordCancelRaceFill(
+          agentId,
+          instance.userId,
+          freshCycle,
+          participant.id,
+          meta,
+          creds,
+          freshCycle.intentEnvelope as SignalIntentEnvelope,
+          settlement.fill,
+          auditReason,
         );
+        continue;
       }
-      if (
-        cancelled.reason === 'NOT_FOUND'
-        && !(await this.replacementTerminalUnfilledProof(creds, meta))
-      ) continue;
+      if (settlement.kind === 'UNKNOWN') {
+        const message = `PENDING_ENTRY_SETTLEMENT_UNKNOWN order=${orderId} participant=${participant.id} reason=${settlement.reason}`;
+        this.logger.error(`${logLabel} ${message}; leaving PENDING_ENTRY`);
+        await this.setInstanceLastError(instance.userId, agentId, message).catch(() => {});
+        continue;
+      }
       // Keep the participant-level audit truthful without closing the shared
       // showcase cycle: another subscriber may still be mirroring that same
       // source order. The UI can now distinguish watchdog cancellation from
@@ -4395,6 +4432,40 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     return { kind: 'PROVEN_UNFILLED' };
   }
 
+  /** One fail-closed settlement protocol for every managed-entry retirement. */
+  private async cancelAndSettleManagedEntry(
+    creds: ExchangeCredentials,
+    meta: ExecutionPayload,
+    label: string,
+  ): Promise<
+    | { kind: 'FILL'; fill: { filledQty: number; fillPrice: number; source: 'ORDER_PARTIAL' | 'POSITION_DELTA'; orderResting: boolean }; cancelAttempts: number; cancelReason?: string }
+    | { kind: 'PROVEN_UNFILLED'; cancelAttempts: number; cancelReason?: string }
+    | { kind: 'UNKNOWN'; reason: string; cancelAttempts: number; cancelReason?: string }
+  > {
+    if (!meta.bitfinexOrderId) {
+      return { kind: 'UNKNOWN', reason: 'MISSING_ORDER_OWNERSHIP', cancelAttempts: 0 };
+    }
+    let before: Awaited<ReturnType<typeof this.detectEntryFillBeforeCancel>>;
+    try {
+      before = await this.detectEntryFillBeforeCancel(creds, meta, true);
+    } catch {
+      return { kind: 'UNKNOWN', reason: 'PRE_CANCEL_EVIDENCE_UNAVAILABLE', cancelAttempts: 0 };
+    }
+    if (before) return { kind: 'FILL', fill: before, cancelAttempts: 0 };
+
+    const cancel = await this.cancelManagedOrderGone(creds, meta.bitfinexOrderId, label);
+    if (!cancel.gone) {
+      return {
+        kind: 'UNKNOWN',
+        reason: 'CANCEL_NOT_CONFIRMED_GONE',
+        cancelAttempts: cancel.attempts,
+        cancelReason: cancel.reason,
+      };
+    }
+    const settled = await this.classifyPostCancelEntry(creds, meta, cancel.reason);
+    return { ...settled, cancelAttempts: cancel.attempts, cancelReason: cancel.reason };
+  }
+
   /**
    * A source paper fill retires its exact pending mirror immediately. Private
    * Bitfinex state remains the only fill authority: a pre-cancel check and the
@@ -5263,7 +5334,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           this.logger.log(`Instance ${instance.userId}: ${funding.message}`);
         }
         this.currentStage = 'BITFINEX_ABSURD_ORDER_CHECK';
-        await this.cancelAbsurdPendingOrders(creds, instance.userId);
         this.currentStage = 'BITFINEX_ACTIVE_ORDERS';
         const activeOrders = await this.activeTrading.listActiveOrders(creds);
         activeOrdersSnapshot = activeOrders;
@@ -5466,16 +5536,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
       if (participant.status === SignalCycleStatus.OPEN) {
         managedOpenTrade = true;
-        // F2 — Showcase-unreachable orphan kill. If the showcase has been dark
-        // past ORPHAN_KILL_MS this lot is by definition an orphan (the normal
-        // SHOWCASE_POSITION_ABSENT path requires a successful fetch to fire,
-        // which is exactly the case the outage defeats). Force-close at market.
+        // F2 — Source outage is UNKNOWN. Past the escalation threshold, pause
+        // entries and retain physical protection; never infer a terminal exit.
         // Skip in sim mode — sim lots are the user's own test money and the
         // showcase is allowed to be dark for sim testing.
         if (!simActive) {
           const orphanCheck = this.openLotOrphanedByShowcaseOutage(instance.id);
           if (orphanCheck.orphan) {
-            const killed = await this.enforceShowcaseOutageOrphanKill(
+            const held = await this.enforceShowcaseOutageOrphanKill(
               agentId,
               instance.userId,
               instance.id,
@@ -5486,11 +5554,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               orphanCheck.elapsedMs,
             ).catch((err) => {
               this.logger.warn(
-                `[F2] orphan kill failed ${instance.userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
+                `[F2] outage hold persistence failed ${instance.userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
               );
               return false;
             });
-            if (killed) {
+            if (held) {
               this.showcaseFlatOpenSince.delete(participant.id);
               continue;
             }
@@ -5695,7 +5763,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         const lastNotice = this.showcaseSafeModeNoticeAt.get(instance.id) ?? 0;
         if (Date.now() - lastNotice > 5 * 60_000) {
           this.showcaseSafeModeNoticeAt.set(instance.id, Date.now());
-          const msg = `Showcase unreachable for ${Math.round(elapsed / 1000)}s — live copy in safe mode: no new entries (F1); open lots will be closed past ${Math.round(SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS / 1000)}s (F2).`;
+          const msg = `Showcase unreachable for ${Math.round(elapsed / 1000)}s — live copy in safe mode: no new entries (F1); protected open lots will be held and escalated after ${Math.round(SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS / 1000)}s (F2), never closed from outage alone.`;
           this.logger.warn(`[SAFE-MODE] ${instance.userId}: ${msg}`);
           await this.prisma.tradingAgentInstance
             .update({ where: { id: instance.id }, data: { lastError: msg } })
@@ -7804,7 +7872,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }),
       this.prisma.signalCycle.findUnique({
         where: { id: participant.cycleId },
-        select: { id: true },
+        select: { id: true, status: true, tradeId: true, intentEnvelope: true },
       }),
       this.loadExecutionMeta(participant.id),
     ]);
@@ -7816,28 +7884,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     ) return false;
     const orderId = meta.bitfinexOrderId;
     if (orderId) {
-      const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
-      if (fill) {
+      const settlement = await this.cancelAndSettleManagedEntry(
+        creds,
+        meta,
+        `Showcase catch-up clear ${userId} cycle=${participant.cycleId} cancel stale limit ${orderId}`,
+      );
+      if (settlement.kind === 'FILL') {
         this.logger.warn(
           `[MIRROR-CATCHUP] pending ${participant.id} trade had real fill before clear — deferring to fill path`,
         );
+        await this.recordCancelRaceFill(
+          agentId, userId, freshCycle, participant.id, meta, creds,
+          freshCycle.intentEnvelope as SignalIntentEnvelope,
+          settlement.fill, 'SHOWCASE_FILLED_CATCHUP_CLEAR',
+        );
         return false;
       }
-      const cancel = await this.cancelManagedOrderGone(
-        creds,
-        orderId,
-        `Showcase catch-up clear ${userId} cycle=${participant.cycleId} cancel stale limit ${orderId}`,
-      );
-      if (!cancel.gone) {
+      if (settlement.kind === 'UNKNOWN') {
         this.logger.warn(
           `[MIRROR-CATCHUP] could not clear pending ${participant.id} order ${orderId} — cancel failed`,
         );
         return false;
       }
-      if (
-        cancel.reason === 'NOT_FOUND'
-        && !(await this.replacementTerminalUnfilledProof(creds, meta))
-      ) return false;
     }
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXPIRED', {
@@ -8811,21 +8879,92 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       leverage,
     );
 
+    if (!meta.bitfinexOrderId) return false;
+    const promotion = await this.acquireFillPromotionClaim({
+      participantId,
+      entryOrderId: meta.bitfinexOrderId,
+      lifecycleGeneration: this.fillPromotionGeneration(cycle, intent, meta.bitfinexOrderId),
+    });
+    if (!promotion) return false;
+
     const stopSubmitStartedAtMs = Date.now();
-    const stopOrderId = await this.activeTrading
-      .submitStopOrder(creds, {
-        positionDirection: meta.direction,
-        qty,
-        stopPrice,
-        leverage,
-      })
-      .catch((err) => {
-        this.logger.warn(
-          `Cancel-race fill stop placement ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
+    const stopInput = {
+      positionDirection: meta.direction,
+      qty,
+      stopPrice,
+      leverage,
+      clientOrderId: promotion.stopClientOrderId,
+    } as const;
+    const resumingProtectedStop = promotion.resumeStopOrderId != null;
+    let recoveredSubmittingStopId: number | undefined;
+    if (promotion.recoverSubmitting) {
+      const activeStops = await this.activeTrading.listActiveOrders(creds).catch(() => null);
+      if (!activeStops) return false;
+      const candidate = activeStops.find((order) => order.cid === promotion.stopClientOrderId);
+      if (!candidate) {
+        // SUBMITTING is intentionally non-stealable. Absence from one active
+        // snapshot is UNKNOWN (ACK may be delayed); never resubmit here.
+        return false;
+      }
+      recoveredSubmittingStopId = candidate.id;
+    }
+    if (
+      !resumingProtectedStop
+      && !promotion.recoverSubmitting
+      && !(await this.setFillPromotionPhase(
+        participantId,
+        promotion.token,
+        'CLAIMED',
+        'SUBMITTING',
+      ))
+    ) return false;
+    const verifiedStop = resumingProtectedStop || recoveredSubmittingStopId != null
+      ? await this.authenticateExactProtectiveStop(
+          creds,
+          promotion.resumeStopOrderId ?? recoveredSubmittingStopId!,
+          stopInput,
+        )
+      : await this.submitVerifiedProtectiveStop(creds, stopInput);
+    const stopOrderId = verifiedStop.ok ? verifiedStop.orderId : null;
+    const stopExchangeAckAtMs: number | null = verifiedStop.ok
+      ? (resumingProtectedStop || recoveredSubmittingStopId != null
+          ? Date.now()
+          : Number((verifiedStop as unknown as { submitAckAtMs: number }).submitAckAtMs))
+      : null;
+    if (!verifiedStop.ok) {
+      // A submit error can be an exchange timeout after acceptance. Preserve
+      // SUBMITTING as non-stealable until deterministic CID recovery proves
+      // the exact order; a retry must never create a second protective stop.
+      await this.holdUnprotectedFill(
+        agentId,
+        userId,
+        cycle.id,
+        participantId,
+        verifiedStop,
+        `CANCEL_RACE_FILL/${cancelContext}`,
+      );
+      return false;
+    }
+    if (!resumingProtectedStop) {
+      const protectedDurably = await this.setFillPromotionPhase(
+        participantId,
+        promotion.token,
+        'SUBMITTING',
+        'PROTECTED',
+        verifiedStop.orderId,
+      );
+      if (!protectedDurably) {
+        await this.holdUnprotectedFill(
+          agentId,
+          userId,
+          cycle.id,
+          participantId,
+          { orderId: verifiedStop.orderId, reason: 'STOP_OWNERSHIP_PERSIST_FAILED' },
+          `CANCEL_RACE_FILL/${cancelContext}`,
         );
-        return null;
-      });
-    const stopExchangeAckAtMs = stopOrderId != null ? Date.now() : null;
+        return false;
+      }
+    }
 
     const exchangeFillEvidence = await this.resolveExchangeTradesFillEvidence(
       creds,
@@ -8958,6 +9097,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       unfilled_qty_cancelled: ttlRemainderSettlement?.cancelledQty,
       ttl_remainder_cancel_reason: ttlRemainderSettlement?.cancelReason,
     });
+    if (!(await this.setFillPromotionPhase(
+      participantId,
+      promotion.token,
+      'PROTECTED',
+      'PROMOTED',
+      stopOrderId ?? undefined,
+    ))) {
+      throw new Error(`FILL_PROMOTION_FINALIZE_LOST participant=${participantId}`);
+    }
     if (stopOrderId != null) {
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
         venue: 'bitfinex',
@@ -9037,7 +9185,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           partialFillStopOrderId: null,
         },
         creds,
-        { trigger: `${cancelContext}_PARTIAL_FILL`, forceMirrorExit: true },
+        {
+          trigger: `${cancelContext}_PARTIAL_FILL`,
+          forceMirrorExit: true,
+          terminalAuthority: {
+            kind: 'LATE_FILL_CLEANUP',
+            canonicalTradeId:
+              resolveShowcaseMirrorTradeIdFromInputs(cycle.tradeId, meta.originTradeId) ??
+              cycle.tradeId ??
+              cycle.id,
+            lifecycleGeneration:
+              showcaseIntentRevision(intent) ??
+              `legacy:${
+                resolveShowcaseMirrorTradeIdFromInputs(cycle.tradeId, meta.originTradeId) ??
+                cycle.tradeId ??
+                cycle.id
+              }`,
+            evidence: {
+              policy: 'EXCHANGE_ONLY_PARTIAL_FILL_TERMINAL_CLEANUP',
+              cancel_context: cancelContext,
+              fill_source: fill.source,
+              filled_qty: qty,
+              intended_qty: intendedQty,
+            },
+          },
+        },
       );
       if (!closed) {
         await this.pauseUserRelayForPositionMismatch(
@@ -9244,34 +9416,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // cancel is a bug, not a feature flag): the order may have (partially)
       // filled before the showcase closure reached us — record the REAL fill
       // instead of cancelling and closing at $0 (orphan factory).
-      {
-        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
-        if (fill) {
-          const recorded = await this.recordCancelRaceFill(
-            agentId,
-            userId,
-            cycle,
-            participant.id,
-            meta,
-            creds,
-            intent,
-            fill,
-            'SHOWCASE_CYCLE_CLOSED',
-          );
-          if (recorded) return;
-        }
-      }
-      const cancel = await this.cancelManagedOrderGone(
+      const settlement = await this.cancelAndSettleManagedEntry(
         creds,
-        orderId,
+        meta,
         `Hire expire ${userId} cycle=${cycle.id} (showcase ${cycle.status}) cancel relay limit ${orderId}`,
       );
-      if (!cancel.gone) {
+      if (settlement.kind === 'FILL') {
+        await this.recordCancelRaceFill(
+          agentId, userId, cycle, participant.id, meta, creds, intent,
+          settlement.fill, 'SHOWCASE_CYCLE_CLOSED',
+        );
+        return;
+      }
+      if (settlement.kind === 'UNKNOWN') {
         // CRITICAL money-path: cancel failed AND the order is still live. Do
         // NOT mark the participant EXPIRED — that would orphan the order. Leave
         // PENDING_ENTRY, surface the failure, audit, and let the next tick retry.
         this.logger.error(
-          `Hire expire ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY for next tick`,
+          `Hire expire ${userId} cycle=${cycle.id}: settlement unknown (attempts=${settlement.cancelAttempts}, reason=${settlement.reason}) for order ${orderId}; leaving PENDING_ENTRY`,
         );
         await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
@@ -9280,15 +9442,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           event: 'SHOWCASE_CYCLE_CLOSED',
           reason: cycle.status,
           bitfinex_order_id: orderId,
-          cancel_attempts: cancel.attempts,
-          cancel_reason: cancel.reason ?? 'unknown',
+          cancel_attempts: settlement.cancelAttempts,
+          cancel_reason: settlement.cancelReason ?? settlement.reason,
         });
         return;
       }
-      this.logger.log(
-        `Hire expire ${userId} cycle=${cycle.id}: showcase cycle ${cycle.status} — cancelled relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
-      );
-      if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
+      this.logger.log(`Hire expire ${userId} cycle=${cycle.id}: showcase cycle ${cycle.status}; exchange-proven unfilled relay limit retired`);
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
         pnl_usd: 0,
@@ -9299,9 +9458,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return;
     }
 
-    await this.cancelAbsurdPendingOrders(creds, userId);
-
-    // cancelAbsurdPendingOrders can perform exchange reads. If the private
+    // If the private
     // stream identified a real fill while it was running, release the lane
     // now rather than carrying on into bot-state and chase reconciliation.
     if (this.priorityWsFillParticipants?.has(participant.id)) return;
@@ -9639,31 +9796,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           return;
         }
         // Cancel-race fill check (always on — see SHOWCASE_CYCLE_CLOSED branch).
-        {
-          const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
-          if (fill) {
-            const recorded = await this.recordCancelRaceFill(
-              agentId,
-              userId,
-              cycle,
-              participant.id,
-              meta,
-              creds,
-              intent,
-              fill,
-              'SHOWCASE_ABANDONED',
-            );
-            if (recorded) return;
-          }
-        }
-        const cancel = await this.cancelManagedOrderGone(
+        const settlement = await this.cancelAndSettleManagedEntry(
           creds,
-          orderId,
+          meta,
           `Hire expire ${userId} cycle=${cycle.id} (showcase abandoned) cancel relay limit ${orderId}`,
         );
-        if (!cancel.gone) {
+        if (settlement.kind === 'FILL') {
+          await this.recordCancelRaceFill(
+            agentId, userId, cycle, participant.id, meta, creds, intent,
+            settlement.fill, 'SHOWCASE_ABANDONED',
+          );
+          return;
+        }
+        if (settlement.kind === 'UNKNOWN') {
           this.logger.error(
-            `Hire expire ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY for next tick`,
+            `Hire expire ${userId} cycle=${cycle.id}: settlement unknown (attempts=${settlement.cancelAttempts}, reason=${settlement.reason}) for order ${orderId}; leaving PENDING_ENTRY`,
           );
           await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
           await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
@@ -9672,15 +9819,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             event: 'SHOWCASE_ABANDONED',
             reason: abandon.reason,
             bitfinex_order_id: orderId,
-            cancel_attempts: cancel.attempts,
-            cancel_reason: cancel.reason ?? 'unknown',
+            cancel_attempts: settlement.cancelAttempts,
+            cancel_reason: settlement.cancelReason ?? settlement.reason,
           });
           return;
         }
-        this.logger.log(
-          `Hire expire ${userId} cycle=${cycle.id}: showcase abandoned (${abandon.reason ?? 'unknown'}) — cancelled relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
-        );
-        if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
+        this.logger.log(`Hire expire ${userId} cycle=${cycle.id}: showcase abandoned (${abandon.reason ?? 'unknown'}); exchange-proven unfilled relay limit retired`);
         const mirrorDiffBeforeStale = abandon.reason === 'STALE_NO_EXPOSURE'
           ? await this.prisma.signalCycleEvent.findFirst({
               where: {
@@ -9740,31 +9884,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     if (!retainLateEntry && cycle.expiresAt && cycle.expiresAt < new Date()) {
       // Cancel-race fill check (always on — see SHOWCASE_CYCLE_CLOSED branch).
-      {
-        const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
-        if (fill) {
-          const recorded = await this.recordCancelRaceFill(
-            agentId,
-            userId,
-            cycle,
-            participant.id,
-            meta,
-            creds,
-            intent,
-            fill,
-            'SIGNAL_TTL_EXPIRED',
-          );
-          if (recorded) return;
-        }
-      }
-      const cancel = await this.cancelManagedOrderGone(
+      const settlement = await this.cancelAndSettleManagedEntry(
         creds,
-        orderId,
+        meta,
         `Hire expire ${userId} cycle=${cycle.id} (signal TTL expired) cancel relay limit ${orderId}`,
       );
-      if (!cancel.gone) {
+      if (settlement.kind === 'FILL') {
+        await this.recordCancelRaceFill(
+          agentId, userId, cycle, participant.id, meta, creds, intent,
+          settlement.fill, 'SIGNAL_TTL_EXPIRED',
+        );
+        return;
+      }
+      if (settlement.kind === 'UNKNOWN') {
         this.logger.error(
-          `Hire expire ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY for next tick`,
+          `Hire expire ${userId} cycle=${cycle.id}: settlement unknown (attempts=${settlement.cancelAttempts}, reason=${settlement.reason}) for order ${orderId}; leaving PENDING_ENTRY`,
         );
         await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'RECONCILE_CANCEL_FAILED', {
@@ -9772,12 +9906,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           source: 'hire',
           event: 'SIGNAL_TTL_EXPIRED',
           bitfinex_order_id: orderId,
-          cancel_attempts: cancel.attempts,
-          cancel_reason: cancel.reason ?? 'unknown',
+          cancel_attempts: settlement.cancelAttempts,
+          cancel_reason: settlement.cancelReason ?? settlement.reason,
         });
         return;
       }
-      if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
         venue: 'bitfinex',
         pnl_usd: 0,
@@ -9796,31 +9929,21 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         // PAUSED / hire-expired exit-only must CANCEL resting entries, not
         // early-return. Returning here left cont-3d3cd2524783 live on Bitfinex
         // after showcase went flat while the hire was PAUSED.
-        {
-          const fill = await this.detectEntryFillBeforeCancel(creds, meta).catch(() => null);
-          if (fill) {
-            const recorded = await this.recordCancelRaceFill(
-              agentId,
-              userId,
-              cycle,
-              participant.id,
-              meta,
-              creds,
-              intent,
-              fill,
-              'EXIT_ONLY_PENDING_CANCEL',
-            );
-            if (recorded) return;
-          }
-        }
-        const cancel = await this.cancelManagedOrderGone(
+        const settlement = await this.cancelAndSettleManagedEntry(
           creds,
-          orderId,
+          meta,
           `Exit-only ${userId} cycle=${cycle.id} cancel relay limit ${orderId}`,
         );
-        if (!cancel.gone) {
+        if (settlement.kind === 'FILL') {
+          await this.recordCancelRaceFill(
+            agentId, userId, cycle, participant.id, meta, creds, intent,
+            settlement.fill, 'EXIT_ONLY_PENDING_CANCEL',
+          );
+          return;
+        }
+        if (settlement.kind === 'UNKNOWN') {
           this.logger.error(
-            `Exit-only ${userId} cycle=${cycle.id}: cancel failed (attempts=${cancel.attempts}, reason=${cancel.reason}) and order ${orderId} still live — leaving PENDING_ENTRY`,
+            `Exit-only ${userId} cycle=${cycle.id}: settlement unknown (attempts=${settlement.cancelAttempts}, reason=${settlement.reason}) for order ${orderId}; leaving PENDING_ENTRY`,
           );
           await this.setInstanceLastError(userId, agentId, 'CANCEL_FAILED_ORDER_STILL_LIVE');
           await this.cycles.recordHireExecutionEvent(
@@ -9833,16 +9956,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               source: 'hire',
               event: 'EXIT_ONLY_PENDING_CANCEL',
               bitfinex_order_id: orderId,
-              cancel_attempts: cancel.attempts,
-              cancel_reason: cancel.reason ?? 'unknown',
+              cancel_attempts: settlement.cancelAttempts,
+              cancel_reason: settlement.cancelReason ?? settlement.reason,
             },
           );
           return;
         }
-        this.logger.log(
-          `Exit-only ${userId} cycle=${cycle.id}: cancelled resting relay limit (${cancel.reason === 'NOT_FOUND' ? 'already gone' : 'cancelled'})`,
-        );
-        if (cancel.reason === 'NOT_FOUND' && !(await this.replacementTerminalUnfilledProof(creds, meta))) return;
+        this.logger.log(`Exit-only ${userId} cycle=${cycle.id}: exchange-proven unfilled relay limit retired`);
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXPIRED', {
           venue: 'bitfinex',
           pnl_usd: 0,
@@ -10035,20 +10155,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (runtime?.filledRecorded) return;
 
     const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = intent.risk.stop_loss_margin_pct ?? -18;
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+      intent.risk.stop_loss_margin_pct,
+      { mirrorMode: isShowcaseMirrorOnlyMode() },
+    );
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
-    const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
+    const verifiedStop = await this.submitVerifiedProtectiveStop(creds, {
       positionDirection: meta.direction,
       qty,
       stopPrice,
       leverage,
-    }).catch((err) => {
-      this.logger.warn(
-        `Stop placement ${userId} cycle=${cycle.id}: ${err instanceof Error ? err.message : err}`,
-      );
-      return null;
     });
+    if (!verifiedStop.ok) {
+      await this.holdUnprotectedFill(
+        agentId,
+        userId,
+        cycle.id,
+        participant.id,
+        verifiedStop,
+        'MONITOR_ENTRY_FILL',
+      );
+      return;
+    }
+    const stopOrderId = verifiedStop.orderId;
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
       venue: 'bitfinex',
@@ -10170,6 +10300,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
       const orderId = meta.bitfinexOrderId;
       if (orderId && activeOrderIdSet.has(orderId)) continue;
+      const intent = row.cycle.intentEnvelope as SignalIntentEnvelope;
 
       const filledCount = await this.prisma.signalCycleEvent.count({
         where: { participantId: row.id, eventType: 'FILLED' },
@@ -10181,12 +10312,45 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             : position.basePrice > 0
               ? position.basePrice
               : await this.activeTrading.getMarkPrice();
+        const qty = meta.qty ?? MIN_QTY_BTC;
+        const leverage = resolveSubscriberLeverage(intent);
+        const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+          intent?.risk?.stop_loss_margin_pct,
+          { mirrorMode: isShowcaseMirrorOnlyMode() },
+        );
+        const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+        const verifiedStop = meta.stopOrderId
+          ? await this.authenticateExactProtectiveStop(creds, meta.stopOrderId, {
+              positionDirection: meta.direction,
+              qty,
+              stopPrice,
+              leverage,
+            })
+          : await this.submitVerifiedProtectiveStop(creds, {
+              positionDirection: meta.direction,
+              qty,
+              stopPrice,
+              leverage,
+            });
+        if (!verifiedStop.ok) {
+          await this.holdUnprotectedFill(
+            agentId, userId, row.cycleId, row.id, verifiedStop,
+            'RECONCILE_EXISTING_FILLED_EVENT',
+          );
+          continue;
+        }
+        if (!meta.stopOrderId) {
+          await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'STOP_LOSS_ARMED', {
+            venue: 'bitfinex', source: 'hire', stop_price: stopPrice,
+            stopOrderId: verifiedStop.orderId, qty, stop_loss_margin_pct: stopLossMarginPct,
+            event: 'RECONCILE_EXISTING_FILL_PROTECTED',
+          });
+        }
         await this.healStuckPendingFill(row.id, row.cycleId, fillPrice);
-        gap -= meta.qty ?? MIN_QTY_BTC;
+        gap -= qty;
         continue;
       }
 
-      const intent = row.cycle.intentEnvelope as SignalIntentEnvelope;
       // Fix D — prefer the exchange's own per-order trade history (real
       // volume-weighted fill) over the limit-price/basePrice approximation.
       const exchangeFillPrice = await this.resolveExchangeTradesFillPrice(
@@ -10202,15 +10366,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             : await this.activeTrading.getMarkPrice());
       const qty = meta.qty ?? MIN_QTY_BTC;
       const leverage = resolveSubscriberLeverage(intent);
-      const stopLossMarginPct = intent?.risk?.stop_loss_margin_pct ?? -18;
+      const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+        intent?.risk?.stop_loss_margin_pct,
+        { mirrorMode: isShowcaseMirrorOnlyMode() },
+      );
       const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
 
-      const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
+      const verifiedStop = await this.submitVerifiedProtectiveStop(creds, {
         positionDirection: meta.direction,
         qty,
         stopPrice,
         leverage,
-      }).catch(() => null);
+      });
+      if (!verifiedStop.ok) {
+        await this.holdUnprotectedFill(
+          agentId,
+          userId,
+          row.cycleId,
+          row.id,
+          verifiedStop,
+          'EXCHANGE_FILL_RECONCILE',
+        );
+        continue;
+      }
+      const stopOrderId = verifiedStop.orderId;
 
       await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'FILLED', {
         venue: 'bitfinex',
@@ -11839,6 +12018,104 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * reduce-only, so the brief overlap cannot reverse or over-close the
    * position, while there is never an unprotected cancellation window.
    */
+  private async emergencyClosePartialWithFence(input: {
+    participantId: string;
+    creds: ExchangeCredentials;
+    direction: 'LONG' | 'SHORT';
+    attributableQty: number;
+    leverage: number;
+  }): Promise<boolean> {
+    const current = await this.activeTrading.getOpenPositionDetail(input.creds);
+    if (!current) return true;
+    const sameDirection = (input.direction === 'LONG' && current.amount > 0)
+      || (input.direction === 'SHORT' && current.amount < 0);
+    if (!sameDirection) return false;
+
+    const existing = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: input.participantId },
+      select: {
+        partialEmergencyRequestId: true,
+        partialEmergencyPhase: true,
+        partialEmergencyTargetAmount: true,
+      },
+    });
+    if (existing?.partialEmergencyRequestId) {
+      const target = finiteDecimalLikeNumber(existing.partialEmergencyTargetAmount);
+      if (target == null) return false;
+      if (btcToSats(Math.abs(current.amount - target)) <= 1) {
+        await this.prisma.signalCycleParticipant.updateMany({
+          where: {
+            id: input.participantId,
+            partialEmergencyRequestId: existing.partialEmergencyRequestId,
+          },
+          data: { partialEmergencyPhase: 'CONFIRMED' },
+        });
+        return true;
+      }
+      // SUBMITTING/ACKNOWLEDGED can represent an accepted but delayed market
+      // order. Never steal or resubmit from a single inconclusive position read.
+      return false;
+    }
+
+    const closeQty = Math.min(Math.abs(current.amount), input.attributableQty);
+    if (btcToSats(closeQty) === 0) return true;
+    const targetAmount = current.amount + (input.direction === 'LONG' ? -closeQty : closeQty);
+    const requestId = createHash('sha256')
+      .update(`partial-emergency:${input.participantId}:${closeQty.toFixed(8)}`)
+      .digest('hex');
+    const claimed = await this.prisma.signalCycleParticipant.updateMany({
+      where: {
+        id: input.participantId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        partialEmergencyRequestId: null,
+      },
+      data: {
+        partialEmergencyRequestId: requestId,
+        partialEmergencyPhase: 'SUBMITTING',
+        partialEmergencyClaimedAt: new Date(),
+        partialEmergencyBeforeAmount: current.amount,
+        partialEmergencyTargetAmount: targetAmount,
+      },
+    });
+    if (claimed.count !== 1) return false;
+
+    let orderId: number;
+    try {
+      orderId = await this.activeTrading.submitMarketClose(input.creds, {
+        positionDirection: input.direction,
+        qty: closeQty,
+        leverage: input.leverage,
+      });
+    } catch {
+      // A transport error may follow exchange acceptance. Keep SUBMITTING.
+      return false;
+    }
+    const acknowledged = await this.prisma.signalCycleParticipant.updateMany({
+      where: {
+        id: input.participantId,
+        partialEmergencyRequestId: requestId,
+        partialEmergencyPhase: 'SUBMITTING',
+      },
+      data: {
+        partialEmergencyPhase: 'ACKNOWLEDGED',
+        partialEmergencyOrderId: BigInt(orderId),
+      },
+    });
+    if (acknowledged.count !== 1) return false;
+    const confirmed = await this.waitForMarketCloseConfirmation(
+      input.creds,
+      input.direction,
+      Math.abs(current.amount),
+      closeQty,
+    ).catch(() => false);
+    if (!confirmed) return false;
+    await this.prisma.signalCycleParticipant.updateMany({
+      where: { id: input.participantId, partialEmergencyRequestId: requestId },
+      data: { partialEmergencyPhase: 'CONFIRMED' },
+    });
+    return true;
+  }
+
   private async protectPartialFillAndRetainRemainder(
     agentId: string,
     userId: string,
@@ -11863,7 +12140,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const alreadyCovered = meta.partialFillQty ?? 0;
 
     if (priorStopId && btcToSats(alreadyCovered) >= btcToSats(filledQty)) {
-      const existing = await this.activeTrading.findOrder(creds, priorStopId);
+      let existing: Awaited<ReturnType<ExecutionTradingClient['findOrder']>>;
+      try {
+        existing = await this.activeTrading.findOrder(creds, priorStopId);
+      } catch (err) {
+        const message = `PARTIAL_FILL_EXISTING_STOP_STATUS_UNKNOWN cycle=${cycleId} stop=${priorStopId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+        throw new Error(message);
+      }
       if (existing) return;
     }
 
@@ -11891,18 +12177,48 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       ? fillEvidence.fillPrice
       : meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
     const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+    const partialStopClientOrderId = (
+      parseInt(
+        createHash('sha256')
+          .update(`partial-stop:${participantId}:${meta.bitfinexOrderId}:${btcToSats(filledQty)}`)
+          .digest('hex')
+          .slice(0, 8),
+        16,
+      ) & 0x7fffffff
+    ) || 1;
 
     let newStopId: number;
     const stopSubmitStartedAtMs = Date.now();
-    let stopExchangeAckAtMs: number | undefined;
+    let stopExchangeAckAtMs = 0;
+    let activeOrdersForRecovery: Awaited<ReturnType<ExecutionTradingClient['listActiveOrders']>>;
     try {
-      newStopId = await this.activeTrading.submitStopOrder(creds, {
+      activeOrdersForRecovery = await this.activeTrading.listActiveOrders(creds);
+    } catch (err) {
+      const message = `PARTIAL_FILL_STOP_RECOVERY_BOOK_UNKNOWN cycle=${cycleId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      throw new Error(message);
+    }
+    try {
+      const recoveryCandidate = activeOrdersForRecovery.find(
+        (order) => order.cid === partialStopClientOrderId,
+      );
+      const stopInput = {
         positionDirection: meta.direction,
         qty: filledQty,
         stopPrice,
         leverage,
-      });
-      stopExchangeAckAtMs = Date.now();
+        clientOrderId: partialStopClientOrderId,
+      } as const;
+      const verified = recoveryCandidate
+        ? await this.authenticateExactProtectiveStop(creds, recoveryCandidate.id, stopInput)
+        : await this.submitVerifiedProtectiveStop(creds, stopInput);
+      if (!verified.ok) throw new Error(verified.reason);
+      newStopId = verified.orderId;
+      stopExchangeAckAtMs = 'submitAckAtMs' in verified
+        ? Number(verified.submitAckAtMs)
+        : Date.now();
     } catch (err) {
       const message = `PARTIAL_FILL_PROTECTION_FAILED cycle=${cycleId}: ${
         err instanceof Error ? err.message : String(err)
@@ -11935,33 +12251,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             await this.pauseUserRelayForPositionMismatch(userId, agentId, mismatch).catch(() => {});
           } else {
             const beforeQty = Math.abs(before.amount);
-            // After the entry remainder is confirmed gone, flatten the fresh
-            // same-direction exchange quantity rather than the stale observed
-            // partial. A concurrent final fill can otherwise survive as an orphan.
-            const closeQty = beforeQty;
-            if (btcToSats(closeQty) === 0) {
-              flattened = true;
-            } else {
-          await this.activeTrading.submitMarketClose(creds, {
-            positionDirection: meta.direction,
-            qty: closeQty,
-            leverage: resolveSubscriberLeverage(intent),
-          }).catch(() => null);
-          flattened = await this.waitForMarketCloseConfirmation(
-            creds,
-            meta.direction,
-            beforeQty,
-            closeQty,
-          ).catch(() => false);
-            }
+            // Bitfinex merges same-direction legs at account level. This
+            // emergency path owns only this participant's authenticated fill;
+            // never flatten another participant merely because it shares the
+            // same account-side position.
+            flattened = await this.emergencyClosePartialWithFence({
+              participantId,
+              creds,
+              direction: meta.direction,
+              attributableQty: Math.min(beforeQty, filledQty),
+              leverage: resolveSubscriberLeverage(intent),
+            }).catch(() => false);
           }
         }
       }
       if (flattened) {
+        await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'NEGATIVE_EVIDENCE', {
+          schema: 'copy_negative_evidence_v1',
+          venue: 'bitfinex',
+          source: 'hire',
+          event: 'PROTECTION_FAILURE_EMERGENCY_CLOSE',
+          participant_id: participantId,
+          bitfinex_order_id: meta.bitfinexOrderId,
+          attributable_qty: filledQty,
+          analysis_eligible: false,
+          analysis_exclusion_reasons: ['PROTECTION_FAILURE_EMERGENCY_CLOSE'],
+          excluded_cohorts: ['BITFINEX_COPY_FIDELITY', 'REAL_COPY_PARAMETER_OPTIMISATION'],
+        });
         await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXPIRED', {
           venue: 'bitfinex',
           source: 'hire',
-          event: 'PARTIAL_FILL_PROTECTION_FAIL_CLOSED',
+          event: 'PROTECTION_FAILURE_EMERGENCY_CLOSE',
           reason: 'STOP_SUBMIT_FAILED_EXCHANGE_FLAT_CONFIRMED',
           partial_fill_qty: filledQty,
           pnl_usd: 0,
@@ -11991,6 +12311,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     let supersededStopId: number | undefined = priorStopId && priorStopId !== newStopId
       ? priorStopId
       : undefined;
+    try {
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
       venue: 'bitfinex',
       source: 'hire',
@@ -12022,6 +12343,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         : 'COPY_FILLED_SOURCE_PENDING_OR_UNKNOWN',
       fill_ratio: desiredQty > 0 ? filledQty / desiredQty : 1,
     });
+    } catch (err) {
+      // The exact new stop is live, but ownership could not be persisted. Keep
+      // any prior stop in place and pause; cancelling it would turn a database
+      // outage into an unprotected-position window.
+      const message = `PARTIAL_FILL_STOP_OWNERSHIP_PERSIST_UNKNOWN cycle=${cycleId} stop=${newStopId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+      throw new Error(message);
+    }
 
     if (priorStopId && priorStopId !== newStopId) {
       const oldGone = await this.cancelManagedOrderGone(
@@ -12077,22 +12408,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
 
-  /** Cancel resting limits whose price is far from market (e.g. $904 on $64k BTC). */
-  private async cancelAbsurdPendingOrders(creds: ExchangeCredentials, userId: string) {
+  /**
+   * Ownership-blind cleanup must never mutate exchange state. Report anomalous
+   * prices only; exact relay-owned entry retirement uses cancel-and-settle.
+   */
+  private async auditAbsurdPendingOrders(creds: ExchangeCredentials, userId: string) {
     const mark = await this.activeTrading.getMarkPrice().catch(() => null);
     if (!mark) return;
     const orders = await this.activeTrading.listActiveOrders(creds).catch(() => []);
     for (const order of orders) {
       const deviationPct = Math.abs((order.price - mark) / mark) * 100;
       if (deviationPct > 8) {
-        try {
-          await this.activeTrading.cancelOrder(creds, order.id);
-          this.logger.warn(
-            `Cancelled absurd order ${order.id} for ${userId}: price ${order.price} vs mark ${mark.toFixed(2)}`,
-          );
-        } catch {
-          /* already gone */
-        }
+        this.logger.error(
+          `Observed anomalous active order ${order.id} for ${userId}: price ${order.price} vs mark ${mark.toFixed(2)}; no ownership-blind cancellation performed`,
+        );
       }
     }
   }
@@ -12373,7 +12702,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   private detectShowcaseTradeClosed(
     bot: BotApiState | null,
     tradeId: string | null,
-  ): { closed: boolean; exitPrice?: number; exitReason?: string } {
+  ): { closed: boolean; exitPrice?: number; exitReason?: string; exitAt?: string } {
     if (!bot || !tradeId) return { closed: false };
 
     const inPositions = (bot.positions ?? []).some(
@@ -12389,45 +12718,260 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     );
     if (inOrders) return { closed: false };
 
-    const details = resolveShowcaseTradeDetails(bot, tradeId);
-    if (details?.exit != null && Number.isFinite(details.exit) && details.exit > 0) {
-      return {
-        closed: true,
-        exitPrice: details.exit,
-        exitReason: details.exitReason,
-      };
-    }
+    if (!canonicalTerminalSnapshotComplete(bot)) return { closed: false };
 
-    for (const [mapKey, entry] of Object.entries(bot.trades_map ?? {})) {
-      const sig = entry?.signal_ref as Record<string, unknown> | undefined;
-      if (!sig) continue;
-      const refId = String(sig.trade_id ?? mapKey);
-      if (!tradeIdsMatch(refId, tradeId) && !tradeIdsMatch(mapKey, tradeId)) continue;
-      if (
-        String(sig.status ?? '') === 'CLOSED' &&
-        (sig.exit_price != null || sig.closed_ts != null)
-      ) {
-        const exitCtx = sig.exit_context as Record<string, unknown> | undefined;
-        const exitPrice = Number(exitCtx?.exit_price ?? sig.exit_price ?? 0);
+    const terminal = completeCanonicalTerminalRecord(
+      tradeId,
+      resolveShowcaseTradeDetails(bot, tradeId),
+    );
+    if (terminal) return { closed: true, ...terminal };
+
+    return { closed: false };
+  }
+
+  private fillPromotionGeneration(
+    cycle: { id: string; tradeId?: string | null },
+    intent: SignalIntentEnvelope | null,
+    entryOrderId: number,
+  ): string {
+    const sourceRevision = showcaseIntentRevision(intent);
+    return createHash('sha256')
+      .update(`${cycle.tradeId ?? cycle.id}:${sourceRevision ?? 'legacy'}:${entryOrderId}`)
+      .digest('hex');
+  }
+
+  /**
+   * Distributed, durable ownership fence for the exchange-fill -> protected
+   * OPEN promotion. The in-memory money lane prevents duplicate work inside
+   * one process; this claim prevents a second Railway/Fly replica or a restart
+   * from submitting another stop for the same entry generation.
+   */
+  private async acquireFillPromotionClaim(input: {
+    participantId: string;
+    entryOrderId: number;
+    lifecycleGeneration: string;
+  }): Promise<{ token: string; stopClientOrderId: number; resumeStopOrderId?: number; recoverSubmitting?: boolean } | null> {
+    const key = createHash('sha256')
+      .update(`${input.participantId}:${input.entryOrderId}:${input.lifecycleGeneration}`)
+      .digest('hex');
+    const token = randomUUID();
+    const stopClientOrderId = (parseInt(key.slice(0, 8), 16) & 0x7fffffff) || 1;
+    const staleBefore = new Date(Date.now() - 120_000);
+    const updated = await this.prisma.signalCycleParticipant.updateMany({
+      where: {
+        id: input.participantId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        OR: [
+          { fillPromotionKey: null },
+          { fillPromotionKey: key, fillPromotionPhase: 'FAILED' },
+          {
+            fillPromotionKey: key,
+            fillPromotionPhase: 'CLAIMED',
+            fillPromotionClaimedAt: { lt: staleBefore },
+          },
+        ],
+      },
+      data: {
+        fillPromotionKey: key,
+        fillPromotionClaimToken: token,
+        fillPromotionClaimedAt: new Date(),
+        fillPromotionGeneration: input.lifecycleGeneration,
+        fillPromotionEntryOrderId: BigInt(input.entryOrderId),
+        fillPromotionStopOrderId: null,
+        fillPromotionStopClientId: stopClientOrderId,
+        fillPromotionPhase: 'CLAIMED',
+      },
+    });
+    if (updated.count === 1) return { token, stopClientOrderId };
+
+    // A prior owner may have durably authenticated protection and crashed
+    // before writing FILLED. Resume from that exact stop; never submit another.
+    const existing = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: input.participantId },
+      select: {
+        status: true,
+        fillPromotionKey: true,
+        fillPromotionPhase: true,
+        fillPromotionStopOrderId: true,
+        fillPromotionStopClientId: true,
+        fillPromotionClaimToken: true,
+      },
+    });
+    if (
+      existing?.status === SignalCycleStatus.PENDING_ENTRY
+      && existing.fillPromotionKey === key
+      && existing.fillPromotionPhase === 'PROTECTED'
+      && existing.fillPromotionStopOrderId != null
+    ) {
+      const resumed = await this.prisma.signalCycleParticipant.updateMany({
+        where: {
+          id: input.participantId,
+          status: SignalCycleStatus.PENDING_ENTRY,
+          fillPromotionKey: key,
+          fillPromotionPhase: 'PROTECTED',
+          fillPromotionStopOrderId: existing.fillPromotionStopOrderId,
+        },
+        data: { fillPromotionClaimToken: token, fillPromotionClaimedAt: new Date() },
+      });
+      if (resumed.count === 1) {
         return {
-          closed: true,
-          exitPrice: exitPrice > 0 ? exitPrice : undefined,
-          exitReason: String(sig.exit_reason ?? ''),
+          token,
+          stopClientOrderId: existing.fillPromotionStopClientId ?? stopClientOrderId,
+          resumeStopOrderId: Number(existing.fillPromotionStopOrderId),
         };
       }
     }
-
-    const trades = normalizeBotSessionTrades(bot);
-    const trade = trades.find((t) => t.trade_id && tradeIdsMatch(t.trade_id, tradeId));
-    if (trade?.exit != null && trade.pnl != null) {
+    if (
+      existing?.status === SignalCycleStatus.PENDING_ENTRY
+      && existing.fillPromotionKey === key
+      && existing.fillPromotionPhase === 'SUBMITTING'
+      && existing.fillPromotionClaimToken
+      && existing.fillPromotionStopClientId
+    ) {
       return {
-        closed: true,
-        exitPrice: trade.exit ?? undefined,
-        exitReason: trade.exit_reason ?? undefined,
+        token: existing.fillPromotionClaimToken,
+        stopClientOrderId: existing.fillPromotionStopClientId,
+        recoverSubmitting: true,
       };
     }
+    return null;
+  }
 
-    return { closed: false };
+  private async setFillPromotionPhase(
+    participantId: string,
+    token: string,
+    expectedPhase: 'CLAIMED' | 'SUBMITTING' | 'PROTECTED',
+    phase: 'FAILED' | 'SUBMITTING' | 'PROTECTED' | 'PROMOTED',
+    stopOrderId?: number,
+  ): Promise<boolean> {
+    const updated = await this.prisma.signalCycleParticipant.updateMany({
+      where: {
+        id: participantId,
+        fillPromotionClaimToken: token,
+        fillPromotionPhase: expectedPhase,
+      },
+      data: {
+        fillPromotionPhase: phase,
+        fillPromotionStopOrderId: stopOrderId == null ? undefined : BigInt(stopOrderId),
+      },
+    });
+    return updated.count === 1;
+  }
+
+  /**
+   * Submit a protective stop and authenticate the exact live exchange order
+   * before any fill is allowed to promote the participant to OPEN.  A submit
+   * response containing an id is only an acknowledgement of the write; it is
+   * not proof that the active order has the required reduce-only semantics.
+   */
+  private async submitVerifiedProtectiveStop(
+    creds: ExchangeCredentials,
+    input: {
+      positionDirection: 'LONG' | 'SHORT';
+      qty: number;
+      stopPrice: number;
+      leverage: number;
+      clientOrderId?: number;
+    },
+  ): Promise<
+    | { ok: true; orderId: number; order: BitfinexActiveOrder; submitAckAtMs: number }
+    | { ok: false; orderId?: number; reason: string; submitAckAtMs?: number }
+  > {
+    let orderId: number;
+    try {
+      orderId = await this.activeTrading.submitStopOrder(creds, input);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `STOP_SUBMIT_FAILED: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) {
+      return { ok: false, reason: 'STOP_SUBMIT_ACK_MISSING_ORDER_ID' };
+    }
+    const submitAckAtMs = Date.now();
+    const authenticated = await this.authenticateExactProtectiveStop(creds, orderId, input);
+    return { ...authenticated, submitAckAtMs };
+  }
+
+  private async authenticateExactProtectiveStop(
+    creds: ExchangeCredentials,
+    orderId: number,
+    input: {
+      positionDirection: 'LONG' | 'SHORT';
+      qty: number;
+      stopPrice: number;
+      leverage: number;
+      clientOrderId?: number;
+    },
+  ): Promise<
+    | { ok: true; orderId: number; order: BitfinexActiveOrder }
+    | { ok: false; orderId: number; reason: string }
+  > {
+    let lastReason = 'STOP_ACTIVE_ORDER_NOT_VISIBLE';
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let order: BitfinexActiveOrder | null;
+      try {
+        order = await this.activeTrading.findOrder(creds, orderId);
+      } catch (err) {
+        lastReason = `STOP_AUTH_READ_FAILED: ${err instanceof Error ? err.message : String(err)}`;
+        order = null;
+      }
+      if (order) {
+        const expectedAmount = input.positionDirection === 'LONG'
+          ? -Math.abs(input.qty)
+          : Math.abs(input.qty);
+        const exactQty = btcToSats(Math.abs(order.amount)) === btcToSats(Math.abs(input.qty))
+          && btcToSats(Math.abs(order.amountOrig)) === btcToSats(Math.abs(input.qty));
+        const exactSide = Math.sign(order.amount) === Math.sign(expectedAmount)
+          && Math.sign(order.amountOrig) === Math.sign(expectedAmount);
+        const stopType = order.orderType.toUpperCase().includes('STOP');
+        const reduceOnly = ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0;
+        const exactSymbol = order.symbol === BITFINEX_BTC_PERP_SYMBOL;
+        const exactPrice = Math.abs(order.price - input.stopPrice) < 0.011;
+        const active = order.status.toUpperCase().includes('ACTIVE');
+        if (exactQty && exactSide && stopType && reduceOnly && exactSymbol && exactPrice && active) {
+          return { ok: true, orderId, order };
+        }
+        lastReason = [
+          !exactQty ? 'QTY' : null,
+          !exactSide ? 'SIDE' : null,
+          !stopType ? 'TYPE' : null,
+          !reduceOnly ? 'REDUCE_ONLY' : null,
+          !exactSymbol ? 'SYMBOL' : null,
+          !exactPrice ? 'PRICE' : null,
+          !active ? 'STATUS' : null,
+        ].filter(Boolean).join(',');
+      }
+      if (attempt < 2) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    return { ok: false, orderId, reason: `STOP_AUTHENTICATION_FAILED:${lastReason}` };
+  }
+
+  private async holdUnprotectedFill(
+    agentId: string,
+    userId: string,
+    cycleId: string,
+    participantId: string,
+    failure: { orderId?: number; reason: string },
+    context: string,
+  ): Promise<void> {
+    const message = `UNPROTECTED_FILL_HELD cycle=${cycleId} participant=${participantId} context=${context} reason=${failure.reason}`;
+    await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
+    await this.setInstanceLastError(userId, agentId, message).catch(() => {});
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'RECONCILE_CANCEL_FAILED', {
+      venue: 'bitfinex',
+      source: 'hire',
+      event: 'PROTECTIVE_STOP_REQUIRED_BEFORE_FILL_PROMOTION',
+      participant_id: participantId,
+      context,
+      stop_order_id: failure.orderId,
+      reason: failure.reason,
+      verdict: 'UNKNOWN',
+      fill_promoted: false,
+    }).catch(() => {});
   }
 
   /**
@@ -12456,24 +13000,40 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
     const mirrorRelinked = (cycle.tradeId ?? '').startsWith('adopt:');
 
-    let closed =
-      preWakeSignedClose != null
-      || cycle.status === SignalCycleStatus.CLOSED
-      || cycle.status === SignalCycleStatus.EXPIRED;
+    // A database lifecycle label alone is not exchange-close authority. It can
+    // be written by TTL, cleanup, or an incomplete source snapshot. Require an
+    // exact signed close, a complete canonical terminal record, or persisted
+    // actionable absence evidence below.
+    const signedClose = preWakeSignedClose ?? readSignedShowcaseClose(cycle.intentEnvelope);
+    let closed = signedClose != null;
     let showcaseExitPrice: number | undefined;
     let showcaseExitReason: string | undefined;
     let mirrorTrigger = mirrorRelinked ? 'ORIGIN_SHOWCASE_CLOSED' : 'SHOWCASE_CLOSED';
+    let terminalAuthority: TerminalCloseAuthority | undefined;
+    const lifecycleGeneration =
+      showcaseIntentRevision(cycle.intentEnvelope) ??
+      `legacy:${showcaseTradeId ?? cycle.tradeId ?? cycle.id}`;
     // The private prewake is emitted only after owner + HMAC verification. Carry
     // that exact terminal evidence into the worker so it can close the already-
     // owned lot while the canonical Neon transaction is still committing,
     // instead of polling Fly and losing the intended overlap.
-    const signedClose = preWakeSignedClose ?? readSignedShowcaseClose(cycle.intentEnvelope);
     if (closed && signedClose) {
       showcaseExitPrice = signedClose.exitPrice;
       showcaseExitReason = signedClose.exitReason;
       mirrorTrigger = mirrorRelinked
         ? 'ORIGIN_SHOWCASE_CLOSED_WEBHOOK'
         : 'SHOWCASE_CLOSED_WEBHOOK';
+      terminalAuthority = {
+        kind: 'SIGNED_POSITION_CLOSED',
+        canonicalTradeId: showcaseTradeId ?? cycle.tradeId ?? cycle.id,
+        lifecycleGeneration,
+        evidence: {
+          source_event_at_ms: signedClose.sourceEventAtMs,
+          platform_received_at_ms: signedClose.platformReceivedAtMs,
+          exit_price: signedClose.exitPrice,
+          exit_reason: signedClose.exitReason,
+        },
+      };
     }
 
     if (!closed && showcaseTradeId) {
@@ -12491,6 +13051,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         mirrorTrigger = mirrorRelinked
           ? `ORIGIN_SHOWCASE_CLOSED_${wakeSource}`
           : `SHOWCASE_CLOSED_${wakeSource}`;
+        terminalAuthority = {
+          kind: 'CANONICAL_TERMINAL_RECORD',
+          canonicalTradeId: showcaseTradeId,
+          lifecycleGeneration,
+          evidence: {
+            exit_price: det.exitPrice,
+            exit_reason: det.exitReason,
+            observed_at_ms: Date.now(),
+          },
+        };
       } else {
         const absenceEvidence = bot
           ? this.trackShowcasePositionAbsent(participant.id, showcaseTradeId, bot)
@@ -12514,6 +13084,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             closed = true;
             showcaseExitReason = 'SHOWCASE_POSITION_ABSENT';
             mirrorTrigger = 'SHOWCASE_POSITION_ABSENT';
+            terminalAuthority = {
+              kind: 'SOURCE_ABSENCE_ACTIONABLE',
+              canonicalTradeId: showcaseTradeId,
+              lifecycleGeneration,
+              evidence: { ...absenceEvidence },
+            };
             this.logger.warn(
               `Showcase position absent ${userId} cycle=${cycle.id} trade=${showcaseTradeId}; ` +
                 `market-closing copy lot after persisted snapshot seq=${absenceEvidence.snapshotSeq}, ` +
@@ -12533,21 +13109,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.consumeWakeTrigger();
     }
 
-    if (!closed && mirrorRelinked && meta.originCycleId) {
-      const originCycle = await this.prisma.signalCycle.findUnique({
-        where: { id: meta.originCycleId },
-        select: { status: true },
-      });
-      if (
-        originCycle?.status === SignalCycleStatus.CLOSED ||
-        originCycle?.status === SignalCycleStatus.EXPIRED
-      ) {
-        closed = true;
-        mirrorTrigger = 'ORIGIN_SHOWCASE_CLOSED';
-      }
-    }
-
-    if (!closed) return false;
+    if (!closed || !terminalAuthority) return false;
 
     if (showcaseExitPrice == null && showcaseTradeId && signedClose == null) {
       const bot = await this.fetchExecutionBotState();
@@ -12570,15 +13132,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         platformReceivedAtMs: signedClose?.platformReceivedAtMs,
         mirrorRelinked,
         trigger: mirrorTrigger,
+        terminalAuthority,
       },
     );
   }
 
   /**
-   * Fail-safe when showcase is flat/closed but a copy lot remains OPEN after the
-   * normal mirror path did not close it (e.g. stale EXIT before hasParticipantExited
-   * fix, or a transient bot-state miss). Surfaces operator alert at 120s and forces
-   * market-close via executeShowcaseMirrorClose.
+   * Alert-only guard when the source appears flat but a protected copy lot is
+   * still OPEN. Empty/partial source books are UNKNOWN, never terminal proof.
+   * The normal mirror path owns signed/canonical closes and persisted actionable
+   * absence. This guard may pause entries, but cannot close.
    */
   private async enforceShowcaseFlatOpenFailsafe(
     agentId: string,
@@ -12592,35 +13155,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     },
     participant: { id: string; fillPrice: { toNumber?: () => number } | null },
     meta: ExecutionPayload,
-    creds: ExchangeCredentials,
+    _creds: ExchangeCredentials,
     simActive = false,
   ): Promise<boolean> {
     if (simActive) return false;
     if (!mirrorExitConvergenceEnabled() || !isShowcaseMirrorOnlyMode()) return false;
 
     const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
-    const cycleTerminal =
-      cycle.status === SignalCycleStatus.CLOSED || cycle.status === SignalCycleStatus.EXPIRED;
+    let showcaseAppearsFlat = false;
+    let observationReason: string | undefined;
 
-    let showcaseFlat = cycleTerminal;
-    let showcaseExitPrice: number | undefined;
-    let showcaseExitReason: string | undefined;
-
-    if (!showcaseFlat && showcaseTradeId) {
+    if (showcaseTradeId) {
       const bot = await this.fetchExecutionBotState();
       if (!bot) return false;
       const det = this.detectShowcaseTradeClosed(bot, showcaseTradeId);
       if (det.closed) {
-        showcaseFlat = true;
-        showcaseExitPrice = det.exitPrice;
-        showcaseExitReason = det.exitReason;
+        showcaseAppearsFlat = true;
+        observationReason = det.exitReason ?? 'CANONICAL_TERMINAL_NOT_CONSUMED';
       } else {
         const inPositions = (bot.positions ?? []).some(
           (p) => p.trade_id && tradeIdsMatch(p.trade_id, showcaseTradeId),
         );
         if (!inPositions && (bot.positions ?? []).length === 0) {
-          showcaseFlat = true;
-          showcaseExitReason = 'SHOWCASE_BOOK_FLAT';
+          showcaseAppearsFlat = true;
+          observationReason = 'SHOWCASE_BOOK_APPEARS_FLAT';
         } else {
           this.showcaseFlatOpenSince.delete(participant.id);
           return false;
@@ -12628,7 +13186,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
     }
 
-    if (!showcaseFlat) {
+    if (!showcaseAppearsFlat) {
       this.showcaseFlatOpenSince.delete(participant.id);
       return false;
     }
@@ -12647,28 +13205,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const staleExitCount = await this.prisma.signalCycleEvent.count({
       where: { participantId: participant.id, eventType: 'EXIT' },
     });
-    const alertMsg = `MIRROR EXIT FAIL-SAFE: showcase flat but copy OPEN ${Math.round(elapsed / 1000)}s (participant=${participant.id.slice(0, 8)}… stale_exit_events=${staleExitCount}) — forcing market close`;
+    const alertMsg = `MIRROR EXIT HOLD: source appears flat but copy remains protected OPEN for ${Math.round(elapsed / 1000)}s (participant=${participant.id.slice(0, 8)}… stale_exit_events=${staleExitCount}) — evidence UNKNOWN; entries paused, no close`;
     this.logger.error(alertMsg);
-    await this.setInstanceLastError(userId, agentId, alertMsg);
-    await this.cycles
-      .recordHireExecutionEvent(userId, agentId, cycle.id, 'MIRROR_EXIT_FAILSAFE_ALERT', {
+    await this.pauseUserRelayForPositionMismatch(userId, agentId, alertMsg).catch(() => {});
+    await this.cycles.recordHireExecutionEvent(
+      userId,
+      agentId,
+      cycle.id,
+      'MIRROR_EXIT_FAILSAFE_ALERT',
+      {
         venue: 'bitfinex',
         source: 'hire',
         participant_id: participant.id,
         trade_id: showcaseTradeId ?? cycle.tradeId,
         elapsed_ms: elapsed,
         stale_exit_events: staleExitCount,
-        showcase_exit_reason: showcaseExitReason,
-      })
-      .catch(() => {});
-
-    return this.executeShowcaseMirrorClose(agentId, userId, cycle, participant, meta, creds, {
-      showcaseExitPrice,
-      showcaseExitReason: showcaseExitReason ?? 'SHOWCASE_FLAT_FAILSAFE',
-      mirrorRelinked: (cycle.tradeId ?? '').startsWith('adopt:'),
-      trigger: 'SHOWCASE_FLAT_FAILSAFE',
-      forceMirrorExit: true,
-    });
+        showcase_exit_reason: observationReason,
+        verdict: 'UNKNOWN',
+        action: 'ALERT_ONLY_HOLD_PROTECTED_POSITION',
+        terminal_authority: false,
+        analysis_exclusion_reasons: ['UNSUPPORTED_FLAT_BOOK_EVIDENCE'],
+      },
+    );
+    // Throttle repeats while retaining the UNKNOWN/hold state.
+    this.showcaseFlatOpenSince.set(participant.id, now);
+    return false;
   }
 
   private async expectedRemainingLedgerAmount(
@@ -12772,6 +13333,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     prepared?: {
       remainingLedgerAmount: number | null;
     },
+    terminalFence?: { cycleId: string; claim: TerminalCloseClaim },
   ): Promise<RelayLotExitTarget> {
     if (!meta.direction) {
       throw new Error('EXIT_TARGET_MISSING_DIRECTION');
@@ -12800,6 +13362,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       throw new Error(message);
     }
     if (btcToSats(target.closeQty) === 0) {
+      if (terminalFence && terminalFence.claim.phase !== 'CONFIRMED') {
+        terminalFence.claim = await this.advanceTerminalCloseFence({
+          cycleId: terminalFence.cycleId,
+          participantId,
+          claim: terminalFence.claim,
+          from: [terminalFence.claim.phase],
+          to: 'CONFIRMED',
+          beforeAmount: target.currentAmount,
+          targetAmount: target.targetAmount,
+          closeQty: 0,
+        });
+      }
       // No market action is required, so there is no close-SLA critical path
       // to protect. Retire any stale reduce-only stops before reporting the
       // ledger-target result.
@@ -12818,21 +13392,44 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return target;
     }
 
+    if (!terminalFence) throw new Error('TERMINAL_CLOSE_FENCE_REQUIRED');
+    terminalFence.claim = await this.advanceTerminalCloseFence({
+      cycleId: terminalFence.cycleId,
+      participantId,
+      claim: terminalFence.claim,
+      from: ['CLAIMED'],
+      to: 'SUBMITTING',
+      beforeAmount: target.currentAmount,
+      targetAmount: target.targetAmount,
+      closeQty: target.closeQty,
+    });
     const closeSubmitStartedAtMs = Date.now();
+    let closeExchangeOrderId: number;
     if (target.finalAccountFlatten) {
-      await this.activeTrading.submitPositionFlatten(creds, {
+      closeExchangeOrderId = await this.activeTrading.submitPositionFlatten(creds, {
         positionDirection: meta.direction,
         qty: target.closeQty,
         leverage,
       });
     } else {
-      await this.activeTrading.submitMarketClose(creds, {
+      closeExchangeOrderId = await this.activeTrading.submitMarketClose(creds, {
         positionDirection: meta.direction,
         qty: target.closeQty,
         leverage,
       });
     }
     const closeExchangeAckAtMs = Date.now();
+    terminalFence.claim = await this.advanceTerminalCloseFence({
+      cycleId: terminalFence.cycleId,
+      participantId,
+      claim: terminalFence.claim,
+      from: ['SUBMITTING'],
+      to: 'ACKNOWLEDGED',
+      beforeAmount: target.currentAmount,
+      targetAmount: target.targetAmount,
+      closeQty: target.closeQty,
+      exchangeOrderId: closeExchangeOrderId,
+    });
     const confirmed = await this.waitForMarketCloseConfirmation(
       creds,
       meta.direction,
@@ -12846,6 +13443,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
       throw new Error(message);
     }
+    terminalFence.claim = await this.advanceTerminalCloseFence({
+      cycleId: terminalFence.cycleId,
+      participantId,
+      claim: terminalFence.claim,
+      from: ['ACKNOWLEDGED'],
+      to: 'CONFIRMED',
+      beforeAmount: target.currentAmount,
+      targetAmount: target.targetAmount,
+      closeQty: target.closeQty,
+    });
     // Keep reduce-only protection live until the exchange has confirmed the
     // market reduction. Cancelling a stop before submitting the close made the
     // stop-cancel round trip part of the critical path (2.493s in cont-9b),
@@ -12910,6 +13517,334 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
+   * Persist and atomically own one exact terminal authority before any exchange
+   * order is cancelled or any reduce-only close is submitted. Only a stale
+   * CLAIMED fence is recoverable by time: SUBMITTING and later phases require
+   * authenticated exchange reconciliation and can never be stolen on timeout.
+   */
+  private async acquireTerminalCloseClaim(input: {
+    agentId: string;
+    userId: string;
+    cycleId: string;
+    participantId: string;
+    meta: ExecutionPayload;
+    authority: TerminalCloseAuthority;
+  }): Promise<TerminalCloseClaim | null> {
+    const ownerToken = randomUUID();
+    const newRequestId = randomUUID();
+    const claimedAt = new Date();
+    const staleBefore = new Date(claimedAt.getTime() - TERMINAL_CLOSE_CLAIM_LEASE_MS);
+    return this.prisma.$transaction(
+      async (tx) => {
+        const [cycle, participant] = await Promise.all([
+          tx.signalCycle.findFirst({
+            where: { id: input.cycleId, agentId: input.agentId },
+            select: { id: true, tradeId: true, intentEnvelope: true },
+          }),
+          tx.signalCycleParticipant.findFirst({
+            where: {
+              id: input.participantId,
+              cycleId: input.cycleId,
+              userId: input.userId,
+            },
+            select: {
+              status: true,
+              terminalCloseClaimToken: true,
+              terminalCloseClaimedAt: true,
+              terminalClosePhase: true,
+              terminalCloseRequestId: true,
+            },
+          }),
+        ]);
+        if (!cycle || !participant || participant.status !== SignalCycleStatus.OPEN) {
+          return null;
+        }
+        const canonicalTradeId = resolveShowcaseMirrorTradeIdFromInputs(
+          cycle.tradeId,
+          input.meta.originTradeId,
+        );
+        const lifecycleGeneration =
+          showcaseIntentRevision(cycle.intentEnvelope) ??
+          `legacy:${canonicalTradeId ?? cycle.tradeId ?? cycle.id}`;
+        if (
+          !canonicalTradeId ||
+          !tradeIdsMatch(canonicalTradeId, input.authority.canonicalTradeId) ||
+          lifecycleGeneration !== input.authority.lifecycleGeneration
+        ) {
+          return null;
+        }
+        const recovered = Boolean(
+          participant.terminalCloseClaimToken &&
+            participant.terminalCloseClaimedAt &&
+            participant.terminalCloseClaimedAt < staleBefore &&
+            (participant.terminalClosePhase == null || participant.terminalClosePhase === 'CLAIMED'),
+        );
+        const requestId = participant.terminalCloseRequestId ?? newRequestId;
+        const claim = await tx.signalCycleParticipant.updateMany({
+          where: {
+            id: input.participantId,
+            status: SignalCycleStatus.OPEN,
+            OR: [
+              { terminalCloseClaimToken: null },
+              {
+                terminalCloseClaimedAt: { lt: staleBefore },
+                terminalClosePhase: { in: ['CLAIMED'] },
+              },
+              {
+                terminalCloseClaimedAt: { lt: staleBefore },
+                terminalClosePhase: null,
+              },
+            ],
+          },
+          data: {
+            terminalCloseClaimToken: ownerToken,
+            terminalCloseClaimedAt: claimedAt,
+            terminalCloseGeneration: lifecycleGeneration,
+            terminalCloseAuthority: input.authority as unknown as Prisma.InputJsonValue,
+            terminalClosePhase: 'CLAIMED',
+            terminalCloseRequestId: requestId,
+          },
+        });
+        if (claim.count !== 1) return null;
+        await tx.signalCycleEvent.create({
+          data: {
+            cycleId: input.cycleId,
+            participantId: input.participantId,
+            eventType: recovered ? 'TERMINAL_CLOSE_CLAIM_RECOVERED' : 'TERMINAL_CLOSE_CLAIM',
+            payload: {
+              schema: 'terminal_close_fence_v2',
+              owner_token: ownerToken,
+              request_id: requestId,
+              phase: 'CLAIMED',
+              claimed_at: claimedAt.toISOString(),
+              lease_ms: TERMINAL_CLOSE_CLAIM_LEASE_MS,
+              recovered,
+              authority: input.authority,
+            } as Prisma.InputJsonValue,
+          },
+        });
+        return { ownerToken, requestId, phase: 'CLAIMED' as const, authority: input.authority, recovered };
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  }
+
+  /** Re-read durable identity and claim ownership immediately before close. */
+  private async terminalCloseClaimStillValid(input: {
+    agentId: string;
+    userId: string;
+    cycleId: string;
+    participantId: string;
+    meta: ExecutionPayload;
+    claim: TerminalCloseClaim;
+  }): Promise<boolean> {
+    const participant = await this.prisma.signalCycleParticipant.findFirst({
+      where: {
+        id: input.participantId,
+        cycleId: input.cycleId,
+        userId: input.userId,
+        status: SignalCycleStatus.OPEN,
+        terminalCloseClaimToken: input.claim.ownerToken,
+        terminalCloseGeneration: input.claim.authority.lifecycleGeneration,
+      },
+      select: {
+        terminalCloseClaimedAt: true,
+        terminalClosePhase: true,
+        terminalCloseRequestId: true,
+        cycle: {
+          select: { agentId: true, tradeId: true, intentEnvelope: true },
+        },
+      },
+    });
+    if (!participant || participant.cycle.agentId !== input.agentId) return false;
+    if (!participant.terminalCloseRequestId || participant.terminalCloseRequestId !== input.claim.requestId) {
+      return false;
+    }
+    if (
+      (participant.terminalClosePhase == null || participant.terminalClosePhase === 'CLAIMED') &&
+      (!participant.terminalCloseClaimedAt ||
+        Date.now() - participant.terminalCloseClaimedAt.getTime() > TERMINAL_CLOSE_CLAIM_LEASE_MS)
+    ) return false;
+    const canonicalTradeId = resolveShowcaseMirrorTradeIdFromInputs(
+      participant.cycle.tradeId,
+      input.meta.originTradeId,
+    );
+    const lifecycleGeneration =
+      showcaseIntentRevision(participant.cycle.intentEnvelope) ??
+      `legacy:${canonicalTradeId ?? participant.cycle.tradeId ?? input.cycleId}`;
+    return Boolean(
+      canonicalTradeId &&
+        tradeIdsMatch(canonicalTradeId, input.claim.authority.canonicalTradeId) &&
+        lifecycleGeneration === input.claim.authority.lifecycleGeneration,
+    );
+  }
+
+  private async advanceTerminalCloseFence(input: {
+    cycleId: string;
+    participantId: string;
+    claim: TerminalCloseClaim;
+    from: TerminalCloseClaim['phase'][];
+    to: TerminalCloseClaim['phase'];
+    beforeAmount?: number;
+    targetAmount?: number;
+    closeQty?: number;
+    exchangeOrderId?: number;
+  }): Promise<TerminalCloseClaim> {
+    const now = new Date();
+    const advanced = await this.prisma.$transaction(async (tx) => {
+      const update = await tx.signalCycleParticipant.updateMany({
+        where: {
+          id: input.participantId,
+          status: SignalCycleStatus.OPEN,
+          terminalCloseClaimToken: input.claim.ownerToken,
+          terminalCloseRequestId: input.claim.requestId,
+          terminalCloseGeneration: input.claim.authority.lifecycleGeneration,
+          terminalClosePhase: { in: input.from },
+        },
+        data: {
+          terminalClosePhase: input.to,
+          ...(input.to === 'SUBMITTING'
+            ? {
+                terminalCloseBeforeAmount: input.beforeAmount,
+                terminalCloseTargetAmount: input.targetAmount,
+                terminalCloseQty: input.closeQty,
+              }
+            : {}),
+          ...(input.to === 'ACKNOWLEDGED' ? { terminalCloseAcknowledgedAt: now } : {}),
+          ...(input.exchangeOrderId != null
+            ? { terminalCloseExchangeOrderId: BigInt(Math.trunc(input.exchangeOrderId)) }
+            : {}),
+          ...(input.to === 'CONFIRMED' ? { terminalCloseConfirmedAt: now } : {}),
+        },
+      });
+      if (update.count !== 1) return false;
+      await tx.signalCycleEvent.create({
+        data: {
+          cycleId: input.cycleId,
+          participantId: input.participantId,
+          eventType: `TERMINAL_CLOSE_${input.to}`,
+          payload: {
+            schema: 'terminal_close_fence_v2',
+            owner_token: input.claim.ownerToken,
+            request_id: input.claim.requestId,
+            phase: input.to,
+            before_amount: input.beforeAmount,
+            target_amount: input.targetAmount,
+            close_qty: input.closeQty,
+            exchange_order_id: input.exchangeOrderId != null
+              ? String(Math.trunc(input.exchangeOrderId))
+              : undefined,
+            authority: input.claim.authority,
+            observed_at: now.toISOString(),
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    if (!advanced) throw new Error(`TERMINAL_CLOSE_FENCE_${input.to}_REFUSED`);
+    return { ...input.claim, phase: input.to };
+  }
+
+  /**
+   * A timed-out SUBMITTING/ACKNOWLEDGED fence is never resubmitted. Recovery
+   * first proves that the authenticated exchange position already equals the
+   * immutable target, then adopts the fence only to finish ledger persistence.
+   */
+  private async recoverSettledTerminalCloseFence(input: {
+    agentId: string;
+    userId: string;
+    cycleId: string;
+    participantId: string;
+    meta: ExecutionPayload;
+    creds: ExchangeCredentials;
+    authority: TerminalCloseAuthority;
+  }): Promise<TerminalCloseClaim | null> {
+    const row = await this.prisma.signalCycleParticipant.findFirst({
+      where: {
+        id: input.participantId,
+        cycleId: input.cycleId,
+        userId: input.userId,
+        status: SignalCycleStatus.OPEN,
+      },
+      select: {
+        terminalCloseClaimToken: true,
+        terminalCloseRequestId: true,
+        terminalCloseGeneration: true,
+        terminalCloseAuthority: true,
+        terminalClosePhase: true,
+        terminalCloseTargetAmount: true,
+        cycle: { select: { agentId: true } },
+      },
+    });
+    if (
+      !row || row.cycle.agentId !== input.agentId ||
+      !row.terminalCloseClaimToken || !row.terminalCloseRequestId ||
+      row.terminalCloseGeneration !== input.authority.lifecycleGeneration ||
+      !['SUBMITTING', 'ACKNOWLEDGED', 'CONFIRMED'].includes(row.terminalClosePhase ?? '')
+    ) return null;
+    const storedAuthority = row.terminalCloseAuthority as TerminalCloseAuthority | null;
+    if (
+      !storedAuthority ||
+      storedAuthority.kind !== input.authority.kind ||
+      !tradeIdsMatch(storedAuthority.canonicalTradeId, input.authority.canonicalTradeId) ||
+      storedAuthority.lifecycleGeneration !== input.authority.lifecycleGeneration
+    ) return null;
+    const targetAmount = finiteDecimalLikeNumber(row.terminalCloseTargetAmount);
+    if (targetAmount == null) return null;
+    const position = await this.activeTrading.getOpenPositionDetail(input.creds);
+    const currentAmount = position?.amount ?? 0;
+    if (btcToSats(currentAmount) !== btcToSats(targetAmount)) return null;
+
+    const ownerToken = randomUUID();
+    const confirmedAt = new Date();
+    const adopted = await this.prisma.$transaction(async (tx) => {
+      const update = await tx.signalCycleParticipant.updateMany({
+        where: {
+          id: input.participantId,
+          status: SignalCycleStatus.OPEN,
+          terminalCloseRequestId: row.terminalCloseRequestId!,
+          terminalCloseClaimToken: row.terminalCloseClaimToken!,
+          terminalClosePhase: { in: ['SUBMITTING', 'ACKNOWLEDGED', 'CONFIRMED'] },
+        },
+        data: {
+          terminalCloseClaimToken: ownerToken,
+          terminalClosePhase: 'CONFIRMED',
+          terminalCloseConfirmedAt: confirmedAt,
+        },
+      });
+      if (update.count !== 1) return false;
+      await tx.signalCycleEvent.create({
+        data: {
+          cycleId: input.cycleId,
+          participantId: input.participantId,
+          eventType: 'TERMINAL_CLOSE_RECOVERED_CONFIRMED',
+          payload: {
+            schema: 'terminal_close_fence_v2',
+            request_id: row.terminalCloseRequestId,
+            prior_owner_token: row.terminalCloseClaimToken,
+            owner_token: ownerToken,
+            prior_phase: row.terminalClosePhase,
+            phase: 'CONFIRMED',
+            target_amount: targetAmount,
+            observed_exchange_amount: currentAmount,
+            exchange_reconciled: true,
+            observed_at: confirmedAt.toISOString(),
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    if (!adopted) return null;
+    return {
+      ownerToken,
+      requestId: row.terminalCloseRequestId,
+      phase: 'CONFIRMED',
+      authority: storedAuthority,
+      recovered: true,
+    };
+  }
+
+  /**
    * Phase 2c — market-close copy lot on showcase closure with observability fields.
    * Idempotent via exitingLots + hasParticipantExited (unless forceMirrorExit).
    */
@@ -12931,6 +13866,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       platformReceivedAtMs?: number;
       mirrorRelinked?: boolean;
       trigger?: string;
+      terminalAuthority: TerminalCloseAuthority;
       /** Bypass hasParticipantExited (stale RECONCILE_CANCEL EXIT events). */
       forceMirrorExit?: boolean;
     },
@@ -12938,6 +13874,74 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const closePreflightStartedAtMs = Date.now();
     if (!opts?.forceMirrorExit && (await this.hasParticipantExited(participant.id))) return true;
     if (this.exitingLots.has(participant.id)) return true;
+    if (!opts?.terminalAuthority) {
+      await this.pauseUserRelayForPositionMismatch(
+        userId,
+        agentId,
+        `TERMINAL_CLOSE_AUTHORITY_MISSING cycle=${cycle.id}: protected position held`,
+      ).catch(() => {});
+      return false;
+    }
+    const terminalAuthority = opts.terminalAuthority;
+
+    let terminalClaim: TerminalCloseClaim;
+    try {
+      const acquired = await this.acquireTerminalCloseClaim({
+        agentId,
+        userId,
+        cycleId: cycle.id,
+        participantId: participant.id,
+        meta,
+        authority: terminalAuthority,
+      });
+      if (!acquired) {
+        const recovered = await this.recoverSettledTerminalCloseFence({
+          agentId,
+          userId,
+          cycleId: cycle.id,
+          participantId: participant.id,
+          meta,
+          creds,
+          authority: terminalAuthority,
+        });
+        if (recovered) {
+          terminalClaim = recovered;
+        } else {
+        const existing = await this.prisma.signalCycleParticipant.findUnique({
+          where: { id: participant.id },
+          select: { status: true, terminalCloseClaimToken: true, terminalClosePhase: true },
+        });
+        if (
+          existing?.status === SignalCycleStatus.OPEN &&
+          existing.terminalCloseClaimToken
+        ) {
+          await this.pauseUserRelayForPositionMismatch(
+            userId,
+            agentId,
+            `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycle.id} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
+          ).catch(() => {});
+          return true;
+        }
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycle.id}: identity, generation, status, or authority changed`,
+        ).catch(() => {});
+        return false;
+        }
+      } else {
+        terminalClaim = acquired;
+      }
+    } catch (err) {
+      await this.pauseUserRelayForPositionMismatch(
+        userId,
+        agentId,
+        `TERMINAL_CLOSE_CLAIM_PERSIST_FAILED cycle=${cycle.id}: protected position held; ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      ).catch(() => {});
+      return false;
+    }
 
     this.exitingLots.add(participant.id);
     try {
@@ -12996,6 +14000,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             leverage,
             ownedStopOrderIds(meta),
             { remainingLedgerAmount },
+            { cycleId: cycle.id, claim: terminalClaim },
           );
         } catch (err) {
           await this.pauseUserRelayForPositionMismatch(
@@ -13050,6 +14055,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           showcase_exit_reason: opts?.showcaseExitReason,
           mirror_relinked: opts?.mirrorRelinked ?? false,
           mirror_trigger: opts?.trigger,
+          terminal_authority_kind: terminalClaim.authority.kind,
+          terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+          terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+          terminal_close_claim_token: terminalClaim.ownerToken,
+          terminal_close_request_id: terminalClaim.requestId,
+          terminal_close_phase: 'CONFIRMED',
+          terminal_close_claim_recovered: terminalClaim.recovered,
           pnl_usd: Math.round(pnlUsd * 100) / 100,
           pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
           pnl_source: pnlSource,
@@ -13065,6 +14077,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         return true;
       }
 
+      if (
+        !(await this.terminalCloseClaimStillValid({
+          agentId,
+          userId,
+          cycleId: cycle.id,
+          participantId: participant.id,
+          meta,
+          claim: terminalClaim,
+        }))
+      ) {
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `TERMINAL_CLOSE_CLAIM_REVALIDATION_FAILED cycle=${cycle.id}: protected position held`,
+        ).catch(() => {});
+        return false;
+      }
+
       let closeTarget: RelayLotExitTarget;
       try {
         closeTarget = await this.closeParticipantPositionToLedgerTarget(
@@ -13076,6 +14106,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           leverage,
           ownedStopOrderIds(meta),
           { remainingLedgerAmount },
+          { cycleId: cycle.id, claim: terminalClaim },
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -13128,6 +14159,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         showcase_exit_price: opts?.showcaseExitPrice,
         exit_slippage_usd: exitSlippageUsd,
         showcase_exit_reason: opts?.showcaseExitReason,
+        terminal_authority_kind: terminalClaim.authority.kind,
+        terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+        terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+        terminal_close_claim_token: terminalClaim.ownerToken,
+        terminal_close_request_id: terminalClaim.requestId,
+        terminal_close_phase: 'CONFIRMED',
+        terminal_close_claim_recovered: terminalClaim.recovered,
         close_submit_started_at: closeTarget.closeSubmitStartedAtMs != null
           ? new Date(closeTarget.closeSubmitStartedAtMs).toISOString()
           : undefined,
@@ -14127,13 +15165,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     return { blocked: elapsed >= SHOWCASE_UNREACHABLE_ENTRY_BLOCK_MS, elapsedMs: elapsed };
   }
 
-  /**
-   * F2 — Should an OPEN copy lot be force-closed right now because the
-   * showcase has been unreachable for ≥ ORPHAN_KILL_MS? This is the orphan
-   * counterpart to {@link enforceShowcaseFlatOpenFailsafe} — that one needs a
-   * successfully fetched flat book to fire; this one fires precisely when the
-   * fetch keeps failing, which is the case the existing failsafe cannot cover.
-   */
+  /** F2 — Should an OPEN copy lot enter outage UNKNOWN/hold state? */
   private openLotOrphanedByShowcaseOutage(instanceId: string): {
     orphan: boolean;
     elapsedMs: number;
@@ -14146,12 +15178,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
-   * F2 — Market-close an OPEN copy lot because the showcase has been
-   * unreachable past the orphan-kill threshold. We do NOT know the
-   * showcase_exit_price here (no fetch succeeded) — that's fine; the
-   * alternative is letting the orphan marinade while real money is on the
-   * line. Reuses {@link executeShowcaseMirrorClose} for idempotency and
-   * accounting. Always surfaces an operator alert + lastError.
+   * F2 — Source outage is UNKNOWN. Pause entries and retain physical
+   * protection; an unreachable source can never authorize a market close.
    */
   private async enforceShowcaseOutageOrphanKill(
     agentId: string,
@@ -14164,19 +15192,23 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       intentEnvelope?: unknown;
     },
     participant: { id: string; fillPrice: { toNumber?: () => number } | null },
-    meta: ExecutionPayload,
-    creds: ExchangeCredentials,
+    _meta: ExecutionPayload,
+    _creds: ExchangeCredentials,
     elapsedMs: number,
   ): Promise<boolean> {
-    const alertMsg = `SHOWCASE OUTAGE ORPHAN KILL: copy OPEN lot for trade=${
+    const alertMsg = `SHOWCASE OUTAGE HOLD: copy OPEN lot for trade=${
       cycle.tradeId ?? '?'
-    } (participant=${participant.id.slice(0, 8)}…) market-closing — showcase unreachable for ${Math.round(
+    } (participant=${participant.id.slice(0, 8)}…) remains protected — showcase unreachable for ${Math.round(
       elapsedMs / 1000,
-    )}s (≥ SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS=${SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS}ms). F2 safe-mode.`;
+    )}s; evidence UNKNOWN, entries paused, no close.`;
     this.logger.error(alertMsg);
-    await this.setInstanceLastError(userId, agentId, alertMsg);
-    await this.cycles
-      .recordHireExecutionEvent(userId, agentId, cycle.id, 'SHOWCASE_OUTAGE_ORPHAN_KILL', {
+    await this.pauseUserRelayForPositionMismatch(userId, agentId, alertMsg).catch(() => {});
+    await this.cycles.recordHireExecutionEvent(
+      userId,
+      agentId,
+      cycle.id,
+      'SHOWCASE_OUTAGE_ORPHAN_KILL',
+      {
         venue: 'bitfinex',
         source: 'hire',
         participant_id: participant.id,
@@ -14184,15 +15216,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         elapsed_ms: elapsedMs,
         threshold_ms: SHOWCASE_UNREACHABLE_ORPHAN_KILL_MS,
         instance_id: instanceId,
-      })
-      .catch(() => {});
-
-    return this.executeShowcaseMirrorClose(agentId, userId, cycle, participant, meta, creds, {
-      showcaseExitReason: 'SHOWCASE_UNREACHABLE_OPEN_LOT',
-      mirrorRelinked: (cycle.tradeId ?? '').startsWith('adopt:'),
-      trigger: 'SHOWCASE_UNREACHABLE_OPEN_LOT',
-      forceMirrorExit: true,
-    });
+        verdict: 'UNKNOWN',
+        action: 'ALERT_ONLY_HOLD_PROTECTED_POSITION',
+        terminal_authority: false,
+        analysis_exclusion_reasons: ['SOURCE_UNREACHABLE'],
+      },
+    );
+    return false;
   }
 
   /**
@@ -14449,7 +15479,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         },
       );
     }
-    if (vanishedEvidence?.actionable) {
+    if (vanishedEvidence?.actionable && showcaseTradeIdForVanish) {
       this.logger.warn(
         `Showcase trade VANISHED ${userId} cycle=${cycle.id} trade=${showcaseTradeIdForVanish} ` +
           `(cycle.tradeId=${cycle.tradeId}); persisted snapshot seq=${vanishedEvidence.snapshotSeq}, ` +
@@ -14464,6 +15494,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         peakMarginPct: runtime.peakMarginPct,
         unrealMarginPct,
         stopLossMarginPct,
+        terminalAuthority: {
+          kind: 'SOURCE_ABSENCE_ACTIONABLE',
+          canonicalTradeId: showcaseTradeIdForVanish,
+          lifecycleGeneration:
+            showcaseIntentRevision(cycle.intentEnvelope) ?? `legacy:${showcaseTradeIdForVanish}`,
+          evidence: { ...vanishedEvidence },
+        },
       });
       if (closed) this.positionRuntime.delete(participant.id);
       return;
@@ -14487,6 +15524,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         peakMarginPct: runtime.peakMarginPct,
         unrealMarginPct,
         stopLossMarginPct,
+        terminalAuthority: {
+          kind:
+            exitReason === 'PROFIT_LOCK'
+              ? 'SCENARIO_C_PROFIT_LOCK'
+              : exitReason === 'THESIS_FAST_CUT'
+                ? 'THESIS_FAST_CUT'
+                : 'HARD_STOP',
+          canonicalTradeId:
+            this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId ?? cycle.id,
+          lifecycleGeneration:
+            showcaseIntentRevision(cycle.intentEnvelope) ??
+            `legacy:${this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId ?? cycle.id}`,
+          evidence: {
+            peak_margin_pct: runtime.peakMarginPct,
+            unreal_margin_pct: unrealMarginPct,
+            lock_floor_margin_pct: lockFloor,
+            stop_loss_margin_pct: stopLossMarginPct,
+          },
+        },
       });
       if (closed) this.positionRuntime.delete(participant.id);
       return;
@@ -14533,6 +15589,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             peakMarginPct: runtime.peakMarginPct,
             unrealMarginPct,
             stopLossMarginPct,
+            terminalAuthority: {
+              kind:
+                safetyNet.reason === 'PROFIT_LOCK'
+                  ? 'SCENARIO_C_PROFIT_LOCK'
+                  : safetyNet.reason === 'THESIS_FAST_CUT'
+                    ? 'THESIS_FAST_CUT'
+                    : 'HARD_STOP',
+              canonicalTradeId:
+                this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId ?? cycle.id,
+              lifecycleGeneration:
+                showcaseIntentRevision(cycle.intentEnvelope) ??
+                `legacy:${this.resolveShowcaseMirrorTradeId(cycle, meta) ?? cycle.tradeId ?? cycle.id}`,
+              evidence: {
+                source: 'REAL_SIDE_SAFETY_NET',
+                peak_margin_pct: runtime.peakMarginPct,
+                unreal_margin_pct: unrealMarginPct,
+                lock_floor_margin_pct: safetyNet.lockFloor,
+                stop_loss_margin_pct: stopLossMarginPct,
+              },
+            },
           },
         );
         if (closed) {
@@ -14856,7 +15932,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     creds: ExchangeCredentials,
     opts: {
       /** Scenario C exits plus Fix B's showcase-vanished close (same machinery). */
-      reason: NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED';
+      reason:
+        | NonNullable<VirtualLotExitReason>
+        | 'SHOWCASE_VANISHED'
+        | 'AUTHENTICATED_EMERGENCY_CLOSE';
       mark: number;
       fillPrice: number;
       leverage: number;
@@ -14864,11 +15943,71 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       unrealMarginPct: number;
       lockFloor?: number;
       stopLossMarginPct: number;
+      terminalAuthority: TerminalCloseAuthority;
     },
   ): Promise<boolean> {
     if (!meta.qty || !meta.direction || !opts.reason) return false;
     if (this.exitingLots.has(participantId)) return false;
     if (await this.hasParticipantExited(participantId)) return true;
+
+    let terminalClaim: TerminalCloseClaim;
+    try {
+      const acquired = await this.acquireTerminalCloseClaim({
+        agentId,
+        userId,
+        cycleId,
+        participantId,
+        meta,
+        authority: opts.terminalAuthority,
+      });
+      if (!acquired) {
+        const recovered = await this.recoverSettledTerminalCloseFence({
+          agentId,
+          userId,
+          cycleId,
+          participantId,
+          meta,
+          creds,
+          authority: opts.terminalAuthority,
+        });
+        if (recovered) {
+          terminalClaim = recovered;
+        } else {
+        const existing = await this.prisma.signalCycleParticipant.findUnique({
+          where: { id: participantId },
+          select: { status: true, terminalCloseClaimToken: true, terminalClosePhase: true },
+        });
+        if (
+          existing?.status === SignalCycleStatus.OPEN &&
+          existing.terminalCloseClaimToken
+        ) {
+          await this.pauseUserRelayForPositionMismatch(
+            userId,
+            agentId,
+            `TERMINAL_CLOSE_FENCE_IN_PROGRESS cycle=${cycleId} phase=${existing.terminalClosePhase ?? 'CLAIMED'}: no resubmit`,
+          ).catch(() => {});
+          return true;
+        }
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `TERMINAL_CLOSE_CLAIM_REFUSED cycle=${cycleId}: ${opts.reason} authority changed`,
+        ).catch(() => {});
+        return false;
+        }
+      } else {
+        terminalClaim = acquired;
+      }
+    } catch (err) {
+      await this.pauseUserRelayForPositionMismatch(
+        userId,
+        agentId,
+        `TERMINAL_CLOSE_CLAIM_PERSIST_FAILED cycle=${cycleId}: protected position held; ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      ).catch(() => {});
+      return false;
+    }
 
     this.exitingLots.add(participantId);
     try {
@@ -14888,6 +16027,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const runtimeTrack = this.positionRuntime.get(participantId);
       const trackedStopId = runtimeTrack?.currentStopOrderId;
       if (trackedStopId) stopIdsToCancel.add(trackedStopId);
+      if (
+        !(await this.terminalCloseClaimStillValid({
+          agentId,
+          userId,
+          cycleId,
+          participantId,
+          meta,
+          claim: terminalClaim,
+        }))
+      ) {
+        throw new Error('TERMINAL_CLOSE_CLAIM_REVALIDATION_FAILED');
+      }
       const closeTarget = await this.closeParticipantPositionToLedgerTarget(
         agentId,
         userId,
@@ -14896,6 +16047,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         creds,
         opts.leverage,
         stopIdsToCancel,
+        undefined,
+        { cycleId, claim: terminalClaim },
       );
       closeQty = closeTarget.closeQty;
     } catch (err) {
@@ -14962,11 +16115,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         ? opts.lockFloor
         : opts.unrealMarginPct;
 
-    const exitReasonMap: Record<NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED', string> = {
+    const exitReasonMap: Record<
+      NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE',
+      string
+    > = {
       PROFIT_LOCK: 'PROFIT_LOCK',
       THESIS_FAST_CUT: 'THESIS_FAST_CUT',
       HARD_STOP: 'HARD_STOP',
       SHOWCASE_VANISHED: 'SHOWCASE_VANISHED',
+      AUTHENTICATED_EMERGENCY_CLOSE: 'EMERGENCY_CLOSE',
     };
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
@@ -14980,6 +16137,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       qty_closed: closeQty,
       pnl_source: pnlSource,
+      terminal_authority_kind: terminalClaim.authority.kind,
+      terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
+      terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+      terminal_close_claim_token: terminalClaim.ownerToken,
+      terminal_close_request_id: terminalClaim.requestId,
+      terminal_close_phase: 'CONFIRMED',
+      terminal_close_claim_recovered: terminalClaim.recovered,
       source: 'hire',
     });
 
@@ -15386,17 +16550,31 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return;
     }
 
-    const showcaseTradeId = this.resolveShowcaseMirrorTradeId(cycle, meta);
-    const bot = await this.fetchExecutionBotState();
-    const det = showcaseTradeId ? this.detectShowcaseTradeClosed(bot, showcaseTradeId) : { closed: false };
-    const mirrorRelinked = (cycle.tradeId ?? '').startsWith('adopt:');
-
-    await this.executeShowcaseMirrorClose(agentId, userId, cycle, participant, meta, creds, {
-      showcaseExitPrice: det.exitPrice,
-      showcaseExitReason: det.exitReason,
-      mirrorRelinked,
-      trigger: 'CYCLE_CLOSED',
-    });
+    // CLOSED/EXPIRED is a lifecycle label, not terminal authority. TTL cleanup,
+    // reconciliation, or an incomplete source snapshot may write it while an
+    // authenticated exchange position still exists. Route through the one
+    // evidence gate that accepts only an exact signed close, a complete
+    // canonical terminal record, or durably persisted ACTIONABLE absence.
+    // When none exists, keep the physical stop active and let the alert-only
+    // guard pause new entries; never turn this status into a market close.
+    const authorized = await this.tryImmediateShowcaseMirrorExit(
+      agentId,
+      userId,
+      cycle,
+      participant,
+      meta,
+      creds,
+    );
+    if (!authorized) {
+      await this.enforceShowcaseFlatOpenFailsafe(
+        agentId,
+        userId,
+        cycle,
+        participant,
+        meta,
+        creds,
+      );
+    }
   }
 
   private async cleanupOrphanCopyOrders(
@@ -15912,15 +17090,38 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     for (const row of openRows) {
       const meta = await this.loadExecutionMeta(row.id);
       if (!meta.qty || !meta.direction) continue;
+      const cycle = await this.prisma.signalCycle.findUnique({
+        where: { id: row.cycleId },
+        select: { tradeId: true, intentEnvelope: true },
+      });
+      if (!cycle) continue;
       const fillPrice = meta.fillPrice ?? mark;
       const closed = await this.closeVirtualLot(agent.id, userId, row.cycleId, row.id, meta, creds, {
-        reason: 'HARD_STOP',
+        reason: 'AUTHENTICATED_EMERGENCY_CLOSE',
         mark: mark || fillPrice,
         fillPrice,
         leverage: meta.leverage ?? resolveSubscriberLeverage(),
         peakMarginPct: meta.peakMarginPct ?? 0,
         unrealMarginPct: 0,
         stopLossMarginPct: meta.stopLossMarginPct ?? 0,
+        terminalAuthority: {
+          kind: 'AUTHENTICATED_MANUAL_OR_EMERGENCY',
+          canonicalTradeId:
+            resolveShowcaseMirrorTradeIdFromInputs(cycle.tradeId, meta.originTradeId) ??
+            cycle.tradeId,
+          lifecycleGeneration:
+            showcaseIntentRevision(cycle.intentEnvelope) ??
+            `legacy:${
+              resolveShowcaseMirrorTradeIdFromInputs(cycle.tradeId, meta.originTradeId) ??
+              cycle.tradeId
+            }`,
+          evidence: {
+            actor_user_id: userId,
+            actor_type: 'AUTHENTICATED_ACCOUNT_OWNER',
+            action: 'EMERGENCY_FLATTEN_OPEN_COPY_LOTS',
+            agent_slug: agentSlug,
+          },
+        },
       });
       if (closed) flattened += 1;
     }
@@ -16269,15 +17470,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const adoptQty = Math.min(orphanSlice, match.meta.qty ?? orphanSlice);
 
     // Fix 1 — stop economics. Use the origin's actual stop-loss margin pct
-    // (its meta stopLossMarginPct, default -18) applied to the REAL fill
+    // (clamped to the frozen -13% mirror boundary) applied to the REAL fill
     // price. When the origin was in profit (carried peak/floor), the existing
     // profit-lock-rung logic recomputes a tighter stop from the carried
     // values instead of the hardcoded first rung.
     const mark = await this.activeTrading.getMarkPrice().catch(() => fillPrice);
     const unrealMarginPct = computeUnrealizedMarginPct(fillPrice, mark, direction, leverage);
-    const stopLossMarginPct =
-      match.meta.stopLossMarginPct ?? intent.risk.stop_loss_margin_pct ?? -18;
-    const effectiveStopMargin = resolveEffectiveStopLossMarginPct(stopLossMarginPct, {
+    const requestedStopMargin =
+      match.meta.stopLossMarginPct ??
+      intent.risk.stop_loss_margin_pct ??
+      SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
+    const effectiveStopMargin = resolveEffectiveStopLossMarginPct(requestedStopMargin, {
       mirrorMode: isShowcaseMirrorOnlyMode(),
     });
     const standardStop = computeStopPrice(fillPrice, direction, effectiveStopMargin, leverage);
@@ -16322,7 +17525,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       fill_price_source: fillPriceSource,
       qty: adoptQty,
       stop_loss_placed: false, // armed below
-      stop_loss_margin_pct: stopLossMarginPct,
+      stop_loss_margin_pct: effectiveStopMargin,
       peak_margin_pct: carriedPeak,
       lock_floor_margin_pct: effectiveFloor > 0 ? effectiveFloor : undefined,
       source: 'hire',
@@ -16354,7 +17557,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       peakMarginPct: carriedPeak,
       profitLockFloor: effectiveFloor > 0 ? effectiveFloor : undefined,
       leverage,
-      stopLossMarginPct,
+      stopLossMarginPct: effectiveStopMargin,
       clientOrderId: match.meta.clientOrderId,
       originParticipantId: match.participantId,
       originCycleId: match.cycleId,
@@ -16404,7 +17607,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         effective_lock_floor_margin_pct: effectiveFloor,
         stop_price: conservativeStop,
         stop_reason: stopReason,
-        stop_loss_margin_pct: stopLossMarginPct,
+        stop_loss_margin_pct: effectiveStopMargin,
         standard_stop: standardStop,
         unreal_margin_pct: Math.round(unrealMarginPct * 100) / 100,
         budget_remaining: budgetRemaining - 1,

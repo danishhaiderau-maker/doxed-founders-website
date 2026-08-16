@@ -25,6 +25,10 @@ _EXCLUDED_PROVENANCE = {
     "EMERGENCY_ACTION",
     "EMERGENCY_CLOSE",
     "SHOWCASE_UNREACHABLE_OPEN_LOT",
+    "SHOWCASE_FLAT_FAILSAFE",
+    "SHOWCASE_BOOK_FLAT",
+    "EXIT_ONLY_PENDING_CANCEL_PARTIAL_FILL",
+    "LATE_FILL_CLEANUP",
     "STALE_NO_EXPOSURE",
     "MIRROR_DIFF_STALE_NO_EXPOSURE",
 }
@@ -74,6 +78,10 @@ def classify_row(row):
             target.append("STALE_NO_EXPOSURE")
         elif provenance in {"SOURCE_ABSENCE_FALLBACK", "SHOWCASE_POSITION_ABSENT", "SHOWCASE_VANISHED"}:
             target.append("SOURCE_ABSENCE_FALLBACK")
+        elif provenance in {"SHOWCASE_FLAT_FAILSAFE", "SHOWCASE_BOOK_FLAT"}:
+            target.append("UNSUPPORTED_FLAT_BOOK_EXIT")
+        elif provenance in {"EXIT_ONLY_PENDING_CANCEL_PARTIAL_FILL", "LATE_FILL_CLEANUP"}:
+            target.append("LATE_FILL_CLEANUP")
         elif provenance in {"EMERGENCY_ACTION", "EMERGENCY_CLOSE"}:
             target.append("EMERGENCY_CLOSE")
         else:
@@ -90,7 +98,9 @@ def classify_row(row):
         showcase.append("MIXED_POLICY")
     if row.get("replay_complete") is not True:
         showcase.append("REPLAY_INCOMPLETE")
-    if not provenance:
+    if mirror_stale_lifecycle:
+        showcase.append("MIRROR_DIFF_STALE_NO_EXPOSURE")
+    elif not provenance:
         showcase.append("TERMINAL_PROVENANCE_MISSING")
     elif provenance in _EXCLUDED_PROVENANCE:
         append_provenance_exclusion(showcase)
@@ -99,10 +109,7 @@ def classify_row(row):
     fidelity = reasons[BITFINEX_COPY_FIDELITY]
     if not _present(row.get("trade_id")):
         fidelity.append("CANONICAL_IDENTITY_MISSING")
-    if not any(
-        _present(row.get(key)) or _present(evidence.get(key))
-        for key in ("participant_id", "client_order_id", "bitfinex_order_id", "fill_ids")
-    ):
+    if evidence.get("linkage_complete") is not True:
         fidelity.append("BITFINEX_LINKAGE_MISSING")
     if evidence.get("quantity_evidence_complete") is not True:
         fidelity.append("QUANTITY_EVIDENCE_INCOMPLETE")
@@ -114,7 +121,9 @@ def classify_row(row):
         fidelity.append("SOURCE_SNAPSHOT_EVIDENCE_INCOMPLETE")
     if evidence.get("reconciliation_complete") is not True:
         fidelity.append("RECONCILIATION_INCOMPLETE")
-    if not provenance:
+    if mirror_stale_lifecycle:
+        fidelity.append("MIRROR_DIFF_STALE_NO_EXPOSURE")
+    elif not provenance:
         fidelity.append("TERMINAL_PROVENANCE_MISSING")
     elif provenance in _EXCLUDED_PROVENANCE:
         append_provenance_exclusion(fidelity)
