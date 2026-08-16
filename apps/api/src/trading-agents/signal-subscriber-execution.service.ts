@@ -19216,7 +19216,29 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         cycle: { agentId: agent.id },
       },
     });
-    if (operator && openRows.length > 0) {
+    const exactFencedOpenRows = operator
+      ? openRows.filter((row) => {
+          const authority =
+            row.terminalCloseAuthority && typeof row.terminalCloseAuthority === 'object'
+            && !Array.isArray(row.terminalCloseAuthority)
+              ? row.terminalCloseAuthority as Record<string, unknown>
+              : null;
+          return Boolean(
+            row.terminalCloseClaimToken
+            && row.terminalCloseRequestId
+            && row.terminalClosePhase === 'SUBMITTING'
+            && authority?.schema === 'account_emergency_close_v2'
+            && authority.request_id === row.terminalCloseRequestId
+            && Number(authority.client_order_id) === computeAccountEmergencyClientOrderId(
+              row.terminalCloseRequestId,
+            ),
+          );
+        })
+      : [];
+    if (
+      operator && openRows.length > 0
+      && !(openRows.length === 1 && exactFencedOpenRows.length === 1)
+    ) {
       throw new ConflictException(
         'BOT_ADMIN emergency reconcile refuses promoted OPEN lots; use authenticated account-owner recovery',
       );
@@ -19224,7 +19246,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     let flattened = 0;
     let allOpenClosesConfirmed = true;
-    for (const row of openRows) {
+    // An exact OPEN participant carrying the already-durable account emergency
+    // fence must resume that same request below. Starting closeVirtualLot here
+    // would create a competing terminal claim/CID.
+    for (const row of operator ? [] : openRows) {
       const meta = await this.loadExecutionMeta(row.id);
       if (!meta.qty || !meta.direction) continue;
       const cycle = await this.prisma.signalCycle.findUnique({
@@ -19271,15 +19296,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // owner has explicitly selected emergency flatten, so retire only exact
     // managed entry remainders, re-read the private position, and close the
     // exact residual without inventing participant ownership.
-    const pendingRows = await this.prisma.signalCycleParticipant.findMany({
+    const residualRows = await this.prisma.signalCycleParticipant.findMany({
       where: {
         userId,
-        status: SignalCycleStatus.PENDING_ENTRY,
+        status: exactFencedOpenRows.length > 0
+          ? { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] }
+          : SignalCycleStatus.PENDING_ENTRY,
         cycle: { agentId: agent.id },
       },
       include: { cycle: { select: { tradeId: true } } },
       orderBy: { createdAt: 'asc' },
     });
+    const exactFencedOpenIds = new Set(exactFencedOpenRows.map((row) => row.id));
+    const pendingRows = residualRows.filter((row) =>
+      row.status === SignalCycleStatus.PENDING_ENTRY || exactFencedOpenIds.has(row.id));
     if (pendingRows.length > 0) {
       // Never let the account-level residual close race an OPEN-lot close whose
       // durable terminal fence is still SUBMITTING/ACKNOWLEDGED or otherwise

@@ -7942,6 +7942,34 @@ test('account emergency reuses the same immutable CID once after authenticated a
   assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
 });
 
+test('BOT_ADMIN resumes one promoted OPEN only through its exact existing account fence', async () => {
+  const fx = accountEmergencyServiceFixture({ submitThrows: true });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /submit result UNKNOWN/,
+  );
+  const immutableRequestId = fx.durable.terminalCloseRequestId;
+  const immutableCid = fx.durable.terminalCloseAuthority.client_order_id;
+  const openParticipant = {
+    id: 'participant-a', cycleId: 'cycle-a', createdAt: new Date(0),
+    status: SignalCycleStatus.OPEN, cycle: { tradeId: 'cont-a' },
+  };
+  fx.service.prisma.signalCycleParticipant.findMany = async ({ where }: any) => {
+    if (where.status === SignalCycleStatus.OPEN) return [{ ...openParticipant, ...fx.durable }];
+    if (where.status?.in) return [{ ...openParticipant, ...fx.durable }];
+    return [];
+  };
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah', {
+      actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason: 'exact-fence-recovery',
+    }),
+    /submit result UNKNOWN; no automatic resubmit/,
+  );
+  assert.equal(fx.getSubmits(), 2);
+  assert.equal(fx.durable.terminalCloseRequestId, immutableRequestId);
+  assert.equal(fx.durable.terminalCloseAuthority.client_order_id, immutableCid);
+});
+
 test('account emergency releases only an explicitly rejected SUBMITTING request', async () => {
   const rejection = 'Bitfinex v2/auth/w/order/submit: Invalid order: not enough tradable balance';
   assert.equal(isDeterministicBitfinexSubmitRejection(new Error(rejection)), true);
