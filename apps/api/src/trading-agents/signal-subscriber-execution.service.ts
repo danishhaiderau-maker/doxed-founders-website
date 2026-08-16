@@ -1119,6 +1119,19 @@ export function entryTtlPartialFillDisposition(input: {
     : 'NORMAL_FILL_PATH';
 }
 
+export function authenticatedOrderFillGapAllocation(input: {
+  accountGapQty: number;
+  authenticatedOrderFillQty: number | null;
+}): { kind: 'ALLOCATE'; qty: number } | { kind: 'UNKNOWN'; reason: string } {
+  if (input.authenticatedOrderFillQty == null || btcToSats(input.authenticatedOrderFillQty) <= 0) {
+    return { kind: 'UNKNOWN', reason: 'ORDER_FILL_EVIDENCE_MISSING' };
+  }
+  if (btcToSats(input.authenticatedOrderFillQty) > btcToSats(input.accountGapQty)) {
+    return { kind: 'UNKNOWN', reason: 'ORDER_FILL_EXCEEDS_UNRESERVED_ACCOUNT_GAP' };
+  }
+  return { kind: 'ALLOCATE', qty: input.authenticatedOrderFillQty };
+}
+
 /**
  * Normalize a terminal exchange fill without hiding a real partial quantity.
  * Bitfinex order/trade arithmetic can report a completed amount one satoshi
@@ -3388,6 +3401,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   private readonly cancelRaceFillInFlight = new Set<string>();
   /** Serializes cancel/replace persistence against gone-order classification. */
   private participantMoneyLane = new Map<string, Promise<void>>();
+  private accountFillGapLane = new Map<string, Promise<void>>();
   private readonly replacementMissingProbe = new Map<
     string,
     { generation: string; firstMissingAtMs: number; count: number }
@@ -3405,6 +3419,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (lane.get(participantId) === current) {
         lane.delete(participantId);
       }
+    };
+  }
+
+  /** Serialize account-level gap allocation across same-process poll/wake work. */
+  private async acquireAccountFillGapLane(userId: string): Promise<() => void> {
+    const lane = this.accountFillGapLane ?? (this.accountFillGapLane = new Map());
+    const previous = lane.get(userId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    lane.set(userId, current);
+    await previous;
+    return () => {
+      release();
+      if (lane.get(userId) === current) lane.delete(userId);
     };
   }
   /** Recently discovered Bitfinex relay instances. Direct signed wakes start
@@ -10952,6 +10980,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     activeOrderIdSet: Set<number>,
     participantScope: { createdAt?: { gte: Date } } = {},
   ) {
+    const releaseAccountGap = await this.acquireAccountFillGapLane(userId);
+    try {
     const position = await this.activeTrading.getOpenPositionDetail(creds).catch(() => null);
     if (!position || Math.abs(position.amount) < MIN_QTY_BTC) return;
 
@@ -11046,18 +11076,50 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
       // Fix D — prefer the exchange's own per-order trade history (real
       // volume-weighted fill) over the limit-price/basePrice approximation.
-      const exchangeFillPrice = await this.resolveExchangeTradesFillPrice(
+      const exchangeFill = await this.resolveExchangeTradesFillEvidence(
         creds,
         meta.bitfinexOrderId,
       );
-      const fillPrice =
-        exchangeFillPrice ??
-        (meta.limitPrice && meta.limitPrice > 0
-          ? meta.limitPrice
-          : position.basePrice > 0
-            ? position.basePrice
-            : await this.activeTrading.getMarkPrice());
-      const qty = meta.qty ?? MIN_QTY_BTC;
+      if (!exchangeFill) {
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `EXCHANGE_FILL_GAP_ORDER_EVIDENCE_UNKNOWN participant=${row.id} order=${meta.bitfinexOrderId ?? 'missing'}`,
+        ).catch(() => {});
+        await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'RECONCILE_CANCEL_FAILED', {
+          venue: 'bitfinex', source: 'hire',
+          event: 'EXCHANGE_FILL_GAP_ORDER_EVIDENCE_UNKNOWN',
+          participant_id: row.id,
+          bitfinex_order_id: meta.bitfinexOrderId,
+          remaining_account_gap_qty: gap,
+          verdict: 'UNKNOWN',
+        }).catch(() => {});
+        continue;
+      }
+      const allocation = authenticatedOrderFillGapAllocation({
+        accountGapQty: gap,
+        authenticatedOrderFillQty: exchangeFill.qty,
+      });
+      if (allocation.kind === 'UNKNOWN') {
+        await this.pauseUserRelayForPositionMismatch(
+          userId,
+          agentId,
+          `EXCHANGE_FILL_GAP_ALLOCATION_AMBIGUOUS participant=${row.id} orderFill=${exchangeFill.qty} gap=${gap}`,
+        ).catch(() => {});
+        await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'RECONCILE_CANCEL_FAILED', {
+          venue: 'bitfinex', source: 'hire',
+          event: 'EXCHANGE_FILL_GAP_ALLOCATION_AMBIGUOUS',
+          participant_id: row.id,
+          bitfinex_order_id: meta.bitfinexOrderId,
+          authenticated_order_fill_qty: exchangeFill.qty,
+          authenticated_fill_ids: exchangeFill.fillIds.map(String),
+          remaining_account_gap_qty: gap,
+          verdict: 'UNKNOWN',
+        }).catch(() => {});
+        continue;
+      }
+      const qty = allocation.qty;
+      const fillPrice = exchangeFill.price;
       const leverage = resolveSubscriberLeverage(intent);
       const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
         intent?.risk?.stop_loss_margin_pct,
@@ -11087,8 +11149,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'FILLED', {
         venue: 'bitfinex',
         fill_price: fillPrice,
-        fill_price_source: exchangeFillPrice != null ? 'exchange_trades' : undefined,
+        fill_price_source: 'exchange_trades',
         qty,
+        exchange_fill_ids: exchangeFill.fillIds.map(String),
+        exchange_fill_fees: exchangeFill.fees,
+        exchange_first_fill_at: exchangeFill.firstExecutedAtMs == null
+          ? undefined : new Date(exchangeFill.firstExecutedAtMs).toISOString(),
+        exchange_last_fill_at: exchangeFill.lastExecutedAtMs == null
+          ? undefined : new Date(exchangeFill.lastExecutedAtMs).toISOString(),
+        account_gap_before_qty: gap,
+        account_gap_after_qty: Math.max(0, gap - qty),
         stop_loss_placed: stopOrderId != null,
         stop_loss_margin_pct: stopLossMarginPct,
         stopOrderId: stopOrderId ?? undefined,
@@ -11139,6 +11209,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.logger.log(
         `Reconciled fill ${userId} cycle=${row.cycleId} ${meta.direction} @ ${fillPrice.toFixed(2)} qty=${qty}`,
       );
+    }
+    } finally {
+      releaseAccountGap();
     }
   }
 
@@ -12921,6 +12994,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `Partial protection failed ${userId} cycle=${cycleId}: cancel entry remainder`,
       );
       let flattened = false;
+      let emergencyAttributableQty = filledQty;
       if (remainder.gone) {
         let before: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> | undefined;
         try {
@@ -12939,6 +13013,37 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             await this.pauseUserRelayForPositionMismatch(userId, agentId, mismatch).catch(() => {});
           } else {
             const beforeQty = Math.abs(before.amount);
+            // The remainder can execute while its cancel is settling. The
+            // initially observed partial quantity is therefore stale after a
+            // confirmed cancel. Reconcile the exact parent-order executions
+            // before choosing the emergency close quantity; otherwise a late
+            // residual fill is left unowned and unprotected (cont-46fedb).
+            const postCancel = await this.classifyPostCancelEntry(
+              creds,
+              meta,
+              remainder.reason,
+            );
+            if (postCancel.kind !== 'FILL') {
+              await this.cycles.recordHireExecutionEvent(
+                userId,
+                agentId,
+                cycleId,
+                'RECONCILE_CANCEL_FAILED',
+                {
+                  venue: 'bitfinex',
+                  source: 'hire',
+                  event: 'PARTIAL_FILL_PROTECTION_FAILED_POST_CANCEL_UNKNOWN',
+                  participant_id: participantId,
+                  bitfinex_order_id: meta.bitfinexOrderId,
+                  initially_observed_fill_qty: filledQty,
+                  reason: postCancel.kind === 'UNKNOWN'
+                    ? postCancel.reason
+                    : 'POST_CANCEL_PROVEN_UNFILLED_CONTRADICTS_OPEN_POSITION',
+                },
+              ).catch(() => {});
+              throw new Error(`${message}: post-cancel fill ownership is unknown`);
+            }
+            emergencyAttributableQty = postCancel.fill.filledQty;
             // Bitfinex merges same-direction legs at account level. This
             // emergency path owns only this participant's authenticated fill;
             // never flatten another participant merely because it shares the
@@ -12947,7 +13052,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               participantId,
               creds,
               direction: meta.direction,
-              attributableQty: Math.min(beforeQty, filledQty),
+              attributableQty: Math.min(beforeQty, emergencyAttributableQty),
               leverage: resolveSubscriberLeverage(intent),
             }).catch(() => false);
           }
@@ -12961,7 +13066,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           event: 'PROTECTION_FAILURE_EMERGENCY_CLOSE',
           participant_id: participantId,
           bitfinex_order_id: meta.bitfinexOrderId,
-          attributable_qty: filledQty,
+          attributable_qty: emergencyAttributableQty,
+          initially_observed_fill_qty: filledQty,
           analysis_eligible: false,
           analysis_exclusion_reasons: ['PROTECTION_FAILURE_EMERGENCY_CLOSE'],
           excluded_cohorts: ['BITFINEX_COPY_FIDELITY', 'REAL_COPY_PARAMETER_OPTIMISATION'],
@@ -12971,7 +13077,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           source: 'hire',
           event: 'PROTECTION_FAILURE_EMERGENCY_CLOSE',
           reason: 'STOP_SUBMIT_FAILED_EXCHANGE_FLAT_CONFIRMED',
-          partial_fill_qty: filledQty,
+          partial_fill_qty: emergencyAttributableQty,
+          initially_observed_fill_qty: filledQty,
           pnl_usd: 0,
         });
       } else {
@@ -18582,10 +18689,156 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (closed) flattened += 1;
     }
 
+    // A protection failure can deliberately leave an authenticated exchange
+    // fill unpromoted while its participant remains PENDING_ENTRY. The account
+    // owner has explicitly selected emergency flatten, so retire only exact
+    // managed entry remainders, re-read the private position, and close the
+    // exact residual without inventing participant ownership.
+    const pendingRows = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        cycle: { agentId: agent.id },
+      },
+      include: { cycle: { select: { tradeId: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (pendingRows.length > 0) {
+      const pendingMeta = await Promise.all(
+        pendingRows.map(async (row) => ({ row, meta: await this.loadExecutionMeta(row.id) })),
+      );
+      for (const { row, meta } of pendingMeta) {
+        if (!meta.bitfinexOrderId) {
+          throw new Error(`Emergency flatten refused: missing managed entry order for ${row.cycle.tradeId}`);
+        }
+        const cancelled = await this.cancelManagedOrderGone(
+          creds,
+          meta.bitfinexOrderId,
+          `emergency-account-flat:${row.cycle.tradeId}`,
+        );
+        if (!cancelled.gone) {
+          throw new Error(
+            `Emergency flatten refused: managed entry ${meta.bitfinexOrderId} is not confirmed gone`,
+          );
+        }
+      }
+
+      const before = await this.activeTrading.getOpenPositionDetail(creds);
+      if (before && btcToSats(Math.abs(before.amount)) > 0) {
+        const beforeAmount = before.amount;
+        const closeQty = Math.abs(beforeAmount);
+        const direction: 'LONG' | 'SHORT' = beforeAmount > 0 ? 'LONG' : 'SHORT';
+        const incidentId = `account-emergency-${randomUUID()}`;
+        for (const { row, meta } of pendingMeta) {
+          await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'NEGATIVE_EVIDENCE', {
+            venue: 'bitfinex', source: 'hire',
+            event: 'UNATTRIBUTED_PARTIAL_EMERGENCY_CLOSE',
+            incident_id: incidentId,
+            actor_user_id: userId,
+            actor_type: 'AUTHENTICATED_ACCOUNT_OWNER',
+            canonical_trade_id: row.cycle.tradeId,
+            participant_id: row.id,
+            managed_entry_order_id: meta.bitfinexOrderId,
+            account_position_before: beforeAmount,
+            exact_close_qty: closeQty,
+            verdict: 'EMERGENCY_CLOSE_REQUIRED',
+            analysis_eligible: false,
+            analysis_exclusion_reasons: [
+              'UNATTRIBUTED_PARTIAL_FILL',
+              'PROTECTION_FAILURE_EMERGENCY_CLOSE',
+              'RECONCILIATION_INCOMPLETE',
+            ],
+            excluded_cohorts: ['BITFINEX_COPY_FIDELITY', 'REAL_COPY_PARAMETER_OPTIMISATION'],
+          });
+        }
+
+        const closeOrderId = await this.activeTrading.submitMarketClose(creds, {
+          positionDirection: direction,
+          qty: closeQty,
+          leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
+        });
+        const confirmed = await this.waitForMarketCloseConfirmation(
+          creds,
+          direction,
+          closeQty,
+          closeQty,
+        ).catch(() => false);
+        if (!confirmed) {
+          throw new Error(
+            `Emergency account close ${closeOrderId} was acknowledged but flatness is not confirmed`,
+          );
+        }
+        flattened += 1;
+
+        // Flat first, then remove only still-active orders whose ids are
+        // durably owned by the affected participants. Foreign orders are never
+        // touched and reduce-only orders cannot reverse the now-flat account.
+        const participantIds = pendingRows.map((row) => row.id);
+        const ownedEvents = await this.prisma.signalCycleEvent.findMany({
+          where: { participantId: { in: participantIds } },
+          select: { payload: true },
+        });
+        const ownedOrderIds = new Set<number>();
+        const addOwnedId = (value: unknown) => {
+          const id = Number(value);
+          if (Number.isSafeInteger(id) && id > 0) ownedOrderIds.add(id);
+        };
+        for (const event of ownedEvents) {
+          if (!event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) continue;
+          const payload = event.payload as Record<string, unknown>;
+          for (const key of [
+            'bitfinexOrderId', 'bitfinex_order_id', 'stopOrderId', 'stop_order_id',
+            'replacedOrderId', 'replaced_order_id', 'previousStopOrderId',
+          ]) addOwnedId(payload[key]);
+          for (const key of ['supersededStopOrderIds', 'superseded_stop_order_ids']) {
+            const ids = payload[key];
+            if (Array.isArray(ids)) ids.forEach(addOwnedId);
+          }
+        }
+        const activeOrders = await this.activeTrading.listActiveOrders(creds);
+        for (const order of activeOrders) {
+          if (!ownedOrderIds.has(order.id)) continue;
+          const gone = await this.cancelManagedOrderGone(
+            creds,
+            order.id,
+            `emergency-post-flat-owned-order:${incidentId}`,
+          );
+          if (!gone.gone) {
+            throw new Error(`Emergency flat confirmed but owned order ${order.id} remains active`);
+          }
+        }
+        const finalPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        if (finalPosition && btcToSats(Math.abs(finalPosition.amount)) > 0) {
+          throw new Error('Emergency close did not produce a flat private position');
+        }
+        for (const { row, meta } of pendingMeta) {
+          await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'EXPIRED', {
+            venue: 'bitfinex', source: 'hire',
+            event: 'UNATTRIBUTED_PARTIAL_EMERGENCY_CLOSE',
+            reason: 'AUTHENTICATED_ACCOUNT_EMERGENCY_FLAT_CONFIRMED',
+            incident_id: incidentId,
+            actor_user_id: userId,
+            actor_type: 'AUTHENTICATED_ACCOUNT_OWNER',
+            managed_entry_order_id: meta.bitfinexOrderId,
+            emergency_close_order_id: closeOrderId,
+            account_position_before: beforeAmount,
+            account_position_after: 0,
+            exact_close_qty: closeQty,
+            pnl_usd: 0,
+            analysis_eligible: false,
+            analysis_exclusion_reasons: [
+              'UNATTRIBUTED_PARTIAL_FILL',
+              'PROTECTION_FAILURE_EMERGENCY_CLOSE',
+            ],
+          });
+        }
+      }
+    }
+
     await this.prisma.tradingAgentInstance.update({
       where: { id: instance.id },
       data: {
-        lastError: `Sync protection — emergency flatten closed ${flattened} open lot(s). Relay paused.`,
+        lastError: `Sync protection — emergency flatten closed ${flattened} exchange exposure(s). Relay paused.`,
       },
     });
 

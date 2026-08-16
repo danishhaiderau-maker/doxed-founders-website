@@ -38,6 +38,7 @@ import {
   mirrorPositionQuantityDelta,
   partialEntryFillDisposition,
   entryTtlPartialFillDisposition,
+  authenticatedOrderFillGapAllocation,
   finalizedEntryFillQty,
   recoverableSubmittingStop,
   protectiveStopReferencePrice,
@@ -107,6 +108,39 @@ import {
   resolveExactShowcaseEntryQty,
   resolveEffectiveStopLossMarginPct,
 } from './signal-subscriber-execution.service';
+
+test('account fill-gap allocation requires exact per-order evidence and never overbooks residual', () => {
+  assert.deepEqual(authenticatedOrderFillGapAllocation({
+    accountGapQty: 0.03172,
+    authenticatedOrderFillQty: 0.02802596,
+  }), { kind: 'ALLOCATE', qty: 0.02802596 });
+  assert.deepEqual(authenticatedOrderFillGapAllocation({
+    accountGapQty: 0.00369404,
+    authenticatedOrderFillQty: 0.03172,
+  }), { kind: 'UNKNOWN', reason: 'ORDER_FILL_EXCEEDS_UNRESERVED_ACCOUNT_GAP' });
+  assert.deepEqual(authenticatedOrderFillGapAllocation({
+    accountGapQty: 0.00369404,
+    authenticatedOrderFillQty: null,
+  }), { kind: 'UNKNOWN', reason: 'ORDER_FILL_EVIDENCE_MISSING' });
+});
+
+test('account fill-gap lane serializes concurrent poll and wake allocation', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  );
+  const releaseFirst = await (service as any).acquireAccountFillGapLane('user');
+  let secondAcquired = false;
+  const second = (service as any).acquireAccountFillGapLane('user').then((release: () => void) => {
+    secondAcquired = true;
+    release();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(secondAcquired, false);
+  releaseFirst();
+  await second;
+  assert.equal(secondAcquired, true);
+});
 
 function protectiveStopFencePrisma(status: SignalCycleStatus = SignalCycleStatus.PENDING_ENTRY) {
   const row: Record<string, any> = {
@@ -1690,6 +1724,10 @@ test('service protection failure writes terminal state only after confirmed emer
   };
   (service as any).pauseUserRelayForPositionMismatch = async () => {};
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  (service as any).classifyPostCancelEntry = async () => ({
+    kind: 'FILL',
+    fill: { filledQty: 0.015, fillPrice: 64_126.31, source: 'ORDER_PARTIAL', orderResting: false },
+  });
   (service as any).authenticatedExchangeObservedTerminalProvenance = async () => ({
     terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
     terminal_authority_evidence: {},
@@ -1724,6 +1762,10 @@ test('service protection failure never terminalizes an unconfirmed emergency clo
   };
   (service as any).pauseUserRelayForPositionMismatch = async () => {};
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  (service as any).classifyPostCancelEntry = async () => ({
+    kind: 'FILL',
+    fill: { filledQty: 0.015, fillPrice: 64_126.31, source: 'ORDER_PARTIAL', orderResting: false },
+  });
   (service as any).waitForMarketCloseConfirmation = async () => false;
   (service as any).emergencyClosePartialWithFence = async () => false;
   await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
@@ -1761,6 +1803,42 @@ test('service distinguishes explicit flat from an unknown exchange read during f
       ? ['NEGATIVE_EVIDENCE', 'EXPIRED']
       : ['RECONCILE_CANCEL_FAILED']);
   }
+});
+
+test('service protection failure closes authenticated late cancel-race fill, not stale initial partial', async () => {
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  let emergencyCloseQty = 0;
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: Record<string, unknown>) => events.push({ type, payload }) } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async () => { throw new Error('stop rejected'); },
+    listActiveOrders: async () => [],
+    getOpenPositionDetail: async () => ({ amount: -0.03172 }),
+  };
+  (service as any).pauseUserRelayForPositionMismatch = async () => {};
+  (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1, reason: 'CANCELLED' });
+  (service as any).classifyPostCancelEntry = async () => ({
+    kind: 'FILL',
+    fill: { filledQty: 0.03172, fillPrice: 63_105.48, source: 'ORDER_PARTIAL', orderResting: false },
+  });
+  (service as any).emergencyClosePartialWithFence = async (input: { attributableQty: number }) => {
+    emergencyCloseQty = input.attributableQty;
+    return true;
+  };
+
+  await assert.rejects(() => (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant',
+    { direction: 'SHORT', qty: 0.03172, bitfinexOrderId: 242000962968, limitPrice: 63_105.48 },
+    {}, { risk: { stop_loss_margin_pct: -13 } }, 0.02802596,
+  ));
+
+  assert.equal(emergencyCloseQty, 0.03172);
+  const negative = events.find((event) => event.type === 'NEGATIVE_EVIDENCE');
+  assert.equal(negative?.payload.attributable_qty, 0.03172);
+  assert.equal(negative?.payload.initially_observed_fill_qty, 0.02802596);
 });
 
 test('service stop-trigger path refuses terminal state while residual exposure remains', async () => {
@@ -7504,7 +7582,8 @@ test('watchdog and partial-protection source retain fail-closed ownership invari
     'signal-subscriber-execution.service.ts',
   ), 'utf8');
   assert.match(source, /cancelVerifiedUnfilledPendingEntries[\s\S]*cancelAndSettleManagedEntry/);
-  assert.match(source, /attributableQty: Math\.min\(beforeQty, filledQty\)/);
+  assert.match(source, /attributableQty: Math\.min\(beforeQty, emergencyAttributableQty\)/);
+  assert.match(source, /classifyPostCancelEntry\([\s\S]*remainder\.reason/);
   assert.match(source, /event: 'PROTECTION_FAILURE_EMERGENCY_CLOSE'/);
   assert.match(source, /PARTIAL_FILL_STOP_OWNERSHIP_PERSIST_UNKNOWN/);
   assert.match(source, /fillPromotionPhase: phase/);
