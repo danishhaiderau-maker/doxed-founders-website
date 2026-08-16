@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Corroborate emergency position authority
+Pin emergency recovery to Bitfinex client
 
 ## Last Activity
 
