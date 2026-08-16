@@ -111,11 +111,11 @@ def main() -> None:
         in SUPERVISOR,
     )
     check(
-        "analyzer dashboard recovery preserves the research engine",
-        "function Restart-AnalyzerDashboardHidden" in ANALYZER_MONITOR
-        and "consecutiveHealthFailures -lt 3" in ANALYZER_MONITOR
-        and "dashboard recovery failed while research engine remained alive"
-        in ANALYZER_MONITOR,
+        "retired analyzer restart monitor fails closed without mutations",
+        "disabled fail-closed" in ANALYZER_MONITOR
+        and "Start-Process" not in ANALYZER_MONITOR
+        and "Set-Content" not in ANALYZER_MONITOR
+        and "Remove-Item" not in ANALYZER_MONITOR,
     )
     check(
         "supervisor defers to the dedicated analyzer monitor",

@@ -366,19 +366,11 @@ test('raw Fly evidence defaults to machine-local storage and migration is copy-o
   assert.doesNotMatch(migration, /Remove-Item|Move-Item/);
 });
 
-test('analyzer singleton self-heals the data-only Fly mirror worker', async () => {
+test('retired analyzer restart monitor cannot create a second owner', async () => {
   const monitor = await readFile(analyzerAutoRestartPath, 'utf8');
 
-  assert.match(monitor, /function Ensure-FlyDataSyncLoop/);
-  assert.match(monitor, /\.fly-data-sync-loop\.heartbeat\.json/);
-  assert.match(monitor, /flySyncHeartbeatMaxAgeSec\s*=\s*600/);
-  assert.match(monitor, /sync-fly-bot-data-loop\.ps1/);
-  assert.match(monitor, /syncArgString[\s\S]*-File `"/);
-  assert.match(monitor, /Ensure-FlyDataSyncLoop/);
-  assert.doesNotMatch(
-    monitor.match(/function Ensure-FlyDataSyncLoop[\s\S]*?^  }/m)?.[0] ?? '',
-    /bot\.py|btc_conservative_agent\.py|DEEPSEEK|BITFINEX_API/,
-  );
+  assert.match(monitor, /disabled fail-closed/);
+  assert.doesNotMatch(monitor, /Start-Process|Set-Content|Remove-Item/);
 });
 
 test('Fly process heartbeat cannot be blocked by the five-minute AI pipeline', async () => {

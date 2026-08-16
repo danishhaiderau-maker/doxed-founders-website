@@ -305,15 +305,15 @@ def test_single_loopback_dashboard_contract() -> None:
     restart = (ROOT.parents[1] / "scripts" / "analyzer-auto-restart.ps1").read_text(
         encoding="utf-8"
     )
-    analyzer = (RESEARCH / "analyzer_research_engine_v62.py").read_text(
+    analyzer = (ROOT / "analyzer_research_engine_v62.py").read_text(
         encoding="utf-8"
     )
-    for source in (launcher, restart):
-        assert 'RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"' in source
-        assert 'ANALYZER_EMBEDDED_DASHBOARD = "0"' in source
+    assert 'RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"' in launcher
+    assert 'ANALYZER_EMBEDDED_DASHBOARD = "0"' in launcher
+    assert "disabled fail-closed" in restart
+    assert "Start-Process" not in restart
     assert "Get-AnalyzerListenerPids" in launcher
     assert "$listenerPids.Count -eq 1" in launcher
-    assert 'os.getenv("ANALYZER_EMBEDDED_DASHBOARD", "1")' in analyzer
     dashboard_source = (RESEARCH / "research_dashboard.py").read_text(encoding="utf-8")
     assert 'RESEARCH_DASHBOARD_BIND_HOST", "127.0.0.1"' in dashboard_source
 

@@ -47,7 +47,6 @@ const LOCAL_MIRROR_FILES = [
   ['scenario_c_config.py', join(AGENT, 'scenario_c_config.py')],
   ['pathway_lane_roster.py', join(AGENT, 'pathway_lane_roster.py')],
   ['pathway_lab_validation.py', join(AGENT, 'pathway_lab_validation.py')],
-  ['analyzer_research_engine_v62.py', join(AGENT, 'research/analyzer_research_engine_v62.py')],
   ['analyzer_research_engine_v62.py', join(AGENT, 'analyzer_research_engine_v62.py')],
 ];
 

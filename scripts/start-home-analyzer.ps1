@@ -32,7 +32,6 @@ $machineStateBase = if ($env:LOCALAPPDATA) {
 $machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
 New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
 $lockFile = Join-Path $machineLockDir "home-analyzer-start-$AnalyzerPort.lock"
-$monitorLockFile = Join-Path $machineLockDir "home-analyzer-auto-restart-$AnalyzerPort.lock"
 $starterPidFile = Join-Path $repoRoot ".home-analyzer-starter.pid"
 
 function Test-PortOpen([int]$P) {
@@ -73,24 +72,6 @@ function Wait-ForKey {
   try { Read-Host } catch { while ($true) { Start-Sleep -Seconds 3600 } }
 }
 
-function Test-MachineAnalyzerMonitorActive {
-  if (-not (Test-Path -LiteralPath $monitorLockFile)) { return $false }
-  $probe = $null
-  try {
-    $probe = [System.IO.File]::Open(
-      $monitorLockFile,
-      [System.IO.FileMode]::OpenOrCreate,
-      [System.IO.FileAccess]::ReadWrite,
-      [System.IO.FileShare]::None
-    )
-    return $false
-  } catch {
-    return $true
-  } finally {
-    if ($probe) { $probe.Dispose() }
-  }
-}
-
 if (-not (Test-Path $agentDir)) {
   Write-Host "Agent dir not found: $agentDir" -ForegroundColor Red
   Wait-ForKey
@@ -117,17 +98,6 @@ try {
   }
 }
 Set-Content -LiteralPath $starterPidFile -Value "$PID" -NoNewline
-
-# A monitor from any checkout owns both analyzer recovery and the :9001
-# dashboard. Do not launch a competing engine merely because a report-version
-# refresh is still in progress; the machine-wide owner will recover it.
-if (Test-MachineAnalyzerMonitorActive) {
-  Write-Host "Machine-wide analyzer supervisor already active - not starting a duplicate." -ForegroundColor Yellow
-  if ($lockHandle) { $lockHandle.Dispose() }
-  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-  if (-not $NoWait) { Wait-ForKey }
-  exit 0
-}
 
 Set-Location $agentDir
 foreach ($secretName in @(
@@ -229,46 +199,14 @@ if ($NoWait) {
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
   }
   $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
-  # Auto-restart monitor - mirrors start-home-bot.ps1 launching bot-auto-restart.ps1.
-  # Keeps the analyzer alive across crashes/hangs without a human restarting it, which
-  # stops the recurring "analyzer_offline_ping=0" stack-abnormality popups. Skipped for
-  # --once (single pass has nothing to keep alive). Single-string -ArgumentList survives
-  # the space in the repo path ("Final Bots") - array form splits the path and the
-  # monitor never starts.
+  # The retired analyzer-auto-restart monitor is intentionally not launched.
+  # The explicit launcher/supervisor owns recovery; two independent restart
+  # owners previously caused a crash-loop popup storm and divergent PID files.
   if ($analyzerProc -and $analyzerProc.Id -gt 0 -and -not $Once) {
-    $monitorPidFile = Join-Path $repoRoot ".home-analyzer-crash-monitor.pid"
-    $monitorLockFile = Join-Path $repoRoot ".home-analyzer-auto-restart.lock"
-    if (Test-Path -LiteralPath $monitorPidFile) {
-      try {
-        $oldMonitorPid = [int](Get-Content -LiteralPath $monitorPidFile -Raw)
-        if ($oldMonitorPid -gt 0) {
-          Stop-Process -Id $oldMonitorPid -Force -ErrorAction SilentlyContinue
-        }
-      } catch { }
-      Remove-Item -LiteralPath $monitorPidFile -Force -ErrorAction SilentlyContinue
-    }
-    # A prior launcher could overwrite the pid file before its replacement
-    # monitor acquired the lock, leaving the real old monitor alive and the new
-    # monitor exiting immediately. Reclaim the lock holder explicitly so the
-    # pid file and single running monitor cannot diverge.
-    if (Test-Path -LiteralPath $monitorLockFile) {
-      try {
-        $lockHolderPid = [int](Get-Content -LiteralPath $monitorLockFile -Raw)
-        if ($lockHolderPid -gt 0) {
-          Stop-Process -Id $lockHolderPid -Force -ErrorAction SilentlyContinue
-        }
-      } catch { }
-      Remove-Item -LiteralPath $monitorLockFile -Force -ErrorAction SilentlyContinue
-    }
     Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") -Value "$($analyzerProc.Id)" -NoNewline -Encoding UTF8
-    $monitorScript = Join-Path $scriptDir "analyzer-auto-restart.ps1"
-    $monitorArgString = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorScript`" -AnalyzerPid $($analyzerProc.Id) -Port $AnalyzerPort"
-    if ($vaultEnv -and (Test-Path $vaultEnv)) { $monitorArgString += " -VaultEnv `"$vaultEnv`"" }
-    $mon = Start-Process -FilePath "powershell" -ArgumentList $monitorArgString -WindowStyle Hidden -PassThru
-    if ($mon -and $mon.Id -gt 0) {
-      Set-Content -Path (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") -Value "$($mon.Id)" -NoNewline
-      Write-Host "Auto-restart monitor launched (pid $($mon.Id)) - analyzer will relaunch automatically if it crashes/hangs." -ForegroundColor DarkGray
-    }
+    Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer-auto-restart.lock") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer-auto-restart.heartbeat") -Force -ErrorAction SilentlyContinue
   }
   exit 0
 }

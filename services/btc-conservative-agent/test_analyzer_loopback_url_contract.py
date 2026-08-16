@@ -7,7 +7,6 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 ANALYZER_SOURCES = (
     ROOT / "analyzer_research_engine_v62.py",
-    ROOT / "research" / "analyzer_research_engine_v62.py",
 )
 
 

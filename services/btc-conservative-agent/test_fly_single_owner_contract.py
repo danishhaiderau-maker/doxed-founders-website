@@ -54,10 +54,7 @@ assert "sync-fly-bot-data-loop.ps1" in text("start-fly-desktop-mirror.ps1")
 assert "$env:BTC_AGENT_DATA_DIR = $analyzerDataDir" in text(
     "start-home-analyzer.ps1"
 )
-assert "$env:BTC_AGENT_DATA_DIR = $analyzerDataDir" in text(
-    "analyzer-auto-restart.ps1"
-)
-for analyzer_launcher in ("start-home-analyzer.ps1", "analyzer-auto-restart.ps1"):
+for analyzer_launcher in ("start-home-analyzer.ps1",):
     analyzer_text = text(analyzer_launcher)
     assert '$env:RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"' in analyzer_text
     assert '"BITFINEX_API_KEY"' in analyzer_text

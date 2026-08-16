@@ -118,15 +118,15 @@ def test_execution_and_research_hard_stop_policy_stay_in_parity():
     expected = assigned_value(SOURCE, "MAX_SL_MARGIN_PCT")
     assert expected == 13.0
     assert assigned_value(ENGINE_SOURCE, "MAX_SL_MARGIN_PCT") == expected
-    for analyzer_source in ANALYZER_SOURCES:
-        assert assigned_value(analyzer_source, "HARD_STOP_MARGIN_PCT") == expected
-        assert "Hard SL margin cap: 30%" not in analyzer_source
+    assert assigned_value(CANONICAL_ANALYZER_SOURCE, "HARD_STOP_MARGIN_PCT") == expected
+    assert "Hard SL margin cap: 30%" not in CANONICAL_ANALYZER_SOURCE
 
 
-def test_legacy_analyzer_fails_closed_and_imports_shared_cohort_contract():
-    assert 'from analysis_eligibility import (' in LEGACY_ANALYZER_SOURCE
+def test_legacy_analyzer_is_a_minimal_fail_closed_stub():
     assert 'Legacy research analyzer is disabled fail-closed.' in LEGACY_ANALYZER_SOURCE
     assert 'Run ../analyzer_research_engine_v62.py' in LEGACY_ANALYZER_SOURCE
+    assert "pandas" not in LEGACY_ANALYZER_SOURCE
+    assert "write_report_manifest" not in LEGACY_ANALYZER_SOURCE
 
 
 def test_report_manifest_exposes_cohort_provenance_and_revision():
@@ -198,8 +198,7 @@ def test_snapshot_routes_resolve_only_the_atomically_selected_generation():
 
 
 def test_mobile_snapshot_is_truthfully_labelled_and_uses_portable_report_links():
-    for analyzer_source in ANALYZER_SOURCES:
-        assert "Local Analyzer Snapshot" in analyzer_source
-        assert "Read-only Fly mirror of the locally generated analyzer" in analyzer_source
-        assert "not the live interactive desktop dashboard" in analyzer_source
-        assert '.replace(os.sep, "/")' in analyzer_source
+    assert "Local Analyzer Snapshot" in CANONICAL_ANALYZER_SOURCE
+    assert "Read-only Fly mirror of the locally generated analyzer" in CANONICAL_ANALYZER_SOURCE
+    assert "not the live interactive desktop dashboard" in CANONICAL_ANALYZER_SOURCE
+    assert '.replace(os.sep, "/")' in CANONICAL_ANALYZER_SOURCE

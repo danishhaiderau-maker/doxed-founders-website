@@ -388,6 +388,18 @@ def test_analyzer_bundle_install_is_atomic_and_bad_hash_preserves_current_genera
         assert json.loads(pointer.read_text(encoding="utf-8")) == first_pointer
         assert (first_generation / "analysis_dashboard.html").read_bytes() == b"dashboard-v1"
 
+        summary_path = first_generation / "executive_summary.txt"
+        summary_path.write_bytes(b"tampered!")
+        assert namespace["_active_analyzer_mirror_dir"]() is None
+        summary_path.write_bytes(b"summary-v1")
+        assert namespace["_active_analyzer_mirror_dir"]() == first_generation
+
+        shutil.rmtree(first_generation)
+        assert namespace["_active_analyzer_mirror_dir"]() is None
+        (root / "legacy").mkdir()
+        (root / "legacy" / "analysis_dashboard.html").write_text("legacy", encoding="utf-8")
+        assert namespace["_active_analyzer_mirror_dir"]() is None
+
 
 def test_flask_snapshot_routes_require_auth_serve_links_and_reject_traversal():
     from flask import Flask, jsonify, make_response, request, send_file
@@ -443,6 +455,74 @@ def test_flask_snapshot_routes_require_auth_serve_links_and_reject_traversal():
         summary.close()
         traversal.close()
         outside.unlink(missing_ok=True)
+
+
+def test_flask_snapshot_routes_fail_closed_without_complete_generation():
+    from flask import Flask, jsonify, make_response, request, send_file
+
+    tree = ast.parse(BOT)
+    wanted = {"analyzer_mirror_dashboard_index", "analyzer_mirror_artifact"}
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    app = Flask("analyzer-fail-closed-fixture")
+    namespace = {
+        "app": app,
+        "request": request,
+        "jsonify": jsonify,
+        "make_response": make_response,
+        "send_file": send_file,
+        "_analyzer_view_authed": lambda: True,
+        "_active_analyzer_mirror_dir": lambda: None,
+        "_ANALYZER_BUNDLE_ALLOWED_SUFFIXES": frozenset((".html", ".txt", ".json", ".log")),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    client = app.test_client()
+    dashboard = client.get("/analysis/")
+    artifact = client.get("/analysis/executive_summary.txt")
+    assert dashboard.status_code == 503
+    assert artifact.status_code == 503
+    assert b"complete validated analyzer bundle" in dashboard.data
+
+
+def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
+    from flask import Flask, jsonify, request
+
+    tree = ast.parse(BOT)
+    wanted = {"api_data_sync_analyzer_report", "api_analyzer_mirror_status"}
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        legacy = Path(tmp) / "legacy"
+        legacy.mkdir()
+        (legacy / "analysis_dashboard.html").write_text("forensic legacy", encoding="utf-8")
+        app = Flask("analyzer-publication-fixture")
+        namespace = {
+            "app": app,
+            "request": request,
+            "jsonify": jsonify,
+            "_admin_authed_strict": lambda: True,
+            "_active_analyzer_mirror_dir": lambda: None,
+            "_analyzer_mirror_dir": lambda: legacy,
+            "_ANALYZER_BUNDLE_SCHEMA": "analyzer_mirror_bundle_v2",
+            "_ANALYZER_BUNDLE_MAX_COMPRESSED_BYTES": 50 * 1024 * 1024,
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+        client = app.test_client()
+        response = client.post(
+            "/api/data-sync/analyzer-report",
+            data={"report": (io.BytesIO(b"new legacy"), "analysis_dashboard.html")},
+        )
+        assert response.status_code == 410
+        assert response.json["required_schema"] == "analyzer_mirror_bundle_v2"
+        assert (legacy / "analysis_dashboard.html").read_text(encoding="utf-8") == "forensic legacy"
+        status = client.get("/api/analyzer-mirror/status")
+        assert status.status_code == 404
+        assert status.json["available"] is False
+        assert status.json["legacy_data_preserved"] is True
 
 
 if __name__ == "__main__":

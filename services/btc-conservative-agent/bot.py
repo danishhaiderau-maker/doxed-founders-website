@@ -33850,15 +33850,56 @@ def _analyzer_current_pointer_path() -> Path:
 
 
 def _valid_analyzer_generation(candidate: Path) -> bool:
+    """Accept only a complete, hash-bound bundle-v2 generation on disk."""
     try:
         status = json.loads((candidate / "status.json").read_text(encoding="utf-8"))
-        return bool(
+        manifest = json.loads(
+            (candidate / _ANALYZER_BUNDLE_MANIFEST).read_text(encoding="utf-8")
+        )
+        if not (
             candidate.is_dir()
             and status.get("complete") is True
             and status.get("schema") == _ANALYZER_BUNDLE_SCHEMA
-            and (candidate / "analysis_dashboard.html").is_file()
-            and (candidate / _ANALYZER_BUNDLE_MANIFEST).is_file()
-        )
+            and manifest.get("schema") == _ANALYZER_BUNDLE_SCHEMA
+            and isinstance(manifest.get("files"), list)
+        ):
+            return False
+        declared = {}
+        for row in manifest["files"]:
+            rel = str((row or {}).get("path") or "").replace("\\", "/")
+            rel_path = Path(rel)
+            digest = str((row or {}).get("sha256") or "").lower()
+            size = int((row or {}).get("size_bytes"))
+            if (
+                not rel or rel_path.is_absolute() or ".." in rel_path.parts
+                or rel != str(rel_path).replace("\\", "/")
+                or rel == _ANALYZER_BUNDLE_MANIFEST
+                or rel.casefold() in declared
+                or rel_path.suffix.lower() not in _ANALYZER_BUNDLE_ALLOWED_SUFFIXES
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or size < 0 or size > _ANALYZER_BUNDLE_MAX_MEMBER_BYTES
+            ):
+                return False
+            declared[rel.casefold()] = (rel, digest, size)
+        if "analysis_dashboard.html" not in {row[0] for row in declared.values()}:
+            return False
+        actual = set()
+        root = candidate.resolve()
+        for path in candidate.rglob("*"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            rel = path.relative_to(candidate).as_posix()
+            if rel in ("status.json", _ANALYZER_BUNDLE_MANIFEST):
+                continue
+            resolved = path.resolve()
+            resolved.relative_to(root)
+            actual.add(rel.casefold())
+            expected = declared.get(rel.casefold())
+            if expected is None or path.stat().st_size != expected[2]:
+                return False
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected[1]:
+                return False
+        return actual == set(declared)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return False
 
@@ -33880,8 +33921,8 @@ def _recover_latest_analyzer_generation() -> Path | None:
     return candidates[0] if candidates else None
 
 
-def _active_analyzer_mirror_dir() -> Path:
-    """Resolve only a fully installed generation, else the legacy mirror."""
+def _active_analyzer_mirror_dir() -> Path | None:
+    """Resolve only a fully validated immutable generation; never serve legacy HTML."""
     pointer = _analyzer_current_pointer_path()
     try:
         row = json.loads(pointer.read_text(encoding="utf-8"))
@@ -33898,7 +33939,7 @@ def _active_analyzer_mirror_dir() -> Path:
     recovered = _recover_latest_analyzer_generation()
     if recovered is not None:
         return recovered
-    return _analyzer_mirror_dir()
+    return None
 
 
 def _prune_analyzer_generations(active_generation: str, keep: int = 3) -> None:
@@ -34165,41 +34206,33 @@ def api_data_sync_analyzer_report():
             return jsonify({"error": f"invalid analyzer bundle: {exc}"}), 400
         return jsonify({"ok": True, **installed})
 
-    # Backward compatibility for an older publisher. The HTML-only upload is
-    # deliberately labelled incomplete so operators cannot mistake broken links
-    # for a complete research mirror.
+    # The retired HTML-only publisher produced dashboards with broken report
+    # links. Existing files remain untouched for forensic review, but new
+    # legacy publications are rejected and can never become active.
     upload = request.files.get("report")
     if upload is None:
         return jsonify({"error": "multipart field 'report' is required"}), 400
-    payload = upload.read(25 * 1024 * 1024 + 1)
-    if len(payload) > 25 * 1024 * 1024:
-        return jsonify({"error": "report exceeds 25 MB"}), 413
-    mirror = _analyzer_mirror_dir()
-    mirror.mkdir(parents=True, exist_ok=True)
-    target = mirror / "analysis_dashboard.html"
-    tmp = mirror / "analysis_dashboard.html.tmp"
-    tmp.write_bytes(payload)
-    os.replace(tmp, target)
-    meta = {
-        "schema": "analyzer_mirror_html_only_v0",
-        "complete": False,
-        "uploaded_at": utc_iso(),
-        "size": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "source_git_rev": request.form.get("source_git_rev"),
-        "analyzer_generated_at": request.form.get("analyzer_generated_at"),
-    }
-    meta_tmp = mirror / "status.tmp"
-    meta_tmp.write_text(json.dumps(meta, separators=(",", ":")), encoding="utf-8")
-    os.replace(meta_tmp, mirror / "status.json")
-    return jsonify({"ok": True, **meta})
+    return jsonify({
+        "error": "HTML-only analyzer publication is retired",
+        "required_schema": _ANALYZER_BUNDLE_SCHEMA,
+        "legacy_data_preserved": True,
+    }), 410
 
 
 @app.route('/api/analyzer-mirror/status')
 def api_analyzer_mirror_status():
+    active = _active_analyzer_mirror_dir()
+    if active is None:
+        legacy_preserved = _analyzer_mirror_dir().exists()
+        return jsonify({
+            "available": False,
+            "reason": "no complete validated analyzer bundle is installed",
+            "required_schema": _ANALYZER_BUNDLE_SCHEMA,
+            "legacy_data_preserved": legacy_preserved,
+        }), 404
     try:
         payload = json.loads(
-            (_active_analyzer_mirror_dir() / "status.json").read_text(encoding="utf-8")
+            (active / "status.json").read_text(encoding="utf-8")
         )
         resp = jsonify({"available": True, **payload})
         resp.headers['Cache-Control'] = 'no-store'
@@ -34228,7 +34261,13 @@ def analyzer_mirror_dashboard_index():
         resp.headers['Location'] = '/analysis/login'
         resp.headers['Cache-Control'] = 'no-store'
         return resp
-    report = _active_analyzer_mirror_dir() / "analysis_dashboard.html"
+    active = _active_analyzer_mirror_dir()
+    if active is None:
+        return jsonify({
+            "error": "no complete validated analyzer bundle is available",
+            "next": "run the bundle-v2 local analyzer publisher while the PC is online",
+        }), 503
+    report = active / "analysis_dashboard.html"
     if not report.is_file():
         return jsonify({
             "error": "no analyzer mirror is available yet",
@@ -34250,7 +34289,12 @@ def analyzer_mirror_artifact(artifact_path):
         resp.headers['Location'] = '/analysis/login'
         resp.headers['Cache-Control'] = 'no-store'
         return resp
-    mirror = _active_analyzer_mirror_dir().resolve()
+    active = _active_analyzer_mirror_dir()
+    if active is None:
+        return jsonify({
+            "error": "no complete validated analyzer bundle is available",
+        }), 503
+    mirror = active.resolve()
     normalized = str(artifact_path or "").replace("\\", "/")
     target = (mirror / normalized).resolve()
     try:

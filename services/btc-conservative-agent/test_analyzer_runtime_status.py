@@ -69,9 +69,10 @@ checks = {
         and "$expectedReportRoot = [System.IO.Path]::GetFullPath($agentDir)" in health
         and "$actualReportRoot.Equals($expectedReportRoot" in health
     ),
-    "restart monitor probes cheap health with a cold-start grace": (
-        '[int]$BootGraceSec = 180' in restart_analyzer
-        and '    $urls = @(\n      "http://127.0.0.1:$Port/api/health"' in restart_analyzer
+    "retired restart monitor cannot create a competing owner": (
+        "disabled fail-closed" in restart_analyzer
+        and "Start-Process" not in restart_analyzer
+        and "Set-Content" not in restart_analyzer
         and 'AddSeconds(180)' in start_all
     ),
     "health accepts only synced report or bounded current pass": (
@@ -90,10 +91,8 @@ checks = {
     ),
     "all launchers use the canonical tested analyzer": (
         '@("analyzer_research_engine_v62.py")' in start_analyzer
-        and '@("analyzer_research_engine_v62.py")' in restart_analyzer
         and '@("analyzer_research_engine_v62.py")' in local_analyzer
         and '$env:BTC_AGENT_REPORT_DIR = $agentDir' in start_analyzer
-        and '$env:BTC_AGENT_REPORT_DIR = $agentDir' in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in start_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in local_analyzer
@@ -138,7 +137,6 @@ checks = {
         and "stdout=subprocess.DEVNULL" in analyzer_engine
         and "research_dashboard_cache_warm" not in analyzer_engine
         and '@("research_dashboard.py", "--standalone")' in start_analyzer
-        and '@("research_dashboard.py", "--standalone")' in restart_analyzer
         and '".home-analyzer-dashboard.pid"' in start_analyzer
         and "-WindowStyle Hidden -PassThru" in start_analyzer
     ),
