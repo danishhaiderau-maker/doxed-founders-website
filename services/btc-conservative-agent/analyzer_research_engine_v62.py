@@ -17115,6 +17115,8 @@ def _mirror_reports_to_dir():
 
 
 def write_report_manifest(payload=None):
+    manifest_generated_at = datetime.now(timezone.utc)
+    current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
     """Manifest for research dashboard — no hardcoded report list in UI."""
     cohort_summary = {}
     for cohort in (
@@ -17141,7 +17143,10 @@ def write_report_manifest(payload=None):
     }
     reports = []
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
-        if os.path.isfile(fname):
+        # Catalog files can survive from an older iteration when current data
+        # cannot regenerate that report. Keep them for local history, but do
+        # not qualify them as members of this immutable generation.
+        if os.path.isfile(fname) and os.path.getmtime(fname) >= current_run_cutoff:
             reports.append({
                 "title": title,
                 "file": fname,
@@ -17157,7 +17162,7 @@ def write_report_manifest(payload=None):
         "schema": "report_manifest_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": ANALYZER_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": manifest_generated_at.isoformat(),
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "analysis_provenance": analysis_provenance,
         "cohort_schema": analysis_provenance["cohort_schema"],
