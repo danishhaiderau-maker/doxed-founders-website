@@ -76,11 +76,12 @@ function syncVerdict({
   expectedMissedShowcase,
   suppressedPreArmShowcase,
   entryEnabled,
+  instanceLastError,
   dash,
   alerts,
 }) {
   if (!bot.ok) return { verdict: 'FAIL', reason: 'showcase_unreachable' };
-  if (dash?.lastError) alerts.push(`lastError:${dash.lastError}`);
+  if (instanceLastError) alerts.push(`lastError:${instanceLastError}`);
   const md = dash?.mirrorDiff;
   const mdTypes = md?.counts?.byType || {};
   if (mdTypes.COPY_ORDER_NO_SHOWCASE > 0) {
@@ -108,12 +109,33 @@ function syncVerdict({
   if (orphan.length) alerts.push(`orphan:${orphan.map((t) => t.slice(0, 10)).join(',')}`);
 
   const book = dash?.exchangeLiveBook || dash?.liveBook;
+  const reconcile = dash?.copyRelayReconcile;
+  const reconcileDelta = Math.abs(Number(reconcile?.deltaBtc ?? 0));
+  const exchangePosition = Math.abs(
+    Number(reconcile?.signedExchangePositionQty ?? reconcile?.exchangePositionQty ?? 0),
+  );
+  if (reconcile?.alert === true || reconcileDelta > 0.00000001 || exchangePosition > 0.00000001) {
+    alerts.push(
+      `RECONCILE_MISMATCH:delta=${Number(reconcile?.deltaBtc ?? 0)} exchange=${Number(
+        reconcile?.signedExchangePositionQty ?? reconcile?.exchangePositionQty ?? 0,
+      )}`,
+    );
+  }
+  if (!entryEnabled && copyPending.length > 0) {
+    alerts.push(`UNRESOLVED_PENDING:${copyPending.length}`);
+  }
   const derivFree = book?.derivativesUsd ?? book?.derivativesAvailableUsd ?? null;
   if (derivFree != null && derivFree < 1 && missEntry.length) {
     alerts.push(`margin_block:$${derivFree}`);
   }
 
-  if (alerts.some((a) => /missEntry|orphan|margin_block|COPY_ORDER|showcase_unreachable/i.test(a))) {
+  if (
+    alerts.some((a) =>
+      /missEntry|orphan|margin_block|COPY_ORDER|showcase_unreachable|RECONCILE_MISMATCH|UNRESOLVED_PENDING/i.test(
+        a,
+      ),
+    )
+  ) {
     return { verdict: 'FAIL', reason: alerts.join('; ') };
   }
   if (alerts.length || pendingWorking.length) {
@@ -233,6 +255,7 @@ try {
     expectedMissedShowcase,
     suppressedPreArmShowcase,
     entryEnabled: inst?.status === 'ACTIVE',
+    instanceLastError: inst?.lastError ?? null,
     dash,
     alerts,
   });
