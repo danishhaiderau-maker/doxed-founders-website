@@ -74,7 +74,7 @@ function Test-AnalyzerEngineAlive {
     if ($enginePid -le 0) { return $false }
     if (-not (Test-ProcessAliveFast -ProcessId $enginePid)) { return $false }
     $commandLine = [string](Get-ProcessCommandLineFast -ProcessId $enginePid)
-    return [bool]($commandLine -match '(^|[\\/\s])analyzer_research_engine_v62\.py(\s|$)')
+    return [bool]($commandLine -match '(^|[\\/\s])analyzer_research_engine_v62\.py(["''\s]|$)')
   } catch {
     return $false
   }
@@ -159,6 +159,38 @@ $env:BTC_AGENT_REPORT_DIR = $agentDir
 . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
+function Get-CanonicalAnalyzerEnginePids([int]$P) {
+  $ownedMarker = "--owner-port=$P"
+  $owned = @()
+  $legacy = @()
+  foreach ($proc in @(Get-Process -Name "python*" -ErrorAction SilentlyContinue)) {
+    $commandLine = [string](Get-ProcessCommandLineFast -ProcessId $proc.Id)
+    if ($commandLine -notmatch '(^|[\\/\s])analyzer_research_engine_v62\.py(["''\s]|$)') { continue }
+    if ($commandLine.Contains($ownedMarker)) { $owned += [int]$proc.Id }
+    elseif ($P -eq 9001) { $legacy += [int]$proc.Id }
+  }
+  # Legacy launchers did not put the port in argv. Treat every legacy engine as
+  # a possible :9001 owner and fail closed instead of spawning over it.
+  return @(($owned + $legacy) | Sort-Object -Unique)
+}
+
+$discoveredEnginePids = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
+if ($discoveredEnginePids.Count -gt 1) {
+  Write-Host (
+    "REFUSED: multiple analyzer engines already exist for :$AnalyzerPort " +
+    "(PIDs $($discoveredEnginePids -join ', ')). No new engine was started."
+  ) -ForegroundColor Red
+  Write-Host "Stop/reconcile the incumbents explicitly, then start again." -ForegroundColor Yellow
+  if ($lockHandle) { $lockHandle.Dispose() }
+  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  if (-not $NoWait) { Wait-ForKey }
+  exit 2
+}
+if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
+  Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") `
+    -Value "$($discoveredEnginePids[0])" -NoNewline -Encoding UTF8
+}
+
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
 if (Test-PortOpen $AnalyzerPort) {
   $listenerPids = @(Get-AnalyzerListenerPids $AnalyzerPort)
@@ -207,6 +239,14 @@ if (-not $Once -and -not (Test-PortOpen $AnalyzerPort)) {
   }
 }
 
+if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
+  Write-Host "Existing analyzer engine PID $($discoveredEnginePids[0]) retained; no duplicate engine started." -ForegroundColor Yellow
+  if ($lockHandle) { $lockHandle.Dispose() }
+  Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+  if (-not $NoWait) { Wait-ForKey }
+  exit 0
+}
+
 Write-Host "IMPORTANT: Analyzer reads CSV/JSONL from THIS folder only:"
 Write-Host "  $analyzerDataDir"
 Write-Host "Research dashboard (Flask, this PC only): http://127.0.0.1:$AnalyzerPort/"
@@ -216,14 +256,10 @@ Write-Host ""
 
 $pyArgs = @("analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
+$pyArgs += "--owner-port=$AnalyzerPort"
 
 if ($NoWait) {
   Write-Host "Starting analyzer detached on :$AnalyzerPort ..."
-  if ($lockHandle) {
-    try { $lockHandle.Dispose() } catch { }
-    $lockHandle = $null
-    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-  }
   $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   # The retired analyzer-auto-restart monitor is intentionally not launched.
   # The explicit launcher/supervisor owns recovery; two independent restart
@@ -233,6 +269,13 @@ if ($NoWait) {
     Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer-crash-monitor.pid") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer-auto-restart.lock") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer-auto-restart.heartbeat") -Force -ErrorAction SilentlyContinue
+  }
+  # Keep the exclusive start claim until the child PID is durably published.
+  # A concurrent Start click must observe either this lock or the new owner.
+  if ($lockHandle) {
+    try { $lockHandle.Dispose() } catch { }
+    $lockHandle = $null
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
   }
   exit 0
 }

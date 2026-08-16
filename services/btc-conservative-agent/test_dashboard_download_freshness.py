@@ -268,11 +268,23 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         root.mkdir(parents=True)
         mirror.mkdir()
         (root / "research" / "genome" / "__pycache__").mkdir(parents=True)
+        _write_json(
+            root / "research" / "genome" / "genome_analysis_report.json",
+            {"schema": "trading_genome_analysis_v1"},
+        )
         _write_csv(mirror / "trades_3factor.csv", [{"trade_id": "fly-current"}])
+        _write_json(mirror / "relay_lifecycle_evidence_v1.json", {
+            "schema": "relay_lifecycle_evidence_v1", "records": []
+        })
+        (mirror / "counterfactual.jsonl").write_text("{}\n", encoding="utf-8")
         _write_csv(root / "trades_3factor.csv", [{"trade_id": "history"}])
+        _write_json(root / "historical_trade_cohort_report.json", {"cohorts": {}})
         _write_json(
             root / "report_manifest.json",
-            {"generated_at": "now", "reports": []},
+            {
+                "generated_at": "now",
+                "reports": [{"file": "historical_trade_cohort_report.json"}],
+            },
         )
         (root / "research" / "genome" / "__pycache__" / "bad.pyc").write_bytes(b"x")
         audit = root / "audit.zip"
@@ -286,14 +298,25 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             with dashboard.app.test_client() as client:
                 response = client.get("/download/everything")
                 assert response.status_code == 200
+                assert "complete_research_evidence_bundle_" in response.headers[
+                    "Content-Disposition"
+                ]
                 with zipfile.ZipFile(io.BytesIO(response.data)) as zf:
                     assert zf.testzip() is None
                     names = zf.namelist()
                     assert "raw/current_fly_mirror/trades_3factor.csv" in names
+                    assert "raw/current_fly_mirror/relay_lifecycle_evidence_v1.json" in names
+                    assert "raw/current_fly_mirror/counterfactual.jsonl" in names
                     assert "raw/research_history/trades_3factor.csv" in names
                     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
                     manifest = json.loads(zf.read("MANIFEST.json"))
                     assert manifest["schema"] == "doxxed_everything_bundle_v2"
+                    coverage = manifest["notes"]["component_coverage"]
+                    assert coverage["relay_lifecycle_evidence_v1"] is True
+                    assert coverage["counterfactual_evidence"] is True
+                    assert coverage["cohort_reports"] is True
+                    assert coverage["genome_and_dna"] is True
+                    assert coverage["report_manifest"] is True
         finally:
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
 
@@ -313,6 +336,12 @@ def test_single_loopback_dashboard_contract() -> None:
     assert "disabled fail-closed" in restart
     assert "Start-Process" not in restart
     assert "Get-AnalyzerListenerPids" in launcher
+    assert "Get-CanonicalAnalyzerEnginePids" in launcher
+    assert "multiple analyzer engines already exist" in launcher
+    assert '"--owner-port=$AnalyzerPort"' in launcher
+    assert launcher.index("Start-Process -FilePath \"python\"") < launcher.index(
+        "Keep the exclusive start claim until the child PID is durably published."
+    )
     assert "$listenerPids.Count -eq 1" in launcher
     dashboard_source = (RESEARCH / "research_dashboard.py").read_text(encoding="utf-8")
     assert 'RESEARCH_DASHBOARD_BIND_HOST", "127.0.0.1"' in dashboard_source

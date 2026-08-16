@@ -2081,6 +2081,15 @@ def download_everything():
         if agent_root.resolve() != DATA_ROOT.resolve():
             for path in sorted(agent_root.glob(pattern)):
                 candidates.append((path, f"raw/research_history/{path.name}"))
+    # JSON reports are manifest-owned below. The immutable cross-service relay
+    # export is raw evidence, so include that one explicitly without sweeping
+    # unrelated runtime/config JSON into the downloadable archive.
+    relay_evidence = DATA_ROOT / "relay_lifecycle_evidence_v1.json"
+    if relay_evidence.is_file():
+        candidates.append((
+            relay_evidence,
+            "raw/current_fly_mirror/relay_lifecycle_evidence_v1.json",
+        ))
 
     # Exactly one scope-aware copy of each current report. Historical/all-data
     # reports remain available under an explicitly named directory.
@@ -2103,6 +2112,7 @@ def download_everything():
     unique = {}
     for path, arcname in candidates:
         unique.setdefault(arcname, path)
+    member_names = set(unique)
     manifest = {
         "schema": "doxxed_everything_bundle_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -2114,6 +2124,21 @@ def download_everything():
             "current_report_scope": "FRESH-COLLECTION",
             "live_trading_data": False,
             "purpose": "research audit and offline analysis",
+            "source_revision": os.getenv("SOURCE_GIT_REV") or "UNKNOWN",
+            "component_coverage": {
+                "relay_lifecycle_evidence_v1": any(
+                    name.endswith("/relay_lifecycle_evidence_v1.json")
+                    for name in member_names
+                ),
+                "counterfactual_evidence": any(
+                    "counterfactual" in name.lower() for name in member_names
+                ),
+                "cohort_reports": any("cohort" in name.lower() for name in member_names),
+                "genome_and_dna": any(name.startswith("genome/") for name in member_names),
+                "report_manifest": any(
+                    name.endswith("/report_manifest.json") for name in member_names
+                ),
+            },
         },
     }
     buf = io.BytesIO()
@@ -2142,7 +2167,7 @@ def download_everything():
         buf,
         mimetype="application/zip",
         as_attachment=True,
-        download_name=f"doxxed_research_everything_{stamp}.zip",
+        download_name=f"complete_research_evidence_bundle_{stamp}.zip",
     )
 
 
@@ -2941,33 +2966,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       analyzer are deterministic and out-of-process; they never call an AI
       provider. DeepSeek is reserved for the bot's trading-direction decision.
     </div>
-    <p><b>Past Analysis</b> — the latest preserved pre-wipe conclusions, all derived reports, integrity manifest, and source fingerprints. Bulky raw data is excluded.</p>
-    <a class="btn" href="/download/past-analysis" id="dl-past-analysis">&#11015; Download Past Analysis</a>
-    <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Everything (one verified ZIP)</a>
-    <p class="note" id="gpt-audit-note">GPT audit bundle auto-updates every analyzer cycle (~30 min).</p>
-    <p><b>All-in-one research pack</b> — the 6 core artifacts (research_highlights, research_findings, research_coverage, research_deep_dive_index, analysis_dashboard.html, analyzer_run.log) merged into a single downloadable HTML file. No secrets.</p>
-    <a class="btn" href="/download/research-pack" id="dl-research-pack" style="background:#2a6e2a">⬇ Research Pack (one file, all 6 merged)</a>
-    <p style="margin-top:16px"><b>GPT full-stack audit</b> — bot.py + v62 analyzer + genome pipeline + IMPLEMENTATION_STATUS.json (upload entire ZIP to ChatGPT).</p>
-    <a class="btn" href="/download/gpt-audit" id="dl-gpt-audit">⬇ GPT Audit Bundle (1-click, always latest)</a>
-    <a class="btn secondary" href="/download/genome" id="dl-genome">⬇ Genome + DNA Fingerprints ZIP</a>
-    <p style="margin-top:16px"><b>External-AI full raw bundle</b> — complete cached history for upload to Cursor, DeepSeek, or another offline analysis workspace. Rebuilding is analyzer-owned and never runs in the trading process.</p>
-    <a class="btn" href="/download/all-sessions" id="dl-all-sessions">⬇ All Sessions ZIP</a>
-    <a class="btn secondary" href="/download/complete" id="dl-complete">⬇ External AI Full Raw Bundle (cached)</a>
-    <p style="margin-top:16px"><b>External-AI compact upload</b> — small verified ZIP with trade-count manifest when the full archive is too large.</p>
-    <a class="btn" href="/download/chatgpt" id="dl-chatgpt">⬇ External AI Compact Bundle</a>
-    <p style="margin-top:16px"><b>Week collection DB</b> — auto-updated every analyzer run (~30 min), v9.83+ trades only.</p>
-    <a class="btn secondary" href="/download/accumulator" id="dl-accumulator">⬇ Accumulator DB + CSV</a>
-    <a class="btn secondary" href="/api/accumulator" target="_blank">View accumulator status JSON</a>
-    <p style="margin-top:16px"><b>Research layers</b> — text summaries from the latest analyzer run.</p>
-    <a class="btn secondary" href="/research_highlights.txt?download=1">⬇ research_highlights.txt</a>
-    <a class="btn secondary" href="/research_findings.txt?download=1">⬇ research_findings.txt</a>
-    <a class="btn secondary" href="/research_coverage.txt?download=1">⬇ research_coverage.txt</a>
-    <a class="btn secondary" href="/research_deep_dive_index.txt?download=1">⬇ research_deep_dive_index.txt</a>
-    <a class="btn secondary" href="/analysis_dashboard.html?download=1">⬇ analysis_dashboard.html</a>
-    <a class="btn secondary" href="/analyzer_run.log?download=1">⬇ analyzer_run.log</a>
-    <p style="margin-top:16px"><b>Latest snapshot only</b> — current analyzer run reports.</p>
-    <a class="btn" href="/download/reports" id="dl-zip">⬇ Latest Reports ZIP</a>
-    <a class="btn secondary" href="/api/manifest" target="_blank">View report_manifest.json</a>
+    <p><b>Complete Research Evidence Bundle</b> — one verified ZIP containing the current Fly mirror, immutable relay lifecycle evidence, counterfactual and cohort data, current and historical reports, Genome/DNA artifacts, preserved sessions, source audit, and a SHA-256 manifest.</p>
+    <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Complete Research Evidence Bundle</a>
+    <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
     <pre id="bundle-list"></pre>
   </section>
 </main>

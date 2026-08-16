@@ -38,10 +38,12 @@ def main() -> None:
     assert 'id="collection-contract"' in source
     assert 'id="collection-status"' in source
     assert "they never call an AI" in source
-    assert "External AI Full Raw Bundle" in source
-    assert "External AI Compact Bundle" in source
     assert 'href="/download/everything"' in source
-    assert "Download Everything (one verified ZIP)" in source
+    assert "Download Complete Research Evidence Bundle" in source
+    assert 'id="dl-chatgpt"' not in source
+    assert 'id="dl-complete"' not in source
+    assert 'id="dl-gpt-audit"' not in source
+    assert 'id="dl-research-pack"' not in source
     assert "Past Analysis — not available yet" in source
     assert '@app.route("/api/accumulator")' in source
     assert '@app.route("/download/accumulator")' in source
