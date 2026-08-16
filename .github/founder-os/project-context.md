@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fix late partial-fill emergency reconciliation
+Fence account emergency residual closes
 
 ## Last Activity
 
