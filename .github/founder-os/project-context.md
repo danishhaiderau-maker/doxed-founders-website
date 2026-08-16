@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Harden clustered entry risk and qualified replay evidence
+Retire stale analyzer paths and fail closed
 
 ## Last Activity
 
