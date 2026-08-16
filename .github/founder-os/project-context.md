@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Pin emergency recovery to Bitfinex client
+Attribute already-flat emergency stop exits
 
 ## Last Activity
 
