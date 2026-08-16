@@ -3819,14 +3819,36 @@ def risk_trading_allowed() -> bool:
     rolled_over, pause_reason = _rollover_daily_pnl_if_new_utc_day()
     if rolled_over and pause_reason == "DAILY_DRAWDOWN":
         set_execution_paused("")
+
+    # A successful operator resume/reset can leave the persisted pause label
+    # behind after its loss counters and timer have already been cleared.  Do
+    # not let that stale label re-pause an otherwise healthy executor forever.
+    # Snapshot under the lock, but clear through the canonical pause setter
+    # outside it: that setter performs disarm/order work and must not be called
+    # recursively while state_lock is held.
+    with state_lock:
+        loss_pause_until = float(state.get("loss_pause_until", 0) or 0)
+        consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
+        stale_loss_pause = (
+            bool(state.get("execution_paused"))
+            and state.get("execution_reason") == "LOSS_STREAK"
+            and loss_pause_until <= 0
+            and consecutive_losses < CONSECUTIVE_LOSS_PAUSE
+        )
+        expired_loss_pause = (
+            state.get("execution_reason") == "LOSS_STREAK"
+            and loss_pause_until > 0
+            and loss_pause_until <= now
+        )
+        if expired_loss_pause:
+            state["loss_pause_until"] = 0
+    if stale_loss_pause or expired_loss_pause:
+        set_execution_paused("")
+
     with state_lock:
         pause_until = state.get("loss_pause_until", 0)
         if pause_until > now:
             return False
-        if pause_until > 0 and pause_until <= now:
-            state["loss_pause_until"] = 0
-            if state.get("execution_reason") == "LOSS_STREAK":
-                set_execution_paused("")
         if state.get("daily_pnl_usd", 0) <= -DAILY_DRAWDOWN_PAUSE_USD:
             if not state.get("execution_paused") or state.get("execution_reason") != "DAILY_DRAWDOWN":
                 set_execution_paused("DAILY_DRAWDOWN")

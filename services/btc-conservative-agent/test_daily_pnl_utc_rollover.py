@@ -15,6 +15,7 @@ module-level print/check harness still executes via import).
 import os
 import sys
 import datetime as _dt
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -189,6 +190,40 @@ with bot.state_lock:
 rolled, _ = bot._rollover_daily_pnl_if_new_utc_day()
 check("rollover returns False on same day", rolled is False)
 check("daily_pnl_usd untouched on same day", bot.state.get("daily_pnl_usd") == 12.34)
+
+
+# ---------------------------------------------------------------------------
+# [6] Cleared loss counters cannot leave a stale LOSS_STREAK pause latched
+# ---------------------------------------------------------------------------
+print("\n[6] Cleared loss counters release a stale LOSS_STREAK pause")
+reset_risk_state()
+with bot.state_lock:
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "LOSS_STREAK"
+    bot.state["consecutive_losses"] = 0
+    bot.state["loss_pause_until"] = 0.0
+allowed = bot.risk_trading_allowed()
+check("stale LOSS_STREAK pause is cleared", bot.state.get("execution_paused") is False)
+check("stale LOSS_STREAK reason is cleared", bot.state.get("execution_reason") == "")
+check("trading is allowed after stale latch clears", allowed is True)
+
+
+# ---------------------------------------------------------------------------
+# [7] A real, unexpired loss pause remains enforced even if counters reset
+# ---------------------------------------------------------------------------
+print("\n[7] Active LOSS_STREAK timer remains enforced")
+reset_risk_state()
+active_until = time.time() + 300.0
+with bot.state_lock:
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "LOSS_STREAK"
+    bot.state["consecutive_losses"] = 0
+    bot.state["loss_pause_until"] = active_until
+allowed = bot.risk_trading_allowed()
+check("active LOSS_STREAK pause remains set", bot.state.get("execution_paused") is True)
+check("active LOSS_STREAK reason remains set", bot.state.get("execution_reason") == "LOSS_STREAK")
+check("active loss timer remains intact", bot.state.get("loss_pause_until") == active_until)
+check("trading remains blocked during active timer", allowed is False)
 
 
 print("\n" + "=" * 72)
