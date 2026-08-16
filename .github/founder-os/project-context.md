@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fix emergency recovery test fixture build
+Resume exact fenced emergency close after fill promotion
 
 ## Last Activity
 
