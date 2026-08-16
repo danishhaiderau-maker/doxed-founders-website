@@ -57,6 +57,7 @@ import csv
 import io
 import itertools
 import zipfile
+import hashlib
 from pathlib import Path
 from research.analysis_eligibility import (
     BITFINEX_COPY_FIDELITY,
