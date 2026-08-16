@@ -878,6 +878,39 @@ export class SignalCyclesService implements OnModuleInit {
     eventId?: string;
     duplicateTerminal?: boolean;
   }> {
+    if (event === 'EXIT') {
+      const authorityKind = typeof body.terminal_authority_kind === 'string'
+        ? body.terminal_authority_kind
+        : '';
+      const authorityEvidence = body.terminal_authority_evidence;
+      const reconciliation = body.final_reconciliation;
+      const evidenceRecord = authorityEvidence && typeof authorityEvidence === 'object' && !Array.isArray(authorityEvidence)
+        ? authorityEvidence as Record<string, unknown>
+        : null;
+      const reconciliationRecord = reconciliation && typeof reconciliation === 'object' && !Array.isArray(reconciliation)
+        ? reconciliation as Record<string, unknown>
+        : null;
+      const exchangeObserved = authorityKind === 'EXCHANGE_OBSERVED_TERMINAL';
+      const closeConfirmed = body.terminal_close_phase === 'CONFIRMED' &&
+        typeof body.terminal_close_request_id === 'string' &&
+        typeof body.terminal_close_claim_token === 'string';
+      if (
+        !authorityKind || !evidenceRecord ||
+        !reconciliationRecord ||
+        reconciliationRecord.schema !== 'relay_final_reconciliation_v1' ||
+        reconciliationRecord.position_reconciled !== true ||
+        reconciliationRecord.complete !== true ||
+        (exchangeObserved
+          ? evidenceRecord.schema !== 'exchange_observed_terminal_v1' ||
+            evidenceRecord.authenticated_exchange_read !== true ||
+            evidenceRecord.submitted_close !== false
+          : !closeConfirmed)
+      ) {
+        throw new BadRequestException(
+          'EXIT requires confirmed terminal authority and authenticated final reconciliation.',
+        );
+      }
+    }
     // Cycle ownership and participant identity are independent reads. Running
     // them serially put two Neon round trips in front of every durable event;
     // on the strict mirror EXIT path that alone consumed ~137 ms after the

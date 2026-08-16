@@ -40,12 +40,29 @@ function terminalEventService(prisma: any) {
   return new SignalCyclesService(prisma, {} as never, {} as never, {} as never);
 }
 
+const authenticatedObservedExit = {
+  venue: 'bitfinex',
+  pnl_usd: 1,
+  pnl_margin_pct: 1,
+  terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+  terminal_authority_evidence: {
+    schema: 'exchange_observed_terminal_v1',
+    authenticated_exchange_read: true,
+    submitted_close: false,
+  },
+  final_reconciliation: {
+    schema: 'relay_final_reconciliation_v1',
+    position_reconciled: true,
+    complete: true,
+  },
+};
+
 test('hire terminal event atomically claims participant before appending its audit row', async () => {
   const calls: string[] = [];
   const service = terminalEventService(terminalEventPrisma(1, calls));
 
   const result = await service.recordHireExecutionEvent(
-    'user-1', 'agent-1', 'cycle-1', 'EXIT', { venue: 'bitfinex', pnl_usd: 1, pnl_margin_pct: 1 },
+    'user-1', 'agent-1', 'cycle-1', 'EXIT', authenticatedObservedExit,
   );
 
   assert.deepEqual(result, { ok: true, participantId: 'participant-1', duplicateTerminal: false });
@@ -63,11 +80,24 @@ test('hire duplicate terminal event is ignored after another closer owns the par
   const service = terminalEventService(terminalEventPrisma(0, calls));
 
   const result = await service.recordHireExecutionEvent(
-    'user-1', 'agent-1', 'cycle-1', 'EXIT', { venue: 'bitfinex', pnl_usd: 1, pnl_margin_pct: 1 },
+    'user-1', 'agent-1', 'cycle-1', 'EXIT', authenticatedObservedExit,
   );
 
   assert.deepEqual(result, { ok: true, participantId: 'participant-1', duplicateTerminal: true });
   assert.deepEqual(calls, ['cycle-read', 'participant-read', 'participant-terminal-claim']);
+});
+
+test('hire EXIT rejects ledger-only terminal writes before reading or mutating the database', async () => {
+  const calls: string[] = [];
+  const service = terminalEventService(terminalEventPrisma(1, calls));
+  await assert.rejects(
+    service.recordHireExecutionEvent(
+      'user-1', 'agent-1', 'cycle-1', 'EXIT',
+      { venue: 'bitfinex', pnl_usd: 0, exit_reason: 'GHOST_LOT_REPAIRED' },
+    ),
+    /authenticated final reconciliation/,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test('source-open position prevents fallback TTL from falsely expiring its INTENT cycle', async () => {

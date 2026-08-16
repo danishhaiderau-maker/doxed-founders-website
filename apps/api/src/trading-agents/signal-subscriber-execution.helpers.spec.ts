@@ -74,6 +74,7 @@ import {
   readSignedShowcaseClose,
   validateTerminalCloseAuthority,
   terminalFinalReconciliation,
+  exchangeObservedTerminalProvenance,
   relayArmTimestampMs,
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
@@ -743,11 +744,13 @@ test('service money path protects a partial fill without cancelling its entry re
   resolveSubmit(7001);
   await protecting.finally(() => { Date.now = originalNow; });
   assert.equal(entryCancelCalls, 0);
-  assert.equal(events.length, 2);
+  assert.equal(events.length, 3);
   assert.equal(events.at(0)?.type, 'UPDATE_STOPS');
   assert.equal(events.at(0)?.payload.event, 'PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED');
-  assert.equal(events.at(1)?.type, 'UPDATE_STOPS');
-  assert.equal(events.at(1)?.payload.event, 'PARTIAL_FILL_REMAINDER_RETAINED');
+  assert.equal(events.at(1)?.type, 'EXECUTION_TIMING');
+  assert.equal(events.at(1)?.payload.operation, 'PARTIAL_STOP_PERSISTED');
+  assert.equal(events.at(2)?.type, 'UPDATE_STOPS');
+  assert.equal(events.at(2)?.payload.event, 'PARTIAL_FILL_REMAINDER_RETAINED');
   assert.equal(events.at(0)?.payload.bitfinexOrderId, 6001);
   assert.equal(events.at(0)?.payload.partialFillStopOrderId, 7001);
   assert.equal(events.at(0)?.payload.partialFillQty, 0.015);
@@ -766,7 +769,11 @@ test('service money path protects a partial fill without cancelling its entry re
     detectionToAck: 400,
     submitToAck: 300,
   });
-  assert.deepEqual(timing(events.at(1)?.payload), timing(events.at(0)?.payload));
+  assert.equal(
+    events.at(1)?.payload.timing_correlation_id,
+    events.at(0)?.payload.timing_correlation_id,
+  );
+  assert.deepEqual(timing(events.at(2)?.payload), timing(events.at(0)?.payload));
   assert.ok(Date.parse(String(events.at(0)?.payload.partial_fill_detected_at))
     <= Date.parse(String(events.at(0)?.payload.stop_submit_started_at)));
   assert.ok(Date.parse(String(events.at(0)?.payload.stop_submit_started_at))
@@ -808,7 +815,68 @@ test('service persists replacement stop ownership before cancelling the old part
     },
     {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
   );
-  assert.deepEqual(order, ['persist', 'cancel-old', 'persist']);
+  assert.deepEqual(order, ['persist', 'persist', 'cancel-old', 'persist']);
+});
+
+test('partial-fill coverage never trusts an existing stop id with wrong exchange properties', async () => {
+  const order: string[] = [];
+  let replacementStopPrice = 0;
+  const fence = protectiveStopFencePrisma();
+  const service = new SignalSubscriberExecutionService(
+    fence.prisma as never,
+    {} as never,
+    { recordHireExecutionEvent: async () => order.push('persist') } as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async (_creds: unknown, input: any) => {
+      replacementStopPrice = input.stopPrice;
+      order.push('submit-new');
+      return 7102;
+    },
+    listActiveOrders: async () => [],
+    findOrder: async (_creds: unknown, id: number) => id === 7101 ? ({
+      id,
+      symbol: 'tBTCF0:USTF0',
+      // Existing metadata claims 0.015 BTC is covered, but the authenticated
+      // exchange order protects only 0.010 BTC and therefore cannot short-cut.
+      amount: 0.01,
+      amountOrig: 0.01,
+      price: replacementStopPrice || 64_767.57,
+      status: 'ACTIVE',
+      orderType: 'STOP',
+      flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }) : ({
+      id,
+      symbol: 'tBTCF0:USTF0',
+      amount: 0.015,
+      amountOrig: 0.015,
+      price: replacementStopPrice,
+      status: 'ACTIVE',
+      orderType: 'STOP',
+      flags: BITFINEX_REDUCE_ONLY_FLAG,
+    }),
+    getMarkPrice: async () => 64_126.31,
+  };
+  (service as any).cancelManagedOrderGone = async (_creds: unknown, id: number) => {
+    order.push(`cancel-${id}`);
+    return { gone: true, attempts: 1 };
+  };
+
+  await (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant',
+    {
+      direction: 'SHORT', qty: 0.031206116, bitfinexOrderId: 6001,
+      limitPrice: 64_126.31, partialFillQty: 0.015, partialFillStopOrderId: 7101,
+    },
+    {}, { risk: { stop_loss_margin_pct: 10 } }, 0.015,
+  );
+
+  assert.deepEqual(order, ['submit-new', 'persist', 'persist', 'cancel-7101', 'persist']);
 });
 
 test('pre-enrichment limit stop reference is no wider than the real limit execution boundary', () => {
@@ -1235,6 +1303,11 @@ test('service protection failure writes terminal state only after confirmed emer
   };
   (service as any).pauseUserRelayForPositionMismatch = async () => {};
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  (service as any).authenticatedExchangeObservedTerminalProvenance = async () => ({
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    terminal_authority_evidence: {},
+    final_reconciliation: { complete: true },
+  });
   (service as any).waitForMarketCloseConfirmation = async () => true;
   (service as any).emergencyClosePartialWithFence = async (input: { attributableQty: number }) => {
     emergencyCloseQty = input.attributableQty;
@@ -1339,6 +1412,11 @@ test('service stop-trigger path records fill and exit only after fresh flat proo
   };
   (service as any).pauseUserRelayForPositionMismatch = async () => {};
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  (service as any).authenticatedExchangeObservedTerminalProvenance = async () => ({
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    terminal_authority_evidence: {},
+    final_reconciliation: { complete: true },
+  });
   await (service as any).reconcilePendingPartialFillStop(
     'agent', 'user', { id: 'cycle', status: SignalCycleStatus.OPEN, tradeId: 'cont-x' },
     'participant',
@@ -1391,6 +1469,11 @@ test('terminal source takes precedence over partial stop rearm in the same tick'
   };
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1, reason: 'NOT_FOUND' });
   (service as any).resolveExchangeTradesFillEvidence = async () => null;
+  (service as any).authenticatedExchangeObservedTerminalProvenance = async () => ({
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    terminal_authority_evidence: {},
+    final_reconciliation: { complete: true },
+  });
   (service as any).recordCancelRaceFill = async (...args: unknown[]) => {
     context = String(args[8]);
     closedQty = Number((args[7] as { filledQty: number }).filledQty);
@@ -1430,6 +1513,11 @@ test('terminal protected partial already flat records FILLED and EXIT without su
   };
   (service as any).cancelManagedOrderGone = async () => ({ gone: true, attempts: 1, reason: 'NOT_FOUND' });
   (service as any).resolveExchangeTradesFillEvidence = async () => null;
+  (service as any).authenticatedExchangeObservedTerminalProvenance = async () => ({
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    terminal_authority_evidence: {},
+    final_reconciliation: { complete: true },
+  });
   const handled = await (service as any).reconcilePendingPartialFillStop(
     'agent', 'user', { id: 'cycle', status: SignalCycleStatus.CLOSED, tradeId: 'cont-x' },
     'participant',
@@ -5298,6 +5386,132 @@ test('terminal authority validation accepts complete signed and persisted absenc
   assert.equal(validateTerminalCloseAuthority(absence, now), true);
   assert.equal(validateTerminalCloseAuthority({ ...absence, evidence: { ...absence.evidence, graceMs: 0 } }, now), false);
   assert.equal(validateTerminalCloseAuthority({ ...absence, evidence: { ...absence.evidence, persistedEventId: '' } }, now), false);
+});
+
+test('terminal account-wide ownership snapshot classifies managed, orphan, and foreign orders', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.activeTrading = {
+    listActiveOrders: async () => [20, 30, 40].map((id) => ({ id, createdAtMs: Date.now() })),
+  };
+  service.prisma = {
+    signalCycleParticipant: {
+      findMany: async () => [
+        { id: 'exiting', status: SignalCycleStatus.OPEN },
+        { id: 'peer', status: SignalCycleStatus.OPEN },
+      ],
+    },
+    signalCycleEvent: {
+      findMany: async () => [{ payload: { bitfinex_order_id: 30 } }],
+    },
+  };
+  service.loadExecutionMeta = async (id: string) => ({
+    exiting: { stopOrderId: 10 },
+    peer: { stopOrderId: 20 },
+  })[id];
+  const result = await service.attachAuthenticatedAccountWideOrderOwnership(
+    'agent', 'user', 'exiting', {},
+    { ok: true, currentAmount: 0, targetAmount: 0, closeQty: 1, finalAccountFlatten: true, confirmedExchangeAmount: 0 },
+  );
+  assert.deepEqual(result.accountWideActiveOrderIds, [20, 30, 40]);
+  assert.deepEqual(result.accountWideManagedOrderIds, [20]);
+  assert.deepEqual(result.orphanOrderIds, [30]);
+  assert.deepEqual(result.foreignOrderIds, [40]);
+  assert.equal(terminalFinalReconciliation(result)?.complete, true);
+});
+
+test('terminal account-wide ownership snapshot fails closed on uncertainty or exiting order', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.prisma = {
+    signalCycleParticipant: { findMany: async () => [{ id: 'exiting', status: SignalCycleStatus.OPEN }] },
+    signalCycleEvent: { findMany: async () => [] },
+  };
+  service.loadExecutionMeta = async () => ({ stopOrderId: 10 });
+  service.activeTrading = { listActiveOrders: async () => { throw new Error('unavailable'); } };
+  const target = { ok: true, currentAmount: 0, targetAmount: 0, closeQty: 1, finalAccountFlatten: true, confirmedExchangeAmount: 0 };
+  await assert.rejects(
+    service.attachAuthenticatedAccountWideOrderOwnership('agent', 'user', 'exiting', {}, target),
+    /unavailable/,
+  );
+  service.activeTrading.listActiveOrders = async () => [{ id: 10, createdAtMs: Date.now() }];
+  await assert.rejects(
+    service.attachAuthenticatedAccountWideOrderOwnership('agent', 'user', 'exiting', {}, target),
+    /MANAGED_ORDER_REMAINS_ACTIVE/,
+  );
+});
+
+test('exchange-observed terminal provenance requires authenticated exact reconciliation', () => {
+  assert.throws(
+    () => exchangeObservedTerminalProvenance({
+      observation: 'AUTHENTICATED_POSITION_FLAT',
+      observedAtMs: 1_700_000_000_000,
+      reconciliation: undefined,
+    }),
+    /RECONCILIATION_REQUIRED/,
+  );
+  assert.throws(
+    () => exchangeObservedTerminalProvenance({
+      observation: 'AUTHENTICATED_POSITION_FLAT',
+      observedAtMs: 1_700_000_000_000,
+      reconciliation: { schema: 'relay_final_reconciliation_v1', position_reconciled: false },
+    }),
+    /RECONCILIATION_REQUIRED/,
+  );
+  const reconciliation = terminalFinalReconciliation({
+    ok: true,
+    currentAmount: 0,
+    targetAmount: 0,
+    closeQty: 0.01,
+    finalAccountFlatten: true,
+    confirmedExchangeAmount: 0,
+    remainingManagedOrderIds: [],
+  });
+  assert.deepEqual(exchangeObservedTerminalProvenance({
+    observation: 'AUTHENTICATED_POSITION_FLAT',
+    observedAtMs: 1_700_000_000_000,
+    reconciliation,
+  }), {
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    terminal_authority_evidence: {
+      schema: 'exchange_observed_terminal_v1',
+      observation: 'AUTHENTICATED_POSITION_FLAT',
+      observed_at: '2023-11-14T22:13:20.000Z',
+      authenticated_exchange_read: true,
+      submitted_close: false,
+    },
+    final_reconciliation: reconciliation,
+  });
+});
+
+test('rulebook terminal authorities require the claimed exit condition to have actually fired', () => {
+  const identity = { canonicalTradeId: 'cont-rulebook', lifecycleGeneration: 'seq:9' };
+  const scenario = {
+    ...identity,
+    kind: 'SCENARIO_C_PROFIT_LOCK' as const,
+    evidence: { peak_margin_pct: 5.2, unreal_margin_pct: 2.9, lock_floor_margin_pct: 3 },
+  };
+  assert.equal(validateTerminalCloseAuthority(scenario), true);
+  assert.equal(validateTerminalCloseAuthority({ ...scenario, evidence: { ...scenario.evidence, unreal_margin_pct: 3.1 } }), false);
+  assert.equal(validateTerminalCloseAuthority({ ...scenario, evidence: { ...scenario.evidence, lock_floor_margin_pct: 2 } }), false);
+  assert.equal(validateTerminalCloseAuthority({ ...scenario, evidence: { peak_margin_pct: 3.9, unreal_margin_pct: 1, lock_floor_margin_pct: 0 } }), false);
+
+  const thesis = {
+    ...identity,
+    kind: 'THESIS_FAST_CUT' as const,
+    evidence: { peak_margin_pct: 4.9, unreal_margin_pct: -12, stop_loss_margin_pct: -13 },
+  };
+  assert.equal(validateTerminalCloseAuthority(thesis), true);
+  assert.equal(validateTerminalCloseAuthority({ ...thesis, evidence: { ...thesis.evidence, peak_margin_pct: 5 } }), false);
+  assert.equal(validateTerminalCloseAuthority({ ...thesis, evidence: { ...thesis.evidence, unreal_margin_pct: -11.99 } }), false);
+  assert.equal(validateTerminalCloseAuthority({ ...thesis, evidence: { ...thesis.evidence, stop_loss_margin_pct: -30 } }), false);
+
+  const hardStop = {
+    ...identity,
+    kind: 'HARD_STOP' as const,
+    evidence: { unreal_margin_pct: -13.1, stop_loss_margin_pct: -13 },
+  };
+  assert.equal(validateTerminalCloseAuthority(hardStop), true);
+  assert.equal(validateTerminalCloseAuthority({ ...hardStop, evidence: { unreal_margin_pct: -12.9, stop_loss_margin_pct: -13 } }), false);
+  assert.equal(validateTerminalCloseAuthority({ ...hardStop, evidence: { unreal_margin_pct: -30, stop_loss_margin_pct: -30 } }), false);
 });
 
 // ---------------------------------------------------------------------------

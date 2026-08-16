@@ -376,3 +376,85 @@ def test_policy_key_changes_with_execution_cost_or_ladder():
         buf["exit_config"], buf, changed
     )
     assert key_one != key_two
+
+
+def test_execution_timing_projects_only_explicit_stages_and_reports_sla():
+    record = {"participantId": "p1", "events": [{
+        "id": "timing-1", "eventType": "EXECUTION_TIMING", "createdAt": "2026-08-16T00:00:09Z",
+        "payload": {"schema": "relay_execution_timing_v1", "operation": "ORDER_PLACED",
+                    "bitfinex_order_id": "42", "stages": {
+                        "queueEnteredAtMs": 1000, "executorStartedAtMs": 1100,
+                        "databasePreflightStartedAtMs": 1200, "databasePreflightCompletedAtMs": 1300,
+                        "bitfinexRequestStartedAtMs": 1400, "exchangeAckAtMs": 4201,
+                        "persistenceStartedAtMs": 4300, "persistenceCompletedAtMs": 4400,
+                    }}
+    }]}
+    evidence = pure_relay._normalize_platform_bitfinex_evidence([record], "cont-timing")
+    timing = evidence["execution_timing"][0]
+    assert timing["complete"] is True
+    assert timing["queue_to_exchange_ack_ms"] == 3201
+    assert timing["sla_3s_verdict"] == "MISS"
+
+
+def test_execution_timing_missing_ack_is_unknown_not_event_timestamp():
+    record = {"participantId": "p1", "events": [{
+        "id": "timing-2", "eventType": "EXECUTION_TIMING", "createdAt": "2026-08-16T00:00:09Z",
+        "payload": {"schema": "relay_execution_timing_v1", "operation": "LIMIT_UPDATED",
+                    "stages": {"queueEnteredAtMs": 1000}}
+    }]}
+    evidence = pure_relay._normalize_platform_bitfinex_evidence([record], "cont-unknown")
+    timing = evidence["execution_timing"][0]
+    assert timing["complete"] is False
+    assert "exchangeAckAtMs" in timing["missing_stages"]
+    assert timing["queue_to_exchange_ack_ms"] is None
+    assert timing["sla_3s_verdict"] == "UNKNOWN"
+
+
+def test_fill_stop_close_timing_preserves_explicit_stages_and_missing_truth():
+    events = [
+        {"id": "fill", "eventType": "FILLED", "createdAt": "2026-08-16T00:00:50Z",
+         "payload": {"exchange_fill_last_at": "2026-08-16T00:00:01Z",
+                     "exchange_fill_received_at": "2026-08-16T00:00:02Z",
+                     "fill_detected_at": "2026-08-16T00:00:03Z",
+                     "stop_submit_started_at": "2026-08-16T00:00:04Z",
+                     "stop_exchange_ack_at": "2026-08-16T00:00:05Z"}},
+        {"id": "stop", "eventType": "STOP_LOSS_ARMED", "createdAt": "2026-08-16T00:00:51Z",
+         "payload": {"stopOrderId": "stop-1", "stop_submit_started_at": "2026-08-16T00:00:04Z",
+                     "stop_exchange_ack_at": "2026-08-16T00:00:05Z"}},
+        {"id": "exit", "eventType": "EXIT", "createdAt": "2026-08-16T00:01:50Z",
+         "payload": {"close_preflight_started_at": "2026-08-16T00:01:01Z",
+                     "close_submit_started_at": "2026-08-16T00:01:02Z",
+                     "close_exchange_ack_at": "2026-08-16T00:01:03Z",
+                     "close_confirmed_at": "2026-08-16T00:01:04Z"}},
+        {"id": "exit-receipt", "eventType": "EXECUTION_TIMING", "createdAt": "2026-08-16T00:01:51Z",
+         "payload": {"schema": "relay_execution_persistence_receipt_v1",
+                     "operation": "EXIT_PERSISTED",
+                     "stages": {"persistenceCompletedAtMs": 1786838465000}}},
+    ]
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": events}], "cont-lifecycle"
+    )
+    rows = {row["operation"]: row for row in evidence["execution_timing"]}
+    assert (rows["FILL_PROTECTED"]["stages"]["exchangeFillReceivedAtMs"]
+            - rows["FILL_PROTECTED"]["stages"]["exchangeFillOccurredAtMs"]) == 1000
+    assert "fillPersistenceCompletedAtMs" in rows["FILL_PROTECTED"]["missing_stages"]
+    assert "fillDetectedAtMs" in rows["STOP_PROTECTION"]["missing_stages"]
+    assert (rows["TERMINAL_CLOSE"]["stages"]["closeConfirmedAtMs"]
+            - rows["TERMINAL_CLOSE"]["stages"]["closeExchangeAckAtMs"]) == 1000
+    assert rows["TERMINAL_CLOSE"]["stages"]["closePersistenceCompletedAtMs"] == 1786838465000
+    assert "closePersistenceCompletedAtMs" not in rows["TERMINAL_CLOSE"]["missing_stages"]
+    assert all(row["complete"] is False for row in rows.values())
+
+
+def test_persistence_receipts_are_post_write_and_fail_observability_only():
+    service = (ROOT.parent.parent / "apps" / "api" / "src" / "trading-agents" /
+               "signal-subscriber-execution.service.ts").read_text(encoding="utf-8")
+    for lifecycle_type, receipt in (
+        ("'FILLED'", "operation: 'FILLED_PERSISTED'"),
+        ("'STOP_LOSS_ARMED'", "operation: 'STOP_LOSS_ARMED_PERSISTED'"),
+        ("'EXIT'", "operation: 'EXIT_PERSISTED'"),
+    ):
+        receipt_at = service.index(receipt)
+        assert service.rfind(lifecycle_type, 0, receipt_at) >= 0
+        receipt_tail = service[receipt_at:receipt_at + 900]
+        assert ".catch((err) => this.logger.warn" in receipt_tail

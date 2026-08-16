@@ -42,6 +42,8 @@ import {
   solveScenarioCRung,
   SCENARIO_C_LADDER,
   SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
+  SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT,
+  SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT,
   buildCopyRelayCapacity,
   isPaperLaneTradeId,
   isMirrorableLaneTradeId,
@@ -785,6 +787,10 @@ export type RelayLotExitTarget = {
   closeConfirmedAtMs?: number;
   confirmedExchangeAmount?: number;
   remainingManagedOrderIds?: number[];
+  accountWideActiveOrderIds?: number[];
+  accountWideManagedOrderIds?: number[];
+  orphanOrderIds?: number[];
+  foreignOrderIds?: number[];
   reason?: string;
 };
 
@@ -797,6 +803,10 @@ export function terminalFinalReconciliation(
     !Number.isFinite(target.targetAmount)
   ) return undefined;
   const remaining = (target.remainingManagedOrderIds ?? []).filter(Number.isSafeInteger);
+  const accountWideKnown = Array.isArray(target.accountWideActiveOrderIds) &&
+    Array.isArray(target.accountWideManagedOrderIds) &&
+    Array.isArray(target.orphanOrderIds) &&
+    Array.isArray(target.foreignOrderIds);
   const positionDeltaSats = btcToSats(target.confirmedExchangeAmount - target.targetAmount);
   return {
     schema: 'relay_final_reconciliation_v1',
@@ -809,10 +819,46 @@ export function terminalFinalReconciliation(
     order_delta: remaining.length,
     // These require an account-wide ownership snapshot. Never claim zero from
     // this participant-local confirmation alone.
-    orphan_order_count: null,
-    foreign_order_count: null,
-    complete: false,
-    incomplete_reasons: ['ACCOUNT_WIDE_ORDER_OWNERSHIP_NOT_CAPTURED'],
+    ...(accountWideKnown ? {
+      account_wide_active_order_ids: target.accountWideActiveOrderIds!.map(String),
+      account_wide_managed_order_ids: target.accountWideManagedOrderIds!.map(String),
+    } : {}),
+    orphan_order_count: accountWideKnown ? target.orphanOrderIds!.length : null,
+    foreign_order_count: accountWideKnown ? target.foreignOrderIds!.length : null,
+    ...(accountWideKnown ? {
+      orphan_order_ids: target.orphanOrderIds!.map(String),
+      foreign_order_ids: target.foreignOrderIds!.map(String),
+    } : {}),
+    complete: accountWideKnown,
+    incomplete_reasons: accountWideKnown ? [] : ['ACCOUNT_WIDE_ORDER_OWNERSHIP_NOT_CAPTURED'],
+  };
+}
+
+export function exchangeObservedTerminalProvenance(input: {
+  observation: 'AUTHENTICATED_POSITION_FLAT' | 'AUTHENTICATED_STOP_REDUCTION';
+  observedAtMs: number;
+  reconciliation: Record<string, unknown> | undefined;
+}): Record<string, unknown> {
+  if (!Number.isFinite(input.observedAtMs) || input.observedAtMs <= 0) {
+    throw new Error('EXCHANGE_OBSERVED_TERMINAL_OBSERVED_AT_REQUIRED');
+  }
+  if (
+    !input.reconciliation ||
+    input.reconciliation.schema !== 'relay_final_reconciliation_v1' ||
+    input.reconciliation.position_reconciled !== true
+  ) {
+    throw new Error('EXCHANGE_OBSERVED_TERMINAL_RECONCILIATION_REQUIRED');
+  }
+  return {
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    terminal_authority_evidence: {
+      schema: 'exchange_observed_terminal_v1',
+      observation: input.observation,
+      observed_at: new Date(input.observedAtMs).toISOString(),
+      authenticated_exchange_read: true,
+      submitted_close: false,
+    },
+    final_reconciliation: input.reconciliation,
   };
 }
 
@@ -1312,12 +1358,30 @@ export function validateTerminalCloseAuthority(
         Array.isArray(missingEvidence) && missingEvidence.length === 0 && text('persistedEventId')
       );
     }
-    case 'SCENARIO_C_PROFIT_LOCK':
-      return finite('peak_margin_pct') != null && finite('unreal_margin_pct') != null && finite('lock_floor_margin_pct') != null;
-    case 'THESIS_FAST_CUT':
-      return finite('peak_margin_pct') != null && finite('unreal_margin_pct') != null && finite('stop_loss_margin_pct') != null;
-    case 'HARD_STOP':
-      return finite('unreal_margin_pct') != null && finite('stop_loss_margin_pct') != null;
+    case 'SCENARIO_C_PROFIT_LOCK': {
+      const peak = finite('peak_margin_pct');
+      const unreal = finite('unreal_margin_pct');
+      const recordedFloor = finite('lock_floor_margin_pct');
+      const rulebookFloor = peak == null ? null : getProfitLockFloor(peak, SCENARIO_C_LADDER);
+      return peak != null && unreal != null && recordedFloor != null && rulebookFloor != null &&
+        peak >= SCENARIO_C_LADDER[0][0] && Math.abs(recordedFloor - rulebookFloor) <= 1e-9 &&
+        unreal <= rulebookFloor;
+    }
+    case 'THESIS_FAST_CUT': {
+      const peak = finite('peak_margin_pct');
+      const unreal = finite('unreal_margin_pct');
+      const physicalStop = finite('stop_loss_margin_pct');
+      return peak != null && unreal != null && physicalStop != null &&
+        peak < SUBSCRIBER_THESIS_MFE_PROTECT_MARGIN_PCT &&
+        unreal <= SUBSCRIBER_THESIS_FAST_EXIT_MARGIN_PCT &&
+        physicalStop < 0 && physicalStop >= SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT;
+    }
+    case 'HARD_STOP': {
+      const unreal = finite('unreal_margin_pct');
+      const physicalStop = finite('stop_loss_margin_pct');
+      return unreal != null && physicalStop != null && physicalStop < 0 &&
+        physicalStop >= SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT && unreal <= physicalStop;
+    }
     case 'LATE_FILL_CLEANUP':
       return text('policy') === 'EXCHANGE_ONLY_PARTIAL_FILL_TERMINAL_CLEANUP' && Boolean(text('cancel_context')) && Boolean(text('fill_source')) && positive('filled_qty');
     case 'AUTHENTICATED_MANUAL_OR_EMERGENCY':
@@ -7918,16 +7982,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         continue;
       }
 
-      await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'EXIT', {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, participant.cycleId, 'NEGATIVE_EVIDENCE', {
         venue,
         exit_price: mark || fillPrice,
-        exit_reason: 'MANUAL_PARTIAL_CLOSE',
+        reason: 'PARTIAL_LEDGER_EXIT_RECONCILIATION_DISABLED',
         pnl_usd: Math.round(flat.pnlUsd * 100) / 100,
         pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
         qty_closed: meta.qty,
         pnl_source: flat.pnlSource,
         source: 'hire',
-        event: 'ORPHAN_LEDGER_RECONCILE',
+        event: 'ORPHAN_LEDGER_RECONCILE_BLOCKED',
         cancelled_order_ids: cancelledOids,
       });
 
@@ -7938,7 +8002,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           userId,
           agentId,
           participant.cycleId,
-          'EXIT',
+          'RECONCILE_AUTO_CANCELLED_OWN_ORPHAN',
           {
             venue,
             source: 'hire',
@@ -9443,7 +9507,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         .catch(() => {});
     }
 
+    const fillPersistenceCorrelationId = randomUUID();
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'FILLED', {
+      timing_correlation_id: fillPersistenceCorrelationId,
       venue: 'bitfinex',
       fill_price: fillPrice,
       fill_price_source: exchangeFillEvidence != null ? 'exchange_trades' : undefined,
@@ -9511,6 +9577,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       unfilled_qty_cancelled: ttlRemainderSettlement?.cancelledQty,
       ttl_remainder_cancel_reason: ttlRemainderSettlement?.cancelReason,
     });
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXECUTION_TIMING', {
+      schema: 'relay_execution_persistence_receipt_v1',
+      venue: 'bitfinex', source: 'hire', operation: 'FILLED_PERSISTED',
+      trade_id: cycle.tradeId, participant_id: participantId,
+      bitfinex_order_id: meta.bitfinexOrderId,
+      related_event_type: 'FILLED', timing_correlation_id: fillPersistenceCorrelationId,
+      stages: { persistenceCompletedAtMs: Date.now() },
+    }).catch((err) => this.logger.warn(`FILLED persistence receipt failed: ${err instanceof Error ? err.message : err}`));
     if (!(await this.setFillPromotionPhase(
       participantId,
       promotion.token,
@@ -9521,7 +9595,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       throw new Error(`FILL_PROMOTION_FINALIZE_LOST participant=${participantId}`);
     }
     if (stopOrderId != null) {
+      const stopPersistenceCorrelationId = randomUUID();
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'STOP_LOSS_ARMED', {
+        timing_correlation_id: stopPersistenceCorrelationId,
         venue: 'bitfinex',
         stop_price: stopPrice,
         stopOrderId,
@@ -9537,6 +9613,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             : undefined,
         source: 'hire',
       });
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXECUTION_TIMING', {
+        schema: 'relay_execution_persistence_receipt_v1',
+        venue: 'bitfinex', source: 'hire', operation: 'STOP_LOSS_ARMED_PERSISTED',
+        trade_id: cycle.tradeId, participant_id: participantId,
+        bitfinex_order_id: stopOrderId, related_event_type: 'STOP_LOSS_ARMED',
+        timing_correlation_id: stopPersistenceCorrelationId,
+        stages: { persistenceCompletedAtMs: Date.now() },
+      }).catch((err) => this.logger.warn(`STOP persistence receipt failed: ${err instanceof Error ? err.message : err}`));
     }
     await this.healStuckPendingFill(participantId, cycle.id, fillPrice);
 
@@ -10895,16 +10979,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const ageMs = Date.now() - row.updatedAt.getTime();
       if (ageMs < 120_000) continue;
 
-      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'NEGATIVE_EVIDENCE', {
         venue: 'bitfinex',
-        pnl_usd: 0,
-        exit_reason: 'GHOST_LOT_REPAIRED',
-        event: 'GHOST_LOT_REPAIRED',
+        reason: 'MISSING_LEDGER_QTY_OR_DIRECTION',
+        event: 'GHOST_LOT_REPAIR_REQUIRED',
         source: 'hire',
       });
-      this.positionRuntime.delete(row.id);
-      this.logger.warn(
-        `Closed ghost OPEN lot ${userId} participant=${row.id} cycle=${row.cycleId} (missing qty/direction)`,
+      this.logger.error(
+        `Ghost OPEN lot held ${userId} participant=${row.id} cycle=${row.cycleId} (missing qty/direction; no authenticated terminal evidence)`,
       );
     }
   }
@@ -11097,23 +11179,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
       if (!(await this.replacementTerminalUnfilledProof(creds, latestMeta))) continue;
 
-      await this.prisma.signalCycleParticipant.update({
-        where: { id: row.id },
-        data: {
-          status: SignalCycleStatus.CLOSED,
-          exitPrice: null,
-          pnlUsd: 0,
-          pnlMarginPct: 0,
-        },
-      });
-
-      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXIT', {
+      await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXPIRED', {
         venue,
-        exit_reason: 'RECONCILE_CANCEL_BY_EXCHANGE',
+        reason: 'RECONCILE_CANCEL_BY_EXCHANGE_UNFILLED',
         pnl_usd: 0,
         pnl_margin_pct: 0,
         source: 'hire',
-        event: 'RECONCILE_CANCEL_BY_EXCHANGE',
+        event: 'NEGATIVE_EVIDENCE',
+        lifecycle_outcome: 'TERMINAL_UNFILLED',
         bitfinex_order_id: oid,
         participant_id: row.id,
       });
@@ -12173,6 +12246,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           exit_reason: 'EXCHANGE_ALREADY_FLAT',
           qty_closed: realizedQty,
           pnl_usd: 0,
+          ...await this.authenticatedExchangeObservedTerminalProvenance(
+            agentId, userId, participantId, creds, 'AUTHENTICATED_POSITION_FLAT', {
+              ok: true,
+              currentAmount: 0,
+              targetAmount: 0,
+              closeQty: 0,
+              finalAccountFlatten: true,
+              confirmedExchangeAmount: 0,
+              remainingManagedOrderIds: [],
+            },
+          ),
         });
         return true;
       }
@@ -12417,6 +12501,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       exit_reason: 'EXCHANGE_STOP',
       qty_closed: partialQty,
       pnl_usd: 0,
+      ...await this.authenticatedExchangeObservedTerminalProvenance(
+        agentId, userId, participantId, creds, 'AUTHENTICATED_POSITION_FLAT', {
+          ok: true,
+          currentAmount: 0,
+          targetAmount: 0,
+          closeQty: 0,
+          finalAccountFlatten: true,
+          confirmedExchangeAmount: 0,
+          remainingManagedOrderIds: [],
+        },
+      ),
     });
     await this.pauseUserRelayForPositionMismatch(
       userId,
@@ -12553,18 +12648,34 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const priorStopId = meta.partialFillStopOrderId ?? meta.stopOrderId;
     const alreadyCovered = meta.partialFillQty ?? 0;
 
+    const leverage = resolveSubscriberLeverage(intent);
+    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+      intent?.risk?.stop_loss_margin_pct,
+      { mirrorMode: isShowcaseMirrorOnlyMode() },
+    );
+    const fillPrice = fillEvidence?.fillPrice && fillEvidence.fillPrice > 0
+      ? fillEvidence.fillPrice
+      : meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
+    const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
+
     if (priorStopId && btcToSats(alreadyCovered) >= btcToSats(filledQty)) {
-      let existing: Awaited<ReturnType<ExecutionTradingClient['findOrder']>>;
-      try {
-        existing = await this.activeTrading.findOrder(creds, priorStopId);
-      } catch (err) {
+      const existing = await this.authenticateExactProtectiveStop(creds, priorStopId, {
+        positionDirection: meta.direction,
+        qty: filledQty,
+        stopPrice,
+        leverage,
+      });
+      if (existing.ok) return;
+      if (existing.reason.includes('STOP_AUTH_READ_FAILED')) {
         const message = `PARTIAL_FILL_EXISTING_STOP_STATUS_UNKNOWN cycle=${cycleId} stop=${priorStopId}: ${
-          err instanceof Error ? err.message : String(err)
+          existing.reason
         }`;
         await this.pauseUserRelayForPositionMismatch(userId, agentId, message).catch(() => {});
         throw new Error(message);
       }
-      if (existing) return;
+      // Merely finding an order id is not protection evidence. A stale/wrong
+      // quantity, side, type, reduce-only flag, symbol, price, or status must
+      // proceed through the durable replacement handoff below.
     }
 
     // Retry cleanup from a prior acknowledged overlap before creating another
@@ -12582,15 +12693,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
     }
 
-    const leverage = resolveSubscriberLeverage(intent);
-    const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
-      intent?.risk?.stop_loss_margin_pct,
-      { mirrorMode: isShowcaseMirrorOnlyMode() },
-    );
-    const fillPrice = fillEvidence?.fillPrice && fillEvidence.fillPrice > 0
-      ? fillEvidence.fillPrice
-      : meta.limitPrice ?? (await this.activeTrading.getMarkPrice());
-    const stopPrice = computeStopPrice(fillPrice, meta.direction, stopLossMarginPct, leverage);
     let newStopId: number;
     const stopSubmitStartedAtMs = Date.now();
     let stopExchangeAckAtMs = 0;
@@ -12701,7 +12803,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       ? priorStopId
       : undefined;
     try {
+    const partialStopPersistenceCorrelationId = randomUUID();
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+      timing_correlation_id: partialStopPersistenceCorrelationId,
       venue: 'bitfinex',
       source: 'hire',
       event: 'PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED',
@@ -12732,6 +12836,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         : 'COPY_FILLED_SOURCE_PENDING_OR_UNKNOWN',
       fill_ratio: desiredQty > 0 ? filledQty / desiredQty : 1,
     });
+    await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXECUTION_TIMING', {
+      schema: 'relay_execution_persistence_receipt_v1',
+      venue: 'bitfinex', source: 'hire', operation: 'PARTIAL_STOP_PERSISTED',
+      participant_id: participantId, bitfinex_order_id: newStopId,
+      related_event_type: 'UPDATE_STOPS', timing_correlation_id: partialStopPersistenceCorrelationId,
+      stages: { persistenceCompletedAtMs: Date.now() },
+    }).catch((err) => this.logger.warn(`PARTIAL STOP persistence receipt failed: ${err instanceof Error ? err.message : err}`));
     } catch (err) {
       // The exact new stop is live, but ownership could not be persisted. Keep
       // any prior stop in place and pause; cancelling it would turn a database
@@ -13991,6 +14102,126 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     );
   }
 
+  private async attachAuthenticatedAccountWideOrderOwnership(
+    agentId: string,
+    userId: string,
+    exitingParticipantId: string,
+    creds: ExchangeCredentials,
+    target: RelayLotExitTarget,
+  ): Promise<RelayLotExitTarget> {
+    // Both reads are authoritative inputs. A failed/malformed Bitfinex active
+    // order response throws in the client; never turn uncertainty into zero.
+    const [activeOrders, participants, terminalOwnershipEvents] = await Promise.all([
+      this.activeTrading.listActiveOrders(creds),
+      this.prisma.signalCycleParticipant.findMany({
+        where: {
+          userId,
+          cycle: { agentId },
+          status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        },
+        select: { id: true, status: true },
+      }),
+      this.prisma.signalCycleEvent.findMany({
+        where: {
+          participantId: { not: null },
+          eventType: { in: ['ORDER_PLACED', 'UPDATE_STOPS'] },
+          createdAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000) },
+          participant: {
+            userId,
+            cycle: { agentId },
+            status: { in: [SignalCycleStatus.CLOSED, SignalCycleStatus.EXPIRED] },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 2_000,
+        select: { payload: true },
+      }),
+    ]);
+    const activeIds = new Set(activeOrders.map((order) => order.id));
+    const ownershipCutoffMs = Date.now() - 90 * 24 * 60 * 60 * 1_000;
+    for (const order of activeOrders) {
+      if (!Number.isFinite(order.createdAtMs) || (order.createdAtMs ?? 0) < ownershipCutoffMs) {
+        throw new Error(`ACCOUNT_WIDE_ORDER_OWNERSHIP_WINDOW_UNKNOWN oid=${order.id}`);
+      }
+    }
+    const liveManaged = new Set<number>();
+    const terminalManaged = new Set<number>();
+    const exitingManaged = new Set<number>();
+    for (const participant of participants) {
+      const meta = await this.loadExecutionMeta(participant.id);
+      const ids = [
+        meta.bitfinexOrderId,
+        meta.stopOrderId,
+        meta.partialFillStopOrderId,
+        meta.supersededPartialStopOrderId,
+        meta.supersededStopOrderId,
+      ].filter((id): id is number => Number.isSafeInteger(id));
+      for (const id of ids) {
+        if (!activeIds.has(id)) continue;
+        if (participant.id === exitingParticipantId) exitingManaged.add(id);
+        else liveManaged.add(id);
+      }
+    }
+    for (const event of terminalOwnershipEvents) {
+      if (!event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) continue;
+      const payload = event.payload as Record<string, unknown>;
+      for (const value of [
+        payload.bitfinex_order_id,
+        payload.bitfinexOrderId,
+        payload.stopOrderId,
+        payload.partialFillStopOrderId,
+        payload.supersededPartialStopOrderId,
+        payload.supersededStopOrderId,
+      ]) {
+        const id = Number(value);
+        if (Number.isSafeInteger(id) && activeIds.has(id)) terminalManaged.add(id);
+      }
+      const cid = Number(payload.clientOrderId);
+      if (Number.isSafeInteger(cid)) {
+        for (const order of activeOrders) {
+          if (order.cid === cid) terminalManaged.add(order.id);
+        }
+      }
+    }
+    if (exitingManaged.size > 0) {
+      throw new Error(
+        `EXIT_TARGET_MANAGED_ORDER_REMAINS_ACTIVE ids=${[...exitingManaged].join(',')}`,
+      );
+    }
+    const knownOwned = new Set([...liveManaged, ...terminalManaged, ...exitingManaged]);
+    const foreign = [...activeIds].filter((id) => !knownOwned.has(id));
+    return {
+      ...target,
+      remainingManagedOrderIds: [...exitingManaged],
+      accountWideActiveOrderIds: [...activeIds],
+      accountWideManagedOrderIds: [...liveManaged],
+      orphanOrderIds: [...terminalManaged],
+      foreignOrderIds: foreign,
+    };
+  }
+
+  private async authenticatedExchangeObservedTerminalProvenance(
+    agentId: string,
+    userId: string,
+    participantId: string,
+    creds: ExchangeCredentials,
+    observation: 'AUTHENTICATED_POSITION_FLAT' | 'AUTHENTICATED_STOP_REDUCTION',
+    target: RelayLotExitTarget,
+  ): Promise<Record<string, unknown>> {
+    const reconciled = await this.attachAuthenticatedAccountWideOrderOwnership(
+      agentId,
+      userId,
+      participantId,
+      creds,
+      target,
+    );
+    return exchangeObservedTerminalProvenance({
+      observation,
+      observedAtMs: Date.now(),
+      reconciliation: terminalFinalReconciliation(reconciled),
+    });
+  }
+
   private async closeParticipantPositionToLedgerTarget(
     agentId: string,
     userId: string,
@@ -14060,11 +14291,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           );
         }
       }
-      return {
+      return this.attachAuthenticatedAccountWideOrderOwnership(
+        agentId,
+        userId,
+        participantId,
+        creds,
+        {
         ...target,
         confirmedExchangeAmount: position?.amount ?? 0,
         remainingManagedOrderIds,
-      };
+        },
+      );
     }
 
     if (!terminalFence) throw new Error('TERMINAL_CLOSE_FENCE_REQUIRED');
@@ -14165,14 +14402,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         );
       }
     }
-    return {
+    return this.attachAuthenticatedAccountWideOrderOwnership(
+      agentId,
+      userId,
+      participantId,
+      creds,
+      {
       ...target,
       closeSubmitStartedAtMs,
       closeExchangeAckAtMs,
       closeConfirmedAtMs: Date.now(),
       confirmedExchangeAmount,
       remainingManagedOrderIds,
-    };
+      },
+    );
   }
 
   private async waitForMarketCloseConfirmation(
@@ -14848,7 +15091,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const closeExchangeAckAtMs = closeTarget.closeExchangeAckAtMs;
       const closeConfirmedAtMs = closeTarget.closeConfirmedAtMs;
 
+      const exitPersistenceCorrelationId = randomUUID();
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
+        timing_correlation_id: exitPersistenceCorrelationId,
         venue: 'bitfinex',
         exit_price: exitPrice,
         exit_reason: 'SHOWCASE_MIRROR',
@@ -14901,6 +15146,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         final_reconciliation: terminalFinalReconciliation(closeTarget),
         source: 'hire',
       });
+      await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXECUTION_TIMING', {
+        schema: 'relay_execution_persistence_receipt_v1',
+        venue: 'bitfinex', source: 'hire', operation: 'EXIT_PERSISTED',
+        trade_id: terminalClaim.authority.canonicalTradeId, participant_id: participant.id,
+        related_event_type: 'EXIT', timing_correlation_id: exitPersistenceCorrelationId,
+        stages: { persistenceCompletedAtMs: Date.now() },
+      }).catch((err) => this.logger.warn(`EXIT persistence receipt failed: ${err instanceof Error ? err.message : err}`));
 
       this.logger.log(
         `Hire showcase mirror exit ${userId} cycle=${cycle.id} pnl=$${pnlUsd.toFixed(2)} showcase_exit=${opts?.showcaseExitPrice?.toFixed(2) ?? 'n/a'} slip=$${exitSlippageUsd ?? 0}`,
@@ -17133,6 +17385,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         source: 'hire',
         event: 'IMMEDIATE_EXCHANGE_FLAT',
         cancelled_order_ids: cancelledOids,
+        ...await this.authenticatedExchangeObservedTerminalProvenance(
+          agentId, userId, row.id, creds, 'AUTHENTICATED_POSITION_FLAT', {
+            ok: true,
+            currentAmount: 0,
+            targetAmount: 0,
+            closeQty: 0,
+            finalAccountFlatten: true,
+            confirmedExchangeAmount: postCancelPosition?.amount ?? 0,
+            remainingManagedOrderIds: [],
+          },
+        ),
       });
       this.logger.warn(
         `Immediate flat reconcile ${userId} cycle=${row.cycleId} — exchange 0, ledger OPEN closed (cancelled_oids=[${cancelledOids.join(',')}])`,
@@ -17206,11 +17469,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     if (meta.stopOrderId) {
-      try {
-        await this.activeTrading.cancelOrder(creds, meta.stopOrderId);
-      } catch {
-        /* stop may have filled */
-      }
+      const stopGone = await this.cancelManagedOrderGone(
+        creds,
+        meta.stopOrderId,
+        `EXCHANGE-OBSERVED terminal cancel stop oid=${meta.stopOrderId}`,
+      );
+      if (!stopGone.gone) return false;
     }
 
     const fillPrice =
@@ -17238,6 +17502,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       pnl_source: 'reconstructed',
       source: 'hire',
+      ...await this.authenticatedExchangeObservedTerminalProvenance(
+        agentId, userId, participant.id, creds, 'AUTHENTICATED_POSITION_FLAT', {
+          ok: true,
+          currentAmount: 0,
+          targetAmount: 0,
+          closeQty: 0,
+          finalAccountFlatten: true,
+          confirmedExchangeAmount: position?.amount ?? 0,
+          remainingManagedOrderIds: [],
+        },
+      ),
     });
 
     await this.prisma.tradingAgentInstance.updateMany({
@@ -17525,6 +17800,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const deficit = ledgerQty - exchangeQty;
     if (deficit < meta.qty * 0.85 || deficit > meta.qty * 1.15) return false;
 
+    const expectedLedgerAfterQty = Math.max(0, ledgerQty - meta.qty);
+    if (btcToSats(exchangeQty) !== btcToSats(expectedLedgerAfterQty)) return false;
+
     if (!meta.stopOrderId) return false;
     const stop = await this.activeTrading.findOrder(creds, meta.stopOrderId).catch(() => null);
     if (stop) return false;
@@ -17554,6 +17832,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       qty_closed: closeQty,
       pnl_source: 'open_position',
       source: 'hire',
+      ...await this.authenticatedExchangeObservedTerminalProvenance(
+        agentId, userId, participant.id, creds, 'AUTHENTICATED_STOP_REDUCTION', {
+          ok: true,
+          currentAmount: position.amount,
+          targetAmount: meta.direction === 'LONG' ? expectedLedgerAfterQty : -expectedLedgerAfterQty,
+          closeQty,
+          finalAccountFlatten: expectedLedgerAfterQty === 0,
+          confirmedExchangeAmount: position.amount,
+          remainingManagedOrderIds: [],
+        },
+      ),
     });
 
     this.logger.log(

@@ -18527,6 +18527,20 @@ def write_analysis_dashboard_html(payload):
     cov = payload.get("coverage") or {}
     findings = payload.get("key_findings") or []
     findings_html = "".join(f"<li>{esc(f)}</li>" for f in findings[:10])
+    provenance = payload.get("analysis_provenance") or {}
+    generation_revision = payload.get("generation_revision") or provenance.get("generation_revision") or "UNKNOWN"
+    cohort_schema = payload.get("cohort_schema") or provenance.get("cohort_schema") or "UNKNOWN"
+    cohorts = payload.get("cohorts") or provenance.get("cohorts") or {}
+    cohort_rows = ""
+    for cohort_name, cohort in sorted(cohorts.items()):
+        cohort = cohort if isinstance(cohort, dict) else {}
+        reasons = cohort.get("exclusion_reason_counts") or {}
+        cohort_rows += (
+            f"<tr><td>{esc(cohort_name)}</td>"
+            f"<td>{esc(cohort.get('included_row_count', cohort.get('eligible_ids', 0)))}</td>"
+            f"<td>{esc(cohort.get('excluded_row_count', 'UNKNOWN'))}</td>"
+            f"<td>{esc(json.dumps(reasons, sort_keys=True))}</td></tr>\n"
+        )
     report_links = ""
     for title, fname, _desc in DEEP_DIVE_REPORT_CATALOG[:12]:
         rp = os.path.join(REPORTS_DIR, os.path.basename(fname))
@@ -18564,6 +18578,7 @@ def write_analysis_dashboard_html(payload):
 <h1>Local Analyzer Snapshot</h1>
 <p class="meta">Read-only Fly mirror of the locally generated analyzer; this is not the live interactive desktop dashboard.</p>
 <p class="meta">{esc(scope_meta)} · {esc(ANALYZER_SYNC_ID)} · confidence: {esc(cov.get('confidence_status', 'n/a'))}</p>
+<p class="meta">Generating revision: <b>{esc(generation_revision)}</b> · cohort schema: <b>{esc(cohort_schema)}</b>. UNKNOWN means this snapshot is unqualified for live-policy conclusions.</p>
 <div class="kpis">
   <div class="kpi"><div class="lbl">Trades</div><div class="val">{p.get('trades', 0)}</div></div>
   <div class="kpi"><div class="lbl">Win Rate</div><div class="val">{p.get('win_rate_pct', 'n/a')}%</div></div>
@@ -18573,6 +18588,7 @@ def write_analysis_dashboard_html(payload):
   <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">${float(re.get('gate_damage_usd') or 0):+.2f}</div></div>
 </div>
 <section><h2>Lanes</h2><table><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>Real PnL</th><th>EV/Approve</th></tr>{lane_rows}</table></section>
+<section><h2>Research Cohorts</h2><table><tr><th>Cohort</th><th>Included</th><th>Excluded</th><th>Exclusion reasons</th></tr>{cohort_rows or '<tr><td colspan="4">UNKNOWN — cohort evidence missing</td></tr>'}</table></section>
 <section><h2>AI Confidence</h2><table><tr><th>Band</th><th>Trades</th><th>WR</th><th>PnL</th></tr>{cal_rows or '<tr><td colspan="4">No data</td></tr>'}</table></section>
 <section><h2>Chase</h2><p>Assisted fills: <b>{ch.get('assisted_fills', 0)}</b> / {ch.get('total_fills', 0)} · Saved: {ch.get('saved_fills', 0)} · TTL expired: {ch.get('ttl_expired', 0)}</p></section>
 <section><h2>Scenario C — Leakage &amp; Exits</h2>

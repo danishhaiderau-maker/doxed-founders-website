@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+from datetime import datetime
 from pathlib import Path
 
 def _validate_platform_relay_evidence_payload(payload: dict) -> tuple[bool, str]:
@@ -114,6 +115,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             )),
             "negative_events": [copy.deepcopy(event) for row in participants.values()
                                 for event in row.get("negative_events") or []],
+            "execution_timing": [copy.deepcopy(event) for row in participants.values()
+                                 for event in row.get("execution_timing") or []],
             "analysis_exclusion_reasons": sorted({
                 reason for row in participants.values()
                 for reason in row.get("analysis_exclusion_reasons") or []
@@ -146,6 +149,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "cost_evidence": {},
         "reconciliation": {},
         "negative_events": [],
+        "execution_timing": [],
         "analysis_exclusion_reasons": [],
         "quantity_evidence_complete": False,
         "order_ack_history_complete": False,
@@ -165,6 +169,17 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             number = float(value)
             return number if math.isfinite(number) else None
         except (TypeError, ValueError):
+            return None
+
+    def timestamp_ms(value):
+        number = finite(value)
+        if number is not None:
+            return number
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000.0
+        except ValueError:
             return None
 
     def append_unique(key, value):
@@ -265,6 +280,90 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 payload, "exchange_ack_at", "exchangeAckAt", "entryExchangeAckAtMs",
                 "stop_exchange_ack_at", "ack_at", "acknowledged_at",
             )
+            if event_type == "EXECUTION_TIMING":
+                stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else {}
+                stage_names = (
+                    "queueEnteredAtMs", "executorStartedAtMs",
+                    "databasePreflightStartedAtMs", "databasePreflightCompletedAtMs",
+                    "bitfinexRequestStartedAtMs", "exchangeAckAtMs",
+                    "persistenceStartedAtMs", "persistenceCompletedAtMs",
+                )
+                projected = {name: finite(stages.get(name)) for name in stage_names}
+                present = {name: value for name, value in projected.items() if value is not None}
+                missing = [name for name in stage_names if name not in present]
+                queue_at = present.get("queueEnteredAtMs")
+                exchange_ack_at = present.get("exchangeAckAtMs")
+                if queue_at is None or exchange_ack_at is None:
+                    sla_verdict = "UNKNOWN"
+                    queue_to_ack_ms = None
+                else:
+                    queue_to_ack_ms = max(0.0, exchange_ack_at - queue_at)
+                    sla_verdict = "PASS" if queue_to_ack_ms <= 3000 else "MISS"
+                append_row("execution_timing", {
+                    "event_id": event_id,
+                    "timing_correlation_id": explicit(payload, "timing_correlation_id"),
+                    "schema": explicit(payload, "schema") or "UNKNOWN",
+                    "operation": explicit(payload, "operation") or "UNKNOWN",
+                    "order_id": order_id,
+                    "stages": present,
+                    "missing_stages": missing,
+                    "queue_to_exchange_ack_ms": queue_to_ack_ms,
+                    "sla_3s_verdict": sla_verdict,
+                    "complete": not missing,
+                })
+            elif event_type == "FILLED":
+                fill_stages = {
+                    "sourceEventAtMs": timestamp_ms(explicit(payload, "source_event_at", "source_fill_at")),
+                    "exchangeFillOccurredAtMs": timestamp_ms(explicit(
+                        payload, "exchange_fill_last_at", "exchange_fill_mts", "exchange_fill_first_at"
+                    )),
+                    "exchangeFillReceivedAtMs": timestamp_ms(explicit(payload, "exchange_fill_received_at")),
+                    "fillDetectedAtMs": timestamp_ms(explicit(payload, "exchange_fill_detected_at", "fill_detected_at")),
+                    "stopRequestStartedAtMs": timestamp_ms(explicit(payload, "stop_submit_started_at")),
+                    "stopExchangeAckAtMs": timestamp_ms(explicit(payload, "stop_exchange_ack_at")),
+                    "fillPersistenceCompletedAtMs": timestamp_ms(explicit(payload, "fill_persistence_completed_at")),
+                }
+                present = {key: value for key, value in fill_stages.items() if value is not None}
+                append_row("execution_timing", {
+                    "event_id": event_id, "schema": "relay_fill_protection_timing_v1",
+                    "timing_correlation_id": explicit(payload, "timing_correlation_id"),
+                    "operation": "FILL_PROTECTED", "order_id": order_id, "stages": present,
+                    "missing_stages": [key for key in fill_stages if key not in present],
+                    "complete": all(key in present for key in fill_stages),
+                })
+            elif event_type in {"STOP_LOSS_ARMED", "UPDATE_STOPS"}:
+                stop_stages = {
+                    "fillDetectedAtMs": timestamp_ms(explicit(payload, "partial_fill_detected_at", "fill_detected_at")),
+                    "stopRequestStartedAtMs": timestamp_ms(explicit(payload, "stop_submit_started_at")),
+                    "stopExchangeAckAtMs": timestamp_ms(explicit(payload, "stop_exchange_ack_at")),
+                    "stopPersistenceCompletedAtMs": timestamp_ms(explicit(payload, "stop_persistence_completed_at")),
+                }
+                present = {key: value for key, value in stop_stages.items() if value is not None}
+                append_row("execution_timing", {
+                    "event_id": event_id, "schema": "relay_stop_timing_v1",
+                    "timing_correlation_id": explicit(payload, "timing_correlation_id"),
+                    "operation": "STOP_PROTECTION", "order_id": stop_id or order_id, "stages": present,
+                    "missing_stages": [key for key in stop_stages if key not in present],
+                    "complete": all(key in present for key in stop_stages),
+                })
+            elif event_type == "EXIT":
+                close_stages = {
+                    "sourceEventAtMs": timestamp_ms(explicit(payload, "source_event_at")),
+                    "platformReceivedAtMs": timestamp_ms(explicit(payload, "platform_received_at")),
+                    "closePreflightStartedAtMs": timestamp_ms(explicit(payload, "close_preflight_started_at")),
+                    "closeRequestStartedAtMs": timestamp_ms(explicit(payload, "close_submit_started_at")),
+                    "closeExchangeAckAtMs": timestamp_ms(explicit(payload, "close_exchange_ack_at")),
+                    "closeConfirmedAtMs": timestamp_ms(explicit(payload, "close_confirmed_at")),
+                    "closePersistenceCompletedAtMs": timestamp_ms(explicit(payload, "close_persistence_completed_at")),
+                }
+                present = {key: value for key, value in close_stages.items() if value is not None}
+                append_row("execution_timing", {
+                    "event_id": event_id, "schema": "relay_close_timing_v1",
+                    "timing_correlation_id": explicit(payload, "timing_correlation_id"),
+                    "operation": "TERMINAL_CLOSE", "order_id": order_id, "stages": present,
+                    "missing_stages": [key for key in close_stages if key not in present],
+                    "complete": all(key in present for key in close_stages),
+                })
             if order_id is not None and ack_at is not None and event_type in {"ORDER_PLACED", "UPDATE_STOPS", "EXECUTION_TIMING"}:
                 append_row("ack_history", {
                     "event_id": event_id, "order_id": order_id, "ack_at": ack_at,
@@ -361,6 +460,36 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             ):
                 if payload.get(key) is True:
                     producer_assertions.add(key)
+
+    receipt_targets = {
+        "FILLED_PERSISTED": ("FILL_PROTECTED", "fillPersistenceCompletedAtMs"),
+        "STOP_LOSS_ARMED_PERSISTED": ("STOP_PROTECTION", "stopPersistenceCompletedAtMs"),
+        "PARTIAL_STOP_PERSISTED": ("STOP_PROTECTION", "stopPersistenceCompletedAtMs"),
+        "EXIT_PERSISTED": ("TERMINAL_CLOSE", "closePersistenceCompletedAtMs"),
+    }
+    for receipt in evidence["execution_timing"]:
+        target = receipt_targets.get(receipt.get("operation"))
+        persisted_at = (receipt.get("stages") or {}).get("persistenceCompletedAtMs")
+        if not target or persisted_at is None:
+            continue
+        target_operation, target_stage = target
+        candidates = [row for row in evidence["execution_timing"]
+                      if row.get("operation") == target_operation]
+        correlation_id = receipt.get("timing_correlation_id")
+        if correlation_id is not None:
+            correlated = [row for row in candidates
+                          if row.get("timing_correlation_id") == correlation_id]
+            if correlated:
+                candidates = correlated
+        if receipt.get("order_id") is not None:
+            same_order = [row for row in candidates if row.get("order_id") == receipt.get("order_id")]
+            if same_order:
+                candidates = same_order
+        for row in candidates[-1:]:
+            row["stages"][target_stage] = persisted_at
+            row["missing_stages"] = [name for name in row.get("missing_stages") or []
+                                     if name != target_stage]
+            row["complete"] = not row["missing_stages"]
 
     evidence["analysis_exclusion_reasons"] = sorted(set(evidence["analysis_exclusion_reasons"]))
     quantities_complete = all(
