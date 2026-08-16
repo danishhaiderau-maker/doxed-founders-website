@@ -57,6 +57,7 @@ import {
   BITFINEX_BTC_PERP_SYMBOL,
   BITFINEX_REDUCE_ONLY_FLAG,
   BitfinexTradingClient,
+  normalizeBitfinexOrderPrice,
   type BitfinexActiveOrder,
 } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
@@ -2171,6 +2172,7 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
   copyDirection?: 'LONG' | 'SHORT' | null,
   relayArmedAtMs?: number | null,
   expectedMissedShowcaseTradeIds: ReadonlySet<string> = new Set(),
+  policyBlockedShowcaseTradeIds: ReadonlySet<string> = new Set(),
 ): T[] {
   return divergences.filter(
     (d) => {
@@ -2191,6 +2193,13 @@ export function reportableMirrorDiffsForRelayMode<T extends { type: string }>(
         return false;
       }
       const tradeId = String((d as T & { tradeId?: string }).tradeId ?? '');
+      if (
+        d.type === 'SHOWCASE_ORDER_NOT_MIRRORED' &&
+        tradeId &&
+        policyBlockedShowcaseTradeIds.has(tradeId)
+      ) {
+        return false;
+      }
       if (
         d.type === 'SHOWCASE_POSITION_NOT_MIRRORED' &&
         tradeId &&
@@ -3393,6 +3402,13 @@ export function accountEmergencyOrderMatchesFence(
   return Math.sign(order.amountOrig) === expectedSign
     && btcToSats(Math.abs(order.amountOrig)) === btcToSats(fence.closeQty)
     && ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0;
+}
+
+/** Only authenticated HTTP business rejections prove that no order was accepted. */
+export function isDeterministicBitfinexSubmitRejection(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Bitfinex v2\/auth\/w\/order\/submit:\s*(?:Invalid order|not enough tradable balance|Order could not be submitted)/i.test(message)
+    && !/(?:timeout|timed out|deadline exceeded|network|fetch failed|ECONN|socket)/i.test(message);
 }
 
 type EntryEligibility = {
@@ -7089,12 +7105,68 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
       }
     }
+    const sourceOnlyOrderTradeIds = divergences
+      .filter((d) => d.type === 'SHOWCASE_ORDER_NOT_MIRRORED' && d.tradeId)
+      .map((d) => d.tradeId as string);
+    const policyBlockedShowcaseTradeIds = new Set<string>();
+    if (sourceOnlyOrderTradeIds.length > 0) {
+      const policyEvents = await this.prisma.signalCycleEvent.findMany({
+        where: {
+          eventType: { in: ['CORRELATED_CLUSTER_BLOCKED', 'EXPIRED'] },
+          cycle: { agentId, tradeId: { in: sourceOnlyOrderTradeIds } },
+          participant: {
+            userId: instance.userId,
+            status: SignalCycleStatus.EXPIRED,
+          },
+        },
+        select: {
+          eventType: true,
+          participantId: true,
+          payload: true,
+          cycle: { select: { tradeId: true } },
+        },
+      });
+      const proofByParticipant = new Map<string, {
+        tradeId: string;
+        blocked: boolean;
+        expiredByPolicy: boolean;
+      }>();
+      for (const event of policyEvents) {
+        if (!event.participantId) continue;
+        const payload =
+          event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+            ? event.payload as Record<string, unknown>
+            : {};
+        const proof = proofByParticipant.get(event.participantId) ?? {
+          tradeId: event.cycle.tradeId,
+          blocked: false,
+          expiredByPolicy: false,
+        };
+        if (
+          event.eventType === 'CORRELATED_CLUSTER_BLOCKED' &&
+          payload.event === 'CORRELATED_CLUSTER_BLOCKED' &&
+          payload.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
+        ) proof.blocked = true;
+        if (
+          event.eventType === 'EXPIRED' &&
+          payload.event === 'CORRELATED_CLUSTER_BLOCKED' &&
+          payload.reason === 'SAME_DIRECTION_PRICE_CLUSTER'
+        ) proof.expiredByPolicy = true;
+        proofByParticipant.set(event.participantId, proof);
+      }
+      for (const proof of proofByParticipant.values()) {
+        if (proof.blocked && proof.expiredByPolicy) {
+          policyBlockedShowcaseTradeIds.add(proof.tradeId);
+        }
+      }
+    }
     const reportableDivergences = reportableMirrorDiffsForRelayMode(
       divergences,
       entryEnabled,
       copyDirection,
       relayArmTimestampMs(dash),
       expectedMissedShowcaseTradeIds,
+      policyBlockedShowcaseTradeIds,
     );
 
     // Rolling counters (per instance, persisted in dashboardState.mirrorDiff.rolling).
@@ -12074,18 +12146,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
 
     const priorStopOrderId = meta.stopOrderId;
-    const stopOrderId = await this.activeTrading.submitStopOrder(creds, {
+    const protectedStop = await this.ensureDurableProtectiveStop({
+      participantId,
+      purpose: stopPriceOverride != null
+        ? 'SCENARIO_C_REPLACEMENT'
+        : 'OPEN_REPAIR',
+      creds,
       positionDirection: meta.direction,
       qty,
       stopPrice,
       leverage,
-    }).catch(() => null);
+      predecessorOrderId: priorStopOrderId,
+    }).catch((err) => ({
+      ok: false as const,
+      unknown: true as const,
+      reason: `PROTECTIVE_STOP_REPAIR_FAILED:${err instanceof Error ? err.message : String(err)}`,
+      clientOrderId: 0,
+    }));
 
-    if (stopOrderId != null) {
+    if (protectedStop.ok) {
+      const stopOrderId = protectedStop.orderId;
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'STOP_LOSS_ARMED', {
         venue: 'bitfinex',
         stop_price: stopPrice,
+        venue_stop_price: normalizeBitfinexOrderPrice(stopPrice),
         stopOrderId,
+        stop_client_order_id: protectedStop.clientOrderId,
+        recovered_existing_stop: protectedStop.recovered,
         qty,
         stop_loss_margin_pct: stopLossMarginPct,
         supersededStopOrderId:
@@ -12114,6 +12201,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
       }
       this.logger.log(`Hire stop retry ${userId} cycle=${cycleId} @ ${stopPrice.toFixed(2)}`);
+    } else {
+      await this.holdUnprotectedFill(
+        agentId,
+        userId,
+        cycleId,
+        participantId,
+        { reason: protectedStop.reason },
+        'OPEN_STOP_REPAIR',
+      );
     }
   }
 
@@ -14105,7 +14201,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         const stopType = order.orderType.toUpperCase().includes('STOP');
         const reduceOnly = ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0;
         const exactSymbol = order.symbol === BITFINEX_BTC_PERP_SYMBOL;
-        const exactPrice = Math.abs(order.price - input.stopPrice) < 0.011;
+        const venueStopPrice = normalizeBitfinexOrderPrice(input.stopPrice);
+        const exactPrice = Math.abs(order.price - venueStopPrice) < 1e-8
+          || Math.abs(order.price - input.stopPrice) < 0.011;
         const active = order.status.toUpperCase().includes('ACTIVE');
         if (exactQty && exactSide && stopType && reduceOnly && exactSymbol && exactPrice && active) {
           return { ok: true, orderId, order };
@@ -18677,17 +18775,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     if (qty && btcToSats(qty) > 0 && direction) {
       if (shouldPersistLotMetaRepair(meta, { qty, direction })) {
-        await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
-          venue: 'bitfinex',
-          event: 'META_QTY_REPAIR',
-          qty,
-          direction,
-          margin_usd: marginUsd,
-          source: 'hire',
+        // A derived metadata repair may enrich an active money-path lot, but it
+        // must never append lifecycle mutations after terminal evidence.
+        const repairOwner = await this.prisma.signalCycleParticipant.findUnique({
+          where: { id: participantId },
+          select: { status: true },
         });
-        this.logger.warn(
-          `Repaired missing lot meta ${userId} participant=${participantId} qty=${qty.toFixed(5)} direction=${direction}`,
-        );
+        if (
+          repairOwner?.status === SignalCycleStatus.INTENT ||
+          repairOwner?.status === SignalCycleStatus.PENDING_ENTRY ||
+          repairOwner?.status === SignalCycleStatus.OPEN
+        ) {
+          await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'UPDATE_STOPS', {
+            venue: 'bitfinex',
+            event: 'META_QTY_REPAIR',
+            qty,
+            direction,
+            margin_usd: marginUsd,
+            source: 'hire',
+          });
+          this.logger.warn(
+            `Repaired missing lot meta ${userId} participant=${participantId} qty=${qty.toFixed(5)} direction=${direction}`,
+          );
+        } else {
+          this.logger.debug(
+            `Ignored META_QTY_REPAIR for terminal/missing participant=${participantId} status=${repairOwner?.status ?? 'UNKNOWN'}`,
+          );
+        }
       }
       return { ...meta, qty, direction, margin_usd: marginUsd };
     }
@@ -19017,6 +19131,57 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     return { ...input.fence, phase: input.to, exchangeOrderId: input.exchangeOrderId ?? input.fence.exchangeOrderId };
   }
 
+  private async releaseDeterministicallyRejectedAccountEmergencyFence(input: {
+    cycleId: string;
+    participantId: string;
+    fence: AccountEmergencyCloseFence;
+    rejection: string;
+  }): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      const released = await tx.signalCycleParticipant.updateMany({
+        where: {
+          id: input.participantId,
+          cycleId: input.cycleId,
+          terminalCloseClaimToken: input.fence.ownerToken,
+          terminalCloseRequestId: input.fence.requestId,
+          terminalClosePhase: 'SUBMITTING',
+          terminalCloseExchangeOrderId: null,
+        },
+        data: {
+          terminalCloseClaimToken: null,
+          terminalCloseClaimedAt: null,
+          terminalCloseGeneration: null,
+          terminalCloseAuthority: Prisma.DbNull,
+          terminalClosePhase: null,
+          terminalCloseRequestId: null,
+          terminalCloseBeforeAmount: null,
+          terminalCloseTargetAmount: null,
+          terminalCloseQty: null,
+          terminalCloseExchangeOrderId: null,
+          terminalCloseAcknowledgedAt: null,
+          terminalCloseConfirmedAt: null,
+        },
+      });
+      if (released.count !== 1) return false;
+      await tx.signalCycleEvent.create({ data: {
+        cycleId: input.cycleId,
+        participantId: input.participantId,
+        eventType: 'ACCOUNT_EMERGENCY_CLOSE_REJECTED',
+        payload: {
+          schema: 'account_emergency_close_v2',
+          request_id: input.fence.requestId,
+          client_order_id: input.fence.clientOrderId,
+          phase: 'REJECTED',
+          deterministic_exchange_rejection: true,
+          rejection: input.rejection.slice(0, 500),
+          safe_for_new_operator_request: true,
+          observed_at: new Date().toISOString(),
+        } as Prisma.InputJsonValue,
+      }});
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+  }
+
   /** Emergency flatten all OPEN copy lots (sync protection breach). */
   async emergencyFlattenOpenCopyLots(
     userId: string,
@@ -19209,6 +19374,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         let closeOrderId = fence.exchangeOrderId;
         const currentPosition = await this.activeTrading.getOpenPositionDetail(creds);
         let confirmed = btcToSats(currentPosition?.amount ?? 0) === 0;
+        let submitSameImmutableRequest = !fence.recovered;
         if (fence.recovered && fence.phase !== 'CONFIRMED') {
           // Authenticated CID lookup distinguishes a live/settled original
           // request from an unknown transport result. Neither case authorizes
@@ -19220,15 +19386,65 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             : await this.bitfinex.findOrderHistoryByClientOrderId(creds, fence.clientOrderId);
           const exactOrder = activeByCid ?? historyByCid;
           const exactOrderValid = accountEmergencyOrderMatchesFence(exactOrder, fence);
-          if (!confirmed || !exactOrderValid) {
+          const exactBeforePositionUnchanged =
+            btcToSats(currentPosition?.amount ?? 0) === btcToSats(fence.beforeAmount);
+          if (!confirmed && exactOrder == null && exactBeforePositionUnchanged) {
+            const priorSameCidRecovery = await this.prisma.signalCycleEvent.findFirst({
+              where: {
+                participantId: coordinator.id,
+                eventType: 'NEGATIVE_EVIDENCE',
+                payload: {
+                  path: ['request_id'],
+                  equals: fence.requestId,
+                },
+              },
+              select: { id: true, payload: true },
+            });
+            const priorPayload =
+              priorSameCidRecovery?.payload && typeof priorSameCidRecovery.payload === 'object'
+              && !Array.isArray(priorSameCidRecovery.payload)
+                ? priorSameCidRecovery.payload as Record<string, unknown>
+                : null;
+            if (priorPayload?.event === 'ACCOUNT_EMERGENCY_CLOSE_CID_CONFIRMED_ABSENT') {
+              throw new Error(
+                `Emergency account close ${incidentId} same-CID recovery was already attempted; no resubmit`,
+              );
+            }
+            // Both authenticated Bitfinex order books prove that this exact CID
+            // was never accepted, while the private position is byte-for-byte
+            // unchanged from the durable pre-submit observation. Re-submit the
+            // SAME immutable request/CID once; never mint a second identity.
+            submitSameImmutableRequest = true;
+            await this.cycles.recordHireExecutionEvent(
+              userId,
+              agent.id,
+              coordinator.cycleId,
+              'NEGATIVE_EVIDENCE',
+              {
+                venue: 'bitfinex', source: 'hire',
+                event: 'ACCOUNT_EMERGENCY_CLOSE_CID_CONFIRMED_ABSENT',
+                incident_id: incidentId,
+                request_id: fence.requestId,
+                client_order_id: fence.clientOrderId,
+                participant_id: coordinator.id,
+                authenticated_position_amount: currentPosition?.amount ?? 0,
+                fenced_before_amount: fence.beforeAmount,
+                active_cid_order_absent: true,
+                history_cid_order_absent: true,
+                action: 'RESUBMIT_SAME_IMMUTABLE_CID_ONCE',
+                analysis_eligible: false,
+              },
+            );
+          } else if (!confirmed || !exactOrderValid) {
             throw new Error(
               `Emergency account close ${incidentId} recovery is UNKNOWN; `
               + `position_target_confirmed=${confirmed} exact_cid_order=${exactOrderValid ? exactOrder!.id : 'absent_or_invalid'}; no resubmit`,
             );
+          } else {
+            closeOrderId = exactOrder!.id;
           }
-          closeOrderId = exactOrder!.id;
         }
-        if (!fence.recovered) {
+        if (submitSameImmutableRequest) {
           try {
             closeOrderId = await this.activeTrading.submitMarketClose(creds, {
             positionDirection: direction,
@@ -19237,6 +19453,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               clientOrderId: fence.clientOrderId,
             });
           } catch (error) {
+            if (isDeterministicBitfinexSubmitRejection(error)) {
+              // An authenticated Bitfinex business rejection proves this CID
+              // was not accepted. Release only this exact SUBMITTING fence;
+              // timeouts, transport errors and ambiguous responses remain
+              // permanently fenced until active/history reconciliation.
+              const released = await this.releaseDeterministicallyRejectedAccountEmergencyFence({
+                cycleId: coordinator.cycleId,
+                participantId: coordinator.id,
+                fence,
+                rejection: error instanceof Error ? error.message : String(error),
+              });
+              throw new Error(
+                `Emergency account close ${incidentId} was deterministically rejected; `
+                + `fence_released=${released}; no automatic retry`,
+              );
+            }
             // SUBMITTING remains durable. A retry must reconcile this exact CID
             // and the authenticated position; it must never submit again.
             throw new Error(

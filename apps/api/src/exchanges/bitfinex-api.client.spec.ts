@@ -10,7 +10,14 @@ import {
   parseOpenPositionPayload,
   parseOrderHistoryEvidence,
   parseOrderTrade,
+  normalizeBitfinexOrderPrice,
 } from './bitfinex-api.client';
+
+test('Bitfinex stop prices use the authenticated five-significant-digit venue value', () => {
+  assert.equal(normalizeBitfinexOrderPrice(63_066.88), 63_066);
+  assert.equal(normalizeBitfinexOrderPrice(9_876.543), 9_876.5);
+  assert.equal(normalizeBitfinexOrderPrice(0.01234567), 0.012345);
+});
 
 test('authenticated order-trade parsing preserves immutable fill identity and explicit fee facts', () => {
   const row = [998877, 'tBTCF0:USTF0', 1_723_000_000_000, 241234567890, -0.01, 64_000, 'LIMIT', 64_000, 1, -0.00002, 'UST'];

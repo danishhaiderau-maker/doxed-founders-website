@@ -395,6 +395,20 @@ export type BitfinexActiveOrder = {
   createdAtMs?: number;
 };
 
+/**
+ * Bitfinex normalizes order prices to five significant digits.  Normalize
+ * before submission (and when authenticating the returned active order) so a
+ * request such as 63066.88 is durably identified as the venue order 63066,
+ * rather than being mistaken for a different stop and submitted repeatedly.
+ */
+export function normalizeBitfinexOrderPrice(price: number): number {
+  if (!Number.isFinite(price) || price <= 0) return price;
+  const quantum = 10 ** (Math.floor(Math.log10(Math.abs(price))) - 4);
+  const scaled = price / quantum;
+  // The authenticated Bitfinex order book reports the venue-truncated value.
+  return Math.trunc(scaled + Number.EPSILON) * quantum;
+}
+
 /** Bitfinex order array indices (REST). */
 export function parseActiveOrder(row: unknown[]): BitfinexActiveOrder | null {
   if (!Array.isArray(row) || row.length < 17) return null;
@@ -787,7 +801,7 @@ export class BitfinexTradingClient {
       type: 'STOP',
       symbol,
       amount: amount.toFixed(8),
-      price: input.stopPrice.toFixed(2),
+      price: normalizeBitfinexOrderPrice(input.stopPrice).toString(),
       lev,
       // A stale protective stop must never open the opposite position.
       flags: BITFINEX_REDUCE_ONLY_FLAG,

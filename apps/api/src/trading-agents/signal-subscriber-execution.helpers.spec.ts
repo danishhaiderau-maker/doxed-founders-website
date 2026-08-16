@@ -107,6 +107,7 @@ import {
   shouldRunLocalRealSideSafetyNet,
   resolveExactShowcaseEntryQty,
   resolveEffectiveStopLossMarginPct,
+  isDeterministicBitfinexSubmitRejection,
 } from './signal-subscriber-execution.service';
 
 test('account fill-gap allocation requires exact per-order evidence and never overbooks residual', () => {
@@ -3774,10 +3775,13 @@ test('generic stop rearm persists replacement ownership before clearing a missin
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
   service.activeTrading = {
     findOrder: async () => null,
-    submitStopOrder: async () => {
-      actions.push('submit-replacement');
-      return 202;
-    },
+  };
+  service.ensureDurableProtectiveStop = async () => {
+    actions.push('submit-replacement');
+    return {
+      ok: true, orderId: 202, clientOrderId: 2202,
+      recovered: false, exchangeAckAtMs: Date.now(),
+    };
   };
   service.cancelManagedOrderGone = async (_creds: unknown, orderId: number) => {
     actions.push(`cancel-${orderId}`);
@@ -3932,6 +3936,31 @@ test('paused relay suppresses expected source-only mirror gaps but keeps exposur
   ];
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, false), diffs.slice(2));
   assert.deepEqual(reportableMirrorDiffsForRelayMode(diffs, true), diffs);
+});
+
+test('durable correlated-policy evidence suppresses only its exact source order miss', () => {
+  const diffs = [
+    { type: 'SHOWCASE_ORDER_NOT_MIRRORED', tradeId: 'policy-blocked' },
+    { type: 'SHOWCASE_ORDER_NOT_MIRRORED', tradeId: 'real-miss' },
+    { type: 'SHOWCASE_POSITION_NOT_MIRRORED', tradeId: 'policy-blocked' },
+    { type: 'COPY_ORDER_NO_SHOWCASE', tradeId: 'copy-risk' },
+  ];
+  assert.deepEqual(
+    reportableMirrorDiffsForRelayMode(
+      diffs, true, null, null, new Set(), new Set(['policy-blocked']),
+    ),
+    diffs.slice(1),
+  );
+});
+
+test('mirror policy suppression requires both durable block and matching expiry evidence', () => {
+  const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const start = source.indexOf('const policyBlockedShowcaseTradeIds = new Set<string>()');
+  const end = source.indexOf('const reportableDivergences', start);
+  const contract = source.slice(start, end);
+  assert.match(contract, /eventType: \{ in: \['CORRELATED_CLUSTER_BLOCKED', 'EXPIRED'\] \}/);
+  assert.match(contract, /payload\.reason === 'SAME_DIRECTION_PRICE_CLUSTER'/);
+  assert.match(contract, /proof\.blocked && proof\.expiredByPolicy/);
 });
 
 test('pending partial remains reportable until fresh exchange convergence proves exact quantity', () => {
@@ -5566,6 +5595,37 @@ test('treats an exact minimum-size lot as complete metadata', () => {
   );
 });
 
+test('META_QTY_REPAIR appends only while its exact participant is nonterminal', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const events: unknown[] = [];
+  let status: SignalCycleStatus = SignalCycleStatus.EXPIRED;
+  service.loadExecutionMeta = async () => ({});
+  service.prisma = {
+    signalCycleParticipant: {
+      findUnique: async () => ({ status }),
+    },
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (...args: unknown[]) => events.push(args),
+  };
+  service.logger = { warn() {}, debug() {} };
+  const intent = {
+    direction: 'SHORT',
+    entry: { mode: 'EXACT_LIMIT', exact_limit_price: 64_000, exact_qty_btc: 0.02 },
+    risk: { max_margin_usd: 20, leverage_hint: 100 },
+  };
+  const terminalMeta = await service.resolveLotMeta(
+    'participant', 'cycle', 'user', 'agent', intent, 20,
+  );
+  assert.equal(terminalMeta.qty, 0.02);
+  assert.equal(events.length, 0);
+  status = SignalCycleStatus.PENDING_ENTRY;
+  await service.resolveLotMeta('participant', 'cycle', 'user', 'agent', intent, 20);
+  assert.equal(events.length, 1);
+  assert.equal((events[0] as unknown[])[3], 'UPDATE_STOPS');
+  assert.equal(((events[0] as unknown[])[4] as { event: string }).event, 'META_QTY_REPAIR');
+});
+
 for (const message of [
   'Showcase trade is not present in the current canonical book.',
   'Waiting for the showcase to publish its exact resting limit.',
@@ -6031,7 +6091,13 @@ test('terminal account-wide ownership snapshot fails closed on uncertainty or ex
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.prisma = {
     signalCycleParticipant: { findMany: async () => [{ id: 'exiting', status: SignalCycleStatus.OPEN }] },
-    signalCycleEvent: { findMany: async () => [] },
+    signalCycleEvent: {
+      findMany: async () => [],
+      findFirst: async ({ where }: any) => events.find((event) =>
+        event.participantId === where.participantId
+        && event.eventType === where.eventType
+        && event.payload?.request_id === where.payload?.equals) ?? null,
+    },
   };
   service.loadExecutionMeta = async () => ({ stopOrderId: 10 });
   service.activeTrading = { listActiveOrders: async () => { throw new Error('unavailable'); } };
@@ -7715,7 +7781,7 @@ test('account emergency residual close is durably fenced before exchange submiss
   assert.match(source.slice(confirmAt, expireAt), /remainingOwnedOrderIds/);
 });
 
-function accountEmergencyServiceFixture(options: { submitThrows?: boolean } = {}) {
+function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submitError?: string } = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   const durable: any = {
     terminalCloseClaimToken: null, terminalCloseRequestId: null,
@@ -7764,11 +7830,22 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean } = {}
       findMany: async ({ where }: any) => where.status === SignalCycleStatus.OPEN ? [] : [participant],
       findFirst: async () => durable.terminalCloseClaimToken ? { ...durable } : null,
     },
-    signalCycleEvent: { findMany: async () => [] },
+    signalCycleEvent: {
+      findMany: async () => [],
+      findFirst: async ({ where }: any) => events.find((event) =>
+        event.participantId === where.participantId
+        && event.eventType === where.eventType
+        && event.payload?.request_id === where.payload?.equals) ?? null,
+    },
   };
   service.exchanges = { getUserCredentials: async () => ({ key: 'x', secret: 'y' }) };
   service.botBridge = { fetchStateForExecution: async () => ({ price: 60_000 }) };
-  service.cycles = { recordHireExecutionEvent: async () => undefined };
+  service.cycles = {
+    recordHireExecutionEvent: async (
+      _userId: string, _agentId: string, _cycleId: string,
+      eventType: string, payload: any,
+    ) => { events.push({ participantId: participant.id, eventType, payload }); },
+  };
   service.loadExecutionMeta = async () => ({
     bitfinexOrderId: 101, qty: 0.01, direction: 'SHORT', leverage: 10,
   });
@@ -7781,7 +7858,7 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean } = {}
       submits += 1;
       assert.equal(durable.terminalClosePhase, 'SUBMITTING');
       assert.equal(input.clientOrderId, durable.terminalCloseAuthority.client_order_id);
-      if (options.submitThrows) throw new Error('transport lost');
+      if (options.submitThrows || options.submitError) throw new Error(options.submitError ?? 'transport lost');
       positionAmount = 0;
       return 9001;
     },
@@ -7807,7 +7884,9 @@ test('account emergency close persists immutable CID, submits once, and confirms
   assert.equal(fx.durable.terminalCloseExchangeOrderId, 9001n);
   assert.ok(Number.isSafeInteger(fx.durable.terminalCloseAuthority.client_order_id));
   assert.deepEqual(
-    fx.events.map((event) => event.eventType),
+    fx.events
+      .map((event) => event.eventType)
+      .filter((eventType) => eventType.startsWith('ACCOUNT_EMERGENCY_CLOSE_')),
     ['ACCOUNT_EMERGENCY_CLOSE_SUBMITTING', 'ACCOUNT_EMERGENCY_CLOSE_ACKNOWLEDGED', 'ACCOUNT_EMERGENCY_CLOSE_CONFIRMED'],
   );
 });
@@ -7845,7 +7924,7 @@ test('concurrent account emergency claimants produce one durable SUBMITTING owne
   assert.equal(fx.events.filter((event) => event.eventType === 'ACCOUNT_EMERGENCY_CLOSE_SUBMITTING').length, 1);
 });
 
-test('account emergency UNKNOWN submit survives restart and never resubmits on timeout alone', async () => {
+test('account emergency reuses the same immutable CID once after authenticated absence and unchanged position', async () => {
   const fx = accountEmergencyServiceFixture({ submitThrows: true });
   await assert.rejects(
     fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
@@ -7855,10 +7934,33 @@ test('account emergency UNKNOWN submit survives restart and never resubmits on t
   assert.equal(fx.getSubmits(), 1);
   await assert.rejects(
     fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
-    /recovery is UNKNOWN;.*no resubmit/,
+    /submit result UNKNOWN; no automatic resubmit/,
+  );
+  assert.equal(fx.getSubmits(), 2);
+  const recovery = fx.events.find((event) =>
+    event.payload?.event === 'ACCOUNT_EMERGENCY_CLOSE_CID_CONFIRMED_ABSENT');
+  assert.equal(recovery.payload.client_order_id, fx.durable.terminalCloseAuthority.client_order_id);
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /same-CID recovery was already attempted; no resubmit/,
+  );
+  assert.equal(fx.getSubmits(), 2);
+  assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
+});
+
+test('account emergency releases only an explicitly rejected SUBMITTING request', async () => {
+  const rejection = 'Bitfinex v2/auth/w/order/submit: Invalid order: not enough tradable balance';
+  assert.equal(isDeterministicBitfinexSubmitRejection(new Error(rejection)), true);
+  assert.equal(isDeterministicBitfinexSubmitRejection(new Error('transport timed out')), false);
+  const fx = accountEmergencyServiceFixture({ submitError: rejection });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /deterministically rejected; fence_released=true; no automatic retry/,
   );
   assert.equal(fx.getSubmits(), 1);
-  assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
+  assert.equal(fx.durable.terminalClosePhase, null);
+  assert.equal(fx.durable.terminalCloseRequestId, null);
+  assert.equal(fx.events.at(-1)?.eventType, 'ACCOUNT_EMERGENCY_CLOSE_REJECTED');
 });
 
 test('account emergency restart confirms only exact CID plus authenticated flat target', async () => {
@@ -8091,7 +8193,7 @@ test('durable protective-stop restart recovers exact active CID and persists own
   let cid = 0;
   const active = () => ({
     id: 7701, cid, symbol: 'tBTCF0:USTF0', amount: 0.01, amountOrig: 0.01,
-    price: 65_000, status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+    price: 63_066, status: 'ACTIVE', orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
   });
   (service as any).activeTrading = {
     submitStopOrder: async (_creds: unknown, input: any) => {
@@ -8104,7 +8206,7 @@ test('durable protective-stop restart recovers exact active CID and persists own
   };
   const request = {
     participantId: 'participant-restart', purpose: 'PARTIAL_FILL', creds: {},
-    positionDirection: 'SHORT', qty: 0.01, stopPrice: 65_000, leverage: 4,
+    positionDirection: 'SHORT', qty: 0.01, stopPrice: 63_066.88, leverage: 4,
   };
   assert.equal((await (service as any).ensureDurableProtectiveStop(request)).ok, false);
   const recovered = await (service as any).ensureDurableProtectiveStop(request);
