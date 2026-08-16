@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fix relay QA path portability
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
