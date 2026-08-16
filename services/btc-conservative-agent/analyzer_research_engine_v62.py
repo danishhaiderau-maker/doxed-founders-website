@@ -17233,6 +17233,9 @@ def archive_research_session(payload):
             RESEARCH_HIGHLIGHTS_FILE,
             RESEARCH_FINDINGS_FILE,
             RESEARCH_COVERAGE_FILE,
+            DEEP_DIVE_INDEX_FILE,
+            ANALYSIS_DASHBOARD_HTML,
+            ANALYZER_RUN_LOG_FILE,
             RESEARCH_COMPACT_SUMMARY_FILE,
             REPORT_MANIFEST_FILE,
         ):
@@ -18093,6 +18096,16 @@ def finalize_analyzer_outputs(
     try:
         with open(RESEARCH_COMPACT_SUMMARY_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        # The dashboard reads the top-level compact summary while publication
+        # reads the mirrored reports directory. Refresh both from this same
+        # completed generation before the manifest records file sizes; leaving
+        # the reports copy one iteration behind creates an internally mixed
+        # bundle that the fail-closed publisher correctly rejects.
+        os.makedirs(REPORTS_DIR, exist_ok=True)
+        shutil.copy2(
+            RESEARCH_COMPACT_SUMMARY_FILE,
+            os.path.join(REPORTS_DIR, RESEARCH_COMPACT_SUMMARY_FILE),
+        )
     except Exception:
         pass
     write_report_manifest(payload)

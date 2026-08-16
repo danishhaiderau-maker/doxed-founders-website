@@ -11,6 +11,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
+$analyzerArchiveRoot = Join-Path $agentDir "research_session_archives"
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $lockFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
 $machineStateBase = if ($env:LOCALAPPDATA) {
@@ -257,8 +258,25 @@ try {
       # Publish the latest deterministic analyzer HTML back to Fly so admins
       # have an anywhere-access /analysis route. The local :9001 dashboard
       # remains the full interactive report explorer while the PC is online.
-      if (Test-Path -LiteralPath $analyzerReport) {
-        $syncArgs.PublishAnalyzerReport = $analyzerReport
+      # Publish only an immutable, completed analyzer generation. The live
+      # report directory is also read by :9001 and can change between manifest
+      # validation and archive creation, producing a mixed-generation bundle.
+      $publishReport = $null
+      if (Test-Path -LiteralPath $analyzerArchiveRoot) {
+        $latestCompleteArchive = Get-ChildItem -LiteralPath $analyzerArchiveRoot -Directory -ErrorAction SilentlyContinue |
+          Sort-Object Name -Descending |
+          Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_.FullName "report_manifest.json") -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_.FullName "analysis_dashboard.html") -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_.FullName "reports") -PathType Container)
+          } |
+          Select-Object -First 1
+        if ($latestCompleteArchive) {
+          $publishReport = Join-Path $latestCompleteArchive.FullName "analysis_dashboard.html"
+        }
+      }
+      if ($publishReport) {
+        $syncArgs.PublishAnalyzerReport = $publishReport
       }
       $syncArgs.TargetDir = $mirrorDir
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
