@@ -2274,6 +2274,23 @@ type RelayExecutionTimingStages = {
   persistenceCompletedAtMs?: number;
 };
 
+export function stableRelayFeeModel(): string {
+  return JSON.stringify({
+    schema: 'execution_cost_profile_v1', venue: 'bitfinex',
+    configured_profile: 'BITFINEX_ZERO', maker_fee_rate: 0, taker_fee_rate: 0,
+    funding_source: 'BITFINEX_DERIVATIVES_STATUS',
+  });
+}
+
+export function stableRelayExecutionProfile(repriceMode = 'BITFINEX_IN_PLACE_UPDATE'): string {
+  return JSON.stringify({
+    schema: 'relay_execution_profile_v1', venue: 'bitfinex', instrument: 'tBTCF0:USTF0',
+    entry_order_type: 'LIMIT', reprice_mode: repriceMode,
+    executable_marks: 'DIRECTIONAL_BBO',
+    fill_authority: 'AUTHENTICATED_BITFINEX', protective_exit: 'REDUCE_ONLY_STOP',
+  });
+}
+
 /** Bounded source-fill hint polling; private exchange state remains authority. */
 export async function pollForVerifiedEntryFill<T>(input: {
   detect: () => Promise<T | null>;
@@ -8946,6 +8963,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (timing) timing.persistenceStartedAtMs = Date.now();
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'ORDER_PLACED', {
       venue,
+      fee_model: stableRelayFeeModel(),
+      execution_profile: stableRelayExecutionProfile(),
       local_mark_at_signal: mark,
       limit_price: limitPrice,
         original_limit_price: limitPrice,

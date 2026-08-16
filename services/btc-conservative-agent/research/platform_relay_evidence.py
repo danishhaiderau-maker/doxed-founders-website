@@ -147,6 +147,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "stop_chain": [],
         "exit_evidence": {},
         "cost_evidence": {},
+        "fee_model": None,
+        "execution_profile": None,
         "reconciliation": {},
         "negative_events": [],
         "execution_timing": [],
@@ -230,6 +232,10 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             event_id = explicit(event, "id", "event_id", "eventId")
             event_created_at = explicit(event, "createdAt", "created_at")
             event_name = str(explicit(payload, "event", "reason", "exit_reason") or event_type).upper()
+            if evidence["fee_model"] is None:
+                evidence["fee_model"] = explicit(payload, "fee_model")
+            if evidence["execution_profile"] is None:
+                evidence["execution_profile"] = explicit(payload, "execution_profile")
 
             cid = explicit(payload, "client_order_id", "clientOrderId", "cid")
             if evidence["client_order_id"] is None and cid is not None:
@@ -251,9 +257,12 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
 
             quantity_fields = {
                 "source_quantity": explicit(payload, "source_quantity", "source_qty", "source_exact_qty_btc"),
-                "normalized_quantity": explicit(payload, "normalized_quantity", "normalized_qty", "venue_qty_btc"),
-                "filled_quantity": explicit(payload, "filled_quantity", "filled_qty", "filledQty", "partial_fill_qty", "partialFillQty"),
-                "protected_quantity": explicit(payload, "protected_quantity", "protected_qty", "protected_exchange_qty"),
+                "normalized_quantity": explicit(payload, "normalized_quantity", "normalized_qty", "venue_qty_btc")
+                    or (explicit(payload, "qty") if event_type == "ORDER_PLACED" else None),
+                "filled_quantity": explicit(payload, "filled_quantity", "filled_qty", "filledQty", "partial_fill_qty", "partialFillQty")
+                    or (explicit(payload, "qty") if event_type == "FILLED" else None),
+                "protected_quantity": explicit(payload, "protected_quantity", "protected_qty", "protected_exchange_qty")
+                    or (explicit(payload, "qty") if event_type in {"STOP_LOSS_ARMED", "UPDATE_STOPS"} and stop_id is not None else None),
                 "remaining_quantity": explicit(payload, "remaining_quantity", "remaining_qty", "remainingQty"),
             }
             for key, raw in quantity_fields.items():
@@ -278,7 +287,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
 
             ack_at = explicit(
                 payload, "exchange_ack_at", "exchangeAckAt", "entryExchangeAckAtMs",
-                "stop_exchange_ack_at", "ack_at", "acknowledged_at",
+                "replacementExchangeAckAtMs", "stop_exchange_ack_at", "ack_at", "acknowledged_at",
             )
             if event_type == "EXECUTION_TIMING":
                 stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else {}
@@ -497,18 +506,16 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             "source_quantity", "normalized_quantity", "filled_quantity", "protected_quantity"
         )
     ) and float(evidence.get("protected_quantity") or 0) + 1e-12 >= float(evidence.get("filled_quantity") or 0)
-    evidence["quantity_evidence_complete"] = bool(
-        "quantity_evidence_complete" in producer_assertions and quantities_complete
-    )
+    evidence["quantity_evidence_complete"] = bool(quantities_complete)
     evidence["order_ack_history_complete"] = bool(
-        "order_ack_history_complete" in producer_assertions
-        and evidence["ack_history"]
+        evidence["ack_history"]
         and all(row.get("order_id") is not None and row.get("ack_at") is not None
                 for row in evidence["ack_history"])
+        and all(row.get("order_id") is not None and row.get("ack_at") is not None
+                for row in evidence["reprices"])
     )
     evidence["stop_evidence_complete"] = bool(
-        "stop_evidence_complete" in producer_assertions
-        and evidence["stop_chain"]
+        evidence["stop_chain"]
         and all(row.get("order_id") is not None
                 and finite(row.get("protected_quantity")) is not None
                 and row.get("ack_at") is not None for row in evidence["stop_chain"])

@@ -117,6 +117,7 @@ from research.platform_relay_evidence import (
     _validate_platform_relay_evidence_payload as _pure_validate_platform_relay_evidence_payload,
 )
 from research.counterfactual_normalization import (
+    canonical_profile as _canonical_counterfactual_profile,
     policy_comparability_key as _pure_policy_comparability_key,
     horizons as _pure_counterfactual_horizons,
 )
@@ -35659,6 +35660,20 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
         return
     lev_default = _replay_leverage_default()
     pullback_default = _buf_float(state.get("pullback_threshold"), 0.001)
+    fee_model = meta.get("fee_model") or _canonical_counterfactual_profile(
+        "execution_cost_profile_v1", venue=BOT_EXCHANGE,
+        configured_profile=EXCHANGE_FEE_PROFILE,
+        maker_fee_rate=MAKER_FEE_PCT, taker_fee_rate=TAKER_FEE_PCT,
+        funding_simulation_enabled=bool(FUNDING_SIMULATION_ENABLED),
+    )
+    execution_profile = meta.get("execution_profile") or _canonical_counterfactual_profile(
+        "replay_execution_profile_v1", venue=BOT_EXCHANGE,
+        instrument=BITFINEX_WS_SYMBOL, lane=str(meta.get("lane") or "executed"),
+        entry_order_type="LIMIT", executable_marks="DIRECTIONAL_BBO",
+        fill_at_limit=bool(meta.get("fill_at_limit")),
+        chase_mode=meta.get("chase_mode") or "NONE",
+        protective_exit="REDUCE_ONLY_STOP",
+    )
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
@@ -35689,6 +35704,8 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "collection_mode": meta.get("collection_mode"),
             "is_counterfactual": bool(meta.get("is_counterfactual")),
             "policy_version": meta.get("policy_version"),
+            "fee_model": fee_model,
+            "execution_profile": execution_profile,
             "size_mult": meta.get("size_mult"),
             "session_bucket": meta.get("session_bucket"),
             "entry_features": copy.deepcopy(meta.get("entry_features") or {}),

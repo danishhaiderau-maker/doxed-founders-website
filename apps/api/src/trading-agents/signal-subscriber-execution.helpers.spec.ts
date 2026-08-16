@@ -23,6 +23,8 @@ import {
 import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
   SignalSubscriberExecutionService,
+  stableRelayFeeModel,
+  stableRelayExecutionProfile,
   isCanonicalDuplicateEntry,
   assessCorrelatedExposureCluster,
   finiteDecimalLikeNumber,
@@ -703,6 +705,146 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
   assert.equal(events.some((event) => event.type === 'EXPIRED'), true);
 });
 
+test('relay fee model identifies actual Bitfinex zero-fee derivatives costs', () => {
+  const profile = JSON.parse(stableRelayFeeModel());
+  assert.equal(profile.schema, 'execution_cost_profile_v1');
+  assert.equal(profile.venue, 'bitfinex');
+  assert.equal(profile.configured_profile, 'BITFINEX_ZERO');
+  assert.equal(profile.maker_fee_rate, 0);
+  assert.equal(profile.taker_fee_rate, 0);
+  assert.equal(profile.funding_source, 'BITFINEX_DERIVATIVES_STATUS');
+  assert.equal(stableRelayFeeModel(), stableRelayFeeModel());
+});
+
+test('relay execution profile is stable and sensitive to execution mode', () => {
+  const current = stableRelayExecutionProfile();
+  assert.equal(current, stableRelayExecutionProfile('BITFINEX_IN_PLACE_UPDATE'));
+  assert.notEqual(current, stableRelayExecutionProfile('CANCEL_RECREATE'));
+  const profile = JSON.parse(current);
+  assert.equal(profile.entry_order_type, 'LIMIT');
+  assert.equal(profile.executable_marks, 'DIRECTIONAL_BBO');
+  assert.equal(profile.fill_authority, 'AUTHENTICATED_BITFINEX');
+  assert.equal(profile.protective_exit, 'REDUCE_ONLY_STOP');
+});
+
+test('processInstance restart recovers a stale INTENT exact CID before any reclaim or resubmit', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  ) as any;
+  const now = Date.now();
+  const cycle = {
+    id: 'cycle-restart-entry',
+    agentId: 'agent-restart-entry',
+    tradeId: 'cont-restart-entry',
+    status: SignalCycleStatus.INTENT,
+    createdAt: new Date(now - 10_000),
+    expiresAt: new Date(now + 600_000),
+    intentEnvelope: {
+      action: 'ENTER', direction: 'SHORT', trade_id: 'cont-restart-entry',
+      entry: { exact_limit_price: 64_000, exact_qty_btc: 0.01 },
+      risk: { stop_loss_margin_pct: -13, leverage_hint: 4 },
+      context: { signed_showcase_event: false, entry_limit_policy: 'micro_sr_structural_limit_v1' },
+    },
+  };
+  const participant = {
+    id: 'participant-restart-entry',
+    cycleId: cycle.id,
+    userId: 'user-restart-entry',
+    status: SignalCycleStatus.INTENT,
+    createdAt: new Date(now - 180_000),
+  };
+  const recoveredEvents: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  let deleted = 0;
+  let placed = 0;
+  service.logger = { log() {}, warn() {}, error() {} };
+  service.exchanges = { getUserCredentials: async () => ({ apiKey: 'k', apiSecret: 's' }) };
+  service.prisma = {
+    platformSettings: { findUnique: async () => null },
+    tradingAgentInstance: {
+      findUnique: async () => ({ status: TradingAgentInstanceStatus.ACTIVE, expiresAt: new Date(now + 60_000) }),
+      update: async () => ({}),
+      updateMany: async () => ({}),
+    },
+    signalCycle: {
+      findMany: async ({ where }: any) => where?.participants ? []
+        : (Array.isArray(where?.status?.in) && where.status.in.includes(SignalCycleStatus.INTENT) ? [cycle] : []),
+      update: async () => ({}),
+    },
+    signalCycleParticipant: {
+      findUnique: async () => participant,
+      findMany: async () => [],
+      delete: async () => { deleted += 1; },
+    },
+    signalCycleEvent: {
+      findFirst: async () => ({
+        payload: {
+          schema: 'entry_submission_fence_v1', phase: 'SUBMITTING',
+          trade_id: cycle.tradeId, participant_id: participant.id,
+          client_order_id: 77123, direction: 'SHORT', qty: 0.01,
+          limit_price: 64_000, exchange_qty_at_order: 0, leverage: 4,
+        },
+      }),
+    },
+  };
+  service.activeTrading = {
+    listActiveOrders: async () => [{
+      id: 88001, cid: 77123, symbol: 'tBTCF0:USTF0', amount: -0.01, amountOrig: -0.01,
+      price: 64_000, status: 'ACTIVE', orderType: 'LIMIT', flags: 0,
+    }],
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (
+      _userId: string, _agentId: string, _cycleId: string,
+      type: string, payload: Record<string, unknown>,
+    ) => recoveredEvents.push({ type, payload }),
+  };
+  service.reconcileFilledParticipants = async () => {};
+  service.reconcileGhostOpenLots = async () => {};
+  service.reconcileImmediateExchangeFlat = async () => true;
+  service.reconcileAdoptLoop = async () => {};
+  service.reconcileUnattributedExchangeFills = async () => {};
+  service.reconcileAdoptOrphans = async () => {};
+  service.resolveLotMeta = async () => ({});
+  service.reconcileLotLedger = async () => true;
+  service.buildVirtualLotSummary = async () => ({ openCount: 0, pendingCount: 0 });
+  service.surfaceOrphanOrders = async () => [];
+  service.cleanupOrphanCopyOrders = async () => {};
+  service.fetchExecutionBotState = async () => ({
+    orders: [{
+      trade_id: cycle.tradeId, status: 'PENDING', limit_price: 64_000,
+      entry_limit_policy: 'micro_sr_structural_limit_v1',
+    }],
+  });
+  service.recordMirrorDiff = async () => {};
+  service.enforceSustainedLiveFidelityGuard = async () => false;
+  service.persistCapacityState = async () => {};
+  service.attemptMirrorCatchupEntries = async () => {};
+  service.placeEntry = async () => { placed += 1; return true; };
+  service.showcaseUnreachableSince = new Map();
+  service.showcaseRecoveryHits = new Map();
+  service.showcaseSafeModeNoticeAt = new Map();
+  service.positionRuntime = new Map();
+
+  await service.processInstance(
+    cycle.agentId,
+    {
+      id: 'instance-restart-entry', userId: participant.userId, agentId: cycle.agentId,
+      exchangeProvider: 'paper', status: TradingAgentInstanceStatus.ACTIVE,
+      expiresAt: new Date(now + 60_000), dashboardState: {}, lastError: null,
+    },
+    true,
+  );
+
+  const recovered = recoveredEvents.find((event) => event.type === 'ORDER_PLACED');
+  assert.ok(recovered, JSON.stringify({ stage: service.currentStage, recoveredEvents }));
+  assert.equal(recovered?.payload.event, 'ENTRY_SUBMISSION_RECOVERED');
+  assert.equal(recovered?.payload.bitfinex_order_id, 88001);
+  assert.equal(recovered?.payload.clientOrderId, 77123);
+  assert.equal(deleted, 0);
+  assert.equal(placed, 0);
+});
+
 test('mirror position diff flags material quantity under-copy despite matching row counts', () => {
   const delta = mirrorPositionQuantityDelta(0.031206116, 0.015);
   assert.ok(delta != null);
@@ -1290,6 +1432,125 @@ test('authenticated close prewake uses carried terminal evidence without polling
     assert.equal(closeOpts?.showcaseExitPrice, 64_400);
     assert.equal(closeOpts?.sourceEventAtMs, 1_000);
     assert.equal(closeOpts?.platformReceivedAtMs, 2_000);
+  } finally {
+    if (priorMirror == null) delete process.env.SHOWCASE_MIRROR_ONLY;
+    else process.env.SHOWCASE_MIRROR_ONLY = priorMirror;
+    if (priorConvergence == null) delete process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+    else process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = priorConvergence;
+  }
+});
+
+test('concurrent signed close traverses durable claim and submits exactly one exchange close', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.exitingLots = new Set();
+  service.showcaseVanishedMisses = new Map();
+  service.showcasePositionAbsentMisses = new Map();
+  service.showcasePositionAbsentSince = new Map();
+  service.showcaseFlatOpenSince = new Map();
+  service.logger = { log: () => undefined, warn: () => undefined };
+  const cycle = {
+    id: 'cycle-integrated-close', agentId: 'agent', tradeId: 'cont-integrated-close',
+    intentEnvelope: { context: { showcase_event_seq: 21 } }, showcasePnlUsd: null,
+  };
+  const durable: Record<string, any> = {
+    status: SignalCycleStatus.OPEN,
+    terminalCloseClaimToken: null, terminalCloseClaimedAt: null,
+    terminalClosePhase: null, terminalCloseRequestId: null,
+  };
+  const eventTypes: string[] = [];
+  const participantStore = {
+    findFirst: async () => ({ ...durable, cycle }),
+    findUnique: async () => ({ ...durable, cycle }),
+    updateMany: async (query: any) => {
+      if (query.where.terminalCloseClaimToken === null && durable.terminalCloseClaimToken) {
+        return { count: 0 };
+      }
+      if (query.where.terminalCloseClaimToken &&
+          query.where.terminalCloseClaimToken !== durable.terminalCloseClaimToken) {
+        return { count: 0 };
+      }
+      if (query.where.terminalClosePhase?.in &&
+          !query.where.terminalClosePhase.in.includes(durable.terminalClosePhase)) {
+        return { count: 0 };
+      }
+      Object.assign(durable, query.data);
+      return { count: 1 };
+    },
+  };
+  const tx = {
+    signalCycle: { findFirst: async () => cycle },
+    signalCycleParticipant: participantStore,
+    signalCycleEvent: { create: async (input: any) => { eventTypes.push(input.data.eventType); } },
+  };
+  service.prisma = {
+    signalCycleParticipant: participantStore,
+    $transaction: async (run: (client: any) => Promise<unknown>) => run(tx),
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => {
+      eventTypes.push(type); return { eventId: `event-${eventTypes.length}` };
+    },
+  };
+  service.hasParticipantExited = async () => false;
+  service.cancelLinkedPendingLimits = async () => undefined;
+  service.expectedRemainingLedgerAmount = async () => 0;
+  service.pauseUserRelayForPositionMismatch = async () => undefined;
+  service.ensureProtectiveStopForVerifiedExitResidual = async () => undefined;
+  service.attachAuthenticatedAccountWideOrderOwnership = async (
+    _a: string, _u: string, _p: string, _c: unknown, target: Record<string, unknown>,
+  ) => ({
+    ...target, remainingManagedOrderIds: [], accountWideActiveOrderIds: [],
+    accountWideManagedOrderIds: [], orphanOrderIds: [], foreignOrderIds: [],
+  });
+  let exchangeAmount = -0.01;
+  let exchangeSubmits = 0;
+  let releaseSubmit!: () => void;
+  let submitStarted!: () => void;
+  const submitStartedPromise = new Promise<void>((resolve) => { submitStarted = resolve; });
+  const releaseSubmitPromise = new Promise<void>((resolve) => { releaseSubmit = resolve; });
+  service.activeTrading = {
+    getMarkPrice: async () => 64_400,
+    getOpenPositionDetail: async () => exchangeAmount === 0 ? null : { amount: exchangeAmount },
+    submitPositionFlatten: async () => {
+      exchangeSubmits += 1;
+      submitStarted();
+      await releaseSubmitPromise;
+      exchangeAmount = 0;
+      return 88001;
+    },
+  };
+  service.waitForMarketCloseConfirmation = async () => exchangeAmount === 0;
+  const now = Date.now();
+  const signedClose = {
+    tradeId: 'cont-integrated-close', eventId: 'signed-close-21', eventSeq: 21,
+    exitPrice: 64_400, exitReason: 'PROFIT_LOCK',
+    sourceEventAtMs: now - 100, platformReceivedAtMs: now - 50,
+  };
+  const args = [
+    'agent', 'user', cycle,
+    { id: 'participant-integrated-close', fillPrice: { toNumber: () => 64_500 } },
+    { direction: 'SHORT', qty: 0.01, fillPrice: 64_500 },
+    { apiKey: 'k', apiSecret: 's' }, false, signedClose,
+  ] as const;
+  const priorMirror = process.env.SHOWCASE_MIRROR_ONLY;
+  const priorConvergence = process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE;
+  process.env.SHOWCASE_MIRROR_ONLY = 'true';
+  process.env.SHOWCASE_MIRROR_EXIT_CONVERGENCE = 'true';
+  try {
+    const first = service.tryImmediateShowcaseMirrorExit(...args);
+    await submitStartedPromise;
+    const second = service.tryImmediateShowcaseMirrorExit(...args);
+    assert.equal(await second, true);
+    assert.equal(exchangeSubmits, 1);
+    releaseSubmit();
+    assert.equal(await first, true);
+    assert.equal(exchangeSubmits, 1);
+    assert.equal(durable.terminalClosePhase, 'CONFIRMED');
+    assert.ok(eventTypes.includes('TERMINAL_CLOSE_CLAIM'));
+    assert.ok(eventTypes.includes('TERMINAL_CLOSE_SUBMITTING'));
+    assert.ok(eventTypes.includes('TERMINAL_CLOSE_ACKNOWLEDGED'));
+    assert.ok(eventTypes.includes('TERMINAL_CLOSE_CONFIRMED'));
+    assert.ok(eventTypes.includes('EXIT'));
   } finally {
     if (priorMirror == null) delete process.env.SHOWCASE_MIRROR_ONLY;
     else process.env.SHOWCASE_MIRROR_ONLY = priorMirror;
@@ -6524,6 +6785,49 @@ test('authenticated Bitfinex trade event records exact owned fill without source
   }
 });
 
+test('delayed post-TTL WebSocket fill notification cannot re-promote an OPEN participant or submit another stop', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  ) as any;
+  service.participantMoneyLane = new Map();
+  const participant = {
+    id: 'participant-post-ttl',
+    status: SignalCycleStatus.OPEN,
+    cycle: {
+      id: 'cycle-post-ttl', agentId: 'agent-post-ttl',
+      status: SignalCycleStatus.EXPIRED, tradeId: 'cont-post-ttl', intentEnvelope: {},
+    },
+  };
+  service.prisma = {
+    signalCycleParticipant: {
+      // Simulate a replica reading a candidate list just before the TTL
+      // promotion committed. The authoritative re-read below is OPEN.
+      findMany: async () => [{ id: participant.id }],
+      findUnique: async () => participant,
+    },
+  };
+  service.loadExecutionMeta = async () => ({
+    bitfinexOrderId: 6001, direction: 'SHORT', qty: 0.03,
+    partialFillQty: null, stopOrderId: 7802, limitPrice: 64_000,
+  });
+  let promotions = 0;
+  let stopSubmits = 0;
+  service.recordCancelRaceFill = async () => { promotions += 1; return true; };
+  service.activeTrading = { submitStopOrder: async () => { stopSubmits += 1; return 9999; } };
+  const delayedTrade = {
+    tradeId: 8102, orderId: 6001, symbol: 'tBTCF0:USTF0',
+    mts: 2_000, execAmount: -0.008, execPrice: 64_000,
+    receivedAtMs: 5_000, cumulativeQty: 0.018, cumulativeAveragePrice: 64_000,
+  };
+
+  assert.equal(await service.handleBitfinexWsTrade('user-post-ttl', { apiKey: 'k', apiSecret: 's' }, delayedTrade), false);
+  assert.equal(await service.handleBitfinexWsTrade('user-post-ttl', { apiKey: 'k', apiSecret: 's' }, delayedTrade), false);
+  assert.equal(promotions, 0);
+  assert.equal(stopSubmits, 0);
+  assert.equal(service.priorityWsFillParticipants.size, 0);
+});
+
 test('authenticated Bitfinex trade ignores non-owned order id', async () => {
   const previousExecution=process.env.SUBSCRIBER_EXECUTION_ENABLED;
   const previousWorker=process.env.RELAY_EXECUTOR_WORKER;
@@ -7387,4 +7691,136 @@ test('multi-slice partial protection grows exact coverage before TTL retires onl
   assert.equal(entryTtlPartialFillDisposition({
     context: 'SIGNAL_TTL_EXPIRED', intendedQty: 0.03, filledQty: 0.018, orderResting: true,
   }), 'CANCEL_REMAINDER_AND_OPEN');
+});
+
+test('service lifecycle settles a late TTL cancellation-race slice behind exact replacement protection', async () => {
+  const fence = protectiveStopFencePrisma();
+  const events: Array<{ type: string; payload: Record<string, any> }> = [];
+  const trace: string[] = [];
+  let nextStopId = 7800;
+  const stopInputs = new Map<number, any>();
+  const service = new SignalSubscriberExecutionService(
+    {
+      ...fence.prisma,
+      signalCycleEvent: { count: async () => 0 },
+      signalCycle: { update: async () => ({}) },
+    } as never,
+    {} as never,
+    {
+      recordHireExecutionEvent: async (
+        _userId: string,
+        _agentId: string,
+        _cycleId: string,
+        type: string,
+        payload: Record<string, any>,
+      ) => {
+        trace.push(`event:${type}:${String(payload.event ?? '')}`);
+        events.push({ type, payload });
+      },
+    } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = {
+    submitStopOrder: async (_creds: unknown, input: any) => {
+      const id = ++nextStopId;
+      stopInputs.set(id, input);
+      trace.push(`submit-stop:${id}:${input.qty}`);
+      return id;
+    },
+    findOrder: async (_creds: unknown, id: number) => {
+      const input = stopInputs.get(id);
+      if (!input) return null;
+      return {
+        id,
+        cid: input.clientOrderId,
+        symbol: 'tBTCF0:USTF0',
+        amount: input.qty,
+        amountOrig: input.qty,
+        price: input.stopPrice,
+        status: 'ACTIVE',
+        orderType: 'STOP',
+        flags: BITFINEX_REDUCE_ONLY_FLAG,
+      };
+    },
+    listActiveOrders: async () => [],
+    getMarkPrice: async () => 64_000,
+  };
+  (service as any).cancelManagedOrderGone = async (_creds: unknown, id: number) => {
+    trace.push(`cancel:${id}`);
+    return { gone: true, attempts: 1, reason: 'CANCELLED' };
+  };
+  (service as any).classifyPostCancelEntry = async () => ({
+    kind: 'FILL',
+    fill: { filledQty: 0.018, fillPrice: 64_000, source: 'POSITION_DELTA', orderResting: false },
+  });
+  (service as any).resolveExchangeTradesFillEvidence = async () => ({
+    price: 64_000,
+    qty: 0.018,
+    fillIds: [8101, 8102],
+    fees: [],
+    firstExecutedAtMs: 1,
+    lastExecutedAtMs: 2,
+  });
+  (service as any).healStuckPendingFill = async () => {};
+  (service as any).pauseUserRelayForPositionMismatch = async () => {};
+  (service as any).setInstanceLastError = async () => {};
+  (service as any).cycleAudit = { stage() {} };
+  (service as any).positionRuntime = new Map();
+  (service as any).stopManagerCircuitOpen = new Map();
+
+  const intent = {
+    context: { showcase_event_seq: 7 },
+    risk: { stop_loss_margin_pct: -13, leverage_hint: 4 },
+  } as any;
+  const baseMeta = {
+    direction: 'SHORT' as const,
+    qty: 0.03,
+    bitfinexOrderId: 6001,
+    limitPrice: 64_000,
+    exchangeQtyAtOrder: 0,
+  };
+  await (service as any).protectPartialFillAndRetainRemainder(
+    'agent', 'user', 'cycle', 'participant', baseMeta, {}, intent, 0.01,
+    { fillPrice: 64_000, fillSource: 'ORDER_PARTIAL' },
+  );
+  const firstRetained = events.find((event) =>
+    event.payload.event === 'PARTIAL_FILL_REMAINDER_RETAINED');
+  assert.ok(firstRetained);
+  assert.equal(firstRetained?.payload.partialFillQty, 0.01);
+  assert.equal(firstRetained?.payload.partialFillStopOrderId, 7801);
+
+  const promoted = await (service as any).recordCancelRaceFillOwned(
+    'agent',
+    'user',
+    { id: 'cycle', status: SignalCycleStatus.EXPIRED, tradeId: 'cont-ttl-late-slice' },
+    'participant',
+    {
+      ...baseMeta,
+      partialFillQty: 0.01,
+      partialFillStopOrderId: 7801,
+    },
+    {},
+    intent,
+    { filledQty: 0.01, fillPrice: 64_000, source: 'ORDER_PARTIAL', orderResting: true },
+    'SIGNAL_TTL_EXPIRED',
+  );
+
+  assert.equal(promoted, true);
+  const filled = events.find((event) => event.type === 'FILLED')?.payload;
+  const armed = events.find((event) => event.type === 'STOP_LOSS_ARMED')?.payload;
+  const ttl = events.find((event) => event.payload.event === 'PARTIAL_FILL_TTL_EXPIRED')?.payload;
+  assert.equal(filled?.qty, 0.018);
+  assert.equal(filled?.entry_completion, 'PARTIAL_FILL_TTL_EXPIRED');
+  assert.deepEqual(filled?.exchange_fill_ids, ['8101', '8102']);
+  assert.equal(armed?.qty, 0.018);
+  assert.equal(ttl?.final_filled_qty, 0.018);
+  assert.ok(Math.abs(Number(ttl?.unfilled_qty_cancelled) - 0.012) < 1e-9);
+  assert.equal(ttl?.remaining_entry_order_live, false);
+  const replacementAck = trace.indexOf('event:UPDATE_STOPS:FULL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED');
+  const oldStopCancel = trace.indexOf('cancel:7801');
+  const filledPersist = trace.indexOf('event:FILLED:CANCEL_RACE_FILL');
+  assert.ok(replacementAck >= 0);
+  assert.ok(oldStopCancel > replacementAck);
+  assert.ok(filledPersist > oldStopCancel);
+  assert.equal(stopInputs.get(7802)?.qty, 0.018);
 });

@@ -379,6 +379,29 @@ def test_policy_key_changes_with_execution_cost_or_ladder():
         buf["exit_config"], buf, changed
     )
     assert key_one != key_two
+    changed_profile = copy.deepcopy(snapshot)
+    changed_profile["execution_profile"] = "bitfinex-live-cancel-recreate-v2"
+    key_three = namespace["_counterfactual_policy_comparability_key"](
+        buf["exit_config"], buf, changed_profile
+    )
+    assert key_one != key_three
+
+
+def test_semantic_profiles_are_stable_and_sensitive_to_execution_facts():
+    one = pure_counterfactual.canonical_profile(
+        "execution_cost_profile_v1", venue="bitfinex", maker_fee_rate=0.0,
+        taker_fee_rate=0.0, funding_simulation_enabled=True,
+    )
+    reordered = pure_counterfactual.canonical_profile(
+        "execution_cost_profile_v1", funding_simulation_enabled=True,
+        taker_fee_rate=0.0, maker_fee_rate=0.0, venue="bitfinex",
+    )
+    changed = pure_counterfactual.canonical_profile(
+        "execution_cost_profile_v1", venue="bitfinex", maker_fee_rate=0.0,
+        taker_fee_rate=0.0006, funding_simulation_enabled=True,
+    )
+    assert one == reordered
+    assert one != changed
 
 
 def test_execution_timing_projects_only_explicit_stages_and_reports_sla():
@@ -461,3 +484,61 @@ def test_persistence_receipts_are_post_write_and_fail_observability_only():
         assert service.rfind(lifecycle_type, 0, receipt_at) >= 0
         receipt_tail = service[receipt_at:receipt_at + 900]
         assert ".catch((err) => this.logger.warn" in receipt_tail
+
+
+def test_deployed_event_field_names_qualify_quantity_ack_and_stop_without_claim_flags():
+    events = [
+        {"id": "order", "eventType": "ORDER_PLACED", "createdAt": "2026-08-16T00:00:00Z",
+         "payload": {"bitfinexOrderId": 101, "source_exact_qty_btc": 0.031696,
+                     "venue_qty_btc": 0.03169, "entryExchangeAckAtMs": 1000}},
+        {"id": "reprice", "eventType": "UPDATE_STOPS", "createdAt": "2026-08-16T00:00:01Z",
+         "payload": {"bitfinexOrderId": 101, "new_limit": 63000,
+                     "replacementExchangeAckAtMs": 2000}},
+        {"id": "fill", "eventType": "FILLED", "createdAt": "2026-08-16T00:00:02Z",
+         "payload": {"bitfinexOrderId": 101, "qty": 0.03169}},
+        {"id": "stop", "eventType": "STOP_LOSS_ARMED", "createdAt": "2026-08-16T00:00:03Z",
+         "payload": {"stopOrderId": 202, "qty": 0.03169,
+                     "stop_price": 63800, "stop_exchange_ack_at": "2026-08-16T00:00:03Z"}},
+    ]
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "participant-1", "events": events}], "cont-producer"
+    )
+    assert evidence["source_quantity"] == 0.031696
+    assert evidence["normalized_quantity"] == 0.03169
+    assert evidence["filled_quantity"] == 0.03169
+    assert evidence["protected_quantity"] == 0.03169
+    assert evidence["quantity_evidence_complete"] is True
+    assert evidence["order_ack_history_complete"] is True
+    assert evidence["stop_evidence_complete"] is True
+    assert len(evidence["ack_history"]) == 2
+    assert evidence["source_snapshot_evidence_complete"] is False
+    assert evidence["reconciliation_complete"] is False
+
+
+def test_reprice_without_explicit_exchange_ack_keeps_ack_history_incomplete():
+    events = [
+        {"id": "order", "eventType": "ORDER_PLACED", "createdAt": "2026-08-16T00:00:00Z",
+         "payload": {"bitfinexOrderId": 101, "entryExchangeAckAtMs": 1000}},
+        {"id": "reprice", "eventType": "UPDATE_STOPS", "createdAt": "2026-08-16T00:00:01Z",
+         "payload": {"bitfinexOrderId": 101, "new_limit": 63000}},
+    ]
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "participant-1", "events": events}], "cont-missing-reprice-ack"
+    )
+    assert evidence["reprices"][0]["ack_at"] is None
+    assert evidence["order_ack_history_complete"] is False
+
+
+def test_platform_profile_fields_are_carried_without_default_invention():
+    event = {"id": "order", "eventType": "ORDER_PLACED", "createdAt": "2026-08-16T00:00:00Z",
+             "payload": {"fee_model": "cost-v1", "execution_profile": "limit-v1"}}
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": [event]}], "cont-profile"
+    )
+    assert evidence["fee_model"] == "cost-v1"
+    assert evidence["execution_profile"] == "limit-v1"
+    missing = pure_relay._normalize_platform_bitfinex_evidence(
+        [{"participantId": "p1", "events": [{**event, "payload": {}}]}], "cont-missing"
+    )
+    assert missing["fee_model"] is None
+    assert missing["execution_profile"] is None

@@ -27,6 +27,11 @@ REQUIRED_HORIZONS_SEC = {
 }
 
 
+def canonical_profile(schema, **fields):
+    """Return a stable semantic identity from explicit runtime facts."""
+    return json.dumps({"schema": schema, **fields}, sort_keys=True, separators=(",", ":"))
+
+
 def _number(value, default=0):
     try:
         return float(value)
