@@ -19951,14 +19951,125 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           });
         }
       } else {
-        // This can mean the cancel race filled and another exchange mechanism
-        // flattened before our close, or that the account was already flat.
-        // Without exact per-order settlement provenance it is unsafe to stamp
-        // every pending participant EXPIRED or claim the emergency action
-        // completed successfully.
-        throw new Error(
-          'Emergency pending-residual flatten found the account flat after managed cancels; exact terminal attribution is required',
-        );
+        // No market close is legal when authenticated Bitfinex position reads
+        // are already flat. Recover only if immutable incident stop ids lead
+        // to exact authenticated executions that explain the full lot.
+        if (pendingMeta.length !== 1) {
+          throw new Error(
+            'Emergency already-flat attribution requires exactly one participant',
+          );
+        }
+        const { row, meta } = pendingMeta[0]!;
+        const expectedQty = meta.qty ?? 0;
+        const direction = meta.direction;
+        if (!direction || btcToSats(expectedQty) <= 0) {
+          throw new Error('Emergency already-flat attribution is missing exact lot quantity/direction');
+        }
+        const evidenceEvents = await this.prisma.signalCycleEvent.findMany({
+          where: { participantId: row.id },
+          select: { payload: true },
+        });
+        const incidentStopIds = new Set<number>();
+        const addStopId = (value: unknown) => {
+          const id = Number(value);
+          if (Number.isSafeInteger(id) && id > 0) incidentStopIds.add(id);
+        };
+        for (const event of evidenceEvents) {
+          if (!event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) continue;
+          const payload = event.payload as Record<string, unknown>;
+          for (const key of [
+            'stopOrderId', 'stop_order_id', 'partialFillStopOrderId',
+            'replacedOrderId', 'replaced_order_id', 'previousStopOrderId',
+          ]) addStopId(payload[key]);
+          for (const key of ['supersededStopOrderIds', 'superseded_stop_order_ids']) {
+            const ids = payload[key];
+            if (Array.isArray(ids)) ids.forEach(addStopId);
+          }
+        }
+        const activeIncidentBook = await this.bitfinex.listActiveOrders(creds);
+        const closeSide = direction === 'SHORT' ? 1 : -1;
+        for (const order of activeIncidentBook) {
+          const exactShape =
+            order.symbol === BITFINEX_BTC_PERP_SYMBOL
+            && order.orderType.toUpperCase().includes('STOP')
+            && ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0
+            && Math.sign(order.amountOrig) === closeSide
+            && btcToSats(Math.abs(order.amountOrig)) === btcToSats(expectedQty);
+          if (exactShape) incidentStopIds.add(order.id);
+        }
+        const fills = [] as Awaited<ReturnType<BitfinexTradingClient['fetchOrderTrades']>>;
+        for (const orderId of incidentStopIds) {
+          const orderFills = await this.bitfinex.fetchOrderTrades(creds, orderId);
+          fills.push(...orderFills.filter((fill) => Math.sign(fill.execAmount) === closeSide));
+        }
+        const uniqueFills = [...new Map(fills.map((fill) => [fill.id, fill])).values()];
+        const filledQty = uniqueFills.reduce((sum, fill) => sum + Math.abs(fill.execAmount), 0);
+        if (btcToSats(filledQty) !== btcToSats(expectedQty)) {
+          throw new Error(
+            `Emergency already-flat attribution UNKNOWN: incident stop fills=${filledQty.toFixed(8)} expected=${expectedQty.toFixed(8)}`,
+          );
+        }
+        const filledOrderIds = [...new Set(uniqueFills.map((fill) => fill.orderId))];
+        for (const orderId of filledOrderIds) {
+          const history = await this.bitfinex.fetchOrderHistoryEvidence(creds, orderId);
+          if (!history?.terminal || btcToSats(history.filledQty) <= 0) {
+            throw new Error(`Emergency already-flat attribution UNKNOWN for stop ${orderId}`);
+          }
+        }
+        const activeIncidentIds = activeIncidentBook
+          .filter((order) => incidentStopIds.has(order.id))
+          .map((order) => order.id);
+        for (const orderId of activeIncidentIds) {
+          const gone = await this.cancelManagedOrderGone(
+            creds, orderId, `emergency-already-flat-stop:${row.cycle.tradeId}`,
+            undefined, this.bitfinex,
+          );
+          if (!gone.gone) throw new Error(`Emergency already-flat incident stop ${orderId} remains active`);
+        }
+        const stableFlat = await this.readStableAuthenticatedPosition(creds);
+        if (!stableFlat.known || stableFlat.position !== null) {
+          throw new Error(
+            `Emergency already-flat final position is UNKNOWN; samples=${JSON.stringify(stableFlat.samples)}`,
+          );
+        }
+        const finalOrders = await this.bitfinex.listActiveOrders(creds);
+        const remainingIncidentIds = finalOrders
+          .filter((order) => incidentStopIds.has(order.id))
+          .map((order) => order.id);
+        if (remainingIncidentIds.length > 0) {
+          throw new Error(`Emergency already-flat incident orders remain: ${remainingIncidentIds.join(',')}`);
+        }
+        const weightedExitPrice = uniqueFills.reduce(
+          (sum, fill) => sum + Math.abs(fill.execAmount) * fill.execPrice,
+          0,
+        ) / filledQty;
+        const provenance = exchangeObservedTerminalProvenance({
+          observation: 'AUTHENTICATED_STOP_REDUCTION',
+          observedAtMs: Math.max(...uniqueFills.map((fill) => fill.mtsCreate)),
+          reconciliation: terminalFinalReconciliation({
+            ok: true, currentAmount: direction === 'SHORT' ? -expectedQty : expectedQty,
+            targetAmount: 0, closeQty: expectedQty, finalAccountFlatten: true,
+            confirmedExchangeAmount: 0, remainingManagedOrderIds: [],
+            accountWideActiveOrderIds: finalOrders.map((order) => order.id),
+            accountWideManagedOrderIds: [], orphanOrderIds: [],
+            foreignOrderIds: finalOrders.map((order) => order.id),
+          }),
+        });
+        await this.cycles.recordHireExecutionEvent(userId, agent.id, row.cycleId, 'EXIT', {
+          venue: 'bitfinex', source: 'hire',
+          reason: 'AUTHENTICATED_INCIDENT_STOP_FILL_ALREADY_FLAT',
+          exit_price: weightedExitPrice,
+          fill_ids: uniqueFills.map((fill) => String(fill.id)),
+          exchange_order_ids: filledOrderIds.map(String),
+          actual_fee_usd: uniqueFills.every((fill) => fill.feeCurrency === 'USD')
+            ? uniqueFills.reduce((sum, fill) => sum + Math.abs(fill.fee), 0)
+            : undefined,
+          submitted_close: false,
+          analysis_eligible: false,
+          analysis_exclusion_reasons: ['EMERGENCY_CLOSE', 'RECONCILIATION_INCIDENT'],
+          ...provenance,
+        });
+        flattened += 1;
       }
     }
 

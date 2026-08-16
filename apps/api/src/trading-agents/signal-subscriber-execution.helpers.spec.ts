@@ -8149,6 +8149,37 @@ test('fresh reconciled nonzero exposure forbids flat inference from empty privat
   assert.equal(fx.durable.terminalCloseRequestId, null);
 });
 
+test('already-flat emergency terminalizes only from exact authenticated incident stop fills', async () => {
+  const fx = accountEmergencyServiceFixture();
+  fx.setPositionAmount(0);
+  const stop = {
+    id: 777, cid: 7001, symbol: 'tBTCF0:USTF0', amount: 0.01,
+    amountOrig: 0.01, price: 60_080, status: 'ACTIVE', orderType: 'STOP',
+    flags: BITFINEX_REDUCE_ONLY_FLAG,
+  };
+  let active = [stop];
+  fx.service.prisma.signalCycleEvent.findMany = async () => [{ payload: { stopOrderId: 777 } }];
+  fx.service.bitfinex.listActiveOrders = async () => active;
+  fx.service.bitfinex.fetchOrderTrades = async (_creds: unknown, orderId: number) => orderId === 777 ? [{
+    id: 90001, orderId: 777, execPrice: 60_050, execAmount: 0.01,
+    fee: 0, mtsCreate: Date.now(), feeCurrency: 'USD',
+  }] : [];
+  fx.service.bitfinex.fetchOrderHistoryEvidence = async () => ({
+    id: 777, status: 'EXECUTED', terminal: true, filledQty: 0.01,
+  });
+  fx.service.cancelManagedOrderGone = async (_creds: unknown, orderId: number) => {
+    active = active.filter((order) => order.id !== orderId);
+    return { gone: true };
+  };
+  const result = await fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah');
+  assert.equal(result.flattened, 1);
+  assert.equal(fx.getSubmits(), 0);
+  const exit = fx.events.find((event) => event.eventType === 'EXIT');
+  assert.equal(exit.payload.reason, 'AUTHENTICATED_INCIDENT_STOP_FILL_ALREADY_FLAT');
+  assert.deepEqual(exit.payload.fill_ids, ['90001']);
+  assert.equal(exit.payload.terminal_authority_kind, 'EXCHANGE_OBSERVED_TERMINAL');
+});
+
 test('deterministically rejected OPEN recovery consumes exact proof into one new fenced close', async () => {
   const rejection = 'Bitfinex v2/auth/w/order/submit: Invalid order: not enough tradable balance';
   const fx = accountEmergencyServiceFixture({ submitError: rejection });
