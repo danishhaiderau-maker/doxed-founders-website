@@ -8106,6 +8106,24 @@ test('account emergency ignores one transient flat read and requires stable exac
   assert.equal(fx.durable.terminalClosePhase, 'CONFIRMED');
 });
 
+test('account emergency keeps immutable Bitfinex authority when another tick swaps activeTrading', async () => {
+  const fx = accountEmergencyServiceFixture();
+  let wrongClientTouches = 0;
+  const originalCancel = fx.service.cancelManagedOrderGone;
+  fx.service.cancelManagedOrderGone = async (...args: unknown[]) => {
+    fx.service.activeTrading = {
+      getOpenPositionDetail: async () => { wrongClientTouches += 1; return null; },
+      listActiveOrders: async () => { wrongClientTouches += 1; return []; },
+      submitMarketClose: async () => { wrongClientTouches += 1; throw new Error('wrong client'); },
+    };
+    return originalCancel(...args);
+  };
+  const result = await fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah');
+  assert.equal(result.flattened, 1);
+  assert.equal(fx.getSubmits(), 1);
+  assert.equal(wrongClientTouches, 0);
+});
+
 test('account emergency fails closed on oscillating private position reads', async () => {
   const fx = accountEmergencyServiceFixture({
     positionReads: Array.from({ length: 15 }, (_, index) => index % 2 === 0 ? null : -0.01),

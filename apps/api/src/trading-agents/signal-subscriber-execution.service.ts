@@ -9346,8 +9346,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     orderId: number,
     label: string,
     onTiming?: (timing: { submitStartedAtMs: number; exchangeAckAtMs: number; confirmedAtMs: number }) => void,
+    explicitClient?: CancelCapableClient,
   ): Promise<{ gone: boolean; reason?: string; attempts: number }> {
-    const client = this.activeTrading as CancelCapableClient;
+    const client = explicitClient ?? this.activeTrading as CancelCapableClient;
     const submitStartedAtMs = Date.now();
     const result = await cancelOrderWithRetry(client, creds, orderId, {
       logger: this.logger,
@@ -15000,13 +15001,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     direction: 'LONG' | 'SHORT',
     beforeQty: number,
     closeQty: number,
+    explicitClient?: Pick<ExecutionTradingClient, 'getOpenPositionDetail'>,
   ): Promise<boolean> {
+    const client = explicitClient ?? this.activeTrading;
     for (const delayMs of [0, 200, 400, 800, 1_200]) {
       if (delayMs > 0) {
         await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       }
       try {
-        const after = await this.activeTrading.getOpenPositionDetail(creds);
+        const after = await client.getOpenPositionDetail(creds);
         if (
           marketCloseReductionConfirmed({
             direction,
@@ -19249,7 +19252,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     let latest: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> = null;
     for (let attempt = 0; attempt < 15; attempt += 1) {
       try {
-        latest = await this.activeTrading.getOpenPositionDetail(creds);
+        latest = await this.bitfinex.getOpenPositionDetail(creds);
       } catch {
         return { known: false, position: null, samples };
       }
@@ -19302,7 +19305,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     this.activeTrading = this.bitfinex;
     const mark =
-      (await this.activeTrading.getMarkPrice().catch(() => null)) ??
+      (await this.bitfinex.getMarkPrice().catch(() => null)) ??
       (await this.botBridge.fetchStateForExecution(true).catch(() => null))?.price ??
       0;
 
@@ -19376,7 +19379,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             ? submittedPayload.participant_ids.map(String)
             : [];
           const meta = await this.loadExecutionMeta(row.id);
-          const currentPosition = await this.activeTrading.getOpenPositionDetail(creds);
+          const currentPosition = await this.bitfinex.getOpenPositionDetail(creds);
           const exactProof =
             submittedPayload?.schema === 'account_emergency_close_v2'
             && submittedPayload.request_id === rejectedRequestId
@@ -19497,6 +19500,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           creds,
           meta.bitfinexOrderId,
           `emergency-account-flat:${row.cycle.tradeId}`,
+          undefined,
+          this.bitfinex,
         );
         if (!cancelled.gone) {
           throw new Error(
@@ -19726,7 +19731,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               if (Array.isArray(ids)) ids.forEach(addIncidentStopId);
             }
           }
-          const activeBeforeClose = await this.activeTrading.listActiveOrders(creds);
+          const activeBeforeClose = await this.bitfinex.listActiveOrders(creds);
           const closeSide = direction === 'SHORT' ? 1 : -1;
           const exactIncidentStops = activeBeforeClose.filter((order) => {
             const exactShape =
@@ -19742,6 +19747,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               creds,
               stop.id,
               `emergency-close-ready-stop:${incidentId}`,
+              undefined,
+              this.bitfinex,
             );
             if (!gone.gone) {
               throw new Error(
@@ -19772,7 +19779,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                   creds,
                   coordinator.cycle.intentEnvelope as SignalIntentEnvelope,
                 );
-                const activeAfterRestore = await this.activeTrading.listActiveOrders(creds);
+                const activeAfterRestore = await this.bitfinex.listActiveOrders(creds);
                 const protectionSide = direction === 'SHORT' ? 1 : -1;
                 protectionRestored = activeAfterRestore.some((order) =>
                   order.symbol === BITFINEX_BTC_PERP_SYMBOL
@@ -19807,7 +19814,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             },
           );
           try {
-            closeOrderId = await this.activeTrading.submitMarketClose(creds, {
+            closeOrderId = await this.bitfinex.submitMarketClose(creds, {
             positionDirection: direction,
             qty: closeQty,
             leverage: DEFAULT_SUBSCRIBER_LEVERAGE,
@@ -19846,6 +19853,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             direction,
             closeQty,
             closeQty,
+            this.bitfinex,
           ).catch(() => false);
         }
         if (!confirmed) {
@@ -19879,23 +19887,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             if (Array.isArray(ids)) ids.forEach(addOwnedId);
           }
         }
-        const activeOrders = await this.activeTrading.listActiveOrders(creds);
+        const activeOrders = await this.bitfinex.listActiveOrders(creds);
         for (const order of activeOrders) {
           if (!ownedOrderIds.has(order.id)) continue;
           const gone = await this.cancelManagedOrderGone(
             creds,
             order.id,
             `emergency-post-flat-owned-order:${incidentId}`,
+            undefined,
+            this.bitfinex,
           );
           if (!gone.gone) {
             throw new Error(`Emergency flat confirmed but owned order ${order.id} remains active`);
           }
         }
-        const finalPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        const finalPosition = await this.bitfinex.getOpenPositionDetail(creds);
         if (finalPosition && btcToSats(Math.abs(finalPosition.amount)) > 0) {
           throw new Error('Emergency close did not produce a flat private position');
         }
-        const finalActiveOrders = await this.activeTrading.listActiveOrders(creds);
+        const finalActiveOrders = await this.bitfinex.listActiveOrders(creds);
         const remainingOwnedOrderIds = finalActiveOrders
           .filter((order) => ownedOrderIds.has(order.id))
           .map((order) => order.id);
