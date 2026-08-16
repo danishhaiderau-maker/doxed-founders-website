@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Complete immutable relay evidence and archive pipeline
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
