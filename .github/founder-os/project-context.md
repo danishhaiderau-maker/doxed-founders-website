@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fix analyzer bundle publication on Windows
+Exclude stale reports from analyzer bundles
 
 ## Last Activity
 
