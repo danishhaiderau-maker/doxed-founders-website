@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, Delete, Get, Headers, Param, Post, Query, Req, Res, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { TradingAgentKind } from '@prisma/client';
@@ -115,6 +115,73 @@ export class TradingAgentsController {
     @Headers('authorization') authorization?: string,
   ) {
     return this.tradingAgents.exportOpsRelayEvidence(slug, userId, adminHeader, authorization);
+  }
+
+  /**
+   * Cookie-free, operator-only recovery for an already-paused mismatch.
+   * This never resumes the instance. The execution service additionally
+   * refuses BOT_ADMIN recovery when any promoted OPEN lot exists, so this
+   * route can only reconcile an unattributed pending-entry residual.
+   */
+  @Public()
+  @Throttle({ default: { limit: 2, ttl: 60000 } })
+  @Post(':slug/ops/emergency-reconcile')
+  async opsEmergencyReconcile(
+    @Param('slug') slug: string,
+    @Query('userId') userId: string | undefined,
+    @Headers('x-bot-admin-token') adminHeader: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+    @Body() body: { confirmation?: string; reason?: string },
+  ) {
+    const status = await this.tradingAgents.getOpsRelayStatus(
+      slug, userId, adminHeader, authorization,
+    );
+    if (body?.confirmation !== 'FLATTEN_PAUSED_UNATTRIBUTED_RESIDUAL') {
+      throw new BadRequestException(
+        'confirmation must equal FLATTEN_PAUSED_UNATTRIBUTED_RESIDUAL',
+      );
+    }
+    if (status.status !== 'PAUSED') {
+      throw new ConflictException('Ops emergency reconcile requires a PAUSED instance');
+    }
+    if (!status.positionMismatchDetectedAt && !status.lastError) {
+      throw new ConflictException('No persisted relay mismatch evidence is present');
+    }
+    const result = await this.execution.emergencyFlattenOpenCopyLots(
+      userId!.trim(),
+      slug,
+      {
+        actorType: 'BOT_ADMIN_OPERATOR',
+        actorId: 'BOT_ADMIN_TOKEN',
+        reason: body.reason?.trim() || 'PAUSED_RELAY_MISMATCH_RECOVERY',
+      },
+    );
+    return { ...result, status: 'PAUSED', resumed: false };
+  }
+
+  /** No-close terminal recovery for exact stale PENDING_ENTRY participants. */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post(':slug/ops/recover-already-flat')
+  async opsRecoverAlreadyFlat(
+    @Param('slug') slug: string,
+    @Body() body: { userId?: string; participantIds?: string[]; confirmation?: string },
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    await this.tradingAgents.getOpsRelayStatus(
+      slug, body?.userId, adminHeader, authorization,
+    );
+    if (body?.confirmation !== 'RECOVER_ALREADY_FLAT_PENDING_WITHOUT_CLOSE') {
+      throw new BadRequestException(
+        'confirmation must equal RECOVER_ALREADY_FLAT_PENDING_WITHOUT_CLOSE',
+      );
+    }
+    return this.execution.recoverAlreadyFlatPendingEntries(
+      body.userId!.trim(),
+      slug,
+      Array.isArray(body.participantIds) ? body.participantIds : [],
+    );
   }
 
   @Public()

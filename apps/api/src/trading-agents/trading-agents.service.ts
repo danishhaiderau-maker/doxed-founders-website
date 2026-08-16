@@ -606,6 +606,12 @@ export class TradingAgentsService implements OnModuleInit {
       };
     }
     const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    const reconcile = dash.copyRelayReconcile && typeof dash.copyRelayReconcile === 'object'
+      ? dash.copyRelayReconcile as Record<string, unknown>
+      : null;
+    const exchangeOrderAudit = dash.exchangeOrderAudit && typeof dash.exchangeOrderAudit === 'object'
+      ? dash.exchangeOrderAudit as Record<string, unknown>
+      : null;
     return {
       slug,
       found: true,
@@ -626,6 +632,26 @@ export class TradingAgentsService implements OnModuleInit {
       positionMismatchAlert:
         typeof dash.positionMismatchAlert === 'string' ? dash.positionMismatchAlert : null,
       exchangeProvider: instance.exchangeProvider,
+      reconciliation: reconcile
+        ? {
+            signedExchangePositionQty: reconcile.signedExchangePositionQty ?? null,
+            signedLedgerOpenQty: reconcile.signedLedgerOpenQty ?? null,
+            deltaBtc: reconcile.deltaBtc ?? null,
+            alert: reconcile.alert ?? null,
+            openLots: reconcile.openLots ?? null,
+            pendingLots: reconcile.pendingLots ?? null,
+            updatedAt: reconcile.updatedAt ?? null,
+          }
+        : null,
+      exchangeOrderAudit: exchangeOrderAudit
+        ? {
+            known: exchangeOrderAudit.known ?? false,
+            activeOrderCount: exchangeOrderAudit.activeOrderCount ?? null,
+            managedActiveOrderCount: exchangeOrderAudit.managedActiveOrderCount ?? null,
+            foreignActiveOrderCount: exchangeOrderAudit.foreignActiveOrderCount ?? null,
+            checkedAt: exchangeOrderAudit.checkedAt ?? null,
+          }
+        : null,
       updatedAt: instance.updatedAt.toISOString(),
     };
   }

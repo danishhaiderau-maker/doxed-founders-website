@@ -142,6 +142,93 @@ test('account fill-gap lane serializes concurrent poll and wake allocation', asy
   assert.equal(secondAcquired, true);
 });
 
+test('authenticated-flat retirement preserves exact filled negative evidence and is idempotent', async () => {
+  const events: Array<{ type: string; payload: Record<string, any> }> = [];
+  let status: SignalCycleStatus = SignalCycleStatus.PENDING_ENTRY;
+  const service = new SignalSubscriberExecutionService(
+    {
+      signalCycleParticipant: {
+        findMany: async () => status === SignalCycleStatus.PENDING_ENTRY ? [{
+          id: 'participant', cycleId: 'cycle', partialEmergencyPhase: 'ACKNOWLEDGED',
+          partialEmergencyOrderId: 242001298190n,
+        }] : [],
+        findUnique: async () => ({ status }),
+      },
+    } as never,
+    {} as never,
+    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: Record<string, any>) => {
+      events.push({ type, payload });
+      if (type === 'EXPIRED') status = SignalCycleStatus.EXPIRED;
+    } } as never,
+    {} as never, {} as never, {} as never, {} as never, {} as never,
+  );
+  (service as any).activeTrading = { getOpenPositionDetail: async () => null };
+  (service as any).bitfinex = {
+    fetchOrderHistoryEvidence: async () => ({
+      id: 242000962968, status: 'EXECUTED', terminal: true, filledQty: 0.03172,
+    }),
+  };
+  (service as any).loadExecutionMeta = async () => ({ bitfinexOrderId: 242000962968 });
+  (service as any).resolveExchangeTradesFillEvidence = async () => ({
+    price: 63_105.48, qty: 0.03172, fillIds: [9001, 9002], fees: [],
+    firstExecutedAtMs: 1, lastExecutedAtMs: 2,
+  });
+
+  await (service as any).retireAuthenticatedFlatStalePendingParticipants(
+    'user', 'agent', {}, new Set<number>(), ['participant'],
+  );
+  await (service as any).retireAuthenticatedFlatStalePendingParticipants(
+    'user', 'agent', {}, new Set<number>(), ['participant'],
+  );
+
+  assert.deepEqual(events.map((event) => event.type), ['NEGATIVE_EVIDENCE', 'EXPIRED']);
+  assert.deepEqual(events[0]?.payload.authenticated_fill_ids, ['9001', '9002']);
+  assert.equal(events[0]?.payload.authenticated_entry_filled_qty, 0.03172);
+  assert.equal(events[0]?.payload.emergency_close_order_id, '242001298190');
+  assert.equal(events[1]?.payload.pnl_proven, false);
+});
+
+test('authenticated-flat retirement fails closed for live ownership and uncertain exchange evidence', async () => {
+  for (const scenario of ['position_unknown', 'owned_order_live', 'history_unknown', 'filled_without_close'] as const) {
+    const events: string[] = [];
+    const service = new SignalSubscriberExecutionService(
+      {
+        signalCycleParticipant: {
+          findMany: async () => [{
+            id: 'participant', cycleId: 'cycle', partialEmergencyPhase: null,
+            partialEmergencyOrderId: null,
+          }],
+          findUnique: async () => ({ status: SignalCycleStatus.PENDING_ENTRY }),
+        },
+      } as never,
+      {} as never,
+      { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => events.push(type) } as never,
+      {} as never, {} as never, {} as never, {} as never, {} as never,
+    );
+    (service as any).activeTrading = {
+      getOpenPositionDetail: async () => {
+        if (scenario === 'position_unknown') throw new Error('private read unavailable');
+        return null;
+      },
+    };
+    (service as any).bitfinex = {
+      fetchOrderHistoryEvidence: async () => {
+        if (scenario === 'history_unknown') throw new Error('history unavailable');
+        return { id: 6001, status: 'EXECUTED', terminal: true, filledQty: 0.01 };
+      },
+    };
+    (service as any).loadExecutionMeta = async () => ({ bitfinexOrderId: 6001 });
+    (service as any).resolveExchangeTradesFillEvidence = async () => ({
+      price: 64_000, qty: 0.01, fillIds: [7001], fees: [],
+      firstExecutedAtMs: 1, lastExecutedAtMs: 1,
+    });
+    await (service as any).retireAuthenticatedFlatStalePendingParticipants(
+      'user', 'agent', {}, scenario === 'owned_order_live' ? new Set([6001]) : new Set(), ['participant'],
+    );
+    assert.deepEqual(events, [], scenario);
+  }
+});
+
 function protectiveStopFencePrisma(status: SignalCycleStatus = SignalCycleStatus.PENDING_ENTRY) {
   const row: Record<string, any> = {
     status,
@@ -7712,6 +7799,23 @@ test('account emergency close persists immutable CID, submits once, and confirms
   );
 });
 
+test('BOT_ADMIN residual reconciliation refuses promoted OPEN lots before exchange mutation', async () => {
+  const fx = accountEmergencyServiceFixture();
+  fx.service.prisma.signalCycleParticipant.findMany = async ({ where }: any) =>
+    where.status === SignalCycleStatus.OPEN
+      ? [{ id: 'open-participant', cycleId: 'open-cycle' }]
+      : [];
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah', {
+      actorType: 'BOT_ADMIN_OPERATOR',
+      actorId: 'BOT_ADMIN_TOKEN',
+      reason: 'incident-recovery',
+    }),
+    /refuses promoted OPEN lots/,
+  );
+  assert.equal(fx.getSubmits(), 0);
+});
+
 test('concurrent account emergency claimants produce one durable SUBMITTING owner', async () => {
   const fx = accountEmergencyServiceFixture();
   const input = {
@@ -7756,6 +7860,133 @@ test('account emergency restart confirms only exact CID plus authenticated flat 
   assert.equal(fx.getSubmits(), 1);
   assert.equal(fx.durable.terminalClosePhase, 'CONFIRMED');
   assert.equal(fx.durable.terminalCloseExchangeOrderId, 9001n);
+});
+
+function alreadyFlatRecoveryFixture(options: {
+  foreignOrder?: boolean; positionAmount?: number; historyMissing?: boolean;
+} = {}) {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const rows: any[] = [1, 2].map((n) => ({
+    id: `pending-${n}`, cycleId: `cycle-${n}`, userId: 'user-a',
+    createdAt: new Date(n), status: SignalCycleStatus.PENDING_ENTRY,
+    cycle: { tradeId: `cont-${n}` },
+  }));
+  const events: any[] = [];
+  let submits = 0;
+  service.prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-a' }) },
+    tradingAgentInstance: { findUnique: async () => ({
+      id: 'instance-a', status: TradingAgentInstanceStatus.PAUSED, exchangeProvider: 'bitfinex',
+    }) },
+    signalCycleParticipant: {
+      findMany: async ({ where }: any) => {
+        if (where.status === SignalCycleStatus.EXPIRED) {
+          return rows.filter((row) => row.status === SignalCycleStatus.EXPIRED).map(({ id }) => ({ id }));
+        }
+        return rows;
+      },
+    },
+    $transaction: async (fn: any) => fn({
+      signalCycleParticipant: {
+        updateMany: async () => {
+          const pending = rows.filter((row) => row.status === SignalCycleStatus.PENDING_ENTRY);
+          pending.forEach((row) => { row.status = SignalCycleStatus.EXPIRED; });
+          return { count: pending.length };
+        },
+      },
+      signalCycleEvent: { create: async ({ data }: any) => { events.push(data); } },
+    }),
+  };
+  service.exchanges = { getUserCredentials: async () => ({ key: 'x', secret: 'y' }) };
+  service.loadExecutionMeta = async (participantId: string) => ({
+    bitfinexOrderId: participantId === 'pending-1' ? 101 : 102,
+  });
+  service.cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  service.bitfinex = {
+    getOpenPositionDetail: async () => options.positionAmount
+      ? ({ amount: options.positionAmount, basePrice: 60_000 }) : null,
+    fetchOrderHistoryEvidence: async (_creds: unknown, id: number) => options.historyMissing ? null : ({
+      id, status: 'CANCELED', terminal: true, filledQty: 0.003,
+    }),
+    fetchOrderTrades: async (_creds: unknown, id: number) => [{
+      id: id + 1_000, orderId: id, execPrice: 60_000, execAmount: -0.003,
+      fee: 0, mtsCreate: 1, feeCurrency: 'USD',
+    }],
+    submitMarketClose: async () => { submits += 1; return 999; },
+  };
+  service.attachAuthenticatedAccountWideOrderOwnership = async (
+    _agentId: string, _userId: string, _participantId: string, _creds: unknown, target: any,
+  ) => ({
+    ...target,
+    accountWideActiveOrderIds: options.foreignOrder ? [777] : [],
+    accountWideManagedOrderIds: [], orphanOrderIds: [],
+    foreignOrderIds: options.foreignOrder ? [777] : [],
+  });
+  return { service, rows, events, getSubmits: () => submits };
+}
+
+test('already-flat recovery terminalizes exact pending scope with evidence and no close submit', async () => {
+  const fx = alreadyFlatRecoveryFixture();
+  const result = await fx.service.recoverAlreadyFlatPendingEntries(
+    'user-a', 'cheetah', ['pending-1', 'pending-2'],
+  );
+  assert.deepEqual(result, {
+    recovered: 2, participantIds: ['pending-1', 'pending-2'], alreadyRecovered: false,
+  });
+  assert.equal(fx.getSubmits(), 0);
+  assert.ok(fx.rows.every((row) => row.status === SignalCycleStatus.EXPIRED));
+  assert.deepEqual(fx.events.map((event) => event.eventType), [
+    'NEGATIVE_EVIDENCE', 'EXPIRED', 'NEGATIVE_EVIDENCE', 'EXPIRED',
+  ]);
+  assert.ok(fx.events.every((event) => event.payload.submitted_close === false));
+});
+
+test('already-flat recovery is idempotent after atomic terminal persistence', async () => {
+  const fx = alreadyFlatRecoveryFixture();
+  await fx.service.recoverAlreadyFlatPendingEntries('user-a', 'cheetah', ['pending-1', 'pending-2']);
+  const second = await fx.service.recoverAlreadyFlatPendingEntries(
+    'user-a', 'cheetah', ['pending-1', 'pending-2'],
+  );
+  assert.equal(second.alreadyRecovered, true);
+  assert.equal(second.recovered, 0);
+  assert.equal(fx.events.length, 4);
+  assert.equal(fx.getSubmits(), 0);
+});
+
+test('already-flat recovery fails closed on non-flat position or foreign active order', async () => {
+  const nonFlat = alreadyFlatRecoveryFixture({ positionAmount: -0.003 });
+  await assert.rejects(
+    nonFlat.service.recoverAlreadyFlatPendingEntries('user-a', 'cheetah', ['pending-1', 'pending-2']),
+    /authenticated position is not flat/,
+  );
+  const foreign = alreadyFlatRecoveryFixture({ foreignOrder: true });
+  await assert.rejects(
+    foreign.service.recoverAlreadyFlatPendingEntries('user-a', 'cheetah', ['pending-1', 'pending-2']),
+    /account-wide order reconciliation is not empty and complete/,
+  );
+  assert.equal(nonFlat.events.length + foreign.events.length, 0);
+  assert.equal(nonFlat.getSubmits() + foreign.getSubmits(), 0);
+});
+
+test('already-flat recovery fails closed when exact order history is unavailable', async () => {
+  const fx = alreadyFlatRecoveryFixture({ historyMissing: true });
+  await assert.rejects(
+    fx.service.recoverAlreadyFlatPendingEntries('user-a', 'cheetah', ['pending-1', 'pending-2']),
+    /lacks terminal history/,
+  );
+  assert.equal(fx.events.length, 0);
+  assert.equal(fx.getSubmits(), 0);
+});
+
+test('concurrent already-flat recoveries terminalize once and converge idempotently', async () => {
+  const fx = alreadyFlatRecoveryFixture();
+  const results = await Promise.all([
+    fx.service.recoverAlreadyFlatPendingEntries('user-a', 'cheetah', ['pending-1', 'pending-2']),
+    fx.service.recoverAlreadyFlatPendingEntries('user-a', 'cheetah', ['pending-1', 'pending-2']),
+  ]);
+  assert.deepEqual(results.map((result) => result.recovered).sort(), [0, 2]);
+  assert.equal(fx.events.length, 4);
+  assert.equal(fx.getSubmits(), 0);
 });
 
 test('partial emergency fence closes only its attributable leg and preserves merged peer exposure', async () => {

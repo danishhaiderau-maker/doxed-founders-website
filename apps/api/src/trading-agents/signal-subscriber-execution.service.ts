@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'crypto';
 import {
@@ -11310,6 +11310,16 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     });
     if (pending.length === 0) return;
 
+    if (creds && activeOrderIdSet) {
+      await this.retireAuthenticatedFlatStalePendingParticipants(
+        userId,
+        agentId,
+        creds,
+        activeOrderIdSet,
+        pending.map((row) => row.id),
+      );
+    }
+
     const filledEvents = await this.prisma.signalCycleEvent.findMany({
       where: {
         participantId: { in: pending.map((row) => row.id) },
@@ -18653,6 +18663,132 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
+   * Retire a stale PENDING_ENTRY only when private Bitfinex evidence proves the
+   * account is flat, every participant-owned order is absent from the active
+   * book, and the exact entry history is terminal. A previously filled entry
+   * additionally requires exact per-order executions plus its durable emergency
+   * close acknowledgement. This is negative-evidence cleanup only: it never
+   * invents P&L, adopts exposure, or treats an unavailable read as flat.
+   */
+  private async retireAuthenticatedFlatStalePendingParticipants(
+    userId: string,
+    agentId: string,
+    creds: ExchangeCredentials,
+    activeOrderIdSet: Set<number>,
+    candidateIds: string[],
+  ): Promise<void> {
+    let position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    try {
+      position = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch {
+      return;
+    }
+    if (position !== null) return;
+
+    const candidates = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        id: { in: candidateIds },
+        userId,
+        status: SignalCycleStatus.PENDING_ENTRY,
+        updatedAt: { lt: new Date(Date.now() - 120_000) },
+        cycle: { agentId },
+      },
+      select: {
+        id: true,
+        cycleId: true,
+        partialEmergencyPhase: true,
+        partialEmergencyOrderId: true,
+      },
+    });
+
+    for (const row of candidates) {
+      const release = await this.acquireParticipantMoneyLane(row.id);
+      try {
+        const [fresh, meta] = await Promise.all([
+          this.prisma.signalCycleParticipant.findUnique({
+            where: { id: row.id },
+            select: { status: true },
+          }),
+          this.loadExecutionMeta(row.id),
+        ]);
+        if (fresh?.status !== SignalCycleStatus.PENDING_ENTRY || !meta.bitfinexOrderId) continue;
+        const ownedOrderIds = [
+          meta.bitfinexOrderId,
+          meta.stopOrderId,
+          meta.partialFillStopOrderId,
+          meta.supersededPartialStopOrderId,
+        ].filter((id): id is number => Number.isSafeInteger(id) && Number(id) > 0);
+        if (ownedOrderIds.some((id) => activeOrderIdSet.has(id))) continue;
+
+        let history: Awaited<ReturnType<BitfinexTradingClient['fetchOrderHistoryEvidence']>>;
+        try {
+          history = await this.bitfinex.fetchOrderHistoryEvidence(creds, meta.bitfinexOrderId);
+        } catch {
+          continue;
+        }
+        if (!history?.terminal) continue;
+
+        let executions: {
+          price: number;
+          qty: number;
+          fillIds: number[];
+          fees: Array<{ fillId: number; amount: number; currency: string | null }>;
+          firstExecutedAtMs: number | null;
+          lastExecutedAtMs: number | null;
+        } | null = null;
+        if (btcToSats(history.filledQty) > 0) {
+          executions = await this.resolveExchangeTradesFillEvidence(creds, meta.bitfinexOrderId);
+          if (
+            !executions
+            || btcToSats(executions.qty) !== btcToSats(history.filledQty)
+            || !['ACKNOWLEDGED', 'CONFIRMED'].includes(row.partialEmergencyPhase ?? '')
+            || row.partialEmergencyOrderId == null
+          ) continue;
+        }
+
+        const reason = executions
+          ? 'STALE_PENDING_AUTHENTICATED_FLAT_AFTER_PROTECTION_FAILURE'
+          : 'STALE_PENDING_AUTHENTICATED_TERMINAL_UNFILLED';
+        // The immutable exclusion receipt must commit before terminal state.
+        await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'NEGATIVE_EVIDENCE', {
+          schema: 'copy_negative_evidence_v1',
+          venue: 'bitfinex',
+          source: 'hire',
+          event: reason,
+          participant_id: row.id,
+          bitfinex_order_id: meta.bitfinexOrderId,
+          entry_history_status: history.status,
+          authenticated_entry_filled_qty: history.filledQty,
+          authenticated_fill_ids: executions?.fillIds.map(String) ?? [],
+          authenticated_fill_price: executions?.price,
+          emergency_close_order_id: row.partialEmergencyOrderId?.toString(),
+          final_exchange_position_qty: 0,
+          remaining_owned_active_order_ids: [],
+          analysis_eligible: false,
+          analysis_exclusion_reasons: [reason],
+          excluded_cohorts: ['BITFINEX_COPY_FIDELITY', 'REAL_COPY_PARAMETER_OPTIMISATION'],
+        });
+        await this.cycles.recordHireExecutionEvent(userId, agentId, row.cycleId, 'EXPIRED', {
+          venue: 'bitfinex',
+          source: 'hire',
+          event: reason,
+          reason,
+          participant_id: row.id,
+          bitfinex_order_id: meta.bitfinexOrderId,
+          final_reconciliation: {
+            complete: true,
+            exchange_position_qty: 0,
+            remaining_owned_active_order_ids: [],
+          },
+          pnl_proven: false,
+        });
+      } finally {
+        release();
+      }
+    }
+  }
+
+  /**
    * Own the one account-level emergency request in the participant row before
    * touching Bitfinex. The immutable request id/CID survive process restart;
    * SUBMITTING is deliberately not lease-recoverable.
@@ -18817,7 +18953,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /** Emergency flatten all OPEN copy lots (sync protection breach). */
-  async emergencyFlattenOpenCopyLots(userId: string, agentSlug: string): Promise<{ flattened: number }> {
+  async emergencyFlattenOpenCopyLots(
+    userId: string,
+    agentSlug: string,
+    operator?: {
+      actorType: 'BOT_ADMIN_OPERATOR';
+      actorId: string;
+      reason: string;
+    },
+  ): Promise<{ flattened: number }> {
     const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
     if (!agent) throw new NotFoundException('Agent not found');
     const instance = await this.prisma.tradingAgentInstance.findUnique({
@@ -18842,6 +18986,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         cycle: { agentId: agent.id },
       },
     });
+    if (operator && openRows.length > 0) {
+      throw new ConflictException(
+        'BOT_ADMIN emergency reconcile refuses promoted OPEN lots; use authenticated account-owner recovery',
+      );
+    }
 
     let flattened = 0;
     let allOpenClosesConfirmed = true;
@@ -18874,8 +19023,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               cycle.tradeId
             }`,
           evidence: {
-            actor_user_id: userId,
-            actor_type: 'AUTHENTICATED_ACCOUNT_OWNER',
+            actor_user_id: operator?.actorId ?? userId,
+            actor_type: operator?.actorType ?? 'AUTHENTICATED_ACCOUNT_OWNER',
+            target_user_id: userId,
+            operator_reason: operator?.reason,
             action: 'EMERGENCY_FLATTEN_OPEN_COPY_LOTS',
             agent_slug: agentSlug,
           },
@@ -18970,8 +19121,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             venue: 'bitfinex', source: 'hire',
             event: 'UNATTRIBUTED_PARTIAL_EMERGENCY_CLOSE',
             incident_id: incidentId,
-            actor_user_id: userId,
-            actor_type: 'AUTHENTICATED_ACCOUNT_OWNER',
+            actor_user_id: operator?.actorId ?? userId,
+            actor_type: operator?.actorType ?? 'AUTHENTICATED_ACCOUNT_OWNER',
+            target_user_id: userId,
+            operator_reason: operator?.reason,
             canonical_trade_id: row.cycle.tradeId,
             participant_id: row.id,
             managed_entry_order_id: meta.bitfinexOrderId,
@@ -19112,8 +19265,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             event: 'UNATTRIBUTED_PARTIAL_EMERGENCY_CLOSE',
             reason: 'AUTHENTICATED_ACCOUNT_EMERGENCY_FLAT_CONFIRMED',
             incident_id: incidentId,
-            actor_user_id: userId,
-            actor_type: 'AUTHENTICATED_ACCOUNT_OWNER',
+            actor_user_id: operator?.actorId ?? userId,
+            actor_type: operator?.actorType ?? 'AUTHENTICATED_ACCOUNT_OWNER',
+            target_user_id: userId,
+            operator_reason: operator?.reason,
             managed_entry_order_id: meta.bitfinexOrderId,
             emergency_close_order_id: closeOrderId,
             account_position_before: beforeAmount,
@@ -19147,6 +19302,165 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     });
 
     return { flattened };
+  }
+
+  /** No-close ops recovery for explicitly named stale pending participants. */
+  async recoverAlreadyFlatPendingEntries(
+    userId: string,
+    agentSlug: string,
+    requestedParticipantIds: string[],
+  ): Promise<{ recovered: number; participantIds: string[]; alreadyRecovered: boolean }> {
+    const participantIds = [...new Set(requestedParticipantIds.map((id) => id.trim()).filter(Boolean))];
+    if (participantIds.length === 0 || participantIds.length > 10) {
+      throw new Error('Already-flat recovery requires 1-10 explicit participant ids');
+    }
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance || instance.status !== TradingAgentInstanceStatus.PAUSED) {
+      throw new Error('Already-flat recovery requires a paused relay instance');
+    }
+    if (!instance.exchangeProvider || instance.exchangeProvider === 'paper') {
+      throw new Error('Already-flat recovery requires an authenticated live exchange');
+    }
+    const creds = await this.exchanges.getUserCredentials(userId, instance.exchangeProvider);
+    if (!creds) throw new Error('Already-flat recovery requires exchange credentials');
+    this.activeTrading = this.bitfinex;
+
+    const scopedRows = await this.prisma.signalCycleParticipant.findMany({
+      where: { id: { in: participantIds }, userId, cycle: { agentId: agent.id } },
+      include: { cycle: { select: { tradeId: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (scopedRows.length !== participantIds.length) {
+      throw new Error('Already-flat recovery participant scope is incomplete');
+    }
+    const pendingRows = scopedRows.filter((row) => row.status === SignalCycleStatus.PENDING_ENTRY);
+    if (pendingRows.length === 0 && scopedRows.every((row) => row.status === SignalCycleStatus.EXPIRED)) {
+      return { recovered: 0, participantIds, alreadyRecovered: true };
+    }
+    if (pendingRows.length !== scopedRows.length) {
+      throw new Error('Already-flat recovery accepts only PENDING_ENTRY or already EXPIRED rows');
+    }
+
+    const orderEvidence: Array<Record<string, unknown>> = [];
+    for (const row of pendingRows) {
+      const meta = await this.loadExecutionMeta(row.id);
+      const orderId = meta.bitfinexOrderId;
+      if (!orderId || !Number.isSafeInteger(orderId)) {
+        throw new Error(`Already-flat recovery missing managed order id for ${row.id}`);
+      }
+      const cancelled = await this.cancelManagedOrderGone(
+        creds, orderId, `ops-already-flat:${row.cycle.tradeId}`,
+      );
+      if (!cancelled.gone) {
+        throw new Error(`Already-flat recovery order ${orderId} remains active or unreadable`);
+      }
+      const [history, trades] = await Promise.all([
+        this.bitfinex.fetchOrderHistoryEvidence(creds, orderId),
+        this.bitfinex.fetchOrderTrades(creds, orderId),
+      ]);
+      if (!history || history.id !== orderId || history.terminal !== true) {
+        throw new Error(`Already-flat recovery order ${orderId} lacks terminal history`);
+      }
+      if (trades.some((trade) => trade.orderId !== orderId)) {
+        throw new Error(`Already-flat recovery order ${orderId} returned foreign trade evidence`);
+      }
+      orderEvidence.push({
+        participant_id: row.id,
+        canonical_trade_id: row.cycle.tradeId,
+        managed_entry_order_id: String(orderId),
+        cancel_confirmed_gone: true,
+        cancel_attempts: cancelled.attempts,
+        history_status: history.status,
+        history_terminal: history.terminal,
+        history_filled_qty: history.filledQty,
+        authenticated_fill_ids: trades.map((trade) => String(trade.id)),
+        authenticated_filled_qty: trades.reduce((sum, trade) => sum + Math.abs(trade.execAmount), 0),
+      });
+    }
+
+    const firstPosition = await this.activeTrading.getOpenPositionDetail(creds);
+    if (btcToSats(firstPosition?.amount ?? 0) !== 0) {
+      throw new Error('Already-flat recovery refused: authenticated position is not flat');
+    }
+    const ownership = await this.attachAuthenticatedAccountWideOrderOwnership(
+      agent.id, userId, pendingRows[0]!.id, creds,
+      {
+        ok: true, currentAmount: 0, targetAmount: 0, closeQty: 0,
+        finalAccountFlatten: false, confirmedExchangeAmount: 0,
+        remainingManagedOrderIds: [],
+      },
+    );
+    const reconciliation = terminalFinalReconciliation(ownership);
+    if (!reconciliation || reconciliation.complete !== true
+      || reconciliation.position_reconciled !== true
+      || (ownership.accountWideActiveOrderIds?.length ?? -1) !== 0
+      || (ownership.accountWideManagedOrderIds?.length ?? -1) !== 0
+      || (ownership.orphanOrderIds?.length ?? -1) !== 0
+      || (ownership.foreignOrderIds?.length ?? -1) !== 0) {
+      throw new Error('Already-flat recovery refused: account-wide order reconciliation is not empty and complete');
+    }
+    const finalPosition = await this.activeTrading.getOpenPositionDetail(creds);
+    if (btcToSats(finalPosition?.amount ?? 0) !== 0) {
+      throw new Error('Already-flat recovery refused: final authenticated position changed from flat');
+    }
+
+    const recoveryId = `already-flat-${randomUUID()}`;
+    const observedAt = new Date();
+    const persisted = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.signalCycleParticipant.updateMany({
+        where: {
+          id: { in: participantIds }, userId,
+          status: SignalCycleStatus.PENDING_ENTRY,
+          cycle: { agentId: agent.id },
+        },
+        data: { status: SignalCycleStatus.EXPIRED },
+      });
+      if (updated.count !== participantIds.length) return false;
+      for (const row of pendingRows) {
+        const shared = {
+          schema: 'already_flat_pending_recovery_v1', recovery_id: recoveryId,
+          actor_type: 'BOT_ADMIN_TOKEN_OPERATOR', submitted_close: false,
+          canonical_trade_id: row.cycle.tradeId, participant_id: row.id,
+          order_evidence: orderEvidence.find((e) => e.participant_id === row.id),
+          authenticated_position_before: firstPosition?.amount ?? 0,
+          authenticated_position_after: finalPosition?.amount ?? 0,
+          final_reconciliation: reconciliation,
+          analysis_eligible: false,
+          analysis_exclusion_reasons: [
+            'UNATTRIBUTED_PARTIAL_FILL', 'PROTECTION_FAILURE_EMERGENCY_RECOVERY',
+            'ALREADY_FLAT_OPERATOR_RECOVERY',
+          ],
+          observed_at: observedAt.toISOString(),
+        };
+        await tx.signalCycleEvent.create({ data: {
+          cycleId: row.cycleId, participantId: row.id,
+          eventType: 'NEGATIVE_EVIDENCE', payload: shared as Prisma.InputJsonValue,
+        }});
+        await tx.signalCycleEvent.create({ data: {
+          cycleId: row.cycleId, participantId: row.id, eventType: 'EXPIRED',
+          payload: {
+            ...shared, reason: 'AUTHENTICATED_ALREADY_FLAT_PENDING_RECOVERY',
+            terminal_provenance: 'EXCHANGE_OBSERVED_ALREADY_FLAT_NO_CLOSE',
+          } as Prisma.InputJsonValue,
+        }});
+      }
+      return true;
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    if (!persisted) {
+      const terminalRows = await this.prisma.signalCycleParticipant.findMany({
+        where: { id: { in: participantIds }, userId, status: SignalCycleStatus.EXPIRED },
+        select: { id: true },
+      });
+      if (terminalRows.length === participantIds.length) {
+        return { recovered: 0, participantIds, alreadyRecovered: true };
+      }
+      throw new Error('Already-flat recovery lost its atomic participant claim');
+    }
+    return { recovered: participantIds.length, participantIds, alreadyRecovered: false };
   }
 
   // ---------------------------------------------------------------------------
