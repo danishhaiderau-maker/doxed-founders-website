@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fence account emergency residual closes
+Fence account emergency exchange submission
 
 ## Last Activity
 
