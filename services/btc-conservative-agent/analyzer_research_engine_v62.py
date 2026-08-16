@@ -682,6 +682,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
     ("Exit Leakage by Reason", EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "Which exit reasons destroy the most value"),
     ("Exit Ladder Simulator", EXIT_LADDER_SIMULATOR_REPORT_FILE, "Replay tick sim — alternate ladder rungs vs live"),
+    ("Qualified Exit Policy Grid", QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE, "Fail-closed real-copy thesis, ladder, and MFE holdout grid"),
     ("Correlated Price Clusters", CORRELATED_PRICE_CLUSTER_REPORT_FILE, "Research-only price clustering with qualified 120m replay"),
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),

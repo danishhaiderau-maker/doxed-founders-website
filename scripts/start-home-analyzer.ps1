@@ -66,6 +66,22 @@ function Get-AnalyzerListenerPids([int]$P) {
   }
 }
 
+function Test-AnalyzerEngineAlive {
+  $pidFile = Join-Path $repoRoot ".home-analyzer.pid"
+  if (-not (Test-Path -LiteralPath $pidFile)) { return $false }
+  try {
+    $enginePid = [int](Get-Content -LiteralPath $pidFile -Raw)
+    if ($enginePid -le 0) { return $false }
+    $engine = Get-CimInstance Win32_Process -Filter "ProcessId = $enginePid" -ErrorAction Stop
+    return [bool](
+      $engine -and
+      [string]$engine.CommandLine -match '(^|[\\/\s])analyzer_research_engine_v62\.py(\s|$)'
+    )
+  } catch {
+    return $false
+  }
+}
+
 function Wait-ForKey {
   Write-Host ""
   Write-Host "--- Console stays open so you can copy logs. Press Enter to close ---" -ForegroundColor Cyan
@@ -131,6 +147,11 @@ $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$AnalyzerPort/"
 $env:ANALYZER_EMBEDDED_DASHBOARD = "0"
 $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
+$sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
+if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
+  throw "Analyzer source revision could not be resolved to a full Git SHA."
+}
+$env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()
 # Pin report discovery as well as raw-data discovery. The bridge and desktop
 # launcher are long-lived and can otherwise pass an obsolete report directory
 # into a freshly restarted dashboard.
@@ -142,30 +163,36 @@ $env:BTC_AGENT_REPORT_DIR = $agentDir
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
 if (Test-PortOpen $AnalyzerPort) {
   $listenerPids = @(Get-AnalyzerListenerPids $AnalyzerPort)
-  if ((Test-AnalyzerHealthy) -and $listenerPids.Count -eq 1) {
-    Write-Host "Analyzer healthy on :$AnalyzerPort (manifest + sync OK) - not starting a duplicate." -ForegroundColor Yellow
+  $dashboardHealthy = (Test-AnalyzerHealthy)
+  $engineAlive = (Test-AnalyzerEngineAlive)
+  if ($dashboardHealthy -and $listenerPids.Count -eq 1 -and $engineAlive) {
+    Write-Host "Analyzer dashboard and research engine are healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
     if ($lockHandle) { $lockHandle.Dispose() }
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
     if (-not $NoWait) { Wait-ForKey }
     exit 0
   }
-  if ($listenerPids.Count -gt 1) {
+  if ($dashboardHealthy -and $listenerPids.Count -eq 1 -and -not $engineAlive) {
+    Write-Host "Analyzer dashboard is healthy but the research engine is absent - preserving the dashboard and restarting collection." -ForegroundColor Yellow
+  } elseif ($listenerPids.Count -gt 1) {
     Write-Host "Port $AnalyzerPort has $($listenerPids.Count) listeners - replacing them with one loopback dashboard owner..." -ForegroundColor Yellow
   } else {
     Write-Host "Port $AnalyzerPort has a stale dashboard listener - clearing and starting the analyzer..." -ForegroundColor Yellow
   }
-  $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
-  if (Test-Path -LiteralPath $analyzerPidFile) {
-    try {
-      $staleAnalyzerPid = [int](Get-Content -LiteralPath $analyzerPidFile -Raw)
-      if ($staleAnalyzerPid -gt 0) {
-        Stop-Process -Id $staleAnalyzerPid -Force -ErrorAction SilentlyContinue
-      }
-    } catch { }
-    Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
+  if (-not ($dashboardHealthy -and $listenerPids.Count -eq 1)) {
+    $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
+    if (Test-Path -LiteralPath $analyzerPidFile) {
+      try {
+        $staleAnalyzerPid = [int](Get-Content -LiteralPath $analyzerPidFile -Raw)
+        if ($staleAnalyzerPid -gt 0) {
+          Stop-Process -Id $staleAnalyzerPid -Force -ErrorAction SilentlyContinue
+        }
+      } catch { }
+      Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
+    }
+    Stop-ListenPortFast $AnalyzerPort | Out-Null
+    Start-Sleep -Seconds 2
   }
-  Stop-ListenPortFast $AnalyzerPort | Out-Null
-  Start-Sleep -Seconds 2
 }
 
 # Publish the read-only dashboard before the heavy analyzer import. On this PC

@@ -132,6 +132,21 @@ assert.match(startBot, /\.home-bot-starter\.pid/);
 assert.match(startAnalyzer, /\.home-analyzer-starter\.pid/);
 assert.match(startAnalyzer, /DoxxedCrypto\\locks/);
 assert.match(startAnalyzer, /home-analyzer-start-\$AnalyzerPort\.lock/);
+assert.match(startAnalyzer, /function Test-AnalyzerEngineAlive/);
+assert.match(startAnalyzer, /\$dashboardHealthy = \(Test-AnalyzerHealthy\)/);
+assert.match(startAnalyzer, /\$engineAlive = \(Test-AnalyzerEngineAlive\)/);
+assert.match(startAnalyzer, /git -C \$repoRoot rev-parse HEAD/);
+assert.match(startAnalyzer, /\$env:SOURCE_GIT_REV = \$sourceRevision\.ToLowerInvariant\(\)/);
+assert.match(
+  startAnalyzer,
+  /if \(\$dashboardHealthy -and \$listenerPids\.Count -eq 1 -and \$engineAlive\)[\s\S]*not starting a duplicate/,
+  "analyzer startup may skip only when both the dashboard and engine are alive",
+);
+assert.match(
+  startAnalyzer,
+  /if \(\$dashboardHealthy -and \$listenerPids\.Count -eq 1 -and -not \$engineAlive\)[\s\S]*preserving the dashboard and restarting collection/,
+  "a healthy dashboard must not hide a dead analyzer engine",
+);
 assert.match(analyzerAutoRestart, /disabled fail-closed/);
 assert.doesNotMatch(analyzerAutoRestart, /Start-Process|Set-Content|Remove-Item/);
 assert.match(flyDataSyncLoop, /DoxxedCrypto\\locks/);
