@@ -106,6 +106,15 @@ def test_local_sync_has_fail_closed_30_gib_admission_guard():
     assert "fingerprinted receipts" in SYNC_SCRIPT
 
 
+def test_local_sync_removes_only_manifest_absent_top_level_raw_research_files():
+    assert "stale local Fly research file" in SYNC_SCRIPT
+    assert "\\.(jsonl|log|csv)(?:\\.\\d+)?$" in SYNC_SCRIPT
+    assert "$manifestPaths.Contains($candidate.Name)" in SYNC_SCRIPT
+    assert "Get-ChildItem -LiteralPath $targetRoot -File" in SYNC_SCRIPT
+    assert "[System.IO.File]::Delete($resolvedCandidate)" in SYNC_SCRIPT
+    assert "[void]$syncState.Remove($candidate.Name)" in SYNC_SCRIPT
+
+
 def test_retention_never_removes_active_or_unacknowledged_files():
     assert "active/unacked files retained" in BOT
     assert "newest_kept = frozenset(sorted(generations)[-keep_newest:])" in BOT

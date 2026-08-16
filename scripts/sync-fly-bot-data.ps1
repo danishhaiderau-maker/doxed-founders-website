@@ -79,6 +79,42 @@ if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
 $ackRows = [System.Collections.Generic.List[object]]::new()
 $chunkLimit = 4MB
 $selectedFiles = @($manifest.files)
+
+# Fly is the authoritative owner of raw research streams. Once a top-level raw
+# stream or closed rotation is no longer declared by its authenticated
+# manifest, keeping an extra local copy only wastes disk and can make the
+# analyzer rediscover a retired epoch. Reports, archives, JSON configuration
+# and subdirectories are never candidates.
+$manifestPaths = [System.Collections.Generic.HashSet[string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach ($manifestRow in @($manifest.files)) {
+  [void]$manifestPaths.Add(([string]$manifestRow.path).Replace("\", "/"))
+}
+$staleRotationFiles = 0
+$staleRotationBytes = [int64]0
+foreach ($candidate in @(Get-ChildItem -LiteralPath $targetRoot -File -Force -ErrorAction SilentlyContinue)) {
+  if ($candidate.Name -notmatch '\.(jsonl|log|csv)(?:\.\d+)?$') { continue }
+  $resolvedCandidate = [System.IO.Path]::GetFullPath($candidate.FullName)
+  if (-not $resolvedCandidate.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Local raw research file escaped the mirror root: $resolvedCandidate"
+  }
+  if ($manifestPaths.Contains($candidate.Name)) { continue }
+  $staleRotationBytes += [int64]$candidate.Length
+  [System.IO.File]::Delete($resolvedCandidate)
+  if (Test-Path -LiteralPath $resolvedCandidate) {
+    throw "Failed to remove stale local Fly research file: $resolvedCandidate"
+  }
+  [void]$syncState.Remove($candidate.Name)
+  $staleRotationFiles += 1
+}
+if ($staleRotationFiles -gt 0) {
+  Write-Host (
+    "Removed $staleRotationFiles stale local Fly research file(s), " +
+    "$staleRotationBytes byte(s), absent from the authenticated manifest."
+  )
+  Save-SyncState
+}
 if ($IncludePath.Count -gt 0) {
   $selectedFiles = @(
     $selectedFiles | Where-Object { [string]$_.path -in $IncludePath }
