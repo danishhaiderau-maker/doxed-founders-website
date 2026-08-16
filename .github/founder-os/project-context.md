@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Retire stale analyzer paths and fail closed
+Keep analyzer collection and publication truthful
 
 ## Last Activity
 
