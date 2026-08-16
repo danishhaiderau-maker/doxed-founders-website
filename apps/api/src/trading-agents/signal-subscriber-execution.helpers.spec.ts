@@ -7829,7 +7829,7 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submi
       findFirst: async ({ where }: any) => events.find((event) =>
         event.participantId === where.participantId
         && event.eventType === where.eventType
-        && event.payload?.request_id === where.payload?.equals) ?? null,
+        && event.payload?.event === where.payload?.equals) ?? null,
     },
   };
   service.exchanges = { getUserCredentials: async () => ({ key: 'x', secret: 'y' }) };
@@ -7968,6 +7968,54 @@ test('BOT_ADMIN resumes one promoted OPEN only through its exact existing accoun
   assert.equal(fx.getSubmits(), 2);
   assert.equal(fx.durable.terminalCloseRequestId, immutableRequestId);
   assert.equal(fx.durable.terminalCloseAuthority.client_order_id, immutableCid);
+});
+
+test('account emergency cancels only exact reserved stops at close-ready and fails closed on uncertainty', async () => {
+  const exactStop = {
+    id: 777, cid: 7001, symbol: 'tBTCF0:USTF0', amount: 0.01,
+    amountOrig: 0.01, price: 60_080, status: 'ACTIVE', orderType: 'STOP',
+    flags: BITFINEX_REDUCE_ONLY_FLAG,
+  };
+  const unrelatedLimit = {
+    id: 778, cid: 7002, symbol: 'tBTCF0:USTF0', amount: -0.02,
+    amountOrig: -0.02, price: 59_000, status: 'ACTIVE', orderType: 'LIMIT', flags: 0,
+  };
+  const wrongQtyStop = { ...exactStop, id: 779, cid: 7003, amount: 0.02, amountOrig: 0.02 };
+
+  const success = accountEmergencyServiceFixture();
+  const successCancelled: number[] = [];
+  success.service.bitfinex.listActiveOrders = async () =>
+    successCancelled.includes(777) ? [unrelatedLimit, wrongQtyStop] : [exactStop, unrelatedLimit, wrongQtyStop];
+  success.service.cancelManagedOrderGone = async (_creds: unknown, id: number) => {
+    if (id === 777) successCancelled.push(id);
+    return { gone: true };
+  };
+  const result = await success.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah');
+  assert.equal(result.flattened, 1);
+  assert.deepEqual(successCancelled, [777]);
+  assert.equal(success.getSubmits(), 1);
+
+  const cancelUnknown = accountEmergencyServiceFixture();
+  cancelUnknown.service.bitfinex.listActiveOrders = async () => [exactStop];
+  cancelUnknown.service.cancelManagedOrderGone = async (_creds: unknown, id: number) =>
+    id === 777 ? ({ gone: false }) : ({ gone: true });
+  await assert.rejects(
+    cancelUnknown.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /incident stop 777 remains active/,
+  );
+  assert.equal(cancelUnknown.getSubmits(), 0);
+
+  const changed = accountEmergencyServiceFixture();
+  changed.service.bitfinex.listActiveOrders = async () => [exactStop];
+  changed.service.cancelManagedOrderGone = async (_creds: unknown, id: number) => {
+    if (id === 777) changed.setPositionAmount(-0.009);
+    return { gone: true };
+  };
+  await assert.rejects(
+    changed.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /position changed before submit/,
+  );
+  assert.equal(changed.getSubmits(), 0);
 });
 
 test('account emergency releases only an explicitly rejected SUBMITTING request', async () => {

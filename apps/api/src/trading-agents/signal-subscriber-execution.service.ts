@@ -19424,8 +19424,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                 participantId: coordinator.id,
                 eventType: 'NEGATIVE_EVIDENCE',
                 payload: {
-                  path: ['request_id'],
-                  equals: fence.requestId,
+                  path: ['event'],
+                  equals: 'ACCOUNT_EMERGENCY_CLOSE_CID_CONFIRMED_ABSENT',
                 },
               },
               select: { id: true, payload: true },
@@ -19435,7 +19435,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               && !Array.isArray(priorSameCidRecovery.payload)
                 ? priorSameCidRecovery.payload as Record<string, unknown>
                 : null;
-            if (priorPayload?.event === 'ACCOUNT_EMERGENCY_CLOSE_CID_CONFIRMED_ABSENT') {
+            if (
+              priorPayload?.event === 'ACCOUNT_EMERGENCY_CLOSE_CID_CONFIRMED_ABSENT'
+              && priorPayload.request_id === fence.requestId
+            ) {
               throw new Error(
                 `Emergency account close ${incidentId} same-CID recovery was already attempted; no resubmit`,
               );
@@ -19475,6 +19478,76 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           }
         }
         if (submitSameImmutableRequest) {
+          // Bitfinex reserves derivative quantity behind active reduce-only
+          // stops. Keep protection until the close request is fully ready,
+          // then remove only stops proven to belong to this incident either by
+          // immutable event ownership or by exact authenticated stop shape.
+          const protectionEvents = await this.prisma.signalCycleEvent.findMany({
+            where: { participantId: { in: participantIds } },
+            select: { payload: true },
+          });
+          const incidentStopIds = new Set<number>();
+          const addIncidentStopId = (value: unknown) => {
+            const id = Number(value);
+            if (Number.isSafeInteger(id) && id > 0) incidentStopIds.add(id);
+          };
+          for (const event of protectionEvents) {
+            if (!event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) continue;
+            const payload = event.payload as Record<string, unknown>;
+            for (const key of [
+              'stopOrderId', 'stop_order_id', 'partialFillStopOrderId',
+              'replacedOrderId', 'replaced_order_id', 'previousStopOrderId',
+            ]) addIncidentStopId(payload[key]);
+            for (const key of ['supersededStopOrderIds', 'superseded_stop_order_ids']) {
+              const ids = payload[key];
+              if (Array.isArray(ids)) ids.forEach(addIncidentStopId);
+            }
+          }
+          const activeBeforeClose = await this.activeTrading.listActiveOrders(creds);
+          const closeSide = direction === 'SHORT' ? 1 : -1;
+          const exactIncidentStops = activeBeforeClose.filter((order) => {
+            const exactShape =
+              order.symbol === BITFINEX_BTC_PERP_SYMBOL
+              && order.orderType.toUpperCase().includes('STOP')
+              && ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0
+              && Math.sign(order.amountOrig) === closeSide
+              && btcToSats(Math.abs(order.amountOrig)) === btcToSats(closeQty);
+            return incidentStopIds.has(order.id) || exactShape;
+          });
+          for (const stop of exactIncidentStops) {
+            const gone = await this.cancelManagedOrderGone(
+              creds,
+              stop.id,
+              `emergency-close-ready-stop:${incidentId}`,
+            );
+            if (!gone.gone) {
+              throw new Error(
+                `Emergency account close ${incidentId} refused: incident stop ${stop.id} remains active`,
+              );
+            }
+          }
+          const positionAtSubmit = await this.activeTrading.getOpenPositionDetail(creds);
+          if (btcToSats(positionAtSubmit?.amount ?? 0) !== btcToSats(beforeAmount)) {
+            throw new Error(
+              `Emergency account close ${incidentId} refused after stop cleanup: position changed before submit`,
+            );
+          }
+          await this.cycles.recordHireExecutionEvent(
+            userId,
+            agent.id,
+            coordinator.cycleId,
+            'NEGATIVE_EVIDENCE',
+            {
+              venue: 'bitfinex', source: 'hire',
+              event: 'ACCOUNT_EMERGENCY_CLOSE_READY',
+              incident_id: incidentId,
+              request_id: fence.requestId,
+              client_order_id: fence.clientOrderId,
+              cancelled_incident_stop_ids: exactIncidentStops.map((order) => order.id),
+              authenticated_position_amount: positionAtSubmit?.amount ?? 0,
+              analysis_eligible: false,
+            },
+          );
           try {
             closeOrderId = await this.activeTrading.submitMarketClose(creds, {
             positionDirection: direction,
