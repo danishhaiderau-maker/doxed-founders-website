@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Attribute already-flat emergency stop exits
+Fence relay credentials to canonical identity
 
 ## Last Activity
 
