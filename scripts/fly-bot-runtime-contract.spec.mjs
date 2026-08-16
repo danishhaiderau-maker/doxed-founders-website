@@ -125,6 +125,7 @@ test('Fly image includes and imports every root runtime research module', async 
     'analysis_eligibility',
     'platform_relay_evidence',
     'immutable_archive',
+    'counterfactual_normalization',
   ];
 
   for (const moduleName of requiredModules) {

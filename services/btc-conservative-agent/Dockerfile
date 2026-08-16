@@ -34,7 +34,7 @@ COPY . /app
 
 # Fail the image build if the whitelist-style .dockerignore drops a module that
 # bot.py or the canonical analyzer imports at runtime.
-RUN python -c "import research.analysis_eligibility, research.platform_relay_evidence, research.immutable_archive"
+RUN python -c "import research.analysis_eligibility, research.platform_relay_evidence, research.immutable_archive, research.counterfactual_normalization"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
