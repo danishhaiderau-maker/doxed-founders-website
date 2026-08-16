@@ -6091,13 +6091,7 @@ test('terminal account-wide ownership snapshot fails closed on uncertainty or ex
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   service.prisma = {
     signalCycleParticipant: { findMany: async () => [{ id: 'exiting', status: SignalCycleStatus.OPEN }] },
-    signalCycleEvent: {
-      findMany: async () => [],
-      findFirst: async ({ where }: any) => events.find((event) =>
-        event.participantId === where.participantId
-        && event.eventType === where.eventType
-        && event.payload?.request_id === where.payload?.equals) ?? null,
-    },
+    signalCycleEvent: { findMany: async () => [] },
   };
   service.loadExecutionMeta = async () => ({ stopOrderId: 10 });
   service.activeTrading = { listActiveOrders: async () => { throw new Error('unavailable'); } };
