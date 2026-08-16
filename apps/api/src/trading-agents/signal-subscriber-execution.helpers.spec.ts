@@ -73,6 +73,7 @@ import {
   readFreshSignedShowcaseExactLimit,
   readSignedShowcaseClose,
   validateTerminalCloseAuthority,
+  terminalFinalReconciliation,
   relayArmTimestampMs,
   reportableMirrorDiffsForRelayMode,
   shouldPersistLotMetaRepair,
@@ -863,6 +864,11 @@ test('verified fill submits protective stop before trade enrichment and persists
     return {
       price: 64_279,
       qty: 0.0311,
+      fillIds: [88771, 88772],
+      fees: [
+        { fillId: 88771, amount: -0.00001, currency: 'UST' },
+        { fillId: 88772, amount: -0.00002, currency: 'UST' },
+      ],
       firstExecutedAtMs: exchangeFillAtMs,
       lastExecutedAtMs: exchangeFillAtMs,
     };
@@ -921,6 +927,11 @@ test('verified fill submits protective stop before trade enrichment and persists
   assert.equal(filled?.exchange_fill_mts, new Date(exchangeFillAtMs).toISOString());
   assert.equal(filled?.source_event_at, new Date(exchangeFillAtMs).toISOString());
   assert.equal(filled?.stopOrderId, 7003);
+  assert.deepEqual(filled?.exchange_fill_ids, ['88771', '88772']);
+  assert.deepEqual(filled?.exchange_fill_costs, [
+    { fillId: 88771, amount: -0.00001, currency: 'UST' },
+    { fillId: 88772, amount: -0.00002, currency: 'UST' },
+  ]);
   const submitAt = Date.parse(String(filled?.stop_submit_started_at));
   const ackAt = Date.parse(String(filled?.stop_exchange_ack_at));
   assert.ok(Number.isFinite(submitAt));
@@ -1398,10 +1409,16 @@ test('terminal source takes precedence over partial stop rearm in the same tick'
 
 test('terminal protected partial already flat records FILLED and EXIT without submitting a stop', async () => {
   const types: string[] = [];
+  const payloads: Array<Record<string, unknown>> = [];
   let stopSubmits = 0;
   const service = new SignalSubscriberExecutionService(
     {} as never, {} as never,
-    { recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string) => types.push(type) } as never,
+    { recordHireExecutionEvent: async (
+      _u: string, _a: string, _c: string, type: string, payload: Record<string, unknown>,
+    ) => {
+      types.push(type);
+      payloads.push(payload);
+    } } as never,
     {} as never, {} as never, {} as never, {} as never, {} as never,
   );
   (service as any).activeTrading = {
@@ -1424,6 +1441,8 @@ test('terminal protected partial already flat records FILLED and EXIT without su
   );
   assert.equal(handled, true);
   assert.deepEqual(types, ['FILLED', 'EXIT']);
+  assert.equal(payloads[0]?.exchange_fill_ids, undefined);
+  assert.equal(payloads[0]?.exchange_fill_costs, undefined);
   assert.equal(stopSubmits, 0);
 });
 
@@ -2930,6 +2949,31 @@ test('market close is recorded only after the exchange position is reduced', () 
     false,
     'a one-satoshi reduction is not a confirmed full close',
   );
+});
+
+test('terminal reconciliation reports only authenticated participant-local facts and stays incomplete account-wide', () => {
+  assert.equal(terminalFinalReconciliation({
+    ok: true, currentAmount: -0.02, targetAmount: 0, closeQty: 0.02,
+    finalAccountFlatten: true,
+  }), undefined);
+  assert.deepEqual(terminalFinalReconciliation({
+    ok: true, currentAmount: -0.02, targetAmount: 0, closeQty: 0.02,
+    finalAccountFlatten: true, confirmedExchangeAmount: 0,
+    remainingManagedOrderIds: [],
+  }), {
+    schema: 'relay_final_reconciliation_v1',
+    exchange_position_amount: 0,
+    expected_ledger_amount: 0,
+    exchange_vs_ledger_delta_sats: 0,
+    position_reconciled: true,
+    managed_order_count_after: 0,
+    managed_order_ids_after: [],
+    order_delta: 0,
+    orphan_order_count: null,
+    foreign_order_count: null,
+    complete: false,
+    incomplete_reasons: ['ACCOUNT_WIDE_ORDER_OWNERSHIP_NOT_CAPTURED'],
+  });
 });
 
 test('watchdog cleanup cancels only exchange orders with zero reported fill', () => {

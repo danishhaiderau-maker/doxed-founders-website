@@ -112,6 +112,43 @@ function Write-SizeReport {
   }
 }
 
+function Test-CompleteAnalyzerArchive {
+  param([Parameter(Mandatory=$true)][string]$ArchivePath)
+  try {
+    $root = [IO.Path]::GetFullPath($ArchivePath).TrimEnd('\', '/')
+    $manifestPath = Join-Path $root "archive_manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
+    $archive = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($archive.schema -ne "research_session_archive_v2" -or $archive.complete -ne $true) { return $false }
+    if (-not $archive.report_manifest_sha256 -or $null -eq $archive.files) { return $false }
+    $declared = @{}
+    foreach ($row in @($archive.files)) {
+      $relative = ([string]$row.path).Replace('\', '/')
+      if (-not $relative -or $relative.StartsWith('/') -or $relative -match '(^|/)\.\.(/|$)' -or $declared.ContainsKey($relative.ToLowerInvariant())) { return $false }
+      $target = [IO.Path]::GetFullPath((Join-Path $root $relative))
+      if (-not $target.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+      if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return $false }
+      $item = Get-Item -LiteralPath $target
+      if ([int64]$row.size_bytes -ne [int64]$item.Length) { return $false }
+      if ([string]$row.sha256 -notmatch '^[0-9a-fA-F]{64}$') { return $false }
+      if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ine [string]$row.sha256) { return $false }
+      $declared[$relative.ToLowerInvariant()] = $true
+    }
+    foreach ($required in @("report_manifest.json", "analysis_dashboard.html", "session_meta.json")) {
+      if (-not $declared.ContainsKey($required)) { return $false }
+    }
+    $actual = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | ForEach-Object {
+      $_.FullName.Substring($root.Length + 1).Replace('\', '/').ToLowerInvariant()
+    } | Where-Object { $_ -ne "archive_manifest.json" })
+    if (@($actual).Count -ne $declared.Count) { return $false }
+    foreach ($relative in $actual) { if (-not $declared.ContainsKey($relative)) { return $false } }
+    $reportHash = (Get-FileHash -LiteralPath (Join-Path $root "report_manifest.json") -Algorithm SHA256).Hash
+    return $reportHash -ieq [string]$archive.report_manifest_sha256
+  } catch {
+    return $false
+  }
+}
+
 
 if (-not (Test-Path (Split-Path -Parent $logFile))) {
   New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
@@ -310,11 +347,7 @@ try {
       if (Test-Path -LiteralPath $analyzerArchiveRoot) {
         $latestCompleteArchive = Get-ChildItem -LiteralPath $analyzerArchiveRoot -Directory -ErrorAction SilentlyContinue |
           Sort-Object Name -Descending |
-          Where-Object {
-            (Test-Path -LiteralPath (Join-Path $_.FullName "report_manifest.json") -PathType Leaf) -and
-            (Test-Path -LiteralPath (Join-Path $_.FullName "analysis_dashboard.html") -PathType Leaf) -and
-            (Test-Path -LiteralPath (Join-Path $_.FullName "reports") -PathType Container)
-          } |
+          Where-Object { Test-CompleteAnalyzerArchive -ArchivePath $_.FullName } |
           Select-Object -First 1
         if ($latestCompleteArchive) {
           $publishReport = Join-Path $latestCompleteArchive.FullName "analysis_dashboard.html"

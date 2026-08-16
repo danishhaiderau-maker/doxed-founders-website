@@ -108,6 +108,14 @@ from research_opportunity_v2 import (
     summarize_lane_verdicts,
 )
 from process_singleton import ProcessSingletonError, acquire_process_singleton
+from research.platform_relay_evidence import (
+    _load_offline_sim_jsonl_revisions as _pure_load_offline_sim_jsonl_revisions,
+    _normalize_platform_bitfinex_evidence as _pure_normalize_platform_bitfinex_evidence,
+    _offline_sim_jsonl_paths as _pure_offline_sim_jsonl_paths,
+    _platform_relay_evidence_index as _pure_platform_relay_evidence_index,
+    _snapshot_with_platform_relay_evidence as _pure_snapshot_with_platform_relay_evidence,
+    _validate_platform_relay_evidence_payload as _pure_validate_platform_relay_evidence_payload,
+)
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
 from sr_micro_tile_v2 import (
@@ -27230,13 +27238,6 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_invert_signal');
       refresh();
     }
-    async function toggleProfitGates() {
-      await post('/api/toggle_profit_gates');
-      refresh();
-    }
-    async function toggleProfitGatesLane() {
-      await toggleProfitGates();
-    }
     async function toggleContinuousAi() {
       await post('/api/toggle_continuous_ai_research');
       refresh();
@@ -27259,14 +27260,6 @@ DASHBOARD_JS = """(function () {
     }
     async function toggleResearchLane(lane) {
       await setResearchLane(lane, null);
-    }
-    async function toggleContinuousAiDirect() {
-      await post('/api/toggle_continuous_ai_direct');
-      refresh();
-    }
-    async function toggleDuplicateLimitBlock() {
-      await post('/api/toggle_duplicate_limit_block');
-      refresh();
     }
     function showPathwayTab(name) {
       const tabs = ['scorecard', 'funnel', 'session', 'kpis'];
@@ -27623,8 +27616,6 @@ DASHBOARD_JS = """(function () {
     window.showPathwayTab = showPathwayTab;
     window.setResearchLane = setResearchLane;
     window.setContinuousAi = setContinuousAi;
-    window.toggleProfitGates = toggleProfitGates;
-    window.toggleContinuousAiDirect = toggleContinuousAiDirect;
     async function toggleDebug() {
       const cur = document.getElementById('debugToggle').innerText.includes('OFF');
       await post('/api/toggle_debug', {enabled: cur});
@@ -28728,8 +28719,6 @@ DASHBOARD_JS = """(function () {
     window.wipeFlyOnly = wipeFlyOnly;
     window.toggleContinuousAi = toggleContinuousAi;
     window.toggleResearchLane = toggleResearchLane;
-    window.toggleProfitGates = toggleProfitGates;
-    window.toggleDuplicateLimitBlock = toggleDuplicateLimitBlock;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
     window.updateEdge = updateEdge;
@@ -33826,32 +33815,7 @@ _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
 
 
 def _validate_platform_relay_evidence_payload(payload: dict) -> tuple[bool, str]:
-    """Validate the immutable platform export before making it visible to research."""
-    if not isinstance(payload, dict) or payload.get("schema") != "relay_lifecycle_evidence_v1":
-        return False, "SCHEMA_INVALID"
-    if not all(payload.get(key) for key in ("generatedAt", "generatingRevision", "runIdentity")):
-        return False, "PROVENANCE_INCOMPLETE"
-    if payload.get("agentSlug") != "conservative-btc" or not payload.get("userId"):
-        return False, "SCOPE_INVALID"
-    records = payload.get("records")
-    if not isinstance(records, list):
-        return False, "RECORDS_INVALID"
-    event_ids = set()
-    for record in records:
-        if not isinstance(record, dict) or not all(
-            record.get(key) for key in ("canonicalTradeId", "lifecycleId", "participantId")
-        ) or not isinstance(record.get("events"), list):
-            return False, "RECORD_INVALID"
-        for event in record["events"]:
-            if not isinstance(event, dict) or not all(
-                event.get(key) for key in ("id", "eventType", "createdAt")
-            ):
-                return False, "EVENT_INVALID"
-            event_id = str(event["id"])
-            if event_id in event_ids:
-                return False, "DUPLICATE_EVENT"
-            event_ids.add(event_id)
-    return True, "OK"
+    return _pure_validate_platform_relay_evidence_payload(payload)
 
 
 @app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])
@@ -36854,6 +36818,7 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "ack_history": ack_history,
         "stop_chain": stop_chain,
         "exit_evidence": first("exit_evidence", "bitfinex_exit") or {},
+        "cost_evidence": first("cost_evidence", "bitfinex_cost_evidence") or {},
         "reconciliation": reconciliation,
         "source_snapshot_evidence": source_snapshot,
         "source_absence_observations": source_observations,
@@ -37017,111 +36982,77 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
 
 
 def _platform_relay_evidence_index(path=PLATFORM_RELAY_EVIDENCE_FILE) -> dict:
-    """Load a qualified read-only platform export. Invalid/stale-shaped input
-    returns no evidence, so cohort classification remains fail-closed."""
-    try:
-        with open(path, "r", encoding="utf-8-sig") as handle:
-            export = json.load(handle)
-        if export.get("schema") != "relay_lifecycle_evidence_v1":
-            return {}
-        if not all(export.get(key) for key in ("generatedAt", "generatingRevision", "runIdentity")):
-            return {}
-        records = export.get("records")
-        if not isinstance(records, list):
-            return {}
-        grouped = {}
-        for record in records:
-            trade_id = record.get("canonicalTradeId") if isinstance(record, dict) else None
-            if trade_id:
-                grouped.setdefault(str(trade_id), []).append(copy.deepcopy(record))
-        return {
-            trade_id: {
-                "schema": export["schema"],
-                "generated_at": export["generatedAt"],
-                "generating_revision": export["generatingRevision"],
-                "run_identity": export["runIdentity"],
-                "records": rows,
-                "evidence_revision": hashlib.sha256(json.dumps(
-                    rows, sort_keys=True, separators=(",", ":"), default=str
-                ).encode("utf-8")).hexdigest(),
-            }
-            for trade_id, rows in grouped.items()
-        }
-    except (OSError, ValueError, TypeError):
-        return {}
+    return _pure_platform_relay_evidence_index(path)
 
 
-def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str) -> dict:
-    joined = _platform_relay_evidence_index().get(str(trade_id))
-    if not joined:
-        return snapshot
-    enriched = copy.deepcopy(snapshot)
-    records = joined["records"]
-    events = []
-    for record in records:
-        participant_id = record.get("participantId")
-        for event in record.get("events") or []:
-            if isinstance(event, dict):
-                normalized = {**copy.deepcopy(event), "participantId": participant_id}
-                normalized["event_type"] = normalized.get("event_type") or normalized.get("eventType")
-                events.append(normalized)
-    enriched["platform_relay_evidence"] = joined
-    enriched["platform_evidence_revision"] = joined["evidence_revision"]
-    enriched["lifecycle_events"] = events
-    # Raw immutable events are authoritative evidence, but unknown producer
-    # payload shapes are never guessed into a completeness=true assertion.
-    evidence = copy.deepcopy(enriched.get("bitfinex_evidence") or {})
-    evidence["platform_records"] = records
-    evidence["participant_id"] = evidence.get("participant_id") or next(
-        (r.get("participantId") for r in records if r.get("participantId")), None
+def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str) -> dict:
+    return _pure_normalize_platform_bitfinex_evidence(records, canonical_trade_id)
+
+
+def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str, evidence_index=None) -> dict:
+    index = evidence_index if evidence_index is not None else _platform_relay_evidence_index()
+    return _pure_snapshot_with_platform_relay_evidence(snapshot, trade_id, index)
+
+
+_OFFLINE_SIM_MAX_ROTATIONS = 128
+_OFFLINE_SIM_MAX_JSONL_ROW_BYTES = 8 * 1024 * 1024
+
+
+def _offline_sim_jsonl_paths(active_path, max_rotations=_OFFLINE_SIM_MAX_ROTATIONS):
+    return _pure_offline_sim_jsonl_paths(active_path, max_rotations=max_rotations)
+
+
+def _load_offline_sim_jsonl_revisions(
+    active_path,
+    max_rotations=_OFFLINE_SIM_MAX_ROTATIONS,
+    target_trade_ids=None,
+):
+    return _pure_load_offline_sim_jsonl_revisions(
+        active_path,
+        max_rotations=max_rotations,
+        target_trade_ids=target_trade_ids,
+        on_read_error=lambda path, exc: logger.debug(
+            f"[RESEARCH_SIM] immutable shard read failed path={path}: {exc}"
+        ),
     )
-    evidence["source_lifecycle_id"] = evidence.get("source_lifecycle_id") or next(
-        (r.get("lifecycleId") for r in records if r.get("lifecycleId")), None
-    )
-    enriched["bitfinex_evidence"] = evidence
-    return enriched
 
 
 def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_file=SIGNAL_REPLAY_FILE, output_file=COUNTERFACTUAL_FILE):
     global write_counter, _sim_processed_trade_ids
-    if not os.path.exists(signal_snapshot_file) or not os.path.exists(signal_replay_file):
+    platform_index = _platform_relay_evidence_index()
+    platform_trade_ids = set(platform_index)
+    snapshots = _load_offline_sim_jsonl_revisions(
+        signal_snapshot_file,
+        target_trade_ids=platform_trade_ids,
+    )
+    replays = _load_offline_sim_jsonl_revisions(
+        signal_replay_file,
+        target_trade_ids=set(snapshots),
+    )
+    if not snapshots or not replays:
         return
-    snapshots = {}
-    with open(signal_snapshot_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-                tid = row.get("trade_id")
-                if tid:
-                    snapshots[tid] = row
-            except Exception:
-                pass
-    replays = {}
-    with open(signal_replay_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-                tid = row.get("trade_id")
-                if tid:
-                    replays[tid] = row
-            except Exception:
-                pass
+    prior_counterfactuals = _load_offline_sim_jsonl_revisions(
+        output_file,
+        target_trade_ids=set(snapshots),
+    )
     written = 0
     for trade_id, snapshot in snapshots.items():
-        if trade_id in _sim_processed_trade_ids:
+        platform_revision = (platform_index.get(str(trade_id)) or {}).get("evidence_revision")
+        prior_platform_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
+            "platform_evidence_revision"
+        )
+        prior_exists = str(trade_id) in prior_counterfactuals
+        if (trade_id in _sim_processed_trade_ids or prior_exists) and (
+            not platform_revision or prior_platform_revision == platform_revision
+        ):
+            _sim_processed_trade_ids.add(trade_id)
             continue
         if not snapshot.get("ai", {}).get("approved", False):
             continue
         replay = replays.get(trade_id)
         if not replay:
             continue
-        snapshot = _snapshot_with_platform_relay_evidence(snapshot, trade_id)
+        snapshot = _snapshot_with_platform_relay_evidence(snapshot, trade_id, platform_index)
         cfg = snapshot.get("config", {})
         buf = {
             "start_price": replay.get("start_price"),

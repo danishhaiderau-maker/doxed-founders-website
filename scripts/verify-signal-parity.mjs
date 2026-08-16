@@ -2,7 +2,8 @@
 /**
  * Signal parity gate — Phase 1 file hash + Phase 2 combo/signal-flag probe.
  */
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,9 +107,14 @@ try {
 const fullProbe = process.argv.includes('--full');
 if (fullProbe) {
   console.log('\n--- Phase 2b: signal-flag probe (imports bot.py) ---\n');
+  const probeWorkingDir = mkdtempSync(join(tmpdir(), 'dcf-signal-parity-'));
+  let fullProbeFailed = false;
   try {
     execSync(`python "${probe}" --full`, {
-      cwd: root,
+      // bot.py still owns legacy runtime defaults at import time.  Keep the
+      // characterization probe hermetic so it cannot leave config/log/archive
+      // artifacts in the repository merely because CI imported the module.
+      cwd: probeWorkingDir,
       stdio: 'inherit',
       encoding: 'utf8',
       timeout: 120_000,
@@ -119,8 +125,11 @@ if (fullProbe) {
       }),
     });
   } catch {
-    fail('signal_probe.py --full failed');
+    fullProbeFailed = true;
+  } finally {
+    rmSync(probeWorkingDir, { recursive: true, force: true });
   }
+  if (fullProbeFailed) fail('signal_probe.py --full failed');
 } else {
   console.log('Tip: npm run verify:signal-parity -- --full for bot import flag parity\n');
 }

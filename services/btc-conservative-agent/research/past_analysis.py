@@ -52,6 +52,8 @@ RAW_SOURCE_NAMES = (
     "shadow_outcome.jsonl",
     "shadow_lane_outcome.jsonl",
     "lane_opportunity_capture.jsonl",
+    "counterfactual.jsonl",
+    "relay_lifecycle_evidence_v1.json",
     "research.db",
 )
 

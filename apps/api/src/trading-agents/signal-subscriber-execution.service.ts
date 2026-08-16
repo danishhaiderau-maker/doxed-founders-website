@@ -783,8 +783,38 @@ export type RelayLotExitTarget = {
   closeExchangeAckAtMs?: number;
   /** Wall-clock time when the exchange position read confirmed the reduction. */
   closeConfirmedAtMs?: number;
+  confirmedExchangeAmount?: number;
+  remainingManagedOrderIds?: number[];
   reason?: string;
 };
+
+export function terminalFinalReconciliation(
+  target: RelayLotExitTarget,
+): Record<string, unknown> | undefined {
+  if (
+    target.confirmedExchangeAmount == null ||
+    !Number.isFinite(target.confirmedExchangeAmount) ||
+    !Number.isFinite(target.targetAmount)
+  ) return undefined;
+  const remaining = (target.remainingManagedOrderIds ?? []).filter(Number.isSafeInteger);
+  const positionDeltaSats = btcToSats(target.confirmedExchangeAmount - target.targetAmount);
+  return {
+    schema: 'relay_final_reconciliation_v1',
+    exchange_position_amount: target.confirmedExchangeAmount,
+    expected_ledger_amount: target.targetAmount,
+    exchange_vs_ledger_delta_sats: positionDeltaSats,
+    position_reconciled: positionDeltaSats === 0,
+    managed_order_count_after: remaining.length,
+    managed_order_ids_after: remaining.map(String),
+    order_delta: remaining.length,
+    // These require an account-wide ownership snapshot. Never claim zero from
+    // this participant-local confirmation alone.
+    orphan_order_count: null,
+    foreign_order_count: null,
+    complete: false,
+    incomplete_reasons: ['ACCOUNT_WIDE_ORDER_OWNERSHIP_NOT_CAPTURED'],
+  };
+}
 
 /**
  * Decide the exact reduction for one virtual lot inside Bitfinex's merged
@@ -3522,6 +3552,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           participant.cycle.intentEnvelope as SignalIntentEnvelope,
           { filledQty: trade.cumulativeQty, fillPrice: trade.cumulativeAveragePrice, source: 'ORDER_PARTIAL', orderResting },
           'BITFINEX_AUTH_WS_TRADE', new Date(trade.mts).toISOString(), new Date(trade.receivedAtMs).toISOString(),
+          [trade.tradeId],
         );
       } finally {
         release();
@@ -8959,6 +8990,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   ): Promise<{
     price: number;
     qty: number;
+    fillIds: number[];
+    fees: Array<{ fillId: number; amount: number; currency: string | null }>;
     firstExecutedAtMs: number | null;
     lastExecutedAtMs: number | null;
   } | null> {
@@ -8979,6 +9012,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return {
         price: notional / qtySum,
         qty: qtySum,
+        fillIds: trades.map((trade) => trade.id),
+        fees: trades.map((trade) => ({
+          fillId: trade.id,
+          amount: trade.fee,
+          currency: trade.feeCurrency,
+        })),
         firstExecutedAtMs: executionTimes.length ? Math.min(...executionTimes) : null,
         lastExecutedAtMs: executionTimes.length ? Math.max(...executionTimes) : null,
       };
@@ -9032,6 +9071,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     cancelContext: string,
     sourceFillAt?: string,
     exchangeFillReceivedAt?: string,
+    authenticatedFillIds?: number[],
   ): Promise<boolean> {
     if (this.cancelRaceFillInFlight.has(participantId)) return false;
     this.cancelRaceFillInFlight.add(participantId);
@@ -9048,6 +9088,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         cancelContext,
         sourceFillAt,
         exchangeFillReceivedAt,
+        authenticatedFillIds,
       );
     } finally {
       this.cancelRaceFillInFlight.delete(participantId);
@@ -9071,6 +9112,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     cancelContext: string,
     sourceFillAt?: string,
     exchangeFillReceivedAt?: string,
+    authenticatedFillIds?: number[],
   ): Promise<boolean> {
     if (!meta.direction) return false;
     // Capture at funnel entry, before any remainder cancellation or exchange
@@ -9336,6 +9378,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       creds,
       meta.bitfinexOrderId,
     );
+    const exchangeFillIds = Array.from(new Set([
+      ...(exchangeFillEvidence?.fillIds ?? []),
+      ...(authenticatedFillIds ?? []),
+    ])).map(String);
     // VWAP is accounting enrichment only. Do not replace the acknowledged
     // stop afterward: the limit/order reference is already a no-worse risk
     // boundary for a valid limit execution, and a second stop handoff would
@@ -9451,6 +9497,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       cancel_context: cancelContext,
       fill_source: fill.source,
       exchange_fill_authoritative: true,
+      exchange_fill_ids: exchangeFillIds.length ? exchangeFillIds : undefined,
+      exchange_fill_costs: exchangeFillEvidence?.fees,
       source_model_fill_state: sourceFillAt ? 'SOURCE_CONFIRMED' : 'INDEPENDENT_OR_PENDING',
       copy_reconciliation_state: sourceFillAt
         ? 'BOTH_FILLED_RECONCILED'
@@ -13669,6 +13717,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             exit_reason: det.exitReason,
             exit_at: det.exitAt,
             observed_at_ms: Date.now(),
+            source_snapshot_evidence: bot?.state_integrity
+              ? {
+                  source_git_rev: bot.source_git_rev ?? null,
+                  sequence: bot.state_integrity.snapshot_seq ?? null,
+                  captured_at: bot.state_integrity.snapshot_ts ?? null,
+                  snapshot_age_sec: bot.state_integrity.snapshot_age_sec ?? null,
+                  positions_synced: bot.state_integrity.positions_synced ?? null,
+                  orders_synced: bot.state_integrity.orders_synced ?? null,
+                  trades_synced: bot.state_integrity.trades_synced ?? null,
+                }
+              : undefined,
           },
         };
       } else {
@@ -13987,6 +14046,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // No market action is required, so there is no close-SLA critical path
       // to protect. Retire any stale reduce-only stops before reporting the
       // ledger-target result.
+      const remainingManagedOrderIds: number[] = [];
       for (const stopOrderId of new Set(stopOrderIds)) {
         const result = await this.cancelManagedOrderGone(
           creds,
@@ -13994,12 +14054,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           `EXIT-TARGET already-flat cancel stop oid=${stopOrderId} ${userId} participant=${participantId}`,
         );
         if (!result.gone) {
+          remainingManagedOrderIds.push(stopOrderId);
           throw new Error(
             `EXIT_TARGET_STOP_CANCEL_FAILED oid=${stopOrderId} reason=${result.reason ?? 'unknown'}`,
           );
         }
       }
-      return target;
+      return {
+        ...target,
+        confirmedExchangeAmount: position?.amount ?? 0,
+        remainingManagedOrderIds,
+      };
     }
 
     if (!terminalFence) throw new Error('TERMINAL_CLOSE_FENCE_REQUIRED');
@@ -14053,6 +14118,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       await this.pauseUserRelayForPositionMismatch(userId, agentId, message);
       throw new Error(message);
     }
+    const confirmedPosition = await this.activeTrading.getOpenPositionDetail(creds);
+    const confirmedExchangeAmount = confirmedPosition?.amount ?? 0;
+    if (btcToSats(confirmedExchangeAmount) !== btcToSats(target.targetAmount)) {
+      throw new Error(
+        `MARKET_CLOSE_CONFIRMATION_DRIFT: exchange ${confirmedExchangeAmount.toFixed(8)} BTC, ` +
+        `expected ${target.targetAmount.toFixed(8)} BTC`,
+      );
+    }
     terminalFence.claim = await this.advanceTerminalCloseFence({
       cycleId: terminalFence.cycleId,
       participantId,
@@ -14069,6 +14142,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // even though a reduce-only stop cannot reverse a flat position. Cleanup
     // is now post-confirmation and best effort; orphan reconciliation retains
     // it as a backstop if Bitfinex has a transient cancel-read failure.
+    const remainingManagedOrderIds: number[] = [];
     for (const stopOrderId of new Set(stopOrderIds)) {
       try {
         const result = await this.cancelManagedOrderGone(
@@ -14077,11 +14151,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           `EXIT-TARGET post-close cancel stop oid=${stopOrderId} ${userId} participant=${participantId}`,
         );
         if (!result.gone) {
+          remainingManagedOrderIds.push(stopOrderId);
           this.logger.warn(
             `EXIT_TARGET_POST_CLOSE_STOP_CANCEL_PENDING oid=${stopOrderId} reason=${result.reason ?? 'unknown'}`,
           );
         }
       } catch (err) {
+        remainingManagedOrderIds.push(stopOrderId);
         this.logger.warn(
           `EXIT_TARGET_POST_CLOSE_STOP_CANCEL_ERROR oid=${stopOrderId}: ${
             err instanceof Error ? err.message : String(err)
@@ -14094,6 +14170,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       closeSubmitStartedAtMs,
       closeExchangeAckAtMs,
       closeConfirmedAtMs: Date.now(),
+      confirmedExchangeAmount,
+      remainingManagedOrderIds,
     };
   }
 
@@ -14603,8 +14681,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         return false;
       }
       if (!position || btcToSats(position.amount) === 0) {
+        let alreadyFlatTarget: RelayLotExitTarget;
         try {
-          await this.closeParticipantPositionToLedgerTarget(
+          alreadyFlatTarget = await this.closeParticipantPositionToLedgerTarget(
             agentId,
             userId,
             participant.id,
@@ -14671,6 +14750,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           terminal_authority_kind: terminalClaim.authority.kind,
           terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
           terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+          terminal_authority_evidence: terminalClaim.authority.evidence,
           terminal_close_claim_token: terminalClaim.ownerToken,
           terminal_close_request_id: terminalClaim.requestId,
           terminal_close_phase: 'CONFIRMED',
@@ -14678,6 +14758,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           pnl_usd: Math.round(pnlUsd * 100) / 100,
           pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
           pnl_source: pnlSource,
+          actual_bitfinex_realized_pnl_usd:
+            pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
+          final_reconciliation: terminalFinalReconciliation(alreadyFlatTarget),
           source: 'hire',
         });
         this.showcaseVanishedMisses.delete(participant.id);
@@ -14775,6 +14858,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         terminal_authority_kind: terminalClaim.authority.kind,
         terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
         terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+        terminal_authority_evidence: terminalClaim.authority.evidence,
         terminal_close_claim_token: terminalClaim.ownerToken,
         terminal_close_request_id: terminalClaim.requestId,
         terminal_close_phase: 'CONFIRMED',
@@ -14814,6 +14898,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         pnl_usd: Math.round(pnlUsd * 100) / 100,
         pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
         pnl_source: 'open_position',
+        final_reconciliation: terminalFinalReconciliation(closeTarget),
         source: 'hire',
       });
 
@@ -16645,6 +16730,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.exitingLots.add(participantId);
     try {
     let closeQty = 0;
+    let closeTarget: RelayLotExitTarget;
     const stopIdsToCancel = new Set<number>();
     if (meta.stopOrderId) stopIdsToCancel.add(meta.stopOrderId);
 
@@ -16672,7 +16758,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       ) {
         throw new Error('TERMINAL_CLOSE_CLAIM_REVALIDATION_FAILED');
       }
-      const closeTarget = await this.closeParticipantPositionToLedgerTarget(
+      closeTarget = await this.closeParticipantPositionToLedgerTarget(
         agentId,
         userId,
         participantId,
@@ -16770,9 +16856,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
       qty_closed: closeQty,
       pnl_source: pnlSource,
+      actual_bitfinex_realized_pnl_usd:
+        pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
+      final_reconciliation: terminalFinalReconciliation(closeTarget),
       terminal_authority_kind: terminalClaim.authority.kind,
       terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
       terminal_authority_generation: terminalClaim.authority.lifecycleGeneration,
+      terminal_authority_evidence: terminalClaim.authority.evidence,
       terminal_close_claim_token: terminalClaim.ownerToken,
       terminal_close_request_id: terminalClaim.requestId,
       terminal_close_phase: 'CONFIRMED',

@@ -5,6 +5,9 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
+import sys
+from research import platform_relay_evidence as pure_relay
 
 
 ROOT = Path(__file__).resolve().parent
@@ -20,6 +23,7 @@ def _load_evidence_functions():
         "_counterfactual_bitfinex_evidence",
         "build_counterfactual_observability_fields",
         "_platform_relay_evidence_index",
+        "_normalize_platform_bitfinex_evidence",
         "_snapshot_with_platform_relay_evidence",
     }
     selected = [
@@ -51,6 +55,9 @@ def _load_evidence_functions():
             "60m": 3600,
             "120m": 7200,
         },
+        "_pure_platform_relay_evidence_index": pure_relay._platform_relay_evidence_index,
+        "_pure_normalize_platform_bitfinex_evidence": pure_relay._normalize_platform_bitfinex_evidence,
+        "_pure_snapshot_with_platform_relay_evidence": pure_relay._snapshot_with_platform_relay_evidence,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace
@@ -84,6 +91,7 @@ def test_platform_relay_evidence_join_is_provenanced_and_preserves_negative_even
         "MIRROR_DIFF", "STALE_NO_EXPOSURE"
     ]
     assert joined["platform_evidence_revision"]
+    assert pure_relay._platform_relay_evidence_index(artifact) == index
 
 
 def test_platform_relay_evidence_join_fails_closed_without_complete_provenance(tmp_path):
@@ -93,6 +101,161 @@ def test_platform_relay_evidence_join_fails_closed_without_complete_provenance(t
         "schema": "relay_lifecycle_evidence_v1", "records": []
     }), encoding="utf-8")
     assert funcs["_platform_relay_evidence_index"](artifact) == {}
+
+
+def test_pure_relay_module_import_has_no_runtime_side_effects(tmp_path):
+    code = (
+        "import pathlib,threading; before=set(pathlib.Path('.').iterdir()); "
+        "import research.platform_relay_evidence as m; "
+        "after=set(pathlib.Path('.').iterdir()); "
+        "assert before == after; assert len(threading.enumerate()) == 1; "
+        "assert not hasattr(m, 'app') and not hasattr(m, 'state')"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT)
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_bot_compatibility_validation_wrapper_matches_pure_contract():
+    validate = _load_evidence_functions().get("_validate_platform_relay_evidence_payload")
+    if validate is None:
+        tree = ast.parse(SOURCE)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_validate_platform_relay_evidence_payload")
+        namespace = {"_pure_validate_platform_relay_evidence_payload": pure_relay._validate_platform_relay_evidence_payload}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+        validate = namespace["_validate_platform_relay_evidence_payload"]
+    fixture = {"schema": "bad"}
+    assert validate(fixture) == pure_relay._validate_platform_relay_evidence_payload(fixture)
+
+
+def test_platform_events_normalize_explicit_exchange_lifecycle_without_invention():
+    normalize = _load_evidence_functions()["_normalize_platform_bitfinex_evidence"]
+    records = [{
+        "canonicalTradeId": "cont-rich", "lifecycleId": "cycle-rich", "participantId": "part-rich",
+        "events": [
+            {"id": "order", "eventType": "ORDER_PLACED", "createdAt": "2026-08-16T00:00:01Z", "payload": {
+                "bitfinexOrderId": 101, "clientOrderId": 501, "source_exact_qty_btc": 0.03,
+                "venue_qty_btc": 0.02999, "entryExchangeAckAtMs": 1_000,
+            }},
+            {"id": "fill", "eventType": "FILLED", "payload": {
+                "bitfinex_order_id": 101, "fill_id": 201, "filled_qty": 0.02999,
+                "fill_price": 63_000, "exchange_fill_received_at": "2026-08-16T00:00:02Z",
+            }},
+            {"id": "stop", "eventType": "STOP_LOSS_ARMED", "payload": {
+                "stopOrderId": 301, "qty": 0.02999, "stop_price": 64_500,
+                "stop_exchange_ack_at": "2026-08-16T00:00:03Z",
+            }},
+            {"id": "reprice", "eventType": "UPDATE_STOPS", "payload": {
+                "event": "LIMIT_UPDATED", "bitfinex_order_id": 101, "newLimit": 63_050,
+                "exchange_ack_at": "2026-08-16T00:00:04Z",
+            }},
+            {"id": "exit", "eventType": "EXIT", "payload": {
+                "bitfinex_order_id": 401, "fill_id": 402, "exit_price": 62_900,
+                "exit_reason": "SOURCE_CONFIRMED", "actual_bitfinex_realized_pnl_usd": 2.25,
+                "trading_fee_usd": 0.0,
+                "reconciliation": {"complete": True, "position_delta": 0, "order_delta": 0,
+                                   "orphan_order_count": 0, "foreign_order_count": 0},
+                "quantity_evidence_complete": True, "order_ack_history_complete": True,
+                "stop_evidence_complete": True, "reconciliation_complete": True,
+            }},
+        ],
+    }]
+    evidence = normalize(records, "cont-rich")
+    assert evidence["schema"] == "bitfinex_evidence_v1"
+    assert evidence["participant_id"] == "part-rich"
+    assert evidence["source_lifecycle_id"] == "cycle-rich"
+    assert evidence["client_order_id"] == 501
+    assert evidence["bitfinex_order_ids"] == [101, 301, 401]
+    assert evidence["fill_ids"] == [201, 402]
+    assert evidence["source_quantity"] == 0.03
+    assert evidence["normalized_quantity"] == 0.02999
+    assert evidence["filled_quantity"] == 0.02999
+    assert evidence["protected_quantity"] == 0.02999
+    assert evidence["fills"][0]["fill_id"] == 201
+    assert evidence["reprices"][0]["price"] == 63050.0
+    assert evidence["ack_history"][0]["ack_at"] == 1000
+    assert evidence["stop_chain"][0]["order_id"] == 301
+    assert evidence["exit_evidence"]["order_id"] == 401
+    assert evidence["actual_bitfinex_realized_pnl_usd"] == 2.25
+    assert evidence["cost_evidence"] == {"trading_fee_usd": 0.0}
+    assert evidence["reconciliation_complete"] is True
+
+
+def test_platform_event_normalizer_keeps_missing_ids_and_completeness_missing():
+    normalize = _load_evidence_functions()["_normalize_platform_bitfinex_evidence"]
+    evidence = normalize([{"participantId": "part-missing", "events": [
+        {"id": "filled-no-id", "eventType": "FILLED", "createdAt": "2026-08-16T00:00:01Z",
+         "payload": {"filled_qty": 0.01, "fill_price": 63_000,
+                     "quantity_evidence_complete": True, "order_ack_history_complete": True}},
+        {"id": "stop-no-id", "eventType": "STOP_LOSS_ARMED", "createdAt": "2026-08-16T00:00:02Z",
+         "payload": {"qty": 0.01, "stop_price": 64_000, "stop_evidence_complete": True,
+                     "reconciliation_complete": True}},
+    ]}], "cont-missing")
+    assert evidence["fill_ids"] == []
+    assert evidence["bitfinex_order_ids"] == []
+    assert evidence["ack_history"] == []
+    assert evidence["stop_chain"] == []
+    assert evidence["quantity_evidence_complete"] is False
+    assert evidence["order_ack_history_complete"] is False
+    assert evidence["stop_evidence_complete"] is False
+    assert evidence["reconciliation_complete"] is False
+
+
+def test_platform_event_normalizer_preserves_partial_fill_stop_chain_and_excludes_unsupported_exit():
+    normalize = _load_evidence_functions()["_normalize_platform_bitfinex_evidence"]
+    evidence = normalize([{"participantId": "part-partial", "events": [
+        {"id": "f1", "eventType": "FILLED", "payload": {
+            "bitfinexOrderId": 101, "fillId": 201, "partialFillQty": 0.01,
+        }},
+        {"id": "s1", "eventType": "UPDATE_STOPS", "payload": {
+            "event": "PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED", "partialFillStopOrderId": 301,
+            "partialFillQty": 0.01, "stop_exchange_ack_at": "2026-08-16T00:00:02Z",
+        }},
+        {"id": "f2", "eventType": "FILLED", "payload": {
+            "bitfinexOrderId": 101, "fillId": 202, "partialFillQty": 0.018,
+        }},
+        {"id": "s2", "eventType": "UPDATE_STOPS", "payload": {
+            "event": "PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED", "partialFillStopOrderId": 302,
+            "partialFillQty": 0.018, "supersededPartialStopOrderId": 301,
+            "stop_exchange_ack_at": "2026-08-16T00:00:03Z",
+        }},
+        {"id": "x", "eventType": "EXIT", "payload": {
+            "exit_reason": "PROTECTION_FAILURE_EMERGENCY_CLOSE", "exit_price": 63_100,
+        }},
+    ]}], "cont-partial")
+    assert evidence["filled_quantity"] == 0.018
+    assert evidence["protected_quantity"] == 0.018
+    assert evidence["fill_ids"] == [201, 202]
+    assert [row["order_id"] for row in evidence["stop_chain"]] == [301, 302]
+    assert evidence["stop_chain"][1]["predecessor_order_id"] == 301
+    assert "PROTECTION_FAILURE_EMERGENCY_CLOSE" in evidence["analysis_exclusion_reasons"]
+    assert "TERMINAL_PROVENANCE_EXCLUDED" in evidence["analysis_exclusion_reasons"]
+    assert evidence["reconciliation_complete"] is False
+
+
+def test_platform_event_normalizer_keeps_concurrent_participants_separate():
+    normalize = _load_evidence_functions()["_normalize_platform_bitfinex_evidence"]
+    records = [
+        {"participantId": "part-a", "lifecycleId": "cycle-a", "events": [{
+            "id": "a", "eventType": "ORDER_PLACED",
+            "payload": {"bitfinexOrderId": 101, "clientOrderId": 501, "entryExchangeAckAtMs": 1000},
+        }]},
+        {"participantId": "part-b", "lifecycleId": "cycle-b", "events": [{
+            "id": "b", "eventType": "ORDER_PLACED",
+            "payload": {"bitfinexOrderId": 102, "clientOrderId": 502, "entryExchangeAckAtMs": 1001},
+        }]},
+    ]
+    evidence = normalize(records, "cont-shared")
+    assert evidence["participant_id"] is None
+    assert set(evidence["participants"]) == {"part-a", "part-b"}
+    assert evidence["participants"]["part-a"]["client_order_id"] == 501
+    assert evidence["participants"]["part-b"]["client_order_id"] == 502
+    assert evidence["bitfinex_order_ids"] == [101, 102]
+    assert evidence["quantity_evidence_complete"] is False
 
 
 def _complete_fixture():

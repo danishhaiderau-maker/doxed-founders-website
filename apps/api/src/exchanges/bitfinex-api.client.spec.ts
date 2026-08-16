@@ -9,7 +9,22 @@ import {
   parseActiveOrdersPayload,
   parseOpenPositionPayload,
   parseOrderHistoryEvidence,
+  parseOrderTrade,
 } from './bitfinex-api.client';
+
+test('authenticated order-trade parsing preserves immutable fill identity and explicit fee facts', () => {
+  const row = [998877, 'tBTCF0:USTF0', 1_723_000_000_000, 241234567890, -0.01, 64_000, 'LIMIT', 64_000, 1, -0.00002, 'UST'];
+  assert.deepEqual(parseOrderTrade(row), {
+    id: 998877,
+    orderId: 241234567890,
+    execPrice: 64_000,
+    execAmount: -0.01,
+    fee: -0.00002,
+    mtsCreate: 1_723_000_000_000,
+    feeCurrency: 'UST',
+  });
+  assert.equal(parseOrderTrade([null, 'tBTCF0:USTF0', 1, 2, 0.01, 64_000, '', 0, 0, 0, 'UST']), null);
+});
 
 test('REST and WS nonce allocations share one strictly monotonic api-key sequence', () => {
   const values = Array.from({ length: 20 }, () => BigInt(allocateBitfinexAuthNonce('shared-nonce-key')));

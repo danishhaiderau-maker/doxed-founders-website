@@ -17727,71 +17727,10 @@ def _manifest_category(title: str) -> str:
 
 
 def archive_research_session(payload):
-    """Store snapshot of this analyzer run for session comparison."""
+    """Atomically store one exact, hash-bound analyzer generation."""
     try:
-        os.makedirs(SESSION_ARCHIVE_DIR, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        seq = len(glob.glob(os.path.join(SESSION_ARCHIVE_DIR, "session_*"))) + 1
-        folder = os.path.join(SESSION_ARCHIVE_DIR, f"session_{seq:03d}_{stamp}")
-        os.makedirs(folder, exist_ok=True)
-        p = payload.get("performance") or {}
-        meta = {
-            "schema": "research_session_archive_v1",
-            "session_id": os.path.basename(folder),
-            "generated_at": payload.get("generated_at"),
-            "analyzer_sync_id": payload.get("analyzer_sync_id"),
-            "data_scope": payload.get("data_scope"),
-            "trades": p.get("trades"),
-            "net_pnl_usd": p.get("net_pnl_usd"),
-            "win_rate_pct": p.get("win_rate_pct"),
-        }
-        with open(os.path.join(folder, "session_meta.json"), "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-        for name in (
-            EXECUTIVE_SUMMARY_FILE,
-            RESEARCH_HIGHLIGHTS_FILE,
-            RESEARCH_FINDINGS_FILE,
-            RESEARCH_COVERAGE_FILE,
-            DEEP_DIVE_INDEX_FILE,
-            ANALYSIS_DASHBOARD_HTML,
-            ANALYZER_RUN_LOG_FILE,
-            RESEARCH_COMPACT_SUMMARY_FILE,
-            REPORT_MANIFEST_FILE,
-        ):
-            if os.path.isfile(name):
-                shutil.copy2(name, os.path.join(folder, name))
-        if os.path.isdir(REPORTS_DIR):
-            # Preserve this run's derived reports only. reports/history contains
-            # earlier snapshots; recursively copying it made every new archive
-            # larger than the last and consumed hundreds of MB in one day.
-            report_destination = os.path.join(folder, "reports")
-            for source_root, dirs, files in os.walk(REPORTS_DIR):
-                relative_root = os.path.relpath(source_root, REPORTS_DIR)
-                if relative_root == ".":
-                    dirs[:] = [name for name in dirs if name != "history"]
-                elif relative_root.split(os.sep, 1)[0] == "history":
-                    dirs[:] = []
-                    continue
-                target_root = (
-                    report_destination
-                    if relative_root == "."
-                    else os.path.join(report_destination, relative_root)
-                )
-                os.makedirs(target_root, exist_ok=True)
-                for name in files:
-                    shutil.copy2(os.path.join(source_root, name), os.path.join(target_root, name))
-        index = {"sessions": []}
-        if os.path.isfile(SESSION_ARCHIVE_INDEX_FILE):
-            try:
-                with open(SESSION_ARCHIVE_INDEX_FILE, encoding="utf-8") as f:
-                    index = json.load(f)
-            except Exception:
-                pass
-        index.setdefault("sessions", []).insert(0, meta)
-        index["sessions"] = index["sessions"][:50]
-        with open(SESSION_ARCHIVE_INDEX_FILE, "w", encoding="utf-8") as f:
-            json.dump(index, f, indent=2)
-        return folder
+        from research.immutable_archive import create_archive
+        return str(create_archive(os.getcwd(), payload, SESSION_ARCHIVE_DIR))
     except Exception as exc:
         print(f"  ⚠️ Session archive failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
         return None

@@ -337,6 +337,10 @@ export function parseBitfinexOrderId(response: unknown): number | null {
 
 /** One execution of an order — parsed from Bitfinex v2 auth order-trades rows. */
 export type BitfinexOrderTrade = {
+  /** Authenticated Bitfinex execution ID (ID, index 0). */
+  id: number;
+  /** Authenticated parent order ID (ORDER_ID, index 3). */
+  orderId: number;
   /** Real execution price (EXEC_PRICE, index 5). */
   execPrice: number;
   /** Signed executed amount in BTC (EXEC_AMOUNT, index 4). */
@@ -345,6 +349,7 @@ export type BitfinexOrderTrade = {
   fee: number;
   /** Execution timestamp ms (MTS_CREATE, index 2). */
   mtsCreate: number;
+  feeCurrency: string | null;
 };
 
 /** Bitfinex v2 trade array: [ID, PAIR, MTS_CREATE, ORDER_ID, EXEC_AMOUNT, EXEC_PRICE,
@@ -353,12 +358,17 @@ export function parseOrderTrade(row: unknown): BitfinexOrderTrade | null {
   if (!Array.isArray(row) || row.length < 11) return null;
   const execAmount = Number(row[4] ?? 0);
   const execPrice = Number(row[5] ?? 0);
-  if (!Number.isFinite(execPrice) || execPrice <= 0) return null;
+  const id = Number(row[0]);
+  const orderId = Number(row[3]);
+  if (!Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(orderId) || orderId <= 0 || !Number.isFinite(execPrice) || execPrice <= 0) return null;
   return {
+    id,
+    orderId,
     execPrice,
     execAmount: Number.isFinite(execAmount) ? execAmount : 0,
     fee: Number(row[9] ?? 0) || 0,
     mtsCreate: Number(row[2] ?? 0) || 0,
+    feeCurrency: typeof row[10] === 'string' && row[10].trim() ? row[10].trim() : null,
   };
 }
 

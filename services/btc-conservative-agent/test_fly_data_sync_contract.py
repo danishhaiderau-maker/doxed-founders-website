@@ -11,6 +11,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from research.platform_relay_evidence import _validate_platform_relay_evidence_payload as pure_validate_relay
 
 
 ROOT = Path(__file__).resolve().parent
@@ -34,6 +35,7 @@ def _load_bot_functions(*names):
         "_DATA_SYNC_EXTENSIONS": frozenset(
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
         ),
+        "_pure_validate_platform_relay_evidence_payload": pure_validate_relay,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace
