@@ -3431,6 +3431,8 @@ type ExecutionTradingClient = BitfinexTradingClient | BitfinexSimTradingClient;
 
 @Injectable()
 export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleDestroy {
+  private emergencyPositionReadWait = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
   private readonly bitfinex = new BitfinexTradingClient();
   private activeTrading: ExecutionTradingClient;
@@ -19212,9 +19214,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // flat or submit branch. Require three consecutive byte-equivalent
       // authenticated observations; bounded retries also reject oscillation.
       if (consecutive >= 3) return { known: true, position: latest, samples };
-      if (attempt < 4) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 75));
-      }
+      if (attempt < 4) await this.emergencyPositionReadWait(750);
     }
     return { known: false, position: latest, samples };
   }

@@ -7781,6 +7781,7 @@ function accountEmergencyServiceFixture(options: {
   positionReads?: Array<number | null>;
 } = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.emergencyPositionReadWait = async () => {};
   const durable: any = {
     terminalCloseClaimToken: null, terminalCloseRequestId: null,
     terminalCloseGeneration: null, terminalCloseAuthority: null,
