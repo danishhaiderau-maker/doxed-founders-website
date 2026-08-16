@@ -1143,6 +1143,16 @@ export function finalizedEntryFillQty(input: {
   return satsToBtc(filledSats);
 }
 
+export function recoverableSubmittingStop(
+  activeOrders: BitfinexActiveOrder[],
+  historyOrder: BitfinexActiveOrder | null,
+  clientOrderId: number,
+): BitfinexActiveOrder | null {
+  const candidate = activeOrders.find((order) => order.cid === clientOrderId)
+    ?? (historyOrder?.cid === clientOrderId ? historyOrder : null);
+  return candidate?.status.toUpperCase().includes('ACTIVE') ? candidate : null;
+}
+
 /** Quantity parity for an already matched showcase/copy position identity. */
 export function mirrorPositionQuantityDelta(
   showcaseQty: number | null | undefined,
@@ -6299,6 +6309,92 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           existing.status === SignalCycleStatus.INTENT &&
           existing.createdAt.getTime() < Date.now() - 120_000
         ) {
+          const submissionFence = await this.prisma.signalCycleEvent.findFirst({
+            where: { participantId: existing.id, eventType: 'ENTRY_SUBMISSION_UNKNOWN' },
+            orderBy: { createdAt: 'desc' },
+            select: { payload: true },
+          });
+          if (submissionFence?.payload && typeof submissionFence.payload === 'object' && !Array.isArray(submissionFence.payload)) {
+            const fence = submissionFence.payload as Record<string, unknown>;
+            const cid = Number(fence.client_order_id);
+            const expectedQty = Number(fence.qty);
+            const expectedPrice = Number(fence.limit_price);
+            const expectedDirection = fence.direction === 'LONG' || fence.direction === 'SHORT'
+              ? fence.direction
+              : null;
+            if (Number.isSafeInteger(cid) && cid > 0 && expectedQty > 0 && expectedPrice > 0 && expectedDirection) {
+              let recovered: BitfinexActiveOrder | null = null;
+              try {
+                const active = await this.activeTrading.listActiveOrders(creds);
+                recovered = active.find((order) => order.cid === cid) ?? null;
+                if (!recovered && this.activeTrading instanceof BitfinexTradingClient) {
+                  recovered = await this.activeTrading.findOrderHistoryByClientOrderId(creds, cid);
+                }
+              } catch {
+                // Authenticated recovery state unavailable: retain the durable
+                // claim. A timeout must never turn into a second entry.
+                continue;
+              }
+              if (recovered) {
+                const expectedAmount = expectedDirection === 'LONG' ? expectedQty : -expectedQty;
+                const exactIdentity = recovered.cid === cid
+                  && recovered.symbol === BITFINEX_BTC_PERP_SYMBOL
+                  && btcToSats(Math.abs(recovered.amountOrig)) === btcToSats(expectedQty)
+                  && Math.sign(recovered.amountOrig) === Math.sign(expectedAmount);
+                if (!exactIdentity) continue;
+                if (recovered.status.toUpperCase().includes('ACTIVE')) {
+                  await this.cycles.recordHireExecutionEvent(
+                    instance.userId, agentId, cycle.id, 'ORDER_PLACED', {
+                      venue: 'bitfinex', source: 'hire', event: 'ENTRY_SUBMISSION_RECOVERED',
+                      bitfinexOrderId: recovered.id, bitfinex_order_id: recovered.id,
+                      clientOrderId: cid, direction: expectedDirection, qty: expectedQty,
+                      limitPrice: expectedPrice, originalLimitPrice: expectedPrice,
+                      exchangeQtyAtOrder: Number(fence.exchange_qty_at_order ?? 0),
+                      leverage: Number(fence.leverage ?? resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope)),
+                    },
+                  );
+                  continue;
+                }
+                const tradeEvidence = await this.resolveExchangeTradesFillEvidence(creds, recovered.id);
+                if (tradeEvidence && btcToSats(tradeEvidence.qty) > 0) {
+                  await this.recordCancelRaceFill(
+                    agentId,
+                    instance.userId,
+                    cycle,
+                    existing.id,
+                    {
+                      bitfinexOrderId: recovered.id,
+                      clientOrderId: cid,
+                      direction: expectedDirection,
+                      qty: expectedQty,
+                      limitPrice: expectedPrice,
+                      originalLimitPrice: expectedPrice,
+                      exchangeQtyAtOrder: Number(fence.exchange_qty_at_order ?? 0),
+                      leverage: Number(fence.leverage ?? resolveSubscriberLeverage(cycle.intentEnvelope as SignalIntentEnvelope)),
+                    },
+                    creds,
+                    cycle.intentEnvelope as SignalIntentEnvelope,
+                    {
+                      filledQty: tradeEvidence.qty,
+                      fillPrice: tradeEvidence.price,
+                      source: 'ORDER_PARTIAL',
+                      orderResting: false,
+                    },
+                    'ENTRY_SUBMISSION_RESTART_RECOVERY',
+                    undefined,
+                    undefined,
+                    tradeEvidence.fillIds,
+                  );
+                }
+                // A non-active row without authenticated executions remains
+                // UNKNOWN. Never infer no-fill or resubmit from status text.
+                continue;
+              }
+              // Absence from one active/history snapshot remains UNKNOWN.
+              continue;
+            }
+            continue;
+          }
           await this.prisma.signalCycleParticipant
             .delete({ where: { id: existing.id } })
             .catch(() => {
@@ -8772,6 +8868,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       : undefined;
     entryClientOrderId = clientOrderId;
 
+    // Durable request fence must exist before the exchange write. A crash or
+    // transport timeout can then recover the deterministic CID instead of
+    // deleting the INTENT claim and submitting a duplicate order.
+    await this.prisma.signalCycleEvent.create({
+      data: {
+        cycleId,
+        participantId: claimParticipantId,
+        eventType: 'ENTRY_SUBMISSION_UNKNOWN',
+        payload: {
+          schema: 'entry_submission_fence_v1',
+          phase: 'SUBMITTING',
+          trade_id: tradeId,
+          participant_id: claimParticipantId,
+          client_order_id: clientOrderId ?? null,
+          direction: intent.direction,
+          qty,
+          limit_price: limitPrice,
+          exchange_qty_at_order: exchangeQtyAtOrder,
+          leverage,
+        } as Prisma.InputJsonValue,
+      },
+    });
     if (timing) timing.bitfinexRequestStartedAtMs = Date.now();
     entrySubmitStarted = true;
     const orderId = await this.activeTrading.submitLimitOrder(creds, {
@@ -9394,10 +9512,27 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (promotion.recoverSubmitting) {
       const activeStops = await this.activeTrading.listActiveOrders(creds).catch(() => null);
       if (!activeStops) return false;
-      const candidate = activeStops.find((order) => order.cid === promotion.stopClientOrderId);
+      let historyCandidate: BitfinexActiveOrder | null = null;
+      if (!activeStops.some((order) => order.cid === promotion.stopClientOrderId)
+          && this.activeTrading instanceof BitfinexTradingClient) {
+        try {
+          historyCandidate = await this.activeTrading.findOrderHistoryByClientOrderId(
+            creds,
+            promotion.stopClientOrderId,
+          );
+        } catch {
+          return false;
+        }
+      }
+      const candidate = recoverableSubmittingStop(
+        activeStops,
+        historyCandidate,
+        promotion.stopClientOrderId,
+      );
       if (!candidate) {
-        // SUBMITTING is intentionally non-stealable. Absence from one active
-        // snapshot is UNKNOWN (ACK may be delayed); never resubmit here.
+        // SUBMITTING is intentionally non-stealable. Absence from authenticated
+        // active + history views is UNKNOWN (ACK may be delayed, or the stop may
+        // already have fired); never resubmit or promote from this observation.
         return false;
       }
       recoveredSubmittingStopId = candidate.id;
@@ -12597,7 +12732,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const claimed = await this.prisma.signalCycleParticipant.updateMany({
       where: {
         id: input.participantId,
-        status: SignalCycleStatus.PENDING_ENTRY,
+        status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY] },
         partialEmergencyRequestId: null,
       },
       data: {
@@ -13282,7 +13417,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const updated = await this.prisma.signalCycleParticipant.updateMany({
       where: {
         id: input.participantId,
-        status: SignalCycleStatus.PENDING_ENTRY,
+        status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY] },
         OR: [
           { fillPromotionKey: null },
           { fillPromotionKey: key, fillPromotionPhase: 'FAILED' },
@@ -13320,7 +13455,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       },
     });
     if (
-      existing?.status === SignalCycleStatus.PENDING_ENTRY
+      existing != null && (existing.status === SignalCycleStatus.INTENT || existing.status === SignalCycleStatus.PENDING_ENTRY)
       && existing.fillPromotionKey === key
       && existing.fillPromotionPhase === 'PROTECTED'
       && existing.fillPromotionStopOrderId != null
@@ -13328,7 +13463,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       const resumed = await this.prisma.signalCycleParticipant.updateMany({
         where: {
           id: input.participantId,
-          status: SignalCycleStatus.PENDING_ENTRY,
+          status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY] },
           fillPromotionKey: key,
           fillPromotionPhase: 'PROTECTED',
           fillPromotionStopOrderId: existing.fillPromotionStopOrderId,
@@ -13344,7 +13479,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
     }
     if (
-      existing?.status === SignalCycleStatus.PENDING_ENTRY
+      existing != null && (existing.status === SignalCycleStatus.INTENT || existing.status === SignalCycleStatus.PENDING_ENTRY)
       && existing.fillPromotionKey === key
       && existing.fillPromotionPhase === 'SUBMITTING'
       && existing.fillPromotionClaimToken
@@ -13477,7 +13612,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    */
   private async ensureDurableProtectiveStop(input: {
     participantId: string;
-    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT';
+    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT' | 'MARKET_CATCHUP';
     creds: ExchangeCredentials;
     positionDirection: 'LONG' | 'SHORT';
     qty: number;
@@ -13511,7 +13646,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     });
     if (
       !participant
-      || (participant.status !== SignalCycleStatus.PENDING_ENTRY && participant.status !== SignalCycleStatus.OPEN)
+      || (participant.status !== SignalCycleStatus.INTENT
+        && participant.status !== SignalCycleStatus.PENDING_ENTRY
+        && participant.status !== SignalCycleStatus.OPEN)
     ) {
       return { ok: false, unknown: true, reason: 'PROTECTIVE_STOP_PARTICIPANT_NOT_ACTIVE', clientOrderId };
     }
@@ -13605,7 +13742,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const claimed = await this.prisma.signalCycleParticipant.updateMany({
       where: {
         id: input.participantId,
-        status: { in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
         protectiveStopRequestId: participant.protectiveStopRequestId,
         protectiveStopPhase: participant.protectiveStopPhase,
       },
@@ -14484,10 +14621,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     meta: ExecutionPayload;
     authority: TerminalCloseAuthority;
   }): Promise<TerminalCloseClaim | null> {
-    if (!validateTerminalCloseAuthority(input.authority)) return null;
+    // Use the exact timestamp that is durably stored with the claim as the
+    // authority-validation reference. Recovery can then reproduce this proof
+    // without a millisecond boundary race at the freshness cutoff.
+    const claimedAt = new Date();
+    if (!validateTerminalCloseAuthority(input.authority, claimedAt.getTime())) return null;
     const ownerToken = randomUUID();
     const newRequestId = randomUUID();
-    const claimedAt = new Date();
     const staleBefore = new Date(claimedAt.getTime() - TERMINAL_CLOSE_CLAIM_LEASE_MS);
     return this.prisma.$transaction(
       async (tx) => {
@@ -14714,7 +14854,6 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     creds: ExchangeCredentials;
     authority: TerminalCloseAuthority;
   }): Promise<TerminalCloseClaim | null> {
-    if (!validateTerminalCloseAuthority(input.authority)) return null;
     const row = await this.prisma.signalCycleParticipant.findFirst({
       where: {
         id: input.participantId,
@@ -14727,6 +14866,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         terminalCloseRequestId: true,
         terminalCloseGeneration: true,
         terminalCloseAuthority: true,
+        terminalCloseClaimedAt: true,
         terminalClosePhase: true,
         terminalCloseTargetAmount: true,
         cycle: { select: { agentId: true } },
@@ -14735,13 +14875,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     if (
       !row || row.cycle.agentId !== input.agentId ||
       !row.terminalCloseClaimToken || !row.terminalCloseRequestId ||
+      !row.terminalCloseClaimedAt ||
       row.terminalCloseGeneration !== input.authority.lifecycleGeneration ||
       !['SUBMITTING', 'ACKNOWLEDGED', 'CONFIRMED'].includes(row.terminalClosePhase ?? '')
     ) return null;
     const storedAuthority = row.terminalCloseAuthority as TerminalCloseAuthority | null;
+    // Recovery is proving an already-submitted immutable request, not creating
+    // fresh terminal authority. Validate both the stored and supplied proof at
+    // the durable claim time so a legitimate crash recovery does not become
+    // impossible merely because a 15-second snapshot or five-minute signed
+    // receipt aged while the fence remained SUBMITTING/ACKNOWLEDGED. Exchange
+    // target reconciliation below is still mandatory and no resubmit occurs.
+    const authorityValidationAtMs = row.terminalCloseClaimedAt.getTime();
     if (
       !storedAuthority ||
-      !validateTerminalCloseAuthority(storedAuthority) ||
+      !validateTerminalCloseAuthority(storedAuthority, authorityValidationAtMs) ||
+      !validateTerminalCloseAuthority(input.authority, authorityValidationAtMs) ||
       storedAuthority.kind !== input.authority.kind ||
       !tradeIdsMatch(storedAuthority.canonicalTradeId, input.authority.canonicalTradeId) ||
       storedAuthority.lifecycleGeneration !== input.authority.lifecycleGeneration
@@ -15701,6 +15850,28 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const qty = exactQty.qty;
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
 
+    let prePosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    try {
+      prePosition = await this.activeTrading.getOpenPositionDetail(creds);
+    } catch {
+      await releaseClaim();
+      return false;
+    }
+    const exchangeQtyAtOrder = prePosition ? Math.abs(prePosition.amount) : 0;
+    await this.prisma.signalCycleEvent.create({
+      data: {
+        cycleId,
+        participantId: claimParticipantId,
+        eventType: 'ENTRY_SUBMISSION_UNKNOWN',
+        payload: {
+          schema: 'entry_submission_fence_v1', phase: 'SUBMITTING', operation: 'MARKET_CATCHUP',
+          trade_id: tradeId, participant_id: claimParticipantId, client_order_id: clientOrderId,
+          direction: intent.direction, qty, limit_price: mark, original_limit_price: showcaseEntry,
+          exchange_qty_at_order: exchangeQtyAtOrder, leverage,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
     let marketOrderId: number;
     try {
       marketOrderId = await this.activeTrading.submitMarketEntry(creds, {
@@ -15710,26 +15881,78 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         clientOrderId,
       });
     } catch (err) {
-      await releaseClaim();
+      await this.cycles.recordHireExecutionEvent(
+        instance.userId, agentId, cycleId, 'ENTRY_SUBMISSION_UNKNOWN', {
+          schema: 'entry_submission_fence_v1', phase: 'SUBMIT_RESULT_UNKNOWN', operation: 'MARKET_CATCHUP',
+          trade_id: tradeId, participant_id: claimParticipantId, client_order_id: clientOrderId,
+          direction: intent.direction, qty, limit_price: mark, exchange_qty_at_order: exchangeQtyAtOrder,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      ).catch(() => undefined);
       this.logger.warn(
-        `[MIRROR-CATCHUP] market entry failed ${instance.userId} cycle=${cycleId}: ${err instanceof Error ? err.message : err}`,
+        `[MIRROR-CATCHUP] market entry result unknown ${instance.userId} cycle=${cycleId}; durable claim retained: ${err instanceof Error ? err.message : err}`,
       );
+      await this.pauseUserRelayForPositionMismatch(
+        instance.userId,
+        agentId,
+        `MARKET_CATCHUP_SUBMIT_RESULT_UNKNOWN cycle=${cycleId}; awaiting exact CID recovery`,
+      ).catch(() => undefined);
       return false;
     }
 
-    const fillPrice = mark;
+    const tradeEvidence = await this.resolveExchangeTradesFillEvidence(creds, marketOrderId);
+    let authenticatedQty = tradeEvidence?.qty ?? 0;
+    let fillPrice = tradeEvidence?.price ?? 0;
+    if (btcToSats(authenticatedQty) === 0) {
+      let postPosition: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+      try {
+        postPosition = await this.activeTrading.getOpenPositionDetail(creds);
+      } catch {
+        return false;
+      }
+      const sameDirection = Boolean(postPosition && (
+        (intent.direction === 'LONG' && postPosition.amount > 0)
+        || (intent.direction === 'SHORT' && postPosition.amount < 0)
+      ));
+      const delta = sameDirection && postPosition
+        ? Math.max(0, Math.abs(postPosition.amount) - exchangeQtyAtOrder)
+        : 0;
+      if (btcToSats(delta) === 0) return false;
+      authenticatedQty = Math.min(qty, delta);
+      fillPrice = postPosition?.basePrice ?? mark;
+    }
     const stopLossMarginPct = resolveEffectiveStopLossMarginPct(intent.risk.stop_loss_margin_pct, {
       mirrorMode: true,
     });
     const stopPrice = computeStopPrice(fillPrice, intent.direction, stopLossMarginPct, leverage);
-    const stopOrderId = await this.activeTrading
-      .submitStopOrder(creds, {
-        positionDirection: intent.direction,
-        qty,
-        stopPrice,
-        leverage,
-      })
-      .catch(() => null);
+    const protectedStop = await this.ensureDurableProtectiveStop({
+      participantId: claimParticipantId!, purpose: 'MARKET_CATCHUP', creds,
+      positionDirection: intent.direction, qty: authenticatedQty, stopPrice, leverage,
+    }).catch((err) => ({ ok: false as const, unknown: true as const, reason: String(err), clientOrderId: 0 }));
+    if (!protectedStop.ok) {
+      await this.pauseUserRelayForPositionMismatch(
+        instance.userId, agentId, `MARKET_CATCHUP_PROTECTION_UNKNOWN cycle=${cycleId}: ${protectedStop.reason}`,
+      ).catch(() => undefined);
+      const flattened = await this.emergencyClosePartialWithFence({
+        participantId: claimParticipantId!, creds, direction: intent.direction,
+        attributableQty: authenticatedQty, leverage,
+      }).catch(() => false);
+      await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'NEGATIVE_EVIDENCE', {
+        schema: 'copy_negative_evidence_v1', venue: 'bitfinex', source: 'hire',
+        event: 'MARKET_CATCHUP_PROTECTION_FAILURE', participant_id: claimParticipantId,
+        bitfinex_order_id: marketOrderId, attributable_qty: authenticatedQty,
+        emergency_flat_confirmed: flattened, analysis_eligible: false,
+        analysis_exclusion_reasons: ['MARKET_CATCHUP_PROTECTION_FAILURE'],
+      }).catch(() => undefined);
+      if (flattened) {
+        await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'EXPIRED', {
+          venue: 'bitfinex', source: 'hire', event: 'MARKET_CATCHUP_PROTECTION_FAILURE',
+          reason: 'STOP_PROTECTION_FAILED_EXCHANGE_FLAT_CONFIRMED', qty: authenticatedQty,
+        });
+      }
+      return false;
+    }
+    const stopOrderId = protectedStop.orderId;
 
     await this.cycles.recordHireExecutionEvent(
       instance.userId,
@@ -15743,9 +15966,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         showcase_entry: showcaseEntry,
         mark_at_entry: mark,
         slip_usd: Math.round(slipUsd * 100) / 100,
-        qty,
+        qty: authenticatedQty,
         source_exact_qty_btc: showcaseQty,
-        venue_qty_btc: qty,
+        venue_qty_btc: authenticatedQty,
         direction: intent.direction,
         leverage,
         margin_usd: marginUsd,
@@ -15766,9 +15989,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     await this.cycles.recordHireExecutionEvent(instance.userId, agentId, cycleId, 'FILLED', {
       venue: 'bitfinex',
       fill_price: fillPrice,
-      qty,
+      qty: authenticatedQty,
       source_exact_qty_btc: showcaseQty,
-      venue_qty_btc: qty,
+      venue_qty_btc: authenticatedQty,
       direction: intent.direction,
       leverage,
       margin_usd: marginUsd,
@@ -15791,7 +16014,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         venue: 'bitfinex',
         stop_price: stopPrice,
         stopOrderId,
-        qty,
+        qty: authenticatedQty,
         stop_loss_margin_pct: stopLossMarginPct,
         source: 'hire',
       });

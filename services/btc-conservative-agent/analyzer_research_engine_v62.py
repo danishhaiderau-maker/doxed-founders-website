@@ -65,6 +65,10 @@ from research.analysis_eligibility import (
     REAL_COPY_PARAMETER_OPTIMISATION,
     eligible_trade_ids as _cohort_eligible_trade_ids,
 )
+from research.platform_relay_evidence import (
+    _normalize_platform_bitfinex_evidence,
+    _platform_relay_evidence_index,
+)
 from research_opportunity_v2 import (
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
     REPORT_FILE as TYPE_B_RESEARCH_V2_REPORT_NAME,
@@ -1946,6 +1950,7 @@ def _safe_replay_sweep(name, fn, *args, **kwargs):
 
 
 def _load_jsonl_by_trade_id(path):
+    requested_path = path
     path = _agent_data_path(path)
     rows = {}
     if not os.path.exists(path):
@@ -1962,6 +1967,33 @@ def _load_jsonl_by_trade_id(path):
                     rows[tid] = row
     except Exception as e:
         print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    if os.path.basename(str(requested_path)) == COUNTERFACTUAL_FILE and rows:
+        relay_path = _agent_data_path("relay_lifecycle_evidence_v1.json")
+        relay_index = _platform_relay_evidence_index(relay_path)
+        for trade_id, source_row in list(rows.items()):
+            joined = relay_index.get(str(trade_id))
+            if not joined:
+                continue
+            normalized = _normalize_platform_bitfinex_evidence(
+                joined.get("records") or [], str(trade_id)
+            )
+            existing = source_row.get("bitfinex_evidence") \
+                if isinstance(source_row.get("bitfinex_evidence"), dict) else {}
+            projected = {
+                key: value for key, value in normalized.items()
+                if value not in (None, "", [], {})
+            }
+            evidence = {**existing, **projected}
+            evidence["linkage_complete"] = bool(
+                evidence.get("participant_id")
+                and evidence.get("bitfinex_order_ids")
+            )
+            materialized = dict(source_row)
+            materialized["bitfinex_evidence"] = evidence
+            materialized["platform_evidence_revision"] = joined.get("evidence_revision")
+            materialized["platform_evidence_generating_revision"] = joined.get("generating_revision")
+            materialized["lifecycle_events"] = list(evidence.get("negative_events") or [])
+            rows[trade_id] = materialized
     return rows
 
 

@@ -249,10 +249,17 @@ def test_proven_dead_compatibility_functions_stay_removed():
     }
     assert names.isdisjoint({
         "_spawn_research_lane",
+        "_utc_iso_to_melbourne_display",
+        "auto_recovery_check",
+        "is_ai_active",
         "maybe_tick_a160_v2_research",
+        "run_pipeline",
+        "run_with_restart",
         "spawn_research_lanes_from_continuous",
         "spawn_profit_gates_lane",
         "should_call_ai",
+        "system_health_snapshot",
+        "to_melbourne_time",
         "ai_loop",
     })
 

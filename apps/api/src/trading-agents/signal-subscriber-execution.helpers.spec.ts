@@ -37,6 +37,7 @@ import {
   partialEntryFillDisposition,
   entryTtlPartialFillDisposition,
   finalizedEntryFillQty,
+  recoverableSubmittingStop,
   protectiveStopReferencePrice,
   mirrorDiffPriceDeltaIsWithinSignedRepriceGrace,
   shouldRecordAggressiveCatchupDeferred,
@@ -487,6 +488,7 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
       update: async () => ({}),
     },
     signalCycle: { findUnique: async () => ({ createdAt }) },
+    signalCycleEvent: { create: async () => ({}) },
   };
   service.cycles = {
     recordHireExecutionEvent: async (...args: unknown[]) => {
@@ -525,6 +527,9 @@ test('market catch-up money path also submits the exact showcase position quanti
   service.showcaseRecoveryHits = new Map();
   service.showcaseSafeModeNoticeAt = new Map();
   service.prisma = {
+    signalCycleEvent: {
+      create: async () => ({}),
+    },
     signalCycleParticipant: {
       findUnique: async () => null,
       create: async () => ({ id: 'participant-catchup-exact-qty' }),
@@ -534,17 +539,26 @@ test('market catch-up money path also submits the exact showcase position quanti
   };
   service.activeTrading = {
     getDerivativesAvailableUsd: async () => 100,
+    getOpenPositionDetail: async () => null,
     submitMarketEntry: async (_creds: unknown, order: Record<string, unknown>) => {
       submitted.push(order);
       return 9101;
     },
-    submitStopOrder: async () => 9102,
   };
   service.cycles = {
     recordHireExecutionEvent: async (...args: unknown[]) => {
       events.push(args.at(-1) as Record<string, unknown>);
     },
   };
+  service.resolveExchangeTradesFillEvidence = async () => ({
+    price: 63_620,
+    qty: 0.02361,
+    fillIds: [501],
+    fees: [],
+    firstExecutedAtMs: 1,
+    lastExecutedAtMs: 1,
+  });
+  service.ensureDurableProtectiveStop = async () => ({ ok: true, orderId: 9102 });
   service.healStuckPendingFill = async () => {};
 
   const placed = await service.placeMirrorCatchupEntry(
@@ -575,6 +589,118 @@ test('market catch-up money path also submits the exact showcase position quanti
   assert.equal(events[0].source_exact_qty_btc, 0.02361832782239017);
   assert.equal(events[0].venue_qty_btc, 0.02361);
   assert.equal(events[0].margin_cap_usd, 20);
+});
+
+test('market catch-up accepted-timeout retains its durable claim and pauses for exact CID recovery', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const fences: Array<Record<string, unknown>> = [];
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  let deleted = 0;
+  let paused = 0;
+  service.logger = { log() {}, warn() {}, error() {} };
+  service.positionRuntime = new Map();
+  service.showcaseUnreachableSince = new Map();
+  service.showcaseRecoveryHits = new Map();
+  service.showcaseSafeModeNoticeAt = new Map();
+  service.prisma = {
+    signalCycleEvent: { create: async ({ data }: any) => { fences.push(data.payload); return {}; } },
+    signalCycleParticipant: {
+      findUnique: async () => null,
+      create: async () => ({ id: 'participant-catchup-timeout' }),
+      delete: async () => { deleted += 1; },
+      update: async () => ({}),
+    },
+  };
+  service.activeTrading = {
+    getDerivativesAvailableUsd: async () => 100,
+    getOpenPositionDetail: async () => null,
+    submitMarketEntry: async () => { throw new Error('accepted response timeout'); },
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (...args: unknown[]) => {
+      events.push({ type: String(args.at(-2)), payload: args.at(-1) as Record<string, unknown> });
+    },
+  };
+  service.pauseUserRelayForPositionMismatch = async () => { paused += 1; };
+
+  const placed = await service.placeMirrorCatchupEntry(
+    'agent-catchup',
+    { id: 'instance-catchup', userId: 'user-catchup', agentId: 'agent-catchup', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+    'cycle-catchup-timeout',
+    {
+      direction: 'SHORT',
+      entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+    },
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 20, 'cont-catchup-timeout', 63_614.55,
+    0.02361832782239017, 63_620, 5.45,
+  );
+
+  assert.equal(placed, false);
+  assert.equal(deleted, 0);
+  assert.equal(paused, 1);
+  assert.equal(fences.length, 1);
+  assert.equal(fences[0].phase, 'SUBMITTING');
+  assert.equal(events.some((event) => event.type === 'ENTRY_SUBMISSION_UNKNOWN'), true);
+  assert.equal(events.some((event) => event.type === 'FILLED'), false);
+});
+
+test('market catch-up cannot promote FILLED when exact durable stop protection fails', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  let emergencyQty = 0;
+  service.logger = { log() {}, warn() {}, error() {} };
+  service.positionRuntime = new Map();
+  service.showcaseUnreachableSince = new Map();
+  service.showcaseRecoveryHits = new Map();
+  service.showcaseSafeModeNoticeAt = new Map();
+  service.prisma = {
+    signalCycleEvent: { create: async () => ({}) },
+    signalCycleParticipant: {
+      findUnique: async () => null,
+      create: async () => ({ id: 'participant-catchup-stop-fail' }),
+      delete: async () => ({}),
+      update: async () => ({}),
+    },
+  };
+  service.activeTrading = {
+    getDerivativesAvailableUsd: async () => 100,
+    getOpenPositionDetail: async () => null,
+    submitMarketEntry: async () => 9201,
+  };
+  service.cycles = {
+    recordHireExecutionEvent: async (...args: unknown[]) => {
+      events.push({ type: String(args.at(-2)), payload: args.at(-1) as Record<string, unknown> });
+    },
+  };
+  service.resolveExchangeTradesFillEvidence = async () => ({
+    price: 63_620, qty: 0.01234, fillIds: [601], fees: [], firstExecutedAtMs: 1, lastExecutedAtMs: 1,
+  });
+  service.ensureDurableProtectiveStop = async () => ({ ok: false, unknown: true, reason: 'stop ACK unknown', clientOrderId: 123 });
+  service.pauseUserRelayForPositionMismatch = async () => {};
+  service.emergencyClosePartialWithFence = async ({ attributableQty }: any) => {
+    emergencyQty = attributableQty;
+    return true;
+  };
+
+  const placed = await service.placeMirrorCatchupEntry(
+    'agent-catchup',
+    { id: 'instance-catchup', userId: 'user-catchup', agentId: 'agent-catchup', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+    'cycle-catchup-stop-fail',
+    {
+      direction: 'SHORT',
+      entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+    },
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 20, 'cont-catchup-stop-fail', 63_614.55,
+    0.02361832782239017, 63_620, 5.45,
+  );
+
+  assert.equal(placed, false);
+  assert.equal(emergencyQty, 0.01234);
+  assert.equal(events.some((event) => event.type === 'FILLED'), false);
+  assert.equal(events.some((event) => event.type === 'NEGATIVE_EVIDENCE' && event.payload.event === 'MARKET_CATCHUP_PROTECTION_FAILURE'), true);
+  assert.equal(events.some((event) => event.type === 'EXPIRED'), true);
 });
 
 test('mirror position diff flags material quantity under-copy despite matching row counts', () => {
@@ -6861,6 +6987,7 @@ test('SUBMITTING recovery needs exact authenticated exchange target and never re
   const row = {
     terminalCloseClaimToken: 'owner-old', terminalCloseRequestId: 'request-fixed',
     terminalCloseGeneration: 'seq:4', terminalCloseAuthority: validSignedCloseAuthority('cont', 4),
+    terminalCloseClaimedAt: new Date(),
     terminalClosePhase: 'SUBMITTING', terminalCloseTargetAmount: { toNumber: () => -0.02 },
     cycle: { agentId: 'agent' },
   };
@@ -6893,6 +7020,45 @@ test('SUBMITTING recovery needs exact authenticated exchange target and never re
   });
   assert.equal(mismatch, null);
   assert.equal(exchangeSubmits, 0);
+});
+
+test('SUBMITTING recovery validates immutable authority at claim time after evidence ages out', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const claimedAtMs = Date.now() - 10 * 60_000;
+  const authority = {
+    kind: 'SIGNED_POSITION_CLOSED' as const,
+    canonicalTradeId: 'cont-aged', lifecycleGeneration: 'seq:12',
+    evidence: {
+      trade_id: 'cont-aged', event_id: 'close-aged', event_seq: 12,
+      exit_price: 64_250, exit_reason: 'PROFIT_LOCK',
+      source_event_at_ms: claimedAtMs - 1_000,
+      platform_received_at_ms: claimedAtMs - 500,
+    },
+  };
+  assert.equal(validateTerminalCloseAuthority(authority), false);
+  const row = {
+    terminalCloseClaimToken: 'owner-aged', terminalCloseRequestId: 'request-aged',
+    terminalCloseGeneration: 'seq:12', terminalCloseAuthority: authority,
+    terminalCloseClaimedAt: new Date(claimedAtMs),
+    terminalClosePhase: 'SUBMITTING', terminalCloseTargetAmount: { toNumber: () => 0 },
+    cycle: { agentId: 'agent' },
+  };
+  let writes = 0;
+  service.prisma = {
+    signalCycleParticipant: { findFirst: async () => row },
+    $transaction: async (run: (client: any) => Promise<unknown>) => run({
+      signalCycleParticipant: { updateMany: async () => { writes += 1; return { count: 1 }; } },
+      signalCycleEvent: { create: async () => { writes += 1; } },
+    }),
+  };
+  service.activeTrading = { getOpenPositionDetail: async () => null };
+  const recovered = await service.recoverSettledTerminalCloseFence({
+    agentId: 'agent', userId: 'user', cycleId: 'cycle', participantId: 'participant',
+    meta: { direction: 'SHORT', qty: 0.01 }, creds: {}, authority,
+  });
+  assert.equal(recovered?.phase, 'CONFIRMED');
+  assert.equal(recovered?.requestId, 'request-aged');
+  assert.equal(writes, 2);
 });
 
 test('terminal authority persistence failure holds protection without touching exchange', async () => {
@@ -6961,7 +7127,7 @@ test('fill promotion claim is durable, generation-bound, and single-owner', asyn
   });
   assert.ok(first?.token);
   assert.equal(second, null);
-  assert.equal(writes[0].where.status, 'PENDING_ENTRY');
+  assert.deepEqual(writes[0].where.status, { in: ['INTENT', 'PENDING_ENTRY'] });
   assert.equal(writes[0].data.fillPromotionEntryOrderId, 9001n);
   assert.equal(writes[0].data.fillPromotionGeneration, 'seq:7');
 });
@@ -7015,6 +7181,17 @@ test('timed-out SUBMITTING fill promotion cannot be stolen or resubmitted', asyn
   assert.equal(recovered?.token, 'original-owner');
   assert.equal(recovered?.recoverSubmitting, true);
   assert.equal(recovered?.stopClientOrderId, 12345);
+});
+
+test('SUBMITTING fill promotion can recover only the exact active CID from active or history views', () => {
+  const order = (id: number, cid: number, status = 'ACTIVE') => ({
+    id, cid, status, symbol: 'tBTCF0:USTF0', amount: 0.01, amountOrig: 0.01,
+    price: 60_000, orderType: 'STOP', flags: BITFINEX_REDUCE_ONLY_FLAG,
+  });
+  assert.equal(recoverableSubmittingStop([order(1, 77)], null, 77)?.id, 1);
+  assert.equal(recoverableSubmittingStop([], order(2, 77), 77)?.id, 2);
+  assert.equal(recoverableSubmittingStop([], order(3, 88), 77), null);
+  assert.equal(recoverableSubmittingStop([], order(4, 77, 'EXECUTED'), 77), null);
 });
 
 test('watchdog and partial-protection source retain fail-closed ownership invariants', () => {

@@ -4413,10 +4413,6 @@ def _timestamp_to_melbourne_display(ts: float) -> str:
         return "-"
 
 
-def _utc_iso_to_melbourne_display(ts_str: str) -> str:
-    return _format_melbourne_hm(ts_str)
-
-
 def _enrich_melbourne_time_fields(row: dict) -> dict:
     """Add ts_melbourne / close_ts_melbourne for dashboard + Agent Hub matching."""
     if not isinstance(row, dict):
@@ -4461,13 +4457,6 @@ def _experimental_entry_filter_detail(lane_id: str, spec: dict) -> list:
         return parts
     return []
 
-
-def to_melbourne_time(utc_iso_str):
-    try:
-        dt = datetime.fromisoformat(utc_iso_str.replace("Z", "+00:00"))
-        return dt.astimezone(melbourne_tz).strftime("%Y-%m-%d %H:%M Melbourne")
-    except:
-        return utc_iso_str
 
 DEBUG_LOG_BUFFER = deque(maxlen=5000)
 
@@ -10247,31 +10236,6 @@ def validate_startup():
         if fn not in globals():
             raise Exception(f"[STARTUP ERROR] Missing function: {fn}")
     logger.info("[STARTUP] All critical functions verified [PIPELINE ENFORCEMENT]")
-
-def system_health_snapshot():
-    try:
-        snapshot = {
-            "time": utc_iso(),
-            "price": state.get("price"),
-            "price_age": time.time() - state.get("price_ts", 0) if state.get("price_ts") else None,
-            "ws_ready": state.get("ws_ready"),
-            "candles": len(latest_candles),
-            "data_stale": is_data_stale(),
-            "execution_status": state.get("execution_status"),
-            "paused": state.get("execution_paused"),
-            "pending_orders": len(pending_orders),
-            "open_positions": len(open_positions),
-            "active_signals": get_active_signal_count(),
-            "ai_last_run": time.time() - state.get("last_ai_ts", 0),
-            "ai_calls": state.get("ai_call_count"),
-            "no_signal_count": state.get("no_signal_count", 0)
-        }
-        logger.info("\n" + "#"*60)
-        logger.info("[SYSTEM HEALTH]")
-        logger.info(json.dumps(snapshot, indent=2, default=str))
-        logger.info("#"*60 + "\n")
-    except Exception as e:
-        logger.error(f"[HEALTH ERROR] {e} [PIPELINE ENFORCEMENT]")
 
 def track_event(trade_id, stage):
     if trade_id in trades_map:
@@ -37606,9 +37570,6 @@ def run_flask(httpd):
         logger.error(f"[FLASK] server error: {e}")
         raise SystemExit(1)
 
-def is_ai_active():
-    return state.get("ai_enabled", False) and bool(_deepseek_api_key())
-
 def ttl_monitor():
     global _last_fresh_maintain_ts, _last_lane_memory_check_ts
     logger.info("[TTL] Independent monitor started")
@@ -37692,9 +37653,6 @@ def system_health_check():
     else:
         logger.info("[HEALTH] OK")
     return healthy
-
-def auto_recovery_check():
-    system_health_check()
 
 def startup_hard_fix_ai_threshold():
     with state_lock:
@@ -37844,19 +37802,6 @@ def tick_execution_engine():
             time.sleep(FAST_MONITOR_INTERVAL_SEC)
         except Exception as e:
             logger.error(f"[ENGINE ERROR] {e}")
-            time.sleep(2)
-
-def run_pipeline():
-    logger.info("[PIPELINE STAGE][RAW CONTEXT] - DISABLED IN DUAL LOOP MODE")
-    return
-
-def run_with_restart(target, name):
-    while not shutdown_event.is_set():
-        try:
-            target()
-        except Exception as e:
-            logger.error(f"[{name}] CRASH - restarting: {e}")
-            set_execution_paused("THREAD_CRASH")
             time.sleep(2)
 
 def print_console_dashboard():
