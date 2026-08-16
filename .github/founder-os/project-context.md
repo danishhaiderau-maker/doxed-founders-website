@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fence account emergency exchange submission
+Recover authenticated flat relay incidents
 
 ## Last Activity
 
