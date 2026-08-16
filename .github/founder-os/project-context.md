@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Consume rejected emergency proof into one new fence
+Require stable position proof for emergency close
 
 ## Last Activity
 
