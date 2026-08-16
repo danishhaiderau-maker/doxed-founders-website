@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Keep analyzer collection and publication truthful
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
