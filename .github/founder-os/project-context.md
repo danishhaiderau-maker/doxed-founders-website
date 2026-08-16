@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Fence relay credentials to canonical identity
+Refresh reviewed Bitfinex policy lock
 
 ## Last Activity
 
