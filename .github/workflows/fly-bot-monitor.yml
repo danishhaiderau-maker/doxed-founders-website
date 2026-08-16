@@ -32,7 +32,8 @@ jobs:
           revision="$(git log -1 --format=%H -- \
             services/btc-conservative-agent \
             scripts/check-relay-flat.mjs \
-            .github/workflows/fly-bot-deploy.yml)"
+            .github/workflows/fly-bot-deploy.yml \
+            ':(exclude,glob)services/btc-conservative-agent/test*.py')"
           if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Unable to resolve latest btc-conservative-agent revision" >&2
             exit 1

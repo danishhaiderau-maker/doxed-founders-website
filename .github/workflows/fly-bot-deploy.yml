@@ -5,6 +5,10 @@ on:
     branches: [master]
     paths:
       - "services/btc-conservative-agent/**"
+      # Tests validate an image but are not copied into or imported by the
+      # running Fly service. A test-only push must not claim a new deployed
+      # source revision.
+      - "!services/btc-conservative-agent/test*.py"
       - "scripts/check-relay-flat.mjs"
       - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
