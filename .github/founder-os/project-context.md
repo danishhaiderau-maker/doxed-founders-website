@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Refresh approved Bitfinex policy lock
+Refresh Bitfinex policy lock for evidence collection
 
 ## Last Activity
 
