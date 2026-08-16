@@ -67,6 +67,7 @@ const flyDockerignorePath = new URL(
   import.meta.url,
 );
 const flyLockHelperPath = new URL('./fly-canonical-lock.ps1', import.meta.url);
+const flyDeployHelperPath = new URL('./deploy-fly-btc-bot.ps1', import.meta.url);
 const homeLauncherPath = new URL('./home-stack-launcher.ps1', import.meta.url);
 const fastRecoverPath = new URL('./fast-recover-global.ps1', import.meta.url);
 const overnightGuardPath = new URL(
@@ -105,6 +106,20 @@ test('flat-boundary proof targets the canonical Fly owner', async () => {
     workflow,
     /SHOWCASE_OWNER_URL:\s*https:\/\/bot\.doxxedcrypto\.digital/,
   );
+});
+
+test('manual Fly deployment is pinned to the BTC service context and flat boundary', async () => {
+  const helper = await readFile(flyDeployHelperPath, 'utf8');
+
+  assert.match(helper, /services\\btc-conservative-agent/);
+  assert.match(helper, /Push-Location \$serviceRoot/);
+  assert.match(helper, /check-relay-flat\.mjs/);
+  assert.match(helper, /REQUIRE_CANONICAL_FLY_OWNER = "YES"/);
+  assert.match(helper, /SOURCE_GIT_REV=\$revision/);
+  assert.match(helper, /source_git_rev/);
+  assert.match(helper, /live_armed -eq \$false/);
+  assert.match(helper, /force_paper_mode -eq \$true/);
+  assert.doesNotMatch(helper, /Push-Location \$repoRoot/);
 });
 
 test('Fly deploy proves a disarmed paper-signal owner, never a direct live executor', async () => {
