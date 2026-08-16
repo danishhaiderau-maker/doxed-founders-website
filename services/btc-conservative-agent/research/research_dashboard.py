@@ -1600,6 +1600,72 @@ def api_status():
     })
 
 
+def _decision_readiness_payload():
+    """Question-specific readiness; historical evidence cannot authorize policy."""
+    manifest = _read_json(REPORT_MANIFEST_FILE)
+    provenance = manifest.get("analysis_provenance") or {}
+    cohorts = provenance.get("cohorts") or {}
+    showcase = cohorts.get("SHOWCASE_STRATEGY") or {}
+    real_copy = cohorts.get("REAL_COPY_PARAMETER_OPTIMISATION") or {}
+    showcase_n = int(showcase.get("included_row_count") or 0)
+    qualified_n = int(real_copy.get("included_row_count") or 0)
+    exclusions = real_copy.get("exclusion_reason_counts") or {}
+    revision = provenance.get("generation_revision") or manifest.get("generation_revision")
+    cluster = _read_json("correlated_price_cluster_report.json")
+    ladder = _read_json("exit_ladder_simulator_report.json")
+    fast_cut = _read_json("fast_cut_sweep_report.json")
+    chase = _read_json("chase_effectiveness_report.json")
+    policy_grid = _read_json("qualified_exit_policy_grid_report.json")
+    grid_ready = bool(policy_grid.get("live_policy_change_allowed"))
+
+    def question(key, text, report, ready, qualified_detail):
+        return {
+            "key": key,
+            "question": text,
+            "status": "QUALIFIED" if ready else "BLOCKED",
+            "current_epoch_qualified_rows": qualified_n,
+            "historical_showcase_rows": showcase_n,
+            "evidence_scope": "REAL_COPY_PARAMETER_OPTIMISATION",
+            "report": report,
+            "detail": qualified_detail if ready else "No question-specific qualified holdout; live changes remain fail-closed.",
+            "exclusion_reason_counts": exclusions,
+        }
+
+    questions = [
+        question("cluster_distance", "Cluster distance", "correlated_price_cluster_report.json",
+                 bool(cluster.get("live_policy_change_allowed")),
+                 f"Qualified 120-minute cost-complete rows: {int(cluster.get('qualified_120m_cost_complete') or 0)}."),
+        question("thesis_fast_cut", "Thesis fast-cut", "fast_cut_sweep_report.json", grid_ready,
+                 f"Sweep candidates: {len(fast_cut.get('sweep_levels') or [])}."),
+        question("hard_stop", "Physical hard stop", "qualified_exit_policy_grid_report.json", grid_ready,
+                 "Authenticated costs, stop evidence, terminal provenance and reconciliation are complete."),
+        question("scenario_c", "Scenario C ladder", "exit_ladder_simulator_report.json", grid_ready,
+                 f"Matched replay rows: {int(ladder.get('replays_matched_executed') or 0)}; status: {ladder.get('data_status') or 'UNKNOWN'}."),
+        question("chase", "Chase timing and limits", "chase_effectiveness_report.json", False,
+                 f"Historical buckets: {len(chase.get('buckets') or {})}; qualified real-copy validation is present."),
+    ]
+    return {
+        "schema": "question_specific_readiness_v1",
+        "generation_revision": revision,
+        "cohort_schema": provenance.get("cohort_schema"),
+        "current_qualified_epoch": {
+            "real_copy_rows": qualified_n,
+            "showcase_strategy_rows": showcase_n,
+            "live_policy_changes_allowed": bool(questions) and all(q["status"] == "QUALIFIED" for q in questions),
+        },
+        "legacy_historical": {
+            "status": "DESCRIPTIVE_ONLY",
+            "note": "Historical and legacy results remain visible for context but cannot authorize live policy changes.",
+        },
+        "questions": questions,
+    }
+
+
+@app.route("/api/decision-readiness")
+def api_decision_readiness():
+    return jsonify(_decision_readiness_payload())
+
+
 @app.route("/api/summary")
 def api_summary():
     compact = _read_json(COMPACT_SUMMARY_FILE)
@@ -1649,6 +1715,9 @@ def api_summary():
         "type_b_research_v2": typeb_research_v2,
         "retention": retention,
         "storage": {
+            "mirror_identity": "LOCAL_CACHED_COPY_OF_FLY_RUNTIME_DATA",
+            "mirror_path": str(DATA_ROOT),
+            "report_path": str(ROOT),
             "local_size_mb": mirror_size.get("local_size_mb"),
             "local_file_count": mirror_size.get("local_file_count"),
             "local_limit_mb": int(retention.get("raw_mirror_cap_gib") or 30) * 1024,
@@ -2756,6 +2825,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="cohort-note"></p>
+    <h2>Live-policy question readiness</h2>
+    <p class="note">Current qualified epoch is evaluated separately from legacy and historical reports. BLOCKED means evidence is incomplete, not that a policy performed badly.</p>
+    <div class="kpis" id="decision-readiness"></div>
+    <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
     <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code>. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
   </section>
@@ -3141,7 +3214,7 @@ async function loadSummary() {
         + Number(retention.raw_mirror_usage_pct || 0).toFixed(1) + '% · '
         + retention.raw_mirror_cap_status)
       : 'Pending first retention measurement'],
-    ['Local mirror', storage.local_size_mb == null
+    ['Local Fly mirror cache', storage.local_size_mb == null
       ? 'No size report'
       : (Number(storage.local_size_mb).toFixed(1) + ' MB / 30 GB Â· '
         + Number(storage.local_limit_pct || 0).toFixed(2) + '% Â· '
@@ -3151,7 +3224,9 @@ async function loadSummary() {
       : (Number(storage.fly_size_mb).toFixed(1) + ' MB / '
         + Number(storage.fly_volume_total_mb || 1024).toFixed(0) + ' MB Â· '
         + Number(storage.fly_volume_pct || 0).toFixed(1) + '%')],
-    ['Last data sync', storage.sync_computed_at ? fmtMelb(storage.sync_computed_at) : 'No sync receipt'],
+    ['Mirror sync receipt', storage.sync_computed_at
+      ? ('local cache refreshed ' + fmtMelb(storage.sync_computed_at))
+      : 'No local mirror receipt'],
     ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],
@@ -3168,6 +3243,26 @@ async function loadSummary() {
       ? `Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical executed research remains separate: ${hist.unique_trades} unique trades from ${raw} exported rows (${dupes} duplicates removed).`
       : 'Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical archives have not been imported on this machine.';
   }
+  await loadDecisionReadiness();
+}
+
+async function loadDecisionReadiness() {
+  const r = await fetch('/api/decision-readiness');
+  const d = await r.json();
+  const rows = d.questions || [];
+  document.getElementById('decision-readiness').innerHTML = rows.map(q => {
+    const cls = q.status === 'QUALIFIED' ? 'green' : 'amber';
+    return `<div class="kpi"><div class="lbl">${q.question}</div>`
+      + `<div class="val ${cls}">${q.status}</div>`
+      + `<div class="note">Current qualified: ${q.current_epoch_qualified_rows || 0}`
+      + ` · Historical Showcase: ${q.historical_showcase_rows || 0}</div>`
+      + `<div class="note">${q.detail || ''}</div></div>`;
+  }).join('');
+  const epoch = d.current_qualified_epoch || {};
+  document.getElementById('decision-readiness-provenance').textContent =
+    `Current qualified epoch: ${epoch.real_copy_rows || 0} real-copy rows · `
+    + `Legacy/historical: ${(d.legacy_historical || {}).status || 'DESCRIPTIVE_ONLY'} · `
+    + `Revision: ${d.generation_revision || 'UNKNOWN'} · Cohort: ${d.cohort_schema || 'UNKNOWN'}`;
 }
 
 async function loadFindings() {

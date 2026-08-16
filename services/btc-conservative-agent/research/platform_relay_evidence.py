@@ -134,6 +134,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "canonical_trade_id": str(canonical_trade_id),
         "participant_id": None,
         "source_lifecycle_id": None,
+        "source_identity": {},
         "client_order_id": None,
         "client_order_ids": [],
         "bitfinex_order_ids": [],
@@ -146,9 +147,13 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "cancelled_quantity": None,
         "fills": [],
         "reprices": [],
+        "chase_history": [],
+        "cluster_evidence": {},
         "ack_history": [],
         "stop_chain": [],
         "exit_evidence": {},
+        "terminal_authority": {},
+        "bbo_evidence": {},
         "cost_evidence": {},
         "cost_evidence_complete": False,
         "fee_model": None,
@@ -225,8 +230,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         lifecycle_id = explicit(record, "lifecycleId", "lifecycle_id", "cycleId", "cycle_id")
         if evidence["participant_id"] is None and participant_id is not None:
             evidence["participant_id"] = participant_id
-        if evidence["source_lifecycle_id"] is None and lifecycle_id is not None:
-            evidence["source_lifecycle_id"] = lifecycle_id
+            if evidence["source_lifecycle_id"] is None and lifecycle_id is not None:
+                evidence["source_lifecycle_id"] = lifecycle_id
         for event in record.get("events") or []:
             if not isinstance(event, dict):
                 continue
@@ -243,6 +248,29 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 evidence["fee_model"] = explicit(payload, "fee_model")
             if evidence["execution_profile"] is None:
                 evidence["execution_profile"] = explicit(payload, "execution_profile")
+
+            source_event_id = explicit(payload, "source_event_id", "sourceEventId", "showcase_event_id")
+            source_event_seq = explicit(payload, "source_event_seq", "sourceEventSeq", "showcase_event_seq")
+            if source_event_id is not None or source_event_seq is not None:
+                evidence["source_identity"] = {
+                    key: value for key, value in {
+                        "canonical_trade_id": str(canonical_trade_id),
+                        "source_lifecycle_id": evidence.get("source_lifecycle_id"),
+                        "source_event_id": source_event_id,
+                        "source_event_seq": source_event_seq,
+                        "source_event_at": explicit(payload, "source_event_at", "sourceEventAt"),
+                        "platform_received_at": explicit(payload, "platform_received_at", "platformReceivedAt"),
+                    }.items() if value is not None
+                }
+            cluster_evidence = explicit(payload, "correlated_cluster_evidence")
+            if isinstance(cluster_evidence, dict):
+                evidence["cluster_evidence"] = cluster_evidence
+            entry_bbo = explicit(payload, "entry_bbo", "entryBbo")
+            if isinstance(entry_bbo, dict):
+                evidence["bbo_evidence"]["entry"] = entry_bbo
+            close_bbo = explicit(payload, "close_bbo", "closeBbo")
+            if isinstance(close_bbo, dict):
+                evidence["bbo_evidence"]["exit"] = close_bbo
 
             cid = explicit(payload, "client_order_id", "clientOrderId", "cid")
             if evidence["client_order_id"] is None and cid is not None:
@@ -412,11 +440,21 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             if event_type == "UPDATE_STOPS" and any(
                 key in payload for key in ("new_limit", "newLimit", "limit_price", "limitPrice")
             ):
-                append_row("reprices", {
+                reprice_row = {
                     "event_id": event_id,
                     "order_id": order_id,
+                    "prior_price": finite(explicit(payload, "prior_limit", "priorLimit")),
                     "price": finite(explicit(payload, "new_limit", "newLimit", "limit_price", "limitPrice")),
                     "ack_at": ack_at,
+                    "replacement_mode": explicit(payload, "replacementMode", "replacement_mode"),
+                    "mark": finite(explicit(payload, "local_mark", "localMark")),
+                    "chase_count": finite(explicit(payload, "limitChaseCount", "limit_chase_count")),
+                    "source_event_id": source_event_id,
+                    "source_event_seq": source_event_seq,
+                }
+                append_row("reprices", reprice_row)
+                append_row("chase_history", {
+                    key: value for key, value in reprice_row.items() if value is not None
                 })
 
             if (
@@ -468,6 +506,10 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 authority_kind = str(explicit(payload, "terminal_authority_kind") or "").upper()
                 authority = explicit(payload, "terminal_authority_evidence")
                 if isinstance(authority, dict):
+                    evidence["terminal_authority"] = {
+                        "kind": authority_kind,
+                        "evidence": authority,
+                    }
                     source_proof = {"authority_kind": authority_kind, **authority}
                     evidence["source_snapshot_evidence"] = source_proof
                     if authority_kind == "SIGNED_POSITION_CLOSED":
@@ -569,6 +611,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             "trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"
         )
     )
+    evidence["actual_costs"] = copy.deepcopy(evidence["cost_evidence"])
     quantities_complete = all(
         finite(evidence.get(key)) is not None for key in (
             "source_quantity", "normalized_quantity", "filled_quantity", "protected_quantity"

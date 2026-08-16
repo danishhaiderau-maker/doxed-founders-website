@@ -183,6 +183,13 @@ def test_platform_events_normalize_explicit_exchange_lifecycle_without_invention
             {"id": "order", "eventType": "ORDER_PLACED", "createdAt": "2026-08-16T00:00:01Z", "payload": {
                 "bitfinexOrderId": 101, "clientOrderId": 501, "source_exact_qty_btc": 0.03,
                 "venue_qty_btc": 0.02999, "entryExchangeAckAtMs": 1_000,
+                "sourceEventId": "source-order-1", "sourceEventSeq": 7,
+                "sourceEventAt": "2026-08-16T00:00:00Z",
+                "platformReceivedAt": "2026-08-16T00:00:00.100Z",
+                "entry_bbo": {"bid": 62999, "ask": 63001, "observedAtMs": 900,
+                              "source": "BITFINEX_PUBLIC_TICKER"},
+                "correlated_cluster_evidence": {"schema": "correlated_exposure_cluster_v2",
+                                                "allowed": True, "same_direction_managed_or_reserved_count": 1},
             }},
             {"id": "fill", "eventType": "FILLED", "payload": {
                 "bitfinex_order_id": 101, "fill_id": 201, "filled_qty": 0.02999,
@@ -194,12 +201,19 @@ def test_platform_events_normalize_explicit_exchange_lifecycle_without_invention
             }},
             {"id": "reprice", "eventType": "UPDATE_STOPS", "payload": {
                 "event": "LIMIT_UPDATED", "bitfinex_order_id": 101, "newLimit": 63_050,
-                "exchange_ack_at": "2026-08-16T00:00:04Z",
+                "prior_limit": 63_000, "replacementMode": "BITFINEX_IN_PLACE_UPDATE",
+                "limitChaseCount": 1, "exchange_ack_at": "2026-08-16T00:00:04Z",
             }},
             {"id": "exit", "eventType": "EXIT", "payload": {
                 "bitfinex_order_id": 401, "fill_id": 402, "exit_price": 62_900,
                 "exit_reason": "SOURCE_CONFIRMED", "actual_bitfinex_realized_pnl_usd": 2.25,
                 "trading_fee_usd": 0.0,
+                "close_bbo": {"bid": 62899, "ask": 62901, "observedAtMs": 4_000,
+                              "source": "BITFINEX_PUBLIC_TICKER"},
+                "terminal_authority_kind": "SIGNED_POSITION_CLOSED",
+                "terminal_authority_evidence": {"trade_id": "cont-rich", "event_id": "close-1",
+                    "event_seq": 8, "source_event_at_ms": 3_500, "platform_received_at_ms": 3_600,
+                    "exit_price": 62_900, "exit_reason": "SOURCE_CONFIRMED"},
                 "reconciliation": {"complete": True, "position_delta": 0, "order_delta": 0,
                                    "orphan_order_count": 0, "foreign_order_count": 0},
                 "quantity_evidence_complete": True, "order_ack_history_complete": True,
@@ -220,11 +234,20 @@ def test_platform_events_normalize_explicit_exchange_lifecycle_without_invention
     assert evidence["protected_quantity"] == 0.02999
     assert evidence["fills"][0]["fill_id"] == 201
     assert evidence["reprices"][0]["price"] == 63050.0
+    assert evidence["chase_history"][0]["prior_price"] == 63000.0
+    assert evidence["chase_history"][0]["replacement_mode"] == "BITFINEX_IN_PLACE_UPDATE"
+    assert evidence["source_identity"]["source_event_id"] == "source-order-1"
+    assert evidence["source_identity"]["source_event_seq"] == 7
+    assert evidence["cluster_evidence"]["allowed"] is True
+    assert evidence["bbo_evidence"]["entry"]["ask"] == 63001
+    assert evidence["bbo_evidence"]["exit"]["bid"] == 62899
     assert evidence["ack_history"][0]["ack_at"] == 1000
     assert evidence["stop_chain"][0]["order_id"] == 301
     assert evidence["exit_evidence"]["order_id"] == 401
     assert evidence["actual_bitfinex_realized_pnl_usd"] == 2.25
+    assert evidence["terminal_authority"]["kind"] == "SIGNED_POSITION_CLOSED"
     assert evidence["cost_evidence"] == {"trading_fee_usd": 0.0}
+    assert evidence["actual_costs"] == evidence["cost_evidence"]
     assert evidence["reconciliation_complete"] is True
 
 
@@ -338,6 +361,7 @@ def _complete_fixture():
     evidence = {
         "participant_id": "participant-1",
         "source_lifecycle_id": "source-life-1",
+        "source_identity": {"source_event_id": "source-1", "source_event_seq": 4},
         "client_order_id": "cid-1",
         "bitfinex_order_ids": ["order-1", "stop-1", "exit-1"],
         "fill_ids": ["fill-1", "exit-fill-1"],
@@ -348,9 +372,13 @@ def _complete_fixture():
         "remaining_quantity": 0.0,
         "fills": [{"fill_id": "fill-1", "quantity": 0.03172}],
         "reprices": [{"order_id": "order-1", "price": 63064.88}],
+        "chase_history": [{"order_id": "order-1", "price": 63064.88, "chase_count": 1}],
+        "cluster_evidence": {"allowed": True, "same_direction_managed_or_reserved_count": 1},
         "ack_history": [{"order_id": "order-1", "ack_at": "2026-08-16T00:00:01Z"}],
         "stop_chain": [{"order_id": "stop-1", "protected_quantity": 0.03172, "ack_at": "2026-08-16T00:00:02Z"}],
         "exit_evidence": {"order_id": "exit-1", "fill_id": "exit-fill-1"},
+        "terminal_authority": {"kind": "SIGNED_POSITION_CLOSED"},
+        "bbo_evidence": {"entry": {"bid": 1, "ask": 2}, "exit": {"bid": 2, "ask": 3}},
         "reconciliation": {
             "complete": True,
             "position_delta": 0,
@@ -412,6 +440,11 @@ def test_complete_exchange_evidence_qualifies_all_three_cohorts():
     assert fields["required_entry_horizons_complete"] is True
     assert fields["entry_horizons"]["required"]["120m"]["observed"] is True
     assert fields["bitfinex_evidence"]["linkage_complete"] is True
+    assert fields["bitfinex_evidence"]["source_identity"]["source_event_seq"] == 4
+    assert fields["bitfinex_evidence"]["chase_history"][0]["chase_count"] == 1
+    assert fields["bitfinex_evidence"]["cluster_evidence"]["allowed"] is True
+    assert fields["bitfinex_evidence"]["terminal_authority"]["kind"] == "SIGNED_POSITION_CLOSED"
+    assert fields["bitfinex_evidence"]["actual_costs"] == fields["bitfinex_evidence"]["cost_evidence"]
     assert all(fields["analysis_cohorts"]["eligible"].values())
     assert fields["analysis_eligible"] is True
 

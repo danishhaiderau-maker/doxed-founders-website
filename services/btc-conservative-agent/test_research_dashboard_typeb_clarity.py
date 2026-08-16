@@ -40,6 +40,11 @@ def main() -> None:
     assert "they never call an AI" in source
     assert 'href="/download/everything"' in source
     assert "Download Complete Research Evidence Bundle" in source
+    assert 'id="decision-readiness"' in source
+    assert '@app.route("/api/decision-readiness")' in source
+    assert "Current qualified epoch" in source
+    assert "Legacy/historical" in source
+    assert "Local Fly mirror cache" in source
     assert 'id="dl-chatgpt"' not in source
     assert 'id="dl-complete"' not in source
     assert 'id="dl-gpt-audit"' not in source
@@ -124,6 +129,30 @@ def main() -> None:
             assert v2_payload["modes_observed"]["PAUSED_SHADOW"] == 6
             assert v2_payload["entry_probability_table"][0]["bucket"] == "GAP_4"
             assert v2_payload["recent_opportunities"][0]["opportunity_id"] == "scan-v2"
+            (agent_root / "report_manifest.json").write_text(json.dumps({
+                "analysis_provenance": {
+                    "cohort_schema": "analysis_cohorts_v1",
+                    "generation_revision": "abc123",
+                    "cohorts": {
+                        "SHOWCASE_STRATEGY": {"included_row_count": 7},
+                        "REAL_COPY_PARAMETER_OPTIMISATION": {
+                            "included_row_count": 0,
+                            "exclusion_reason_counts": {"RECONCILIATION_INCOMPLETE": 7},
+                        },
+                    },
+                },
+            }), encoding="utf-8")
+            readiness = research_dashboard._decision_readiness_payload()
+            assert readiness["schema"] == "question_specific_readiness_v1"
+            assert len(readiness["questions"]) == 5
+            assert all(row["status"] == "BLOCKED" for row in readiness["questions"])
+            assert all(row["current_epoch_qualified_rows"] == 0 for row in readiness["questions"])
+            assert all(row["historical_showcase_rows"] == 7 for row in readiness["questions"])
+            assert readiness["current_qualified_epoch"]["live_policy_changes_allowed"] is False
+            with research_dashboard.app.test_client() as client:
+                response = client.get("/api/decision-readiness")
+                assert response.status_code == 200
+                assert response.get_json()["generation_revision"] == "abc123"
     finally:
         research_dashboard._API_RESPONSE_CACHE.clear()
         research_dashboard.ROOT = original_root

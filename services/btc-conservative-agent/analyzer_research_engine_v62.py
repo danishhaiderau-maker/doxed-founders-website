@@ -1168,17 +1168,20 @@ def safe_float(x):
 
 def _agent_data_path(filename: str) -> str:
     """Resolve CSV/JSONL under agent root when cwd is research/."""
+    # A configured desktop mirror is the canonical runtime evidence source.
+    # Prefer it even when an older same-named file remains beside the analyzer;
+    # otherwise a source-tree launch silently analyzes stale historical data.
+    env_root = os.getenv("BTC_AGENT_DATA_DIR")
+    if env_root:
+        env_alt = os.path.join(env_root, filename)
+        if os.path.isfile(env_alt):
+            return env_alt
     if os.path.isfile(filename):
         return filename
     parent = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
     alt = os.path.normpath(os.path.join(parent, filename))
     if os.path.isfile(alt):
         return alt
-    env_root = os.getenv("BTC_AGENT_DATA_DIR")
-    if env_root:
-        env_alt = os.path.join(env_root, filename)
-        if os.path.isfile(env_alt):
-            return env_alt
     return filename
 
 
@@ -3787,6 +3790,29 @@ def qualified_exit_policy_grid_report():
         "selected_on_train": selected,
         "conclusions_allowed": conclusions_allowed,
         "verdict": "QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        "preliminary_descriptive_estimate": {
+            "status": "DESCRIPTIVE_ONLY" if selected else "NO_ESTIMATE",
+            "selected_on_train": selected,
+            "sample_size": len(qualified),
+            "warning": "Train-selected counterfactuals are not live recommendations unless the qualified chronological holdout gate passes.",
+        },
+        "qualified_live_recommendation": {
+            "status": "AVAILABLE" if conclusions_allowed else "NOT_AVAILABLE",
+            "parameters": ({
+                "hard_stop_margin_pct": selected["hard_stop_margin_pct"],
+                "thesis_fast_cut_pct": selected["thesis_fast_cut_pct"],
+                "ladder_first_trigger_pct": selected["ladder_first_trigger_pct"],
+                "ladder_first_lock_pct": selected["ladder_first_lock_pct"],
+                "mfe_protect_pct": selected["mfe_protect_pct"],
+            } if conclusions_allowed else None),
+            "note": "The physical hard stop remains the fixed 13% invariant; this report never widens it.",
+        },
+        "question_outputs": {
+            "hard_stop": {"status": "FIXED_SAFETY_INVARIANT", "value_pct": HARD_STOP_MARGIN_PCT},
+            "thesis_fast_cut": {"status": "QUALIFIED" if conclusions_allowed else "PRELIMINARY_ONLY" if selected else "NO_EVIDENCE"},
+            "scenario_c_ladder": {"status": "QUALIFIED" if conclusions_allowed else "PRELIMINARY_ONLY" if selected else "NO_EVIDENCE"},
+            "chase": {"status": "NOT_EVALUATED_BY_THIS_REPORT", "recommendation": None},
+        },
         "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
     }
     with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
@@ -15039,7 +15065,9 @@ def exit_ladder_simulator_report(trades=None, session=None):
     return payload
 
 
-CORRELATED_PRICE_DISTANCE_GRID_USD = (0.01, 5, 10, 15, 20, 25, 50, 75, 100, 150)
+# Predeclared normalized thresholds around the temporary 9 bps safety boundary.
+# This is research-only and does not mutate the live boundary.
+CORRELATED_PRICE_DISTANCE_GRID_BPS = (5, 7, 8, 8.5, 8.9, 9, 9.1, 10, 12, 15)
 CORRELATED_PRICE_CLUSTER_SIZE_GRID = (2, 3, 4, 5, 8, 10)
 CORRELATED_PRICE_TIME_WINDOW_GRID_SEC = (30, 60, 120, 300, 600, 900, 1800)
 
@@ -15062,13 +15090,18 @@ def _cluster_ts(value):
         return None
 
 
-def _cluster_stats(rows, distance, max_size, window_sec):
+def _cluster_stats(rows, distance_bps, max_size, window_sec):
     """Chronological admission using same-direction, nearby admitted intents."""
     recent = []
     decisions = []
     for row in rows:
         recent = [prior for prior in recent if row["ts"] - prior["ts"] <= window_sec]
-        related = [prior for prior in recent if prior["direction"] == row["direction"] and abs(prior["price"] - row["price"]) <= distance]
+        related = [
+            prior for prior in recent
+            if prior["direction"] == row["direction"]
+            and row["price"] > 0
+            and (abs(prior["price"] - row["price"]) / row["price"]) * 10_000 <= distance_bps
+        ]
         related_keys = {prior["cluster_key"] for prior in related}
         cluster_key = min(related_keys) if related_keys else row["trade_id"]
         if len(related_keys) > 1:
@@ -15084,10 +15117,14 @@ def _cluster_stats(rows, distance, max_size, window_sec):
         decisions.append(decision)
         recent.append(decision)
     cluster_losses = defaultdict(list)
+    cluster_pnls = defaultdict(float)
     for decision in decisions:
         cluster_losses[decision["cluster_key"]].append(decision["pnl"] < 0)
+        if decision["allowed"]:
+            cluster_pnls[decision["cluster_key"]] += decision["pnl"]
     allowed = [row for row in decisions if row["allowed"]]
     blocked = [row for row in decisions if not row["allowed"]]
+    blocked_pnls = [row["pnl"] for row in blocked]
     pnls = [row["pnl"] for row in allowed]
     cumulative = 0.0
     peak = 0.0
@@ -15114,7 +15151,12 @@ def _cluster_stats(rows, distance, max_size, window_sec):
         "touches": sum(bool(row["touched"]) for row in allowed),
         "winners_blocked": sum(row["pnl"] > 0 for row in blocked),
         "losses_avoided": sum(row["pnl"] < 0 for row in blocked),
+        "blocked_opportunity_net_pnl_usd": round(sum(blocked_pnls), 6),
+        "winner_opportunity_cost_usd": round(sum(max(0.0, pnl) for pnl in blocked_pnls), 6),
+        "loss_avoided_usd": round(-sum(min(0.0, pnl) for pnl in blocked_pnls), 6),
         "joint_loss_rate_pct": round(100 * sum(sum(flags) >= 2 for flags in cluster_losses.values()) / len(cluster_losses), 3) if cluster_losses else None,
+        "worst_admitted_cluster_pnl_usd": round(min(cluster_pnls.values()), 6) if cluster_pnls else None,
+        "admitted_cluster_drawdown_usd": round(max(0.0, -min(cluster_pnls.values())), 6) if cluster_pnls else None,
         "cluster_net_pnl_usd": round(sum(pnls), 6),
         "max_drawdown_usd": round(max_drawdown, 6),
         "cvar_95_usd": round(cvar, 6) if cvar is not None else None,
@@ -15222,13 +15264,15 @@ def correlated_price_cluster_report(session=None):
     validation_n = len(ordered) - train_n
     train_rows, validation_rows = ordered[:train_n], ordered[train_n:]
     grid_results = []
-    for distance in CORRELATED_PRICE_DISTANCE_GRID_USD:
+    for distance_bps in CORRELATED_PRICE_DISTANCE_GRID_BPS:
         for size in CORRELATED_PRICE_CLUSTER_SIZE_GRID:
             for window in CORRELATED_PRICE_TIME_WINDOW_GRID_SEC:
-                train_stats = _cluster_stats(train_rows, distance, size, window)
-                validation_stats = _cluster_stats(validation_rows, distance, size, window)
+                train_stats = _cluster_stats(train_rows, distance_bps, size, window)
+                validation_stats = _cluster_stats(validation_rows, distance_bps, size, window)
                 grid_results.append({
-                    "distance_usd": distance, "cluster_size": size, "time_window_sec": window,
+                    "distance_bps": distance_bps,
+                    "distance_pct": distance_bps / 100,
+                    "cluster_size": size, "time_window_sec": window,
                     "all_opportunities": len(candidate_ids), "qualified_opportunities": len(qualified),
                     "train": train_stats, "validation": validation_stats,
                     "conclusion_allowed": False,
@@ -15238,7 +15282,7 @@ def correlated_price_cluster_report(session=None):
         key=lambda cell: (
             cell["train"].get("ev_per_qualified_opportunity_usd") is not None,
             cell["train"].get("ev_per_qualified_opportunity_usd") or float("-inf"),
-            -cell["distance_usd"], -cell["cluster_size"], -cell["time_window_sec"],
+            -cell["distance_bps"], -cell["cluster_size"], -cell["time_window_sec"],
         ),
         reverse=True,
     )
@@ -15297,7 +15341,8 @@ def correlated_price_cluster_report(session=None):
         },
         "denominator_complete": denominator_complete,
         "predeclared_grids": {
-            "distance_usd": list(CORRELATED_PRICE_DISTANCE_GRID_USD),
+            "distance_bps": list(CORRELATED_PRICE_DISTANCE_GRID_BPS),
+            "distance_pct": [value / 100 for value in CORRELATED_PRICE_DISTANCE_GRID_BPS],
             "cluster_size": list(CORRELATED_PRICE_CLUSTER_SIZE_GRID),
             "time_window_sec": list(CORRELATED_PRICE_TIME_WINDOW_GRID_SEC),
         },
@@ -15312,13 +15357,33 @@ def correlated_price_cluster_report(session=None):
         "holdout_confirmed": holdout_confirmed,
         "conclusion_allowed": research_conclusions_allowed,
         "live_policy_change_allowed": False,
+        "preliminary_descriptive_estimate": {
+            "status": "DESCRIPTIVE_ONLY",
+            "selected_on_train": selected_on_train,
+            "holdout_result": selected_validation,
+            "sample_size": len(qualified),
+            "confidence_available": bool(selected_validation and selected_validation.get("confidence_interval_95_ev_admitted")),
+            "warning": "May describe this qualified Showcase replay sample; must not be presented as a live-copy recommendation.",
+        },
+        "qualified_live_recommendation": {
+            "status": "NOT_AVAILABLE",
+            "recommended_distance_bps": None,
+            "reason": "Cluster grid is Showcase-strategy research; a fully qualified real-copy optimisation cohort is required for live policy.",
+        },
+        "question_outputs": {
+            "cluster_distance": {
+                "answered_descriptively": selected_on_train is not None,
+                "answered_for_live_policy": False,
+                "temporary_boundary_bps": 9,
+            },
+        },
         "data_status": "QUALIFIED_RESEARCH" if research_conclusions_allowed else "INSUFFICIENT_QUALIFIED_EVIDENCE",
         "diagnostic": {
             "required_horizon_sec": 7200,
-            "canonical_data_root": os.path.realpath(os.getenv("ANALYZER_DATA_ROOT") or os.getcwd()),
+            "canonical_data_root": os.path.realpath(os.getenv("BTC_AGENT_DATA_DIR") or os.getcwd()),
             "analyzer_working_directory": os.path.abspath(os.getcwd()),
-            "signal_replay_resolved_path": os.path.abspath(SIGNAL_REPLAY_FILE),
-            "signal_replay_exists_in_working_directory": os.path.isfile(SIGNAL_REPLAY_FILE),
+            "signal_replay_resolved_path": os.path.abspath(_agent_data_path(SIGNAL_REPLAY_FILE)),
+            "signal_replay_exists_in_working_directory": os.path.isfile(_agent_data_path(SIGNAL_REPLAY_FILE)),
             "why_existing_signal_replay_yielded_zero": "First verify analyzer working-directory identity. A source-tree analyzer run cannot see the Fly mirror file. When the file is present, rows may still be scan-/rev- shadow IDs, incomplete buffers, or lack canonical executed-ID overlap, full 120m post-exit ticks, and explicit costs.",
             "producer_gap_fields": {
                 "REPLAY_MISSING": ["canonical trade_id replay linkage"],

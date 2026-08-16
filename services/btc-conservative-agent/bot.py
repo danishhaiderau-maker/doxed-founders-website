@@ -24071,9 +24071,9 @@ def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
 def _seal_past_analysis_with_fallback(reason: str) -> dict:
     """Seal a past-analysis record, degrading gracefully on Fly.
 
-    Fly's .dockerignore excludes the ``research/`` Python package from
-    the container image (only ``research_genome/`` is shipped). When the
-    wipe endpoint runs there, ``from research.past_analysis import
+    Fly's whitelist excludes the optional ``research.past_analysis`` module
+    from the container image while retaining the small runtime-safe research
+    helpers. When the wipe endpoint runs there, ``from research.past_analysis import
     seal_past_analysis`` raises ImportError and the safety guard turns
     that into HTTP 409 -- blocking every wipe.
 
@@ -24086,7 +24086,7 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
     try:
         from research.past_analysis import seal_past_analysis
     except ImportError:
-        # Fly image excludes research/ -- build a minimal archive dict
+        # Fly image excludes the full past-analysis module -- build a minimal archive dict
         # inline using only stdlib + in-memory bot state.
         ts = utc_iso()
         with trade_lock:
@@ -24141,6 +24141,41 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
+    # A research epoch boundary must never become a money-path mutation. Read
+    # the authoritative in-memory books before archiving or clearing anything,
+    # and require the operator to have paused and disarmed the source first.
+    # The reset preserves that pause; it is not an implicit resume command.
+    with state_lock:
+        pre_reset_paused = bool(state.get("execution_paused", False))
+        pre_reset_reason = str(state.get("execution_reason") or "")
+        pre_reset_pause_priority = int(state.get("_pause_priority") or 0)
+        pre_reset_live_armed = bool(state.get("live_armed", False))
+    with trade_lock:
+        pending_count = len(pending_orders)
+        open_count = len(open_positions)
+    if pre_reset_live_armed or not pre_reset_paused or pending_count or open_count:
+        blockers = []
+        if pre_reset_live_armed:
+            blockers.append("LIVE_ARMED")
+        if not pre_reset_paused:
+            blockers.append("EXECUTION_NOT_PAUSED")
+        if pending_count:
+            blockers.append(f"PENDING_ORDERS:{pending_count}")
+        if open_count:
+            blockers.append(f"OPEN_POSITIONS:{open_count}")
+        logger.error(
+            f"[FRESH COLLECTION] ABORT WIPE — unsafe boundary ({','.join(blockers)}) "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return {
+            "ok": False,
+            "wipe_aborted": True,
+            "error": "fresh_collection_requires_paused_disarmed_flat_boundary",
+            "blockers": blockers,
+            "pending_order_count": pending_count,
+            "open_position_count": open_count,
+            "summary": "Pause and disarm execution, then reach a flat order/position boundary",
+        }
     try:
         # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
         past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
@@ -24217,9 +24252,9 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             # Bump the local-sync-loop signal so the mirror is wiped on the
             # next manifest poll. /api/wipe_fly_only passes False here.
             state["fresh_collection_signal_ts"] = time.time()
-        state["execution_paused"] = False
-        state["execution_reason"] = ""
-        state["_pause_priority"] = 0
+        state["execution_paused"] = pre_reset_paused
+        state["execution_reason"] = pre_reset_reason
+        state["_pause_priority"] = pre_reset_pause_priority
     save_persistent_config()
     logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
     with state_lock:
@@ -36661,6 +36696,7 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "schema": "bitfinex_lifecycle_evidence_v1",
         "participant_id": first("participant_id"),
         "source_lifecycle_id": first("source_lifecycle_id", "lifecycle_id"),
+        "source_identity": first("source_identity") or {},
         "client_order_id": first("client_order_id", "cid"),
         "client_order_ids": first("client_order_ids") or [],
         "fee_model": first("fee_model"),
@@ -36670,10 +36706,14 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "quantities": quantities,
         "fills": rows("fills", "partial_fills"),
         "reprices": rows("reprices", "reprice_history"),
+        "chase_history": rows("chase_history", "reprices", "reprice_history"),
+        "cluster_evidence": first("cluster_evidence", "correlated_cluster_evidence") or {},
         "ack_history": ack_history,
         "stop_chain": stop_chain,
         "exit_evidence": first("exit_evidence", "bitfinex_exit") or {},
-        "cost_evidence": first("cost_evidence", "bitfinex_cost_evidence") or {},
+        "terminal_authority": first("terminal_authority") or {},
+        "bbo_evidence": first("bbo_evidence") or {},
+        "cost_evidence": first("cost_evidence", "actual_costs", "bitfinex_cost_evidence") or {},
         "reconciliation": reconciliation,
         "source_snapshot_evidence": source_snapshot,
         "source_absence_observations": source_observations,
@@ -36706,6 +36746,7 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
             "trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"
         ))
     )
+    evidence["actual_costs"] = copy.deepcopy(evidence["cost_evidence"])
     evidence["linkage_complete"] = bool(
         evidence["participant_id"]
         and evidence["client_order_id"]

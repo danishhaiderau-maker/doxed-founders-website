@@ -1,7 +1,8 @@
 """Seal-past-analysis fallback contract for the Fly wipe path.
 
-Fly's .dockerignore excludes the ``research/`` Python package from the
-container image. The wipe endpoint's ``from research.past_analysis import
+Fly's .dockerignore excludes the optional ``research.past_analysis`` module
+from the container image while retaining runtime-safe research helpers. The
+wipe endpoint's ``from research.past_analysis import
 seal_past_analysis`` therefore raises ImportError, which the safety guard
 turns into HTTP 409 -- blocking every wipe on Fly.
 
@@ -29,12 +30,32 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
         # Snapshot in-memory state so each test starts from a clean baseline.
         with bot.trade_lock:
             self._orig_trades = list(bot.trades)
+            self._orig_pending = list(bot.pending_orders)
+            self._orig_open = list(bot.open_positions)
             bot.trades.clear()
+            bot.pending_orders.clear()
+            bot.open_positions.clear()
+        with bot.state_lock:
+            self._orig_pause = (
+                bot.state.get("execution_paused"), bot.state.get("execution_reason"),
+                bot.state.get("_pause_priority"), bot.state.get("live_armed"),
+            )
+            bot.state["execution_paused"] = True
+            bot.state["execution_reason"] = "TEST_PAUSE"
+            bot.state["_pause_priority"] = 50
+            bot.state["live_armed"] = False
 
     def tearDown(self):
         with bot.trade_lock:
             bot.trades.clear()
             bot.trades.extend(self._orig_trades)
+            bot.pending_orders.clear()
+            bot.pending_orders.extend(self._orig_pending)
+            bot.open_positions.clear()
+            bot.open_positions.extend(self._orig_open)
+        with bot.state_lock:
+            (bot.state["execution_paused"], bot.state["execution_reason"],
+             bot.state["_pause_priority"], bot.state["live_armed"]) = self._orig_pause
 
     # -- Test 1: package available -> real seal is called -------------------
     def test_fallback_calls_real_seal_when_package_available(self):
@@ -77,7 +98,7 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
 
         class _RaiseOnImport:
             def find_spec(self, name, path=None, target=None):
-                if name == "research.past_analysis" or name == "research":
+                if name == "research.past_analysis":
                     raise ImportError("forced for test")
                 return None
 
@@ -126,19 +147,21 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
         # Force ImportError on the inner import path inside the helper.
         class _RaiseOnImport:
             def find_spec(self, name, path=None, target=None):
-                if name == "research.past_analysis" or name == "research":
+                if name == "research.past_analysis":
                     raise ImportError("forced for test")
                 return None
 
         for key in list(sys.modules.keys()):
-            if key == "research" or (
-                key.startswith("research.") and not key.startswith("research_genome")
-            ):
+            if key == "research.past_analysis":
                 sys.modules.pop(key, None)
 
         sys.meta_path.insert(0, _RaiseOnImport())
         try:
-            result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
+            with mock.patch.object(bot, "reset_all_research_files", return_value={
+                "moved": [], "errors": [], "path": "test-quarantine",
+                "cutoff_utc": "2026-08-16T00:00:00Z",
+            }):
+                result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
         finally:
             sys.meta_path.pop(0)
 
@@ -148,6 +171,27 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
         self.assertFalse(result.get("wipe_aborted", False))
         self.assertIn("past_analysis_id", result)
         self.assertTrue(result["past_analysis_id"].startswith("degraded_"))
+        self.assertTrue(bot.state.get("execution_paused"))
+        self.assertEqual(bot.state.get("execution_reason"), "TEST_PAUSE")
+
+    def test_reset_aborts_before_archive_when_boundary_is_not_paused_and_flat(self):
+        with bot.state_lock:
+            bot.state["execution_paused"] = False
+        with mock.patch.object(bot, "_seal_past_analysis_with_fallback") as seal:
+            result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
+        self.assertFalse(result.get("ok"))
+        self.assertIn("EXECUTION_NOT_PAUSED", result.get("blockers") or [])
+        seal.assert_not_called()
+
+        with bot.state_lock:
+            bot.state["execution_paused"] = True
+        with bot.trade_lock:
+            bot.pending_orders.append({"trade_id": "live-pending"})
+        with mock.patch.object(bot, "_seal_past_analysis_with_fallback") as seal:
+            result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
+        self.assertFalse(result.get("ok"))
+        self.assertIn("PENDING_ORDERS:1", result.get("blockers") or [])
+        seal.assert_not_called()
 
 
 if __name__ == "__main__":

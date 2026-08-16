@@ -5743,6 +5743,8 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
           signed_showcase_event: true,
           showcase_event: 'ORDER_PLACED',
           showcase_event_at: '2026-07-20T01:02:01.750Z',
+          showcase_event_id: 'showcase-order-7',
+          showcase_event_seq: 7,
           platform_received_at: '2026-07-20T01:02:02.250Z',
           entry_limit_policy: 'micro_sr_structural_limit_v1',
         },
@@ -5756,6 +5758,8 @@ test('accepts a fresh HMAC-verified exact showcase resting limit', () => {
       exactQtyBtc: 0.02361,
       receivedAtMs: Date.parse('2026-07-20T01:02:02.250Z'),
       sourceEventAtMs: Date.parse('2026-07-20T01:02:01.750Z'),
+      eventId: 'showcase-order-7',
+      eventSeq: 7,
     },
   );
 });

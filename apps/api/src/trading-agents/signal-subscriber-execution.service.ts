@@ -1229,6 +1229,8 @@ type ExecutionPayload = {
   leverage?: number;
   stopLossMarginPct?: number;
   sourceEventAt?: string;
+  sourceEventId?: string;
+  sourceEventSeq?: number;
   platformReceivedAt?: string;
   sourceToPlatformMs?: number;
   platformToExchangeAckMs?: number;
@@ -1548,6 +1550,8 @@ type SignedShowcaseExactLimit = {
   exactQtyBtc: number;
   receivedAtMs: number;
   sourceEventAtMs?: number;
+  eventId?: string;
+  eventSeq?: number;
 };
 
 type SignedShowcaseEnvelope = SignalIntentEnvelope & {
@@ -1561,6 +1565,8 @@ type SignedShowcaseEnvelope = SignalIntentEnvelope & {
     showcase_event?: string;
     showcase_event_at?: string;
     platform_received_at?: string;
+    showcase_event_id?: string;
+    showcase_event_seq?: number;
     entry_limit_policy?: string;
   };
 };
@@ -1578,6 +1584,8 @@ export function readFreshSignedShowcaseExactLimit(
   const exactQtyBtc = Number(intent?.entry?.exact_qty_btc ?? 0);
   const direction = intent?.direction;
   const event = String(intent?.context?.showcase_event ?? '');
+  const eventId = terminalEvidenceString(intent?.context?.showcase_event_id);
+  const eventSeq = terminalEvidenceNumber(intent?.context?.showcase_event_seq);
   if (
     !tradeId
     || envelopeTradeId !== tradeId
@@ -1606,6 +1614,8 @@ export function readFreshSignedShowcaseExactLimit(
     exactQtyBtc,
     receivedAtMs,
     ...(Number.isFinite(sourceEventAtMs) ? { sourceEventAtMs } : {}),
+    ...(eventId ? { eventId } : {}),
+    ...(eventSeq != null && Number.isInteger(eventSeq) && eventSeq >= 0 ? { eventSeq } : {}),
   };
 }
 
@@ -9062,6 +9072,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                   ),
                 }
               : {}),
+            ...(signedExactLimit.eventId ? { sourceEventId: signedExactLimit.eventId } : {}),
+            ...(signedExactLimit.eventSeq != null ? { sourceEventSeq: signedExactLimit.eventSeq } : {}),
           }
         : {}),
       ...(clientOrderId != null ? { clientOrderId } : {}),
@@ -9082,6 +9094,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         margin_usd: marginUsd,
         margin_cap_usd: effectiveCap,
         leverage,
+        correlated_cluster_evidence: {
+          schema: 'correlated_exposure_cluster_v2',
+          allowed: cluster.allowed,
+          reason: cluster.reason,
+          same_direction_managed_or_reserved_count: cluster.sameDirectionCount,
+          aggregate_qty_btc: cluster.aggregateQty,
+          aggregate_margin_usd: cluster.aggregateMarginUsd,
+          price_boundary_fraction: CORRELATED_EXPOSURE_PRICE_BOUNDARY_FRACTION,
+          nearest_trade_id: cluster.nearest?.tradeId ?? null,
+          nearest_participant_id: cluster.nearest?.participantId ?? null,
+          nearest_price_distance_usd: cluster.nearest?.priceDistanceUsd ?? null,
+          nearest_price_distance_fraction: cluster.nearest?.priceDistanceFraction ?? null,
+          nearest_lifecycle_distance_sec: cluster.nearest?.lifecycleDistanceSec ?? null,
+        },
       ...payload,
     });
     if (timing) {
@@ -12471,8 +12497,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                       0,
                       exchangeAckAtMs - signedExactLimit.sourceEventAtMs,
                     ),
-                  }
-                : {}),
+                }
+              : {}),
+              ...(signedExactLimit.eventId ? { sourceEventId: signedExactLimit.eventId } : {}),
+              ...(signedExactLimit.eventSeq != null ? { sourceEventSeq: signedExactLimit.eventSeq } : {}),
             }
           : {}),
         source: 'hire',

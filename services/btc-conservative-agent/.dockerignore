@@ -21,6 +21,7 @@ research/*
 !research/platform_relay_evidence.py
 !research/immutable_archive.py
 !research/counterfactual_normalization.py
+!research/epoch_quarantine.py
 
 # 4. Re-include deploy + Python dependency manifests.
 !requirements.txt

@@ -3,6 +3,21 @@ import json
 import analyzer_research_engine_v62 as analyzer
 
 
+def test_configured_mirror_wins_over_stale_source_file(tmp_path, monkeypatch):
+    mirror = tmp_path / "mirror"
+    source = tmp_path / "source"
+    mirror.mkdir()
+    source.mkdir()
+    (mirror / "signal_replay.jsonl").write_text("mirror\n", encoding="utf-8")
+    (source / "signal_replay.jsonl").write_text("stale-source\n", encoding="utf-8")
+    monkeypatch.chdir(source)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(mirror))
+
+    resolved = analyzer._agent_data_path("signal_replay.jsonl")
+
+    assert resolved == str(mirror / "signal_replay.jsonl")
+
+
 def test_report_provenance_executes_against_canonical_evidence_root(tmp_path, monkeypatch):
     (tmp_path / "relay_lifecycle_evidence_v1.json").write_text(
         json.dumps({
