@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import {
   EXCHANGE_PROVIDER_LABELS,
   exchangeCredentialProvider,
@@ -9,6 +10,17 @@ import { CredentialCryptoService } from './credential-crypto.service';
 import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { ExchangeAdapterRegistry } from './exchange-adapter.registry';
 import { BitfinexTradingClient } from './bitfinex-api.client';
+
+export function bitfinexCredentialFingerprint(creds: ExchangeCredentials): string {
+  return createHash('sha256')
+    .update(`${creds.apiKey}\0${creds.apiSecret}`)
+    .digest('hex');
+}
+
+export function credentialFingerprintMatches(actual: string, expected: string): boolean {
+  if (!/^[a-f0-9]{64}$/i.test(actual) || !/^[a-f0-9]{64}$/i.test(expected)) return false;
+  return timingSafeEqual(Buffer.from(actual.toLowerCase()), Buffer.from(expected.toLowerCase()));
+}
 
 export async function readBitfinexExchangeSnapshot(
   client: Pick<BitfinexTradingClient, 'listActiveOrders' | 'getOpenPositionDetail'>,
@@ -66,6 +78,9 @@ export class ExchangesService {
         testnet: creds.testnet ?? false,
       }),
     );
+    const credentialFingerprint = provider === 'bitfinex'
+      ? bitfinexCredentialFingerprint(creds)
+      : undefined;
 
     const row = await this.prisma.integrationCredential.upsert({
       where: { userId_provider: { userId, provider: providerKey } },
@@ -77,6 +92,7 @@ export class ExchangesService {
           exchange: provider,
           accountLabel: validation.accountLabel,
           permissions: validation.permissions,
+          ...(credentialFingerprint ? { accountCredentialFingerprint: credentialFingerprint } : {}),
         },
         verifiedAt: new Date(),
       },
@@ -86,6 +102,7 @@ export class ExchangesService {
           exchange: provider,
           accountLabel: validation.accountLabel,
           permissions: validation.permissions,
+          ...(credentialFingerprint ? { accountCredentialFingerprint: credentialFingerprint } : {}),
         },
         verifiedAt: new Date(),
       },
@@ -197,6 +214,29 @@ export class ExchangesService {
     try {
       const parsed = JSON.parse(this.crypto.decrypt(row.token)) as ExchangeCredentials;
       if (!parsed.apiKey || !parsed.apiSecret) return null;
+      if (providerKey === exchangeCredentialProvider('bitfinex')) {
+        const actual = bitfinexCredentialFingerprint(parsed);
+        const metadata = row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+          ? row.metadata as Record<string, unknown>
+          : null;
+        const storedExpected = typeof metadata?.accountCredentialFingerprint === 'string'
+          ? metadata.accountCredentialFingerprint.trim()
+          : '';
+        const configuredExpected = process.env.BITFINEX_EXPECTED_CREDENTIAL_FINGERPRINT?.trim() ?? '';
+        // Executor money paths must never silently switch accounts after a
+        // partial credential rotation. The metadata fingerprint is written in
+        // the same DB update as the encrypted token; an optional deployment
+        // fingerprint pins the intended live key across database restores.
+        if (
+          (storedExpected && !credentialFingerprintMatches(actual, storedExpected))
+          || (configuredExpected && !credentialFingerprintMatches(actual, configuredExpected))
+          || (
+            process.env.SUBSCRIBER_EXECUTION_ENABLED === 'true'
+            && !storedExpected
+            && !configuredExpected
+          )
+        ) return null;
+      }
       return parsed;
     } catch {
       return null;
