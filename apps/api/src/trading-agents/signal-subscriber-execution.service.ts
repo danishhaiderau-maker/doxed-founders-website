@@ -19183,6 +19183,42 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /** Emergency flatten all OPEN copy lots (sync protection breach). */
+  private async readStableAuthenticatedPosition(
+    creds: ExchangeCredentials,
+  ): Promise<{
+    known: boolean;
+    position: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>>;
+    samples: Array<number | null>;
+  }> {
+    const samples: Array<number | null> = [];
+    let priorKey: string | null = null;
+    let consecutive = 0;
+    let latest: Awaited<ReturnType<ExecutionTradingClient['getOpenPositionDetail']>> = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        latest = await this.activeTrading.getOpenPositionDetail(creds);
+      } catch {
+        return { known: false, position: null, samples };
+      }
+      const amount = latest?.amount ?? null;
+      samples.push(amount);
+      const key = amount == null ? 'FLAT' : String(btcToSats(amount));
+      if (key === priorKey) consecutive += 1;
+      else {
+        priorKey = key;
+        consecutive = 1;
+      }
+      // A single transient null/non-null private read must never choose the
+      // flat or submit branch. Require three consecutive byte-equivalent
+      // authenticated observations; bounded retries also reject oscillation.
+      if (consecutive >= 3) return { known: true, position: latest, samples };
+      if (attempt < 4) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 75));
+      }
+    }
+    return { known: false, position: latest, samples };
+  }
+
   async emergencyFlattenOpenCopyLots(
     userId: string,
     agentSlug: string,
@@ -19371,7 +19407,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           : SignalCycleStatus.PENDING_ENTRY,
         cycle: { agentId: agent.id },
       },
-      include: { cycle: { select: { tradeId: true } } },
+      include: { cycle: { select: { tradeId: true, intentEnvelope: true } } },
       orderBy: { createdAt: 'asc' },
     });
     const exactFencedOpenIds = new Set(
@@ -19408,7 +19444,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
       }
 
-      const before = await this.activeTrading.getOpenPositionDetail(creds);
+      const stableBefore = await this.readStableAuthenticatedPosition(creds);
+      if (!stableBefore.known) {
+        throw new Error(
+          `Emergency pending-residual position preflight is UNKNOWN; samples=${JSON.stringify(stableBefore.samples)}; no close submit`,
+        );
+      }
+      const before = stableBefore.position;
       const coordinator = pendingRows[0]!;
       const participantIds = pendingRows.map((row) => row.id);
       const generation = createHash('sha256').update(JSON.stringify({
@@ -19471,7 +19513,13 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         }
 
         let closeOrderId = fence.exchangeOrderId;
-        const currentPosition = await this.activeTrading.getOpenPositionDetail(creds);
+        const stableCurrent = await this.readStableAuthenticatedPosition(creds);
+        if (!stableCurrent.known) {
+          throw new Error(
+            `Emergency account close ${fence.requestId} reconciliation position is UNKNOWN; samples=${JSON.stringify(stableCurrent.samples)}; no resubmit`,
+          );
+        }
+        const currentPosition = stableCurrent.position;
         let confirmed = btcToSats(currentPosition?.amount ?? 0) === 0;
         let submitSameImmutableRequest = !fence.recovered;
         if (fence.recovered && fence.phase !== 'CONFIRMED') {
@@ -19611,10 +19659,45 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               );
             }
           }
-          const positionAtSubmit = await this.activeTrading.getOpenPositionDetail(creds);
-          if (btcToSats(positionAtSubmit?.amount ?? 0) !== btcToSats(beforeAmount)) {
+          const stableAtSubmit = await this.readStableAuthenticatedPosition(creds);
+          const positionAtSubmit = stableAtSubmit.position;
+          if (
+            !stableAtSubmit.known
+            || btcToSats(positionAtSubmit?.amount ?? 0) !== btcToSats(beforeAmount)
+          ) {
+            // Stop cleanup is the final action before submission. If the
+            // private position stream is inconsistent, restore participant
+            // protection before failing closed rather than leaving an exposed
+            // residual while refusing the close.
+            const coordinatorMeta = pendingMeta.find(({ row }) => row.id === coordinator.id)?.meta;
+            let protectionRestored = false;
+            if (coordinatorMeta) {
+              try {
+                await this.ensureProtectiveStop(
+                  agent.id,
+                  userId,
+                  coordinator.cycleId,
+                  coordinator.id,
+                  coordinatorMeta,
+                  creds,
+                  coordinator.cycle.intentEnvelope as SignalIntentEnvelope,
+                );
+                const activeAfterRestore = await this.activeTrading.listActiveOrders(creds);
+                const protectionSide = direction === 'SHORT' ? 1 : -1;
+                protectionRestored = activeAfterRestore.some((order) =>
+                  order.symbol === BITFINEX_BTC_PERP_SYMBOL
+                  && order.orderType.toUpperCase().includes('STOP')
+                  && ((order.flags ?? 0) & BITFINEX_REDUCE_ONLY_FLAG) !== 0
+                  && Math.sign(order.amountOrig) === protectionSide
+                  && btcToSats(Math.abs(order.amountOrig)) === btcToSats(closeQty));
+              } catch (error) {
+                this.logger.error(
+                  `Emergency account close ${incidentId} could not restore protection after UNKNOWN position reads: ${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+            }
             throw new Error(
-              `Emergency account close ${incidentId} refused after stop cleanup: position changed before submit`,
+              `Emergency account close ${incidentId} refused after stop cleanup: stable exact position not proven; samples=${JSON.stringify(stableAtSubmit.samples)} protection_restored=${protectionRestored}`,
             );
           }
           await this.cycles.recordHireExecutionEvent(

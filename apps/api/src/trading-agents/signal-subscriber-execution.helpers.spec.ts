@@ -7757,7 +7757,7 @@ test('account emergency residual close is durably fenced before exchange submiss
   ), 'utf8');
   const methodAt = source.indexOf('async emergencyFlattenOpenCopyLots');
   const cancelAt = source.indexOf('emergency-account-flat:', methodAt);
-  const positionAt = source.indexOf('getOpenPositionDetail(creds)', cancelAt);
+  const positionAt = source.indexOf('readStableAuthenticatedPosition(creds)', cancelAt);
   const persistSubmittingAt = source.indexOf('acquireAccountEmergencyCloseFence({', positionAt);
   const submitAt = source.indexOf('submitMarketClose(creds', persistSubmittingAt);
   const acknowledgeAt = source.indexOf("to: 'ACKNOWLEDGED'", submitAt);
@@ -7775,7 +7775,11 @@ test('account emergency residual close is durably fenced before exchange submiss
   assert.match(source.slice(confirmAt, expireAt), /remainingOwnedOrderIds/);
 });
 
-function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submitError?: string } = {}) {
+function accountEmergencyServiceFixture(options: {
+  submitThrows?: boolean;
+  submitError?: string;
+  positionReads?: Array<number | null>;
+} = {}) {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   const durable: any = {
     terminalCloseClaimToken: null, terminalCloseRequestId: null,
@@ -7786,6 +7790,7 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submi
   };
   const events: any[] = [];
   let positionAmount = -0.01;
+  const positionReads = [...(options.positionReads ?? [])];
   let submits = 0;
   const participant = {
     id: 'participant-a', cycleId: 'cycle-a', createdAt: new Date(0),
@@ -7861,7 +7866,12 @@ function accountEmergencyServiceFixture(options: { submitThrows?: boolean; submi
   service.waitForMarketCloseConfirmation = async () => positionAmount === 0;
   service.bitfinex = {
     getMarkPrice: async () => 60_000,
-    getOpenPositionDetail: async () => positionAmount === 0 ? null : ({ amount: positionAmount, basePrice: 60_000 }),
+    getOpenPositionDetail: async () => {
+      const scripted = positionReads.length > 0 ? positionReads.shift() : positionAmount;
+      return scripted == null || scripted === 0
+        ? null
+        : ({ amount: scripted, basePrice: 60_000 });
+    },
     submitMarketClose: async (_creds: unknown, input: any) => {
       submits += 1;
       assert.equal(durable.terminalClosePhase, 'SUBMITTING');
@@ -8027,9 +8037,31 @@ test('account emergency cancels only exact reserved stops at close-ready and fai
   };
   await assert.rejects(
     changed.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
-    /position changed before submit/,
+    /stable exact position not proven/,
   );
   assert.equal(changed.getSubmits(), 0);
+});
+
+test('account emergency ignores one transient flat read and requires stable exact position before submit', async () => {
+  const fx = accountEmergencyServiceFixture({
+    positionReads: [null, -0.01, -0.01, -0.01],
+  });
+  const result = await fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah');
+  assert.equal(result.flattened, 1);
+  assert.equal(fx.getSubmits(), 1);
+  assert.equal(fx.durable.terminalClosePhase, 'CONFIRMED');
+});
+
+test('account emergency fails closed on oscillating private position reads', async () => {
+  const fx = accountEmergencyServiceFixture({
+    positionReads: [null, -0.01, null, -0.01, null],
+  });
+  await assert.rejects(
+    fx.service.emergencyFlattenOpenCopyLots('user-a', 'cheetah'),
+    /position preflight is UNKNOWN/,
+  );
+  assert.equal(fx.getSubmits(), 0);
+  assert.equal(fx.durable.terminalCloseRequestId, null);
 });
 
 test('deterministically rejected OPEN recovery consumes exact proof into one new fenced close', async () => {
