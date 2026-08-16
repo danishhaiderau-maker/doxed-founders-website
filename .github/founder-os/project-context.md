@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Resume exact fenced emergency close after fill promotion
+Release reserved stops only at fenced close submit
 
 ## Last Activity
 
