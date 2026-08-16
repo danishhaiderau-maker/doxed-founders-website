@@ -236,7 +236,9 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             payload = event.get("payload") if isinstance(event.get("payload"), dict) else event
             event_id = explicit(event, "id", "event_id", "eventId")
             event_created_at = explicit(event, "createdAt", "created_at")
-            event_name = str(explicit(payload, "event", "reason", "exit_reason") or event_type).upper()
+            event_name = str(
+                explicit(payload, "event", "diff_type", "reason", "exit_reason") or event_type
+            ).upper()
             if evidence["fee_model"] is None:
                 evidence["fee_model"] = explicit(payload, "fee_model")
             if evidence["execution_profile"] is None:
@@ -517,6 +519,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     }.items() if value is not None
                 })
                 if event_name in unsupported_exit_markers:
+                    evidence["analysis_exclusion_reasons"].append(event_name)
+                if event_name == "COPY_ORDER_NO_SHOWCASE":
                     evidence["analysis_exclusion_reasons"].append(event_name)
 
             # Producer assertions are necessary but never sufficient. They

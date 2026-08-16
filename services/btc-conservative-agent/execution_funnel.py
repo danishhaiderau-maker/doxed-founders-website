@@ -90,6 +90,18 @@ def funnel_on_order(signal: dict, order: dict) -> None:
         return
     price = float(state_price(signal))
     limit = float(order.get("limit_price") or order.get("planned_limit_price") or 0)
+    now = time.time()
+    order_max_age_sec = int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(120 * 60)))
+    order_created_ts = float(order.get("created_ts") or now)
+    order_expires_ts = order_created_ts + order_max_age_sec
+    try:
+        signal_expires_ts = float(signal.get("expires_ts") or 0)
+    except (TypeError, ValueError):
+        signal_expires_ts = 0.0
+    effective_expires_ts = min(
+        expiry for expiry in (signal_expires_ts, order_expires_ts) if expiry > 0
+    )
+    effective_ttl_sec = max(0, int(round(effective_expires_ts - now)))
     row = {
         "schema": "execution_funnel_v1",
         "ts": _utc_iso(),
@@ -102,7 +114,14 @@ def funnel_on_order(signal: dict, order: dict) -> None:
         "entry_mode": order.get("entry_mode") or signal.get("entry_mode"),
         "signal_price": order.get("signal_price") or signal.get("signal_price"),
         "distance_from_market_pct": _distance_pct(price, limit) if limit and price else None,
-        "ttl_sec": int(os.getenv("LIMIT_ORDER_MAX_AGE_SEC", str(120 * 60))),
+        # ttl_sec remains the effective remaining lifetime for report
+        # compatibility.  The two independent clocks are explicit so a 2h
+        # order-age ceiling is never presented as the source signal's 30m TTL.
+        "ttl_sec": effective_ttl_sec,
+        "effective_ttl_sec": effective_ttl_sec,
+        "effective_expires_ts": effective_expires_ts,
+        "source_signal_expires_ts": signal_expires_ts or None,
+        "order_max_age_sec": order_max_age_sec,
     }
     with _lock:
         st = _states.setdefault(tid, {"trade_id": tid})

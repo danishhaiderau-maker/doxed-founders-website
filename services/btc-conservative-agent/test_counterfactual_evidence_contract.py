@@ -9,6 +9,11 @@ import subprocess
 import sys
 from research import platform_relay_evidence as pure_relay
 from research import counterfactual_normalization as pure_counterfactual
+from research.analysis_eligibility import (
+    BITFINEX_COPY_FIDELITY,
+    REAL_COPY_PARAMETER_OPTIMISATION,
+    classify_row,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -104,6 +109,41 @@ def test_platform_relay_evidence_join_fails_closed_without_complete_provenance(t
         "schema": "relay_lifecycle_evidence_v1", "records": []
     }), encoding="utf-8")
     assert funcs["_platform_relay_evidence_index"](artifact) == {}
+
+
+def test_copy_order_without_showcase_is_explicit_negative_copy_evidence():
+    records = [{
+        "canonicalTradeId": "cont-orphan-pending",
+        "participantId": "participant-1",
+        "events": [{
+            "id": "mirror-1",
+            "eventType": "MIRROR_DIFF",
+            "createdAt": "2026-08-16T00:00:01Z",
+            "payload": {
+                "trade_id": "cont-orphan-pending",
+                "diff_type": "COPY_ORDER_NO_SHOWCASE",
+                "copy_limit": 63066.52,
+            },
+        }],
+    }]
+
+    evidence = pure_relay._normalize_platform_bitfinex_evidence(
+        records, "cont-orphan-pending"
+    )
+    assert evidence["negative_events"][0]["event"] == "COPY_ORDER_NO_SHOWCASE"
+    assert "COPY_ORDER_NO_SHOWCASE" in evidence["analysis_exclusion_reasons"]
+
+    assessment = classify_row({
+        "trade_id": "cont-orphan-pending",
+        "policy_snapshot_complete": True,
+        "policy_version": "policy-v1",
+        "replay_complete": True,
+        "terminal_provenance": "SIGNAL_TTL_EXPIRED",
+        "bitfinex_evidence": evidence,
+    })
+    assert "COPY_ORDER_NO_SHOWCASE" in assessment["exclusion_reasons"][BITFINEX_COPY_FIDELITY]
+    assert assessment["eligible"][BITFINEX_COPY_FIDELITY] is False
+    assert assessment["eligible"][REAL_COPY_PARAMETER_OPTIMISATION] is False
 
 
 def test_pure_relay_module_import_has_no_runtime_side_effects(tmp_path):

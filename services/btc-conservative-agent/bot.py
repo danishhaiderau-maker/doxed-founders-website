@@ -22036,6 +22036,22 @@ def _expired_already_recorded(trade_id: str) -> bool:
 
 def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
     """Only a real, previously-resting source limit may drive copy cancellation."""
+    status = str(source.get("status") or "").upper()
+    # TTL callers historically stamp the shared signal object EXPIRED before
+    # handing it to _record_expired_order().  Preserve proof that it really
+    # rested using the durable order markers instead of suppressing the signed
+    # ORDER_EXPIRED wake merely because terminal state was stamped first.
+    terminalized_resting_order = bool(
+        (
+            status == "EXPIRED"
+            and source.get("order_placed") is True
+            and source.get("order_created_ts")
+        )
+        or (
+            status == "CANCELLED"
+            and source.get("cancel_confirmed") is True
+        )
+    )
     return bool(
         str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
         # Continuous creates real paper resting orders with entry_type LIMIT,
@@ -22044,7 +22060,7 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
         # genuine Continuous TTL fall back to the slow relay poll instead of
         # emitting the signed, exact-generation ORDER_EXPIRED wake.
         and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
-        and str(source.get("status") or "").upper() == "PENDING"
+        and (status == "PENDING" or terminalized_resting_order)
         and source.get("created_ts")
         and isinstance(limit_price, (int, float))
         and limit_price > 0
@@ -23989,12 +24005,14 @@ def _reset_runtime_log_handlers():
         except Exception as e:
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
-def reset_all_research_files() -> tuple:
-    deleted, errors = _delete_paths(
-        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
-        + _fresh_collection_derived_history_paths()
+def reset_all_research_files() -> dict:
+    from research.epoch_quarantine import quarantine_epoch
+    result = quarantine_epoch(
+        os.getcwd(),
+        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True),
+        cutoff=utc_iso(),
     )
-    return deleted, errors
+    return result
 
 def maintain_fresh_collection_files():
     """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
@@ -24142,7 +24160,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         trades_map.clear()
         trades.clear()
         recent_trades.clear()
-    deleted, errors = reset_all_research_files()
+    quarantine = reset_all_research_files()
+    moved, errors = quarantine["moved"], quarantine["errors"]
     # Fresh Collection is the operator boundary for every active holdout.  The
     # file wipe alone is insufficient because Tile 2 counters also live in
     # memory and would otherwise be written back with pre-reset/test values.
@@ -24162,9 +24181,11 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         "past_analysis_id": past_analysis_id,
         "deleted_files": 0,
         "deleted_bytes": 0,
-        "raw_payloads_retained": False,
+        "raw_payloads_retained": True,
+        "quarantined_files": len(moved),
+        "quarantine_path": quarantine["path"],
     }
-    summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    summary = f"quarantined {len(moved)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     for err in errors:
         logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
     with state_lock:
@@ -24187,7 +24208,10 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             f"— local mirror will be wiped on next manifest poll [PIPELINE ENFORCEMENT]"
         )
     return {
-        "deleted": deleted,
+        "deleted": [],
+        "quarantined": moved,
+        "quarantine_path": quarantine["path"],
+        "epoch_cutoff_utc": quarantine["cutoff_utc"],
         "errors": errors,
         "summary": summary,
         "archive_path": archive_path,
@@ -24198,7 +24222,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         "ok": True,
         "wipe_aborted": False,
         "fresh_collection_signal_ts": signal_ts,
-        "local_mirror_will_wipe": bool(send_local_signal),
+        "local_mirror_will_wipe": False,
+        "local_mirror_will_quarantine": bool(send_local_signal),
     }
 
 replay_buffers: Dict[str, Dict] = {}

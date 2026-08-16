@@ -106,6 +106,16 @@ def classify_row(row):
         append_provenance_exclusion(showcase)
 
     evidence = _evidence(row)
+    negative_event_names = {
+        str(
+            event.get("event")
+            or (event.get("payload") or {}).get("diff_type")
+            or event.get("event_type")
+            or ""
+        ).upper()
+        for event in (evidence.get("negative_events") or [])
+        if isinstance(event, dict)
+    }
     fidelity = reasons[BITFINEX_COPY_FIDELITY]
     if not _present(row.get("trade_id")):
         fidelity.append("CANONICAL_IDENTITY_MISSING")
@@ -121,6 +131,8 @@ def classify_row(row):
         fidelity.append("SOURCE_SNAPSHOT_EVIDENCE_INCOMPLETE")
     if evidence.get("reconciliation_complete") is not True:
         fidelity.append("RECONCILIATION_INCOMPLETE")
+    if "COPY_ORDER_NO_SHOWCASE" in negative_event_names:
+        fidelity.append("COPY_ORDER_NO_SHOWCASE")
     if mirror_stale_lifecycle:
         fidelity.append("MIRROR_DIFF_STALE_NO_EXPOSURE")
     elif not provenance:

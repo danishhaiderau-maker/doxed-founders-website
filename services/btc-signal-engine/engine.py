@@ -22113,6 +22113,22 @@ def _expired_already_recorded(trade_id: str) -> bool:
 
 def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
     """Only a real, previously-resting source limit may drive copy cancellation."""
+    status = str(source.get("status") or "").upper()
+    # TTL callers historically stamp the shared signal object EXPIRED before
+    # handing it to _record_expired_order(). Preserve proof that it really
+    # rested using durable placement/cancel markers, while virtual candidates
+    # without those markers remain unable to publish ORDER_EXPIRED.
+    terminalized_resting_order = bool(
+        (
+            status == "EXPIRED"
+            and source.get("order_placed") is True
+            and source.get("order_created_ts")
+        )
+        or (
+            status == "CANCELLED"
+            and source.get("cancel_confirmed") is True
+        )
+    )
     return bool(
         str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
         # Continuous creates real paper resting orders with entry_type LIMIT,
@@ -22121,7 +22137,7 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
         # genuine Continuous TTL fall back to the slow relay poll instead of
         # emitting the signed, exact-generation ORDER_EXPIRED wake.
         and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
-        and str(source.get("status") or "").upper() == "PENDING"
+        and (status == "PENDING" or terminalized_resting_order)
         and source.get("created_ts")
         and isinstance(limit_price, (int, float))
         and limit_price > 0

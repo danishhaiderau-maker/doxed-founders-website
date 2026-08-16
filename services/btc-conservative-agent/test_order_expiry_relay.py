@@ -63,6 +63,57 @@ class OrderExpiryRelayTests(unittest.TestCase):
             64000,
         ))
 
+    def test_terminal_stamp_after_real_resting_limit_still_emits(self):
+        predicate = load_predicate()
+        self.assertTrue(predicate(
+            {
+                "entry_type": "LIMIT",
+                "created_ts": 123.0,
+                "order_created_ts": 130.0,
+                "order_placed": True,
+                "status": "EXPIRED",
+            },
+            "SIGNAL_TTL_EXPIRED",
+            64000,
+        ))
+
+    def test_terminal_pre_order_signal_cannot_emit(self):
+        predicate = load_predicate()
+        self.assertFalse(predicate(
+            {
+                "entry_type": "LIMIT",
+                "created_ts": 123.0,
+                "status": "EXPIRED",
+            },
+            "SIGNAL_TTL_EXPIRED",
+            64000,
+        ))
+
+    def test_confirmed_cancelled_resting_order_still_emits(self):
+        predicate = load_predicate()
+        self.assertTrue(predicate(
+            {
+                "entry_type": "SIM_LIMIT",
+                "created_ts": 123.0,
+                "status": "CANCELLED",
+                "cancel_confirmed": True,
+            },
+            "SIGNAL_TTL_EXPIRED",
+            64000,
+        ))
+
+    def test_unconfirmed_cancelled_order_cannot_emit(self):
+        predicate = load_predicate()
+        self.assertFalse(predicate(
+            {
+                "entry_type": "SIM_LIMIT",
+                "created_ts": 123.0,
+                "status": "CANCELLED",
+            },
+            "SIGNAL_TTL_EXPIRED",
+            64000,
+        ))
+
     def test_real_expiry_waits_for_durable_platform_receipt(self):
         self.assertTrue(expiry_push_uses_durable_receipt())
 
