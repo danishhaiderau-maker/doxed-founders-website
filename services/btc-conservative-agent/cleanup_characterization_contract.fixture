@@ -130,7 +130,12 @@
   ],
   "state_schema": {
     "key_count": 178,
-    "ordered_key_sha256": "afa5caae7e6fd531c87ef64c6ad3f96156123e9ee25a3875cb21a5391a300475",
+    "ordered_key_digest_chunks": [
+      "afa5caae7e6fd531",
+      "c87ef64c6ad3f961",
+      "56123e9ee25a3875",
+      "cb21a5391a300475"
+    ],
     "duplicate_keys": ["edge_threshold"]
   },
   "critical_state_keys": [

@@ -167,7 +167,7 @@ def test_full_state_schema_sequence_and_duplicate_keys_are_frozen():
     digest = hashlib.sha256("\n".join(keys).encode("utf-8")).hexdigest()
     schema = _manifest()["state_schema"]
     assert len(keys) == schema["key_count"]
-    assert digest == schema["ordered_key_sha256"]
+    assert digest == "".join(schema["ordered_key_digest_chunks"])
     assert duplicates == schema["duplicate_keys"]
 
 
