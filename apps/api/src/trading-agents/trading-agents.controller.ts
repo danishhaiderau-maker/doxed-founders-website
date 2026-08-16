@@ -147,14 +147,10 @@ export class TradingAgentsController {
     if (!status.positionMismatchDetectedAt && !status.lastError) {
       throw new ConflictException('No persisted relay mismatch evidence is present');
     }
-    const result = await this.execution.emergencyFlattenOpenCopyLots(
+    const result = await this.execution.requestExecutorEmergencyReconcile(
       userId!.trim(),
       slug,
-      {
-        actorType: 'BOT_ADMIN_OPERATOR',
-        actorId: 'BOT_ADMIN_TOKEN',
-        reason: body.reason?.trim() || 'PAUSED_RELAY_MISMATCH_RECOVERY',
-      },
+      body.reason?.trim() || 'PAUSED_RELAY_MISMATCH_RECOVERY',
     );
     return { ...result, status: 'PAUSED', resumed: false };
   }

@@ -4205,6 +4205,56 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
   }
 
+  async requestExecutorEmergencyReconcile(
+    userId: string,
+    agentSlug: string,
+    reason: string,
+  ): Promise<{ flattened: number; requestId: string }> {
+    if (executionEnabled()) {
+      const local = await this.emergencyFlattenOpenCopyLots(userId, agentSlug, {
+        actorType: 'BOT_ADMIN_OPERATOR', actorId: 'BOT_ADMIN_TOKEN', reason,
+      });
+      return { ...local, requestId: 'local-executor' };
+    }
+    const base = process.env.RELAY_EXECUTOR_WAKE_URL?.trim().replace(/\/$/, '');
+    const secret = process.env.BOT_CONTROL_SECRET?.trim();
+    if (!base || !secret) {
+      throw new Error('Relay executor internal emergency dispatch is not configured');
+    }
+    const requestId = createHash('sha256')
+      .update(JSON.stringify({ schema: 'executor_emergency_reconcile_v1', userId, agentSlug, reason }))
+      .digest('hex');
+    const response = await fetch(`${base}/api/ops/emergency-reconcile`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-bot-control-secret': secret,
+      },
+      body: JSON.stringify({ userId, agentSlug, reason, requestId }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const text = await response.text();
+    let parsed: Record<string, unknown> = {};
+    try {
+      const value = text ? JSON.parse(text) : {};
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        parsed = value as Record<string, unknown>;
+      }
+    } catch {
+      // Preserve the HTTP result without exposing internal response bytes.
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Relay executor emergency request ${requestId} failed HTTP ${response.status}: ${String(parsed.error ?? parsed.status ?? 'unknown').slice(0, 500)}`,
+      );
+    }
+    const flattened = Number(parsed.flattened);
+    if (!Number.isSafeInteger(flattened) || flattened < 0 || parsed.requestId !== requestId) {
+      throw new Error(`Relay executor emergency request ${requestId} returned an invalid acknowledgement`);
+    }
+    return { flattened, requestId };
+  }
+
   async acceptDirectExecutorWake(wake: RelayExecutorWakeRequest): Promise<boolean> {
     if (!executionEnabled()) return false;
     const laneKey = this.executorWakeLaneKey(wake);

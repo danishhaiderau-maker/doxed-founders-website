@@ -129,9 +129,9 @@ test('ops emergency reconcile requires admin-scoped paused mismatch and explicit
     },
   };
   const execution = {
-    emergencyFlattenOpenCopyLots: async (...args: unknown[]) => {
+    requestExecutorEmergencyReconcile: async (...args: unknown[]) => {
       calls.push(args);
-      return { flattened: 1 };
+      return { flattened: 1, requestId: 'request-1' };
     },
   };
   const controller = new TradingAgentsController(
@@ -161,26 +161,22 @@ test('ops emergency reconcile requires admin-scoped paused mismatch and explicit
         reason: 'incident-2026-08-16',
       },
     ),
-    { flattened: 1, status: 'PAUSED', resumed: false },
+    { flattened: 1, requestId: 'request-1', status: 'PAUSED', resumed: false },
   );
   assert.deepEqual(calls[1], ['conservative-btc', 'user-1', 'secret', undefined]);
   assert.deepEqual(calls[2], [
     'user-1',
     'conservative-btc',
-    {
-      actorType: 'BOT_ADMIN_OPERATOR',
-      actorId: 'BOT_ADMIN_TOKEN',
-      reason: 'incident-2026-08-16',
-    },
+    'incident-2026-08-16',
   ]);
 });
 
 test('ops emergency reconcile refuses an unpaused or unevidenced instance', async () => {
   let emergencyCalls = 0;
   const execution = {
-    emergencyFlattenOpenCopyLots: async () => {
+    requestExecutorEmergencyReconcile: async () => {
       emergencyCalls += 1;
-      return { flattened: 1 };
+      return { flattened: 1, requestId: 'request-1' };
     },
   };
   for (const status of [

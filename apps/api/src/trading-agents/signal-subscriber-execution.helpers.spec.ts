@@ -7967,6 +7967,51 @@ test('account emergency reuses the same immutable CID once after authenticated a
   assert.equal(fx.durable.terminalClosePhase, 'SUBMITTING');
 });
 
+test('web process dispatches emergency reconciliation to the authenticated executor with stable identity', async () => {
+  const priorExecution = process.env.SUBSCRIBER_EXECUTION_ENABLED;
+  const priorWorker = process.env.RELAY_EXECUTOR_WORKER;
+  const priorUrl = process.env.RELAY_EXECUTOR_WAKE_URL;
+  const priorSecret = process.env.BOT_CONTROL_SECRET;
+  const originalFetch = globalThis.fetch;
+  process.env.SUBSCRIBER_EXECUTION_ENABLED = 'false';
+  process.env.RELAY_EXECUTOR_WORKER = 'false';
+  process.env.RELAY_EXECUTOR_WAKE_URL = 'http://relay-executor.internal';
+  process.env.BOT_CONTROL_SECRET = 'control-secret';
+  const calls: Array<{ url: string; init: RequestInit; body: any }> = [];
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    calls.push({ url: String(url), init: init ?? {}, body });
+    return new Response(JSON.stringify({ flattened: 1, requestId: body.requestId }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  try {
+    const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+    const first = await service.requestExecutorEmergencyReconcile(
+      'user-a', 'conservative-btc', 'operator-approved',
+    );
+    const second = await service.requestExecutorEmergencyReconcile(
+      'user-a', 'conservative-btc', 'operator-approved',
+    );
+    assert.equal(first.flattened, 1);
+    assert.equal(first.requestId, second.requestId);
+    assert.match(first.requestId, /^[a-f0-9]{64}$/);
+    assert.equal(calls[0]?.url, 'http://relay-executor.internal/api/ops/emergency-reconcile');
+    assert.equal((calls[0]?.init.headers as Record<string, string>)['x-bot-control-secret'], 'control-secret');
+    assert.equal(calls[0]?.body.requestId, calls[1]?.body.requestId);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (priorExecution == null) delete process.env.SUBSCRIBER_EXECUTION_ENABLED;
+    else process.env.SUBSCRIBER_EXECUTION_ENABLED = priorExecution;
+    if (priorWorker == null) delete process.env.RELAY_EXECUTOR_WORKER;
+    else process.env.RELAY_EXECUTOR_WORKER = priorWorker;
+    if (priorUrl == null) delete process.env.RELAY_EXECUTOR_WAKE_URL;
+    else process.env.RELAY_EXECUTOR_WAKE_URL = priorUrl;
+    if (priorSecret == null) delete process.env.BOT_CONTROL_SECRET;
+    else process.env.BOT_CONTROL_SECRET = priorSecret;
+  }
+});
+
 test('BOT_ADMIN resumes one promoted OPEN only through its exact existing account fence', async () => {
   const fx = accountEmergencyServiceFixture({ submitThrows: true });
   await assert.rejects(

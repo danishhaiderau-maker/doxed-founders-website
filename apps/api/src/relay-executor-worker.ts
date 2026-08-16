@@ -4,6 +4,8 @@ import { RelayExecutorWorkerModule } from './relay-executor-worker.module';
 import { SignalSubscriberExecutionService } from './trading-agents/signal-subscriber-execution.service';
 import { executorWakeAuthorized, parseExecutorWakeRequest } from './relay-executor-wake-http';
 
+const emergencyRequests = new Map<string, Promise<{ flattened: number }>>();
+
 async function bootstrap() {
   if (process.env.RELAY_EXECUTOR_WORKER !== 'true') {
     throw new Error('RELAY_EXECUTOR_WORKER=true is required');
@@ -23,6 +25,70 @@ async function bootstrap() {
   }
   const port = Number(process.env.PORT ?? 4000);
   const server = createServer((req, res) => {
+    if (req.url === '/api/ops/emergency-reconcile' && req.method === 'POST') {
+      const supplied = Array.isArray(req.headers['x-bot-control-secret'])
+        ? req.headers['x-bot-control-secret'][0]
+        : req.headers['x-bot-control-secret'];
+      if (!executorWakeAuthorized(supplied, process.env.BOT_CONTROL_SECRET?.trim() ?? '')) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ status: 'unauthorized' }));
+        return;
+      }
+      let size = 0;
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > 8_192) req.destroy();
+        else chunks.push(chunk);
+      });
+      req.on('end', () => {
+        let body: Record<string, unknown> | null = null;
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          body = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed as Record<string, unknown>
+            : null;
+        } catch {
+          body = null;
+        }
+        const userId = typeof body?.userId === 'string' ? body.userId.trim() : '';
+        const agentSlug = typeof body?.agentSlug === 'string' ? body.agentSlug.trim() : '';
+        const reason = typeof body?.reason === 'string' ? body.reason.trim() : '';
+        const requestId = typeof body?.requestId === 'string' ? body.requestId.trim() : '';
+        if (
+          !userId || agentSlug !== 'conservative-btc' || !reason
+          || !/^[a-f0-9]{64}$/.test(requestId)
+        ) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ status: 'invalid_request' }));
+          return;
+        }
+        let operation = emergencyRequests.get(requestId);
+        if (!operation) {
+          operation = execution.emergencyFlattenOpenCopyLots(userId, agentSlug, {
+            actorType: 'BOT_ADMIN_OPERATOR',
+            actorId: 'BOT_ADMIN_TOKEN',
+            reason: `${reason};executor_request_id=${requestId}`,
+          });
+          emergencyRequests.set(requestId, operation);
+          if (emergencyRequests.size > 128) {
+            const oldest = emergencyRequests.keys().next().value as string | undefined;
+            if (oldest && oldest !== requestId) emergencyRequests.delete(oldest);
+          }
+        }
+        void operation.then((result) => {
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          res.end(JSON.stringify({ ...result, requestId }));
+        }).catch((error) => {
+          res.writeHead(500, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          res.end(JSON.stringify({
+            status: 'failed', requestId,
+            error: error instanceof Error ? error.message.slice(0, 500) : 'unknown',
+          }));
+        });
+      });
+      return;
+    }
     if (req.url === '/api/wake' && req.method === 'POST') {
       const supplied = Array.isArray(req.headers['x-bot-control-secret'])
         ? req.headers['x-bot-control-secret'][0]
