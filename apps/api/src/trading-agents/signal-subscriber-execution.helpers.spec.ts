@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import test from 'node:test';
 import {
   executorWakeAuthorized,
@@ -6445,7 +6444,7 @@ test('timed-out SUBMITTING fill promotion cannot be stolen or resubmitted', asyn
 
 test('watchdog and partial-protection source retain fail-closed ownership invariants', () => {
   const source = readFileSync(resolve(
-    dirname(fileURLToPath(import.meta.url)),
+    __dirname,
     'signal-subscriber-execution.service.ts',
   ), 'utf8');
   assert.match(source, /cancelVerifiedUnfilledPendingEntries[\s\S]*cancelAndSettleManagedEntry/);
