@@ -137,6 +137,8 @@ def classify_row(row):
         optimisation.append("BITFINEX_ACTUAL_PNL_MISSING")
     if row.get("required_post_exit_horizons_complete") is not True:
         optimisation.append("REQUIRED_POST_EXIT_HORIZON_INCOMPLETE")
+    if row.get("required_entry_horizons_complete") is not True:
+        optimisation.append("REQUIRED_ENTRY_HORIZON_INCOMPLETE")
 
     normalized = {cohort: sorted(set(values)) for cohort, values in reasons.items()}
     return {

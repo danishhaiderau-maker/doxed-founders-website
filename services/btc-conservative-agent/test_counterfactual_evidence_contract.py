@@ -16,6 +16,7 @@ def _load_evidence_functions():
     names = {
         "_counterfactual_policy_comparability_key",
         "_counterfactual_post_exit_horizons",
+        "_counterfactual_entry_horizons",
         "_counterfactual_bitfinex_evidence",
         "build_counterfactual_observability_fields",
         "_platform_relay_evidence_index",
@@ -141,7 +142,8 @@ def _complete_fixture():
     }
     exit_t = 100.0
     ticks = [
-        {"phase": "post_exit", "t": exit_t + seconds, "price": 63000 + seconds, "unreal_pct": 1.0}
+        {"phase": "post_exit", "t": exit_t + seconds, "price": 63000 + seconds,
+         "best_bid": 62999 + seconds, "best_ask": 63001 + seconds, "unreal_pct": 1.0}
         for seconds in (60, 300, 900, 1800, 3600, 7200)
     ]
     return (
@@ -160,6 +162,8 @@ def _complete_fixture():
             "replay_complete": True,
             "post_exit_complete": True,
             "exit_t_rel": exit_t,
+            "virtual_fill_t": 0.0,
+            "direction": "LONG",
             "ticks": ticks,
         },
         {},
@@ -172,6 +176,8 @@ def test_complete_exchange_evidence_qualifies_all_three_cohorts():
     assert fields["evidence_schema"] == "counterfactual_evidence_v1"
     assert fields["policy_comparability_key"].startswith("policy_comparability_v1:")
     assert fields["required_post_exit_horizons_complete"] is True
+    assert fields["required_entry_horizons_complete"] is True
+    assert fields["entry_horizons"]["required"]["120m"]["observed"] is True
     assert fields["bitfinex_evidence"]["linkage_complete"] is True
     assert all(fields["analysis_cohorts"]["eligible"].values())
     assert fields["analysis_eligible"] is True
@@ -188,6 +194,7 @@ def test_missing_exchange_evidence_and_horizons_fail_closed_without_invention():
     )
     assert fields["bitfinex_evidence"]["linkage_complete"] is False
     assert fields["required_post_exit_horizons_complete"] is False
+    assert fields["required_entry_horizons_complete"] is False
     assert fields["post_exit_horizons"]["required"]["120m"]["observed"] is False
     assert fields["analysis_eligible"] is False
     assert "BITFINEX_LINKAGE_MISSING" in fields["analysis_exclusion_reasons"]

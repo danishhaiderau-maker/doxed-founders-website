@@ -44,7 +44,7 @@ import pandas as pd
 import numpy as np
 import time
 import threading
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import os
 import json
@@ -97,7 +97,7 @@ SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
 REAL_EDGE_SUMMARY_FILE = "real_edge_summary.json"
 HORIZON_PROFITABILITY_REPORT_FILE = "horizon_profitability_report.json"
-HORIZON_PROFIT_HORIZONS = {"5m": 300, "10m": 600, "15m": 900, "30m": 1800, "60m": 3600, "120m": 7200}
+HORIZON_PROFIT_HORIZONS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "120m": 7200}
 TOP_LEAKAGE_REPORT_FILE = "top_leakage_report.json"
 LANE_RETIREMENT_REPORT_FILE = "lane_retirement_report.json"
 FEATURE_IMPORTANCE_REPORT_FILE = "feature_importance_report.json"
@@ -107,6 +107,7 @@ EDGE_VALIDATION_REPORT_FILE = "edge_validation_report.json"
 BENCHMARK_CONTRIBUTION_REPORT_FILE = "benchmark_contribution_report.json"
 LANE_OVERLAP_REPORT_FILE = "lane_overlap_report.json"
 FAST_CUT_SWEEP_REPORT_FILE = "fast_cut_sweep_report.json"
+QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE = "qualified_exit_policy_grid_report.json"
 LANE_DEFINITION_REPORT_FILE = "lane_definition_report.json"
 URGENT_CHASE_REPORT_FILE = "urgent_chase_report.json"
 LANE_CHASE_ISOLATION_REPORT_FILE = "lane_chase_isolation_report.json"
@@ -120,6 +121,7 @@ CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
+CORRELATED_PRICE_CLUSTER_REPORT_FILE = "correlated_price_cluster_report.json"
 ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
 PAUSED_SHADOW_REPORT_FILE = "paused_shadow_research_report.json"
@@ -595,6 +597,7 @@ ANALYZER_JSON_REPORT_FILES = (
     EDGE_PREDICTIVENESS_REPORT_FILE,
     EDGE_SCORE_DECILE_REPORT_FILE,
     FAST_CUT_SURVIVOR_REPORT_FILE,
+    QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE,
     FILL_QUALITY_REPORT_FILE,
     FIRST_15M_OUTCOME_REPORT_FILE,
     HORIZON_COUNTERFACTUAL_REPORT_FILE,
@@ -610,6 +613,7 @@ ANALYZER_JSON_REPORT_FILES = (
     TOP_LEAKAGE_REPORT_FILE,
     EXIT_LEAKAGE_BY_REASON_REPORT_FILE,
     EXIT_LADDER_SIMULATOR_REPORT_FILE,
+    CORRELATED_PRICE_CLUSTER_REPORT_FILE,
     LANE_RETIREMENT_REPORT_FILE,
     FEATURE_IMPORTANCE_REPORT_FILE,
     CHASE_PROFIT_REPORT_FILE,
@@ -678,6 +682,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
     ("Exit Leakage by Reason", EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "Which exit reasons destroy the most value"),
     ("Exit Ladder Simulator", EXIT_LADDER_SIMULATOR_REPORT_FILE, "Replay tick sim — alternate ladder rungs vs live"),
+    ("Correlated Price Clusters", CORRELATED_PRICE_CLUSTER_REPORT_FILE, "Research-only price clustering with qualified 120m replay"),
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),
     ("Bot↔Analyzer Sync", "bot_analyzer_sync.json", "SYSTEM_NOT_READY gate at startup"),
@@ -1873,21 +1878,39 @@ def _load_jsonl_replays(use_cache=True):
     if use_cache and _replay_cache is not None:
         return _replay_cache
     replays = {}
-    try:
-        for path in _signal_replay_paths():
-            if not os.path.isfile(path):
-                continue
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
+    malformed = 0
+    for path in _signal_replay_paths():
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                for line_number, line in enumerate(f, 1):
                     line = line.strip()
                     if not line:
                         continue
-                    row = json.loads(line)
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError) as exc:
+                        malformed += 1
+                        if malformed <= 5:
+                            print(
+                                f"⚠️ signal_replay malformed row skipped path={path} "
+                                f"line={line_number}: {exc} {PIPELINE_ENFORCEMENT_TAG}"
+                            )
+                        continue
+                    if not isinstance(row, dict):
+                        malformed += 1
+                        continue
                     tid = row.get("trade_id")
                     if tid:
                         replays[tid] = row
-    except Exception as e:
-        print(f"⚠️ signal_replay read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
+        except OSError as exc:
+            print(f"⚠️ signal_replay file read error path={path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    if malformed:
+        print(
+            f"⚠️ signal_replay ingestion skipped {malformed} malformed row(s); "
+            f"valid immutable rows were retained. {PIPELINE_ENFORCEMENT_TAG}"
+        )
     if use_cache:
         _replay_cache = replays
     return replays
@@ -2996,7 +3019,7 @@ def counterfactual_vs_actual_analysis(trades, shadow_df=None):
 
 def _simulate_ticks_fast_cut_ladder(
     ticks, entry, direction, leverage, margin_usdt, fast_cut_pct, ladder, thesis_exit_above,
-    fill_t=None, mfe_protect_pct=None,
+    fill_t=None, mfe_protect_pct=None, hard_stop_margin_pct=HARD_STOP_MARGIN_PCT,
 ):
     """Tick walk: fast cut + profit ladder only (no thesis flip — needs live scores).
     Replay ticks from bot v1.1.18+ use executable depth marks; older ticks used last trade."""
@@ -3027,6 +3050,9 @@ def _simulate_ticks_fast_cut_ladder(
             _, lock = _ladder_lock_for_peak_custom(peak, ladder)
             if lock is not None and unreal <= lock:
                 return _margin_pct_to_usd(lock, margin_usdt), "PROFIT_LOCK_LADDER", peak
+        hard_stop = -abs(float(hard_stop_margin_pct))
+        if unreal <= hard_stop:
+            return _margin_pct_to_usd(hard_stop, margin_usdt), "HARD_STOP", peak
         if unreal > thesis_exit_above:
             continue
         if peak >= ladder[0][0]:
@@ -3545,6 +3571,193 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
         print(mfe_slice[["mfe_protect_%", "sum_pnl_usd", "win_rate_pct", "thesis_exits"]].to_string(index=False))
 
     return float(best["sum_pnl_usd"])
+
+
+def qualified_exit_policy_grid_report():
+    """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
+
+    The physical hard stop is an invariant (13%), not an optimisation axis.
+    Actual exchange results remain separate from counterfactual simulations.
+    """
+    all_replays = _load_jsonl_replays()
+    cohort_assessments = {}
+    for cohort_name in (
+        SHOWCASE_STRATEGY,
+        BITFINEX_COPY_FIDELITY,
+        REAL_COPY_PARAMETER_OPTIMISATION,
+    ):
+        ids, reason_counts, cohort_evidence_rows = _analysis_eligible_trade_ids(cohort_name)
+        cohort_assessments[cohort_name] = {
+            "included_row_count": len(ids),
+            "evidence_row_count": cohort_evidence_rows,
+            "exclusion_reason_counts": reason_counts,
+        }
+    eligible_ids, exclusions, evidence_rows = _analysis_eligible_trade_ids(
+        REAL_COPY_PARAMETER_OPTIMISATION
+    )
+    evidence = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    qualified = []
+    local_exclusions = Counter()
+    def has_executable_horizons(replay, origin, phase=None):
+        if origin is None:
+            return False
+        side_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
+        ticks = [tick for tick in (replay.get("ticks") or []) if isinstance(tick, dict)]
+        for seconds in HORIZON_PROFIT_HORIZONS.values():
+            if not any(
+                (phase is None or str(tick.get("phase") or "") == phase)
+                and float(tick.get("t") or -1) >= float(origin) + seconds
+                and (_cluster_float(tick.get(side_key)) or 0) > 0
+                for tick in ticks
+            ):
+                return False
+        return True
+    for trade_id in sorted(eligible_ids):
+        replay = all_replays.get(trade_id)
+        row = evidence.get(trade_id) or {}
+        if not replay:
+            local_exclusions["REPLAY_ROW_MISSING"] += 1
+            continue
+        if replay.get("replay_complete") is not True:
+            local_exclusions["REPLAY_INCOMPLETE"] += 1
+            continue
+        if row.get("required_entry_horizons_complete") is not True:
+            local_exclusions["REQUIRED_ENTRY_HORIZON_INCOMPLETE"] += 1
+            continue
+        if row.get("required_post_exit_horizons_complete") is not True:
+            local_exclusions["REQUIRED_POST_EXIT_HORIZON_INCOMPLETE"] += 1
+            continue
+        if not has_executable_horizons(replay, replay.get("virtual_fill_t")):
+            local_exclusions["ENTRY_BBO_HORIZON_EVIDENCE_INCOMPLETE"] += 1
+            continue
+        if not has_executable_horizons(replay, replay.get("exit_t_rel"), "post_exit"):
+            local_exclusions["POST_EXIT_BBO_HORIZON_EVIDENCE_INCOMPLETE"] += 1
+            continue
+        costs = row.get("actual_costs") or (row.get("bitfinex_evidence") or {}).get("actual_costs") or {}
+        total_cost = costs.get("total_cost_usd")
+        if total_cost is None:
+            parts = [costs.get(key) for key in ("fees_usd", "funding_usd", "slippage_usd")]
+            if any(value is None for value in parts):
+                local_exclusions["COST_EVIDENCE_INCOMPLETE"] += 1
+                continue
+            total_cost = sum(float(value) for value in parts)
+        actual_pnl = row.get("actual_bitfinex_realized_pnl_usd")
+        if actual_pnl is None:
+            local_exclusions["BITFINEX_ACTUAL_PNL_MISSING"] += 1
+            continue
+        try:
+            total_cost = float(total_cost)
+            actual_pnl = float(actual_pnl)
+        except (TypeError, ValueError):
+            local_exclusions["NONFINITE_PNL_OR_COST"] += 1
+            continue
+        if not (np.isfinite(total_cost) and np.isfinite(actual_pnl)):
+            local_exclusions["NONFINITE_PNL_OR_COST"] += 1
+            continue
+        policy_key = row.get("policy_comparability_key")
+        if not policy_key:
+            local_exclusions["POLICY_COMPARABILITY_KEY_MISSING"] += 1
+            continue
+        qualified.append((trade_id, replay, total_cost, actual_pnl, str(policy_key)))
+
+    policy_group_counts = Counter(item[4] for item in qualified)
+    selected_policy_key = (
+        sorted(policy_group_counts, key=lambda key: (-policy_group_counts[key], key))[0]
+        if policy_group_counts else None
+    )
+    if selected_policy_key:
+        mismatches = sum(count for key, count in policy_group_counts.items() if key != selected_policy_key)
+        if mismatches:
+            local_exclusions["POLICY_COMPARABILITY_KEY_MISMATCH"] += mismatches
+        qualified = [item for item in qualified if item[4] == selected_policy_key]
+
+    qualified.sort(key=lambda item: str(item[1].get("start_ts") or ""))
+    split_at = max(1, int(len(qualified) * 0.7)) if qualified else 0
+    train = qualified[:split_at]
+    holdout = qualified[split_at:]
+    cells = []
+    for thesis_stop in (-6, -8, -10, -12):
+        for trigger, lock in ((4, 2), (5, 3), (8, 5), (12, 10)):
+            ladder = _build_ladder_with_first_rung(trigger, lock)
+            for mfe_floor in (0, 2, 4, 6, 8, 10):
+                cell = {
+                    "hard_stop_margin_pct": HARD_STOP_MARGIN_PCT,
+                    "thesis_fast_cut_pct": thesis_stop,
+                    "ladder_first_trigger_pct": trigger,
+                    "ladder_first_lock_pct": lock,
+                    "mfe_protect_pct": mfe_floor,
+                }
+                for label, cohort_rows in (("train", train), ("holdout", holdout)):
+                    outcomes = []
+                    simulation_missing = 0
+                    for _tid, replay, cost, _actual_pnl, _policy_key in cohort_rows:
+                        entry = _replay_entry_price(replay)
+                        simulated = _simulate_ticks_fast_cut_ladder(
+                            replay.get("ticks") or [], entry, replay.get("direction"),
+                            int(replay.get("leverage") or 100),
+                            float(replay.get("margin_usdt") or 20), thesis_stop, ladder,
+                            THESIS_EXIT_ABOVE_DEFAULT, fill_t=replay.get("virtual_fill_t"),
+                            mfe_protect_pct=None if mfe_floor == 0 else mfe_floor,
+                        )
+                        if simulated is not None:
+                            outcomes.append(float(simulated[0]) - cost)
+                        else:
+                            simulation_missing += 1
+                    mean = (sum(outcomes) / len(outcomes)) if outcomes else None
+                    ci95 = None
+                    if len(outcomes) >= 2:
+                        half = 1.96 * float(np.std(outcomes, ddof=1)) / np.sqrt(len(outcomes))
+                        ci95 = [round(mean - half, 4), round(mean + half, 4)]
+                    cell[label] = {
+                        "n": len(outcomes),
+                        "simulation_missing": simulation_missing,
+                        "counterfactual_net_pnl_usd": round(sum(outcomes), 4),
+                        "counterfactual_avg_net_pnl_usd": round(mean, 4) if mean is not None else None,
+                        "confidence_interval_95_avg_net_pnl_usd": ci95,
+                    }
+                cells.append(cell)
+
+    ranked = sorted(
+        (cell for cell in cells if cell["train"]["n"] > 0),
+        key=lambda cell: cell["train"]["counterfactual_net_pnl_usd"],
+        reverse=True,
+    )
+    selected = ranked[0] if ranked else None
+    conclusions_allowed = bool(
+        selected and selected["train"]["n"] >= 30 and selected["holdout"]["n"] >= 20
+        and selected["holdout"]["confidence_interval_95_avg_net_pnl_usd"] is not None
+        and selected["holdout"]["confidence_interval_95_avg_net_pnl_usd"][0] > 0
+    )
+    report = {
+        "schema": "qualified_exit_policy_grid_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "generation_revision": os.getenv("GIT_SHA") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown",
+        "cohort": REAL_COPY_PARAMETER_OPTIMISATION,
+        "cohort_schema": "analysis_cohorts_v1",
+        "cohorts": cohort_assessments,
+        "evidence_rows": evidence_rows,
+        "eligible_ids": len(eligible_ids),
+        "qualified_costed_replays": len(qualified),
+        "selected_policy_comparability_key": selected_policy_key,
+        "policy_group_counts": dict(policy_group_counts),
+        "cohort_exclusion_reason_counts": exclusions,
+        "grid_exclusion_reason_counts": dict(local_exclusions),
+        "physical_hard_stop_invariant_pct": HARD_STOP_MARGIN_PCT,
+        "chronological_split": {"train_n": len(train), "holdout_n": len(holdout), "train_pct": 70},
+        "actual_bitfinex": {
+            "n": len(qualified),
+            "realized_pnl_usd": round(sum(item[3] for item in qualified), 4),
+        },
+        "counterfactual_grid": cells,
+        "selected_on_train": selected,
+        "conclusions_allowed": conclusions_allowed,
+        "verdict": "QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
+    }
+    with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    return report
 
 
 def _load_signal_snapshots():
@@ -6412,6 +6625,7 @@ def run_v55_analysis(df, decisions, blocked, ai_log):
     _safe_replay_sweep("thesis stop wide sweep", stop_thesis_wide_sweep_all_replays, df if not df.empty else None)
     _safe_replay_sweep("stop x ladder 2D grid sweep", stop_ladder_2d_grid_sweep_all_replays, df if not df.empty else None)
     _safe_replay_sweep("stop x ladder x MFE 3D sweep", stop_ladder_mfe_3d_sweep_all_replays, df if not df.empty else None)
+    _safe_replay_sweep("qualified exit policy grid", qualified_exit_policy_grid_report)
     entry_gate_replay_sweeps(blocked)
     entry_gate_mtf_chop_sweet_spot_sweep(blocked)
     pullback_replay_fill_sweep(blocked)
@@ -14791,6 +15005,301 @@ def exit_ladder_simulator_report(trades=None, session=None):
     return payload
 
 
+CORRELATED_PRICE_DISTANCE_GRID_USD = (0.01, 5, 10, 15, 20, 25, 50, 75, 100, 150)
+CORRELATED_PRICE_CLUSTER_SIZE_GRID = (2, 3, 4, 5, 8, 10)
+CORRELATED_PRICE_TIME_WINDOW_GRID_SEC = (30, 60, 120, 300, 600, 900, 1800)
+
+
+def _cluster_float(value):
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cluster_ts(value):
+    try:
+        if isinstance(value, (int, float, np.integer, np.floating)):
+            # Audit `created_ts` is Unix seconds; pandas otherwise assumes ns.
+            return float(value)
+        return pd.Timestamp(value).timestamp()
+    except Exception:
+        return None
+
+
+def _cluster_stats(rows, distance, max_size, window_sec):
+    """Chronological admission using same-direction, nearby admitted intents."""
+    recent = []
+    decisions = []
+    for row in rows:
+        recent = [prior for prior in recent if row["ts"] - prior["ts"] <= window_sec]
+        related = [prior for prior in recent if prior["direction"] == row["direction"] and abs(prior["price"] - row["price"]) <= distance]
+        related_keys = {prior["cluster_key"] for prior in related}
+        cluster_key = min(related_keys) if related_keys else row["trade_id"]
+        if len(related_keys) > 1:
+            # A bridge joins transitive components; normalize active identity.
+            for prior in recent:
+                if prior["cluster_key"] in related_keys:
+                    prior["cluster_key"] = cluster_key
+        admitted_in_cluster = sum(
+            prior["allowed"] and prior["cluster_key"] == cluster_key for prior in recent
+        )
+        allow = admitted_in_cluster < max_size
+        decision = {**row, "allowed": allow, "cluster_key": cluster_key}
+        decisions.append(decision)
+        recent.append(decision)
+    cluster_losses = defaultdict(list)
+    for decision in decisions:
+        cluster_losses[decision["cluster_key"]].append(decision["pnl"] < 0)
+    allowed = [row for row in decisions if row["allowed"]]
+    blocked = [row for row in decisions if not row["allowed"]]
+    pnls = [row["pnl"] for row in allowed]
+    cumulative = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for pnl in pnls:
+        cumulative += pnl
+        peak = max(peak, cumulative)
+        max_drawdown = max(max_drawdown, peak - cumulative)
+    tail_n = max(1, int(np.ceil(len(pnls) * 0.05))) if pnls else 0
+    cvar = float(np.mean(sorted(pnls)[:tail_n])) if tail_n else None
+    mean = float(np.mean(pnls)) if pnls else None
+    ci = None
+    if len(pnls) >= 2:
+        half = 1.96 * float(np.std(pnls, ddof=1)) / np.sqrt(len(pnls))
+        ci = [round(mean - half, 6), round(mean + half, 6)]
+    segments = defaultdict(lambda: {"n": 0, "pnl_usd": 0.0})
+    for row in allowed:
+        key = f"{row['regime']}|{row['direction']}|{row['volatility']}"
+        segments[key]["n"] += 1
+        segments[key]["pnl_usd"] += row["pnl"]
+    return {
+        "opportunities": len(rows), "allowed": len(allowed), "blocked": len(blocked),
+        "fills": sum(bool(row["filled"]) for row in allowed),
+        "touches": sum(bool(row["touched"]) for row in allowed),
+        "winners_blocked": sum(row["pnl"] > 0 for row in blocked),
+        "losses_avoided": sum(row["pnl"] < 0 for row in blocked),
+        "joint_loss_rate_pct": round(100 * sum(sum(flags) >= 2 for flags in cluster_losses.values()) / len(cluster_losses), 3) if cluster_losses else None,
+        "cluster_net_pnl_usd": round(sum(pnls), 6),
+        "max_drawdown_usd": round(max_drawdown, 6),
+        "cvar_95_usd": round(cvar, 6) if cvar is not None else None,
+        "ev_per_qualified_opportunity_usd": round(sum(pnls) / len(rows), 6) if rows else None,
+        "ev_per_admitted_usd": round(mean, 6) if mean is not None else None,
+        "sample_size": len(rows), "confidence_interval_95_ev_admitted": ci,
+        "by_regime_direction_volatility": [
+            {"segment": key, "n": cell["n"], "pnl_usd": round(cell["pnl_usd"], 6)}
+            for key, cell in sorted(segments.items())
+        ],
+    }
+
+
+def _qualified_cluster_row(trade_id, replay, meta, evidence=None):
+    evidence = evidence if isinstance(evidence, dict) else {}
+    if not replay:
+        return None, "REPLAY_MISSING"
+    if replay.get("replay_complete") is not True:
+        return None, "REPLAY_INCOMPLETE"
+    if replay.get("post_exit_complete") is not True or float(replay.get("post_exit_sec") or 0) < 7200:
+        return None, "REQUIRED_120M_HORIZON_INCOMPLETE"
+    costs = evidence.get("actual_costs") or (evidence.get("bitfinex_evidence") or {}).get("actual_costs") or {}
+    cost_values = {
+        "trading_fees_usd": replay.get("trading_fees_usd", costs.get("fees_usd")),
+        "funding_fees_usd": replay.get("funding_fees_usd", costs.get("funding_usd")),
+        "slippage_usd": replay.get("slippage_usd", costs.get("slippage_usd")),
+    }
+    if any(value is None for value in cost_values.values()):
+        return None, "EXECUTION_COST_EVIDENCE_MISSING"
+    price = _cluster_float(meta.get("limit_price") or meta.get("signal_price") or replay.get("start_price"))
+    ts = _cluster_ts(meta.get("ts") or meta.get("created_ts") or replay.get("start_ts"))
+    pnl = _cluster_float(
+        replay.get("net_pnl_usd") if replay.get("net_pnl_usd") is not None
+        else replay.get("outcome_net_pnl_usd") if replay.get("outcome_net_pnl_usd") is not None
+        else evidence.get("actual_bitfinex_realized_pnl_usd")
+    )
+    direction = str(meta.get("direction") or replay.get("direction") or "").upper()
+    if price is None or ts is None or pnl is None or direction not in {"LONG", "SHORT"}:
+        return None, "CLUSTER_OUTCOME_IDENTITY_INCOMPLETE"
+    return {
+        "trade_id": trade_id, "price": price, "ts": ts, "pnl": pnl,
+        "direction": direction,
+        "filled": bool(replay.get("filled") or replay.get("virtual_entry") is not None),
+        "touched": bool(replay.get("touched") or replay.get("virtual_entry") is not None),
+        "regime": str(meta.get("regime") or replay.get("regime") or "UNKNOWN"),
+        "volatility": str(meta.get("volatility_bucket") or meta.get("volatility") or replay.get("volatility_bucket") or "UNKNOWN"),
+    }, None
+
+
+def correlated_price_cluster_report(session=None):
+    """Research-only cluster contract; never changes or recommends live policy."""
+    session = session or load_research_session()
+    audits = _load_jsonl_rows("duplicate_intent_audit.jsonl")
+    snapshots = _load_jsonl_rows(SIGNAL_SNAPSHOT_FILE)
+    rejected = _load_jsonl_rows(APPROVED_BUT_REJECTED_FILE)
+    blocked = robust_read_csv(BLOCKED_FILE, "Correlated price blocked candidates")
+    candidate_meta = {}
+    approved_snapshots = [
+        row for row in snapshots
+        if isinstance(row, dict) and (row.get("ai") or {}).get("approved") is True
+    ]
+    distinct_audits = [
+        row for row in audits
+        if isinstance(row, dict) and row.get("decision") == "ALLOW_DISTINCT"
+    ]
+    for row in distinct_audits + approved_snapshots + rejected:
+        if isinstance(row, dict) and row.get("trade_id"):
+            candidate_meta.setdefault(str(row["trade_id"]), {}).update(row)
+    candidate_ids = {
+        str(row.get("trade_id")) for row in distinct_audits + approved_snapshots + rejected
+        if isinstance(row, dict) and row.get("trade_id")
+    }
+    if blocked is not None and not blocked.empty and "trade_id" in blocked.columns:
+        candidate_ids.update(blocked["trade_id"].dropna().astype(str))
+        for _, row in blocked.iterrows():
+            trade_id = str(row.get("trade_id") or "")
+            if trade_id:
+                candidate_meta.setdefault(trade_id, {}).update(row.dropna().to_dict())
+    replays = _load_jsonl_replays(use_cache=False)
+    showcase_eligible_ids, showcase_exclusions, showcase_evidence_rows = _analysis_eligible_trade_ids(
+        SHOWCASE_STRATEGY
+    )
+    counterfactual_evidence = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    linked = {}
+    for trade_id in candidate_ids:
+        replay = next((replays.get(key) for key in _replay_keys_for_trade_id(trade_id) if replays.get(key)), None)
+        if replay:
+            linked[trade_id] = replay
+    qualified = {}
+    exclusions = defaultdict(int)
+    for trade_id in sorted(candidate_ids):
+        if trade_id not in showcase_eligible_ids:
+            exclusions["SHOWCASE_COHORT_INELIGIBLE"] += 1
+            continue
+        replay = linked.get(trade_id)
+        row, reason = _qualified_cluster_row(
+            trade_id, replay, candidate_meta.get(trade_id, {}), counterfactual_evidence.get(trade_id)
+        )
+        if reason:
+            exclusions[reason] += 1
+        else:
+            qualified[trade_id] = row
+    ordered = sorted(qualified.values(), key=lambda row: (row["ts"], row["trade_id"]))
+    train_n = int(len(ordered) * 0.7)
+    validation_n = len(ordered) - train_n
+    train_rows, validation_rows = ordered[:train_n], ordered[train_n:]
+    grid_results = []
+    for distance in CORRELATED_PRICE_DISTANCE_GRID_USD:
+        for size in CORRELATED_PRICE_CLUSTER_SIZE_GRID:
+            for window in CORRELATED_PRICE_TIME_WINDOW_GRID_SEC:
+                train_stats = _cluster_stats(train_rows, distance, size, window)
+                validation_stats = _cluster_stats(validation_rows, distance, size, window)
+                grid_results.append({
+                    "distance_usd": distance, "cluster_size": size, "time_window_sec": window,
+                    "all_opportunities": len(candidate_ids), "qualified_opportunities": len(qualified),
+                    "train": train_stats, "validation": validation_stats,
+                    "conclusion_allowed": False,
+                })
+    ranked_train = sorted(
+        grid_results,
+        key=lambda cell: (
+            cell["train"].get("ev_per_qualified_opportunity_usd") is not None,
+            cell["train"].get("ev_per_qualified_opportunity_usd") or float("-inf"),
+            -cell["distance_usd"], -cell["cluster_size"], -cell["time_window_sec"],
+        ),
+        reverse=True,
+    )
+    selected_on_train = ranked_train[0] if ranked_train and train_rows else None
+    selected_validation = selected_on_train.get("validation") if selected_on_train else None
+    generation_revision = (
+        os.getenv("SOURCE_GIT_REV") or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION") or os.getenv("GIT_SHA")
+    )
+    revision_qualified = bool(generation_revision and str(generation_revision).upper() != "UNKNOWN")
+    denominator_complete = len(qualified) == len(candidate_ids) and not exclusions
+    for cell in grid_results:
+        for split_name in ("train", "validation"):
+            split = cell[split_name]
+            split["ev_per_all_opportunity_usd"] = (
+                split.get("ev_per_qualified_opportunity_usd") if denominator_complete else None
+            )
+    holdout_confirmed = bool(
+        selected_validation
+        and selected_validation.get("ev_per_qualified_opportunity_usd") is not None
+        and selected_validation["ev_per_qualified_opportunity_usd"] > 0
+    )
+    research_conclusions_allowed = bool(
+        train_n >= 30 and validation_n >= 15 and revision_qualified
+        and denominator_complete and holdout_confirmed
+    )
+    if selected_on_train is not None:
+        selected_on_train["conclusion_allowed"] = research_conclusions_allowed
+    payload = {
+        "schema": "correlated_price_cluster_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "generation_revision": generation_revision or "UNKNOWN",
+        "revision_qualified": revision_qualified,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "session_scope": _shadow_scope_label(session),
+        "research_only": True,
+        "legacy_price_dedupe_status": "UNQUALIFIED",
+        "cohort": "SHOWCASE_STRATEGY_RESEARCH_ONLY",
+        "sources": ["duplicate_intent_audit.jsonl", SIGNAL_SNAPSHOT_FILE, APPROVED_BUT_REJECTED_FILE, BLOCKED_FILE],
+        "all_opportunity_denominator": len(candidate_ids),
+        "opportunity_source_counts": {
+            "distinct_duplicate_audit": len({str(r.get("trade_id")) for r in distinct_audits if r.get("trade_id")}),
+            "approved_snapshot": len({str(r.get("trade_id")) for r in approved_snapshots if r.get("trade_id")}),
+            "approved_but_rejected": len({str(r.get("trade_id")) for r in rejected if isinstance(r, dict) and r.get("trade_id")}),
+            "blocked_csv": int(blocked["trade_id"].dropna().astype(str).nunique()) if blocked is not None and not blocked.empty and "trade_id" in blocked.columns else 0,
+        },
+        "replays_on_disk": len(replays),
+        "replays_linked_to_candidates": len(linked),
+        "qualified_120m_cost_complete": len(qualified),
+        "exclusion_reason_counts": dict(sorted(exclusions.items())),
+        "showcase_cohort": {
+            "schema": "analysis_cohorts_v1", "eligible_ids": len(showcase_eligible_ids),
+            "evidence_rows": showcase_evidence_rows,
+            "exclusion_reason_counts": showcase_exclusions,
+        },
+        "denominator_complete": denominator_complete,
+        "predeclared_grids": {
+            "distance_usd": list(CORRELATED_PRICE_DISTANCE_GRID_USD),
+            "cluster_size": list(CORRELATED_PRICE_CLUSTER_SIZE_GRID),
+            "time_window_sec": list(CORRELATED_PRICE_TIME_WINDOW_GRID_SEC),
+        },
+        "chronological_split": {
+            "method": "first_70_pct_train_last_30_pct_validation",
+            "train_n": train_n, "validation_n": validation_n,
+            "validation_complete": train_n > 0 and validation_n > 0,
+        },
+        "grid_results": grid_results,
+        "selected_on_train": selected_on_train,
+        "selected_validation": selected_validation,
+        "holdout_confirmed": holdout_confirmed,
+        "conclusion_allowed": research_conclusions_allowed,
+        "live_policy_change_allowed": False,
+        "data_status": "QUALIFIED_RESEARCH" if research_conclusions_allowed else "INSUFFICIENT_QUALIFIED_EVIDENCE",
+        "diagnostic": {
+            "required_horizon_sec": 7200,
+            "canonical_data_root": os.path.realpath(os.getenv("ANALYZER_DATA_ROOT") or os.getcwd()),
+            "analyzer_working_directory": os.path.abspath(os.getcwd()),
+            "signal_replay_resolved_path": os.path.abspath(SIGNAL_REPLAY_FILE),
+            "signal_replay_exists_in_working_directory": os.path.isfile(SIGNAL_REPLAY_FILE),
+            "why_existing_signal_replay_yielded_zero": "First verify analyzer working-directory identity. A source-tree analyzer run cannot see the Fly mirror file. When the file is present, rows may still be scan-/rev- shadow IDs, incomplete buffers, or lack canonical executed-ID overlap, full 120m post-exit ticks, and explicit costs.",
+            "producer_gap_fields": {
+                "REPLAY_MISSING": ["canonical trade_id replay linkage"],
+                "REPLAY_INCOMPLETE": ["replay_complete"],
+                "REQUIRED_120M_HORIZON_INCOMPLETE": ["post_exit_complete", "post_exit_sec>=7200"],
+                "EXECUTION_COST_EVIDENCE_MISSING": ["trading_fees_usd", "funding_fees_usd", "slippage_usd"],
+                "CLUSTER_OUTCOME_IDENTITY_INCOMPLETE": ["direction", "limit/signal/start price", "timestamp", "net_pnl_usd"],
+            },
+        },
+    }
+    with open(CORRELATED_PRICE_CLUSTER_REPORT_FILE, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
+
+
 def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None):
     """Chase count buckets split by lane, AI bucket, and spread bucket."""
     if session is None:
@@ -16500,6 +17009,7 @@ def pre_test_analytics_reports(
     exit_combinations_report(trades=trades, session=session)
     exit_leakage_by_reason_report(trades=trades, session=session)
     exit_ladder_simulator_report(trades=trades, session=session)
+    correlated_price_cluster_report(session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
     type_b_predictor_report(trades=trades, session=session)
     type_b_research_v2_report()

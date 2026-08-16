@@ -2581,9 +2581,109 @@ export function resolveEffectiveStopLossMarginPct(
   return Math.max(requested, policyHardStop);
 }
 
-/** Two copy/showcase limits within this many USD are "the same book entry"
- *  (showcase book dedupes duplicate lane spawns at the EXACT same price). */
+/** Price equality is supporting evidence only; canonical source identity owns dedupe. */
 const DUPLICATE_LIMIT_EPSILON_USD = 0.01;
+const CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_MS = 5_000;
+const CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS = 3;
+
+type CorrelatedExposureCandidate = {
+  participantId: string;
+  cycleId: string;
+  tradeId: string;
+  direction: 'LONG' | 'SHORT';
+  limitPrice: number | null;
+  createdAtMs: number | null;
+  qty: number | null;
+  marginUsd: number | null;
+  sourceCallId?: string | null;
+  lifecycleGeneration?: string | null;
+};
+
+export function isCanonicalDuplicateEntry(
+  candidate: Pick<CorrelatedExposureCandidate, 'tradeId' | 'cycleId' | 'sourceCallId' | 'createdAtMs'>,
+  existing: Pick<CorrelatedExposureCandidate, 'tradeId' | 'cycleId' | 'sourceCallId' | 'createdAtMs'>,
+): boolean {
+  if (candidate.cycleId === existing.cycleId) return true;
+  if (candidate.tradeId && candidate.tradeId === existing.tradeId) return true;
+  return Boolean(
+    candidate.sourceCallId && candidate.sourceCallId === existing.sourceCallId
+      && candidate.createdAtMs != null
+      && existing.createdAtMs != null
+      && Math.abs(candidate.createdAtMs - existing.createdAtMs)
+        <= CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_MS,
+  );
+}
+
+function canonicalIdentityTimestampMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1_000;
+  }
+  const parsed = Date.parse(String(value ?? ''));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function canonicalEntryIdentity(
+  tradeId: string,
+  cycleId: string,
+  envelopeJson: unknown,
+  persistedCreatedAt?: Date | null,
+) {
+  const envelope = envelopeJson as { context?: Record<string, unknown> } | null;
+  const context = envelope?.context ?? {};
+  const sourceCallId = String(context.shared_ai_call_id ?? context.source_trade_id ?? '') || null;
+  return {
+    tradeId,
+    cycleId,
+    sourceCallId,
+    createdAtMs: canonicalIdentityTimestampMs(
+      context.signal_created_ts ?? context.showcase_event_at,
+    ) ?? persistedCreatedAt?.getTime() ?? null,
+  };
+}
+
+export function assessCorrelatedExposureCluster(input: {
+  candidate: CorrelatedExposureCandidate;
+  active: CorrelatedExposureCandidate[];
+  riskStateAvailable: boolean;
+  ceiling?: number;
+}) {
+  const ceiling = input.ceiling ?? CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS;
+  if (!input.riskStateAvailable) {
+    return {
+      allowed: false, reason: 'RISK_STATE_UNAVAILABLE', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd: null, nearest: null,
+    };
+  }
+  const sameDirection = input.active.filter(
+    (row) => row.direction === input.candidate.direction,
+  );
+  const nearest = sameDirection
+    .filter((row) => row.participantId !== input.candidate.participantId)
+    .map((row) => ({
+      ...row,
+      priceDistanceUsd:
+        row.limitPrice != null && input.candidate.limitPrice != null
+          ? Math.abs(row.limitPrice - input.candidate.limitPrice)
+          : null,
+      lifecycleDistanceSec:
+        row.createdAtMs != null && input.candidate.createdAtMs != null
+          ? Math.abs(row.createdAtMs - input.candidate.createdAtMs) / 1_000
+          : null,
+    }))
+    .sort((a, b) => (a.priceDistanceUsd ?? Number.POSITIVE_INFINITY) - (b.priceDistanceUsd ?? Number.POSITIVE_INFINITY))[0] ?? null;
+  return {
+    allowed: sameDirection.length <= ceiling,
+    reason: sameDirection.length <= ceiling ? null : 'SAME_DIRECTION_CEILING',
+    sameDirectionCount: sameDirection.length,
+    aggregateQty: sameDirection.every((row) => row.qty != null)
+      ? sameDirection.reduce((sum, row) => sum + Number(row.qty), 0)
+      : null,
+    aggregateMarginUsd: sameDirection.every((row) => row.marginUsd != null)
+      ? sameDirection.reduce((sum, row) => sum + Number(row.marginUsd), 0)
+      : null,
+    nearest,
+  };
+}
 
 /** Price delta below this (USD) is considered converged for MIRROR_DIFF. */
 const MIRROR_DIFF_PRICE_EPSILON_USD = 0.01;
@@ -7925,19 +8025,18 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
-   * Phase 1 book-state dedupe (MIRROR_CONVERGENCE_ENABLED). The showcase bot
-   * spawns the same signal into multiple research lanes (cont-/vc603-) but
-   * its own paper book holds only ONE order per limit price (duplicates are
-   * expired as DUPLICATE_LIMIT_PRICE). The copy must mirror the BOOK, not the
-   * spawns: if any other PENDING_ENTRY participant already owns a real
-   * resting order at (epsilon-)the same limit price — either its current
-   * copy-side limit or its showcase anchor — the new entry is a duplicate.
-   * Returns the mirror-owner participant, or null when the price is unique.
+   * Phase 1 canonical replay dedupe (MIRROR_CONVERGENCE_ENABLED). The same
+   * canonical trade is a replay; otherwise suppression requires the same
+   * shared source call, lifecycle creation within five seconds, and an equal
+   * limit within one cent. Equal price alone never suppresses an independent
+   * lifecycle. The copy mirrors canonical source identity, not price buckets.
    */
   private async findDuplicateRestingLimit(
     userId: string,
     agentId: string,
     cycleId: string,
+    tradeId: string,
+    envelopeJson: unknown,
     limitPrice: number,
     botState: BotApiState | null,
   ): Promise<{ participantId: string; cycleId: string; tradeId: string | null; price: number } | null> {
@@ -7948,12 +8047,25 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         cycle: { agentId },
         NOT: { cycleId },
       },
-      include: { cycle: { select: { tradeId: true } } },
+      include: { cycle: { select: { tradeId: true, intentEnvelope: true, createdAt: true } } },
     });
     for (const p of pendings) {
       const meta = await this.loadExecutionMeta(p.id);
       // Only a participant with a REAL resting order can be the mirror owner.
       if (!meta.bitfinexOrderId) continue;
+      const incomingIdentity = canonicalEntryIdentity(tradeId, cycleId, envelopeJson);
+      const existingIdentity = canonicalEntryIdentity(
+        p.cycle?.tradeId ?? '', p.cycleId, p.cycle?.intentEnvelope, p.cycle?.createdAt,
+      );
+      if (!isCanonicalDuplicateEntry(incomingIdentity, existingIdentity)) continue;
+      if (incomingIdentity.tradeId === existingIdentity.tradeId) {
+        return {
+          participantId: p.id,
+          cycleId: p.cycleId,
+          tradeId: p.cycle?.tradeId ?? null,
+          price: meta.limitPrice ?? limitPrice,
+        };
+      }
       const anchor = p.cycle?.tradeId
         ? this.resolveBotLimitPrice(botState, p.cycle.tradeId)
         : null;
@@ -8178,6 +8290,9 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // if order placement fails (otherwise the cycle gets stuck on an INTENT claim with no
     // order, blocking all future retries for this user/cycle).
     let claimParticipantId: string | null = null;
+    let entrySubmitStarted = false;
+    let exchangeAckedOrderId: number | null = null;
+    let entryClientOrderId: number | undefined;
 
     try {
     // C5 multi-replica atomic claim: create the participant row with INTENT status BEFORE
@@ -8185,16 +8300,89 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // cycle/user concurrently, its create hits the (cycleId, userId) unique constraint
     // (P2002) and it bails out — preventing a DUPLICATE order on Bitfinex. The claim is
     // released (deleted) if order placement fails, so a future tick can retry.
+    let cluster: ReturnType<typeof assessCorrelatedExposureCluster>;
     try {
-      const claimed = await this.prisma.signalCycleParticipant.create({
-        data: {
-          cycleId,
-          userId: instance.userId,
-          venue,
-          status: SignalCycleStatus.INTENT,
-        },
+      const claimedAndAssessed = await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe(
+          'SELECT pg_advisory_xact_lock(hashtext($1))',
+          `copy-cluster:${instance.userId}:${agentId}`,
+        );
+        const claimed = await tx.signalCycleParticipant.create({
+          data: {
+            cycleId,
+            userId: instance.userId,
+            venue,
+            status: SignalCycleStatus.INTENT,
+          },
+        });
+        const assessment = await this.correlatedExposureSnapshot({
+          userId: instance.userId, agentId, participantId: claimed.id,
+          cycleId, tradeId, direction: intent.direction, limitPrice, qty, marginUsd,
+          createdAtMs: Date.now(),
+        }, tx);
+        if (!assessment.allowed) {
+          const evidence = {
+            schema: 'correlated_exposure_cluster_v1',
+            event: 'CORRELATED_EXPOSURE_CLUSTER',
+            reason: assessment.reason,
+            candidate_trade_id: tradeId,
+            candidate_cycle_id: cycleId,
+            candidate_participant_id: claimed.id,
+            direction: intent.direction,
+            candidate_limit_price: limitPrice,
+            candidate_qty_btc: qty,
+            candidate_margin_usd: marginUsd,
+            same_direction_open_pending_intent_count: assessment.sameDirectionCount,
+            ceiling: CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS,
+            aggregate_qty_btc: assessment.aggregateQty,
+            aggregate_margin_usd: assessment.aggregateMarginUsd,
+            nearest_trade_id: assessment.nearest?.tradeId ?? null,
+            nearest_cycle_id: assessment.nearest?.cycleId ?? null,
+            nearest_participant_id: assessment.nearest?.participantId ?? null,
+            nearest_price_distance_usd: assessment.nearest?.priceDistanceUsd ?? null,
+            nearest_lifecycle_distance_sec: assessment.nearest?.lifecycleDistanceSec ?? null,
+            risk_state_available: assessment.reason !== 'RISK_STATE_UNAVAILABLE',
+          };
+          if (assessment.reason === 'RISK_STATE_UNAVAILABLE') {
+            await tx.signalCycleEvent.create({
+              data: {
+                cycleId,
+                participantId: null,
+                eventType: 'CORRELATED_EXPOSURE_CLUSTER',
+                payload: evidence as Prisma.InputJsonValue,
+              },
+            });
+            await tx.signalCycleParticipant.delete({ where: { id: claimed.id } });
+            return { claimed: null, assessment, evidence };
+          }
+          await tx.signalCycleEvent.create({
+            data: {
+              cycleId,
+              participantId: claimed.id,
+              eventType: 'CORRELATED_EXPOSURE_CLUSTER',
+              payload: evidence as Prisma.InputJsonValue,
+            },
+          });
+          await tx.signalCycleParticipant.update({
+            where: { id: claimed.id },
+            data: { status: SignalCycleStatus.EXPIRED },
+          });
+          // Capacity is subscriber-specific. Do not terminalize the shared
+          // canonical cycle and suppress other subscribers' independent caps.
+          await tx.signalCycleEvent.create({
+            data: {
+              cycleId,
+              participantId: claimed.id,
+              eventType: 'EXPIRED',
+              payload: { ...evidence, event: 'CORRELATED_EXPOSURE_CLUSTER' } as Prisma.InputJsonValue,
+            },
+          });
+          return { claimed, assessment, evidence };
+        }
+        return { claimed, assessment, evidence: null };
       });
-      claimParticipantId = claimed.id;
+      claimParticipantId = claimedAndAssessed.claimed?.id ?? null;
+      cluster = claimedAndAssessed.assessment;
     } catch (err) {
       if (err instanceof PrismaClientKnownRequestError && err.code === 'P2002') {
         this.logger.log(
@@ -8209,11 +8397,19 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       // place a second: the earlier participant is the mirror owner of this
       // book entry. Expire this claim ledger-side WITHOUT touching the
       // exchange (mirrors the showcase book's own DUPLICATE_LIMIT_PRICE).
-      if (mirrorConvergenceEnabled() && !fastPreflight?.exchangeBookProvenEmpty) {
+      if (!cluster.allowed) {
+        this.logger.warn(
+          `[CORRELATED-CLUSTER] held ${instance.userId} cycle=${cycleId} trade=${tradeId} reason=${cluster.reason} sameDirection=${cluster.sameDirectionCount ?? 'UNKNOWN'} ceiling=${CORRELATED_EXPOSURE_MAX_SAME_DIRECTION_LEGS}`,
+        );
+        return false;
+      }
+      if (mirrorConvergenceEnabled()) {
         const dup = await this.findDuplicateRestingLimit(
           instance.userId,
           agentId,
           cycleId,
+          tradeId,
+          envelopeJson,
           limitPrice,
           botStateForEntry,
         );
@@ -8313,8 +8509,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const clientOrderId = claimParticipantId
       ? computeClientOrderId(cycleId, claimParticipantId, tradeId)
       : undefined;
+    entryClientOrderId = clientOrderId;
 
     if (timing) timing.bitfinexRequestStartedAtMs = Date.now();
+    entrySubmitStarted = true;
     const orderId = await this.activeTrading.submitLimitOrder(creds, {
       direction: intent.direction,
       qty,
@@ -8322,6 +8520,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         leverage,
       ...(clientOrderId != null ? { clientOrderId } : {}),
     });
+    exchangeAckedOrderId = orderId;
     const exchangeAckAtMs = Date.now();
     if (timing) timing.exchangeAckAtMs = exchangeAckAtMs;
 
@@ -8426,12 +8625,35 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     } catch (err) {
       // C5: order placement (or pre-order checks) failed — release the atomic claim so a
       // future tick can retry this cycle instead of being permanently blocked.
-      if (claimParticipantId) {
+      if (claimParticipantId && !entrySubmitStarted) {
         await this.prisma.signalCycleParticipant
           .delete({ where: { id: claimParticipantId } })
           .catch(() => {
             /* claim may already be gone (e.g. concurrently transitioned) */
           });
+      }
+      if (claimParticipantId && entrySubmitStarted) {
+        await this.prisma.signalCycleEvent.create({
+          data: {
+            cycleId,
+            participantId: claimParticipantId,
+            eventType: 'ENTRY_SUBMISSION_UNKNOWN',
+            payload: {
+              schema: 'entry_submission_fence_v1',
+              phase: exchangeAckedOrderId != null ? 'ACKED_PERSISTENCE_UNKNOWN' : 'SUBMIT_RESULT_UNKNOWN',
+              trade_id: tradeId,
+              participant_id: claimParticipantId,
+              client_order_id: entryClientOrderId ?? null,
+              bitfinex_order_id: exchangeAckedOrderId,
+              direction: intent.direction,
+              qty,
+              limit_price: limitPrice,
+              error: err instanceof Error ? err.message : String(err),
+            } as Prisma.InputJsonValue,
+          },
+        }).catch(() => {
+          /* The retained INTENT claim remains the fail-closed recovery fence. */
+        });
       }
       const msg = err instanceof Error ? err.message : String(err);
       const lowMargin =
@@ -12835,6 +13057,94 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       };
     }
     return null;
+  }
+
+  private async correlatedExposureSnapshot(input: {
+    userId: string;
+    agentId: string;
+    participantId: string;
+    cycleId: string;
+    tradeId: string;
+    direction: 'LONG' | 'SHORT';
+    limitPrice: number;
+    qty: number;
+    marginUsd: number;
+    createdAtMs: number;
+  }, client: Pick<Prisma.TransactionClient, 'signalCycleParticipant'> = this.prisma) {
+    let rows: Array<{
+      id: string;
+      cycleId: string;
+      cycle: { tradeId: string; createdAt: Date; intentEnvelope: unknown };
+    }>;
+    try {
+      rows = await client.signalCycleParticipant.findMany({
+        where: {
+          userId: input.userId,
+          status: { in: [
+            SignalCycleStatus.INTENT,
+            SignalCycleStatus.PENDING_ENTRY,
+            SignalCycleStatus.OPEN,
+          ] },
+          cycle: { agentId: input.agentId },
+        },
+        select: {
+          id: true,
+          cycleId: true,
+          cycle: { select: { tradeId: true, createdAt: true, intentEnvelope: true } },
+        },
+      });
+    } catch (err) {
+      this.logger.error(
+        `[CORRELATED-CLUSTER] risk snapshot unavailable user=${input.userId} cycle=${input.cycleId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return assessCorrelatedExposureCluster({
+        candidate: input,
+        active: [],
+        riskStateAvailable: false,
+      });
+    }
+
+    const active: CorrelatedExposureCandidate[] = [];
+    for (const row of rows) {
+      if (!row.cycle?.tradeId || !row.cycle?.intentEnvelope) {
+        return assessCorrelatedExposureCluster({ candidate: input, active, riskStateAvailable: false });
+      }
+      const envelope = row.cycle.intentEnvelope as Partial<SignalIntentEnvelope> & {
+        entry?: SignalIntentEnvelope['entry'] & { exact_qty_btc?: number; exact_limit_price?: number };
+      };
+      const direction = envelope.direction;
+      if (direction !== 'LONG' && direction !== 'SHORT') {
+        return assessCorrelatedExposureCluster({ candidate: input, active, riskStateAvailable: false });
+      }
+      const limit = row.id === input.participantId
+        ? input.limitPrice
+        : Number(envelope.entry?.exact_limit_price ?? 0) || null;
+      const qty = row.id === input.participantId
+        ? input.qty
+        : Number(envelope.entry?.exact_qty_btc ?? 0) || null;
+      const marginUsd = row.id === input.participantId
+        ? input.marginUsd
+        : Number(envelope.risk?.max_margin_usd ?? 0) || null;
+      active.push({
+        participantId: row.id,
+        cycleId: row.cycleId,
+        tradeId: row.cycle.tradeId,
+        direction,
+        limitPrice: limit,
+        createdAtMs: row.cycle.createdAt?.getTime?.() ?? null,
+        qty,
+        marginUsd,
+      });
+    }
+    if (!active.some((row) => row.participantId === input.participantId)) {
+      return assessCorrelatedExposureCluster({ candidate: input, active, riskStateAvailable: false });
+    }
+    const persistedCandidate = active.find((row) => row.participantId === input.participantId)!;
+    return assessCorrelatedExposureCluster({
+      candidate: { ...input, createdAtMs: persistedCandidate.createdAtMs },
+      active,
+      riskStateAvailable: true,
+    });
   }
 
   private async setFillPromotionPhase(

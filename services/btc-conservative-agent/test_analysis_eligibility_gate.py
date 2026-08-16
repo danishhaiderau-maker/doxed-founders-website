@@ -30,6 +30,7 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
                 "participant_id": "participant-1",
                 "actual_bitfinex_realized_pnl_usd": 1.25,
                 "required_post_exit_horizons_complete": True,
+                "required_entry_horizons_complete": True,
                 "bitfinex_evidence": {
                     "linkage_complete": True,
                     "quantity_evidence_complete": True,

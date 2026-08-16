@@ -3,7 +3,7 @@
   "combo_version": "2026-08-16",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "848da6dfc0bd",
+  "signal_hash": "d31e0de0a88d",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-16T03:35:55.362Z"
+  "updated_at": "2026-08-16T05:23:21.896Z"
 }

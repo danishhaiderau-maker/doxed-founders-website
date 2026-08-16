@@ -181,7 +181,8 @@ def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:
     assert '"replay_complete": replay_complete' in replay_src
     assert '"post_exit_complete": post_exit_complete' in replay_src
     assert '"terminal_provenance"' in replay_src
-    assert "and post_exit_ticks" in replay_src
+    assert "and required_post_exit_tick is not None" in replay_src
+    assert '"best_bid" if' in replay_src and 'else "best_ask"' in replay_src
 
     evidence_func = _function("build_counterfactual_observability_fields")
     evidence_src = ast.get_source_segment(BOT_SOURCE, evidence_func)

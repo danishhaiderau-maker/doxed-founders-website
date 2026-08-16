@@ -23,6 +23,8 @@ import {
 import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
   SignalSubscriberExecutionService,
+  isCanonicalDuplicateEntry,
+  assessCorrelatedExposureCluster,
   finiteDecimalLikeNumber,
   canonicalPendingIntentCycles,
   signedCanonicalPendingIntentCycles,
@@ -251,6 +253,141 @@ test('exact showcase quantity allows only the deterministic anchor margin overhe
   );
 });
 
+test('canonical entry identity suppresses an exact replay but not a same-price distinct lifecycle', () => {
+  assert.equal(isCanonicalDuplicateEntry(
+    { tradeId: 'cont-1', cycleId: 'cycle-new', sourceCallId: 'scan-1', createdAtMs: 20_000 },
+    { tradeId: 'cont-1', cycleId: 'cycle-old', sourceCallId: 'scan-1', createdAtMs: 1_000 },
+  ), true);
+  assert.equal(isCanonicalDuplicateEntry(
+    { tradeId: 'cont-2', cycleId: 'cycle-2', sourceCallId: 'scan-2', createdAtMs: 2_000 },
+    { tradeId: 'cont-1', cycleId: 'cycle-1', sourceCallId: 'scan-1', createdAtMs: 1_000 },
+  ), false, 'price is deliberately absent: equal price alone cannot establish identity');
+});
+
+test('shared source call dedupe uses the Showcase five-second lifecycle window', () => {
+  assert.equal(isCanonicalDuplicateEntry(
+    { tradeId: 'cont-new', cycleId: 'cycle-new', sourceCallId: 'scan-shared', createdAtMs: 5_999 },
+    { tradeId: 'cont-old', cycleId: 'cycle-old', sourceCallId: 'scan-shared', createdAtMs: 1_000 },
+  ), true);
+  assert.equal(isCanonicalDuplicateEntry(
+    { tradeId: 'cont-late', cycleId: 'cycle-late', sourceCallId: 'scan-shared', createdAtMs: 6_001 },
+    { tradeId: 'cont-old', cycleId: 'cycle-old', sourceCallId: 'scan-shared', createdAtMs: 1_000 },
+  ), false);
+  assert.equal(isCanonicalDuplicateEntry(
+    { tradeId: 'cont-unknown', cycleId: 'cycle-unknown', sourceCallId: 'scan-shared', createdAtMs: null },
+    { tradeId: 'cont-old', cycleId: 'cycle-old', sourceCallId: 'scan-shared', createdAtMs: 1_000 },
+  ), false, 'missing time fails open to the independent concentration-risk gate');
+});
+
+test('runtime resting dedupe suppresses a same-trade reprice but allows equal-price distinct identity', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  const existingEnvelope = { context: { shared_ai_call_id: 'scan-old', showcase_event_at: new Date(1_000).toISOString() } };
+  service.prisma = { signalCycleParticipant: { findMany: async () => [{
+    id: 'participant-old', cycleId: 'cycle-old',
+    cycle: { tradeId: 'cont-same', intentEnvelope: existingEnvelope, createdAt: new Date(1_000) },
+  }] } };
+  service.loadExecutionMeta = async () => ({ bitfinexOrderId: 7001, limitPrice: 64_000 });
+  service.resolveBotLimitPrice = () => 64_000;
+  const repricedReplay = await service.findDuplicateRestingLimit(
+    'user', 'agent', 'cycle-new', 'cont-same',
+    { context: { shared_ai_call_id: 'scan-new', showcase_event_at: new Date(20_000).toISOString() } },
+    64_125, null,
+  );
+  assert.equal(repricedReplay?.participantId, 'participant-old');
+  const distinctEqualPrice = await service.findDuplicateRestingLimit(
+    'user', 'agent', 'cycle-new', 'cont-distinct',
+    { context: { shared_ai_call_id: 'scan-distinct', showcase_event_at: new Date(1_000).toISOString() } },
+    64_000, null,
+  );
+  assert.equal(distinctEqualPrice, null);
+});
+
+test('correlated exposure ceiling allows the third same-direction leg and blocks the fourth', () => {
+  const leg = (n: number, direction: 'LONG' | 'SHORT' = 'SHORT') => ({
+    participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction,
+    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.01, marginUsd: 20,
+  });
+  const third = assessCorrelatedExposureCluster({
+    candidate: leg(3), active: [leg(1), leg(2), leg(3)], riskStateAvailable: true,
+  });
+  assert.equal(third.allowed, true);
+  assert.equal(third.sameDirectionCount, 3);
+  const fourth = assessCorrelatedExposureCluster({
+    candidate: leg(4), active: [leg(1), leg(2), leg(3), leg(4)], riskStateAvailable: true,
+  });
+  assert.equal(fourth.allowed, false);
+  assert.equal(fourth.reason, 'SAME_DIRECTION_CEILING');
+  assert.equal(fourth.aggregateQty, 0.04);
+  assert.equal(fourth.aggregateMarginUsd, 80);
+});
+
+test('correlated exposure ceiling ignores opposite direction and fails closed without risk state', () => {
+  const candidate = {
+    participantId: 'p4', cycleId: 'c4', tradeId: 'cont-4', direction: 'LONG' as const,
+    limitPrice: 64_000, createdAtMs: 4_000, qty: 0.01, marginUsd: 20,
+  };
+  const shorts = [1, 2, 3].map((n) => ({
+    participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction: 'SHORT' as const,
+    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.01, marginUsd: 20,
+  }));
+  assert.equal(assessCorrelatedExposureCluster({
+    candidate, active: [...shorts, candidate], riskStateAvailable: true,
+  }).allowed, true);
+  const unknown = assessCorrelatedExposureCluster({ candidate, active: [], riskStateAvailable: false });
+  assert.equal(unknown.allowed, false);
+  assert.equal(unknown.reason, 'RISK_STATE_UNAVAILABLE');
+});
+
+test('entry claim and correlated ceiling snapshot are serialized by one database transaction', () => {
+  const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const transactionAt = source.indexOf('const claimedAndAssessed = await this.prisma.$transaction');
+  const lockAt = source.indexOf('pg_advisory_xact_lock', transactionAt);
+  const claimAt = source.indexOf('const claimed = await tx.signalCycleParticipant.create', lockAt);
+  const assessAt = source.indexOf('this.correlatedExposureSnapshot', claimAt);
+  const returnAt = source.indexOf('claimParticipantId = claimedAndAssessed', assessAt);
+  assert.ok(transactionAt >= 0 && lockAt > transactionAt);
+  assert.ok(claimAt > lockAt && assessAt > claimAt && returnAt > assessAt);
+  assert.match(source.slice(transactionAt, returnAt), /copy-cluster:\$\{instance\.userId\}:\$\{agentId\}/);
+  const clusterEnd = source.indexOf('claimParticipantId = claimedAndAssessed', returnAt);
+  const clusterTxn = source.slice(transactionAt, clusterEnd);
+  assert.match(clusterTxn, /participantId: null,[\s\S]*signalCycleParticipant\.delete/);
+  assert.match(clusterTxn, /eventType: 'CORRELATED_EXPOSURE_CLUSTER'[\s\S]*status: SignalCycleStatus\.EXPIRED[\s\S]*eventType: 'EXPIRED'/);
+  assert.doesNotMatch(source, /mirrorConvergenceEnabled\(\) && !fastPreflight\?\.exchangeBookProvenEmpty/);
+});
+
+test('entry submission fence retains ownership after request start and records UNKNOWN evidence', () => {
+  const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const requestAt = source.indexOf('entrySubmitStarted = true;');
+  const submitAt = source.indexOf('submitLimitOrder', requestAt);
+  const ackAt = source.indexOf('exchangeAckedOrderId = orderId;', submitAt);
+  const catchAt = source.indexOf('if (claimParticipantId && !entrySubmitStarted)', ackAt);
+  const unknownAt = source.indexOf("eventType: 'ENTRY_SUBMISSION_UNKNOWN'", catchAt);
+  assert.ok(requestAt >= 0 && submitAt > requestAt && ackAt > submitAt && catchAt > ackAt && unknownAt > catchAt);
+  assert.match(source.slice(catchAt, unknownAt), /claimParticipantId && entrySubmitStarted/);
+});
+
+test('four concurrent serialized same-direction claims cannot exceed three allowed legs', async () => {
+  const active: Array<{
+    participantId: string; cycleId: string; tradeId: string; direction: 'SHORT';
+    limitPrice: number; createdAtMs: number; qty: number; marginUsd: number;
+  }> = [];
+  let advisoryLane = Promise.resolve();
+  const claim = (n: number) => {
+    const run = advisoryLane.then(() => {
+      const candidate = {
+        participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction: 'SHORT' as const,
+        limitPrice: 64_000 + n, createdAtMs: n * 1_000, qty: 0.01, marginUsd: 20,
+      };
+      active.push(candidate);
+      return assessCorrelatedExposureCluster({ candidate, active: [...active], riskStateAvailable: true });
+    });
+    advisoryLane = run.then(() => undefined);
+    return run;
+  };
+  const results = await Promise.all([claim(1), claim(2), claim(3), claim(4)]);
+  assert.deepEqual(results.map((result) => result.allowed), [true, true, true, false]);
+});
+
 test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   const now = Date.now();
@@ -304,10 +441,21 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     },
   };
   service.prisma = {
+    $transaction: async (run: (tx: any) => Promise<unknown>) => run({
+      $executeRawUnsafe: async () => [{ pg_advisory_xact_lock: null }],
+      signalCycleParticipant: {
+        create: async () => ({ id: 'participant-exact-qty' }),
+        findMany: async () => [{
+          id: 'participant-exact-qty', cycleId: 'cycle-exact-qty',
+          cycle: { tradeId: 'cont-e0ac7001', createdAt, intentEnvelope: envelope },
+        }],
+      },
+    }),
     signalCycleParticipant: {
       create: async () => ({ id: 'participant-exact-qty' }),
       delete: async () => ({}),
       findUnique: async () => null,
+      findMany: async () => [],
     },
     tradingAgentInstance: {
       findUnique: async () => ({ status: TradingAgentInstanceStatus.ACTIVE, dashboardState }),

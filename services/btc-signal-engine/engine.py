@@ -3904,7 +3904,14 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
         return False
     unreal_pct = unrealized_margin_pct(pos, price)
-    append_replay_tick(pos.get("trade_id"), price, unreal_pct)
+    with state_lock:
+        replay_book = copy.deepcopy(state.get("order_book") or {})
+    replay_bid = _buf_float(replay_book.get("best_bid") or replay_book.get("bid"), 0)
+    replay_ask = _buf_float(replay_book.get("best_ask") or replay_book.get("ask"), 0)
+    append_replay_tick(
+        pos.get("trade_id"), price, unreal_pct,
+        best_bid=replay_bid or None, best_ask=replay_ask or None, observed_ts=now,
+    )
     pos["max_pnl_pct"] = max(pos.get("max_pnl_pct", 0.0), unreal_pct)
     if pos.get("max_drawdown", 0) is None or unreal_pct < pos.get("max_drawdown", 0):
         pos["max_drawdown"] = min(pos.get("max_drawdown", 0.0), unreal_pct)
@@ -6844,7 +6851,7 @@ TRADE_LIFECYCLE_FILE = "trade_lifecycle.jsonl"
 RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 POST_EXIT_REPLAY_SEC = int(os.getenv("POST_EXIT_REPLAY_SEC", str(2 * 3600)))  # 120m post-close ticks for horizon recovery
-POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "8000"))
+POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "10000"))
 # Sidecar JSONL that lets post-exit replay buffers survive bot restarts.
 # Each line is one tick event for one trade_id; the loader on startup rebuilds
 # any buffer whose post_exit_deadline_ts has not yet passed.
@@ -12462,11 +12469,12 @@ def capture_near_miss_on_approve(signal, ai, edge_score, ctx):
 
 
 HORIZON_OUTCOME_SECS = {
+    "1m": 60,
     "5m": 300,
     "15m": 900,
     "30m": 1800,
-    "1h": 3600,
-    "4h": 14400,
+    "60m": 3600,
+    "120m": 7200,
 }
 
 
@@ -12482,7 +12490,6 @@ def compute_horizon_outcomes_from_replay(buf: dict) -> dict:
     mfe = 0.0
     mae = 0.0
     horizons = {}
-    last_unreal = 0.0
     for tick in ticks:
         t = _buf_float(tick.get("t"), 0)
         p = _buf_float(tick.get("price"), 0)
@@ -12493,17 +12500,16 @@ def compute_horizon_outcomes_from_replay(buf: dict) -> dict:
             unreal = ((p - start_price) / start_price) * dir_factor * leverage * 100
         else:
             unreal = _buf_float(unreal, 0)
-        last_unreal = unreal
         mfe = max(mfe, unreal)
         mae = min(mae, unreal)
         for label, sec in HORIZON_OUTCOME_SECS.items():
             key = f"outcome_{label}_pct"
             if key not in horizons and t >= sec:
                 horizons[key] = round(unreal, 4)
+    # A horizon without a tick at or beyond its boundary is UNKNOWN. Never
+    # substitute the last observed value, which fabricates future evidence.
     for label in HORIZON_OUTCOME_SECS:
-        key = f"outcome_{label}_pct"
-        if key not in horizons and ticks:
-            horizons[key] = round(last_unreal, 4)
+        horizons.setdefault(f"outcome_{label}_pct", None)
     return {"mfe_pct": round(mfe, 4), "mae_pct": round(mae, 4), **horizons}
 
 
@@ -21704,7 +21710,10 @@ def state_monitor_loop():
                         or buf.get("research_lane") in SHADOW_COLLECTING_LANES
                         or buf.get("research_lane") in COMBO_EXECUTION_LANES
                     )
-                    if len(buf.get("ticks", [])) >= 2000:
+                    if (
+                        not buf.get("post_exit")
+                        and len(buf.get("ticks", [])) >= REPLAY_TICK_MAX
+                    ):
                         expired_ids.append(tid)
                     elif lane == "reversal_study" and age_from_start > REVERSAL_STUDY_TTL_SEC:
                         expired_ids.append(tid)
@@ -35765,10 +35774,18 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
         }
 
 
-def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
+def append_replay_tick(
+    trade_id: str,
+    price: float,
+    unreal_pct: float = None,
+    *,
+    best_bid: float = None,
+    best_ask: float = None,
+    observed_ts: float = None,
+):
     if not trade_id or price is None or price <= 0:
         return
-    now = time.time()
+    now = _buf_float(observed_ts, 0) or time.time()
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf or buf.get("closed"):
@@ -35794,6 +35811,9 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
             "price": float(price),
             "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
             "phase": phase,
+            "best_bid": float(best_bid) if best_bid is not None else None,
+            "best_ask": float(best_ask) if best_ask is not None else None,
+            "observed_ts": now,
         })
         buf["last_update"] = now
         buf["last_tick_ts"] = now
@@ -35812,6 +35832,8 @@ def append_replay_tick(trade_id: str, price: float, unreal_pct: float = None):
                     "phase": "post_exit",
                     "seq": int(buf["seq"]) if is_post_exit else None,
                     "t_rel": t_rel,
+                    "best_bid": float(best_bid) if best_bid is not None else None,
+                    "best_ask": float(best_ask) if best_ask is not None else None,
                 }) + "\n")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
@@ -35900,6 +35922,28 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
         return
     now = time.time()
     with replay_lock:
+        missing_buffer = not replay_buffers.get(trade_id)
+    if missing_buffer:
+        # A long-lived executed replay may have exhausted the pre-exit ring.
+        # Recreate a conservative shell so future post-exit ticks are still
+        # captured; absent pre-exit horizons remain UNKNOWN.
+        entry = float(pos.get("entry") or exit_price)
+        start_replay_buffer(
+            trade_id,
+            entry,
+            lane="executed",
+            direction=pos.get("dir") or "LONG",
+            leverage=pos.get("leverage"),
+            margin_usdt=pos.get("margin_usdt"),
+            virtual_entry=entry,
+            policy_version=pos.get("policy_version"),
+            exit_config=copy.deepcopy(pos.get("exit_config") or get_exit_config_snapshot()),
+        )
+        with replay_lock:
+            rebuilt = replay_buffers.get(trade_id)
+            if rebuilt and _buf_float(pos.get("entry_ts"), 0) > 0:
+                rebuilt["start_ts"] = _buf_float(pos.get("entry_ts"), now)
+    with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
             return
@@ -35947,6 +35991,13 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
                     "exit_reason": buf.get("exit_reason"),
                     "start_ts": buf.get("start_ts"),
                     "exit_t_rel": buf.get("exit_t_rel"),
+                    "virtual_fill_t": buf.get("virtual_fill_t"),
+                    "margin_usdt": buf.get("margin_usdt"),
+                    "policy_version": buf.get("policy_version"),
+                    "exit_config": copy.deepcopy(buf.get("exit_config") or {}),
+                    "bitfinex_evidence": copy.deepcopy(buf.get("bitfinex_evidence") or {}),
+                    "fee_model": buf.get("fee_model"),
+                    "execution_profile": buf.get("execution_profile"),
                 }) + "\n")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] header persist failed tid={trade_id}: {e}")
@@ -35960,7 +36011,10 @@ def service_post_exit_replays():
     """Append mark-price ticks to post-exit replay buffers (no open position required)."""
     with state_lock:
         price = float(state.get("price") or 0)
-    if price <= 0:
+        book = copy.deepcopy(state.get("order_book") or {})
+    best_bid = _buf_float(book.get("best_bid") or book.get("bid"), 0)
+    best_ask = _buf_float(book.get("best_ask") or book.get("ask"), 0)
+    if price <= 0 and best_bid <= 0 and best_ask <= 0:
         return
     with replay_lock:
         tids = [
@@ -35975,8 +36029,20 @@ def service_post_exit_replays():
             entry = _buf_float(buf.get("entry_price") or buf.get("virtual_entry"), 0)
             if entry <= 0:
                 continue
-            unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, price)
-        append_replay_tick(tid, price, unreal)
+            direction = str(buf.get("direction") or "LONG").upper()
+            executable_mark = best_bid if direction == "LONG" else best_ask
+            if executable_mark <= 0:
+                # Last trade is not executable BBO evidence. Leave this sample
+                # UNKNOWN until the direction-correct quote is present.
+                continue
+            unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, executable_mark)
+        append_replay_tick(
+            tid,
+            executable_mark,
+            unreal,
+            best_bid=best_bid or None,
+            best_ask=best_ask or None,
+        )
 
 
 def _load_post_exit_replays():
@@ -35987,14 +36053,23 @@ def _load_post_exit_replays():
     in-memory entries are preserved (live in-progress buffers always take
     precedence over the on-disk snapshot).
     """
-    if not os.path.exists(POST_EXIT_REPLAY_FILE):
+    active_path = Path(POST_EXIT_REPLAY_FILE)
+    rotated_paths = sorted(
+        (path for path in active_path.parent.glob(f"{active_path.name}.*")
+         if path.name[len(active_path.name) + 1:].isdigit()),
+        key=lambda path: int(path.name[len(active_path.name) + 1:]),
+        reverse=True,
+    )
+    replay_paths = rotated_paths + ([active_path] if active_path.exists() else [])
+    if not replay_paths:
         return
     now = time.time()
     restored = 0
     headers: Dict[str, dict] = {}
     ticks_by_tid: Dict[str, list] = {}
     try:
-        with open(POST_EXIT_REPLAY_FILE, "r", encoding="utf-8") as f:
+      for replay_path in replay_paths:
+        with open(replay_path, "r", encoding="utf-8-sig") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -36035,8 +36110,14 @@ def _load_post_exit_replays():
                 "lane": "executed",
                 "direction": header.get("direction") or "LONG",
                 "leverage": _buf_int(header.get("leverage"), _replay_leverage_default()),
-                "margin_usdt": FIXED_MARGIN_USDT,
+                "margin_usdt": _buf_float(header.get("margin_usdt"), FIXED_MARGIN_USDT),
                 "virtual_entry": virtual_entry,
+                "virtual_fill_t": header.get("virtual_fill_t"),
+                "policy_version": header.get("policy_version"),
+                "exit_config": copy.deepcopy(header.get("exit_config") or {}),
+                "bitfinex_evidence": copy.deepcopy(header.get("bitfinex_evidence") or {}),
+                "fee_model": header.get("fee_model"),
+                "execution_profile": header.get("execution_profile"),
                 "post_exit": True,
                 "post_exit_started_ts": _buf_float(header.get("post_exit_started_ts"), now),
                 "post_exit_deadline_ts": deadline,
@@ -36059,6 +36140,9 @@ def _load_post_exit_replays():
                     "price": float(row.get("price") or 0),
                     "unreal_pct": row.get("unreal_pct"),
                     "phase": "post_exit",
+                    "best_bid": row.get("best_bid"),
+                    "best_ask": row.get("best_ask"),
+                    "observed_ts": ts,
                 })
             if buf["ticks"]:
                 buf["last_update"] = _buf_float(tick_rows[-1].get("ts"), now)
@@ -36092,11 +36176,22 @@ def dump_replay(trade_id: str):
             lane = str(buf.get("lane") or "")
             is_executed = lane == "executed"
             post_exit_deadline = _buf_float(buf.get("post_exit_deadline_ts"), 0)
+            exit_t_rel = _buf_float(buf.get("exit_t_rel"), -1)
+            executable_key = (
+                "best_bid" if str(buf.get("direction") or "LONG").upper() == "LONG"
+                else "best_ask"
+            )
+            required_post_exit_tick = next((
+                tick for tick in post_exit_ticks
+                if _buf_float(tick.get("t"), -1) >= exit_t_rel + POST_EXIT_REPLAY_SEC
+                and _buf_float(tick.get(executable_key), 0) > 0
+            ), None)
             post_exit_complete = bool(
                 buf.get("post_exit")
                 and post_exit_deadline > 0
                 and now >= post_exit_deadline
-                and post_exit_ticks
+                and exit_t_rel >= 0
+                and required_post_exit_tick is not None
             )
             replay_complete = bool(
                 buf.get("closed")
@@ -36115,7 +36210,10 @@ def dump_replay(trade_id: str):
                 "block_t_rel": buf.get("block_t_rel"),
                 "post_block_tick_count": len(post_ticks),
                 "post_exit_tick_count": len(post_exit_ticks),
-                "post_exit_sec": POST_EXIT_REPLAY_SEC if buf.get("post_exit") or post_exit_ticks else 0,
+                "post_exit_sec": round(max(
+                    (_buf_float(t.get("t"), exit_t_rel) - exit_t_rel for t in post_exit_ticks),
+                    default=0,
+                ), 3),
                 "post_exit_complete": post_exit_complete,
                 "replay_complete": replay_complete,
                 "replay_completion_reason": (
@@ -36385,6 +36483,8 @@ _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC = {
     "30m": 1800,
     "60m": 3600,
     "120m": 7200,
+    "1h": 3600,
+    "4h": 14400,
 }
 
 
@@ -36439,6 +36539,7 @@ def _counterfactual_post_exit_horizons(replay: dict) -> dict:
         key=lambda row: _buf_float(row.get("t"), 0),
     )
     values = {}
+    executable_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
     for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
         target_t = exit_t + seconds
         observed = next(
@@ -36446,6 +36547,7 @@ def _counterfactual_post_exit_horizons(replay: dict) -> dict:
                 row for row in ticks
                 if str(row.get("phase") or "") == "post_exit"
                 and _buf_float(row.get("t"), -1) >= target_t
+                and _buf_float(row.get(executable_key), 0) > 0
             ),
             None,
         )
@@ -36453,8 +36555,11 @@ def _counterfactual_post_exit_horizons(replay: dict) -> dict:
             "required_sec": seconds,
             "observed": observed is not None,
             "tick_t_rel": observed.get("t") if observed else None,
-            "price": observed.get("price") if observed else None,
+            "price": observed.get(executable_key) if observed else None,
             "unreal_pct": observed.get("unreal_pct") if observed else None,
+            "best_bid": observed.get("best_bid") if observed else None,
+            "best_ask": observed.get("best_ask") if observed else None,
+            "observed_ts": observed.get("observed_ts") if observed else None,
         }
     complete = bool(
         replay.get("post_exit_complete") is True
@@ -36465,6 +36570,47 @@ def _counterfactual_post_exit_horizons(replay: dict) -> dict:
         "schema": "post_exit_horizons_v1",
         "required": values,
         "complete": complete,
+    }
+
+
+def _counterfactual_entry_horizons(replay: dict) -> dict:
+    """Materialize exact entry-relative horizons; absent future ticks stay UNKNOWN."""
+    fill_t = replay.get("virtual_fill_t")
+    has_fill_origin = fill_t is not None and _buf_float(fill_t, -1) >= 0
+    origin_t = _buf_float(fill_t, 0) if has_fill_origin else None
+    ticks = sorted(
+        (row for row in (replay.get("ticks") or []) if isinstance(row, dict)),
+        key=lambda row: _buf_float(row.get("t"), 0),
+    )
+    values = {}
+    executable_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
+    for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
+        target_t = origin_t + seconds if origin_t is not None else None
+        observed = (
+            next(
+                (row for row in ticks
+                 if _buf_float(row.get("t"), -1) >= target_t
+                 and _buf_float(row.get(executable_key), 0) > 0),
+                None,
+            )
+            if target_t is not None
+            else None
+        )
+        values[label] = {
+            "required_sec": seconds,
+            "observed": observed is not None,
+            "tick_t_rel": observed.get("t") if observed else None,
+            "price": observed.get(executable_key) if observed else None,
+            "unreal_pct": observed.get("unreal_pct") if observed else None,
+            "best_bid": observed.get("best_bid") if observed else None,
+            "best_ask": observed.get("best_ask") if observed else None,
+            "observed_ts": observed.get("observed_ts") if observed else None,
+        }
+    return {
+        "schema": "entry_horizons_v1",
+        "origin_t_rel": origin_t,
+        "required": values,
+        "complete": bool(has_fill_origin and all(row["observed"] for row in values.values())),
     }
 
 
@@ -36648,6 +36794,7 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
     policy_key = _counterfactual_policy_comparability_key(policy_snapshot, buf, snapshot)
     bitfinex_evidence = _counterfactual_bitfinex_evidence(buf, snapshot, replay, outcome)
     post_exit_horizons = _counterfactual_post_exit_horizons(replay)
+    entry_horizons = _counterfactual_entry_horizons(replay)
     exclusion_reasons = []
     if missing_policy:
         exclusion_reasons.append("POLICY_SNAPSHOT_INCOMPLETE")
@@ -36694,6 +36841,8 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         "platform_evidence_revision": snapshot.get("platform_evidence_revision"),
         "platform_relay_evidence": copy.deepcopy(snapshot.get("platform_relay_evidence")),
         "post_exit_horizons": post_exit_horizons,
+        "entry_horizons": entry_horizons,
+        "required_entry_horizons_complete": entry_horizons["complete"],
         "required_post_exit_horizons_complete": post_exit_horizons["complete"],
         "replay_complete": replay_complete,
         "replay_tick_count": len(replay.get("ticks") or []),

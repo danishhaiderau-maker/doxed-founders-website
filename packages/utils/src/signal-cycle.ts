@@ -169,6 +169,8 @@ export type SignalCycleEventType =
   // separate EXPIRED event for the status transition).
   | 'MIRROR_DIFF'
   | 'DUPLICATE_LIMIT_SKIPPED'
+  | 'CORRELATED_EXPOSURE_CLUSTER'
+  | 'ENTRY_SUBMISSION_UNKNOWN'
   // Phase 3 � catch-up market entry when showcase is OPEN but copy missed fill.
   | 'MIRROR_CATCHUP_ENTRY'
   // Action-match audit: catch-up could not place an entry (structural skip).
