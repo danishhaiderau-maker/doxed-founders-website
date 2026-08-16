@@ -17147,12 +17147,15 @@ def write_report_manifest(payload=None):
         # cannot regenerate that report. Keep them for local history, but do
         # not qualify them as members of this immutable generation.
         if os.path.isfile(fname) and os.path.getmtime(fname) >= current_run_cutoff:
+            os.makedirs(REPORTS_DIR, exist_ok=True)
+            mirrored_report = os.path.join(REPORTS_DIR, os.path.basename(fname))
+            shutil.copy2(fname, mirrored_report)
             reports.append({
                 "title": title,
                 "file": fname,
                 "category": _manifest_category(title),
                 "description": desc,
-                "size_bytes": os.path.getsize(fname),
+                "size_bytes": os.path.getsize(mirrored_report),
                 "modified_at": datetime.fromtimestamp(
                     os.path.getmtime(fname), tz=timezone.utc
                 ).isoformat(),
