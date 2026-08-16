@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Quarantine legacy research epochs without deletion
+Fix late partial-fill emergency reconciliation
 
 ## Last Activity
 
