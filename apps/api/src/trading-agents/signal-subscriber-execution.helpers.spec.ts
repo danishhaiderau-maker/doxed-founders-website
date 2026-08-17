@@ -8652,6 +8652,71 @@ test('normal close evidence emits exact fills and uniquely attributable ledger P
   assert.equal(evidence.copy_exit_slippage_usd, 0.1);
 });
 
+test('Scenario C policy close persists authenticated PnL, complete costs, profiles, and final reconciliation', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.exitingLots = new Set();
+  service.showcaseVanishedMisses = new Map();
+  service.showcasePositionAbsentMisses = new Map();
+  service.showcasePositionAbsentSince = new Map();
+  service.showcaseFlatOpenSince = new Map();
+  service.stopManagerCircuitOpen = new Map();
+  service.positionRuntime = new Map();
+  service.logger = { log: () => undefined, warn: () => undefined };
+  service.hasParticipantExited = async () => false;
+  service.acquireTerminalCloseClaim = async (input: any) => ({
+    ownerToken: 'owner', requestId: 'request', phase: 'CLAIMED',
+    authority: input.authority, recovered: false,
+  });
+  service.cancelLinkedPendingLimits = async () => undefined;
+  service.terminalCloseClaimStillValid = async () => true;
+  service.closeParticipantPositionToLedgerTarget = async () => ({
+    ok: true, currentAmount: -0.01, targetAmount: 0, closeQty: 0.01,
+    finalAccountFlatten: true, closeExchangeOrderId: 202,
+    closeSubmitStartedAtMs: 20_000, closeExchangeAckAtMs: 20_100,
+    closeConfirmedAtMs: 20_200, confirmedExchangeAmount: 0,
+    remainingManagedOrderIds: [], accountWideActiveOrderIds: [],
+    accountWideManagedOrderIds: [], orphanOrderIds: [], foreignOrderIds: [],
+  });
+  service.resolveNormalCloseExchangeEvidence = async () => ({
+    actual_bitfinex_realized_pnl_usd: 1.23,
+    trading_fee_usd: 0,
+    funding_fee_usd: 0.01,
+    spread_cost_usd: 0.02,
+    slippage_usd: 0.03,
+    fill_ids: ['entry-fill', 'exit-fill'],
+  });
+  let exitPayload: Record<string, any> | undefined;
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => {
+      if (type === 'EXIT') exitPayload = payload;
+      return { eventId: `event-${type}` };
+    },
+  };
+  const authority = {
+    kind: 'SCENARIO_C_PROFIT_LOCK', canonicalTradeId: 'cont-policy-close',
+    lifecycleGeneration: 'seq:9', evidence: {
+      peak_margin_pct: 5.25, unreal_margin_pct: 3, lock_floor_margin_pct: 3,
+    },
+  };
+  assert.equal(await service.closeVirtualLot(
+    'agent', 'user', 'cycle', 'participant',
+    { bitfinexOrderId: 101, stopOrderId: 301, qty: 0.01, direction: 'SHORT' }, {},
+    { reason: 'PROFIT_LOCK', mark: 63_900, fillPrice: 64_000, leverage: 100,
+      peakMarginPct: 5.25, unrealMarginPct: 3, lockFloor: 3,
+      stopLossMarginPct: -13, terminalAuthority: authority },
+  ), true);
+  assert.ok(exitPayload);
+  assert.equal(exitPayload!.actual_bitfinex_realized_pnl_usd, 1.23);
+  assert.equal(exitPayload!.trading_fee_usd, 0);
+  assert.equal(exitPayload!.funding_fee_usd, 0.01);
+  assert.equal(exitPayload!.spread_cost_usd, 0.02);
+  assert.equal(exitPayload!.slippage_usd, 0.03);
+  assert.deepEqual(exitPayload!.fill_ids, ['entry-fill', 'exit-fill']);
+  assert.equal(exitPayload!.final_reconciliation.complete, true);
+  assert.match(exitPayload!.fee_model, /execution_cost_profile_v1/);
+  assert.match(exitPayload!.execution_profile, /relay_execution_profile_v1/);
+});
+
 test('exchange-observed terminal stop uses exact stop fills instead of a later mark reconstruction', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   let exitPayload: Record<string, any> | undefined;

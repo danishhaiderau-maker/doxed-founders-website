@@ -117,6 +117,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                                 for event in row.get("negative_events") or []],
             "execution_timing": [copy.deepcopy(event) for row in participants.values()
                                  for event in row.get("execution_timing") or []],
+            "source_event_history": [copy.deepcopy(event) for row in participants.values()
+                                     for event in row.get("source_event_history") or []],
             "analysis_exclusion_reasons": sorted({
                 reason for row in participants.values()
                 for reason in row.get("analysis_exclusion_reasons") or []
@@ -135,6 +137,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "participant_id": None,
         "source_lifecycle_id": None,
         "source_identity": {},
+        "source_event_history": [],
         "client_order_id": None,
         "client_order_ids": [],
         "bitfinex_order_ids": [],
@@ -263,6 +266,18 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                         "platform_received_at": explicit(payload, "platform_received_at", "platformReceivedAt"),
                     }.items() if value is not None
                 }
+                append_row("source_event_history", {
+                    key: value for key, value in {
+                        "event_id": event_id,
+                        "event_type": event_type,
+                        "source_event_id": source_event_id,
+                        "source_event_seq": source_event_seq,
+                        "source_event_at": explicit(payload, "source_event_at", "sourceEventAt"),
+                        "platform_received_at": explicit(
+                            payload, "platform_received_at", "platformReceivedAt"
+                        ),
+                    }.items() if value is not None
+                })
             cluster_evidence = explicit(payload, "correlated_cluster_evidence")
             if isinstance(cluster_evidence, dict):
                 evidence["cluster_evidence"] = cluster_evidence
@@ -281,7 +296,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             append_unique("client_order_ids", stop_cid)
             order_id = explicit(
                 payload, "bitfinex_order_id", "bitfinexOrderId",
-                "exchange_order_id", "order_id", "orderId",
+                "exchange_order_id", "close_exchange_order_id", "exit_order_id",
+                "order_id", "orderId",
             )
             stop_id = explicit(
                 payload, "stop_order_id", "stopOrderId", "partialFillStopOrderId",
@@ -297,7 +313,10 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             append_unique("bitfinex_order_ids", predecessor_stop_id)
             fill_id = explicit(payload, "fill_id", "fillId", "bitfinex_fill_id", "exchange_fill_id")
             append_unique("fill_ids", fill_id)
-            append_unique("fill_ids", explicit(payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids"))
+            append_unique("fill_ids", explicit(
+                payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids",
+                "entry_fill_ids", "exit_fill_ids", "exchange_exit_fill_ids",
+            ))
 
             quantity_fields = {
                 "source_quantity": explicit(payload, "source_quantity", "source_qty", "source_exact_qty_btc"),
@@ -491,6 +510,10 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     "event_id": event_id,
                     "order_id": order_id,
                     "fill_id": fill_id,
+                    "fill_ids": explicit(payload, "exit_fill_ids", "exchange_exit_fill_ids"),
+                    "filled_quantity": finite(explicit(
+                        payload, "exchange_exit_filled_qty", "exit_filled_qty", "qty_closed"
+                    )),
                     "exit_price": finite(explicit(payload, "exit_price", "exitPrice")),
                     "exit_reason": exit_reason,
                     "exited_at": explicit(payload, "exchange_exit_at", "exit_at", "exited_at"),
@@ -588,6 +611,7 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "FILLED_PERSISTED": ("FILL_PROTECTED", "fillPersistenceCompletedAtMs"),
         "STOP_LOSS_ARMED_PERSISTED": ("STOP_PROTECTION", "stopPersistenceCompletedAtMs"),
         "PARTIAL_STOP_PERSISTED": ("STOP_PROTECTION", "stopPersistenceCompletedAtMs"),
+        "STOP_REPLACEMENT_PERSISTED": ("STOP_PROTECTION", "stopPersistenceCompletedAtMs"),
         "EXIT_PERSISTED": ("TERMINAL_CLOSE", "closePersistenceCompletedAtMs"),
     }
     for receipt in evidence["execution_timing"]:

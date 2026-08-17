@@ -15713,6 +15713,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
         timing_correlation_id: exitPersistenceCorrelationId,
         venue: 'bitfinex',
+        fee_model: stableRelayFeeModel(),
+        execution_profile: stableRelayExecutionProfile(),
         exit_price: exitPrice,
         exit_reason: 'SHOWCASE_MIRROR',
         showcase_exit_price: opts?.showcaseExitPrice,
@@ -17459,6 +17461,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             // Submit-new-before-cancel-old. Both orders are reduce-only, so a
             // short overlap cannot reverse the position and avoids any window
             // where a ladder promotion leaves real exposure unprotected.
+            const replacementSubmitStartedAtMs = Date.now();
             const protectedStop = await this.ensureDurableProtectiveStop({
               participantId: participant.id,
               purpose: 'SCENARIO_C_REPLACEMENT',
@@ -17471,6 +17474,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             });
             if (!protectedStop.ok) throw new Error(protectedStop.reason);
             const newStopId = protectedStop.orderId;
+            const replacementTimingCorrelationId = randomUUID();
             let supersededStopOrderId = !isInitial ? prevStopOrderId : undefined;
             try {
               await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'UPDATE_STOPS', {
@@ -17481,11 +17485,26 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
                 peak_margin_pct: runtime.peakMarginPct,
                 stop_price: trailStop,
                 stopOrderId: newStopId,
+                stopClientOrderId: protectedStop.clientOrderId,
+                stop_submit_started_at: new Date(replacementSubmitStartedAtMs).toISOString(),
+                stop_exchange_ack_at: new Date(protectedStop.exchangeAckAtMs).toISOString(),
+                timing_correlation_id: replacementTimingCorrelationId,
                 supersededStopOrderId,
                 qty: exchangeProtectedQty,
                 protected_exchange_qty: exchangeProtectedQty,
                 source: 'hire',
               });
+              await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXECUTION_TIMING', {
+                schema: 'relay_execution_persistence_receipt_v1',
+                venue: 'bitfinex', source: 'hire', operation: 'STOP_REPLACEMENT_PERSISTED',
+                trade_id: showcaseTradeId ?? cycle.tradeId ?? cycle.id,
+                participant_id: participant.id, bitfinex_order_id: newStopId,
+                related_event_type: 'UPDATE_STOPS',
+                timing_correlation_id: replacementTimingCorrelationId,
+                stages: { persistenceCompletedAtMs: Date.now() },
+              }).catch((err) => this.logger.warn(
+                `STOP replacement persistence receipt failed: ${err instanceof Error ? err.message : err}`,
+              ));
             } catch (persistError) {
               // The shared fence already durably owns the authenticated new
               // stop. Keep both reduce-only orders and pause; a restart can
@@ -17779,6 +17798,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         ? opts.lockFloor
         : opts.unrealMarginPct;
 
+    const authenticatedCloseEvidence = await this.resolveNormalCloseExchangeEvidence({
+      agentId,
+      userId,
+      participantId,
+      creds,
+      meta,
+      closeTarget,
+    }).catch((err) => {
+      this.logger.warn(
+        `Policy close evidence unavailable ${participantId}: ${err instanceof Error ? err.message : err}`,
+      );
+      return {} as Record<string, unknown>;
+    });
+
     const exitReasonMap: Record<
       NonNullable<VirtualLotExitReason> | 'SHOWCASE_VANISHED' | 'AUTHENTICATED_EMERGENCY_CLOSE',
       string
@@ -17792,6 +17825,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycleId, 'EXIT', {
       venue: 'bitfinex',
+      fee_model: stableRelayFeeModel(),
+      execution_profile: stableRelayExecutionProfile(),
       exit_price: opts.mark,
       exit_reason: exitReasonMap[opts.reason],
       peak_margin_pct: opts.peakMarginPct,
@@ -17803,6 +17838,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       pnl_source: pnlSource,
       actual_bitfinex_realized_pnl_usd:
         pnlSource === 'exchange_realised' ? Math.round(pnlUsd * 100) / 100 : undefined,
+      ...authenticatedCloseEvidence,
       final_reconciliation: terminalFinalReconciliation(closeTarget),
       terminal_authority_kind: terminalClaim.authority.kind,
       terminal_authority_trade_id: terminalClaim.authority.canonicalTradeId,
@@ -18339,6 +18375,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
       venue: 'bitfinex',
+      fee_model: stableRelayFeeModel(),
+      execution_profile: stableRelayExecutionProfile(),
       exit_price: exitPrice,
       exit_reason: exactStopExecution ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
       pnl_usd: Math.round(pnlUsd * 100) / 100,
