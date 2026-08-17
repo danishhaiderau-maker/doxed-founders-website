@@ -2777,8 +2777,25 @@ export function shouldRunLocalRealSideSafetyNet(input: {
  * Never-loosen, submit-new-before-cancel-old, idempotent on restart, audit-logged,
  * circuit-broken after 3 consecutive failures.
  */
-function exchangeDynamicStopsEnabled(): boolean {
-  return (process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED ?? '').trim().toLowerCase() === 'true';
+export function exchangeDynamicStopsEnabled(): boolean {
+  const value = (process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED ?? '').trim().toLowerCase();
+  // Scenario C is part of the live-copy rulebook. An unset deployment value
+  // must not leave a profitable real fill behind only the initial -13% stop.
+  // Keep an explicit rollback lever, but default the promised protection on.
+  return !['0', 'false', 'off', 'no'].includes(value);
+}
+
+export function shouldPromoteScenarioCStop(input: {
+  simActive: boolean;
+  showcaseMirrorOnly: boolean;
+  mirrorExitConvergence: boolean;
+}): boolean {
+  return !(
+    !input.simActive &&
+    input.showcaseMirrorOnly &&
+    input.mirrorExitConvergence &&
+    !exchangeDynamicStopsEnabled()
+  );
 }
 
 /** Option A circuit breaker — consecutive stop-replacement failures before
@@ -17345,11 +17362,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     // protective stop advances through the Scenario C ladder rungs on the
     // exchange. Showcase bot remains the EXIT decision maker; this only
     // manages the protective stop between entry and that EXIT.
-    const skipProfitLockTrail =
-      !simActive &&
-      isShowcaseMirrorOnlyMode() &&
-      mirrorExitConvergenceEnabled() &&
-      !exchangeDynamicStopsEnabled();
+    const skipProfitLockTrail = !shouldPromoteScenarioCStop({
+      simActive,
+      showcaseMirrorOnly: isShowcaseMirrorOnlyMode(),
+      mirrorExitConvergence: mirrorExitConvergenceEnabled(),
+    });
     if (lockFloorTrail != null && fillPrice > 0 && meta.stopOrderId && !skipProfitLockTrail) {
       const trailStop = computeProfitLockStopPrice(fillPrice, meta.direction, lockFloorTrail, leverage);
       const priorFloor = runtime.lastProfitLockFloor ?? 0;
@@ -18277,6 +18294,15 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       return false;
     }
 
+    // A disappeared reduce-only stop may itself be the terminal execution.
+    // Capture its immutable per-order trades before cleanup so terminal P&L
+    // and fill identity do not fall back to a later public mark.
+    const stopExecution = meta.stopOrderId
+      ? await this.resolveExchangeTradesFillEvidence(creds, meta.stopOrderId)
+      : null;
+    const exactStopExecution = stopExecution != null
+      && btcToSats(stopExecution.qty) === btcToSats(meta.qty);
+
     if (meta.stopOrderId) {
       const stopGone = await this.cancelManagedOrderGone(
         creds,
@@ -18290,14 +18316,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       finiteDecimalLikeNumber(participant.fillPrice) ??
       meta.limitPrice ??
       (await this.activeTrading.getMarkPrice());
-    const exitPrice = await this.activeTrading.getMarkPrice().catch(() => fillPrice ?? 0);
+    const exitPrice = exactStopExecution
+      ? stopExecution.price
+      : await this.activeTrading.getMarkPrice().catch(() => fillPrice ?? 0);
     const direction = meta.direction;
-    const pnlUsd =
+    const grossPnlUsd =
       fillPrice && exitPrice
         ? direction === 'LONG'
           ? (exitPrice - fillPrice) * meta.qty
           : (fillPrice - exitPrice) * meta.qty
         : 0;
+    const explicitUsdFees = exactStopExecution
+      ? stopExecution.fees
+          .filter((fee) => /^(?:USD|UST|USTF0)$/i.test(fee.currency ?? ''))
+          .reduce((sum, fee) => sum + fee.amount, 0)
+      : 0;
+    const pnlUsd = grossPnlUsd + explicitUsdFees;
     const pnlMarginPct =
       fillPrice && fillPrice > 0
         ? (pnlUsd / (fillPrice * meta.qty)) * 100 * DEFAULT_SUBSCRIBER_LEVERAGE
@@ -18306,10 +18340,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     await this.cycles.recordHireExecutionEvent(userId, agentId, cycle.id, 'EXIT', {
       venue: 'bitfinex',
       exit_price: exitPrice,
-      exit_reason: meta.stopOrderId ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
+      exit_reason: exactStopExecution ? 'EXCHANGE_STOP' : 'MANUAL_OR_EXCHANGE_CLOSE',
       pnl_usd: Math.round(pnlUsd * 100) / 100,
       pnl_margin_pct: Math.round(pnlMarginPct * 100) / 100,
-      pnl_source: 'reconstructed',
+      pnl_source: exactStopExecution ? 'bitfinex_order_trades' : 'reconstructed',
+      ...(exactStopExecution ? {
+        exit_order_id: meta.stopOrderId,
+        exchange_exit_fill_ids: stopExecution.fillIds.map(String),
+        exchange_exit_filled_qty: stopExecution.qty,
+        exchange_exit_fill_first_at: stopExecution.firstExecutedAtMs == null
+          ? null : new Date(stopExecution.firstExecutedAtMs).toISOString(),
+        exchange_exit_fill_last_at: stopExecution.lastExecutedAtMs == null
+          ? null : new Date(stopExecution.lastExecutedAtMs).toISOString(),
+        exchange_exit_costs: stopExecution.fees,
+        gross_pnl_usd: Math.round(grossPnlUsd * 100) / 100,
+        actual_bitfinex_realized_pnl_usd: Math.round(pnlUsd * 100) / 100,
+      } : {}),
       source: 'hire',
       ...await this.authenticatedExchangeObservedTerminalProvenance(
         agentId, userId, participant.id, creds, 'AUTHENTICATED_POSITION_FLAT', {

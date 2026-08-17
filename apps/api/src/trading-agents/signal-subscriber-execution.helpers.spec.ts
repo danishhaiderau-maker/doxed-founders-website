@@ -105,10 +105,44 @@ import {
   readRelayExecutorWakeRequest,
   pollForVerifiedEntryFill,
   shouldRunLocalRealSideSafetyNet,
+  exchangeDynamicStopsEnabled,
+  shouldPromoteScenarioCStop,
   resolveExactShowcaseEntryQty,
   resolveEffectiveStopLossMarginPct,
   isDeterministicBitfinexSubmitRejection,
 } from './signal-subscriber-execution.service';
+
+test('Scenario C exchange stop promotion defaults on and requires an explicit rollback to disable', () => {
+  const prior = process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED;
+  try {
+    delete process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED;
+    assert.equal(exchangeDynamicStopsEnabled(), true);
+    assert.equal(shouldPromoteScenarioCStop({
+      simActive: false,
+      showcaseMirrorOnly: true,
+      mirrorExitConvergence: true,
+    }), true);
+    process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED = 'true';
+    assert.equal(exchangeDynamicStopsEnabled(), true);
+    for (const value of ['0', 'false', 'OFF', 'no']) {
+      process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED = value;
+      assert.equal(exchangeDynamicStopsEnabled(), false);
+      assert.equal(shouldPromoteScenarioCStop({
+        simActive: false,
+        showcaseMirrorOnly: true,
+        mirrorExitConvergence: true,
+      }), false);
+    }
+    assert.equal(shouldPromoteScenarioCStop({
+      simActive: true,
+      showcaseMirrorOnly: true,
+      mirrorExitConvergence: true,
+    }), true);
+  } finally {
+    if (prior == null) delete process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED;
+    else process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED = prior;
+  }
+});
 
 test('account fill-gap allocation requires exact per-order evidence and never overbooks residual', () => {
   assert.deepEqual(authenticatedOrderFillGapAllocation({
@@ -8616,6 +8650,49 @@ test('normal close evidence emits exact fills and uniquely attributable ledger P
   assert.equal(evidence.spread_cost_usd, 0.2);
   assert.equal(evidence.slippage_usd, 0);
   assert.equal(evidence.copy_exit_slippage_usd, 0.1);
+});
+
+test('exchange-observed terminal stop uses exact stop fills instead of a later mark reconstruction', async () => {
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  let exitPayload: Record<string, any> | undefined;
+  service.logger = { log: () => undefined, warn: () => undefined };
+  const fills = [
+    { id: 1958308806, execAmount: 0.00613373, execPrice: 62_936, fee: 0, feeCurrency: 'USD', mtsCreate: 3003 },
+    { id: 1958308805, execAmount: 0.00022191, execPrice: 62_935, fee: 0, feeCurrency: 'USD', mtsCreate: 3002 },
+    { id: 1958308804, execAmount: 0.02549436, execPrice: 62_929, fee: 0, feeCurrency: 'USD', mtsCreate: 3001 },
+  ];
+  service.activeTrading = {
+    getOpenPositionDetail: async () => null,
+    getMarkPrice: async () => 62_915,
+  };
+  service.bitfinex = { fetchOrderTrades: async () => fills };
+  service.cancelManagedOrderGone = async () => ({ gone: true, attempts: 1 });
+  service.authenticatedExchangeObservedTerminalProvenance = async () => ({
+    terminal_authority_kind: 'EXCHANGE_OBSERVED_TERMINAL',
+    final_reconciliation: { complete: true },
+  });
+  service.cycles = {
+    recordHireExecutionEvent: async (_u: string, _a: string, _c: string, type: string, payload: any) => {
+      if (type === 'EXIT') exitPayload = payload;
+    },
+  };
+  service.prisma = { tradingAgentInstance: { updateMany: async () => ({ count: 1 }) } };
+  const closed = await service.reconcileManualClose(
+    'agent', 'user',
+    { id: 'cycle', status: SignalCycleStatus.OPEN, showcasePnlUsd: null },
+    { id: 'participant', fillPrice: { toNumber: () => 62_836 }, status: SignalCycleStatus.OPEN },
+    { qty: 0.03185, direction: 'SHORT', stopOrderId: 242016939845 },
+    {},
+  );
+  const exactVwap = fills.reduce((n, fill) => n + fill.execPrice * fill.execAmount, 0) / 0.03185;
+  assert.equal(closed, true);
+  assert.ok(exitPayload);
+  assert.equal(exitPayload!.exit_reason, 'EXCHANGE_STOP');
+  assert.equal(exitPayload!.pnl_source, 'bitfinex_order_trades');
+  assert.ok(Math.abs(exitPayload!.exit_price - exactVwap) < 1e-8);
+  assert.deepEqual(exitPayload!.exchange_exit_fill_ids, ['1958308806', '1958308805', '1958308804']);
+  assert.equal(exitPayload!.exchange_exit_filled_qty, 0.03185);
+  assert.equal(exitPayload!.actual_bitfinex_realized_pnl_usd, -3.01);
 });
 
 test('normal close evidence never attributes account ledger PnL across concurrent legs', async () => {
