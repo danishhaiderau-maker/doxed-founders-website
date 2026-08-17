@@ -504,6 +504,14 @@ export class TradingAgentInstancesService {
           `wakeNow on resume failed (non-fatal): ${err instanceof Error ? err.message : err}`,
         );
       }
+    } else {
+      try {
+        await this.execution.wakeNow('USER_PAUSE');
+      } catch (err) {
+        this.logger.warn(
+          `wakeNow on pause failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+        );
+      }
     }
 
     if (paused) {
