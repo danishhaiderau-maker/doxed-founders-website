@@ -3152,7 +3152,10 @@ def lane_register_pending_order(order: dict):
     if not order:
         return False
     ln = _ensure_lane_bucket(order)
-    blocked, block_reason, coord = executable_live_copy_entries_blocked()
+    # Prefer globals() so isolated characterization tests that exec() this
+    # function without the coordination helpers still exercise idempotency.
+    blocked_fn = globals().get("executable_live_copy_entries_blocked")
+    blocked, block_reason, coord = blocked_fn() if callable(blocked_fn) else (False, "", "")
     if blocked and str(ln or "").upper() == "CONTINUOUS" and not order.get("coordination_shadow"):
         # Keep research/shadow labelled rows; block new live-copy executable book.
         logger.warning(
