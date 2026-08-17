@@ -80,6 +80,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
                 "research_session_archives", "archive-v2", "object-store", "object_store",
             }),
             "_data_sync_volume_root": lambda: root,
+            "_data_sync_runtime_root": lambda: root,
             "_data_sync_allowed_roots": lambda: [root],
             "_data_sync_relpath": lambda path: path.resolve().relative_to(root).as_posix(),
         }
