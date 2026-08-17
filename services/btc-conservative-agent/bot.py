@@ -33042,6 +33042,60 @@ def wipe_fly_only():
         "fresh_collection_signal_ts": float(state.get("fresh_collection_signal_ts") or 0.0),
     })
 
+_FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"
+
+
+@app.route('/api/fresh_epoch_reset', methods=['POST'])
+def api_fresh_epoch_reset():
+    """Strict operator-only research epoch reset for the Fly execution mirror.
+
+    The ordinary warehouse routes are intentionally unavailable on Fly.  This
+    narrow controller preserves the existing hashed quarantine/reset behavior
+    while requiring a fresh, explicit cross-service flat-boundary receipt from
+    the authenticated operator.  The reset itself repeats the source-side
+    paused/disarmed/order/position checks and fails closed on any contradiction.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    if data.get("confirmation") != _FRESH_EPOCH_CONFIRMATION:
+        return jsonify({
+            "ok": False,
+            "error": "explicit fresh-epoch confirmation required",
+        }), 400
+    proof = data.get("strict_flat_proof")
+    if not isinstance(proof, dict):
+        return jsonify({"ok": False, "error": "strict_flat_proof required"}), 400
+    required_zero = (
+        "showcase_positions", "showcase_pending_orders",
+        "relay_active_participants", "relay_open_lots", "relay_pending_lots",
+        "exchange_positions", "exchange_active_orders", "exchange_delta_btc",
+    )
+    if any(proof.get(key) != 0 for key in required_zero):
+        return jsonify({
+            "ok": False,
+            "error": "strict flat proof is not zero",
+            "required_zero_fields": list(required_zero),
+        }), 409
+    if proof.get("relay_paused") is not True or proof.get("relay_disarmed") is not True:
+        return jsonify({"ok": False, "error": "relay must be paused and disarmed"}), 409
+    try:
+        checked_at = datetime.fromisoformat(str(proof.get("checked_at") or "").replace("Z", "+00:00"))
+        age_s = (datetime.now(timezone.utc) - checked_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        age_s = float("inf")
+    if age_s < 0 or age_s > 60:
+        return jsonify({"ok": False, "error": "strict flat proof is stale"}), 409
+
+    result = perform_fresh_collection_reset(send_local_signal=True)
+    status = 200 if result.get("ok") else 409
+    return jsonify({
+        "ok": bool(result.get("ok")),
+        "reset": result,
+        "deleted": [],
+        "strict_flat_checked_at": proof.get("checked_at"),
+    }), status
+
 @app.get("/api/data_size")
 def api_data_size():
     """Report Fly volume data size for the dashboard cleanup panel.

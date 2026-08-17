@@ -14,6 +14,7 @@ endpoint.
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -132,6 +133,81 @@ class FreshCollectionSignalTests(unittest.TestCase):
             self.assertIsInstance(
                 body["fresh_collection_signal_ts"], (int, float)
             )
+
+    @staticmethod
+    def _strict_flat_proof():
+        return {
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "showcase_positions": 0,
+            "showcase_pending_orders": 0,
+            "relay_active_participants": 0,
+            "relay_open_lots": 0,
+            "relay_pending_lots": 0,
+            "exchange_positions": 0,
+            "exchange_active_orders": 0,
+            "exchange_delta_btc": 0,
+            "relay_paused": True,
+            "relay_disarmed": True,
+        }
+
+    def test_fresh_epoch_reset_requires_strict_admin(self):
+        with mock.patch.object(bot, "_admin_authed_strict", return_value=False), mock.patch.object(
+            bot, "perform_fresh_collection_reset"
+        ) as reset:
+            with bot.app.test_client() as client:
+                response = client.post("/api/fresh_epoch_reset", json={})
+        self.assertEqual(response.status_code, 401)
+        reset.assert_not_called()
+
+    def test_fresh_epoch_reset_requires_confirmation_and_fresh_zero_proof(self):
+        with mock.patch.object(bot, "perform_fresh_collection_reset") as reset:
+            with bot.app.test_client() as client:
+                missing = client.post("/api/fresh_epoch_reset", json={})
+                nonflat_proof = self._strict_flat_proof()
+                nonflat_proof["exchange_active_orders"] = 1
+                nonflat = client.post(
+                    "/api/fresh_epoch_reset",
+                    json={
+                        "confirmation": bot._FRESH_EPOCH_CONFIRMATION,
+                        "strict_flat_proof": nonflat_proof,
+                    },
+                )
+                stale_proof = self._strict_flat_proof()
+                stale_proof["checked_at"] = "2020-01-01T00:00:00Z"
+                stale = client.post(
+                    "/api/fresh_epoch_reset",
+                    json={
+                        "confirmation": bot._FRESH_EPOCH_CONFIRMATION,
+                        "strict_flat_proof": stale_proof,
+                    },
+                )
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(nonflat.status_code, 409)
+        self.assertEqual(stale.status_code, 409)
+        reset.assert_not_called()
+
+    def test_fresh_epoch_reset_calls_atomic_reset_and_never_claims_deletion(self):
+        fake_reset = {
+            "ok": True,
+            "quarantine": {"manifest_path": "/data/quarantine/manifest.json"},
+            "fresh_collection_signal_ts": 12345.0,
+        }
+        with mock.patch.object(
+            bot, "perform_fresh_collection_reset", return_value=fake_reset
+        ) as reset:
+            with bot.app.test_client() as client:
+                response = client.post(
+                    "/api/fresh_epoch_reset",
+                    json={
+                        "confirmation": bot._FRESH_EPOCH_CONFIRMATION,
+                        "strict_flat_proof": self._strict_flat_proof(),
+                    },
+                )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["deleted"], [])
+        reset.assert_called_once_with(send_local_signal=True)
 
 
 if __name__ == "__main__":
