@@ -3194,6 +3194,15 @@ def lane_register_pending_order(order: dict):
         lst = lane_pending_orders[ln]
         if order not in lst:
             lst.append(order)
+    hydrate = globals().get("_sync_canonical_source_pending_order")
+    store = globals().get("_canonical_source_order_market_evidence")
+    if callable(hydrate) and isinstance(store, dict):
+        hydrate(
+            store,
+            order,
+            chase_acked=False,
+            observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
+        )
     _emit_genome_execution_event("LIMIT_CREATED", {
         "trade_id": order.get("trade_id"),
         "limit_price": order.get("limit_price") or order.get("price"),
@@ -18894,11 +18903,44 @@ def _venue_executable_showcase_fill(
     )
     limit = float(order.get("limit_price") or 0)
     qty = float(order.get("qty") or 0)
+    try:
+        live_generation = int(order.get("limit_chase_count") or 0)
+    except (TypeError, ValueError):
+        live_generation = 0
+    store = globals().get("_canonical_source_order_market_evidence")
+    trade_id = str(order.get("trade_id") or "")
+    canonical = store.get(trade_id) if isinstance(store, dict) and trade_id else None
+    if isinstance(canonical, dict):
+        try:
+            canon_gen = int(canonical.get("limit_generation") or 0)
+        except (TypeError, ValueError):
+            canon_gen = 0
+        if canon_gen != live_generation:
+            book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
+            return False, {
+                "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
+                "checked_at_ts": round(float(now), 3),
+                "limit_price": round(limit, 2),
+                "limit_generation": canon_gen,
+                "order_generation": live_generation,
+                "requested_qty": round(qty, 8),
+                "book_age_sec": round(max(0.0, float(now) - book_ts), 3) if book_ts else None,
+                "best_bid": round(float(bid or 0), 2),
+                "best_ask": round(float(ask or 0), 2),
+                "reason": "GENERATION_MISMATCH",
+            }
+        canon_limit = canonical.get("current_limit_price")
+        if canon_limit is not None:
+            try:
+                limit = float(canon_limit)
+            except (TypeError, ValueError):
+                pass
     book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
     evidence = {
         "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
         "checked_at_ts": round(float(now), 3),
         "limit_price": round(limit, 2),
+        "limit_generation": live_generation,
         "requested_qty": round(qty, 8),
         "book_age_sec": round(max(0.0, float(now) - book_ts), 3) if book_ts else None,
         "best_bid": round(float(bid or 0), 2),
@@ -27015,9 +27057,9 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>Trades</h2>
-<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
+<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -28063,7 +28105,12 @@ DASHBOARD_JS = """(function () {
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
         if (src && banner) {
-          if (d.execution_paused) {
+          if (d.live_copy_coordination_state && d.live_copy_coordination_state !== 'RUNNING_TOGETHER') {
+            src.innerHTML = (d.live_copy_coordination_ui_reason || 'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED')
+              + ' [' + d.live_copy_coordination_state + ']';
+            src.className = 'text-red-500 font-bold animate-pulse';
+            banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-orange-600';
+          } else if (d.execution_paused) {
             src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
             src.className = 'text-red-500 font-bold animate-pulse';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
@@ -28637,7 +28684,17 @@ DASHBOARD_JS = """(function () {
           psHint.innerText = ps.historical_coverage_note +
             ' Showing latest ' + pausedRecent.length + ' rows. Safety: never relay-eligible.';
         }
-        safeHTML('tradesTable', (d.trades||[]).map(t => `
+        safeHTML('tradesTable', (d.trades||[]).map(t => {
+          const truth = t.dual_execution_truth || {};
+          const show = truth.showcase_simulated || {};
+          const bf = truth.bitfinex_authenticated || {};
+          const rel = truth.relationship || {};
+          const showcaseLabel = show.status || (show.executed ? 'FILLED' : 'UNFILLED');
+          const bitfinexLabel = bf.authenticated
+            ? (bf.classification || 'AUTHENTICATED')
+            : '-';
+          const relLabel = rel.shadow_label || rel.divergence_classification || '-';
+          return `
           <tr>
             <td>${t.ts_melbourne || t.close_ts_melbourne || formatMelbourneDateTime(t.ts || t.close_ts)}</td>
             <td>${t.trade_id || '-'}</td>
@@ -28652,8 +28709,11 @@ DASHBOARD_JS = """(function () {
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
             <td>$${(t.funding_fees_usd != null ? t.funding_fees_usd : t.funding_fees)?.toFixed(2)||'-'}</td>
-          </tr>
-        `).join(''));
+            <td>${showcaseLabel}</td>
+            <td>${bitfinexLabel}</td>
+            <td>${relLabel}</td>
+          </tr>`;
+        }).join(''));
         const tradesHint = document.getElementById('tradesTableHint');
         if (tradesHint) {
           const shown = (d.trades || []).length;
@@ -31502,6 +31562,8 @@ _DASHBOARD_TRADE_API_KEYS = (
     "final_direction", "dir", "entry", "exit", "dur_min", "pnl",
     "net_pnl_usd", "gross_pnl_usd", "trading_fees_usd", "fees_usd",
     "funding_fees_usd", "ai_band", "exit_reason", "close_ts_melbourne",
+    "dual_execution_truth", "copy_fill_observed",
+    "exchange_confirmed_shadow_overlay",
 )
 
 
@@ -31556,7 +31618,29 @@ def _snapshot_trades_for_api(session_start: float):
         src = list(trades)
     if len(src) > _DASHBOARD_TRADES_MAX:
         src = src[-_DASHBOARD_TRADES_MAX:]
-    return list(src)
+    try:
+        from research.dual_execution_truth import split_execution_truth
+        from research.platform_relay_evidence import (
+            _platform_relay_evidence_index,
+            _snapshot_with_platform_relay_evidence,
+        )
+        index = _platform_relay_evidence_index()
+    except Exception:
+        split_execution_truth = None
+        index = {}
+    rows = []
+    for trade in src:
+        row = dict(trade) if isinstance(trade, dict) else trade
+        tid = str((row or {}).get("trade_id") or "") if isinstance(row, dict) else ""
+        if isinstance(row, dict) and tid and index and tid in index:
+            row = _snapshot_with_platform_relay_evidence(row, tid, index)
+        if isinstance(row, dict) and callable(split_execution_truth):
+            try:
+                row["dual_execution_truth"] = split_execution_truth(row)
+            except Exception:
+                pass
+        rows.append(row)
+    return rows
 
 
 def _build_api_state_snapshot():
@@ -31690,6 +31774,13 @@ def _build_api_state_snapshot():
         # /api/state (the dashboard's primary poll) cannot be silent about a
         # stale running process or a drifted ADX cap.
         snapshot["git_rev"] = _runtime_git_rev()
+        coord = live_copy_coordination_state()
+        snapshot["live_copy_coordination_state"] = coord
+        snapshot["live_copy_coordination_ui_reason"] = (
+            LIVE_RELAY_COORDINATION_REASON
+            if coord != COORD_STATE_RUNNING_TOGETHER
+            else ""
+        )
         snapshot["tile2_policy"] = tile2_policy_descriptor()
         # Section 2: Tile 2 dashboard funnel metrics (raw + derived) so the
         # tile can render the full Section 2 spec without re-deriving from

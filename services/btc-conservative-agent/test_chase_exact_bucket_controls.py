@@ -103,6 +103,85 @@ def test_pending_order_registration_is_trade_id_idempotent():
     assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
+def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelled_shadow():
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "lane_register_pending_order"
+    )
+
+    class QuietLogger:
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    namespace = {
+        "pending_orders": [],
+        "lane_pending_orders": {"CONTINUOUS": []},
+        "trade_lock": threading.RLock(),
+        "_ensure_lane_bucket": lambda order: order.get("research_lane") or "CONTINUOUS",
+        "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+        "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
+        "executable_live_copy_entries_blocked": lambda: (
+            True,
+            "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
+            "RELAY_EXIT_ONLY",
+        ),
+    }
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<coord-register-test>", "exec"), namespace)
+    register = namespace["lane_register_pending_order"]
+    blocked = {"trade_id": "cont-new", "status": "PENDING", "research_lane": "CONTINUOUS"}
+    assert register(blocked) is False
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["outcome"] == "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED"
+    assert namespace["pending_orders"] == []
+    shadow = {
+        "trade_id": "cont-shadow",
+        "status": "PENDING",
+        "research_lane": "CONTINUOUS",
+        "coordination_shadow": True,
+    }
+    assert register(shadow) is True
+    assert namespace["pending_orders"] == [shadow]
+
+
+def test_venue_fill_gate_refuses_old_generation_and_keeps_unknown_on_stale_book():
+    assert "GENERATION_MISMATCH" in BOT_SOURCE
+    namespace = {
+        "_normalize_order_side_to_dir": lambda value: (
+            "LONG" if str(value or "").upper() in {"BUY", "LONG"} else
+            "SHORT" if str(value or "").upper() in {"SELL", "SHORT"} else ""
+        ),
+        "VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC": 2.0,
+        "_canonical_source_order_market_evidence": {
+            "cont-57bb": {"limit_generation": 1, "current_limit_price": 63504.89},
+        },
+    }
+    gate = _compile_function("_venue_executable_showcase_fill", namespace)
+    executable, evidence = gate(
+        {"trade_id": "cont-57bb", "side": "buy", "limit_price": 63486.52, "limit_chase_count": 0, "qty": 0.03},
+        bid=63490, ask=63495,
+        venue_snapshot={"book_ts": 10.0, "order_book": {"asks": [[63495, 1, 1]]}},
+        recent_market_trades=[],
+        now=10.1,
+    )
+    assert executable is False
+    assert evidence["reason"] == "GENERATION_MISMATCH"
+    assert evidence["limit_generation"] == 1
+    matched, matched_ev = gate(
+        {"trade_id": "cont-57bb", "side": "buy", "limit_price": 63504.89, "limit_chase_count": 1, "qty": 0.03},
+        bid=63500, ask=63510,
+        venue_snapshot={"book_ts": 1.0, "order_book": {"asks": [[63510, 1, 1]]}},
+        recent_market_trades=[],
+        now=10.0,
+    )
+    assert matched is False
+    assert matched_ev["reason"] == "BOOK_STALE"
+    assert matched_ev["limit_generation"] == 1
+
+
 def test_virtual_promotion_claim_is_atomic_generation_bound_and_single_owner():
     signal = {
         "trade_id": "cont-promotion-race",

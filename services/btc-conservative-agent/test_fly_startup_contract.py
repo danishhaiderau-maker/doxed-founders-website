@@ -77,6 +77,8 @@ def test_fly_image_includes_shared_analysis_eligibility_contract():
     assert "!research/" in DOCKERIGNORE
     assert "research/*" in DOCKERIGNORE
     assert "!research/analysis_eligibility.py" in DOCKERIGNORE
+    assert "!research/dual_execution_truth.py" in DOCKERIGNORE
+    assert "!research/platform_relay_evidence.py" in DOCKERIGNORE
     assert "from research.analysis_eligibility import" in (
         ROOT / "analyzer_research_engine_v62.py"
     ).read_text(encoding="utf-8")

@@ -693,13 +693,21 @@ export class ShowcaseRelayEventsService {
       throw new BadRequestException('Signed order expiry requires exact source expiry timestamp');
     }
 
+    const noCopyClose =
+      event === 'POSITION_CLOSED' && tradeId
+        ? await this.isShowcaseOnlyRelayPausedClose(tradeId)
+        : false;
+
     // Start the private worker's safety preflight as soon as the signed owner
     // event is authenticated. Entry still waits for this exact cycle to become
     // durable. Close can converge only an already-owned open lot after the
     // worker independently observes the canonical showcase closure. This
     // overlaps transport / safety reads with the canonical transaction below.
+    // Never wake or pre-wake for a Showcase-only close while live-copy is paused:
+    // that path must not invent a participant or exchange exit.
     if (
-      signedLifecycleEvent
+      !noCopyClose
+      && signedLifecycleEvent
       && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED' || event === 'ORDER_EXPIRED')
     ) {
       this.execution.requestExecutorPreWake?.(
@@ -730,7 +738,7 @@ export class ShowcaseRelayEventsService {
         // Canonical signed state is committed before this callback. Start the
         // private executor wake while audit-row idempotency is persisted so
         // bookkeeping never sits in front of the exchange path.
-        if (signedLifecycleEvent && event !== 'APPROVE_PENDING') {
+        if (!noCopyClose && signedLifecycleEvent && event !== 'APPROVE_PENDING') {
           this.queueExecutionWake(
             event,
             body.trade_id ?? null,
@@ -753,7 +761,7 @@ export class ShowcaseRelayEventsService {
 
     // Return the webhook response without waiting for exchange reconciliation.
     // The durable cycle plus the normal 2s runner remain the crash backstop.
-    if (signedLifecycleEvent && event !== 'APPROVE_PENDING' && !executionWakeQueued) {
+    if (!noCopyClose && signedLifecycleEvent && event !== 'APPROVE_PENDING' && !executionWakeQueued) {
       this.queueExecutionWake(
         event,
         body.trade_id ?? null,
@@ -761,7 +769,7 @@ export class ShowcaseRelayEventsService {
         event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
       );
     }
-    if (signedLifecycleEvent) {
+    if (!noCopyClose && signedLifecycleEvent) {
       this.queueCanonicalReconcile(event);
       intentCreated =
         persisted && directExecutableIntent && canonicalRevisionApplied;
@@ -806,6 +814,51 @@ export class ShowcaseRelayEventsService {
       platform_received_at: persistBody.platform_received_at ?? null,
       ingest_ms: Date.now() - ingestStartedAt,
     };
+  }
+
+  /**
+   * True when Showcase closed a trade the live-copy hire never admitted.
+   * Preview only — does not persist evidence or mutate exchange state.
+   */
+  private async isShowcaseOnlyRelayPausedClose(tradeId: string): Promise<boolean> {
+    const agent = await this.prisma.tradingAgent.findUnique({
+      where: { slug: 'conservative-btc' },
+      select: { id: true },
+    });
+    if (!agent) return false;
+    const liveParticipant = await this.prisma.signalCycleParticipant.findFirst({
+      where: {
+        venue: 'bitfinex',
+        cycle: { agentId: agent.id, tradeId },
+        status: {
+          in: [
+            SignalCycleStatus.PENDING_ENTRY,
+            SignalCycleStatus.OPEN,
+            SignalCycleStatus.CLOSED,
+          ],
+        },
+      },
+      select: { id: true },
+    });
+    if (liveParticipant) return false;
+    const activeLive = await this.prisma.tradingAgentInstance.findFirst({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.ACTIVE,
+      },
+      select: { id: true },
+    });
+    if (activeLive) return false;
+    const pausedLive = await this.prisma.tradingAgentInstance.findFirst({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.PAUSED,
+      },
+      select: { id: true },
+    });
+    return Boolean(pausedLive);
   }
 
   /**
