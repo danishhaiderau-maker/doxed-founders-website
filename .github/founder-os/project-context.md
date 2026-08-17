@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(research): repair analyzer join and producer telemetry for a fresh collection epoch
 
 ## Last Activity
 
