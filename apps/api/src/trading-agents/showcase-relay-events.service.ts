@@ -5,7 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { SignalCycleStatus } from '@prisma/client';
+import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
 import type { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { SignalIntentEnvelope } from '@dcf/utils';
@@ -771,6 +771,26 @@ export class ShowcaseRelayEventsService {
       `Showcase relay queued ${event} trade=${body.trade_id ?? '?'} signed=${signedLifecycleEvent ? 'yes' : 'no'} executable=${directExecutableIntent ? 'yes' : 'no'} intent=${intentCreated ? 'ready' : 'none'} persisted=${persisted}`,
     );
 
+    if (event === 'POSITION_CLOSED' && tradeId) {
+      const noCopyAck = await this.acknowledgeShowcaseOnlyCloseIfRelayPaused(tradeId, persistBody);
+      if (noCopyAck) {
+        return {
+          ok: true,
+          accepted: true,
+          action: 'NO_COPY_PARTICIPANT',
+          reason: 'RELAY_WAS_PAUSED_AT_SOURCE_ENTRY',
+          exchange_mutation: false,
+          event,
+          trade_id: tradeId,
+          intentCreated: false,
+          persisted: noCopyAck.persisted || persisted,
+          negative_evidence: 'SHOWCASE_ONLY_RELAY_PAUSED',
+          platform_received_at: persistBody.platform_received_at ?? null,
+          ingest_ms: Date.now() - ingestStartedAt,
+        };
+      }
+    }
+
     return {
       ok: true,
       event,
@@ -786,6 +806,92 @@ export class ShowcaseRelayEventsService {
       platform_received_at: persistBody.platform_received_at ?? null,
       ingest_ms: Date.now() - ingestStartedAt,
     };
+  }
+
+  /**
+   * Showcase closed a trade that live-copy never admitted (hire PAUSED / EXIT_ONLY).
+   * Acknowledge without HTTP 400 and never invent a retrospective participant.
+   */
+  private async acknowledgeShowcaseOnlyCloseIfRelayPaused(
+    tradeId: string,
+    body: ShowcaseRelayEventBody,
+  ): Promise<{ persisted: boolean } | null> {
+    const agent = await this.prisma.tradingAgent.findUnique({
+      where: { slug: 'conservative-btc' },
+      select: { id: true },
+    });
+    if (!agent) return null;
+    const liveParticipant = await this.prisma.signalCycleParticipant.findFirst({
+      where: {
+        venue: 'bitfinex',
+        cycle: { agentId: agent.id, tradeId },
+        status: {
+          in: [
+            SignalCycleStatus.PENDING_ENTRY,
+            SignalCycleStatus.OPEN,
+            SignalCycleStatus.CLOSED,
+          ],
+        },
+      },
+      select: { id: true, status: true },
+    });
+    if (liveParticipant) return null;
+    const activeLive = await this.prisma.tradingAgentInstance.findFirst({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.ACTIVE,
+      },
+      select: { id: true },
+    });
+    if (activeLive) return null;
+    const pausedLive = await this.prisma.tradingAgentInstance.findFirst({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.PAUSED,
+      },
+      select: { id: true, userId: true },
+    });
+    if (!pausedLive) return null;
+
+    let persistedNegative = false;
+    try {
+      const cycle = await this.prisma.signalCycle.findFirst({
+        where: { agentId: agent.id, tradeId },
+        select: { id: true },
+      });
+      if (cycle) {
+        await this.prisma.signalCycleEvent.create({
+          data: {
+            cycleId: cycle.id,
+            eventType: 'NEGATIVE_EVIDENCE',
+            payload: {
+              schema: 'showcase_only_relay_paused_v1',
+              type: 'SHOWCASE_ONLY_RELAY_PAUSED',
+              trade_id: tradeId,
+              exit_price: body.exit_price ?? null,
+              exit_reason: body.exit_reason ?? body.reason ?? null,
+              source_event_id: body.event_id ?? null,
+              platform_received_at: body.platform_received_at ?? null,
+              exchange_mutation: false,
+              note: 'Showcase closed while live relay was paused; no copy participant existed',
+            } as unknown as Prisma.InputJsonValue,
+          },
+        });
+        persistedNegative = true;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `SHOWCASE_ONLY_RELAY_PAUSED persist failed trade=${tradeId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+    this.logger.log(
+      `POSITION_CLOSED acknowledged NO_COPY_PARTICIPANT trade=${tradeId} (relay paused, no Bitfinex participant)`,
+    );
+    return { persisted: persistedNegative };
   }
 
   /**

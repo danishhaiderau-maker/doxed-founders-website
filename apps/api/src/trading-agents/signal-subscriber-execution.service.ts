@@ -5425,6 +5425,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           ? 'POSITION_CLOSED'
           : null; // USER_RESUME / USER_PAUSE / etc are not showcase webhook events
     }
+    if (trigger === 'USER_RESUME') {
+      await this.notifyShowcaseLiveCopyCoordination('RUNNING_TOGETHER', 'CHEETAH_REARMED');
+    } else if (trigger === 'USER_PAUSE') {
+      await this.notifyShowcaseLiveCopyCoordination(
+        'RELAY_EXIT_ONLY',
+        'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED',
+      );
+    }
     if (this.running) {
       this.wakeQueued = true;
       return;
@@ -7714,7 +7722,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       },
     });
 
-    await this.notifications
+        await this.notifyShowcaseLiveCopyCoordination(
+      'RELAY_EXIT_ONLY',
+      'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED',
+    );
+await this.notifications
       .notifyUser(instance.userId, {
         type: NotificationType.TRADING_AGENT_UPDATE,
         title: 'Conservative BTC live copy auto-stopped',
@@ -10238,6 +10250,30 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /** Fail closed on any raw exchange-versus-ledger position mismatch. */
+  private async notifyShowcaseLiveCopyCoordination(
+    state: 'RUNNING_TOGETHER' | 'RELAY_EXIT_ONLY' | 'SOURCE_RESEARCH_ONLY' | 'FULLY_PAUSED',
+    reason: string,
+  ): Promise<void> {
+    try {
+      const result = await this.botBridge.proxyBotPost('/api/live-copy-coordination', {
+        state,
+        reason,
+      });
+      if (!result?.ok) {
+        this.logger.warn(
+          `[LIVE-COPY-COORD] showcase notify failed state=${state} ` +
+            `${(result as { error?: string })?.error ?? `status=${(result as { status?: number })?.status}`}`,
+        );
+      } else {
+        this.logger.warn(`[LIVE-COPY-COORD] showcase notified state=${state} reason=${reason}`);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `[LIVE-COPY-COORD] showcase notify error: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
   private async pauseRelayForPositionMismatch(
     instance: TradingAgentInstance,
     message: string,
@@ -10278,6 +10314,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       },
     });
     if (!alreadyPaused) {
+      await this.notifyShowcaseLiveCopyCoordination(
+        'RELAY_EXIT_ONLY',
+        'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED',
+      );
       await this.notifications
         .notifyUser(instance.userId, {
           type: NotificationType.TRADING_AGENT_UPDATE,

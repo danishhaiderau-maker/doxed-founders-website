@@ -3,6 +3,10 @@
 The source strategy and the exchange copy are deliberately separate facts.
 These helpers only describe what the public market feed showed while a source
 order rested; they never promote a Showcase fill from an exchange fill.
+
+One pending-order generation is authoritative: original limit, current ACK
+limit, chase generation/seq, and qty all live on the same store record used by
+the fill gate, market-evidence collector, fill-quality, and dashboard.
 """
 from __future__ import annotations
 
@@ -17,24 +21,126 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), timezone.utc).isoformat()
 
 
-def update_canonical_extrema(store: dict, order: dict, price: float) -> dict:
-    """Update one lifecycle record even when signal/order are separate dicts."""
-    trade_id = str((order or {}).get("trade_id") or "").strip()
-    if not trade_id or not isinstance(price, (int, float)) or float(price) <= 0:
-        return {}
+def _direction_from_order(order: dict) -> str:
     raw_direction = str(
         (order or {}).get("signal_dir") or (order or {}).get("dir") or (order or {}).get("side") or ""
     ).upper()
-    direction = "LONG" if raw_direction in {"BUY", "LONG"} else "SHORT" if raw_direction in {"SELL", "SHORT"} else raw_direction
+    if raw_direction in {"BUY", "LONG"}:
+        return "LONG"
+    if raw_direction in {"SELL", "SHORT"}:
+        return "SHORT"
+    return raw_direction
+
+
+def _order_generation(order: dict) -> int:
+    for key in ("limit_chase_count", "submitted_order_event_seq", "limit_generation", "event_seq"):
+        try:
+            value = int((order or {}).get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value >= 0:
+            return value
+    return 0
+
+
+def _finite_price(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def sync_canonical_pending_order(
+    store: dict,
+    order: dict,
+    *,
+    chase_acked: bool = False,
+    observed_ts: float | None = None,
+) -> dict:
+    """Atomically refresh the single pending-order record from the live order.
+
+    Chase ACK advances generation + current limit. Failed chase persistence
+    must not call this with chase_acked=True, so the prior ACK limit remains
+    authoritative.
+    """
+    trade_id = str((order or {}).get("trade_id") or "").strip()
+    if not trade_id:
+        return {}
+    direction = _direction_from_order(order)
+    current_limit = _finite_price((order or {}).get("limit_price"))
+    original_limit = _finite_price(
+        (order or {}).get("original_limit_price")
+        or (order or {}).get("planned_limit_price")
+        or (order or {}).get("originalLimitPrice")
+    )
+    generation = _order_generation(order)
+    qty = (order or {}).get("qty")
     record = store.setdefault(trade_id, {
         "schema": "source_order_market_evidence_v1",
         "canonical_trade_id": trade_id,
         "symbol": (order or {}).get("symbol") or "tBTCF0:USTF0",
         "direction": direction,
-        "limit_price": (order or {}).get("limit_price"),
-        "requested_quantity": (order or {}).get("qty"),
+        "original_limit_price": original_limit,
+        "current_limit_price": current_limit,
+        "limit_price": current_limit,
+        "limit_generation": generation,
+        "requested_quantity": qty,
+        "status": str((order or {}).get("status") or "PENDING"),
+        "created_at_ts": (order or {}).get("created_ts") or observed_ts,
+        "last_chase_ack_at": None,
         "observations": [],
     })
+    if direction:
+        record["direction"] = direction
+    if qty is not None:
+        record["requested_quantity"] = qty
+    if original_limit is not None and record.get("original_limit_price") is None:
+        record["original_limit_price"] = original_limit
+    prev_generation = int(record.get("limit_generation") or 0)
+    if chase_acked:
+        # Only advance on authenticated chase ACK. Never regress.
+        if generation >= prev_generation and current_limit is not None:
+            record["limit_generation"] = generation
+            record["current_limit_price"] = current_limit
+            record["limit_price"] = current_limit
+            if observed_ts is not None:
+                record["last_chase_ack_at"] = _iso(observed_ts)
+            elif (order or {}).get("last_chase_ts"):
+                try:
+                    record["last_chase_ack_at"] = _iso(float(order.get("last_chase_ts")))
+                except (TypeError, ValueError):
+                    pass
+    else:
+        # Keep store identical to the live order object used by the fill gate.
+        if generation > prev_generation and current_limit is not None:
+            # Order already advanced (e.g. in-process chase) — mirror it.
+            record["limit_generation"] = generation
+            record["current_limit_price"] = current_limit
+            record["limit_price"] = current_limit
+        elif generation == prev_generation and current_limit is not None:
+            record["current_limit_price"] = current_limit
+            record["limit_price"] = current_limit
+        elif record.get("limit_price") is None and current_limit is not None:
+            record["limit_generation"] = generation
+            record["current_limit_price"] = current_limit
+            record["limit_price"] = current_limit
+    if record.get("original_limit_price") is None and current_limit is not None:
+        record["original_limit_price"] = current_limit
+    status = str((order or {}).get("status") or "").strip()
+    if status:
+        record["status"] = status
+    return record
+
+
+def update_canonical_extrema(store: dict, order: dict, price: float) -> dict:
+    """Update one lifecycle record even when signal/order are separate dicts."""
+    trade_id = str((order or {}).get("trade_id") or "").strip()
+    if not trade_id or not isinstance(price, (int, float)) or float(price) <= 0:
+        return {}
+    record = sync_canonical_pending_order(store, order)
+    if not record:
+        return {}
     value = float(price)
     current_min = record.get("market_min_price")
     current_max = record.get("market_max_price")
@@ -61,6 +167,11 @@ def append_market_observation(
         return {}, {}
     direction = str(record.get("direction") or "").upper()
     executable_quote = float(ask or 0) if direction == "LONG" else float(bid or 0)
+    # Observations always stamp the current ACK generation/limit — never a
+    # stale original captured at first sighting.
+    current_limit = record.get("current_limit_price")
+    if current_limit is None:
+        current_limit = record.get("limit_price")
     observation = {
         "schema": "source_order_market_observation_v1",
         "canonical_trade_id": record["canonical_trade_id"],
@@ -68,7 +179,10 @@ def append_market_observation(
         "observed_at_ts": round(float(observed_ts), 3),
         "symbol": record.get("symbol"),
         "direction": direction,
-        "limit_price": record.get("limit_price"),
+        "limit_price": current_limit,
+        "original_limit_price": record.get("original_limit_price"),
+        "current_limit_price": current_limit,
+        "limit_generation": int(record.get("limit_generation") or 0),
         "requested_quantity": record.get("requested_quantity"),
         "market_last": float(market_price or 0),
         "best_bid": float(bid or 0),
@@ -96,8 +210,11 @@ def evidence_summary(record: dict) -> dict:
     return {
         key: copy.deepcopy(record.get(key))
         for key in (
-            "schema", "canonical_trade_id", "symbol", "direction", "limit_price",
-            "requested_quantity", "market_min_price", "market_max_price",
+            "schema", "canonical_trade_id", "symbol", "direction",
+            "original_limit_price", "current_limit_price", "limit_price",
+            "limit_generation", "requested_quantity", "status",
+            "created_at_ts", "last_chase_ack_at",
+            "market_min_price", "market_max_price",
             "observation_count", "latest_observation",
         )
         if record.get(key) is not None
@@ -139,13 +256,16 @@ def load_market_evidence_index(path, target_trade_ids=None, max_rotations: int =
             continue
     result = {}
     for trade_id, observations in grouped.items():
-        # File/order semantics are immutable oldest-to-newest.  Hash the full
-        # selected history so new evidence produces a new derived CF revision.
+        latest = observations[-1] if observations else {}
         result[trade_id] = {
             "schema": "source_order_market_evidence_v1",
             "canonical_trade_id": trade_id,
             "observations": observations,
-            "latest_observation": observations[-1],
+            "latest_observation": latest,
+            "limit_price": latest.get("current_limit_price", latest.get("limit_price")),
+            "current_limit_price": latest.get("current_limit_price", latest.get("limit_price")),
+            "original_limit_price": latest.get("original_limit_price"),
+            "limit_generation": latest.get("limit_generation"),
             "evidence_revision": hashlib.sha256(json.dumps(
                 observations, sort_keys=True, separators=(",", ":"), default=str
             ).encode("utf-8")).hexdigest(),

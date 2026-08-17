@@ -8,6 +8,7 @@ from research.source_market_evidence import (
     append_market_observation,
     evidence_summary,
     load_market_evidence_index,
+    sync_canonical_pending_order,
     update_canonical_extrema,
 )
 
@@ -120,3 +121,80 @@ def test_market_evidence_rotation_loader_is_malformed_safe_targeted_and_revision
         handle.write('{"canonical_trade_id":"cont-target","observed_at_ts":3}\n')
     second = load_market_evidence_index(active, {"cont-target"})
     assert second["cont-target"]["evidence_revision"] != revision
+
+
+def test_chase_ack_updates_same_canonical_limit_used_by_observations():
+    store = {}
+    order = {
+        "trade_id": "cont-57bb",
+        "side": "buy",
+        "limit_price": 63486.52,
+        "original_limit_price": 63486.52,
+        "qty": 0.03147,
+        "limit_chase_count": 0,
+        "status": "PENDING",
+    }
+    sync_canonical_pending_order(store, order, chase_acked=False, observed_ts=1.0)
+    _, first = append_market_observation(
+        store, order, market_price=63500, bid=63490, ask=63495,
+        venue_snapshot={"book_ts": 1.0},
+        gate_evidence={"reason": "INSUFFICIENT_EXECUTABLE_DEPTH", "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1"},
+        observed_ts=1.0,
+    )
+    assert first["limit_price"] == 63486.52
+    assert first["limit_generation"] == 0
+
+    # Chase ACK advances the SAME store object the fill gate/evidence share.
+    order["limit_price"] = 63504.89
+    order["limit_chase_count"] = 1
+    sync_canonical_pending_order(store, order, chase_acked=True, observed_ts=2.0)
+    record, second = append_market_observation(
+        store, order, market_price=63510, bid=63500, ask=63505,
+        venue_snapshot={"book_ts": 2.0},
+        gate_evidence={"reason": "EXECUTABLE", "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
+                       "visible_executable_qty": 1, "recent_executable_trade_qty": 1},
+        observed_ts=2.0,
+    )
+    assert record["current_limit_price"] == 63504.89
+    assert record["original_limit_price"] == 63486.52
+    assert record["limit_generation"] == 1
+    assert second["limit_price"] == 63504.89
+    assert second["limit_generation"] == 1
+    summary = evidence_summary(record)
+    assert summary["current_limit_price"] == 63504.89
+    assert summary["original_limit_price"] == 63486.52
+
+
+def test_failed_chase_persist_keeps_old_limit_authoritative():
+    store = {}
+    order = {"trade_id": "cont-keep", "side": "buy", "limit_price": 100.0,
+             "original_limit_price": 100.0, "limit_chase_count": 0, "qty": 1}
+    sync_canonical_pending_order(store, order, chase_acked=True, observed_ts=1.0)
+    # Simulated failed chase: caller must NOT pass chase_acked=True with new limit.
+    failed = dict(order, limit_price=101.5, limit_chase_count=1)
+    # Without chase_acked, generation does not advance past ACK until order gen matches live.
+    # If chase never committed, live order still has old limit — pass old order.
+    sync_canonical_pending_order(store, order, chase_acked=False, observed_ts=2.0)
+    assert store["cont-keep"]["limit_price"] == 100.0
+    assert store["cont-keep"]["limit_generation"] == 0
+
+
+def test_exchange_fill_ids_array_builds_copy_fill_observed_overlay():
+    index, records = _relay_index({
+        "exchange_fill_ids": [1958363331],
+        "bitfinexOrderId": 242019286185,
+        "clientOrderId": 958253392,
+        "qty": 0.03147,
+        "fill_price": 63504,
+        "exchange_fill_received_at": "2026-08-17T04:18:14.885Z",
+        "source_model_fill_state": "SOURCE_UNCONFIRMED",
+        "copy_reconciliation_state": "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED",
+    })
+    source = {"trade_id": "cont-copy", "executed": False, "status": "EXPIRED"}
+    enriched = _snapshot_with_platform_relay_evidence(copy.deepcopy(source), "cont-copy", index)
+    assert enriched["executed"] is False
+    assert enriched["status"] == "EXPIRED"
+    assert enriched["copy_fill_observed"]["fill_ids"] == [1958363331]
+    assert enriched["copy_fill_observed"]["classification"] == "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED"
+    assert enriched["exchange_confirmed_shadow_overlay"]["excluded_from_showcase_strategy_stats"] is True
+    assert enriched["exchange_confirmed_shadow_overlay"]["label"] == "EXCHANGE_CONFIRMED_SHADOW_POSITION"
