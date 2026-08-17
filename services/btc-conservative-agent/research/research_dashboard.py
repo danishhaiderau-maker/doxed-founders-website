@@ -1626,7 +1626,8 @@ def _decision_readiness_payload():
     policy_grid = _read_json("qualified_exit_policy_grid_report.json")
     grid_ready = bool(policy_grid.get("live_policy_change_allowed"))
 
-    def question(key, text, report, descriptive_ready, live_ready, qualified_detail, extra_blockers=None):
+    def question(key, text, report, descriptive_ready, live_ready, qualified_detail,
+                 extra_blockers=None, evidence_scope="REAL_COPY_PARAMETER_OPTIMISATION"):
         blockers = list(extra_blockers or [])
         if not counterfactual_available:
             blockers.append("COUNTERFACTUAL_EVIDENCE_MISSING")
@@ -1634,6 +1635,8 @@ def _decision_readiness_payload():
             blockers.append("REPORT_NOT_CURRENT_MANIFEST")
         descriptive_ready = bool(descriptive_ready and counterfactual_available and report in manifest_files)
         live_ready = bool(live_ready and descriptive_ready)
+        if not descriptive_ready:
+            blockers.append("INSUFFICIENT_QUESTION_SPECIFIC_HOLDOUT")
         return {
             "key": key,
             "question": text,
@@ -1642,7 +1645,7 @@ def _decision_readiness_payload():
             "live_policy_change_allowed": live_ready,
             "current_epoch_qualified_rows": qualified_n,
             "historical_showcase_rows": showcase_n,
-            "evidence_scope": "REAL_COPY_PARAMETER_OPTIMISATION",
+            "evidence_scope": evidence_scope,
             "report": report,
             "detail": qualified_detail if descriptive_ready else "No question-specific qualified holdout; live changes remain fail-closed.",
             "exclusion_reason_counts": exclusions,
@@ -1652,7 +1655,8 @@ def _decision_readiness_payload():
     questions = [
         question("cluster_distance", "Cluster distance", "correlated_price_cluster_report.json",
                  bool(cluster.get("conclusion_allowed")), False,
-                 f"Qualified 120-minute cost-complete rows: {int(cluster.get('qualified_120m_cost_complete') or 0)}."),
+                 f"Qualified 120-minute cost-complete rows: {int(cluster.get('qualified_120m_cost_complete') or 0)}.",
+                 evidence_scope="SHOWCASE_STRATEGY"),
         question("thesis_fast_cut", "Thesis fast-cut", "qualified_exit_policy_grid_report.json",
                  bool(policy_grid.get("selected_on_train")), grid_ready,
                  f"Qualified costed replays: {int(policy_grid.get('qualified_costed_replays') or 0)}; train-selected candidates remain preliminary until holdout qualifies."),

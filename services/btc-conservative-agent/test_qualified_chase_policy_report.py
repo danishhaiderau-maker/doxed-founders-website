@@ -81,3 +81,5 @@ def test_question_readiness_uses_question_specific_qualified_reports():
     assert 'bool(cluster.get("conclusion_allowed")), False' in DASHBOARD_SOURCE
     assert '"qualified_exit_policy_grid_report.json",\n                 bool(policy_grid.get("selected_on_train")), grid_ready' in DASHBOARD_SOURCE
     assert '"LIVE_POLICY_QUALIFIED" if live_ready else "DESCRIPTIVE_QUALIFIED"' in DASHBOARD_SOURCE
+    assert 'blockers.append("INSUFFICIENT_QUESTION_SPECIFIC_HOLDOUT")' in DASHBOARD_SOURCE
+    assert 'evidence_scope="SHOWCASE_STRATEGY"' in DASHBOARD_SOURCE
