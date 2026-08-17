@@ -4206,8 +4206,12 @@ def set_live_copy_coordination_state(next_state: str, reason: str = "") -> dict:
                 state["_pause_priority"] = 0
     if wanted == COORD_STATE_FULLY_PAUSED:
         set_execution_paused(LIVE_RELAY_COORDINATION_REASON)
+    cancelled_executable = 0
+    if prev == COORD_STATE_RUNNING_TOGETHER and wanted != COORD_STATE_RUNNING_TOGETHER:
+        cancelled_executable = _expire_executable_live_copy_pendings(reason_text)
     logger.warning(
         f"[LIVE-COPY-COORD] {prev} -> {wanted} reason={reason_text or '-'} "
+        f"cancelled_executable={cancelled_executable} "
         "[PIPELINE ENFORCEMENT]"
     )
     return {
@@ -4215,8 +4219,38 @@ def set_live_copy_coordination_state(next_state: str, reason: str = "") -> dict:
         "previous": prev,
         "state": wanted,
         "reason": reason_text,
+        "cancelled_executable": cancelled_executable,
         "ui_reason": LIVE_RELAY_COORDINATION_REASON if wanted != COORD_STATE_RUNNING_TOGETHER else "",
     }
+
+
+def _expire_executable_live_copy_pendings(reason: str) -> int:
+    """Drop already-resting CONTINUOUS copy intents when live relay pauses.
+
+    Labelled coordination_shadow / non-CONTINUOUS research stays visible.
+    Open Showcase positions are not flattened here (exit-only remains).
+    """
+    expire_reason = reason or LIVE_RELAY_COORDINATION_REASON
+    with trade_lock:
+        candidates = [
+            order for order in list(pending_orders)
+            if isinstance(order, dict)
+            and str(order.get("status") or "").upper() in ("PENDING", "CANCEL_PENDING_LIVE")
+            and order.get("coordination_shadow") is not True
+            and str(order.get("research_lane") or RESEARCH_LANE_CONTINUOUS).upper()
+            in ("", "CONTINUOUS")
+        ]
+    cancelled = 0
+    for order in candidates:
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            expire_reason,
+            record_expired=True,
+            expire_signal=True,
+        )
+        if outcome.get("finalized"):
+            cancelled += 1
+    return cancelled
 
 
 def executable_live_copy_entries_blocked() -> tuple:

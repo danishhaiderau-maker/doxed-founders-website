@@ -147,6 +147,54 @@ def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelle
     assert namespace["pending_orders"] == [shadow]
 
 
+def test_coordination_pause_expires_existing_continuous_but_keeps_labelled_shadow():
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_expire_executable_live_copy_pendings"
+    )
+
+    class QuietLogger:
+        def warning(self, *_args, **_kwargs):
+            pass
+
+    pending = [
+        {"trade_id": "cont-live", "status": "PENDING", "research_lane": "CONTINUOUS"},
+        {
+            "trade_id": "cont-shadow",
+            "status": "PENDING",
+            "research_lane": "CONTINUOUS",
+            "coordination_shadow": True,
+        },
+        {"trade_id": "vc-research", "status": "PENDING", "research_lane": "TYPE_B_HUNTER_V1"},
+    ]
+    expired = []
+
+    def fake_cancel(order, reason, record_expired=True, expire_signal=True):
+        expired.append(order["trade_id"])
+        order["status"] = "EXPIRED"
+        return {"finalized": True}
+
+    namespace = {
+        "pending_orders": pending,
+        "trade_lock": threading.RLock(),
+        "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
+        "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
+        "_cancel_pending_order_confirmed": fake_cancel,
+        "logger": QuietLogger(),
+    }
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<coord-expire-test>", "exec"), namespace)
+    cancelled = namespace["_expire_executable_live_copy_pendings"](
+        "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
+    )
+    assert cancelled == 1
+    assert expired == ["cont-live"]
+    assert pending[1]["status"] == "PENDING"
+    assert pending[2]["status"] == "PENDING"
+
+
 def test_venue_fill_gate_refuses_old_generation_and_keeps_unknown_on_stale_book():
     assert "GENERATION_MISMATCH" in BOT_SOURCE
     namespace = {
