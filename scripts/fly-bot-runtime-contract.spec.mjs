@@ -139,6 +139,7 @@ test('Fly image includes and imports every root runtime research module', async 
   const requiredModules = [
     'analysis_eligibility',
     'platform_relay_evidence',
+    'source_market_evidence',
     'immutable_archive',
     'counterfactual_normalization',
   ];

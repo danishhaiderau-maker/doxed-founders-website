@@ -19,6 +19,7 @@
 research/*
 !research/analysis_eligibility.py
 !research/platform_relay_evidence.py
+!research/source_market_evidence.py
 !research/immutable_archive.py
 !research/counterfactual_normalization.py
 !research/epoch_quarantine.py
