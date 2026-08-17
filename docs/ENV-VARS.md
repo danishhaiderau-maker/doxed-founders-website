@@ -6,7 +6,7 @@ storage see `SECRETS_STORAGE.md`. For deploy infra see `railway-deploy.md` /
 
 ## `EXCHANGE_DYNAMIC_STOPS_ENABLED`
 
-**Default:** `false` (ships dark — feature OFF)
+**Default:** `true` (Scenario C exchange protection ON)
 **Added:** 2026-07-08 (Option A — see `docs/EXCHANGE_DYNAMIC_STOPS.md`)
 
 When `true`, the live-copy relay keeps the protective stop on Bitfinex synced
@@ -19,8 +19,8 @@ profit is actually protected on the exchange.
 
 | Value | Behavior |
 |---|---|
-| unset / `false` / anything else (default) | OFF — Phase 2 exit convergence (wide disaster stop only, showcase EXIT authoritative). |
-| `true` | ON — relay advances the protective stop through `10→6, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120` as unrealized margin grows. Ships with never-loosen, cancel-then-replace, per-account isolation, restart idempotency, audit log to `logs/exchange-stop-manager.log`, and a 3-strike circuit breaker surfaced on `dashboardState.stopManagerCircuitOpen`. |
+| unset / `true` / anything except an explicit false value (default) | ON — relay advances the protective stop through the canonical Scenario C ladder as unrealized margin grows. Ships with never-loosen, cancel-then-replace, per-account isolation, restart idempotency, audit logging, and a 3-strike circuit breaker surfaced on `dashboardState.stopManagerCircuitOpen`. |
+| `0` / `false` / `off` / `no` | OFF — emergency rollback only; leaves the initial disaster stop in place while Showcase EXIT remains authoritative. |
 
 Read per call — flip via Railway env without a redeploy. Full details:
 `docs/EXCHANGE_DYNAMIC_STOPS.md`.

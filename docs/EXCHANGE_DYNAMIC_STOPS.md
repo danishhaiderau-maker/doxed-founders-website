@@ -1,8 +1,9 @@
 # Exchange Dynamic Stops (Option A — Scenario C safety net)
 
-**Status:** SHIPS DARK. Default OFF. Enable per account via Railway env.
+**Status:** LIVE SAFETY DEFAULT. Enabled unless explicitly rolled back.
 **Added:** 2026-07-08
-**Kill switch:** `EXCHANGE_DYNAMIC_STOPS_ENABLED` (default: `false`)
+**Kill switch:** `EXCHANGE_DYNAMIC_STOPS_ENABLED` (default: `true`; explicit
+`0`, `false`, `off`, or `no` disables it)
 
 ## Why this exists
 
@@ -165,13 +166,14 @@ Run: `npx tsx --test packages/utils/src/__tests__/scenario-c-ladder.test.ts`
 
 ## Rollout
 
-1. Default OFF — verify relay still works exactly as before on next deploy.
-2. To enable for ONE account: set `EXCHANGE_DYNAMIC_STOPS_ENABLED=true` on
-   the Railway API service (or locally in `.env.local`).
-3. Watch `logs/exchange-stop-manager.log` for INITIAL → REPLACE progression
+1. Confirm `EXCHANGE_DYNAMIC_STOPS_ENABLED=true` on the exchange-owning relay
+   executor. An unset value also enables protection, but an explicit value is
+   preferred in production.
+2. Watch `logs/exchange-stop-manager.log` for INITIAL → REPLACE progression
    as profit grows.
-4. Confirm `dashboardState.stopManagerCircuitOpen` stays `{}`.
-5. To roll back: unset the env var (no redeploy needed — read per call).
+3. Confirm `dashboardState.stopManagerCircuitOpen` stays `{}`.
+4. Emergency rollback only: set the variable to `false`. Unsetting it does not
+   disable protection because Scenario C now fails safe to ON.
 
 ## Files
 
