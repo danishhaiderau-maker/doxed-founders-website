@@ -116,6 +116,11 @@ from research.platform_relay_evidence import (
     _snapshot_with_platform_relay_evidence as _pure_snapshot_with_platform_relay_evidence,
     _validate_platform_relay_evidence_payload as _pure_validate_platform_relay_evidence_payload,
 )
+from research.counterfactual_normalization import (
+    canonical_profile as _canonical_counterfactual_profile,
+    policy_comparability_key as _pure_policy_comparability_key,
+    horizons as _pure_counterfactual_horizons,
+)
 # Tile 2 frozen policy identifiers (Section 8 of static integrity repair).
 # Single source of truth for policy/exit-profile tagging on every outcome.
 from sr_micro_tile_v2 import (
@@ -3814,14 +3819,36 @@ def risk_trading_allowed() -> bool:
     rolled_over, pause_reason = _rollover_daily_pnl_if_new_utc_day()
     if rolled_over and pause_reason == "DAILY_DRAWDOWN":
         set_execution_paused("")
+
+    # A successful operator resume/reset can leave the persisted pause label
+    # behind after its loss counters and timer have already been cleared.  Do
+    # not let that stale label re-pause an otherwise healthy executor forever.
+    # Snapshot under the lock, but clear through the canonical pause setter
+    # outside it: that setter performs disarm/order work and must not be called
+    # recursively while state_lock is held.
+    with state_lock:
+        loss_pause_until = float(state.get("loss_pause_until", 0) or 0)
+        consecutive_losses = int(state.get("consecutive_losses", 0) or 0)
+        stale_loss_pause = (
+            bool(state.get("execution_paused"))
+            and state.get("execution_reason") == "LOSS_STREAK"
+            and loss_pause_until <= 0
+            and consecutive_losses < CONSECUTIVE_LOSS_PAUSE
+        )
+        expired_loss_pause = (
+            state.get("execution_reason") == "LOSS_STREAK"
+            and loss_pause_until > 0
+            and loss_pause_until <= now
+        )
+        if expired_loss_pause:
+            state["loss_pause_until"] = 0
+    if stale_loss_pause or expired_loss_pause:
+        set_execution_paused("")
+
     with state_lock:
         pause_until = state.get("loss_pause_until", 0)
         if pause_until > now:
             return False
-        if pause_until > 0 and pause_until <= now:
-            state["loss_pause_until"] = 0
-            if state.get("execution_reason") == "LOSS_STREAK":
-                set_execution_paused("")
         if state.get("daily_pnl_usd", 0) <= -DAILY_DRAWDOWN_PAUSE_USD:
             if not state.get("execution_paused") or state.get("execution_reason") != "DAILY_DRAWDOWN":
                 set_execution_paused("DAILY_DRAWDOWN")
@@ -4409,10 +4436,6 @@ def _timestamp_to_melbourne_display(ts: float) -> str:
         return "-"
 
 
-def _utc_iso_to_melbourne_display(ts_str: str) -> str:
-    return _format_melbourne_hm(ts_str)
-
-
 def _enrich_melbourne_time_fields(row: dict) -> dict:
     """Add ts_melbourne / close_ts_melbourne for dashboard + Agent Hub matching."""
     if not isinstance(row, dict):
@@ -4457,13 +4480,6 @@ def _experimental_entry_filter_detail(lane_id: str, spec: dict) -> list:
         return parts
     return []
 
-
-def to_melbourne_time(utc_iso_str):
-    try:
-        dt = datetime.fromisoformat(utc_iso_str.replace("Z", "+00:00"))
-        return dt.astimezone(melbourne_tz).strftime("%Y-%m-%d %H:%M Melbourne")
-    except:
-        return utc_iso_str
 
 DEBUG_LOG_BUFFER = deque(maxlen=5000)
 
@@ -10244,31 +10260,6 @@ def validate_startup():
             raise Exception(f"[STARTUP ERROR] Missing function: {fn}")
     logger.info("[STARTUP] All critical functions verified [PIPELINE ENFORCEMENT]")
 
-def system_health_snapshot():
-    try:
-        snapshot = {
-            "time": utc_iso(),
-            "price": state.get("price"),
-            "price_age": time.time() - state.get("price_ts", 0) if state.get("price_ts") else None,
-            "ws_ready": state.get("ws_ready"),
-            "candles": len(latest_candles),
-            "data_stale": is_data_stale(),
-            "execution_status": state.get("execution_status"),
-            "paused": state.get("execution_paused"),
-            "pending_orders": len(pending_orders),
-            "open_positions": len(open_positions),
-            "active_signals": get_active_signal_count(),
-            "ai_last_run": time.time() - state.get("last_ai_ts", 0),
-            "ai_calls": state.get("ai_call_count"),
-            "no_signal_count": state.get("no_signal_count", 0)
-        }
-        logger.info("\n" + "#"*60)
-        logger.info("[SYSTEM HEALTH]")
-        logger.info(json.dumps(snapshot, indent=2, default=str))
-        logger.info("#"*60 + "\n")
-    except Exception as e:
-        logger.error(f"[HEALTH ERROR] {e} [PIPELINE ENFORCEMENT]")
-
 def track_event(trade_id, stage):
     if trade_id in trades_map:
         if "timeline" not in trades_map[trade_id]:
@@ -14927,11 +14918,6 @@ def spawn_experimental_disagreement_replay(ctx, ai, edge_score, features, source
     )
 
 
-def _spawn_research_lane(ctx, ai, edge_score, features, source_lane: str, target_lane: str, trigger_reason: str):
-    """Legacy spawn — disabled; old pathway lanes are DATA_RETIRED."""
-    return
-
-
 def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
     """Shadow-only horizon study — no orders submitted."""
     if ai.get("decision") != "APPROVE":
@@ -15697,47 +15683,10 @@ def maybe_tick_sr_micro_tile_v2_static_bracket():
     Paper-only until its reconciled filled-sample gate is met.
     """
 
-    return  # SR_MICRO_TILE_V2_STATIC retired 2026-07-30
-def maybe_tick_a160_v2_research():
-    """Phase-shifted V2 AI tick — independent of AI_SCAN / CONTINUOUS order path.
-
-    Schedule: last_ai_call_ts + 90s, then every ~180s on v2_last_ai_call_ts.
-    Never concurrent with AI_SCAN. Never updates last_ai_call_ts.
-    On accept: paper orders when tile ON; shadow Scenario C replay when tile OFF.
-    """
-
-    return  # A160 retired
-def spawn_research_lanes_from_continuous(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Legacy alias — CONTINUOUS spawn handled by spawn_continuous_lane_from_ai_scan."""
-    spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane)
-
-
-def spawn_profit_gates_lane(ctx, ai, edge_score, event_obj, features, source_lane: str):
-    """Independent PROFIT_GATES lane — hard post-AI filters on spawn (never blocks other lanes)."""
-    if not profit_gates_lane_enabled() or not is_research_data_collection():
+    lane = RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC
+    if is_research_lane_retired(lane):
         return
-    if source_lane == RESEARCH_LANE_PROFIT_GATES:
-        return
-    if ai.get("decision") != "APPROVE":
-        return
-    pg_ctx = copy.deepcopy(ctx)
-    pg_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_PROFIT_GATES)
-    logger.info(
-        f"[PROFIT_GATES LANE] spawn execution from {source_lane} trade_id={pg_ctx['trade_id']} "
-        f"[PIPELINE ENFORCEMENT]"
-    )
-    process_signal({
-        "event_trigger": True,
-        "research_lane": RESEARCH_LANE_PROFIT_GATES,
-        "edge_trigger_reason": f"PROFIT_GATES_FROM_{source_lane}",
-        "edge_score": round(float(edge_score), 1),
-        "price": nz(state.get("price")),
-        "timestamp": utc_iso(),
-        "features": features or {},
-        "skip_ai": True,
-        "pre_ai": copy.deepcopy(ai),
-        "pre_ctx": pg_ctx,
-    })
+    return  # Fail closed if retirement metadata is ever inconsistent.
 
 
 def evaluate_signal_with_ai(
@@ -16971,10 +16920,6 @@ def hash_context(ctx):
         ))
     except:
         return hash(str(ctx))
-
-def should_call_ai(ctx, event_trigger):
-    """Legacy alias — use should_invoke_ai for edge-gated AI."""
-    return should_invoke_ai(ctx, state.get("last_edge", 0), event_trigger)
 
 def log_setup(signal):
     try:
@@ -18599,14 +18544,25 @@ def _account_registered_order_submission(signal: dict, ai: dict = None) -> bool:
     if not tid:
         return False
     with trade_lock:
-        exists = any(
-            isinstance(order, dict)
+        submitted_order = next((
+            order for order in pending_orders
+            if isinstance(order, dict)
             and str(order.get("trade_id") or "") == tid
             and str(order.get("status") or "").upper() == "PENDING"
-            for order in pending_orders
-        )
-        if not exists or signal.get("_order_submission_accounted"):
+        ), None)
+        if submitted_order is None or signal.get("_order_submission_accounted"):
             return False
+        # Preserve exact proof on the canonical signal before later cleanup
+        # removes the pending-order object and stamps the signal EXPIRED.
+        # Entry mode (for example AI_DIRECT_LIMIT) is a strategy label, not an
+        # order type, so expiry must not try to reconstruct submission from it.
+        signal["submitted_order_trade_id"] = tid
+        signal["submitted_order_entry_type"] = submitted_order.get("entry_type")
+        signal["submitted_order_created_ts"] = submitted_order.get("created_ts")
+        signal["submitted_order_event_seq"] = int(
+            submitted_order.get("limit_chase_count") or 0
+        )
+        signal["submitted_order_limit_price"] = submitted_order.get("limit_price")
         signal["_order_submission_accounted"] = True
     lane = signal.get("research_lane")
     edge = signal.get("edge_score_at_entry")
@@ -19041,6 +18997,8 @@ def _commit_relay_limit_chase(
         if signal:
             signal["limit_price"] = new_limit
             signal["limit_chase_count"] = chase_count
+            signal["submitted_order_event_seq"] = chase_count
+            signal["submitted_order_limit_price"] = new_limit
             signal["last_chase_ts"] = now
             if tier:
                 signal["urgent_chase_tier"] = tier
@@ -19321,6 +19279,8 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         if signal:
             signal["limit_price"] = new_limit
             signal["limit_chase_count"] = chase_count
+            signal["submitted_order_event_seq"] = chase_count
+            signal["submitted_order_limit_price"] = new_limit
             signal["last_chase_ts"] = now
             signal["marketable_fallback"] = True
             signal["relay_settle_not_before_ts"] = order["relay_settle_not_before_ts"]
@@ -22115,9 +22075,9 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
     """Only a real, previously-resting source limit may drive copy cancellation."""
     status = str(source.get("status") or "").upper()
     # TTL callers historically stamp the shared signal object EXPIRED before
-    # handing it to _record_expired_order(). Preserve proof that it really
-    # rested using durable placement/cancel markers, while virtual candidates
-    # without those markers remain unable to publish ORDER_EXPIRED.
+    # handing it to _record_expired_order().  Preserve proof that it really
+    # rested using the durable order markers instead of suppressing the signed
+    # ORDER_EXPIRED wake merely because terminal state was stamped first.
     terminalized_resting_order = bool(
         (
             status == "EXPIRED"
@@ -22129,6 +22089,19 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
             and source.get("cancel_confirmed") is True
         )
     )
+    durable_submitted_order = bool(
+        source.get("_order_submission_accounted") is True
+        and str(source.get("submitted_order_trade_id") or "")
+            == str(source.get("trade_id") or "")
+        and str(source.get("submitted_order_entry_type") or "").upper()
+            in ("LIMIT", "SIM_LIMIT")
+        and source.get("submitted_order_created_ts")
+        and isinstance(source.get("submitted_order_event_seq"), int)
+        and int(source.get("submitted_order_event_seq"))
+            == int(source.get("event_seq") or source.get("limit_chase_count") or 0)
+        and isinstance(source.get("submitted_order_limit_price"), (int, float))
+        and abs(float(source.get("submitted_order_limit_price")) - float(limit_price or 0)) < 0.005
+    )
     return bool(
         str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
         # Continuous creates real paper resting orders with entry_type LIMIT,
@@ -22136,8 +22109,11 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
         # already-published, executable source order; excluding LIMIT made a
         # genuine Continuous TTL fall back to the slow relay poll instead of
         # emitting the signed, exact-generation ORDER_EXPIRED wake.
-        and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
-        and (status == "PENDING" or terminalized_resting_order)
+        and (
+            str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
+            or durable_submitted_order
+        )
+        and (status == "PENDING" or terminalized_resting_order or durable_submitted_order)
         and source.get("created_ts")
         and isinstance(limit_price, (int, float))
         and limit_price > 0
@@ -24082,12 +24058,14 @@ def _reset_runtime_log_handlers():
         except Exception as e:
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
-def reset_all_research_files() -> tuple:
-    deleted, errors = _delete_paths(
-        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
-        + _fresh_collection_derived_history_paths()
+def reset_all_research_files() -> dict:
+    from research.epoch_quarantine import quarantine_epoch
+    result = quarantine_epoch(
+        os.getcwd(),
+        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True),
+        cutoff=utc_iso(),
     )
-    return deleted, errors
+    return result
 
 def maintain_fresh_collection_files():
     """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
@@ -24124,9 +24102,9 @@ def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
 def _seal_past_analysis_with_fallback(reason: str) -> dict:
     """Seal a past-analysis record, degrading gracefully on Fly.
 
-    Fly's .dockerignore excludes the ``research/`` Python package from
-    the container image (only ``research_genome/`` is shipped). When the
-    wipe endpoint runs there, ``from research.past_analysis import
+    Fly's whitelist excludes the optional ``research.past_analysis`` module
+    from the container image while retaining the small runtime-safe research
+    helpers. When the wipe endpoint runs there, ``from research.past_analysis import
     seal_past_analysis`` raises ImportError and the safety guard turns
     that into HTTP 409 -- blocking every wipe.
 
@@ -24139,7 +24117,7 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
     try:
         from research.past_analysis import seal_past_analysis
     except ImportError:
-        # Fly image excludes research/ -- build a minimal archive dict
+        # Fly image excludes the full past-analysis module -- build a minimal archive dict
         # inline using only stdlib + in-memory bot state.
         ts = utc_iso()
         with trade_lock:
@@ -24194,6 +24172,41 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
+    # A research epoch boundary must never become a money-path mutation. Read
+    # the authoritative in-memory books before archiving or clearing anything,
+    # and require the operator to have paused and disarmed the source first.
+    # The reset preserves that pause; it is not an implicit resume command.
+    with state_lock:
+        pre_reset_paused = bool(state.get("execution_paused", False))
+        pre_reset_reason = str(state.get("execution_reason") or "")
+        pre_reset_pause_priority = int(state.get("_pause_priority") or 0)
+        pre_reset_live_armed = bool(state.get("live_armed", False))
+    with trade_lock:
+        pending_count = len(pending_orders)
+        open_count = len(open_positions)
+    if pre_reset_live_armed or not pre_reset_paused or pending_count or open_count:
+        blockers = []
+        if pre_reset_live_armed:
+            blockers.append("LIVE_ARMED")
+        if not pre_reset_paused:
+            blockers.append("EXECUTION_NOT_PAUSED")
+        if pending_count:
+            blockers.append(f"PENDING_ORDERS:{pending_count}")
+        if open_count:
+            blockers.append(f"OPEN_POSITIONS:{open_count}")
+        logger.error(
+            f"[FRESH COLLECTION] ABORT WIPE — unsafe boundary ({','.join(blockers)}) "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return {
+            "ok": False,
+            "wipe_aborted": True,
+            "error": "fresh_collection_requires_paused_disarmed_flat_boundary",
+            "blockers": blockers,
+            "pending_order_count": pending_count,
+            "open_position_count": open_count,
+            "summary": "Pause and disarm execution, then reach a flat order/position boundary",
+        }
     try:
         # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
         past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
@@ -24235,7 +24248,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         trades_map.clear()
         trades.clear()
         recent_trades.clear()
-    deleted, errors = reset_all_research_files()
+    quarantine = reset_all_research_files()
+    moved, errors = quarantine["moved"], quarantine["errors"]
     # Fresh Collection is the operator boundary for every active holdout.  The
     # file wipe alone is insufficient because Tile 2 counters also live in
     # memory and would otherwise be written back with pre-reset/test values.
@@ -24255,9 +24269,11 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         "past_analysis_id": past_analysis_id,
         "deleted_files": 0,
         "deleted_bytes": 0,
-        "raw_payloads_retained": False,
+        "raw_payloads_retained": True,
+        "quarantined_files": len(moved),
+        "quarantine_path": quarantine["path"],
     }
-    summary = f"deleted {len(deleted)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    summary = f"quarantined {len(moved)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
     for err in errors:
         logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
     with state_lock:
@@ -24267,9 +24283,9 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             # Bump the local-sync-loop signal so the mirror is wiped on the
             # next manifest poll. /api/wipe_fly_only passes False here.
             state["fresh_collection_signal_ts"] = time.time()
-        state["execution_paused"] = False
-        state["execution_reason"] = ""
-        state["_pause_priority"] = 0
+        state["execution_paused"] = pre_reset_paused
+        state["execution_reason"] = pre_reset_reason
+        state["_pause_priority"] = pre_reset_pause_priority
     save_persistent_config()
     logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
     with state_lock:
@@ -24280,7 +24296,10 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             f"— local mirror will be wiped on next manifest poll [PIPELINE ENFORCEMENT]"
         )
     return {
-        "deleted": deleted,
+        "deleted": [],
+        "quarantined": moved,
+        "quarantine_path": quarantine["path"],
+        "epoch_cutoff_utc": quarantine["cutoff_utc"],
         "errors": errors,
         "summary": summary,
         "archive_path": archive_path,
@@ -24291,7 +24310,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         "ok": True,
         "wipe_aborted": False,
         "fresh_collection_signal_ts": signal_ts,
-        "local_mirror_will_wipe": bool(send_local_signal),
+        "local_mirror_will_wipe": False,
+        "local_mirror_will_quarantine": bool(send_local_signal),
     }
 
 replay_buffers: Dict[str, Dict] = {}
@@ -28560,49 +28580,6 @@ DASHBOARD_JS = """(function () {
         } else {
           safeText('laneOpportunity', 'collecting…');
         }
-        // Section 2: Tile 2 (SR_MICRO_TILE_V2_STATIC) funnel metrics.
-        // Renders the full Section 2 metric set on the dashboard tile footer.
-        const t2 = d.tile2_counters || {};
-        if (t2 && t2.lane) {
-          const t2Txt = [
-            'bracket evals=' + (t2.bracket_evals || 0),
-            'eligible L/S=' + (t2.eligible_long || 0) + '/' + (t2.eligible_short || 0),
-            'paper limits=' + (t2.paper_limits || 0),
-            'filled closes=' + (t2.filled_closes || 0),
-            'TTL exp=' + (t2.ttl_expiries || 0),
-            'cancels=' + (t2.cancellations || 0),
-            'pending=' + (t2.pending_orders || 0),
-            'restored=' + (t2.restored_pending_orders || 0),
-            'orphaned=' + (t2.orphaned_orders || 0),
-            'fill%=' + ((t2.fill_rate != null) ? (t2.fill_rate * 100).toFixed(1) : '0.0'),
-            'paper P&L=$' + (t2.paper_pnl_usd || 0).toFixed(2),
-            'EV/elig=$' + (t2.ev_per_eligible_opportunity || 0).toFixed(3),
-            'EV/fill=$' + (t2.ev_per_filled_close || 0).toFixed(3),
-            'episodes=' + (t2.independent_episodes || 0),
-            'cohort=' + (t2.cohort_label || '-')
-          ].join(' · ');
-          safeText('tile2Metrics', t2Txt);
-          const t2Eval = t2.last_evaluation || {};
-          const t2Details = t2Eval.details || {};
-          const t2Reason = t2Eval.block_reason || 'NO_EVALUATION';
-          const t2Adx = Number(t2Details.adx_normalized);
-          const t2Vol = Number(t2Details.volatility_percentile);
-          const t2Cap = Number((d.tile2_policy || {}).adx_cap || 40);
-          const t2State = t2Details.armed && !t2Details.in_midpoint_zone ? 'ELIGIBLE' : 'WAITING';
-          const t2When = t2Eval.observed_ts ? formatMelbourneDateTime(t2Eval.observed_ts) : '-';
-          const t2AdxText = Number.isFinite(t2Adx)
-            ? ('ADX ' + t2Adx.toFixed(2) + (t2Adx > t2Cap ? ' > ' : ' ≤ ') + t2Cap)
-            : 'ADX unavailable';
-          const t2VolText = Number.isFinite(t2Vol) ? ('volatility ' + t2Vol.toFixed(1)) : 'volatility unavailable';
-          safeText(
-            'tile2DecisionSummary',
-            'Tile 2 deterministic gate · ' + t2State + ' · ' + t2Reason +
-              ' · ' + t2AdxText + ' · ' + t2VolText + ' · checked ' + t2When
-          );
-        } else {
-          safeText('tile2Metrics', 'Tile 2 counters not yet collected');
-          safeText('tile2DecisionSummary', 'Tile 2 deterministic gate · collecting…');
-        }
         safeText('lastAICall', dbg.last_ai_call || '-');
         safeText('aiScore', dbg.last_ai_score || '-');
         safeText('signalCooldown', dbg.signal_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_signal + 's)' : 'READY');
@@ -32777,27 +32754,11 @@ def toggle_invert_signal():
 
 @app.route('/api/toggle_profit_gates', methods=['POST'])
 def toggle_profit_gates():
-    with state_lock:
-        enabled = not bool(
-            state.get(
-                "profit_gates_lane_enabled",
-                state.get("profit_gates_enforced", PROFIT_GATES_LANE_DEFAULT_ENABLED),
-            )
-        )
-        state["profit_gates_lane_enabled"] = enabled
-        state["profit_gates_enforced"] = enabled
-        save_persistent_config()
-        mode = "PROFIT_GATES_SPAWN" if enabled else "INDEPENDENT_LANES"
-        logger.info(
-            f"[PROFIT_GATES] spawn lane toggled {'ON' if enabled else 'OFF'} "
-            f"mode={mode} [PIPELINE ENFORCEMENT]"
-        )
     return jsonify({
-        "profit_gates_lane_enabled": state["profit_gates_lane_enabled"],
-        "profit_gates_enforced": state["profit_gates_enforced"],
-        "research_lanes_independent": research_lanes_independent(),
-        "research_execution_mode": mode,
-    })
+        "status": "RETIRED_RESEARCH_CONTROL",
+        "mutable": False,
+        "message": "Profit Gates is retired historical research and cannot be enabled.",
+    }), 410
 
 # Section 8/9: explicit operator action that starts the fresh independent
 # Tile 2 holdout cohort. Zeros out the funnel counters (NOT automatic on
@@ -32809,23 +32770,24 @@ def api_tile2_reset_counters():
             "status": "auth_required",
             "message": "Tile 2 counter reset is admin-only — present X-Bot-Admin-Token",
         }), 401
-    metrics = reset_tile2_counters_for_fresh_holdout()
-    logger.warning(
-        f"[ADMIN] Tile 2 counters RESET via /api/tile2/reset_counters "
-        f"cohort={TILE2_POLICY_ID} [PIPELINE ENFORCEMENT]"
-    )
     return jsonify({
-        "status": "reset",
+        "status": "RETIRED_RESEARCH_CONTROL",
+        "mutable": False,
         "policy_id": TILE2_POLICY_ID,
         "exit_profile_id": TILE2_EXIT_PROFILE_ID,
-        "metrics": metrics,
-    })
+        "message": "Tile 2 is retired historical research; its evidence cannot be reset.",
+    }), 410
 
 
 @app.route('/api/tile2/metrics', methods=['GET'])
 def api_tile2_metrics():
-    """Section 2: public read-only endpoint for Tile 2 funnel metrics."""
-    return jsonify(tile2_dashboard_metrics())
+    """Read-only historical evidence for the retired Tile 2 cohort."""
+    metrics = tile2_dashboard_metrics()
+    metrics.update({
+        "research_surface_status": "RETIRED_HISTORICAL",
+        "mutable": False,
+    })
+    return jsonify(metrics)
 
 
 @app.route('/api/toggle_duplicate_limit_block', methods=['POST'])
@@ -35811,6 +35773,20 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
         return
     lev_default = _replay_leverage_default()
     pullback_default = _buf_float(state.get("pullback_threshold"), 0.001)
+    fee_model = meta.get("fee_model") or _canonical_counterfactual_profile(
+        "execution_cost_profile_v1", venue=BOT_EXCHANGE,
+        configured_profile=EXCHANGE_FEE_PROFILE,
+        maker_fee_rate=MAKER_FEE_PCT, taker_fee_rate=TAKER_FEE_PCT,
+        funding_simulation_enabled=bool(FUNDING_SIMULATION_ENABLED),
+    )
+    execution_profile = meta.get("execution_profile") or _canonical_counterfactual_profile(
+        "replay_execution_profile_v1", venue=BOT_EXCHANGE,
+        instrument=BITFINEX_WS_SYMBOL, lane=str(meta.get("lane") or "executed"),
+        entry_order_type="LIMIT", executable_marks="DIRECTIONAL_BBO",
+        fill_at_limit=bool(meta.get("fill_at_limit")),
+        chase_mode=meta.get("chase_mode") or "NONE",
+        protective_exit="REDUCE_ONLY_STOP",
+    )
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
@@ -35841,6 +35817,8 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "collection_mode": meta.get("collection_mode"),
             "is_counterfactual": bool(meta.get("is_counterfactual")),
             "policy_version": meta.get("policy_version"),
+            "fee_model": fee_model,
+            "execution_profile": execution_profile,
             "size_mult": meta.get("size_mult"),
             "session_bucket": meta.get("session_bucket"),
             "entry_features": copy.deepcopy(meta.get("entry_features") or {}),
@@ -36581,134 +36559,27 @@ _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC = {
     "60m": 3600,
     "120m": 7200,
     "1h": 3600,
-    "4h": 14400,
 }
 
 
+# Compatibility wrappers keep the established bot API while the implementation
+# lives in an import-side-effect-free research module.
 def _counterfactual_policy_comparability_key(policy_snapshot: dict, buf: dict, snapshot: dict):
-    """Hash only a complete, canonical policy/execution-cost identity."""
-    exchange_evidence = (
-        snapshot.get("bitfinex_evidence")
-        if isinstance(snapshot.get("bitfinex_evidence"), dict)
-        else {}
-    )
-    fee_model = (
-        snapshot.get("fee_model")
-        or (snapshot.get("config") or {}).get("fee_model")
-        or exchange_evidence.get("fee_model")
-    )
-    execution_profile = (
-        snapshot.get("execution_profile")
-        or (snapshot.get("config") or {}).get("execution_profile")
-        or exchange_evidence.get("execution_profile")
-    )
-    leverage = buf.get("leverage")
-    if (
-        any(policy_snapshot.get(key) is None for key in _COUNTERFACTUAL_REQUIRED_POLICY_KEYS)
-        or leverage is None
-        or not fee_model
-        or not execution_profile
-    ):
-        return None
-    comparable = {
-        "schema": "policy_comparability_v1",
-        "policy_version": policy_snapshot.get("policy_version"),
-        "hard_stop_margin_pct": policy_snapshot.get("hard_stop_margin_pct"),
-        "thesis_fast_exit_unreal_pct": policy_snapshot.get("thesis_fast_exit_unreal_pct"),
-        "thesis_mfe_protect_pct": policy_snapshot.get("thesis_mfe_protect_pct"),
-        "trail_ladder": policy_snapshot.get("trail_ladder"),
-        "exit_profile_id": policy_snapshot.get("exit_profile_id"),
-        "leverage": leverage,
-        "fee_model": fee_model,
-        "execution_profile": execution_profile,
-    }
-    digest = hashlib.sha256(
-        json.dumps(comparable, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return f"policy_comparability_v1:{digest}"
+    return _pure_policy_comparability_key(policy_snapshot, buf, snapshot)
 
 
 def _counterfactual_post_exit_horizons(replay: dict) -> dict:
-    """Materialize truthful post-exit horizons; never substitute the last tick."""
-    exit_t = _buf_float(replay.get("exit_t_rel"), -1)
-    ticks = sorted(
-        (row for row in (replay.get("ticks") or []) if isinstance(row, dict)),
-        key=lambda row: _buf_float(row.get("t"), 0),
+    return _pure_counterfactual_horizons(
+        replay, post_exit=True,
+        required_horizons=_COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC,
     )
-    values = {}
-    executable_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
-    for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
-        target_t = exit_t + seconds
-        observed = next(
-            (
-                row for row in ticks
-                if str(row.get("phase") or "") == "post_exit"
-                and _buf_float(row.get("t"), -1) >= target_t
-                and _buf_float(row.get(executable_key), 0) > 0
-            ),
-            None,
-        )
-        values[label] = {
-            "required_sec": seconds,
-            "observed": observed is not None,
-            "tick_t_rel": observed.get("t") if observed else None,
-            "price": observed.get(executable_key) if observed else None,
-            "unreal_pct": observed.get("unreal_pct") if observed else None,
-            "best_bid": observed.get("best_bid") if observed else None,
-            "best_ask": observed.get("best_ask") if observed else None,
-            "observed_ts": observed.get("observed_ts") if observed else None,
-        }
-    complete = bool(
-        replay.get("post_exit_complete") is True
-        and exit_t >= 0
-        and all(row["observed"] for row in values.values())
-    )
-    return {
-        "schema": "post_exit_horizons_v1",
-        "required": values,
-        "complete": complete,
-    }
 
 
 def _counterfactual_entry_horizons(replay: dict) -> dict:
-    """Materialize exact entry-relative horizons; absent future ticks stay UNKNOWN."""
-    fill_t = replay.get("virtual_fill_t")
-    has_fill_origin = fill_t is not None and _buf_float(fill_t, -1) >= 0
-    origin_t = _buf_float(fill_t, 0) if has_fill_origin else None
-    ticks = sorted(
-        (row for row in (replay.get("ticks") or []) if isinstance(row, dict)),
-        key=lambda row: _buf_float(row.get("t"), 0),
+    return _pure_counterfactual_horizons(
+        replay, post_exit=False,
+        required_horizons=_COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC,
     )
-    values = {}
-    executable_key = "best_bid" if str(replay.get("direction") or "LONG").upper() == "LONG" else "best_ask"
-    for label, seconds in _COUNTERFACTUAL_REQUIRED_POST_EXIT_HORIZONS_SEC.items():
-        target_t = origin_t + seconds if origin_t is not None else None
-        observed = (
-            next(
-                (row for row in ticks
-                 if _buf_float(row.get("t"), -1) >= target_t
-                 and _buf_float(row.get(executable_key), 0) > 0),
-                None,
-            )
-            if target_t is not None
-            else None
-        )
-        values[label] = {
-            "required_sec": seconds,
-            "observed": observed is not None,
-            "tick_t_rel": observed.get("t") if observed else None,
-            "price": observed.get(executable_key) if observed else None,
-            "unreal_pct": observed.get("unreal_pct") if observed else None,
-            "best_bid": observed.get("best_bid") if observed else None,
-            "best_ask": observed.get("best_ask") if observed else None,
-            "observed_ts": observed.get("observed_ts") if observed else None,
-        }
-    return {
-        "schema": "entry_horizons_v1",
-        "origin_t_rel": origin_t,
-        "required": values,
-        "complete": bool(has_fill_origin and all(row["observed"] for row in values.values())),
-    }
 
 
 def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
@@ -36764,6 +36635,7 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "filled_quantity": first("filled_quantity", "filled_qty"),
         "protected_quantity": first("protected_quantity", "protected_qty"),
         "remaining_quantity": first("remaining_quantity", "remaining_qty"),
+        "cancelled_quantity": first("cancelled_quantity", "cancelled_qty", "unfilled_qty_cancelled"),
     }
     ack_history = rows("ack_history", "order_ack_history")
     stop_chain = rows("stop_chain", "stop_replacements", "protective_stops")
@@ -36800,18 +36672,50 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         and (row.get("ack_at") or row.get("placed_at") or row.get("timestamp"))
         for row in stop_chain
     )
+    canonical_source_snapshot = (
+        source_snapshot.get("source_snapshot_evidence")
+        if isinstance(source_snapshot, dict)
+        and isinstance(source_snapshot.get("source_snapshot_evidence"), dict)
+        else source_snapshot
+    )
     source_snapshot_fields_complete = bool(
         isinstance(source_snapshot, dict)
-        and (source_snapshot.get("sequence") is not None or source_snapshot.get("snapshot_sequence") is not None)
-        and (source_snapshot.get("captured_at") or source_snapshot.get("snapshot_time"))
-        and source_snapshot.get("fresh") is True
-        and source_snapshot.get("complete") is True
+        and (
+            (
+                str(source_snapshot.get("authority_kind") or "").upper() == "SIGNED_POSITION_CLOSED"
+                and source_snapshot.get("trade_id") and source_snapshot.get("event_id")
+                and source_snapshot.get("event_seq") is not None
+                and source_snapshot.get("source_event_at_ms") is not None
+                and source_snapshot.get("platform_received_at_ms") is not None
+                and source_snapshot.get("exit_price") is not None
+                and source_snapshot.get("exit_reason")
+            )
+            or (
+                isinstance(canonical_source_snapshot, dict)
+                and (canonical_source_snapshot.get("sequence") is not None
+                     or canonical_source_snapshot.get("snapshot_sequence") is not None)
+                and (canonical_source_snapshot.get("captured_at")
+                     or canonical_source_snapshot.get("snapshot_time"))
+                and (
+                    canonical_source_snapshot.get("complete") is True
+                    or (
+                        canonical_source_snapshot.get("positions_synced") is True
+                        and canonical_source_snapshot.get("orders_synced") is True
+                        and canonical_source_snapshot.get("trades_synced") is True
+                    )
+                )
+            )
+        )
     )
+    reconciliation_position_delta = reconciliation.get("position_delta")
+    if reconciliation_position_delta is None:
+        reconciliation_position_delta = reconciliation.get("exchange_vs_ledger_delta_sats")
     reconciliation_values_complete = bool(
         isinstance(reconciliation, dict)
         and reconciliation.get("complete") is True
-        and finite_number(reconciliation.get("position_delta"))
-        and abs(float(reconciliation.get("position_delta"))) <= 1e-12
+        and reconciliation.get("position_reconciled", True) is True
+        and finite_number(reconciliation_position_delta)
+        and abs(float(reconciliation_position_delta)) <= 1e-12
         and finite_number(reconciliation.get("order_delta"))
         and abs(float(reconciliation.get("order_delta"))) <= 1e-12
         and finite_number(reconciliation.get("orphan_order_count", 0))
@@ -36823,7 +36727,9 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "schema": "bitfinex_lifecycle_evidence_v1",
         "participant_id": first("participant_id"),
         "source_lifecycle_id": first("source_lifecycle_id", "lifecycle_id"),
+        "source_identity": first("source_identity") or {},
         "client_order_id": first("client_order_id", "cid"),
+        "client_order_ids": first("client_order_ids") or [],
         "fee_model": first("fee_model"),
         "execution_profile": first("execution_profile"),
         "bitfinex_order_ids": order_ids,
@@ -36831,10 +36737,14 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         "quantities": quantities,
         "fills": rows("fills", "partial_fills"),
         "reprices": rows("reprices", "reprice_history"),
+        "chase_history": rows("chase_history", "reprices", "reprice_history"),
+        "cluster_evidence": first("cluster_evidence", "correlated_cluster_evidence") or {},
         "ack_history": ack_history,
         "stop_chain": stop_chain,
         "exit_evidence": first("exit_evidence", "bitfinex_exit") or {},
-        "cost_evidence": first("cost_evidence", "bitfinex_cost_evidence") or {},
+        "terminal_authority": first("terminal_authority") or {},
+        "bbo_evidence": first("bbo_evidence") or {},
+        "cost_evidence": first("cost_evidence", "actual_costs", "bitfinex_cost_evidence") or {},
         "reconciliation": reconciliation,
         "source_snapshot_evidence": source_snapshot,
         "source_absence_observations": source_observations,
@@ -36861,6 +36771,13 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
         explicit.get("reconciliation_complete") is True
         and reconciliation_values_complete
     )
+    evidence["cost_evidence_complete"] = bool(
+        explicit.get("cost_evidence_complete") is True
+        and all(key in evidence["cost_evidence"] for key in (
+            "trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"
+        ))
+    )
+    evidence["actual_costs"] = copy.deepcopy(evidence["cost_evidence"])
     evidence["linkage_complete"] = bool(
         evidence["participant_id"]
         and evidence["client_order_id"]
@@ -37828,9 +37745,6 @@ def run_flask(httpd):
         logger.error(f"[FLASK] server error: {e}")
         raise SystemExit(1)
 
-def is_ai_active():
-    return state.get("ai_enabled", False) and bool(_deepseek_api_key())
-
 def ttl_monitor():
     global _last_fresh_maintain_ts, _last_lane_memory_check_ts
     logger.info("[TTL] Independent monitor started")
@@ -37915,9 +37829,6 @@ def system_health_check():
         logger.info("[HEALTH] OK")
     return healthy
 
-def auto_recovery_check():
-    system_health_check()
-
 def startup_hard_fix_ai_threshold():
     with state_lock:
         research = state.get("strategy_mode") == "RESEARCH"
@@ -37998,9 +37909,6 @@ def periodic_pipeline_loop():
         if event and event.get("event_trigger"):
             process_signal(event)
 
-def ai_loop():
-    pass
-
 def engine_loop():
     global last_engine_run
     try:
@@ -38069,19 +37977,6 @@ def tick_execution_engine():
             time.sleep(FAST_MONITOR_INTERVAL_SEC)
         except Exception as e:
             logger.error(f"[ENGINE ERROR] {e}")
-            time.sleep(2)
-
-def run_pipeline():
-    logger.info("[PIPELINE STAGE][RAW CONTEXT] - DISABLED IN DUAL LOOP MODE")
-    return
-
-def run_with_restart(target, name):
-    while not shutdown_event.is_set():
-        try:
-            target()
-        except Exception as e:
-            logger.error(f"[{name}] CRASH - restarting: {e}")
-            set_execution_paused("THREAD_CRASH")
             time.sleep(2)
 
 def print_console_dashboard():
@@ -38360,9 +38255,9 @@ def main():
     )
     if profit_gates_lane_enabled():
         logger.warning(
-            f"[PROFIT_GATES LANE] ON - spawn experiment with hard post-AI filters "
-            f"(edge>={get_edge_threshold()} AI>={get_ai_threshold()}%) on parent APPROVE "
-            f"[PIPELINE ENFORCEMENT]"
+            "[PROFIT_GATES LANE] RETIRED - legacy enabled flag is preserved for "
+            "historical decoding but has no spawn or mutation authority "
+            "[PIPELINE ENFORCEMENT]"
         )
     if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
         logger.warning(

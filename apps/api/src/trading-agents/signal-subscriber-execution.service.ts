@@ -3785,7 +3785,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           participant.cycle.agentId, userId, participant.cycle, participant.id, meta, creds,
           participant.cycle.intentEnvelope as SignalIntentEnvelope,
           { filledQty: trade.cumulativeQty, fillPrice: trade.cumulativeAveragePrice, source: 'ORDER_PARTIAL', orderResting },
-          'BITFINEX_AUTH_WS_TRADE', new Date(trade.mts).toISOString(), new Date(trade.receivedAtMs).toISOString(),
+          // A private Bitfinex fill is authoritative copy-side evidence, not a
+          // Showcase POSITION_OPENED event.  Never pass its exchange timestamp
+          // through the sourceFillAt slot or the immutable lifecycle will
+          // falsely claim BOTH_FILLED_RECONCILED when Showcase never filled.
+          'BITFINEX_AUTH_WS_TRADE', undefined, new Date(trade.receivedAtMs).toISOString(),
           [trade.tradeId],
         );
       } finally {
@@ -10025,10 +10029,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       exchange_fill_authoritative: true,
       exchange_fill_ids: exchangeFillIds.length ? exchangeFillIds : undefined,
       exchange_fill_costs: exchangeFillEvidence?.fees,
-      source_model_fill_state: sourceFillAt ? 'SOURCE_CONFIRMED' : 'INDEPENDENT_OR_PENDING',
+      source_model_fill_state: sourceFillAt ? 'SOURCE_CONFIRMED' : 'SOURCE_UNCONFIRMED',
       copy_reconciliation_state: sourceFillAt
         ? 'BOTH_FILLED_RECONCILED'
-        : 'COPY_FILLED_SOURCE_PENDING_OR_UNKNOWN',
+        : 'COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED',
       entry_completion: ttlRemainderSettlement
         ? 'PARTIAL_FILL_TTL_EXPIRED'
         : 'FILLED',

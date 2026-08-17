@@ -18544,14 +18544,25 @@ def _account_registered_order_submission(signal: dict, ai: dict = None) -> bool:
     if not tid:
         return False
     with trade_lock:
-        exists = any(
-            isinstance(order, dict)
+        submitted_order = next((
+            order for order in pending_orders
+            if isinstance(order, dict)
             and str(order.get("trade_id") or "") == tid
             and str(order.get("status") or "").upper() == "PENDING"
-            for order in pending_orders
-        )
-        if not exists or signal.get("_order_submission_accounted"):
+        ), None)
+        if submitted_order is None or signal.get("_order_submission_accounted"):
             return False
+        # Preserve exact proof on the canonical signal before later cleanup
+        # removes the pending-order object and stamps the signal EXPIRED.
+        # Entry mode (for example AI_DIRECT_LIMIT) is a strategy label, not an
+        # order type, so expiry must not try to reconstruct submission from it.
+        signal["submitted_order_trade_id"] = tid
+        signal["submitted_order_entry_type"] = submitted_order.get("entry_type")
+        signal["submitted_order_created_ts"] = submitted_order.get("created_ts")
+        signal["submitted_order_event_seq"] = int(
+            submitted_order.get("limit_chase_count") or 0
+        )
+        signal["submitted_order_limit_price"] = submitted_order.get("limit_price")
         signal["_order_submission_accounted"] = True
     lane = signal.get("research_lane")
     edge = signal.get("edge_score_at_entry")
@@ -18986,6 +18997,8 @@ def _commit_relay_limit_chase(
         if signal:
             signal["limit_price"] = new_limit
             signal["limit_chase_count"] = chase_count
+            signal["submitted_order_event_seq"] = chase_count
+            signal["submitted_order_limit_price"] = new_limit
             signal["last_chase_ts"] = now
             if tier:
                 signal["urgent_chase_tier"] = tier
@@ -19266,6 +19279,8 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         if signal:
             signal["limit_price"] = new_limit
             signal["limit_chase_count"] = chase_count
+            signal["submitted_order_event_seq"] = chase_count
+            signal["submitted_order_limit_price"] = new_limit
             signal["last_chase_ts"] = now
             signal["marketable_fallback"] = True
             signal["relay_settle_not_before_ts"] = order["relay_settle_not_before_ts"]
@@ -22074,6 +22089,19 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
             and source.get("cancel_confirmed") is True
         )
     )
+    durable_submitted_order = bool(
+        source.get("_order_submission_accounted") is True
+        and str(source.get("submitted_order_trade_id") or "")
+            == str(source.get("trade_id") or "")
+        and str(source.get("submitted_order_entry_type") or "").upper()
+            in ("LIMIT", "SIM_LIMIT")
+        and source.get("submitted_order_created_ts")
+        and isinstance(source.get("submitted_order_event_seq"), int)
+        and int(source.get("submitted_order_event_seq"))
+            == int(source.get("event_seq") or source.get("limit_chase_count") or 0)
+        and isinstance(source.get("submitted_order_limit_price"), (int, float))
+        and abs(float(source.get("submitted_order_limit_price")) - float(limit_price or 0)) < 0.005
+    )
     return bool(
         str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
         # Continuous creates real paper resting orders with entry_type LIMIT,
@@ -22081,8 +22109,11 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
         # already-published, executable source order; excluding LIMIT made a
         # genuine Continuous TTL fall back to the slow relay poll instead of
         # emitting the signed, exact-generation ORDER_EXPIRED wake.
-        and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
-        and (status == "PENDING" or terminalized_resting_order)
+        and (
+            str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
+            or durable_submitted_order
+        )
+        and (status == "PENDING" or terminalized_resting_order or durable_submitted_order)
         and source.get("created_ts")
         and isinstance(limit_price, (int, float))
         and limit_price > 0

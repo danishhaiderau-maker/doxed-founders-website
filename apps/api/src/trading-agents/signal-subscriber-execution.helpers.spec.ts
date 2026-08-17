@@ -7042,11 +7042,13 @@ test('authenticated Bitfinex trade event records exact owned fill without source
     service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01,limitPrice:64000});
     let context='';
     let fill:any;
+    let sourceFillAt: unknown = 'not-read';
     let receivedAt='';
-    service.recordCancelRaceFill=async(...args:unknown[])=>{fill=args[7];context=String(args[8]);receivedAt=String(args[10]);return true};
+    service.recordCancelRaceFill=async(...args:unknown[])=>{fill=args[7];context=String(args[8]);sourceFillAt=args[9];receivedAt=String(args[10]);return true};
     await service.handleBitfinexWsTrade('u',{apiKey:'k',apiSecret:'s'},{tradeId:1,orderId:42,symbol:'tBTCF0:USTF0',mts:1000,execAmount:-.004,execPrice:64000,receivedAtMs:1100,cumulativeQty:.004,cumulativeAveragePrice:64000});
     assert.equal(context,'BITFINEX_AUTH_WS_TRADE');
     assert.equal(fill.filledQty,.004);
+    assert.equal(sourceFillAt,undefined);
     assert.equal(receivedAt,new Date(1100).toISOString());
     assert.equal(service.priorityWsFillParticipants.size,0);
   } finally {
@@ -7179,7 +7181,7 @@ test('actual te socket event reaches exact participant fill funnel immediately',
   const cycle={id:'c',agentId:'a',tradeId:'cont-ws-real',status:SignalCycleStatus.PENDING_ENTRY,intentEnvelope:{risk:{stop_loss_margin_pct:10}}};
   service.prisma={signalCycleParticipant:{findMany:async()=>[{id:'p'}],findUnique:async()=>({id:'p',status:SignalCycleStatus.PENDING_ENTRY,cycle})},signalCycleEvent:{count:async()=>0},signalCycle:{update:async()=>({})}};
   service.loadExecutionMeta=async()=>({bitfinexOrderId:42,direction:'SHORT',qty:.01,limitPrice:64000});
-  const calls:string[]=[]; let filledResolve!:()=>void; const filledDone=new Promise<void>(resolve=>{filledResolve=resolve});
+  const calls:string[]=[]; let filledPayload:any; let filledResolve!:()=>void; const filledDone=new Promise<void>(resolve=>{filledResolve=resolve});
   service.acquireFillPromotionClaim=async()=>({token:'ws-claim',stopClientOrderId:771});
   service.setFillPromotionPhase=async()=>true;
   let wsStopInput:any;
@@ -7193,12 +7195,15 @@ test('actual te socket event reaches exact participant fill funnel immediately',
   };
   service.cancelManagedOrderGone=async()=>{calls.push('entry-cancel');return{gone:true,attempts:1}};
   service.resolveExchangeTradesFillEvidence=async()=>null; service.healStuckPendingFill=async()=>{}; service.executeShowcaseMirrorClose=async()=>true;
-  service.cycles={recordHireExecutionEvent:async(_u:string,_a:string,_c:string,type:string)=>{calls.push(type);if(type==='FILLED')filledResolve()}};
+  service.cycles={recordHireExecutionEvent:async(_u:string,_a:string,_c:string,type:string,payload:any)=>{calls.push(type);if(type==='FILLED'){filledPayload=payload;filledResolve()}}};
   const stream=new BitfinexAuthTradeStream({apiKey:'socket-k',apiSecret:'socket-s'},trade=>service.handleBitfinexWsTrade('u',{apiKey:'socket-k',apiSecret:'socket-s'},trade),()=>socket as any);
   stream.start(); socket.emit('open',{}); socket.emit('message',{data:JSON.stringify({event:'auth',status:'OK'})});
   socket.emit('message',{data:JSON.stringify([0,'te',[7,'tBTCF0:USTF0',1000,42,-.01,64000]])});
   await filledDone;
   assert.equal(calls[0],'stop-submit'); assert.equal(calls.includes('entry-cancel'),false); stream.stop();
+  assert.equal(filledPayload.source_fill_at, undefined);
+  assert.equal(filledPayload.source_model_fill_state, 'SOURCE_UNCONFIRMED');
+  assert.equal(filledPayload.copy_reconciliation_state, 'COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED');
 });
 
 test('overlapping stream sync serializes rotation and installs only newest fingerprint', async () => {

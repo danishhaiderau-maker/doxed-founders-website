@@ -1,9 +1,9 @@
 {
   "engine_version": "v15-typeb-opportunity-v2",
-  "combo_version": "2026-08-16",
+  "combo_version": "2026-08-17",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "cdf39c04cc95",
+  "signal_hash": "577582b9e600",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-16T07:21:10.460Z"
+  "updated_at": "2026-08-17T02:22:21.596Z"
 }

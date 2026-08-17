@@ -77,6 +77,36 @@ class OrderExpiryRelayTests(unittest.TestCase):
             64000,
         ))
 
+    def test_continuous_signal_uses_exact_preserved_submission_generation(self):
+        predicate = load_predicate()
+        source = {
+            "trade_id": "cont-b357227a8961",
+            "entry_mode": "AI_DIRECT_LIMIT",
+            "created_ts": 123.0,
+            "status": "EXPIRED",
+            "_order_submission_accounted": True,
+            "submitted_order_trade_id": "cont-b357227a8961",
+            "submitted_order_entry_type": "SIM_LIMIT",
+            "submitted_order_created_ts": 130.0,
+            "submitted_order_event_seq": 2,
+            "submitted_order_limit_price": 63259.82,
+            "limit_chase_count": 2,
+        }
+        self.assertTrue(predicate(source, "SIGNAL_TTL_EXPIRED", 63259.82))
+        self.assertFalse(predicate({**source, "limit_chase_count": 3}, "SIGNAL_TTL_EXPIRED", 63259.82))
+        self.assertFalse(predicate({**source, "submitted_order_limit_price": 63260.82}, "SIGNAL_TTL_EXPIRED", 63259.82))
+
+    def test_virtual_signal_cannot_forge_submission_with_partial_markers(self):
+        predicate = load_predicate()
+        self.assertFalse(predicate({
+            "trade_id": "cont-virtual",
+            "entry_mode": "AI_DIRECT_LIMIT",
+            "created_ts": 123.0,
+            "status": "EXPIRED",
+            "_order_submission_accounted": True,
+            "submitted_order_trade_id": "cont-virtual",
+        }, "SIGNAL_TTL_EXPIRED", 64000))
+
     def test_terminal_pre_order_signal_cannot_emit(self):
         predicate = load_predicate()
         self.assertFalse(predicate(
