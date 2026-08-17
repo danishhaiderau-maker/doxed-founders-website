@@ -48,6 +48,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import os
 import json
+import copy
 import glob
 import shutil
 import sys
@@ -1882,6 +1883,41 @@ def _signal_replay_paths():
     return [str(path) for _, path in sorted(rotated)] + [str(active)]
 
 
+def _merge_replay_revision(existing, candidate):
+    """Keep the richest immutable path while accepting stronger terminal facts.
+
+    Buffer finalization can append a compact row for the same trade after the
+    full tick row.  Last-row-wins discarded the full path whenever that compact
+    row had ``ticks=[]``.  Never manufacture completion: only explicit true
+    producer assertions are promoted, while numeric coverage uses maxima.
+    """
+    if not isinstance(existing, dict):
+        return candidate
+    if not isinstance(candidate, dict):
+        return existing
+    existing_ticks = existing.get("ticks") if isinstance(existing.get("ticks"), list) else []
+    candidate_ticks = candidate.get("ticks") if isinstance(candidate.get("ticks"), list) else []
+    richer, other = (candidate, existing) if len(candidate_ticks) > len(existing_ticks) else (existing, candidate)
+    merged = copy.deepcopy(richer)
+    for key in ("replay_complete", "post_exit_complete"):
+        if other.get(key) is True:
+            merged[key] = True
+    for key in ("post_block_tick_count", "post_exit_tick_count", "post_exit_sec"):
+        values = []
+        for row in (existing, candidate):
+            try:
+                values.append(float(row.get(key)))
+            except (TypeError, ValueError):
+                pass
+        if values:
+            best = max(values)
+            merged[key] = int(best) if key.endswith("tick_count") else best
+    for key in ("terminal_provenance", "exit_reason", "replay_completion_reason", "exit_t_rel"):
+        if merged.get(key) in (None, "", [], {}) and other.get(key) not in (None, "", [], {}):
+            merged[key] = copy.deepcopy(other.get(key))
+    return merged
+
+
 def _load_jsonl_replays(use_cache=True):
     global _replay_cache
     if use_cache and _replay_cache is not None:
@@ -1912,7 +1948,7 @@ def _load_jsonl_replays(use_cache=True):
                         continue
                     tid = row.get("trade_id")
                     if tid:
-                        replays[tid] = row
+                        replays[tid] = _merge_replay_revision(replays.get(tid), row)
         except OSError as exc:
             print(f"⚠️ signal_replay file read error path={path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     if malformed:
