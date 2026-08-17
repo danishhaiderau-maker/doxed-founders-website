@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { PrismaClient } from '@prisma/client';
 
+// Must match CONSERVATIVE_BTC_LIVE_RELAY_POLICY in
+// packages/utils/src/relay-execution-policy.ts. The guarded operator path is
+// equivalent to the authenticated Start action and must persist the same
+// consent stamp; otherwise the executor stays fail-closed in dry-run mode.
+const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'continuous_only_v5';
+
 const instanceId = String(process.env.RELAY_INSTANCE_ID ?? '').trim();
 const expectedRevision = String(process.env.EXPECTED_EXECUTOR_REVISION ?? '').trim();
 if (process.env.CONFIRM_RELAY_REARM !== 'ARM_NEXT_FRESH_ONLY') {
@@ -73,6 +79,7 @@ try {
         positionMismatchAlert: null,
         positionMismatchAlertAcked: true,
         relayEntryPolicy: 'NEXT_FRESH_ONLY',
+        relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
         relayExecutorAtArm: executor,
       },
     },
@@ -82,6 +89,7 @@ try {
     instanceId,
     status: 'ACTIVE',
     relayEntryPolicy: 'NEXT_FRESH_ONLY',
+    relayPolicyVersion: CONSERVATIVE_BTC_LIVE_RELAY_POLICY,
     relayArmedAt: armedAt,
     executorRevision: expectedRevision.slice(0, 12),
     virtualExposure,
