@@ -162,6 +162,89 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
             result["exclusion_reasons"][BITFINEX_COPY_FIDELITY],
         )
 
+    def test_showcase_only_relay_paused_is_tagged_and_not_real_copy_opt(self):
+        result = classify_row({
+            "trade_id": "cont-e33a",
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "replay_complete": True,
+            "terminal_provenance": "THESIS_FAST_CUT",
+            "showcase_only_relay_paused": True,
+        })
+        self.assertIn(
+            "SHOWCASE_ONLY_RELAY_PAUSED",
+            result["exclusion_reasons"][BITFINEX_COPY_FIDELITY],
+        )
+        self.assertFalse(result["eligible"][REAL_COPY_PARAMETER_OPTIMISATION])
+
+    def test_copy_only_source_unconfirmed_does_not_drop_authenticated_scenario_c_pnl(self):
+        row = {
+            "trade_id": "cont-57bb",
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "policy_comparability_key": "v5:baseline",
+            "replay_complete": True,
+            "terminal_provenance": "EXCHANGE_OBSERVED_TERMINAL",
+            "actual_bitfinex_realized_pnl_usd": 0.79,
+            "required_post_exit_horizons_complete": True,
+            "required_entry_horizons_complete": True,
+            "copy_fill_observed": {
+                "classification": "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED",
+            },
+            "bitfinex_evidence": {
+                "linkage_complete": True,
+                "quantity_evidence_complete": True,
+                "order_ack_history_complete": True,
+                "stop_evidence_complete": True,
+                "source_snapshot_evidence_complete": True,
+                "reconciliation_complete": True,
+                "cost_evidence_complete": True,
+                "negative_events": [{"event": "MIRROR_DIFF"}],
+            },
+        }
+        result = classify_row(row)
+        self.assertIn(
+            "COPY_ONLY_SOURCE_UNCONFIRMED",
+            result["exclusion_reasons"][SHOWCASE_STRATEGY],
+        )
+        self.assertNotIn(
+            "COPY_ONLY_SOURCE_UNCONFIRMED",
+            result["exclusion_reasons"][REAL_COPY_PARAMETER_OPTIMISATION],
+        )
+        self.assertNotIn(
+            "MIRROR_DIFF",
+            result["exclusion_reasons"][REAL_COPY_PARAMETER_OPTIMISATION],
+        )
+        self.assertTrue(result["eligible"][REAL_COPY_PARAMETER_OPTIMISATION])
+        self.assertTrue(result["eligible"][BITFINEX_COPY_FIDELITY])
+
+    def test_stale_limit_evidence_is_tagged_on_fidelity_cohort(self):
+        result = classify_row({
+            "trade_id": "cont-stale-limit",
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "replay_complete": True,
+            "terminal_provenance": "SOURCE_UNCONFIRMED",
+            "source_order_market_evidence": {
+                "original_limit_price": 63486.52,
+                "current_limit_price": 63504.89,
+                "limit_generation": 1,
+                "latest_observation": {"limit_price": 63486.52, "limit_generation": 0},
+            },
+            "bitfinex_evidence": {
+                "linkage_complete": True,
+                "quantity_evidence_complete": True,
+                "order_ack_history_complete": True,
+                "stop_evidence_complete": True,
+                "source_snapshot_evidence_complete": True,
+                "reconciliation_complete": True,
+            },
+        })
+        self.assertIn(
+            "STALE_LIMIT_EVIDENCE",
+            result["exclusion_reasons"][BITFINEX_COPY_FIDELITY],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

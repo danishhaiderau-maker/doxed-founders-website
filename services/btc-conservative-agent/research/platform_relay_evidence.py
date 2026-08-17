@@ -764,10 +764,19 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
     return evidence
 
 
+def _attach_dual_execution_truth(row: dict) -> dict:
+    try:
+        from research.dual_execution_truth import split_execution_truth
+        row["dual_execution_truth"] = split_execution_truth(row)
+    except Exception:
+        pass
+    return row
+
+
 def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str, evidence_index=None) -> dict:
     joined = (evidence_index if evidence_index is not None else _platform_relay_evidence_index()).get(str(trade_id))
     if not joined:
-        return snapshot
+        return _attach_dual_execution_truth(snapshot)
     enriched = copy.deepcopy(snapshot)
     records = joined["records"]
     events = []
@@ -819,7 +828,7 @@ def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str, eviden
         exit_reason = (evidence.get("exit_evidence") or {}).get("exit_reason")
         if exit_reason:
             enriched["terminal_provenance"] = exit_reason
-    return enriched
+    return _attach_dual_execution_truth(enriched)
 
 
 def _offline_sim_jsonl_paths(active_path, max_rotations=128):

@@ -1092,3 +1092,89 @@ test('signed POSITION_CLOSED reuses a deterministic cycle whose tradeId was reli
   assert.equal(context.showcase_event, 'POSITION_CLOSED');
   assert.equal(context.showcase_exit_price, 65_284);
 });
+
+test('POSITION_CLOSED with no copy participant while relay is paused is acknowledged without a wake', async () => {
+  const secret = 'test-webhook-secret';
+  const createdEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycleParticipant: { findFirst: async () => null },
+    tradingAgentInstance: {
+      findFirst: async (args: { where?: { status?: string } }) => {
+        if (args.where?.status === 'ACTIVE') return null;
+        if (args.where?.status === 'PAUSED') return { id: 'cheetah-paused', userId: 'user-1' };
+        return null;
+      },
+    },
+    signalCycle: {
+      findUnique: async () => ({
+        id: 'cycle-e33a',
+        status: 'INTENT',
+        intentEnvelope: { action: 'ENTER', context: {} },
+      }),
+      findFirst: async () => ({ id: 'cycle-e33a' }),
+      create: async () => {
+        throw new Error('must not create a retrospective cycle participant path');
+      },
+      update: async () => ({}),
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async (args: { data: { eventType: string; payload: Record<string, unknown> } }) => {
+        createdEvents.push({ eventType: args.data.eventType, payload: args.data.payload });
+        return {};
+      },
+    },
+  };
+  const trace: string[] = [];
+  const execution = {
+    requestExecutorWake: async () => {
+      trace.push('wake');
+    },
+    requestExecutorPreWake: () => {
+      trace.push('prewake');
+    },
+  };
+  const cycles = {
+    wakeFromShowcase: async () => {
+      trace.push('reconcile');
+      return false;
+    },
+  };
+  const service = createService('dashboard-active', secret, { prisma, execution, cycles, trace });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_CLOSED' as const,
+    trade_id: 'cont-e33a384d01e6',
+    research_lane: 'CONTINUOUS',
+    direction: 'LONG',
+    exit_price: 63_500,
+    exit_reason: 'THESIS_FAST_CUT',
+    event_id: 'close-cont-e33a384d01e6-1',
+    event_seq: 1,
+    ts: new Date().toISOString(),
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  }) as Record<string, unknown>;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.accepted, true);
+  assert.equal(result.action, 'NO_COPY_PARTICIPANT');
+  assert.equal(result.reason, 'RELAY_WAS_PAUSED_AT_SOURCE_ENTRY');
+  assert.equal(result.exchange_mutation, false);
+  assert.equal(result.negative_evidence, 'SHOWCASE_ONLY_RELAY_PAUSED');
+  assert.equal(trace.includes('wake'), false);
+  assert.equal(trace.includes('prewake'), false);
+  assert.equal(trace.includes('reconcile'), false);
+  assert.equal(
+    createdEvents.some((event) => event.payload?.type === 'SHOWCASE_ONLY_RELAY_PAUSED'),
+    true,
+  );
+});

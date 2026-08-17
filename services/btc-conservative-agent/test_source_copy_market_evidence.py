@@ -198,3 +198,68 @@ def test_exchange_fill_ids_array_builds_copy_fill_observed_overlay():
     assert enriched["copy_fill_observed"]["classification"] == "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED"
     assert enriched["exchange_confirmed_shadow_overlay"]["excluded_from_showcase_strategy_stats"] is True
     assert enriched["exchange_confirmed_shadow_overlay"]["label"] == "EXCHANGE_CONFIRMED_SHADOW_POSITION"
+    truth = enriched["dual_execution_truth"]
+    assert truth["showcase_simulated"]["executed"] is False
+    assert truth["showcase_simulated"]["status"] == "EXPIRED"
+    assert truth["bitfinex_authenticated"]["authenticated"] is True
+    assert truth["bitfinex_authenticated"]["fill_ids"] == [1958363331]
+    assert truth["relationship"]["shadow_label"] == "EXCHANGE_CONFIRMED_SHADOW_POSITION"
+    assert truth["relationship"]["excluded_from_showcase_strategy_stats"] is True
+
+
+def test_copy_fill_overlay_is_idempotent_and_never_sets_showcase_filled():
+    index, _records = _relay_index({
+        "exchange_fill_ids": [1958363331],
+        "bitfinexOrderId": 242019286185,
+        "qty": 0.03147,
+        "fill_price": 63504,
+        "exchange_fill_received_at": "2026-08-17T04:18:14.885Z",
+        "copy_reconciliation_state": "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED",
+    })
+    source = {"trade_id": "cont-copy", "executed": False, "status": "EXPIRED"}
+    first = _snapshot_with_platform_relay_evidence(copy.deepcopy(source), "cont-copy", index)
+    second = _snapshot_with_platform_relay_evidence(copy.deepcopy(first), "cont-copy", index)
+    assert first["executed"] is False
+    assert second["executed"] is False
+    assert second["status"] == "EXPIRED"
+    assert first["copy_fill_observed"]["fill_ids"] == second["copy_fill_observed"]["fill_ids"] == [1958363331]
+
+
+def test_old_generation_cannot_mutate_chased_canonical_limit():
+    store = {}
+    order = {
+        "trade_id": "cont-57bb",
+        "side": "buy",
+        "limit_price": 63486.52,
+        "original_limit_price": 63486.52,
+        "qty": 0.03147,
+        "limit_chase_count": 0,
+        "status": "PENDING",
+    }
+    sync_canonical_pending_order(store, order, chase_acked=False, observed_ts=1.0)
+    order["limit_price"] = 63504.89
+    order["limit_chase_count"] = 1
+    sync_canonical_pending_order(store, order, chase_acked=True, observed_ts=2.0)
+    stale = dict(order, limit_price=63486.52, limit_chase_count=0)
+    sync_canonical_pending_order(store, stale, chase_acked=False, observed_ts=3.0)
+    assert store["cont-57bb"]["current_limit_price"] == 63504.89
+    assert store["cont-57bb"]["original_limit_price"] == 63486.52
+    assert store["cont-57bb"]["limit_generation"] == 1
+    _, observation = append_market_observation(
+        store, stale, market_price=63500, bid=63490, ask=63495,
+        venue_snapshot={"book_ts": 3.0},
+        gate_evidence={"reason": "INSUFFICIENT_EXECUTABLE_DEPTH"},
+        observed_ts=3.0,
+    )
+    assert observation["limit_price"] == 63504.89
+    assert observation["limit_generation"] == 1
+
+
+def test_incomplete_public_evidence_stays_unknown_without_fabricating_fill():
+    source = {"trade_id": "cont-unknown", "executed": False, "status": "PENDING"}
+    enriched = _snapshot_with_platform_relay_evidence(copy.deepcopy(source), "cont-unknown", {})
+    assert enriched["executed"] is False
+    assert enriched["status"] == "PENDING"
+    assert "copy_fill_observed" not in enriched or not enriched.get("copy_fill_observed")
+    assert enriched["dual_execution_truth"]["bitfinex_authenticated"]["authenticated"] is False
+    assert enriched["dual_execution_truth"]["showcase_simulated"]["executed"] is False
