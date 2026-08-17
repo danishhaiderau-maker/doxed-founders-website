@@ -24,6 +24,7 @@ research/*
 !research/immutable_archive.py
 !research/counterfactual_normalization.py
 !research/epoch_quarantine.py
+!research/shadow_outcome_reconstruction.py
 
 # 4. Re-include deploy + Python dependency manifests.
 !requirements.txt
