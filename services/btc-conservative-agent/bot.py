@@ -33608,6 +33608,14 @@ _DATA_SYNC_EXTENSIONS = frozenset({
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
 })
+_DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
+    "research_epoch_quarantine",
+    "research_archive",
+    "research_session_archives",
+    "archive-v2",
+    "object-store",
+    "object_store",
+})
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 
 
@@ -33674,6 +33682,9 @@ def _data_sync_path_allowed(path: Path) -> bool:
     except (OSError, ValueError):
         return False
     name_lower = resolved.name.lower()
+    volume_parts = {part.lower() for part in resolved.parts}
+    if volume_parts.intersection(_DATA_SYNC_EXCLUDED_DIR_NAMES):
+        return False
     if resolved.name in _DATA_SYNC_EXCLUDED_NAMES:
         return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
@@ -33702,6 +33713,10 @@ def _data_sync_inventory() -> list:
     rows = []
     for root in _data_sync_allowed_roots():
         for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            _dirnames[:] = [
+                name for name in _dirnames
+                if name.lower() not in _DATA_SYNC_EXCLUDED_DIR_NAMES
+            ]
             for filename in filenames:
                 path = Path(dirpath) / filename
                 try:

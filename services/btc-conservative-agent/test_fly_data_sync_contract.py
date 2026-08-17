@@ -51,6 +51,45 @@ def _load_bot_functions(*names):
     return namespace
 
 
+def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
+    tree = ast.parse(BOT)
+    wanted = {"_data_sync_rotation_parts", "_data_sync_path_allowed", "_data_sync_inventory"}
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        (root / "signal_snapshot.jsonl").write_text("{}\n", encoding="utf-8")
+        excluded = [
+            root / "research_epoch_quarantine" / "epoch_1" / "old.jsonl",
+            root / "research_archive" / "session_1" / "old.json",
+            root / "research_session_archives" / "old.json",
+            root / "object_store" / "old.jsonl",
+        ]
+        for path in excluded:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+        namespace = {
+            "Path": Path,
+            "os": os,
+            "_DATA_SYNC_EXTENSIONS": frozenset({".json", ".jsonl"}),
+            "_DATA_SYNC_EXCLUDED_NAMES": frozenset({"manifest.json"}),
+            "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({
+                "research_epoch_quarantine", "research_archive",
+                "research_session_archives", "archive-v2", "object-store", "object_store",
+            }),
+            "_data_sync_volume_root": lambda: root,
+            "_data_sync_allowed_roots": lambda: [root],
+            "_data_sync_relpath": lambda path: path.resolve().relative_to(root).as_posix(),
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+        rows = namespace["_data_sync_inventory"]()
+        assert [row["path"] for row in rows] == ["signal_snapshot.jsonl"]
+        for path in excluded:
+            assert namespace["_data_sync_path_allowed"](path) is False
+
+
 def test_fly_runtime_cwd_is_volume_backed():
     assert 'RUNTIME_DIR="$DATA_DIR/runtime"' in ENTRYPOINT
     assert 'export BOT_SINGLETON_DIR="$DATA_DIR/locks"' in ENTRYPOINT
