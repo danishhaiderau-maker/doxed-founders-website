@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Enable Scenario C exchange protection by default
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
