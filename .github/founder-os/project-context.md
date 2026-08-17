@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(founder-os): sync memory (context + roadmap + tasks)
+fix(bitfinex): rewrite nonce fix as UTF-8 for Railway build
 
 ## Last Activity
 
