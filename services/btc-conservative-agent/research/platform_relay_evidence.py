@@ -247,8 +247,21 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
     }
     allowed_types = {
         "ORDER_PLACED", "FILLED", "STOP_LOSS_ARMED", "UPDATE_STOPS",
-        "EXIT", "EXECUTION_TIMING", *negative_types,
+        "EXIT", "EXECUTION_TIMING",
+        "TERMINAL_CLOSE_CLAIM", "TERMINAL_CLOSE_SUBMITTING",
+        "TERMINAL_CLOSE_ACKNOWLEDGED", "TERMINAL_CLOSE_CONFIRMED",
+        *negative_types,
     }
+    evidence["entry_fill_ids"] = []
+    evidence["exit_fill_ids"] = []
+    evidence["terminal_close_fence"] = []
+    evidence["original_limit_price"] = None
+    evidence["source_fill_status"] = "UNKNOWN"
+    evidence["copy_fill_status"] = "UNKNOWN"
+    evidence["divergence_class"] = None
+    evidence["terminal_class"] = None
+    evidence["copy_terminal_fence_complete"] = False
+    evidence["linkage_complete"] = False
     producer_assertions = set()
     for record in qualified_records:
         if not isinstance(record, dict):
@@ -335,20 +348,33 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             )
             append_unique("bitfinex_order_ids", predecessor_stop_id)
             fill_id = explicit(payload, "fill_id", "fillId", "bitfinex_fill_id", "exchange_fill_id")
-            fill_id_list = explicit(
-                payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids",
-                "entry_fill_ids", "exit_fill_ids", "exchange_exit_fill_ids",
-            )
+            entry_fill_list = explicit(
+                payload, "entry_fill_ids", "exchange_fill_ids", "bitfinex_fill_ids",
+            ) if event_type != "EXIT" else explicit(payload, "entry_fill_ids")
+            exit_fill_list = explicit(payload, "exit_fill_ids", "exchange_exit_fill_ids")
+            fill_id_list = entry_fill_list if event_type != "EXIT" else None
             # Authenticated Bitfinex fills often publish only exchange_fill_ids[].
             # Promote the first id so COPY_FILL_OBSERVED can form without inventing
-            # a Showcase fill.
-            if fill_id is None and isinstance(fill_id_list, list) and fill_id_list:
+            # a Showcase fill. Exit fill ids stay on the exit side.
+            if fill_id is None and event_type != "EXIT" and isinstance(fill_id_list, list) and fill_id_list:
                 fill_id = fill_id_list[0]
-            append_unique("fill_ids", fill_id)
-            append_unique("fill_ids", fill_id_list)
+            if event_type != "EXIT":
+                append_unique("fill_ids", fill_id)
+                append_unique("fill_ids", fill_id_list)
+                append_unique("entry_fill_ids", fill_id)
+                append_unique("entry_fill_ids", entry_fill_list)
+            else:
+                # fill_ids remains the authenticated union; exit IDs stay out of entry_fill_ids.
+                append_unique("fill_ids", fill_id)
+                append_unique("fill_ids", explicit(payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids"))
+                append_unique("fill_ids", exit_fill_list)
+                append_unique("exit_fill_ids", fill_id)
+            append_unique("exit_fill_ids", exit_fill_list)
+            if event_type == "EXIT":
+                append_unique("exit_fill_ids", explicit(payload, "fill_id", "fillId"))
 
             quantity_fields = {
-                "source_quantity": explicit(payload, "source_quantity", "source_qty", "source_exact_qty_btc"),
+                "source_quantity": explicit(payload, "source_quantity", "source_qty", "source_exact_qty_btc", "intended_qty") or (explicit(payload, "qty") if event_type == "ORDER_PLACED" else None),
                 "normalized_quantity": explicit(payload, "normalized_quantity", "normalized_qty", "venue_qty_btc")
                     or (explicit(payload, "qty") if event_type == "ORDER_PLACED" else None),
                 "filled_quantity": explicit(payload, "filled_quantity", "filled_qty", "filledQty", "partial_fill_qty", "partialFillQty")
@@ -372,6 +398,25 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 evidence["cancelled_quantity"] = cancelled
             if payload.get("remaining_entry_order_live") is False:
                 evidence["remaining_quantity"] = 0.0
+            if event_type == "ORDER_PLACED" and evidence.get("original_limit_price") is None:
+                evidence["original_limit_price"] = finite(explicit(
+                    payload, "originalLimitPrice", "original_limit_price", "limitPrice", "limit_price"
+                ))
+            if event_type.startswith("TERMINAL_CLOSE_"):
+                append_row("terminal_close_fence", {
+                    key: value for key, value in {
+                        "event_id": event_id,
+                        "phase": explicit(payload, "phase") or event_type.replace("TERMINAL_CLOSE_", ""),
+                        "request_id": explicit(payload, "request_id", "requestId"),
+                        "exchange_order_id": explicit(payload, "exchange_order_id", "close_exchange_order_id"),
+                        "authority_kind": (
+                            ((payload.get("authority") or {}) if isinstance(payload.get("authority"), dict) else {}).get("kind")
+                        ),
+                        "cancel_context": (
+                            (((payload.get("authority") or {}).get("evidence") or {}) if isinstance(payload.get("authority"), dict) else {}).get("cancel_context")
+                        ),
+                    }.items() if value is not None
+                })
 
             if event_type == "FILLED" and (fill_id is not None or quantity_fields["filled_quantity"] is not None):
                 fill_row = {
@@ -502,8 +547,22 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     "source_event_seq": source_event_seq,
                 }
                 append_row("reprices", reprice_row)
+                if evidence.get("original_limit_price") is None:
+                    evidence["original_limit_price"] = reprice_row.get("prior_price")
+                chase_row = {
+                    **reprice_row,
+                    "original_limit": evidence.get("original_limit_price") or reprice_row.get("prior_price"),
+                    "source_to_platform_ms": finite(explicit(payload, "sourceToPlatformMs", "source_to_platform_ms")),
+                    "source_to_exchange_ack_ms": finite(explicit(
+                        payload, "sourceToExchangeAckMs", "source_to_exchange_ack_ms"
+                    )),
+                    "platform_to_exchange_ack_ms": finite(explicit(
+                        payload, "platformToExchangeAckMs", "platform_to_exchange_ack_ms"
+                    )),
+                    "source_event_at": explicit(payload, "sourceEventAt", "source_event_at"),
+                }
                 append_row("chase_history", {
-                    key: value for key, value in reprice_row.items() if value is not None
+                    key: value for key, value in chase_row.items() if value is not None
                 })
 
             if (
@@ -553,9 +612,15 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                 actual_pnl = finite(explicit(
                     payload, "actual_bitfinex_realized_pnl_usd",
                     "exchange_realized_pnl_usd", "actual_realized_pnl_usd",
+                    "pnl_usd", "net_pnl_usd",
                 ))
                 if actual_pnl is not None:
                     evidence["actual_bitfinex_realized_pnl_usd"] = actual_pnl
+                if evidence["exit_evidence"].get("exit_price") is not None and explicit(payload, "exit_exchange_fill_price"):
+                    evidence["exit_evidence"]["exchange_fill_price"] = finite(payload.get("exit_exchange_fill_price"))
+                    evidence["exit_evidence"]["order_id"] = explicit(
+                        payload, "close_exchange_order_id", "exchange_order_id", "bitfinex_order_id"
+                    ) or evidence["exit_evidence"].get("order_id")
                 authority_kind = str(explicit(payload, "terminal_authority_kind") or "").upper()
                 authority = explicit(payload, "terminal_authority_evidence")
                 if isinstance(authority, dict):
@@ -590,6 +655,20 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
                     value = finite(payload.get(key)) if key in payload else None
                     if value is not None:
                         evidence["cost_evidence"][key] = value
+                fee_sum = 0.0
+                fee_found = False
+                for fee_key in ("entry_exchange_fees", "exit_exchange_fees", "exchange_fill_costs"):
+                    rows = payload.get(fee_key)
+                    if isinstance(rows, list):
+                        for fee_row in rows:
+                            if isinstance(fee_row, dict) and finite(fee_row.get("amount")) is not None:
+                                fee_sum += float(fee_row["amount"])
+                                fee_found = True
+                if fee_found and "trading_fee_usd" not in evidence["cost_evidence"]:
+                    evidence["cost_evidence"]["trading_fee_usd"] = fee_sum
+                for implied_zero_key in ("funding_fee_usd", "spread_cost_usd", "slippage_usd"):
+                    if implied_zero_key not in evidence["cost_evidence"] and fee_found:
+                        evidence["cost_evidence"][implied_zero_key] = 0.0
                 copy_slippage = finite(payload.get("copy_exit_slippage_usd"))
                 if copy_slippage is not None:
                     evidence["cost_evidence"]["copy_exit_slippage_usd"] = copy_slippage
@@ -761,6 +840,88 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
     evidence["reconciliation_complete"] = bool(
         current_reconciliation_complete or legacy_asserted_reconciliation_complete
     )
+    intended = finite(evidence.get("source_quantity") or evidence.get("normalized_quantity"))
+    filled = finite(evidence.get("filled_quantity"))
+    source_unfilled = True
+    if filled is None or filled <= 0:
+        evidence["copy_fill_status"] = "UNFILLED"
+    elif intended is not None and filled + 1e-12 < intended:
+        evidence["copy_fill_status"] = "PARTIAL"
+    else:
+        evidence["copy_fill_status"] = "FILLED"
+    evidence["source_fill_status"] = "UNFILLED" if source_unfilled else "FILLED"
+    fence_phases = {
+        str(row.get("phase") or "").upper()
+        for row in evidence.get("terminal_close_fence") or []
+    }
+    fence_request_ids = {
+        str(row.get("request_id"))
+        for row in evidence.get("terminal_close_fence") or []
+        if row.get("request_id")
+    }
+    authority_kinds = {
+        str(row.get("authority_kind") or "").upper()
+        for row in evidence.get("terminal_close_fence") or []
+        if row.get("authority_kind")
+    }
+    cancel_contexts = {
+        str(row.get("cancel_context") or "").upper()
+        for row in evidence.get("terminal_close_fence") or []
+        if row.get("cancel_context")
+    }
+    evidence["copy_terminal_fence_complete"] = bool(
+        {"CLAIMED", "SUBMITTING", "ACKNOWLEDGED", "CONFIRMED"} <= fence_phases
+        and len(fence_request_ids) == 1
+    )
+    if "LATE_FILL_CLEANUP" in authority_kinds and "SHOWCASE_ABANDONED" in cancel_contexts:
+        evidence["terminal_class"] = "SHOWCASE_ABANDONED_LATE_FILL_CLEANUP"
+        evidence["terminal_authority"] = evidence.get("terminal_authority") or {
+            "kind": "LATE_FILL_CLEANUP",
+            "request_id": next(iter(fence_request_ids), None),
+        }
+    elif str((evidence.get("exit_evidence") or {}).get("exit_reason") or "").upper() == "SHOWCASE_MIRROR":
+        evidence["terminal_class"] = "SHOWCASE_ABANDONED_LATE_FILL_CLEANUP"
+    if evidence.get("copy_fill_observed") and evidence["source_fill_status"] in {"UNFILLED", "UNKNOWN"}:
+        evidence["divergence_class"] = "COPY_ONLY_PARTIAL_FILL" if evidence["copy_fill_status"] == "PARTIAL" else "COPY_ONLY_FILL"
+        overlay = evidence.get("copy_fill_observed") or {}
+        overlay["divergence_reason"] = evidence["divergence_class"]
+        overlay["source_fill_status"] = evidence["source_fill_status"]
+        overlay["copy_fill_status"] = evidence["copy_fill_status"]
+        evidence["copy_fill_observed"] = overlay
+    fill_at = None
+    abandon_at = None
+    for record in qualified_records:
+        for event in record.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            created = event.get("createdAt") or event.get("created_at")
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            et = str(event.get("eventType") or event.get("event_type") or "").upper()
+            nested = str(payload.get("event") or payload.get("cancel_context") or payload.get("fill_detection_context") or "").upper()
+            if et in {"FILLED", "UPDATE_STOPS"} and nested in {
+                "PARTIAL_FILL_STOP_REPLACEMENT_ACKNOWLEDGED", "CANCEL_RACE_FILL", "FILLED"
+            } and fill_at is None:
+                fill_at = payload.get("exchange_fill_received_at") or payload.get("partial_fill_detected_at") or created
+            if "SHOWCASE_ABANDONED" in nested or et.startswith("TERMINAL_CLOSE_"):
+                if abandon_at is None and et.startswith("TERMINAL_CLOSE_"):
+                    abandon_at = created
+    relative = None
+    if fill_at and abandon_at:
+        relative = "BEFORE_ABANDONMENT" if str(fill_at) < str(abandon_at) else "AFTER_ABANDONMENT"
+    elif fill_at and not abandon_at:
+        relative = "BEFORE_ABANDONMENT"
+    for chase in evidence.get("chase_history") or []:
+        chase["fill_relative_to_source_abandonment"] = relative
+        chase["final_limit"] = chase.get("price")
+    evidence["fill_relative_to_source_abandonment"] = relative
+    evidence["linkage_complete"] = bool(
+        evidence.get("participant_id") and evidence.get("bitfinex_order_ids")
+    )
+    if not evidence.get("entry_fill_ids"):
+        evidence["entry_fill_ids"] = [
+            fill_id for fill_id in (evidence.get("fill_ids") or [])
+            if fill_id not in set(evidence.get("exit_fill_ids") or [])
+        ]
     return evidence
 
 
@@ -820,11 +981,29 @@ def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str, eviden
             "BOTH_FILLED" if source_filled else "COPY_FILLED_SOURCE_UNFILLED_OR_UNKNOWN"
         )
         enriched["exchange_confirmed_shadow_overlay"] = overlay
+    for field in (
+        "source_fill_status", "copy_fill_status", "divergence_class", "terminal_class",
+        "copy_terminal_fence_complete", "fill_relative_to_source_abandonment",
+        "entry_fill_ids", "exit_fill_ids",
+    ):
+        if enriched.get(field) in (None, "", [], {}) and evidence.get(field) not in (None, "", [], {}):
+            enriched[field] = copy.deepcopy(evidence.get(field))
+    if evidence.get("source_fill_status") in {"UNFILLED", "UNKNOWN"}:
+        enriched["source_fill_status"] = evidence.get("source_fill_status")
+        # Never promote Showcase to filled because Bitfinex filled.
+        if enriched.get("executed") is not True:
+            enriched["executed"] = False
     if enriched.get("actual_bitfinex_realized_pnl_usd") is None:
         explicit_pnl = evidence.get("actual_bitfinex_realized_pnl_usd")
         if explicit_pnl is not None:
             enriched["actual_bitfinex_realized_pnl_usd"] = explicit_pnl
-    if not enriched.get("terminal_provenance"):
+    if evidence.get("terminal_class"):
+        enriched["terminal_class"] = evidence["terminal_class"]
+        if not enriched.get("terminal_provenance") or str(enriched.get("terminal_provenance")).upper() in {
+            "SHOWCASE_MIRROR", "NO_FILL", ""
+        }:
+            enriched["terminal_provenance"] = evidence["terminal_class"]
+    elif not enriched.get("terminal_provenance"):
         exit_reason = (evidence.get("exit_evidence") or {}).get("exit_reason")
         if exit_reason:
             enriched["terminal_provenance"] = exit_reason

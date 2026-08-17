@@ -5,6 +5,7 @@ import pandas as pd
 import analyzer_research_engine_v62 as analyzer
 from research.analysis_eligibility import (
     BITFINEX_COPY_FIDELITY,
+    COPY_ONLY_EXCHANGE_FILLS,
     REAL_COPY_PARAMETER_OPTIMISATION,
     SHOWCASE_STRATEGY,
     classify_row,
@@ -215,7 +216,8 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
             "MIRROR_DIFF",
             result["exclusion_reasons"][REAL_COPY_PARAMETER_OPTIMISATION],
         )
-        self.assertTrue(result["eligible"][REAL_COPY_PARAMETER_OPTIMISATION])
+        self.assertFalse(result["eligible"][REAL_COPY_PARAMETER_OPTIMISATION])
+        self.assertTrue(result["eligible"][COPY_ONLY_EXCHANGE_FILLS])
         self.assertTrue(result["eligible"][BITFINEX_COPY_FIDELITY])
 
     def test_stale_limit_evidence_is_tagged_on_fidelity_cohort(self):

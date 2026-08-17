@@ -12,6 +12,7 @@ from research import counterfactual_normalization as pure_counterfactual
 from research.analysis_eligibility import (
     BITFINEX_COPY_FIDELITY,
     REAL_COPY_PARAMETER_OPTIMISATION,
+    SHOWCASE_STRATEGY,
     classify_row,
 )
 
@@ -424,6 +425,8 @@ def _complete_fixture():
         "thesis_mfe_protect_pct": 2.0,
         "trail_ladder": [[4, 2], [5, 3]],
         "exit_profile_id": "scenario-c",
+        "chase_enabled": True,
+        "correlated_cluster_boundary_pct": 0.09,
     }
     evidence = {
         "participant_id": "participant-1",
@@ -440,7 +443,7 @@ def _complete_fixture():
         "fills": [{"fill_id": "fill-1", "quantity": 0.03172}],
         "reprices": [{"order_id": "order-1", "price": 63064.88}],
         "chase_history": [{"order_id": "order-1", "price": 63064.88, "chase_count": 1}],
-        "cluster_evidence": {"allowed": True, "same_direction_managed_or_reserved_count": 1},
+        "cluster_evidence": {"allowed": True, "same_direction_managed_or_reserved_count": 1, "boundary_pct": 0.09},
         "ack_history": [{"order_id": "order-1", "ack_at": "2026-08-16T00:00:01Z"}],
         "stop_chain": [{"order_id": "stop-1", "protected_quantity": 0.03172, "ack_at": "2026-08-16T00:00:02Z"}],
         "exit_evidence": {"order_id": "exit-1", "fill_id": "exit-fill-1"},
@@ -483,6 +486,8 @@ def _complete_fixture():
             "execution_profile": "bitfinex-live-limit-v1",
             "terminal_provenance": "SOURCE_CONFIRMED",
             "actual_bitfinex_realized_pnl_usd": 1.25,
+            "source_git_rev": "b99aceffb91a1345a96336ba123f651368b3be13",
+            "executor_revision": "af5b912f3de5e6afbe9ca1a366f892c0f8591b31",
             "bitfinex_evidence": evidence,
         },
         {
@@ -512,7 +517,9 @@ def test_complete_exchange_evidence_qualifies_all_three_cohorts():
     assert fields["bitfinex_evidence"]["cluster_evidence"]["allowed"] is True
     assert fields["bitfinex_evidence"]["terminal_authority"]["kind"] == "SIGNED_POSITION_CLOSED"
     assert fields["bitfinex_evidence"]["actual_costs"] == fields["bitfinex_evidence"]["cost_evidence"]
-    assert all(fields["analysis_cohorts"]["eligible"].values())
+    assert fields["analysis_cohorts"]["eligible"][SHOWCASE_STRATEGY] is True
+    assert fields["analysis_cohorts"]["eligible"][BITFINEX_COPY_FIDELITY] is True
+    assert fields["analysis_cohorts"]["eligible"][REAL_COPY_PARAMETER_OPTIMISATION] is True
     assert fields["analysis_eligible"] is True
 
 

@@ -38,7 +38,44 @@ def _number(value, default=0):
         return float(default)
 
 
+def _cluster_boundary(policy, snapshot, evidence):
+    candidates = (
+        policy.get("correlated_cluster_boundary_pct"),
+        policy.get("cluster_boundary_pct"),
+        (evidence.get("cluster_evidence") or {}).get("boundary_pct") if isinstance(evidence.get("cluster_evidence"), dict) else None,
+        snapshot.get("correlated_cluster_boundary_pct"),
+    )
+    for value in candidates:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _chase_configuration(policy, snapshot):
+    chase = (
+        policy.get("chase")
+        if isinstance(policy.get("chase"), dict)
+        else snapshot.get("chase") if isinstance(snapshot.get("chase"), dict) else {}
+    )
+    enabled = policy.get("chase_enabled")
+    if enabled is None:
+        enabled = chase.get("enabled")
+    if enabled is None and (
+        policy.get("limit_chase_enabled") is not None or chase
+    ):
+        enabled = policy.get("limit_chase_enabled", True if chase else None)
+    if enabled is None:
+        return None
+    return {
+        "enabled": bool(enabled),
+        "config": chase or None,
+    }
+
+
 def policy_comparability_key(policy, buf, snapshot):
+    policy = policy if isinstance(policy, dict) else {}
+    buf = buf if isinstance(buf, dict) else {}
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
     evidence = (
         snapshot.get("bitfinex_evidence")
         if isinstance(snapshot.get("bitfinex_evidence"), dict)
@@ -49,18 +86,39 @@ def policy_comparability_key(policy, buf, snapshot):
         snapshot.get("fee_model")
         or config.get("fee_model")
         or evidence.get("fee_model")
+        or policy.get("fee_model")
     )
     profile = (
         snapshot.get("execution_profile")
         or config.get("execution_profile")
         or evidence.get("execution_profile")
+        or policy.get("execution_profile")
     )
     leverage = buf.get("leverage")
+    if leverage is None:
+        leverage = policy.get("leverage") or snapshot.get("leverage") or evidence.get("leverage")
+    chase = _chase_configuration(policy, snapshot)
+    cluster_boundary = _cluster_boundary(policy, snapshot, evidence)
+    source_revision = (
+        snapshot.get("source_git_rev")
+        or snapshot.get("source_revision")
+        or evidence.get("source_git_rev")
+    )
+    platform = snapshot.get("platform_relay_evidence") if isinstance(snapshot.get("platform_relay_evidence"), dict) else {}
+    executor_revision = (
+        snapshot.get("executor_revision")
+        or evidence.get("generating_revision")
+        or platform.get("generating_revision")
+    )
     if (
         any(policy.get(key) is None for key in REQUIRED_POLICY_KEYS)
         or leverage is None
         or not fee
         or not profile
+        or chase is None
+        or cluster_boundary is None
+        or not source_revision
+        or not executor_revision
     ):
         return None
     value = {
@@ -73,9 +131,13 @@ def policy_comparability_key(policy, buf, snapshot):
         "leverage": leverage,
         "fee_model": fee,
         "execution_profile": profile,
+        "chase": chase,
+        "correlated_cluster_boundary_pct": cluster_boundary,
+        "source_revision": source_revision,
+        "executor_revision": executor_revision,
     }
     digest = hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
     return f"policy_comparability_v1:{digest}"
 

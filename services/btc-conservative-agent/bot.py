@@ -31527,7 +31527,11 @@ def _analyzer_proxy_fetch(path: str, timeout: float = 6.0):
 def _external_analyzer_status_payload(endpoint: str) -> dict:
     """Truthful Fly response: analysis is uploaded, never localhost-proxied."""
     mirror_status = {}
-    mirror_dir = _analyzer_mirror_dir()
+    active = _active_analyzer_mirror_dir()
+    if active is not None:
+        mirror_dir = active
+    else:
+        mirror_dir = _analyzer_mirror_dir()
     try:
         mirror_status = json.loads(
             (mirror_dir / "status.json").read_text(encoding="utf-8")
@@ -35898,10 +35902,12 @@ def simulate_replay_outcome(buf: dict) -> dict:
             "filled": False,
             "exit_reason": outcome_label,
             "entry_outcome": outcome_label,
-            "net_pnl_usd": 0.0,
-            "gross_pnl_margin_pct": 0.0,
-            "max_profit_margin_pct": 0.0,
-            "max_drawdown_margin_pct": 0.0,
+            "net_pnl_usd": None,
+            "gross_pnl_margin_pct": None,
+            "max_profit_margin_pct": None,
+            "max_drawdown_margin_pct": None,
+            "not_a_trade": True,
+            "avoided_exposure": True,
             "fill_delay_sec": None,
             "chase_mode": buf.get("chase_mode"),
             "limit_chase_count": int(buf.get("limit_chase_count") or 0),
@@ -36690,9 +36696,11 @@ def dump_replay(trade_id: str):
                 and exit_t_rel >= 0
                 and required_post_exit_tick is not None
             )
+            has_fill_origin = buf.get("virtual_fill_t") is not None and buf.get("virtual_entry") is not None
             replay_complete = bool(
                 buf.get("closed")
                 and buf.get("ticks")
+                and has_fill_origin
                 and (not is_executed or post_exit_complete)
             )
             replay = {
@@ -36716,10 +36724,12 @@ def dump_replay(trade_id: str):
                 "replay_completion_reason": (
                     "POST_EXIT_HORIZON_COMPLETE"
                     if post_exit_complete
-                    else "BUFFER_CLOSED"
+                    else "FILL_ORIGIN_BUFFER_CLOSED"
                     if replay_complete
                     else "INCOMPLETE_EXECUTED_POST_EXIT"
                     if is_executed
+                    else "BUFFER_CLOSED_NO_FILL_ORIGIN"
+                    if buf.get("closed") and buf.get("ticks") and not has_fill_origin
                     else "INCOMPLETE_BUFFER"
                 ),
                 "terminal_provenance": (

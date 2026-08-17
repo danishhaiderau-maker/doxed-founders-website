@@ -49,6 +49,39 @@ def test_report_provenance_executes_against_canonical_evidence_root(tmp_path, mo
     assert all(row["available"] for row in provenance["evidence_inputs"].values())
 
 
+def test_provenance_uses_joined_policy_keys_when_raw_jsonl_is_null(tmp_path, monkeypatch):
+    (tmp_path / "relay_lifecycle_evidence_v1.json").write_text(
+        json.dumps({
+            "schema": "relay_lifecycle_evidence_v1",
+            "generatedAt": "2026-08-16T00:00:00Z",
+            "generatingRevision": "a" * 40,
+            "runIdentity": "run-test",
+            "records": [],
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "counterfactual.jsonl").write_text(
+        json.dumps({"trade_id": "cont-test", "policy_comparability_key": None}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        analyzer,
+        "_load_jsonl_by_trade_id",
+        lambda path: {
+            "cont-test": {
+                "trade_id": "cont-test",
+                "policy_comparability_key": "policy_comparability_v1:joined",
+            }
+        },
+    )
+
+    provenance = analyzer._report_source_evidence_provenance()
+
+    assert provenance["policy_comparability_key"] == "policy_comparability_v1:joined"
+    assert provenance["policy_comparability_status"] == "SINGLE_COMPARABLE_POLICY"
+
+
 def test_report_stamp_marks_ungated_report_descriptive_and_unqualified(tmp_path):
     report_path = tmp_path / "report.json"
     report_path.write_text('{"result":"descriptive"}', encoding="utf-8")

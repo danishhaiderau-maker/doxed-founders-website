@@ -62,6 +62,8 @@ import hashlib
 from pathlib import Path
 from research.analysis_eligibility import (
     BITFINEX_COPY_FIDELITY,
+    COPY_ONLY_EXCHANGE_FILLS,
+    CORRELATED_CLUSTER_BLOCKED,
     SHOWCASE_STRATEGY,
     REAL_COPY_PARAMETER_OPTIMISATION,
     eligible_trade_ids as _cohort_eligible_trade_ids,
@@ -69,6 +71,13 @@ from research.analysis_eligibility import (
 from research.platform_relay_evidence import (
     _normalize_platform_bitfinex_evidence,
     _platform_relay_evidence_index,
+    _snapshot_with_platform_relay_evidence,
+)
+from research.counterfactual_normalization import policy_comparability_key as _policy_comparability_key
+from research.source_market_evidence import load_market_evidence_index as _load_market_evidence_index
+from research.shadow_outcome_reconstruction import (
+    attach_market_evidence as _attach_market_evidence,
+    reconstruct_row as _reconstruct_research_row,
 )
 from research_opportunity_v2 import (
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -132,6 +141,13 @@ ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
 REGIME_LEADERBOARD_REPORT_FILE = "regime_leaderboard.json"
 PAUSED_SHADOW_REPORT_FILE = "paused_shadow_research_report.json"
 HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
+SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE = "showcase_strategy_outcomes_report.json"
+BITFINEX_COPY_FIDELITY_REPORT_FILE = "bitfinex_copy_fidelity_lifecycles_report.json"
+CORRELATED_CLUSTER_BLOCKED_REPORT_FILE = "correlated_cluster_blocked_counterfactual_report.json"
+COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE = "copy_only_exchange_fills_report.json"
+REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE = "real_copy_parameter_optimisation_report.json"
+SHOWCASE_LOSING_CLUSTER_REPORT_FILE = "showcase_losing_cluster_descriptive.json"
+RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
@@ -643,6 +659,13 @@ ANALYZER_JSON_REPORT_FILES = (
     EXIT_COMBINATIONS_REPORT_FILE,
     REGIME_LEADERBOARD_REPORT_FILE,
     PAUSED_SHADOW_REPORT_FILE,
+    SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE,
+    BITFINEX_COPY_FIDELITY_REPORT_FILE,
+    CORRELATED_CLUSTER_BLOCKED_REPORT_FILE,
+    COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE,
+    REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE,
+    SHOWCASE_LOSING_CLUSTER_REPORT_FILE,
+    RESEARCH_HORIZON_MATURITY_REPORT_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
@@ -704,6 +727,13 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Type B Research V2", TYPE_B_RESEARCH_V2_REPORT_FILE, "One row per independent opportunity across paper, live and shadow evidence"),
     ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Relay-ineligible outcomes collected during ADMIN_MANUAL pause, by lane and ADX band"),
     ("Historical Trade Cohort", HISTORICAL_COHORT_REPORT_FILE, "Deduplicated executed trades across downloaded 3factor archives; never mixed into current-session P&L"),
+    ("Showcase Strategy Outcomes", SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE, "Paper Showcase strategy outcomes only; copy fills never rewrite source truth"),
+    ("Bitfinex Copy-Fidelity Lifecycles", BITFINEX_COPY_FIDELITY_REPORT_FILE, "Authenticated source-to-copy execution fidelity, including chase and protection"),
+    ("Correlated Cluster Blocked", CORRELATED_CLUSTER_BLOCKED_REPORT_FILE, "Counterfactual 0.09% cluster-blocked opportunities; not missed copy failures"),
+    ("Copy-Only Exchange Fills", COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE, "Bitfinex fills with Showcase unfilled/unknown; excluded from Showcase win rate"),
+    ("Qualified Real-Copy Optimisation", REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE, "Fail-closed real-copy rows with complete policy, costs, and mature horizons"),
+    ("Showcase Losing Cluster", SHOWCASE_LOSING_CLUSTER_REPORT_FILE, "PRELIMINARY_DESCRIPTIVE fresh Showcase losses; no live parameter recommendation"),
+    ("Research Horizon Maturity", RESEARCH_HORIZON_MATURITY_REPORT_FILE, "1/5/15/30/60/120m horizon completeness for Showcase, unfilled, cluster-blocked, and copy-only rows"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -789,6 +819,7 @@ V2_CHECKER_LOG_FILE = "v2_checker_log.jsonl"
 
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
+SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
 SOFT_REJECT_SHADOW_FILE = "soft_reject_shadow.jsonl"
@@ -1995,47 +2026,125 @@ def _load_jsonl_by_trade_id(path):
     requested_path = path
     path = _agent_data_path(path)
     rows = {}
-    if not os.path.exists(path):
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    tid = row.get("trade_id")
+                    if tid:
+                        rows[tid] = row
+        except Exception as e:
+            print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    elif os.path.basename(str(requested_path)) != COUNTERFACTUAL_FILE:
         return rows
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                row = json.loads(line)
-                tid = row.get("trade_id")
-                if tid:
-                    rows[tid] = row
-    except Exception as e:
-        print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    if os.path.basename(str(requested_path)) == COUNTERFACTUAL_FILE and rows:
-        relay_path = _agent_data_path("relay_lifecycle_evidence_v1.json")
-        relay_index = _platform_relay_evidence_index(relay_path)
-        for trade_id, source_row in list(rows.items()):
-            joined = relay_index.get(str(trade_id))
-            if not joined:
-                continue
-            normalized = _normalize_platform_bitfinex_evidence(
-                joined.get("records") or [], str(trade_id)
-            )
-            existing = source_row.get("bitfinex_evidence") \
-                if isinstance(source_row.get("bitfinex_evidence"), dict) else {}
-            projected = {
-                key: value for key, value in normalized.items()
-                if value not in (None, "", [], {})
-            }
-            evidence = {**existing, **projected}
-            evidence["linkage_complete"] = bool(
-                evidence.get("participant_id")
-                and evidence.get("bitfinex_order_ids")
-            )
-            materialized = dict(source_row)
-            materialized["bitfinex_evidence"] = evidence
-            materialized["platform_evidence_revision"] = joined.get("evidence_revision")
-            materialized["platform_evidence_generating_revision"] = joined.get("generating_revision")
+    if os.path.basename(str(requested_path)) != COUNTERFACTUAL_FILE:
+        return rows
+    relay_path = _agent_data_path("relay_lifecycle_evidence_v1.json")
+    relay_index = _platform_relay_evidence_index(relay_path)
+    snapshot_by_id = {}
+    funnel_ids = set()
+    for raw in _load_jsonl_rows(SIGNAL_SNAPSHOT_FILE):
+        tid = str((raw or {}).get("trade_id") or "")
+        if tid:
+            snapshot_by_id[tid] = raw
+    for raw in _load_jsonl_rows(EXECUTION_FUNNEL_FILE):
+        tid = str((raw or {}).get("trade_id") or "")
+        if tid:
+            funnel_ids.add(tid)
+
+    def _prepare_source_row(trade_id, source_row):
+        prepared = dict(source_row or {})
+        prepared["trade_id"] = str(trade_id)
+        if prepared.get("executed") is not True:
+            prepared["executed"] = False
+            if prepared.get("filled") is not True:
+                prepared["filled"] = False
+        policy = prepared.get("policy_snapshot") if isinstance(prepared.get("policy_snapshot"), dict) else None
+        if policy is None:
+            for key in ("policy_effective", "config"):
+                candidate = prepared.get(key)
+                if isinstance(candidate, dict) and candidate.get("policy_snapshot_schema"):
+                    policy = candidate
+                    break
+        if isinstance(policy, dict):
+            prepared["policy_snapshot"] = policy
+            prepared["policy_snapshot_complete"] = True
+            prepared.setdefault("policy_version", policy.get("policy_version"))
+            prepared.setdefault("source_git_rev", policy.get("source_git_rev") or prepared.get("source_git_rev"))
+        return prepared
+
+    def _materialize(trade_id, source_row, joined):
+        materialized = _snapshot_with_platform_relay_evidence(
+            _prepare_source_row(trade_id, source_row), str(trade_id), relay_index
+        )
+        evidence = materialized.get("bitfinex_evidence") \
+            if isinstance(materialized.get("bitfinex_evidence"), dict) else {}
+        evidence["linkage_complete"] = bool(
+            evidence.get("linkage_complete")
+            or (evidence.get("participant_id") and evidence.get("bitfinex_order_ids"))
+        )
+        materialized["bitfinex_evidence"] = evidence
+        materialized["platform_evidence_revision"] = joined.get("evidence_revision")
+        materialized["platform_evidence_generating_revision"] = joined.get("generating_revision")
+        if not materialized.get("lifecycle_events"):
             materialized["lifecycle_events"] = list(evidence.get("negative_events") or [])
-            rows[trade_id] = materialized
+        if not materialized.get("policy_comparability_key"):
+            policy = materialized.get("policy_snapshot") if isinstance(materialized.get("policy_snapshot"), dict) else {}
+            snapshot_for_key = {
+                **materialized,
+                "fee_model": materialized.get("fee_model") or evidence.get("fee_model"),
+                "execution_profile": materialized.get("execution_profile") or evidence.get("execution_profile"),
+                "executor_revision": joined.get("generating_revision"),
+                "source_git_rev": materialized.get("source_git_rev") or policy.get("source_git_rev"),
+                "bitfinex_evidence": {
+                    **evidence,
+                    "generating_revision": joined.get("generating_revision"),
+                },
+            }
+            materialized["policy_comparability_key"] = _policy_comparability_key(
+                policy,
+                {"leverage": policy.get("leverage") or evidence.get("leverage") or materialized.get("leverage")},
+                snapshot_for_key,
+            )
+        return materialized
+
+    for trade_id, source_row in list(rows.items()):
+        joined = relay_index.get(str(trade_id))
+        if not joined:
+            continue
+        rows[trade_id] = _materialize(trade_id, source_row, joined)
+    for trade_id in set(relay_index) & (set(snapshot_by_id) | funnel_ids):
+        if trade_id in rows:
+            continue
+        joined = relay_index.get(str(trade_id))
+        if not joined:
+            continue
+        source_row = snapshot_by_id.get(trade_id) or {"trade_id": trade_id, "executed": False, "filled": False}
+        rows[trade_id] = _materialize(trade_id, source_row, joined)
+    try:
+        evidence_index = _load_market_evidence_index(
+            _agent_data_path(SOURCE_ORDER_MARKET_EVIDENCE_FILE),
+            target_trade_ids=set(rows),
+        )
+    except Exception:
+        evidence_index = {}
+    for trade_id, source_row in list(rows.items()):
+        attached = _attach_market_evidence(source_row, evidence_index)
+        reconstruction = _reconstruct_research_row(attached)
+        attached["shadow_reconstruction"] = reconstruction
+        if reconstruction.get("replay_complete") is False:
+            attached["replay_complete"] = False
+            attached["replay_completion_reason"] = reconstruction.get("replay_complete_reason")
+        if reconstruction.get("not_a_trade") is True:
+            if attached.get("executed") is not True:
+                attached["not_a_trade"] = True
+                if attached.get("net_pnl_usd") in (0, 0.0) and str(attached.get("exit_reason") or "").upper() in {"NO_FILL", "TTL_EXPIRED", ""}:
+                    attached["net_pnl_usd"] = None
+        rows[trade_id] = attached
     return rows
 
 
@@ -2427,6 +2536,282 @@ def historical_trade_cohort_report():
         f"  Historical cohort: raw={raw_rows} unique={len(rows)} "
         f"duplicates={max(0, raw_rows - len(rows))} {PIPELINE_ENFORCEMENT_TAG}"
     )
+    return payload
+
+
+def _horizon_flags_for_row(row):
+    evidence = row.get("bitfinex_evidence") if isinstance(row.get("bitfinex_evidence"), dict) else {}
+    source_status = str(row.get("source_fill_status") or evidence.get("source_fill_status") or "").upper()
+    copy_status = str(row.get("copy_fill_status") or evidence.get("copy_fill_status") or "").upper()
+    source_filled = bool(
+        row.get("executed") is True
+        or source_status in {"FILLED", "PARTIAL"}
+        or str(row.get("status") or "").upper() in {"FILLED", "OPEN", "CLOSED"}
+    )
+    copy_filled = copy_status in {"PARTIAL", "FILLED"}
+    needs_post_exit = source_filled or copy_filled
+    entry_complete = row.get("required_entry_horizons_complete") is True
+    post_exit_complete = row.get("required_post_exit_horizons_complete") is True
+    replay_complete = row.get("replay_complete") is True
+    reconstruction = row.get("shadow_reconstruction") if isinstance(row.get("shadow_reconstruction"), dict) else {}
+    if reconstruction:
+        replay_complete = reconstruction.get("replay_complete") is True
+    return {
+        "source_filled": source_filled,
+        "copy_filled": copy_filled,
+        "needs_post_exit": needs_post_exit,
+        "replay_complete": replay_complete,
+        "required_entry_horizons_complete": entry_complete,
+        "required_post_exit_horizons_complete": post_exit_complete,
+        "horizons_mature": bool(
+            replay_complete
+            and entry_complete
+            and (post_exit_complete if needs_post_exit else True)
+        ),
+    }
+
+
+def _research_cohort_row_summary(trade_id, row):
+    evidence = row.get("bitfinex_evidence") if isinstance(row.get("bitfinex_evidence"), dict) else {}
+    horizons = _horizon_flags_for_row(row)
+    return {
+        "trade_id": str(trade_id),
+        "executed": row.get("executed") is True,
+        "source_fill_status": row.get("source_fill_status") or evidence.get("source_fill_status") or "UNKNOWN",
+        "copy_fill_status": row.get("copy_fill_status") or evidence.get("copy_fill_status") or "UNKNOWN",
+        "divergence_class": row.get("divergence_class") or evidence.get("divergence_class"),
+        "terminal_class": (
+            row.get("terminal_class")
+            or evidence.get("terminal_class")
+            or row.get("terminal_provenance")
+        ),
+        "actual_bitfinex_realized_pnl_usd": row.get("actual_bitfinex_realized_pnl_usd")
+            if row.get("actual_bitfinex_realized_pnl_usd") is not None
+            else evidence.get("actual_bitfinex_realized_pnl_usd"),
+        "policy_comparability_key": row.get("policy_comparability_key"),
+        **horizons,
+        "qualified": False,
+    }
+
+
+def _write_cohort_report(filename, cohort, eligible_ids, exclusions, evidence_rows, rows, extra=None):
+    summaries = []
+    qualified_ids = []
+    for trade_id in sorted(eligible_ids):
+        summary = _research_cohort_row_summary(trade_id, rows.get(trade_id) or {})
+        summary["qualified"] = bool(summary.get("horizons_mature"))
+        if summary["qualified"]:
+            qualified_ids.append(trade_id)
+        summaries.append(summary)
+    payload = {
+        "schema": "research_cohort_report_v1",
+        "cohort": cohort,
+        "live_policy_change_allowed": False,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "included_row_count": len(eligible_ids),
+        "qualified_row_count": len(qualified_ids),
+        "evidence_row_count": evidence_rows,
+        "exclusion_reason_counts": exclusions,
+        "note": (
+            "Rows are listed when cohort-eligible. A row is qualified only after "
+            "required 1/5/15/30/60/120-minute horizons are naturally mature and complete."
+        ),
+        "trades": summaries,
+    }
+    if extra:
+        payload.update(extra)
+    path = analyzer_report_path(filename)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        f"  {cohort}: included={len(eligible_ids)} qualified={len(qualified_ids)} "
+        f"evidence={evidence_rows} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return payload
+
+
+def research_cohort_split_reports():
+    """Write five non-overlapping research cohort reports. Never mix copy fills into Showcase WR."""
+    rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    reports = {}
+    for cohort, filename, extra in (
+        (SHOWCASE_STRATEGY, SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE, {
+            "question": "What did Showcase paper strategy actually do?",
+            "excludes": ["COPY_ONLY_EXCHANGE_FILLS", "CORRELATED_CLUSTER_BLOCKED"],
+        }),
+        (BITFINEX_COPY_FIDELITY, BITFINEX_COPY_FIDELITY_REPORT_FILE, {
+            "question": "Did Bitfinex copy the source lifecycle with authenticated chase, protection, and terminal fence?",
+        }),
+        (CORRELATED_CLUSTER_BLOCKED, CORRELATED_CLUSTER_BLOCKED_REPORT_FILE, {
+            "question": "Which opportunities were blocked by the 0.09% correlated-exposure boundary?",
+            "classification": "COUNTERFACTUAL_OPPORTUNITY",
+            "not_a_missed_copy_failure": True,
+            "not_a_live_copy_loss": True,
+        }),
+        (COPY_ONLY_EXCHANGE_FILLS, COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE, {
+            "question": "Where did Bitfinex fill while Showcase stayed unfilled/unknown?",
+            "excluded_from_showcase_win_rate": True,
+        }),
+        (REAL_COPY_PARAMETER_OPTIMISATION, REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE, {
+            "question": "Which real-copy rows are exact-policy comparable for parameter research?",
+            "fail_closed_without_policy_key": True,
+        }),
+    ):
+        eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)
+        reports[cohort] = _write_cohort_report(
+            filename, cohort, eligible, exclusions, evidence_rows, rows, extra
+        )
+    eligible_sets = {
+        cohort: {row["trade_id"] for row in (report.get("trades") or [])}
+        for cohort, report in reports.items()
+        if cohort in {SHOWCASE_STRATEGY, COPY_ONLY_EXCHANGE_FILLS, CORRELATED_CLUSTER_BLOCKED}
+    }
+    reports["overlap_guard"] = {
+        "showcase_and_copy_only": sorted(
+            eligible_sets.get(SHOWCASE_STRATEGY, set())
+            & eligible_sets.get(COPY_ONLY_EXCHANGE_FILLS, set())
+        ),
+        "showcase_and_cluster_blocked": sorted(
+            eligible_sets.get(SHOWCASE_STRATEGY, set())
+            & eligible_sets.get(CORRELATED_CLUSTER_BLOCKED, set())
+        ),
+        "copy_only_and_cluster_blocked": sorted(
+            eligible_sets.get(COPY_ONLY_EXCHANGE_FILLS, set())
+            & eligible_sets.get(CORRELATED_CLUSTER_BLOCKED, set())
+        ),
+    }
+    return reports
+
+
+def showcase_losing_cluster_descriptive_report(trades=None, session=None):
+    """PRELIMINARY_DESCRIPTIVE slice of fresh Showcase losses. No parameter recommendation."""
+    if session is None:
+        session = load_research_session()
+    if trades is None:
+        trades = robust_read_csv(TRADES_FILE, "Showcase losing cluster")
+    work = trades.copy() if trades is not None and not getattr(trades, "empty", True) else pd.DataFrame()
+    if not work.empty:
+        work = filter_df_since_session(work, session, ts_cols=("ts", "close_ts", "entry_ts", "open_ts"))
+        if "trade_id" in work.columns:
+            work = work.drop_duplicates(subset=["trade_id"], keep="last")
+    pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
+    rows = []
+    if not work.empty and pnl_col in work.columns:
+        work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce")
+        for _, row in work.iterrows():
+            tid = str(row.get("trade_id") or "")
+            if not tid:
+                continue
+            pnl = row.get(pnl_col)
+            if pnl is None or pd.isna(pnl):
+                continue
+            mfe = pd.to_numeric(row.get("max_profit"), errors="coerce")
+            delay_sec = pd.to_numeric(row.get("entry_delay_sec"), errors="coerce")
+            if pd.isna(delay_sec):
+                delay_sec = pd.to_numeric(row.get("entry_delay"), errors="coerce")
+            chase = int(pd.to_numeric(row.get("limit_chase_count"), errors="coerce") or 0)
+            rows.append({
+                "trade_id": tid,
+                "direction": str(row.get("dir") or row.get("final_direction") or "").upper(),
+                "exit_reason": str(row.get("exit_reason") or "UNKNOWN"),
+                "net_pnl_usd": round(float(pnl), 2),
+                "mfe": None if pd.isna(mfe) else round(float(mfe), 6),
+                "zero_recorded_mfe": bool(pd.isna(mfe) or float(mfe) == 0),
+                "entry_delay_sec": None if pd.isna(delay_sec) else round(float(delay_sec), 3),
+                "entry_delay_min": None if pd.isna(delay_sec) else round(float(delay_sec) / 60.0, 1),
+                "limit_chase_count": chase,
+                "chase_assisted": chase > 0,
+            })
+    closed = len(rows)
+    winners = [row for row in rows if row["net_pnl_usd"] > 0]
+    losses = [row for row in rows if row["net_pnl_usd"] < 0]
+    flats = [row for row in rows if row["net_pnl_usd"] == 0]
+    net = round(sum(row["net_pnl_usd"] for row in rows), 2)
+    by_reason = {}
+    for row in rows:
+        bucket = by_reason.setdefault(row["exit_reason"], {"count": 0, "sum_pnl_usd": 0.0})
+        bucket["count"] += 1
+        bucket["sum_pnl_usd"] = round(bucket["sum_pnl_usd"] + row["net_pnl_usd"], 2)
+    delay_values = [row["entry_delay_min"] for row in rows if row["entry_delay_min"] is not None]
+    payload = {
+        "schema": "showcase_losing_cluster_v1",
+        "classification": "PRELIMINARY_DESCRIPTIVE",
+        "live_policy_change_allowed": False,
+        "parameter_recommendation": None,
+        "recommendation_blocked_reason": "SAMPLE_TOO_SMALL_AND_PRELIMINARY_DESCRIPTIVE_ONLY",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "fresh_epoch": _fresh_epoch_provenance(),
+        "closed_paper_trades": closed,
+        "winners": len(winners),
+        "losses": len(losses),
+        "flats": len(flats),
+        "net_pnl_usd": net,
+        "avg_pnl_usd": round(net / closed, 2) if closed else None,
+        "all_long": bool(rows) and all(row["direction"] == "LONG" for row in rows),
+        "zero_recorded_mfe_count": sum(1 for row in rows if row["zero_recorded_mfe"]),
+        "chase_assisted_count": sum(1 for row in rows if row["chase_assisted"]),
+        "entry_delay_min_range": [min(delay_values), max(delay_values)] if delay_values else None,
+        "by_exit_reason": by_reason,
+        "note": (
+            "Descriptive slice of fresh Showcase paper outcomes only. "
+            "Do not change chase, thesis-cut, 0.09% cluster boundary, or Scenario C from this sample."
+        ),
+        "trades": rows,
+    }
+    path = analyzer_report_path(SHOWCASE_LOSING_CLUSTER_REPORT_FILE)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(
+        f"  Showcase losing cluster PRELIMINARY_DESCRIPTIVE: closed={closed} "
+        f"wins={len(winners)} losses={len(losses)} net=${net} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return payload
+
+
+def research_horizon_maturity_report():
+    """Verify 1/5/15/30/60/120m horizons without marking immature rows qualified."""
+    rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    slices = {
+        "SHOWCASE_FILLS": [],
+        "UNFILLED_SHOWCASE_ORDERS": [],
+        "CLUSTER_BLOCKED_OPPORTUNITIES": [],
+        "COPY_ONLY_BITFINEX_FILLS": [],
+    }
+    for trade_id, row in sorted((rows or {}).items()):
+        summary = _research_cohort_row_summary(trade_id, row)
+        summary["qualified"] = bool(summary.get("horizons_mature"))
+        cluster_eligible, _ = _cohort_eligible_trade_ids({trade_id: row}, CORRELATED_CLUSTER_BLOCKED)
+        copy_only_eligible, _ = _cohort_eligible_trade_ids({trade_id: row}, COPY_ONLY_EXCHANGE_FILLS)
+        if trade_id in cluster_eligible:
+            slices["CLUSTER_BLOCKED_OPPORTUNITIES"].append(summary)
+            continue
+        if trade_id in copy_only_eligible:
+            slices["COPY_ONLY_BITFINEX_FILLS"].append(summary)
+            continue
+        if summary.get("source_filled"):
+            slices["SHOWCASE_FILLS"].append(summary)
+        else:
+            slices["UNFILLED_SHOWCASE_ORDERS"].append(summary)
+    payload = {
+        "schema": "research_horizon_maturity_v1",
+        "required_horizons": list(HORIZON_PROFIT_HORIZONS.keys()),
+        "live_policy_change_allowed": False,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "note": "A row is not qualified until every required horizon is naturally mature and complete.",
+        "slices": {
+            name: {
+                "row_count": len(items),
+                "mature_count": sum(1 for item in items if item.get("horizons_mature")),
+                "immature_count": sum(1 for item in items if not item.get("horizons_mature")),
+                "trades": items,
+            }
+            for name, items in slices.items()
+        },
+    }
+    path = analyzer_report_path(RESEARCH_HORIZON_MATURITY_REPORT_FILE)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(f"  Horizon maturity slices written {PIPELINE_ENFORCEMENT_TAG}")
     return payload
 
 
@@ -11987,6 +12372,12 @@ def chase_attribution_report(trades=None, session=None):
         if tid:
             by_tid.setdefault(tid, []).append(row)
 
+    relay_index = {}
+    try:
+        relay_index = _platform_relay_evidence_index(_agent_data_path("relay_lifecycle_evidence_v1.json"))
+    except Exception:
+        relay_index = {}
+
     attributions = []
     chase_events_total = 0
     for tid, events in by_tid.items():
@@ -12089,6 +12480,50 @@ def chase_attribution_report(trades=None, session=None):
             "win": trade_wr.get(tid),
             "ttl_expired": expire_row is not None and not filled,
         }
+        joined_relay = relay_index.get(tid) if isinstance(relay_index, dict) else None
+        if joined_relay:
+            copy_evidence = _normalize_platform_bitfinex_evidence(
+                joined_relay.get("records") or [], tid
+            )
+            chase_history = copy_evidence.get("chase_history") or []
+            if chase_history:
+                attr["chase_count"] = max(int(attr.get("chase_count") or 0), len(chase_history))
+                attr["chase_events_logged"] = len(chase_history)
+                attr["chase_count_source"] = "relay_chase_history"
+                attr["original_limit_price"] = (
+                    chase_history[0].get("original_limit")
+                    or chase_history[0].get("prior_price")
+                    or attr.get("original_limit_price")
+                )
+                attr["final_limit_price"] = (
+                    chase_history[-1].get("final_limit")
+                    or chase_history[-1].get("price")
+                    or attr.get("final_limit_price")
+                )
+                attr["chase_replacements"] = chase_history
+                attr["source_event_id"] = chase_history[-1].get("source_event_id")
+                attr["source_event_seq"] = chase_history[-1].get("source_event_seq")
+                attr["source_to_platform_ms"] = chase_history[-1].get("source_to_platform_ms")
+                attr["source_to_exchange_ack_ms"] = chase_history[-1].get("source_to_exchange_ack_ms")
+            attr["source_fill_status"] = copy_evidence.get("source_fill_status") or "UNKNOWN"
+            attr["copy_fill_status"] = copy_evidence.get("copy_fill_status") or "UNKNOWN"
+            attr["divergence_class"] = copy_evidence.get("divergence_class")
+            attr["terminal_class"] = copy_evidence.get("terminal_class")
+            attr["copy_fill_price"] = None
+            fills = copy_evidence.get("fills") or []
+            if fills:
+                attr["copy_fill_price"] = fills[0].get("price")
+            if copy_evidence.get("actual_bitfinex_realized_pnl_usd") is not None:
+                attr["net_pnl_usd"] = copy_evidence.get("actual_bitfinex_realized_pnl_usd")
+                attr["win"] = float(attr["net_pnl_usd"]) > 0
+            attr["fill_relative_to_source_abandonment"] = copy_evidence.get(
+                "fill_relative_to_source_abandonment"
+            )
+            if attr.get("copy_fill_status") in {"PARTIAL", "FILLED"} and attr.get("chase_count"):
+                attr["filled_after_chase"] = True
+                if attr.get("fill_reason") == "UNFILLED":
+                    attr["fill_reason"] = "COPY_ONLY_CHASE"
+            chase_events_total += max(0, len(chase_history) - len(chase_rows))
         attributions.append(attr)
         if chase_count or filled or expire_row:
             print(
@@ -12121,6 +12556,61 @@ def chase_attribution_report(trades=None, session=None):
             "ttl_expired": False,
             "chase_count_source": "trades_3factor.limit_chase_count",
         })
+
+    seen_tids = {a.get("trade_id") for a in attributions}
+    for tid, joined_relay in (relay_index or {}).items():
+        if tid in seen_tids or not joined_relay:
+            continue
+        copy_evidence = _normalize_platform_bitfinex_evidence(
+            joined_relay.get("records") or [], tid
+        )
+        chase_history = copy_evidence.get("chase_history") or []
+        copy_status = copy_evidence.get("copy_fill_status") or "UNKNOWN"
+        attr = {
+            "trade_id": tid,
+            "lane": "UNKNOWN",
+            "label": "UNKNOWN",
+            "chase_count": len(chase_history),
+            "chase_events_logged": len(chase_history),
+            "first_chase_sec": None,
+            "last_chase_sec": None,
+            "filled_after_chase": bool(chase_history and copy_status in {"PARTIAL", "FILLED"}),
+            "fill_reason": "COPY_ONLY_CHASE" if copy_status in {"PARTIAL", "FILLED"} else "UNFILLED",
+            "saved_fill": bool(chase_history and copy_status in {"PARTIAL", "FILLED"}),
+            "original_limit_price": (
+                chase_history[0].get("original_limit") or chase_history[0].get("prior_price")
+            ) if chase_history else None,
+            "final_limit_price": (
+                chase_history[-1].get("final_limit") or chase_history[-1].get("price")
+            ) if chase_history else None,
+            "fill_price": None,
+            "net_pnl_usd": copy_evidence.get("actual_bitfinex_realized_pnl_usd"),
+            "win": (
+                float(copy_evidence["actual_bitfinex_realized_pnl_usd"]) > 0
+                if copy_evidence.get("actual_bitfinex_realized_pnl_usd") is not None else None
+            ),
+            "ttl_expired": False,
+            "chase_count_source": "relay_chase_history" if chase_history else "relay_lifecycle",
+            "chase_replacements": chase_history,
+            "source_fill_status": copy_evidence.get("source_fill_status") or "UNKNOWN",
+            "copy_fill_status": copy_status,
+            "divergence_class": copy_evidence.get("divergence_class"),
+            "terminal_class": copy_evidence.get("terminal_class"),
+            "fill_relative_to_source_abandonment": copy_evidence.get(
+                "fill_relative_to_source_abandonment"
+            ),
+        }
+        fills = copy_evidence.get("fills") or []
+        if fills:
+            attr["copy_fill_price"] = fills[0].get("price")
+            attr["fill_price"] = fills[0].get("price")
+        if chase_history:
+            attr["source_event_id"] = chase_history[-1].get("source_event_id")
+            attr["source_event_seq"] = chase_history[-1].get("source_event_seq")
+            attr["source_to_platform_ms"] = chase_history[-1].get("source_to_platform_ms")
+            attr["source_to_exchange_ack_ms"] = chase_history[-1].get("source_to_exchange_ack_ms")
+            chase_events_total += len(chase_history)
+        attributions.append(attr)
 
     approve_count = sum(1 for r in rows if r.get("stage") == "APPROVE")
     orders_created = sum(1 for r in rows if r.get("stage") == "ORDER_SUBMITTED")
@@ -17368,6 +17858,9 @@ def pre_test_analytics_reports(
     benchmark_contribution_report(trades=trades, session=session, benchmark_report=benchmark_report)
     lane_overlap_report(trades=trades, session=session, benchmark_report=benchmark_report)
     fast_cut_sweep_report(trades=trades, session=session)
+    research_cohort_split_reports()
+    showcase_losing_cluster_descriptive_report(trades=trades, session=session)
+    research_horizon_maturity_report()
     chase_payload_final = chase_payload
     if chase_payload_final is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
         chase_payload_final = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
@@ -17974,6 +18467,16 @@ def _report_source_evidence_provenance():
                 except OSError:
                     row["qualification_error"] = "COUNTERFACTUAL_READ_FAILED"
         evidence[name] = row
+    try:
+        joined_rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+        for item in (joined_rows or {}).values():
+            if not isinstance(item, dict):
+                continue
+            key = item.get("policy_comparability_key")
+            if isinstance(key, str) and key.strip():
+                policy_keys.add(key.strip())
+    except Exception:
+        pass
     revision_material = "|".join(
         evidence[name].get("sha256", "MISSING")
         for name in ("relay_lifecycle_evidence_v1.json", "counterfactual.jsonl")
@@ -18103,6 +18606,8 @@ def write_report_manifest(payload=None):
     for cohort in (
         SHOWCASE_STRATEGY,
         BITFINEX_COPY_FIDELITY,
+        CORRELATED_CLUSTER_BLOCKED,
+        COPY_ONLY_EXCHANGE_FILLS,
         REAL_COPY_PARAMETER_OPTIMISATION,
     ):
         eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)

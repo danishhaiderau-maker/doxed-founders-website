@@ -887,14 +887,17 @@ export class TradingAgentsService implements OnModuleInit {
         analyzerMirror: { available: false, fresh: false, status: 'unreachable' },
       };
     }
-    const [flyProbe, canonical, analyzerSummary] = await Promise.all([
+    const [flyProbe, canonical, mirrorReceipt, analyzerSummary] = await Promise.all([
       probePublicBotHealth(CANONICAL_SHOWCASE_BOT_URL),
       this.botBridge.fetchPublicShowcaseState(true).catch(() => null),
+      this.botBridge.fetchAnalyzerMirrorReceipt().catch(() => null),
       this.botBridge.fetchAnalyzerSummary().catch(() => null),
     ]);
+    const mirrorInput =
+      mirrorReceipt && mirrorReceipt.available === true ? mirrorReceipt : analyzerSummary;
     return {
       ...summarizeCanonicalBotHealth(flyProbe, canonical),
-      analyzerMirror: summarizeAnalyzerMirrorHealth(analyzerSummary),
+      analyzerMirror: summarizeAnalyzerMirrorHealth(mirrorInput),
     };
   }
 

@@ -129,3 +129,22 @@ test('analyzer mirror online only when Fly mirror is present and fresh', () => {
 
   assert.equal(summarizeAnalyzerMirrorHealth(null, now).status, 'unreachable');
 });
+
+test('analyzer mirror receipt accepts bundle-v2 status shape', () => {
+  const now = Date.parse('2026-08-17T10:30:00.000Z');
+  const receipt = summarizeAnalyzerMirrorHealth(
+    {
+      available: true,
+      complete: true,
+      schema: 'analyzer_mirror_bundle_v2',
+      uploaded_at: '2026-08-17T10:17:06.543361+00:00',
+      analyzer_generated_at: '2026-08-17T09:47:16.998023+00:00',
+      size: 398066,
+      source: 'Fly trading owner + uploaded desktop analyzer mirror',
+    },
+    now,
+  );
+  assert.equal(receipt.status, 'online');
+  assert.equal(receipt.fresh, true);
+  assert.equal(receipt.ageSec, 773);
+});
