@@ -120,6 +120,7 @@ from research.source_market_evidence import (
     append_market_observation as _append_source_market_observation,
     evidence_summary as _source_market_evidence_summary,
     load_market_evidence_index as _load_source_market_evidence_index,
+    sync_canonical_pending_order as _sync_canonical_source_pending_order,
     update_canonical_extrema as _update_canonical_source_extrema,
 )
 from research.counterfactual_normalization import (
@@ -3151,6 +3152,18 @@ def lane_register_pending_order(order: dict):
     if not order:
         return False
     ln = _ensure_lane_bucket(order)
+    blocked, block_reason, coord = executable_live_copy_entries_blocked()
+    if blocked and str(ln or "").upper() == "CONTINUOUS" and not order.get("coordination_shadow"):
+        # Keep research/shadow labelled rows; block new live-copy executable book.
+        logger.warning(
+            f"[LIVE-COPY-COORD] blocking new CONTINUOUS pending "
+            f"trade={order.get('trade_id')} state={coord} reason={block_reason} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        order["status"] = "BLOCKED"
+        order["outcome"] = LIVE_RELAY_COORDINATION_REASON
+        order["coordination_state"] = coord
+        return False
     tid = str(order.get("trade_id") or "")
     with trade_lock:
         existing = next(
@@ -4140,6 +4153,70 @@ def circuit_breaker_cancel_pending(reason: str):
     return cancelled
 
 
+def live_copy_coordination_state() -> str:
+    """Railway↔Fly coordinated operating state for live-copy lanes."""
+    with state_lock:
+        raw = str(state.get("live_copy_coordination_state") or COORD_STATE_RUNNING_TOGETHER).upper()
+    if raw in {
+        COORD_STATE_RUNNING_TOGETHER,
+        COORD_STATE_RELAY_EXIT_ONLY,
+        COORD_STATE_SOURCE_RESEARCH_ONLY,
+        COORD_STATE_FULLY_PAUSED,
+    }:
+        return raw
+    return COORD_STATE_RUNNING_TOGETHER
+
+
+def set_live_copy_coordination_state(next_state: str, reason: str = "") -> dict:
+    """Apply coordinated state. RELAY_EXIT_ONLY blocks NEW executable CONTINUOUS entries."""
+    wanted = str(next_state or "").strip().upper()
+    if wanted not in {
+        COORD_STATE_RUNNING_TOGETHER,
+        COORD_STATE_RELAY_EXIT_ONLY,
+        COORD_STATE_SOURCE_RESEARCH_ONLY,
+        COORD_STATE_FULLY_PAUSED,
+    }:
+        raise ValueError(f"unsupported coordination state: {next_state}")
+    reason_text = str(reason or "").strip() or (
+        LIVE_RELAY_COORDINATION_REASON if wanted != COORD_STATE_RUNNING_TOGETHER else ""
+    )
+    with state_lock:
+        prev = str(state.get("live_copy_coordination_state") or COORD_STATE_RUNNING_TOGETHER)
+        state["live_copy_coordination_state"] = wanted
+        state["live_copy_coordination_reason"] = reason_text
+        state["live_copy_coordination_updated_at"] = utc_iso()
+        if wanted == COORD_STATE_FULLY_PAUSED:
+            state["manual_admin_pause"] = True
+        elif wanted == COORD_STATE_RUNNING_TOGETHER:
+            if state.get("execution_reason") == LIVE_RELAY_COORDINATION_REASON:
+                state["execution_paused"] = False
+                state["execution_reason"] = ""
+                state["_pause_priority"] = 0
+    if wanted == COORD_STATE_FULLY_PAUSED:
+        set_execution_paused(LIVE_RELAY_COORDINATION_REASON)
+    logger.warning(
+        f"[LIVE-COPY-COORD] {prev} -> {wanted} reason={reason_text or '-'} "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    return {
+        "ok": True,
+        "previous": prev,
+        "state": wanted,
+        "reason": reason_text,
+        "ui_reason": LIVE_RELAY_COORDINATION_REASON if wanted != COORD_STATE_RUNNING_TOGETHER else "",
+    }
+
+
+def executable_live_copy_entries_blocked() -> tuple:
+    """True when Showcase must not emit NEW executable CONTINUOUS copy intents."""
+    coord = live_copy_coordination_state()
+    if coord in {COORD_STATE_RELAY_EXIT_ONLY, COORD_STATE_FULLY_PAUSED, COORD_STATE_SOURCE_RESEARCH_ONLY}:
+        with state_lock:
+            reason = str(state.get("live_copy_coordination_reason") or LIVE_RELAY_COORDINATION_REASON)
+        return True, reason, coord
+    return False, "", coord
+
+
 def set_execution_paused(reason: str):
     global last_console_update
     cancel_reason = None
@@ -4651,6 +4728,12 @@ BOOK_FORCE_MIN_SEC = 1.5
 VENUE_EXECUTABLE_SHOWCASE_FILL_GATE = True
 SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
 _canonical_source_order_market_evidence = {}
+# Coordinated live-copy operating states (Railway Cheetah <-> Fly Showcase).
+COORD_STATE_RUNNING_TOGETHER = "RUNNING_TOGETHER"
+COORD_STATE_RELAY_EXIT_ONLY = "RELAY_EXIT_ONLY"
+COORD_STATE_SOURCE_RESEARCH_ONLY = "SOURCE_RESEARCH_ONLY"
+COORD_STATE_FULLY_PAUSED = "FULLY_PAUSED"
+LIVE_RELAY_COORDINATION_REASON = "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED"
 VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
 VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 FUNDING_RATE_CAP_PER_8H = 0.001
@@ -7991,6 +8074,23 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
             f"limit={limit_price} qty={exact_qty} policy={entry_limit_policy or 'MISSING'}"
         )
         return
+
+    if event == "ORDER_PLACED":
+        blocked, block_reason, coord = executable_live_copy_entries_blocked()
+        if blocked and research_lane in ("", "CONTINUOUS"):
+            logger.warning(
+                f"[LIVE-COPY-COORD] suppressing executable ORDER_PLACED "
+                f"trade={trade_id} state={coord} reason={block_reason} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+            # Downgrade to labelled non-executable research visibility only.
+            event = "APPROVE_PENDING"
+            sig = dict(sig)
+            sig["executable"] = False
+            sig["coordination_shadow"] = True
+            sig["coordination_state"] = coord
+            sig["coordination_reason"] = block_reason
+            signal = sig
 
     try:
         event_seq = int(
@@ -19011,6 +19111,23 @@ def _commit_relay_limit_chase(
             if tier:
                 signal["urgent_chase_tier"] = tier
             signal["fill_model"] = order["fill_model"]
+        # Canonical pending-order identity: fill gate + market evidence share
+        # this generation only after chase ACK mutated the live order.
+        sync_pending = globals().get("_sync_canonical_source_pending_order")
+        store = globals().get("_canonical_source_order_market_evidence")
+        summary_builder = globals().get("_source_market_evidence_summary")
+        if callable(sync_pending) and isinstance(store, dict):
+            if order.get("original_limit_price") is None and old_limit:
+                order["original_limit_price"] = float(old_limit)
+            canonical = sync_pending(store, order, chase_acked=True, observed_ts=now)
+            if callable(summary_builder) and canonical:
+                summary = summary_builder(canonical)
+                order["source_order_market_evidence"] = summary
+                master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+                if isinstance(master, dict):
+                    master["source_order_market_evidence"] = copy.deepcopy(summary)
+                    master["limit_price"] = new_limit
+                    master["limit_chase_count"] = chase_count
         return {
             "ts": utc_iso(),
             "limit_price": new_limit,
@@ -19296,6 +19413,19 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
             signal["relay_event_ack_at_ts"] = order["relay_event_ack_at_ts"]
             signal["marketable_fallback_depth_qty"] = available_qty
             signal["fill_model"] = order["fill_model"]
+        sync_pending = globals().get("_sync_canonical_source_pending_order")
+        store = globals().get("_canonical_source_order_market_evidence")
+        summary_builder = globals().get("_source_market_evidence_summary")
+        if callable(sync_pending) and isinstance(store, dict):
+            if order.get("original_limit_price") is None and old_limit:
+                order["original_limit_price"] = float(old_limit)
+            canonical = sync_pending(store, order, chase_acked=True, observed_ts=now)
+            if callable(summary_builder) and canonical:
+                summary = summary_builder(canonical)
+                order["source_order_market_evidence"] = summary
+                master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+                if isinstance(master, dict):
+                    master["source_order_market_evidence"] = copy.deepcopy(summary)
     logger.info(
         f"[SIM] MARKETABLE_LIMIT trade_id={order.get('trade_id')} dir={direction} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
@@ -32348,6 +32478,40 @@ _RESUMABLE_PAUSE_REASONS = frozenset({
     "MANUAL",
 })
 
+
+
+@app.route('/api/live-copy-coordination', methods=['POST'])
+def api_live_copy_coordination():
+    """Railway safety-pause / re-arm coordination for Showcase executable entries."""
+    if not _admin_authed():
+        resp = jsonify({"ok": False, "error": "unauthorized"})
+        resp.status_code = 401
+        return resp
+    body = request.get_json(silent=True) or {}
+    wanted = str(body.get("state") or body.get("coordination_state") or "").strip().upper()
+    reason = str(body.get("reason") or "").strip()
+    try:
+        result = set_live_copy_coordination_state(wanted, reason)
+    except ValueError as exc:
+        resp = jsonify({"ok": False, "error": str(exc)})
+        resp.status_code = 400
+        return resp
+    with state_lock:
+        result["execution_paused"] = bool(state.get("execution_paused"))
+        result["execution_reason"] = state.get("execution_reason")
+        result["live_copy_coordination_state"] = state.get("live_copy_coordination_state")
+        result["ui_reason"] = (
+            LIVE_RELAY_COORDINATION_REASON
+            if result["state"] != COORD_STATE_RUNNING_TOGETHER
+            else ""
+        )
+    _patch_api_state_cache_fields(
+        live_copy_coordination_state=result["state"],
+        live_copy_coordination_reason=result.get("reason") or "",
+        execution_paused=result.get("execution_paused"),
+        execution_reason=result.get("execution_reason") or "",
+    )
+    return jsonify(result)
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():

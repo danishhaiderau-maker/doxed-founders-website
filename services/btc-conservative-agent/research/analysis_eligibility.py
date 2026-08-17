@@ -133,6 +133,34 @@ def classify_row(row):
         fidelity.append("RECONCILIATION_INCOMPLETE")
     if "COPY_ORDER_NO_SHOWCASE" in negative_event_names:
         fidelity.append("COPY_ORDER_NO_SHOWCASE")
+    # Cont-57bb cohort tags: classify divergence without discarding authenticated
+    # Bitfinex Scenario C PnL merely because MIRROR_DIFF fired.
+    if "SHOWCASE_ONLY_RELAY_PAUSED" in negative_event_names or row.get("showcase_only_relay_paused") is True:
+        fidelity.append("SHOWCASE_ONLY_RELAY_PAUSED")
+    copy_fill = row.get("copy_fill_observed") if isinstance(row.get("copy_fill_observed"), dict) else {}
+    if not copy_fill:
+        copy_fill = evidence.get("copy_fill_observed") if isinstance(evidence.get("copy_fill_observed"), dict) else {}
+    if (
+        str(copy_fill.get("classification") or "").upper() == "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED"
+        or str(copy_fill.get("source_model_fill_state") or "").upper() == "SOURCE_UNCONFIRMED"
+        or row.get("copy_only_source_unconfirmed") is True
+    ):
+        # Source paper never confirmed; keep Bitfinex fidelity/PnL cohortable.
+        showcase.append("COPY_ONLY_SOURCE_UNCONFIRMED")
+    market_evidence = row.get("source_order_market_evidence") if isinstance(row.get("source_order_market_evidence"), dict) else {}
+    latest_obs = market_evidence.get("latest_observation") if isinstance(market_evidence.get("latest_observation"), dict) else {}
+    original_limit = market_evidence.get("original_limit_price")
+    current_limit = market_evidence.get("current_limit_price", market_evidence.get("limit_price"))
+    obs_limit = latest_obs.get("limit_price")
+    if (
+        original_limit is not None
+        and obs_limit is not None
+        and current_limit is not None
+        and abs(float(obs_limit) - float(current_limit)) >= 0.005
+        and abs(float(obs_limit) - float(original_limit)) < 0.005
+        and int(market_evidence.get("limit_generation") or latest_obs.get("limit_generation") or 0) > 0
+    ):
+        fidelity.append("STALE_LIMIT_EVIDENCE")
     if mirror_stale_lifecycle:
         fidelity.append("MIRROR_DIFF_STALE_NO_EXPOSURE")
     elif not provenance:
@@ -143,6 +171,15 @@ def classify_row(row):
     optimisation = reasons[REAL_COPY_PARAMETER_OPTIMISATION]
     optimisation.extend(showcase)
     optimisation.extend(fidelity)
+    # SHOWCASE_ONLY_RELAY_PAUSED has no Bitfinex participant — keep out of real-copy opt.
+    if "SHOWCASE_ONLY_RELAY_PAUSED" in fidelity:
+        optimisation.append("SHOWCASE_ONLY_RELAY_PAUSED")
+    # Authenticated BF Scenario C PnL remains optimisable even with MIRROR_DIFF /
+    # COPY_ONLY_SOURCE_UNCONFIRMED as long as actual PnL + costs are present.
+    while "COPY_ONLY_SOURCE_UNCONFIRMED" in optimisation:
+        optimisation.remove("COPY_ONLY_SOURCE_UNCONFIRMED")
+    while "MIRROR_DIFF" in optimisation:
+        optimisation.remove("MIRROR_DIFF")
     if not _present(policy_key):
         optimisation.append("POLICY_COMPARABILITY_KEY_MISSING")
     if row.get("actual_bitfinex_realized_pnl_usd") is None:

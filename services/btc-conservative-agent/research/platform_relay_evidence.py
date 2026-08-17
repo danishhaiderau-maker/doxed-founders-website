@@ -335,11 +335,17 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             )
             append_unique("bitfinex_order_ids", predecessor_stop_id)
             fill_id = explicit(payload, "fill_id", "fillId", "bitfinex_fill_id", "exchange_fill_id")
-            append_unique("fill_ids", fill_id)
-            append_unique("fill_ids", explicit(
+            fill_id_list = explicit(
                 payload, "fill_ids", "bitfinex_fill_ids", "exchange_fill_ids",
                 "entry_fill_ids", "exit_fill_ids", "exchange_exit_fill_ids",
-            ))
+            )
+            # Authenticated Bitfinex fills often publish only exchange_fill_ids[].
+            # Promote the first id so COPY_FILL_OBSERVED can form without inventing
+            # a Showcase fill.
+            if fill_id is None and isinstance(fill_id_list, list) and fill_id_list:
+                fill_id = fill_id_list[0]
+            append_unique("fill_ids", fill_id)
+            append_unique("fill_ids", fill_id_list)
 
             quantity_fields = {
                 "source_quantity": explicit(payload, "source_quantity", "source_qty", "source_exact_qty_btc"),
@@ -669,16 +675,34 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         and finite(row.get("price")) is not None
     ]
     if authenticated_fills:
+        source_model = None
+        recon_state = None
+        for row in qualified_records:
+            for event in row.get("events") or []:
+                payload = event.get("payload") if isinstance(event, dict) else None
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("source_model_fill_state"):
+                    source_model = payload.get("source_model_fill_state")
+                if payload.get("copy_reconciliation_state"):
+                    recon_state = payload.get("copy_reconciliation_state")
         evidence["copy_fill_observed"] = {
             "schema": "copy_fill_observed_v1",
             "immutable": True,
             "canonical_trade_id": str(canonical_trade_id),
             "participant_id": evidence.get("participant_id"),
+            "lifecycle_id": evidence.get("source_lifecycle_id"),
             "venue": "BITFINEX",
             "authority": "AUTHENTICATED_EXCHANGE_FILL",
             "fills": authenticated_fills,
             "fill_ids": [row["fill_id"] for row in authenticated_fills],
+            "bitfinex_order_ids": list(evidence.get("bitfinex_order_ids") or []),
+            "client_order_ids": list(evidence.get("client_order_ids") or []),
+            "classification": recon_state or "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED",
+            "source_model_fill_state": source_model or "SOURCE_UNCONFIRMED",
+            "divergence_reason": "COPY_FILLED_SOURCE_UNFILLED_OR_UNKNOWN",
             "source_strategy_state_unchanged": True,
+            "showcase_simulated_status": "UNCHANGED",
         }
         evidence["exchange_confirmed_shadow_overlay"] = {
             "schema": "exchange_confirmed_shadow_overlay_v1",
@@ -687,6 +711,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             "copy_state": "FILLED",
             "source_state": "UNCHANGED",
             "provenance": "COPY_FILL_OBSERVED",
+            "label": "EXCHANGE_CONFIRMED_SHADOW_POSITION",
+            "excluded_from_showcase_strategy_stats": True,
             "source_strategy_state_unchanged": True,
         }
     evidence["cost_evidence_complete"] = all(
