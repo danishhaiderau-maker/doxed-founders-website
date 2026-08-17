@@ -21,7 +21,15 @@ ENTRYPOINT = (ROOT / "fly-entrypoint.sh").read_text(encoding="utf-8")
 SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
     encoding="utf-8"
 )
+SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(
+    encoding="utf-8"
+)
 ATOMIC_HELPER = ROOT.parents[1] / "scripts" / "fly-mirror-atomic.ps1"
+
+
+def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
+    assert "@{ signal_ts = $currentSignal" in SYNC_LOOP
+    assert "@{$signal_ts" not in SYNC_LOOP
 
 
 def _load_bot_functions(*names):

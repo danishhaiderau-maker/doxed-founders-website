@@ -300,7 +300,7 @@ try {
             file_count = $preserved.Count; files = $preserved } |
             ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $quarantineDir 'quarantine_manifest.json') -Encoding UTF8
         }
-        @{$signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
+        @{ signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
           ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8
         $lastSyncedTotalBytes = 0
       }
