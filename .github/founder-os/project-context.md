@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Preserve truthful source expiry and venue fill evidence
+Include source market evidence in Fly runtime
 
 ## Last Activity
 
