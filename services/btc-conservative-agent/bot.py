@@ -116,6 +116,12 @@ from research.platform_relay_evidence import (
     _snapshot_with_platform_relay_evidence as _pure_snapshot_with_platform_relay_evidence,
     _validate_platform_relay_evidence_payload as _pure_validate_platform_relay_evidence_payload,
 )
+from research.source_market_evidence import (
+    append_market_observation as _append_source_market_observation,
+    evidence_summary as _source_market_evidence_summary,
+    load_market_evidence_index as _load_source_market_evidence_index,
+    update_canonical_extrema as _update_canonical_source_extrema,
+)
 from research.counterfactual_normalization import (
     canonical_profile as _canonical_counterfactual_profile,
     policy_comparability_key as _pure_policy_comparability_key,
@@ -4643,6 +4649,8 @@ BOOK_FORCE_MIN_SEC = 1.5
 # This deliberately removes the old historical-price-touch fallback that could
 # create a paper fill after Bitfinex had already moved away.
 VENUE_EXECUTABLE_SHOWCASE_FILL_GATE = True
+SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
+_canonical_source_order_market_evidence = {}
 VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
 VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 FUNDING_RATE_CAP_PER_8H = 0.001
@@ -19408,6 +19416,16 @@ def _update_pending_order_price_extremes(price: float):
             else:
                 order["max_price_since_order"] = max(float(mx), float(price))
                 order["min_price_since_order"] = min(float(order.get("min_price_since_order", price)), float(price))
+            canonical = _update_canonical_source_extrema(
+                _canonical_source_order_market_evidence, order, float(price)
+            )
+            summary = _source_market_evidence_summary(canonical)
+            order["source_order_market_evidence"] = summary
+            master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+            if isinstance(master, dict):
+                master["source_order_market_evidence"] = copy.deepcopy(summary)
+                master["min_price_since_order"] = canonical.get("market_min_price")
+                master["max_price_since_order"] = canonical.get("market_max_price")
             try:
                 from execution_funnel import funnel_update_touch
                 funnel_update_touch(order, float(price))
@@ -19459,6 +19477,37 @@ def _pending_limit_ready_for_fill(
 ) -> bool:
     """Honor relay settlement before a terminal marketable source fill."""
     now = time.time() if now is None else float(now)
+
+    def persist_market_evidence(evidence: dict):
+        append_observation = globals().get("_append_source_market_observation")
+        summary_builder = globals().get("_source_market_evidence_summary")
+        store = globals().get("_canonical_source_order_market_evidence")
+        if not callable(append_observation) or not callable(summary_builder) or not isinstance(store, dict):
+            # Isolated characterization tests compile this function without
+            # research persistence dependencies. Production imports all three.
+            return
+        canonical, observation = append_observation(
+            store,
+            order,
+            market_price=float(price or 0),
+            bid=float(bid or 0),
+            ask=float(ask or 0),
+            venue_snapshot=venue_snapshot or {},
+            gate_evidence=evidence or {},
+            observed_ts=now,
+        )
+        if not observation:
+            return
+        summary = summary_builder(canonical)
+        order["source_order_market_evidence"] = summary
+        master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+        if isinstance(master, dict):
+            master["source_order_market_evidence"] = copy.deepcopy(summary)
+        _safe_append_jsonl(
+            SOURCE_ORDER_MARKET_EVIDENCE_FILE,
+            observation,
+            label="SOURCE ORDER MARKET EVIDENCE",
+        )
     if order.get("marketable_fallback_inflight"):
         # Freeze natural source fills while the exact terminal revision is
         # crossing the platform boundary. Cancellation/TTL may still change
@@ -19486,6 +19535,7 @@ def _pending_limit_ready_for_fill(
             )
             evidence["entry_path"] = "MARKETABLE_FALLBACK"
             order["venue_fill_gate"] = evidence
+            persist_market_evidence(evidence)
             return executable
         return False
     # Isolated contract tests compile this helper without the module-level
@@ -19501,6 +19551,7 @@ def _pending_limit_ready_for_fill(
             now=now,
         )
         order["venue_fill_gate"] = evidence
+        persist_market_evidence(evidence)
         return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
 
@@ -22232,6 +22283,13 @@ def _record_expired_order(source: dict, reason: str):
             or source.get("source_trade_id")
             or master.get("source_trade_id")
         ),
+        "source_order_market_evidence": copy.deepcopy(
+            source.get("source_order_market_evidence")
+            or master.get("source_order_market_evidence")
+            or _source_market_evidence_summary(
+                _canonical_source_order_market_evidence.get(str(tid)) or {}
+            )
+        ),
     }
     with trade_lock:
         expired_orders.append(row)
@@ -23952,6 +24010,7 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
@@ -23992,6 +24051,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
         APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
@@ -24248,6 +24308,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         trades_map.clear()
         trades.clear()
         recent_trades.clear()
+        _canonical_source_order_market_evidence.clear()
     quarantine = reset_all_research_files()
     moved, errors = quarantine["moved"], quarantine["errors"]
     # Fresh Collection is the operator boundary for every active holdout.  The
@@ -36958,6 +37019,12 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         signal_snapshot_file,
         target_trade_ids=platform_trade_ids,
     )
+    market_loader = globals().get("_load_source_market_evidence_index")
+    source_market_index = market_loader(
+        globals().get("SOURCE_ORDER_MARKET_EVIDENCE_FILE", "source_order_market_evidence.jsonl"),
+        target_trade_ids=set(snapshots),
+        max_rotations=globals().get("_OFFLINE_SIM_MAX_ROTATIONS", 128),
+    ) if callable(market_loader) else {}
     replays = _load_offline_sim_jsonl_revisions(
         signal_replay_file,
         target_trade_ids=set(snapshots),
@@ -36974,9 +37041,14 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         prior_platform_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
             "platform_evidence_revision"
         )
+        source_market_revision = (source_market_index.get(str(trade_id)) or {}).get("evidence_revision")
+        prior_source_market_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
+            "source_market_evidence_revision"
+        )
         prior_exists = str(trade_id) in prior_counterfactuals
         if (trade_id in _sim_processed_trade_ids or prior_exists) and (
-            not platform_revision or prior_platform_revision == platform_revision
+            (not platform_revision or prior_platform_revision == platform_revision)
+            and (not source_market_revision or prior_source_market_revision == source_market_revision)
         ):
             _sim_processed_trade_ids.add(trade_id)
             continue
@@ -36986,6 +37058,9 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         if not replay:
             continue
         snapshot = _snapshot_with_platform_relay_evidence(snapshot, trade_id, platform_index)
+        if str(trade_id) in source_market_index:
+            snapshot["source_order_market_evidence"] = copy.deepcopy(source_market_index[str(trade_id)])
+            snapshot["source_market_evidence_revision"] = source_market_revision
         cfg = snapshot.get("config", {})
         buf = {
             "start_price": replay.get("start_price"),
@@ -37019,6 +37094,8 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
             "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
             "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+            "source_order_market_evidence": snapshot.get("source_order_market_evidence") or {},
+            "source_market_evidence_revision": snapshot.get("source_market_evidence_revision"),
             **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
         }
         try:

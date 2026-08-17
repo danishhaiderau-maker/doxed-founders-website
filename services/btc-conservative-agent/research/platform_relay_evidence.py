@@ -99,6 +99,11 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             )
             for participant_id in participant_keys
         }
+        participant_fill_overlays = {
+            participant_id: copy.deepcopy(row.get("copy_fill_observed"))
+            for participant_id, row in participants.items()
+            if row.get("copy_fill_observed")
+        }
         return {
             "schema": "bitfinex_evidence_v1",
             "canonical_trade_id": str(canonical_trade_id),
@@ -129,6 +134,22 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             "source_snapshot_evidence_complete": False,
             "reconciliation_complete": False,
             "cost_evidence_complete": False,
+            "copy_fill_observed": ({
+                "schema": "copy_fill_observed_v1",
+                "immutable": True,
+                "canonical_trade_id": str(canonical_trade_id),
+                "participants": participant_fill_overlays,
+                "source_strategy_state_unchanged": True,
+            } if participant_fill_overlays else {}),
+            "exchange_confirmed_shadow_overlay": ({
+                "schema": "exchange_confirmed_shadow_overlay_v1",
+                "canonical_trade_id": str(canonical_trade_id),
+                "copy_state": "FILLED_PARTICIPANTS",
+                "source_state": "UNCHANGED",
+                "provenance": "COPY_FILL_OBSERVED",
+                "participants": sorted(participant_fill_overlays),
+                "source_strategy_state_unchanged": True,
+            } if participant_fill_overlays else {}),
         }
 
     evidence = {
@@ -149,6 +170,8 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
         "remaining_quantity": None,
         "cancelled_quantity": None,
         "fills": [],
+        "copy_fill_observed": {},
+        "exchange_confirmed_shadow_overlay": {},
         "reprices": [],
         "chase_history": [],
         "cluster_evidence": {},
@@ -639,6 +662,33 @@ def _normalize_platform_bitfinex_evidence(records: list, canonical_trade_id: str
             row["complete"] = not row["missing_stages"]
 
     evidence["analysis_exclusion_reasons"] = sorted(set(evidence["analysis_exclusion_reasons"]))
+    authenticated_fills = [
+        copy.deepcopy(row) for row in evidence["fills"]
+        if row.get("fill_id") is not None
+        and finite(row.get("quantity")) is not None
+        and finite(row.get("price")) is not None
+    ]
+    if authenticated_fills:
+        evidence["copy_fill_observed"] = {
+            "schema": "copy_fill_observed_v1",
+            "immutable": True,
+            "canonical_trade_id": str(canonical_trade_id),
+            "participant_id": evidence.get("participant_id"),
+            "venue": "BITFINEX",
+            "authority": "AUTHENTICATED_EXCHANGE_FILL",
+            "fills": authenticated_fills,
+            "fill_ids": [row["fill_id"] for row in authenticated_fills],
+            "source_strategy_state_unchanged": True,
+        }
+        evidence["exchange_confirmed_shadow_overlay"] = {
+            "schema": "exchange_confirmed_shadow_overlay_v1",
+            "canonical_trade_id": str(canonical_trade_id),
+            "participant_id": evidence.get("participant_id"),
+            "copy_state": "FILLED",
+            "source_state": "UNCHANGED",
+            "provenance": "COPY_FILL_OBSERVED",
+            "source_strategy_state_unchanged": True,
+        }
     evidence["cost_evidence_complete"] = all(
         key in evidence["cost_evidence"] for key in (
             "trading_fee_usd", "funding_fee_usd", "spread_cost_usd", "slippage_usd"
@@ -721,6 +771,20 @@ def _snapshot_with_platform_relay_evidence(snapshot: dict, trade_id: str, eviden
             (r.get("lifecycleId") for r in records if r.get("lifecycleId")), None
         )
     enriched["bitfinex_evidence"] = evidence
+    if evidence.get("copy_fill_observed"):
+        # This overlay is copy-side research evidence only.  In particular it
+        # must never set ``executed``, source fill price, or source status.
+        enriched["copy_fill_observed"] = copy.deepcopy(evidence["copy_fill_observed"])
+        overlay = copy.deepcopy(evidence.get("exchange_confirmed_shadow_overlay") or {})
+        source_filled = bool(
+            enriched.get("executed") is True
+            or str(enriched.get("status") or "").upper() in {"FILLED", "OPEN", "CLOSED"}
+        )
+        overlay["source_state"] = "FILLED" if source_filled else "UNFILLED_OR_UNKNOWN"
+        overlay["divergence_classification"] = (
+            "BOTH_FILLED" if source_filled else "COPY_FILLED_SOURCE_UNFILLED_OR_UNKNOWN"
+        )
+        enriched["exchange_confirmed_shadow_overlay"] = overlay
     if enriched.get("actual_bitfinex_realized_pnl_usd") is None:
         explicit_pnl = evidence.get("actual_bitfinex_realized_pnl_usd")
         if explicit_pnl is not None:
