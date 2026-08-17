@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Include source market evidence in Fly runtime
+Persist fresh mirror signal receipt correctly
 
 ## Last Activity
 
