@@ -821,44 +821,49 @@ export class ShowcaseRelayEventsService {
    * Preview only — does not persist evidence or mutate exchange state.
    */
   private async isShowcaseOnlyRelayPausedClose(tradeId: string): Promise<boolean> {
-    const agent = await this.prisma.tradingAgent.findUnique({
-      where: { slug: 'conservative-btc' },
-      select: { id: true },
-    });
-    if (!agent) return false;
-    const liveParticipant = await this.prisma.signalCycleParticipant.findFirst({
-      where: {
-        venue: 'bitfinex',
-        cycle: { agentId: agent.id, tradeId },
-        status: {
-          in: [
-            SignalCycleStatus.PENDING_ENTRY,
-            SignalCycleStatus.OPEN,
-            SignalCycleStatus.CLOSED,
-          ],
+    try {
+      const agent = await this.prisma.tradingAgent.findUnique({
+        where: { slug: 'conservative-btc' },
+        select: { id: true },
+      });
+      if (!agent) return false;
+      const liveParticipant = await this.prisma.signalCycleParticipant.findFirst({
+        where: {
+          venue: 'bitfinex',
+          cycle: { agentId: agent.id, tradeId },
+          status: {
+            in: [
+              SignalCycleStatus.PENDING_ENTRY,
+              SignalCycleStatus.OPEN,
+              SignalCycleStatus.CLOSED,
+            ],
+          },
         },
-      },
-      select: { id: true },
-    });
-    if (liveParticipant) return false;
-    const activeLive = await this.prisma.tradingAgentInstance.findFirst({
-      where: {
-        agentId: agent.id,
-        exchangeProvider: 'bitfinex',
-        status: TradingAgentInstanceStatus.ACTIVE,
-      },
-      select: { id: true },
-    });
-    if (activeLive) return false;
-    const pausedLive = await this.prisma.tradingAgentInstance.findFirst({
-      where: {
-        agentId: agent.id,
-        exchangeProvider: 'bitfinex',
-        status: TradingAgentInstanceStatus.PAUSED,
-      },
-      select: { id: true },
-    });
-    return Boolean(pausedLive);
+        select: { id: true },
+      });
+      if (liveParticipant) return false;
+      const activeLive = await this.prisma.tradingAgentInstance.findFirst({
+        where: {
+          agentId: agent.id,
+          exchangeProvider: 'bitfinex',
+          status: TradingAgentInstanceStatus.ACTIVE,
+        },
+        select: { id: true },
+      });
+      if (activeLive) return false;
+      const pausedLive = await this.prisma.tradingAgentInstance.findFirst({
+        where: {
+          agentId: agent.id,
+          exchangeProvider: 'bitfinex',
+          status: TradingAgentInstanceStatus.PAUSED,
+        },
+        select: { id: true },
+      });
+      return Boolean(pausedLive);
+    } catch {
+      // Fail closed: a lookup error must not skip the owned-lot exit wake.
+      return false;
+    }
   }
 
   /**
@@ -866,6 +871,22 @@ export class ShowcaseRelayEventsService {
    * Acknowledge without HTTP 400 and never invent a retrospective participant.
    */
   private async acknowledgeShowcaseOnlyCloseIfRelayPaused(
+    tradeId: string,
+    body: ShowcaseRelayEventBody,
+  ): Promise<{ persisted: boolean } | null> {
+    try {
+      return await this.tryAcknowledgeShowcaseOnlyCloseIfRelayPaused(tradeId, body);
+    } catch (err) {
+      this.logger.warn(
+        `NO_COPY_PARTICIPANT lookup failed trade=${tradeId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private async tryAcknowledgeShowcaseOnlyCloseIfRelayPaused(
     tradeId: string,
     body: ShowcaseRelayEventBody,
   ): Promise<{ persisted: boolean } | null> {

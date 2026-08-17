@@ -168,13 +168,17 @@ function createService(
       overrides?.trace?.push('execution');
     },
   };
-  const prismaBase = overrides?.prisma ?? {
-    tradingAgent: {
-      findUnique: async () => {
-        overrides?.trace?.push('persist');
-        return null;
+  const prismaBase = {
+    signalCycleParticipant: { findFirst: async () => null },
+    tradingAgentInstance: { findFirst: async () => null },
+    ...(overrides?.prisma ?? {
+      tradingAgent: {
+        findUnique: async () => {
+          overrides?.trace?.push('persist');
+          return null;
+        },
       },
-    },
+    }),
   };
   const transactionClient = {
     ...prismaBase,
@@ -1177,4 +1181,84 @@ test('POSITION_CLOSED with no copy participant while relay is paused is acknowle
     createdEvents.some((event) => event.payload?.type === 'SHOWCASE_ONLY_RELAY_PAUSED'),
     true,
   );
+});
+
+test('signed POSITION_CLOSED still wakes when no-copy lookup tables are missing', async () => {
+  const secret = 'test-webhook-secret';
+  let storedEnvelope: Record<string, unknown> = {
+    schema: 'dcf-signal-intent/v1',
+    action: 'ENTER',
+    direction: 'LONG',
+    entry: { exact_limit_price: 64_500 },
+    context: {},
+  };
+  const trace: string[] = [];
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findUnique: async () => ({
+        id: 'cycle-existing',
+        status: 'OPEN',
+        intentEnvelope: storedEnvelope,
+      }),
+      update: async (args: {
+        data: {
+          intentEnvelope?: Record<string, unknown>;
+          status?: string;
+        };
+      }) => {
+        if (args.data.intentEnvelope) {
+          storedEnvelope = args.data.intentEnvelope;
+          trace.push('persist');
+        }
+        if (args.data.status === 'CLOSED') trace.push('closed');
+        return {};
+      },
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async () => ({}),
+    },
+  };
+  const execution = {
+    requestExecutorPreWake: () => {
+      trace.push('prewake');
+    },
+    requestExecutorWake: async () => {
+      trace.push('execution');
+    },
+  };
+  const service = createService('dashboard-active', secret, {
+    prisma: {
+      ...prisma,
+      signalCycleParticipant: undefined,
+      tradingAgentInstance: undefined,
+    },
+    execution,
+  });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_CLOSED' as const,
+    trade_id: 'cont-c105efa5',
+    direction: 'LONG',
+    signal_price: 64_500,
+    exit_price: 64_620.5,
+    exit_reason: 'PROFIT_LOCK_LADDER',
+    event_id: 'close-cont-c105efa5-lookup-guard',
+    event_seq: 7,
+    ts: new Date().toISOString(),
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  }) as Record<string, unknown>;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.action, undefined);
+  assert.deepEqual(trace, ['prewake', 'persist', 'closed', 'execution']);
 });
