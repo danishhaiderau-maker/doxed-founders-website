@@ -116,6 +116,50 @@ test('ops already-flat recovery authenticates before execution and requires exac
   assert.equal(executions, 1);
 });
 
+test('ops pause authenticates before all mutation and uses canonical pause settlement', async () => {
+  const calls: string[] = [];
+  const tradingAgents = {
+    getOpsRelayStatus: async (_slug: string, _userId: string, token: string) => {
+      calls.push(`auth:${token}`);
+      if (token !== 'valid-token') throw new Error('Invalid BOT_ADMIN_TOKEN');
+      return { status: 'ACTIVE' };
+    },
+  };
+  const instances = {
+    setInstancePaused: async (userId: string, slug: string, paused: boolean) => {
+      calls.push(`pause:${userId}:${slug}:${paused}`);
+      return { ok: true, status: 'PAUSED', relay: { cancelledOrders: 1 } };
+    },
+  };
+  const controller = new TradingAgentsController(
+    tradingAgents as never, instances as never, {} as never, {} as never, {} as never,
+  );
+  const body = { userId: 'user-a', confirmation: 'PAUSE_AND_SETTLE_MANAGED_ENTRIES' };
+
+  await assert.rejects(
+    controller.opsPause('conservative-btc', body, 'wrong-token', undefined),
+    /Invalid BOT_ADMIN_TOKEN/,
+  );
+  assert.deepEqual(calls, ['auth:wrong-token']);
+
+  await assert.rejects(
+    controller.opsPause(
+      'conservative-btc', { ...body, confirmation: 'wrong' }, 'valid-token', undefined,
+    ),
+    /confirmation must equal PAUSE_AND_SETTLE_MANAGED_ENTRIES/,
+  );
+  assert.deepEqual(calls, ['auth:wrong-token', 'auth:valid-token']);
+
+  assert.deepEqual(
+    await controller.opsPause('conservative-btc', body, 'valid-token', undefined),
+    { ok: true, status: 'PAUSED', relay: { cancelledOrders: 1 } },
+  );
+  assert.deepEqual(calls, [
+    'auth:wrong-token', 'auth:valid-token', 'auth:valid-token',
+    'pause:user-a:conservative-btc:true',
+  ]);
+});
+
 test('ops emergency reconcile requires admin-scoped paused mismatch and explicit confirmation', async () => {
   const calls: unknown[][] = [];
   const tradingAgents = {

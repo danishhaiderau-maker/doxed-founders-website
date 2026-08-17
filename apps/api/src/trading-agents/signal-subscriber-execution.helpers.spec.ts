@@ -7292,6 +7292,44 @@ test('fast-wake completion latency excludes dashboard telemetry persistence', as
   assert.equal(persistedPatch.relayExecutorFastWake.outcome, 'ENTRY_PLACED');
 });
 
+test('fast-wake timing evidence is isolated per connected relay account', async () => {
+  const service = new SignalSubscriberExecutionService(
+    {} as never, {} as never, {} as never, {} as never,
+    {} as never, {} as never, {} as never, {} as never,
+  ) as any;
+  const instances = [
+    { id: 'instance-a', userId: 'user-a', agentId: 'agent', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+    { id: 'instance-b', userId: 'user-b', agentId: 'agent', exchangeProvider: 'bitfinex', status: TradingAgentInstanceStatus.ACTIVE, dashboardState: {} },
+  ];
+  service.relayInstanceCache = new Map(instances.map((row) => [row.id, row]));
+  service.prisma = { tradingAgentInstance: { findMany: async () => instances } };
+  service.bitfinex = {};
+  const observed: Array<{ instanceId: string; timing: Record<string, number> }> = [];
+  service.tryFreshSignedFlatEntry = async (_agentId: string, instance: any, _tradeId: string, timing: any) => {
+    if (instance.id === 'instance-a') {
+      timing.bitfinexRequestStartedAtMs = 10;
+      timing.exchangeAckAtMs = 11;
+      timing.persistenceCompletedAtMs = 12;
+      return true;
+    }
+    // Account B fails eligibility before any exchange/persistence stage.
+    return false;
+  };
+  service.persistFastWakeTelemetry = async (instanceId: string, _wake: unknown, _started: number, _outcome: string, timing: any) => {
+    observed.push({ instanceId, timing: { ...timing } });
+  };
+
+  await service.executePersistedFastWake({
+    trigger: 'ORDER_PLACED', tradeId: 'cont-shared-source', at: new Date(1_000).toISOString(),
+  });
+
+  assert.equal(observed.find((row) => row.instanceId === 'instance-a')?.timing.exchangeAckAtMs, 11);
+  const accountBReceipts = observed.filter((row) => row.instanceId === 'instance-b');
+  assert.ok(accountBReceipts.length >= 1);
+  assert.equal(accountBReceipts.every((row) => row.timing.exchangeAckAtMs === undefined), true);
+  assert.equal(accountBReceipts.every((row) => row.timing.persistenceCompletedAtMs === undefined), true);
+});
+
 test('monitorExit cannot turn a bare CLOSED lifecycle label into exchange-close authority', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
   let gated = 0;

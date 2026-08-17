@@ -180,6 +180,32 @@ export class TradingAgentsController {
     );
   }
 
+  /**
+   * Cookie-free operator pause that retains the ordinary money-path contract:
+   * managed entries are cancelled and settled before their participants are
+   * expired.  Authentication deliberately runs before confirmation or any
+   * instance/exchange mutation.
+   */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post(':slug/ops/pause')
+  async opsPause(
+    @Param('slug') slug: string,
+    @Body() body: { userId?: string; confirmation?: string },
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    await this.tradingAgents.getOpsRelayStatus(
+      slug, body?.userId, adminHeader, authorization,
+    );
+    if (body?.confirmation !== 'PAUSE_AND_SETTLE_MANAGED_ENTRIES') {
+      throw new BadRequestException(
+        'confirmation must equal PAUSE_AND_SETTLE_MANAGED_ENTRIES',
+      );
+    }
+    return this.instances.setInstancePaused(body.userId!.trim(), slug, true);
+  }
+
   @Public()
   @Get(':slug/analyzer-genome')
   analyzerGenome(@Param('slug') slug: string) {

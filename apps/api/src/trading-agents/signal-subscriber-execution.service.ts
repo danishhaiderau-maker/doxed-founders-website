@@ -4570,6 +4570,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         if (processedInstanceIds.has(instance.id)) continue;
         if (isCopyRelaySimActive(instance.dashboardState)) continue;
         this.activeTrading = this.bitfinex;
+        // Timing stages are mutated by the entry/reprice path.  Each connected
+        // account must start from the immutable wake receipt, otherwise a
+        // later account that fails before an exchange stage can inherit the
+        // previous account's Bitfinex ACK/persistence timestamps.
+        const instanceTiming: RelayExecutionTimingStages = { ...timing };
         if (wake.trigger === 'ORDER_EXPIRED') {
           const handled = await this.tryImmediateSignedOrderExpiry(instance, wake);
           await this.persistFastWakeTelemetry(
@@ -4640,14 +4645,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             instance.agentId,
             instance,
             wake.tradeId ?? undefined,
-            timing,
+            instanceTiming,
           );
           await this.persistFastWakeTelemetry(
             instance.id,
             wake,
             startedAtMs,
             placed ? 'ENTRY_PLACED' : 'ENTRY_NOT_ELIGIBLE',
-            timing,
+            instanceTiming,
           );
           if (placed) processedInstanceIds.add(instance.id);
         } else if (wake.trigger === 'ORDER_PLACED') {
@@ -4660,14 +4665,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
             instance.agentId,
             instance,
             wake.tradeId ?? undefined,
-            timing,
+            instanceTiming,
           );
           await this.persistFastWakeTelemetry(
             instance.id,
             wake,
             startedAtMs,
             repriced ? 'LIMIT_REPRICE_DISPATCHED' : 'LIMIT_REPRICE_NOT_ELIGIBLE',
-            timing,
+            instanceTiming,
           );
           if (repriced) processedInstanceIds.add(instance.id);
         } else if (wake.trigger === 'LIMIT_UPDATED') {
