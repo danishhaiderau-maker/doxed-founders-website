@@ -438,6 +438,28 @@ export type RelayExecutorHealthSnapshot = {
   executionEnabled?: boolean;
 };
 
+export type LiveCopyCoordinationState =
+  | 'RUNNING_TOGETHER'
+  | 'RELAY_EXIT_ONLY'
+  | 'SOURCE_RESEARCH_ONLY'
+  | 'FULLY_PAUSED';
+
+/** Pure mapping from live-copy hire state to Showcase coordination. */
+export function desiredLiveCopyCoordinationState(input: {
+  liveInstances: Array<{ status: string; simActive?: boolean }>;
+  openOrPendingLots: number;
+}): LiveCopyCoordinationState {
+  const live = input.liveInstances.filter((row) => row.simActive !== true);
+  if (live.some((row) => row.status === TradingAgentInstanceStatus.ACTIVE)) {
+    return 'RUNNING_TOGETHER';
+  }
+  if (input.openOrPendingLots > 0) return 'RELAY_EXIT_ONLY';
+  if (live.some((row) => row.status === TradingAgentInstanceStatus.PAUSED)) {
+    return 'SOURCE_RESEARCH_ONLY';
+  }
+  return 'FULLY_PAUSED';
+}
+
 /** Pure liveness calculation shared by runtime health and focused tests. */
 export function buildRelayExecutorHealth(input: {
   nowMs: number;
@@ -3586,6 +3608,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    */
   private lastShowcaseWakeAt = 0;
   private lastShowcaseWakeTrigger: 'POSITION_CLOSED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | null = null;
+  private lastNotifiedLiveCopyCoord: LiveCopyCoordinationState | null = null;
 
   /**
    * F1/F2/F3 — per-instance showcase-unreachable tracking.
@@ -5490,6 +5513,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           this.relayInstanceCache.set(instance.id, instance);
         }
       }
+      await this.reconcileShowcaseLiveCopyCoordination(agent.id, instances);
 
       for (const row of instances) {
         this.currentInstanceId = row.id;
@@ -10250,10 +10274,49 @@ await this.notifications
   }
 
   /** Fail closed on any raw exchange-versus-ledger position mismatch. */
+  private async reconcileShowcaseLiveCopyCoordination(
+    agentId: string,
+    instances: TradingAgentInstance[],
+  ): Promise<void> {
+    try {
+      const liveInstances = instances
+        .filter((instance) => instance.exchangeProvider === 'bitfinex')
+        .map((instance) => ({
+          status: instance.status,
+          simActive: isCopyRelaySimActive(instance.dashboardState),
+        }));
+      const openOrPendingLots = await this.prisma.signalCycleParticipant.count({
+        where: {
+          venue: 'bitfinex',
+          status: {
+            in: [SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN],
+          },
+          cycle: { agentId },
+        },
+      });
+      const wanted = desiredLiveCopyCoordinationState({
+        liveInstances,
+        openOrPendingLots,
+      });
+      if (this.lastNotifiedLiveCopyCoord === wanted) return;
+      const notified = await this.notifyShowcaseLiveCopyCoordination(
+        wanted,
+        wanted === 'RUNNING_TOGETHER'
+          ? 'CHEETAH_REARMED'
+          : 'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED',
+      );
+      if (notified) this.lastNotifiedLiveCopyCoord = wanted;
+    } catch (err) {
+      this.logger.warn(
+        `[LIVE-COPY-COORD] reconcile failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
   private async notifyShowcaseLiveCopyCoordination(
     state: 'RUNNING_TOGETHER' | 'RELAY_EXIT_ONLY' | 'SOURCE_RESEARCH_ONLY' | 'FULLY_PAUSED',
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const result = await this.botBridge.proxyBotPost('/api/live-copy-coordination', {
         state,
@@ -10264,13 +10327,15 @@ await this.notifications
           `[LIVE-COPY-COORD] showcase notify failed state=${state} ` +
             `${(result as { error?: string })?.error ?? `status=${(result as { status?: number })?.status}`}`,
         );
-      } else {
-        this.logger.warn(`[LIVE-COPY-COORD] showcase notified state=${state} reason=${reason}`);
+        return false;
       }
+      this.logger.warn(`[LIVE-COPY-COORD] showcase notified state=${state} reason=${reason}`);
+      return true;
     } catch (err) {
       this.logger.warn(
         `[LIVE-COPY-COORD] showcase notify error: ${err instanceof Error ? err.message : err}`,
       );
+      return false;
     }
   }
 

@@ -110,6 +110,7 @@ import {
   resolveExactShowcaseEntryQty,
   resolveEffectiveStopLossMarginPct,
   isDeterministicBitfinexSubmitRejection,
+  desiredLiveCopyCoordinationState,
 } from './signal-subscriber-execution.service';
 
 test('Scenario C exchange stop promotion defaults on and requires an explicit rollback to disable', () => {
@@ -9050,4 +9051,35 @@ test('service lifecycle settles a late TTL cancellation-race slice behind exact 
   assert.ok(oldStopCancel > replacementAck);
   assert.ok(filledPersist > oldStopCancel);
   assert.equal(stopInputs.get(7802)?.qty, 0.018);
+});
+
+test('desired live-copy coordination maps pause, open lots, and re-arm', () => {
+  assert.equal(
+    desiredLiveCopyCoordinationState({
+      liveInstances: [{ status: 'PAUSED' }, { status: 'PAUSED' }],
+      openOrPendingLots: 0,
+    }),
+    'SOURCE_RESEARCH_ONLY',
+  );
+  assert.equal(
+    desiredLiveCopyCoordinationState({
+      liveInstances: [{ status: 'PAUSED' }],
+      openOrPendingLots: 1,
+    }),
+    'RELAY_EXIT_ONLY',
+  );
+  assert.equal(
+    desiredLiveCopyCoordinationState({
+      liveInstances: [{ status: 'ACTIVE' }, { status: 'PAUSED' }],
+      openOrPendingLots: 0,
+    }),
+    'RUNNING_TOGETHER',
+  );
+  assert.equal(
+    desiredLiveCopyCoordinationState({
+      liveInstances: [{ status: 'PAUSED', simActive: true }],
+      openOrPendingLots: 0,
+    }),
+    'FULLY_PAUSED',
+  );
 });
