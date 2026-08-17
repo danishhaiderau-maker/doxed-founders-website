@@ -1622,41 +1622,49 @@ def _decision_readiness_payload():
     ladder = _read_json("exit_ladder_simulator_report.json")
     fast_cut = _read_json("fast_cut_sweep_report.json")
     chase = _read_json("chase_effectiveness_report.json")
+    qualified_chase = _read_json("qualified_chase_policy_report.json")
     policy_grid = _read_json("qualified_exit_policy_grid_report.json")
     grid_ready = bool(policy_grid.get("live_policy_change_allowed"))
 
-    def question(key, text, report, ready, qualified_detail, extra_blockers=None):
+    def question(key, text, report, descriptive_ready, live_ready, qualified_detail, extra_blockers=None):
         blockers = list(extra_blockers or [])
         if not counterfactual_available:
             blockers.append("COUNTERFACTUAL_EVIDENCE_MISSING")
         if report not in manifest_files:
             blockers.append("REPORT_NOT_CURRENT_MANIFEST")
-        ready = bool(ready and counterfactual_available and report in manifest_files)
+        descriptive_ready = bool(descriptive_ready and counterfactual_available and report in manifest_files)
+        live_ready = bool(live_ready and descriptive_ready)
         return {
             "key": key,
             "question": text,
-            "status": "QUALIFIED" if ready else "BLOCKED",
+            "status": "LIVE_POLICY_QUALIFIED" if live_ready else "DESCRIPTIVE_QUALIFIED" if descriptive_ready else "BLOCKED",
+            "descriptive_answer_available": descriptive_ready,
+            "live_policy_change_allowed": live_ready,
             "current_epoch_qualified_rows": qualified_n,
             "historical_showcase_rows": showcase_n,
             "evidence_scope": "REAL_COPY_PARAMETER_OPTIMISATION",
             "report": report,
-            "detail": qualified_detail if ready else "No question-specific qualified holdout; live changes remain fail-closed.",
+            "detail": qualified_detail if descriptive_ready else "No question-specific qualified holdout; live changes remain fail-closed.",
             "exclusion_reason_counts": exclusions,
             "blockers": sorted(set(blockers)),
         }
 
     questions = [
         question("cluster_distance", "Cluster distance", "correlated_price_cluster_report.json",
-                 bool(cluster.get("live_policy_change_allowed")),
+                 bool(cluster.get("conclusion_allowed")), False,
                  f"Qualified 120-minute cost-complete rows: {int(cluster.get('qualified_120m_cost_complete') or 0)}."),
-        question("thesis_fast_cut", "Thesis fast-cut", "fast_cut_sweep_report.json", grid_ready,
-                 f"Sweep candidates: {len(fast_cut.get('sweep_levels') or [])}."),
-        question("hard_stop", "Physical hard stop", "qualified_exit_policy_grid_report.json", grid_ready,
-                 "Authenticated costs, stop evidence, terminal provenance and reconciliation are complete."),
-        question("scenario_c", "Scenario C ladder", "exit_ladder_simulator_report.json", grid_ready,
-                 f"Matched replay rows: {int(ladder.get('replays_matched_executed') or 0)}; status: {ladder.get('data_status') or 'UNKNOWN'}."),
-        question("chase", "Chase timing and limits", "chase_effectiveness_report.json", False,
-                 f"Historical buckets: {len(chase.get('buckets') or {})}; qualified real-copy validation is present."),
+        question("thesis_fast_cut", "Thesis fast-cut", "qualified_exit_policy_grid_report.json",
+                 bool(policy_grid.get("selected_on_train")), grid_ready,
+                 f"Qualified costed replays: {int(policy_grid.get('qualified_costed_replays') or 0)}; train-selected candidates remain preliminary until holdout qualifies."),
+        question("hard_stop", "Physical hard stop", "qualified_exit_policy_grid_report.json",
+                 policy_grid.get("physical_hard_stop_invariant_pct") is not None, False,
+                 "The 13% physical hard stop is a fixed safety invariant, not an optimisation axis; this does not authorize widening it."),
+        question("scenario_c", "Scenario C ladder", "qualified_exit_policy_grid_report.json",
+                 bool(policy_grid.get("selected_on_train")), grid_ready,
+                 f"Qualified costed replays: {int(policy_grid.get('qualified_costed_replays') or 0)}; Scenario C candidates share the chronological exit-policy holdout."),
+        question("chase", "Chase timing and limits", "qualified_chase_policy_report.json",
+                 bool(qualified_chase.get("descriptive_conclusion_allowed")), False,
+                 f"Qualified real-copy rows: {int(qualified_chase.get('qualified_rows') or 0)}; historical buckets: {len(chase.get('buckets') or {})}."),
     ]
     return {
         "schema": "question_specific_readiness_v1",
@@ -1665,7 +1673,7 @@ def _decision_readiness_payload():
         "current_qualified_epoch": {
             "real_copy_rows": qualified_n,
             "showcase_strategy_rows": showcase_n,
-            "live_policy_changes_allowed": bool(questions) and all(q["status"] == "QUALIFIED" for q in questions),
+            "live_policy_changes_allowed": bool(questions) and all(q["live_policy_change_allowed"] for q in questions),
         },
         "fresh_epoch": manifest.get("fresh_epoch") or {
             "status": "UNAVAILABLE", "epoch_id": None, "cutoff_utc": None,

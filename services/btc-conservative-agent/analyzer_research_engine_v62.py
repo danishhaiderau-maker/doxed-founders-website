@@ -469,6 +469,7 @@ BENCHMARK_RELATIVE_SCORECARD_FILE = "benchmark_relative_scorecard.json"
 MISSED_OPPORTUNITY_HEATMAP_FILE = "missed_opportunity_heatmap.json"
 CHASE_ATTRIBUTION_REPORT_FILE = "chase_attribution_report.json"
 CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
+QUALIFIED_CHASE_POLICY_REPORT_FILE = "qualified_chase_policy_report.json"
 SCENARIO_C_LEAKAGE_REPORT_FILE = "scenario_c_leakage_report.json"
 FIRST_15M_OUTCOME_REPORT_FILE = "first_15m_outcome_report.json"
 PATHWAY_SURVIVAL_REPORT_FILE = "pathway_survival_report.json"
@@ -597,6 +598,7 @@ ANALYZER_JSON_REPORT_FILES = (
     BENCHMARK_VS_LANES_REPORT_FILE,
     CHASE_ATTRIBUTION_REPORT_FILE,
     CHASE_EFFECTIVENESS_REPORT_FILE,
+    QUALIFIED_CHASE_POLICY_REPORT_FILE,
     CONFIDENCE_BAND_REPORT_FILE,
     DIRECTION_REPORT_FILE,
     EDGE_INCREMENTAL_VALUE_REPORT_FILE,
@@ -652,6 +654,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Lane Analysis", BENCHMARK_VS_LANES_REPORT_FILE, "Per-lane approves, fills, PnL, EV/approve"),
     ("Chase Attribution", CHASE_ATTRIBUTION_REPORT_FILE, "Per-trade chase counts and saved-fill heuristic"),
     ("Chase Effectiveness", CHASE_EFFECTIVENESS_REPORT_FILE, "PnL by chase-count bucket"),
+    ("Qualified Chase Policy", QUALIFIED_CHASE_POLICY_REPORT_FILE, "Fail-closed real-copy chase-count train/holdout evidence"),
     ("Chase Threshold", CHASE_THRESHOLD_REPORT_FILE, "Cumulative EV/WR/PnL at chase_count N+ thresholds"),
     ("Chase Delay Lanes", CHASE_DELAY_REPORT_FILE, "COMBO Direct vs Chase 3+ within each AI/spread tier"),
     ("Confidence Bands", CONFIDENCE_BAND_REPORT_FILE, "Executed trades by AI confidence band"),
@@ -3805,7 +3808,10 @@ def qualified_exit_policy_grid_report():
         "schema": "qualified_exit_policy_grid_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "generation_revision": os.getenv("GIT_SHA") or os.getenv("RAILWAY_GIT_COMMIT_SHA") or "unknown",
+        "generation_revision": (
+            os.getenv("SOURCE_GIT_REV") or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("GIT_REVISION") or os.getenv("GIT_SHA") or "UNKNOWN"
+        ),
         "cohort": REAL_COPY_PARAMETER_OPTIMISATION,
         "cohort_schema": "analysis_cohorts_v1",
         "cohorts": cohort_assessments,
@@ -3825,6 +3831,7 @@ def qualified_exit_policy_grid_report():
         "counterfactual_grid": cells,
         "selected_on_train": selected,
         "conclusions_allowed": conclusions_allowed,
+        "live_policy_change_allowed": conclusions_allowed,
         "verdict": "QUALIFIED_HOLDOUT_AVAILABLE" if conclusions_allowed else "INSUFFICIENT_QUALIFIED_HOLDOUT",
         "preliminary_descriptive_estimate": {
             "status": "DESCRIPTIVE_ONLY" if selected else "NO_ESTIMATE",
@@ -3852,6 +3859,170 @@ def qualified_exit_policy_grid_report():
         "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
     }
     with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    return report
+
+
+def qualified_chase_policy_report():
+    """Real-copy chase-count evidence with chronological train/holdout semantics.
+
+    This is deliberately observational: it can qualify a descriptive statement
+    about naturally executed chase counts, but it cannot claim that a different
+    chase policy would have filled or profited without a counterfactual entry
+    replay for every opportunity.
+    """
+    eligible_ids, cohort_exclusions, evidence_rows = _analysis_eligible_trade_ids(
+        REAL_COPY_PARAMETER_OPTIMISATION
+    )
+    evidence = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    exclusions = Counter()
+    rows = []
+    for trade_id in sorted(eligible_ids):
+        row = evidence.get(trade_id) or {}
+        bitfinex = row.get("bitfinex_evidence") or {}
+        history = bitfinex.get("chase_history") or []
+        if not isinstance(history, list):
+            exclusions["CHASE_HISTORY_INVALID"] += 1
+            continue
+        counts = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("chase_count")
+            if value is None:
+                continue
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                continue
+            if numeric >= 0:
+                counts.append(numeric)
+        chase_count = max(counts) if counts else (0 if history == [] else None)
+        if chase_count is None:
+            exclusions["CHASE_COUNT_MISSING"] += 1
+            continue
+        pnl = row.get("actual_bitfinex_realized_pnl_usd")
+        try:
+            pnl = float(pnl)
+        except (TypeError, ValueError):
+            exclusions["BITFINEX_ACTUAL_PNL_MISSING"] += 1
+            continue
+        if not np.isfinite(pnl):
+            exclusions["NONFINITE_PNL"] += 1
+            continue
+        timing_candidates = [
+            row.get("source_created_at"), row.get("entry_ts"), row.get("created_at"),
+            (bitfinex.get("source_identity") or {}).get("source_created_at"),
+            (bitfinex.get("source_identity") or {}).get("source_event_at"),
+        ]
+        timing_candidates.extend(
+            item.get("ack_at") or item.get("created_at") or item.get("ts")
+            for item in (bitfinex.get("ack_history") or []) if isinstance(item, dict)
+        )
+        timing_candidates.extend(
+            item.get("created_at") or item.get("ts") or item.get("ack_at")
+            for item in history if isinstance(item, dict)
+        )
+        timestamp = next((value for value in timing_candidates if _cluster_ts(value) is not None), None)
+        ts = _cluster_ts(timestamp)
+        if ts is None:
+            exclusions["CHRONOLOGICAL_TIMESTAMP_MISSING"] += 1
+            continue
+        policy_key = row.get("policy_comparability_key")
+        if not policy_key:
+            exclusions["POLICY_COMPARABILITY_KEY_MISSING"] += 1
+            continue
+        rows.append({
+            "trade_id": trade_id, "ts": ts, "chase_count": chase_count,
+            "bucket": _chase_count_bucket(chase_count), "net_pnl_usd": pnl,
+            "policy_comparability_key": str(policy_key),
+        })
+
+    policy_counts = Counter(item["policy_comparability_key"] for item in rows)
+    selected_policy_key = (
+        sorted(policy_counts, key=lambda key: (-policy_counts[key], key))[0]
+        if policy_counts else None
+    )
+    if selected_policy_key:
+        mismatches = sum(count for key, count in policy_counts.items() if key != selected_policy_key)
+        if mismatches:
+            exclusions["POLICY_COMPARABILITY_KEY_MISMATCH"] += mismatches
+        rows = [row for row in rows if row["policy_comparability_key"] == selected_policy_key]
+    rows.sort(key=lambda row: (row["ts"], row["trade_id"]))
+    split_at = max(1, int(len(rows) * 0.7)) if rows else 0
+    train, holdout = rows[:split_at], rows[split_at:]
+
+    def bucket_stats(values):
+        result = {}
+        for bucket in ("0", "1", "2", "3", "4", "5+"):
+            pnls = [row["net_pnl_usd"] for row in values if row["bucket"] == bucket]
+            mean = float(np.mean(pnls)) if pnls else None
+            ci = None
+            if len(pnls) >= 2:
+                half = 1.96 * float(np.std(pnls, ddof=1)) / np.sqrt(len(pnls))
+                ci = [round(mean - half, 6), round(mean + half, 6)]
+            result[bucket] = {
+                "n": len(pnls),
+                "net_pnl_usd": round(sum(pnls), 6),
+                "ev_usd": round(mean, 6) if mean is not None else None,
+                "win_rate_pct": round(100 * sum(value > 0 for value in pnls) / len(pnls), 3) if pnls else None,
+                "confidence_interval_95_ev_usd": ci,
+            }
+        return result
+
+    train_buckets = bucket_stats(train)
+    holdout_buckets = bucket_stats(holdout)
+    ranked = sorted(
+        (key for key, value in train_buckets.items() if value["ev_usd"] is not None),
+        key=lambda key: (train_buckets[key]["ev_usd"], train_buckets[key]["n"], key),
+        reverse=True,
+    )
+    selected_bucket = ranked[0] if ranked else None
+    validation = holdout_buckets.get(selected_bucket) if selected_bucket else None
+    descriptive_qualified = bool(
+        selected_bucket and len(train) >= 30 and len(holdout) >= 20
+        and train_buckets[selected_bucket]["n"] >= 10
+        and validation and validation["n"] >= 5
+        and validation["confidence_interval_95_ev_usd"] is not None
+    )
+    report = {
+        "schema": "qualified_chase_policy_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_revision": (
+            os.getenv("SOURCE_GIT_REV") or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("GIT_REVISION") or os.getenv("GIT_SHA") or "UNKNOWN"
+        ),
+        "cohort": REAL_COPY_PARAMETER_OPTIMISATION,
+        "cohort_schema": "analysis_cohorts_v1",
+        "evidence_rows": evidence_rows,
+        "eligible_ids": len(eligible_ids),
+        "qualified_rows": len(rows),
+        "cohort_exclusion_reason_counts": cohort_exclusions,
+        "report_exclusion_reason_counts": dict(sorted(exclusions.items())),
+        "selected_policy_comparability_key": selected_policy_key,
+        "policy_group_counts": dict(policy_counts),
+        "chronological_split": {"train_n": len(train), "holdout_n": len(holdout), "train_pct": 70},
+        "train_buckets": train_buckets,
+        "holdout_buckets": holdout_buckets,
+        "selected_on_train": selected_bucket,
+        "selected_holdout": validation,
+        "descriptive_conclusion_allowed": descriptive_qualified,
+        "live_policy_change_allowed": False,
+        "verdict": "QUALIFIED_DESCRIPTIVE_HOLDOUT" if descriptive_qualified else "INSUFFICIENT_QUALIFIED_HOLDOUT",
+        "question_outputs": {
+            "chase": {
+                "status": "QUALIFIED_DESCRIPTIVE" if descriptive_qualified else "PRELIMINARY_ONLY" if rows else "NO_EVIDENCE",
+                "counterfactual_policy_answer_available": False,
+                "recommendation": None,
+            }
+        },
+        "producer_gaps": [
+            "ALL_OPPORTUNITY_COUNTERFACTUAL_ENTRY_REPLAY",
+            "COUNTERFACTUAL_TOUCH_AND_FILL_BY_CHASE_POLICY",
+        ],
+        "note": "Natural real-copy outcomes can qualify descriptive chase buckets. Live chase changes remain blocked until all-opportunity counterfactual entry replay is available.",
+    }
+    with open(analyzer_report_path(QUALIFIED_CHASE_POLICY_REPORT_FILE), "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     return report
 
@@ -17131,6 +17302,7 @@ def pre_test_analytics_reports(
     missed_opportunity_heatmap_report(trades=trades, session=session)
     chase_payload = chase_attribution_report(trades=trades, session=session)
     chase_effectiveness_report(trades=trades, session=session, chase_payload=chase_payload)
+    qualified_chase_policy_report()
     chase_threshold_report(trades=trades, session=session, chase_payload=chase_payload)
     chase_profit_report(trades=trades, session=session, chase_payload=chase_payload)
     urgent_chase_report(

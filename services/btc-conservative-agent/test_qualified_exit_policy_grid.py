@@ -44,6 +44,7 @@ def test_grid_fails_closed_without_real_copy_cohort():
             (Path(tmp) / analyzer.QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE).read_text(encoding="utf-8")
         )
     assert report["conclusions_allowed"] is False
+    assert report["live_policy_change_allowed"] is False
     assert report["verdict"] == "INSUFFICIENT_QUALIFIED_HOLDOUT"
     assert report["eligible_ids"] == 0
     assert written["cohort_exclusion_reason_counts"]["BITFINEX_LINKAGE_MISSING"] == 1
