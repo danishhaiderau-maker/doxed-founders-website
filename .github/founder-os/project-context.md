@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-Refresh reviewed Bitfinex policy lock
+Enable Scenario C exchange protection by default
 
 ## Last Activity
 
