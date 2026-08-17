@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -20,6 +21,7 @@ ENTRYPOINT = (ROOT / "fly-entrypoint.sh").read_text(encoding="utf-8")
 SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
     encoding="utf-8"
 )
+ATOMIC_HELPER = ROOT.parents[1] / "scripts" / "fly-mirror-atomic.ps1"
 
 
 def _load_bot_functions(*names):
@@ -67,6 +69,51 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "@app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])" in BOT
     assert "def _validate_platform_relay_evidence_payload" in BOT
     assert "os.replace(temp, destination)" in BOT
+
+
+def test_local_mirror_download_is_validated_then_atomically_published():
+    assert '. (Join-Path $scriptDir "fly-mirror-atomic.ps1")' in SYNC_SCRIPT
+    assert "Test-MirrorCandidate -Path $candidate" in SYNC_SCRIPT
+    assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
+    assert "[System.IO.File]::Copy($local, $candidate, $true)" in SYNC_SCRIPT
+    assert "if (-not ($sameGeneration -and $localSize -eq $remoteSize))" in SYNC_SCRIPT
+    assert "[System.IO.File]::Replace($Candidate, $Destination" in ATOMIC_HELPER.read_text(encoding="utf-8")
+    assert "Remove-Item -LiteralPath $local -Force" not in SYNC_SCRIPT
+
+
+def test_invalid_jsonl_candidate_preserves_previous_mirror_and_valid_candidate_replaces_it():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        destination = root / "signal_snapshot.jsonl"
+        invalid = root / "invalid.download"
+        valid = root / "valid.download"
+        destination.write_text('{"trade_id":"old"}\n', encoding="utf-8")
+        invalid.write_text('{"trade_id":"partial"}', encoding="utf-8")
+        valid.write_text('{"trade_id":"new"}\n', encoding="utf-8")
+        command = (
+            f". '{ATOMIC_HELPER}'; "
+            f"$dest='{destination}'; $invalid='{invalid}'; $valid='{valid}'; "
+            "$failed=$false; try { Test-MirrorCandidate -Path $invalid -RelativePath 'signal_snapshot.jsonl'; "
+            "Publish-MirrorCandidate -Candidate $invalid -Destination $dest } catch { $failed=$true }; "
+            "$before=[IO.File]::ReadAllText($dest); "
+            "Test-MirrorCandidate -Path $valid -RelativePath 'signal_snapshot.jsonl'; "
+            "Publish-MirrorCandidate -Candidate $valid -Destination $dest; "
+            "$after=[IO.File]::ReadAllText($dest); "
+            "@{failed=$failed;before=$before;after=$after}|ConvertTo-Json -Compress"
+        )
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout.strip())
+    result = {key: value.replace("\r\n", "\n") if isinstance(value, str) else value for key, value in result.items()}
+    assert result == {
+        "after": '{"trade_id":"new"}\n',
+        "before": '{"trade_id":"old"}\n',
+        "failed": True,
+    }
 
 
 def test_platform_relay_evidence_validation_rejects_wrong_scope_and_duplicate_events():

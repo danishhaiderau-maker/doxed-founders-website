@@ -12,6 +12,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 . (Join-Path $scriptDir "fly-data-paths.ps1")
+. (Join-Path $scriptDir "fly-mirror-atomic.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
@@ -181,16 +182,22 @@ foreach ($row in $selectedFiles) {
       $localSize -eq $remoteSize
     )
   }
-  if (-not $sameGeneration -and (Test-Path -LiteralPath $local)) {
-    # A Fly rotation/redeploy replaced or truncated the active file. Reset only
-    # this mirror file; the previous generation remains available as a numbered
-    # rotation in the manifest until acknowledged retention removes it.
-    Remove-Item -LiteralPath $local -Force
-    $localSize = 0
-  }
-
-  $offset = $localSize
-  while ($offset -lt $remoteSize) {
+  if (-not ($sameGeneration -and $localSize -eq $remoteSize)) {
+  # Assemble and validate a complete same-directory candidate. Never append
+  # directly to a file that the analyzer can read: doing so exposed a partial
+  # JSONL record between chunk writes. The existing mirror remains untouched
+  # until the candidate is complete and atomically replaces it.
+  $candidate = "$local.$PID.$([guid]::NewGuid().ToString('N')).download"
+  $candidateBackup = "$candidate.replace-backup"
+  try {
+    if ($sameGeneration -and (Test-Path -LiteralPath $local)) {
+      [System.IO.File]::Copy($local, $candidate, $true)
+      $offset = $localSize
+    } else {
+      [System.IO.File]::WriteAllBytes($candidate, [byte[]]::new(0))
+      $offset = 0
+    }
+    while ($offset -lt $remoteSize) {
     $limit = [Math]::Min($chunkLimit, $remoteSize - $offset)
     $chunkComplete = $false
     for ($attempt = 1; $attempt -le 3 -and -not $chunkComplete; $attempt++) {
@@ -217,14 +224,14 @@ foreach ($row in $selectedFiles) {
         $input = [System.IO.File]::OpenRead($tmp)
         try {
           $output = [System.IO.File]::Open(
-            $local,
+            $candidate,
             [System.IO.FileMode]::Append,
             [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::Read
           )
           try { $input.CopyTo($output) } finally { $output.Dispose() }
         } finally { $input.Dispose() }
-        $offset = [int64](Get-Item -LiteralPath $local).Length
+        $offset = [int64](Get-Item -LiteralPath $candidate).Length
         $chunkComplete = $true
       } catch {
         if ($attempt -ge 3) { throw }
@@ -235,13 +242,16 @@ foreach ($row in $selectedFiles) {
         }
       }
     }
+    }
+    if ([int64](Get-Item -LiteralPath $candidate).Length -ne $remoteSize) {
+      throw "Incomplete Fly mirror candidate for $rel."
+    }
+    Test-MirrorCandidate -Path $candidate -RelativePath $rel
+    Publish-MirrorCandidate -Candidate $candidate -Destination $local
+  } finally {
+    Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $candidateBackup -Force -ErrorAction SilentlyContinue
   }
-
-  if (-not (Test-Path -LiteralPath $local)) {
-    [System.IO.File]::WriteAllBytes($local, [byte[]]::new(0))
-  }
-  if ([int64](Get-Item -LiteralPath $local).Length -ne $remoteSize) {
-    throw "Incomplete Fly mirror for $rel."
   }
   $syncState[$rel] = [ordered]@{
     inode = $remoteInode
