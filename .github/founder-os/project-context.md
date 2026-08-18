@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-chore(ci): refresh Bitfinex policy lock and mirror canonical bot.py to engine.py
+test(fly): stub chase-window helpers in confirmed-cancel contract
 
 ## Last Activity
 
