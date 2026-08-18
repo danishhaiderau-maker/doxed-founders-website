@@ -105,8 +105,13 @@ from path_replay_v1 import (
 )
 from cycle_3m_indicators import (
     EXHAUSTION_POLICY_TAG as MTF_EXHAUSTION_LOG_V1,
+    UNIVERSE_FILE as CYCLE_3M_UNIVERSE_FILE,
+    UNIVERSE_POLICY_TAG as CYCLE_3M_UNIVERSE_TAG,
+    UNIVERSE_SCHEMA as CYCLE_3M_UNIVERSE_SCHEMA,
     WOULD_BLOCK_SHORT_REASON as WOULD_BLOCK_SHORT_3M_REASON,
     compute_3m_exhaustion_snapshot,
+    compute_3m_universe_snapshot,
+    cycle_bucket_3m,
 )
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -1140,6 +1145,7 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_sr_state": context.get("sr_state", "UNKNOWN"),
         "entry_dist_to_resistance": context.get("dist_to_resistance", 0.0),
         "entry_dist_to_support": context.get("dist_to_support", 0.0),
+        **_fill_replay_3m_stamps(signal, context),
         "entry_bid": round(entry_bid, 2) if entry_bid > 0 else None,
         "entry_ask": round(entry_ask, 2) if entry_ask > 0 else None,
         "market_bid_ask_spread_usd_at_entry": (
@@ -11298,25 +11304,169 @@ def build_pure_ai_context(state_snapshot, buffers):
     return sanitize_ai_inputs(ctx)
 
 
+def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
+    """Freeze fill-time 3m ATR / Donchian / S-R so offline TPs do not chase ATR."""
+    ctx = context or (signal or {}).get("context") or {}
+    univ = {}
+    if isinstance(ctx, dict):
+        univ = ctx.get("cycle_3m_universe") or ctx.get("exhaustion_3m") or {}
+        if not isinstance(univ, dict) or not univ:
+            if ctx.get("atr14_pct_3m") is not None or ctx.get("donchian_high_3m") is not None:
+                univ = ctx
+    if not isinstance(univ, dict) or not univ:
+        try:
+            with state_lock:
+                univ = dict(state.get("last_cycle_3m_universe") or {})
+        except Exception:
+            univ = {}
+    sr = {}
+    try:
+        with state_lock:
+            sr = dict(state.get("support_resistance") or {})
+    except Exception:
+        sr = {}
+    atr_pct = univ.get("atr14_pct_3m")
+    return {
+        "atr14_pct_3m": atr_pct,
+        "atr14_3m": univ.get("atr14"),
+        "donchian_high_3m": univ.get("donchian_high_3m"),
+        "donchian_low_3m": univ.get("donchian_low_3m"),
+        "donchian_loc_3m": univ.get("donchian_loc_3m"),
+        "bb_width_3m": univ.get("bb_width_3m"),
+        "support_price": univ.get("support_price") or sr.get("swing_low") or sr.get("s1"),
+        "resistance_price": univ.get("resistance_price") or sr.get("swing_high") or sr.get("r1"),
+        "cycle_3m_universe_tag": CYCLE_3M_UNIVERSE_TAG,
+        "path_replay_tag": PATH_REPLAY_POLICY_TAG,
+    }
+
+
+_cycle_3m_written_buckets = {}
+
+
+def _cycle_3m_flow_and_sr():
+    with state_lock:
+        sr = dict(state.get("support_resistance") or {})
+        paused = bool(state.get("execution_paused"))
+        pause_reason = state.get("execution_reason") or ""
+        manual = bool(state.get("manual_admin_pause"))
+    try:
+        delta = get_aggregated(delta_buffer)
+    except Exception:
+        delta = None
+    try:
+        imbalance = get_aggregated(imbalance_buffer)
+    except Exception:
+        imbalance = None
+    return {
+        "delta_3m": delta,
+        "imbalance_3m": imbalance,
+        "dist_to_support": sr.get("dist_to_support"),
+        "dist_to_resistance": sr.get("dist_to_resistance"),
+        "support_price": sr.get("swing_low") or sr.get("s1"),
+        "resistance_price": sr.get("swing_high") or sr.get("r1"),
+        "paused": paused,
+        "pause_reason": pause_reason,
+        "manual_pause": manual,
+    }
+
+
+def _record_cycle_3m_universe(
+    *,
+    outcome: str = "SKIPPED",
+    skip_reason: str = None,
+    decision: str = None,
+    trade_id: str = None,
+    direction: str = None,
+    candles_1m=None,
+    structure_score=None,
+):
+    """Append one taken-or-skipped 3m universe row. Log-only; never a veto."""
+    bucket = cycle_bucket_3m()
+    outcome_u = str(outcome or "SKIPPED").upper()
+    prev = _cycle_3m_written_buckets.get(bucket)
+    if prev == "TAKEN":
+        return None
+    if prev == "SKIPPED" and outcome_u == "SKIPPED" and not decision:
+        return None
+    try:
+        extra = _cycle_3m_flow_and_sr()
+        if candles_1m is None:
+            candles_1m = fetch_mtf_candles("1m", limit=200) or []
+        snap = compute_3m_universe_snapshot(
+            candles_1m,
+            dist_to_support=extra.get("dist_to_support"),
+            dist_to_resistance=extra.get("dist_to_resistance"),
+            structure_score=structure_score,
+            delta_3m=extra.get("delta_3m"),
+            imbalance_3m=extra.get("imbalance_3m"),
+            support_price=extra.get("support_price"),
+            resistance_price=extra.get("resistance_price"),
+            ts=time.time(),
+            cycle_outcome=outcome_u,
+            skip_reason=skip_reason,
+            decision=decision,
+            trade_id=trade_id,
+            direction=direction,
+        )
+        _safe_append_jsonl(CYCLE_3M_UNIVERSE_FILE, snap, label="CYCLE_3M_UNIVERSE")
+        _cycle_3m_written_buckets[bucket] = outcome_u
+        with state_lock:
+            state["last_cycle_3m_universe"] = copy.deepcopy(snap)
+        if len(_cycle_3m_written_buckets) > 12:
+            oldest = min(_cycle_3m_written_buckets)
+            _cycle_3m_written_buckets.pop(oldest, None)
+        logger.info(
+            f"[CYCLE 3M UNIVERSE] {snap.get('line')} bucket={bucket} "
+            f"tag={CYCLE_3M_UNIVERSE_TAG} path_tag={PATH_REPLAY_POLICY_TAG} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return snap
+    except Exception as exc:
+        logger.warning(f"[CYCLE 3M UNIVERSE] record failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
+
+
+def _maybe_record_heartbeat_cycle_3m():
+    extra = _cycle_3m_flow_and_sr()
+    reason = None
+    if extra.get("manual_pause"):
+        reason = "MANUAL_PAUSE"
+    elif extra.get("paused"):
+        reason = extra.get("pause_reason") or "EXECUTION_PAUSED"
+    _record_cycle_3m_universe(outcome="SKIPPED", skip_reason=reason or "HEARTBEAT_CYCLE")
+
+
 def _stamp_3m_exhaustion_for_ai(ctx: dict) -> dict:
-    """Cycle-aligned 3m RSI/Stoch/ADX. Log + payload only; never a hard veto."""
+    """Cycle-aligned 3m RSI/Stoch/ADX/ATR/Donchian. Log + payload only; never a hard veto."""
     if not isinstance(ctx, dict):
         return ctx
     try:
         candles_1m = fetch_mtf_candles("1m", limit=200)
         ms = ctx.get("market_context") or {}
         structure = (ms.get("market_structure") or {}) if isinstance(ms, dict) else {}
-        snap = compute_3m_exhaustion_snapshot(
+        extra = _cycle_3m_flow_and_sr()
+        snap = compute_3m_universe_snapshot(
             candles_1m or [],
-            dist_to_support=ctx.get("dist_to_support") or ctx.get("distance_to_micro_support"),
+            dist_to_support=ctx.get("dist_to_support") or ctx.get("distance_to_micro_support") or extra.get("dist_to_support"),
+            dist_to_resistance=ctx.get("dist_to_resistance") or ctx.get("distance_to_micro_resistance") or extra.get("dist_to_resistance"),
             structure_score=structure.get("structure_score"),
+            delta_3m=ctx.get("delta") if ctx.get("delta") is not None else extra.get("delta_3m"),
+            imbalance_3m=ctx.get("imbalance") if ctx.get("imbalance") is not None else extra.get("imbalance_3m"),
+            support_price=extra.get("support_price"),
+            resistance_price=extra.get("resistance_price"),
+            ts=time.time(),
+            cycle_outcome="CYCLE",
         )
         snap["policy_tag"] = MTF_EXHAUSTION_LOG_V1
         ctx["exhaustion_3m"] = snap
-        ctx["exhaustion_3m_line"] = snap.get("line")
+        ctx["cycle_3m_universe"] = snap
+        ctx["exhaustion_3m_line"] = snap.get("exhaustion_line") or snap.get("line")
+        with state_lock:
+            state["last_cycle_3m_universe"] = copy.deepcopy(snap)
         logger.info(
-            f"[3M EXHAUSTION] {snap.get('line')} tag={MTF_EXHAUSTION_LOG_V1} "
-            f"hard_veto=false path_tag={PATH_REPLAY_POLICY_TAG} [PIPELINE ENFORCEMENT]"
+            f"[3M EXHAUSTION] {snap.get('exhaustion_line')} tag={MTF_EXHAUSTION_LOG_V1} "
+            f"hard_veto=false path_tag={PATH_REPLAY_POLICY_TAG} "
+            f"universe={CYCLE_3M_UNIVERSE_TAG} [PIPELINE ENFORCEMENT]"
         )
     except Exception as exc:
         logger.warning(f"[3M EXHAUSTION] stamp failed: {exc} [PIPELINE ENFORCEMENT]")
@@ -11327,6 +11477,9 @@ def _stamp_3m_exhaustion_for_ai(ctx: dict) -> dict:
             "hard_veto": False,
             "policy_tag": MTF_EXHAUSTION_LOG_V1,
         }
+        ctx["cycle_3m_universe"] = dict(ctx["exhaustion_3m"])
+        ctx["cycle_3m_universe"]["schema"] = CYCLE_3M_UNIVERSE_SCHEMA
+        ctx["cycle_3m_universe"]["policy_tag"] = CYCLE_3M_UNIVERSE_TAG
     return ctx
 
 def _structure_allows_bear_continuation(market_context: dict) -> bool:
@@ -17486,6 +17639,7 @@ def log_no_signal_with_context(signal=None, reason="NO_SETUP_DETECTED", skip_sta
     log_pipeline_event("PIPELINE", "NO_SIGNAL", reason, trade_id, edge_score, force=True)
     logger.info(f"[PIPELINE] No signal - skipping cycle | trade_id={trade_id} reason={reason} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("BLOCKED", reason, trade_id)
+    _record_cycle_3m_universe(outcome="SKIPPED", skip_reason=str(reason or "NO_SIGNAL"), trade_id=trade_id)
 
 def compute_structural_sr(candles):
     if len(candles) < 96:
@@ -20736,6 +20890,13 @@ def process_signal(event: dict):
             if not ai_decision_should_execute(ai):
                 trade_id = ai.get("trade_id") or ctx["trade_id"]
                 ai["trade_id"] = trade_id
+                _record_cycle_3m_universe(
+                    outcome="SKIPPED",
+                    skip_reason=str(ai.get("decision") or "REJECT"),
+                    decision=ai.get("decision"),
+                    trade_id=trade_id,
+                    direction=ai.get("direction"),
+                )
                 if ai.get("decision") == "AI_ERROR":
                     block_tag = f"AI_ERROR:{ai.get('error_type', 'UNKNOWN')}"
                     skip_stage = "AI_ERROR"
@@ -20943,6 +21104,12 @@ def process_signal(event: dict):
             ):
                 # LOG-ONLY. Does not cancel pending or flatten fills.
                 _research_log_would_block(signal, ai, WOULD_BLOCK_SHORT_3M_REASON, edge_score)
+            _record_cycle_3m_universe(
+                outcome="TAKEN",
+                decision=ai.get("decision"),
+                trade_id=signal.get("trade_id") or trade_id,
+                direction=signal.get("final_direction") or ai.get("direction"),
+            )
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -24458,6 +24625,7 @@ def research_wipe_file_paths():
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         PATH_REPLAY_FILE,
+        CYCLE_3M_UNIVERSE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -24500,6 +24668,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         PATH_REPLAY_FILE,
+        CYCLE_3M_UNIVERSE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
@@ -32798,6 +32967,19 @@ def health():
         "analyzer_sync_id": analyzer_sync_id,
         "git_rev": _runtime_git_rev(),
         "tile2_policy": tile2_policy_descriptor(),
+        "collection": {
+            "path_replay": PATH_REPLAY_POLICY_TAG,
+            "cycle_universe": CYCLE_3M_UNIVERSE_TAG,
+            "path_replay_file": PATH_REPLAY_FILE,
+            "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
+            "post_exit_file": POST_EXIT_REPLAY_FILE,
+            "alt_tp": ["atr_k_tp", "chandelier", "structure_tp"],
+            "alt_sl": ["atr_k_stop", "structure_stop"],
+            "live_exits_unchanged": True,
+            "live_thesis_cut": -12.0,
+            "hard_stop_closes_paper": False,
+            "writers_hooked": True,
+        },
     })
 
 
@@ -36186,6 +36368,7 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
     if not trade_id or not fill_price or fill_price <= 0:
         return
     fill_dynamics = None
+    fill_stamps = _fill_replay_3m_stamps()
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -36195,6 +36378,7 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
             buf["lane"] = "executed"
             buf["block_reason"] = None
             buf["virtual_entry"] = float(fill_price)
+            buf.update(fill_stamps)
             fill_t = time.time() - _buf_float(buf.get("start_ts"), time.time())
             buf["virtual_fill_t"] = fill_t
             start_price = _buf_float(buf.get("start_price"), fill_price)
@@ -36675,6 +36859,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
         chase_mode=meta.get("chase_mode") or "NONE",
         protective_exit="REDUCE_ONLY_STOP",
     )
+    fill_stamps = _fill_replay_3m_stamps(None, meta.get("entry_features") or meta)
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
@@ -36734,6 +36919,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "fill_at_limit": bool(meta.get("fill_at_limit")),
             "limit_chase_count": int(meta.get("limit_chase_count") or 0),
             "exit_outcome": meta.get("exit_outcome"),
+            **fill_stamps,
         }
 
 
@@ -38982,6 +39168,10 @@ def heartbeat_loop():
             state["heartbeat"] = now
             state["last_heartbeat"] = now
         last_heartbeat = now
+        try:
+            _maybe_record_heartbeat_cycle_3m()
+        except Exception:
+            pass
         if shutdown_event.wait(PROCESS_HEARTBEAT_INTERVAL_SEC):
             break
 

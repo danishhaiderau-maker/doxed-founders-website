@@ -6,9 +6,15 @@ from cycle_3m_indicators import (
     DECISION_BAR_SEC,
     SOURCE_BAR,
     SOURCE_NOTE,
+    UNIVERSE_SCHEMA,
+    atr14_pct_of_price,
+    bollinger_width,
     compute_3m_exhaustion_snapshot,
+    compute_3m_universe_snapshot,
+    donchian_channel,
     resample_1m_to_3m,
     stoch_rsi,
+    wilder_atr,
     wilder_rsi,
     would_block_short_3m,
 )
@@ -61,6 +67,53 @@ class Cycle3mIndicatorTests(unittest.TestCase):
         self.assertIn("3m exhaustion", snap["line"])
         stoch = stoch_rsi([c[4] for c in resample_1m_to_3m(rows)])
         self.assertIsNotNone(stoch["k"])
+
+    def test_atr_pct_matches_known_true_range(self):
+        # Each 1m bar ranges 10 around close 1000; 3m TR stays 10 → ATR% = 1.0.
+        rows = [_1m_row(i, 1000, high=1005, low=995) for i in range(120)]
+        bars = resample_1m_to_3m(rows)
+        atr = wilder_atr(bars)
+        self.assertAlmostEqual(atr, 10.0, places=4)
+        self.assertAlmostEqual(atr14_pct_of_price(bars), 1.0, places=4)
+
+    def test_donchian_loc_at_high_and_low(self):
+        lows = [_1m_row(i, 100, high=101, low=99) for i in range(60)]
+        highs = [_1m_row(i + 60, 200, high=210, low=190) for i in range(3)]
+        bars = resample_1m_to_3m(lows + highs)
+        loc_high = donchian_channel(bars)
+        self.assertGreater(loc_high["loc"], 0.9)
+        self.assertEqual(loc_high["high"], 210)
+        high_first = [_1m_row(i, 200, high=210, low=190) for i in range(60)]
+        dump = [_1m_row(i + 60, 100, high=101, low=90) for i in range(3)]
+        loc_low = donchian_channel(resample_1m_to_3m(high_first + dump))
+        self.assertLess(loc_low["loc"], 0.1)
+        self.assertEqual(loc_low["low"], 90)
+
+    def test_universe_snapshot_has_collection_fields(self):
+        rows = [_1m_row(i, 1000 + (i % 7), high=1010, low=990) for i in range(200)]
+        snap = compute_3m_universe_snapshot(
+            rows,
+            dist_to_support=0.01,
+            dist_to_resistance=0.02,
+            delta_3m=12.5,
+            imbalance_3m=0.4,
+            ts=1_700_000_180,
+            cycle_outcome="SKIPPED",
+            skip_reason="NO_SETUP",
+        )
+        self.assertEqual(snap["schema"], UNIVERSE_SCHEMA)
+        self.assertEqual(snap["bar"], "3m")
+        self.assertFalse(snap["hard_veto"])
+        self.assertFalse(snap["live_veto"])
+        for key in (
+            "rsi14", "stoch_rsi_k", "adx14", "atr14_pct_3m", "donchian_loc_3m",
+            "bb_width_3m", "delta_3m", "imbalance_3m", "dist_to_support",
+            "dist_to_resistance", "session_utc", "hour_utc",
+        ):
+            self.assertIn(key, snap)
+        self.assertEqual(snap["delta_3m"], 12.5)
+        self.assertEqual(snap["cycle_outcome"], "SKIPPED")
+        self.assertIsNotNone(bollinger_width([c[4] for c in resample_1m_to_3m(rows)]))
 
 
 if __name__ == "__main__":

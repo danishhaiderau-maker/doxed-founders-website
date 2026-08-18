@@ -7,6 +7,7 @@ from path_replay_v1 import (
     PATH_UNITS,
     STOP_4PP_GRID,
     THESIS_4PP_GRID,
+    atr_pct_to_margin_pct,
     integer_levels_0_100,
     integer_thesis_sweep_0_100,
     ladder_for_bucket,
@@ -14,7 +15,11 @@ from path_replay_v1 import (
     one_point_thesis_sweep,
     price_for_short_unreal,
     replay_group_report,
+    simulate_atr_stop,
+    simulate_atr_take_profit,
+    simulate_chandelier_trail,
     simulate_policy_on_path,
+    simulate_structure_stop,
 )
 
 
@@ -199,6 +204,79 @@ class PathReplayGroupingTests(unittest.TestCase):
         self.assertFalse(report["live_recommendation"])
         self.assertTrue(report["integer_sweep_available"])
         self.assertEqual(report["live_policy_untouched"]["thesis_cut"], -12.0)
+        self.assertTrue(report["live_policy_untouched"]["hard_stop_does_not_close_paper"])
+        self.assertEqual(report["live_policy_untouched"]["ladder"][0], [4, 2])
+
+
+class PathReplayAltExitTests(unittest.TestCase):
+    def test_atr_pct_converts_to_margin_at_100x(self):
+        # 0.12% of price at 100x = 12pp of margin (same units as thesis −12).
+        self.assertAlmostEqual(atr_pct_to_margin_pct(0.12, 100), 12.0, places=6)
+
+    def test_runner_2x_atr_and_chandelier_beat_early_4_2(self):
+        # 4→2 locks +2% on the first dip; the path then trends to +40.
+        ticks = _unreal_path([0.0, 4.5, 2.0, 15.0, 40.0, 28.0])
+        atr_pct = 0.10  # 0.10% price → 10% margin; 2×ATR TP = +20
+        early = simulate_policy_on_path(
+            ticks, direction="SHORT", entry_price=ENTRY, thesis_cut=-12.0,
+            hard_stop=None, ladder=((4, 2),),
+        )
+        tp2 = simulate_atr_take_profit(
+            ticks, direction="SHORT", entry_price=ENTRY, atr14_pct=atr_pct, k=2.0,
+        )
+        ch = simulate_chandelier_trail(
+            ticks, direction="SHORT", entry_price=ENTRY, atr14_pct=atr_pct, k=2.0,
+        )
+        self.assertEqual(early["exit_reason"], "PROFIT_LOCK_LADDER")
+        self.assertAlmostEqual(early["exit_unreal_pct"], 2.0, places=1)
+        self.assertEqual(tp2["exit_reason"], "ATR_TAKE_PROFIT")
+        self.assertGreater(tp2["exit_unreal_pct"], early["exit_unreal_pct"])
+        self.assertGreater(ch["exit_unreal_pct"], early["exit_unreal_pct"])
+        report = replay_group_report(
+            ticks, direction="SHORT", entry_price=ENTRY, atr14_pct=atr_pct,
+        )
+        by_k = {row["k"]: row for row in report["alt_tp"]["atr_k"]}
+        self.assertTrue(by_k[2.0]["beat_4_2"])
+        self.assertTrue(report["alt_tp"]["chandelier_k"][0]["beat_4_2"])
+        self.assertEqual(report["early_4_2"]["exit_reason"], "PROFIT_LOCK_LADDER")
+        self.assertFalse(report["live_recommendation"])
+
+    def test_wider_atr_stop_stays_green_when_thesis_minus12_cuts(self):
+        ticks = _unreal_path([0.0, -12.0, -8.0, 6.0])
+        thesis = simulate_policy_on_path(
+            ticks, direction="SHORT", entry_price=ENTRY, thesis_cut=-12.0,
+            hard_stop=None, ladder=(),
+        )
+        stop2 = simulate_atr_stop(
+            ticks, direction="SHORT", entry_price=ENTRY, atr14_pct=0.10, k=2.0,
+        )
+        self.assertEqual(thesis["exit_reason"], "THESIS_FAST_CUT")
+        self.assertFalse(thesis["green"])
+        self.assertNotEqual(stop2["exit_reason"], "ATR_STOP")
+        self.assertTrue(stop2["green"])
+        self.assertGreater(stop2["net_pnl_usd"], thesis["net_pnl_usd"])
+
+    def test_structure_stop_saves_before_thesis_wait(self):
+        # Adverse 5% margin (~$32 on 64k) hits resistance; thesis −12 would wait.
+        resistance = price_for_short_unreal(ENTRY, -5.0, LEV)
+        ticks = _unreal_path([0.0, -5.0, -16.0])
+        thesis = simulate_policy_on_path(
+            ticks, direction="SHORT", entry_price=ENTRY, thesis_cut=-12.0,
+            hard_stop=None, ladder=(),
+        )
+        struct = simulate_structure_stop(
+            ticks, direction="SHORT", entry_price=ENTRY,
+            donchian_high=resistance, resistance_price=resistance,
+        )
+        self.assertEqual(struct["exit_reason"], "STRUCTURE_STOP")
+        self.assertGreater(struct["exit_unreal_pct"], thesis["exit_unreal_pct"])
+        self.assertLess(struct["exit_t"], thesis["exit_t"])
+        report = replay_group_report(
+            ticks, direction="SHORT", entry_price=ENTRY,
+            atr14_pct=0.12, donchian_high=resistance, resistance_price=resistance,
+        )
+        self.assertEqual(report["alt_sl"]["structure"]["exit_reason"], "STRUCTURE_STOP")
+        self.assertTrue(any(hit["sl_fired_first"] for hit in report["first_hit"]))
 
 
 if __name__ == "__main__":

@@ -38,6 +38,13 @@ MARGIN_PP_AS_PRICE_PCT = 0.01
 # Documented live policy — replay grouping must not mutate these on Fly.
 LIVE_THESIS_CUT = -12.0
 LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER = True
+try:
+    from scenario_c_config import TRAIL_LADDER_SCENARIO_C as LIVE_SCENARIO_C_LADDER
+except Exception:  # pragma: no cover - keep replay importable in isolation
+    LIVE_SCENARIO_C_LADDER = ((4, 2), (5, 3), (8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))
+LIVE_EARLY_LADDER_4_2 = ((4.0, 2.0),)
+ATR_K_GRID = (1.0, 1.5, 2.0, 3.0)
+CHANDELIER_K_GRID = (2.0, 3.0)
 
 
 def abs_4pp_grid(limit: int = 100) -> tuple:
@@ -507,6 +514,480 @@ def analyze_shoot_through(
     }
 
 
+def atr_pct_to_margin_pct(atr14_pct: Optional[float], leverage: float = LIVE_LEVERAGE) -> Optional[float]:
+    """Convert ATR% of price to unrealized margin-% at ``leverage``.
+
+    ``atr14_pct`` is (ATR/close)*100, e.g. 0.12 = 0.12% of BTC. At 100x that
+    is 12 percentage points of margin, comparable to thesis −12 / ladder 4→2.
+    """
+    if atr14_pct is None:
+        return None
+    try:
+        value = float(atr14_pct)
+    except (TypeError, ValueError):
+        return None
+    if value != value or value < 0:
+        return None
+    return round(value * float(leverage), 6)
+
+
+def _left_on_table(mfe_pct: Optional[float], exit_unreal: Optional[float]) -> Optional[float]:
+    if mfe_pct is None or exit_unreal is None:
+        return None
+    return round(float(mfe_pct) - float(exit_unreal), 4)
+
+
+def _beat_row(candidate: Mapping[str, Any], baseline: Mapping[str, Any]) -> bool:
+    cand = candidate.get("net_pnl_usd")
+    base = baseline.get("net_pnl_usd")
+    if cand is None or base is None:
+        return False
+    return float(cand) > float(base) + 1e-9
+
+
+def simulate_atr_take_profit(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    atr14_pct: float,
+    k: float = 2.0,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    fill_t: float = 0.0,
+    thesis_cut: Optional[float] = None,
+) -> dict:
+    """Close when favorable unreal reaches k × fill-time 3m ATR (margin %). Offline only."""
+    target = atr_pct_to_margin_pct(atr14_pct, leverage)
+    threshold = None if target is None else float(k) * float(target)
+    thesis = None if thesis_cut is None else -abs(float(thesis_cut))
+    ordered = sorted(ticks, key=lambda tick: float(tick.get("t") or 0))
+    peak = 0.0
+    mae = 0.0
+    exit_reason = "PATH_END"
+    exit_t = exit_unreal = exit_price = None
+    for tick in ordered:
+        t = float(tick.get("t") or 0)
+        if t < fill_t:
+            continue
+        mark = executable_mark(tick, direction)
+        stored = tick.get("unreal_pct")
+        try:
+            unreal = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            unreal = None
+        if unreal is None:
+            if mark is None:
+                continue
+            unreal = unrealized_margin_pct(
+                direction=direction, entry_price=entry_price, mark=mark, leverage=leverage,
+            )
+        elif mark is None:
+            try:
+                mark = float(tick.get("price") or 0) or None
+            except (TypeError, ValueError):
+                mark = None
+        if unreal > peak:
+            peak = unreal
+        if unreal < mae:
+            mae = unreal
+        hit = None
+        if thesis is not None and unreal <= thesis:
+            hit = "THESIS_FAST_CUT"
+        elif threshold is not None and unreal >= threshold:
+            hit = "ATR_TAKE_PROFIT"
+        if hit:
+            exit_reason, exit_t, exit_unreal, exit_price = hit, t, unreal, mark
+            break
+        exit_t, exit_unreal, exit_price = t, unreal, mark
+    pnl_usd = None if exit_unreal is None else round((exit_unreal / 100.0) * float(margin_usdt), 4)
+    return {
+        "schema": "path_alt_tp_v1",
+        "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "live_recommendation": False,
+        "strategy": "ATR_TP",
+        "k": float(k),
+        "atr14_pct": float(atr14_pct) if atr14_pct is not None else None,
+        "atr_margin_pct": target,
+        "threshold_margin_pct": None if threshold is None else round(threshold, 4),
+        "exit_reason": exit_reason,
+        "exit_t": exit_t,
+        "exit_price": exit_price,
+        "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
+        "net_pnl_usd": pnl_usd,
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
+        "left_vs_mfe_pct": _left_on_table(peak, exit_unreal),
+        "green": bool(pnl_usd is not None and pnl_usd > 0),
+    }
+
+
+def simulate_chandelier_trail(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    atr14_pct: float,
+    k: float = 3.0,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    fill_t: float = 0.0,
+    thesis_cut: Optional[float] = None,
+) -> dict:
+    """After MFE, trail at peak − k×ATR (unreal %). SHORT uses the same signed peak.
+
+    Fill-time ATR is frozen so the trail does not chase expanding ATR.
+    """
+    atr_m = atr_pct_to_margin_pct(atr14_pct, leverage)
+    trail_width = None if atr_m is None else float(k) * float(atr_m)
+    thesis = None if thesis_cut is None else -abs(float(thesis_cut))
+    ordered = sorted(ticks, key=lambda tick: float(tick.get("t") or 0))
+    peak = 0.0
+    mae = 0.0
+    exit_reason = "PATH_END"
+    exit_t = exit_unreal = exit_price = None
+    for tick in ordered:
+        t = float(tick.get("t") or 0)
+        if t < fill_t:
+            continue
+        mark = executable_mark(tick, direction)
+        stored = tick.get("unreal_pct")
+        try:
+            unreal = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            unreal = None
+        if unreal is None:
+            if mark is None:
+                continue
+            unreal = unrealized_margin_pct(
+                direction=direction, entry_price=entry_price, mark=mark, leverage=leverage,
+            )
+        elif mark is None:
+            try:
+                mark = float(tick.get("price") or 0) or None
+            except (TypeError, ValueError):
+                mark = None
+        if unreal > peak:
+            peak = unreal
+        if unreal < mae:
+            mae = unreal
+        floor = None if trail_width is None else peak - trail_width
+        hit = None
+        if thesis is not None and unreal <= thesis:
+            hit = "THESIS_FAST_CUT"
+        elif floor is not None and peak > 0 and unreal <= floor:
+            hit = "CHANDELIER_TRAIL"
+        if hit:
+            exit_reason, exit_t, exit_unreal, exit_price = hit, t, unreal, mark
+            break
+        exit_t, exit_unreal, exit_price = t, unreal, mark
+    pnl_usd = None if exit_unreal is None else round((exit_unreal / 100.0) * float(margin_usdt), 4)
+    return {
+        "schema": "path_alt_tp_v1",
+        "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "live_recommendation": False,
+        "strategy": "CHANDELIER",
+        "k": float(k),
+        "atr14_pct": float(atr14_pct) if atr14_pct is not None else None,
+        "atr_margin_pct": atr_m,
+        "trail_width_margin_pct": None if trail_width is None else round(trail_width, 4),
+        "exit_reason": exit_reason,
+        "exit_t": exit_t,
+        "exit_price": exit_price,
+        "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
+        "net_pnl_usd": pnl_usd,
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
+        "left_vs_mfe_pct": _left_on_table(peak, exit_unreal),
+        "green": bool(pnl_usd is not None and pnl_usd > 0),
+    }
+
+
+def simulate_structure_take_profit(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    donchian_low: Optional[float] = None,
+    donchian_high: Optional[float] = None,
+    support_price: Optional[float] = None,
+    resistance_price: Optional[float] = None,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    fill_t: float = 0.0,
+    thesis_cut: Optional[float] = None,
+) -> dict:
+    """Opposite-structure TP: SHORT banks at fill-time Donchian low or support."""
+    side = str(direction or "LONG").upper()
+    thesis = None if thesis_cut is None else -abs(float(thesis_cut))
+    if side == "SHORT":
+        levels = [level for level in (donchian_low, support_price) if level]
+        target = min(levels) if levels else None
+    else:
+        levels = [level for level in (donchian_high, resistance_price) if level]
+        target = max(levels) if levels else None
+    ordered = sorted(ticks, key=lambda tick: float(tick.get("t") or 0))
+    peak = 0.0
+    mae = 0.0
+    exit_reason = "PATH_END"
+    exit_t = exit_unreal = exit_price = None
+    for tick in ordered:
+        t = float(tick.get("t") or 0)
+        if t < fill_t:
+            continue
+        mark = executable_mark(tick, direction)
+        stored = tick.get("unreal_pct")
+        try:
+            unreal = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            unreal = None
+        if mark is None:
+            try:
+                mark = float(tick.get("price") or 0) or None
+            except (TypeError, ValueError):
+                mark = None
+        if unreal is None:
+            if mark is None:
+                continue
+            unreal = unrealized_margin_pct(
+                direction=direction, entry_price=entry_price, mark=mark, leverage=leverage,
+            )
+        if unreal > peak:
+            peak = unreal
+        if unreal < mae:
+            mae = unreal
+        hit = None
+        if thesis is not None and unreal <= thesis:
+            hit = "THESIS_FAST_CUT"
+        elif target is not None and mark is not None:
+            if side == "SHORT" and mark <= float(target):
+                hit = "STRUCTURE_TP"
+            elif side == "LONG" and mark >= float(target):
+                hit = "STRUCTURE_TP"
+        if hit:
+            exit_reason, exit_t, exit_unreal, exit_price = hit, t, unreal, mark
+            break
+        exit_t, exit_unreal, exit_price = t, unreal, mark
+    pnl_usd = None if exit_unreal is None else round((exit_unreal / 100.0) * float(margin_usdt), 4)
+    return {
+        "schema": "path_alt_tp_v1",
+        "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "live_recommendation": False,
+        "strategy": "STRUCTURE_TP",
+        "target_price": target,
+        "exit_reason": exit_reason,
+        "exit_t": exit_t,
+        "exit_price": exit_price,
+        "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
+        "net_pnl_usd": pnl_usd,
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
+        "left_vs_mfe_pct": _left_on_table(peak, exit_unreal),
+        "green": bool(pnl_usd is not None and pnl_usd > 0),
+    }
+
+
+def simulate_atr_stop(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    atr14_pct: float,
+    k: float = 2.0,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    fill_t: float = 0.0,
+    ladder: Sequence[Sequence[float]] = (),
+) -> dict:
+    """Stop when adverse unreal reaches −k × fill-time 3m ATR. Offline only."""
+    atr_m = atr_pct_to_margin_pct(atr14_pct, leverage)
+    threshold = None if atr_m is None else -float(k) * float(atr_m)
+    ordered = sorted(ticks, key=lambda tick: float(tick.get("t") or 0))
+    peak = 0.0
+    mae = 0.0
+    lock = None
+    exit_reason = "PATH_END"
+    exit_t = exit_unreal = exit_price = None
+    for tick in ordered:
+        t = float(tick.get("t") or 0)
+        if t < fill_t:
+            continue
+        mark = executable_mark(tick, direction)
+        stored = tick.get("unreal_pct")
+        try:
+            unreal = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            unreal = None
+        if unreal is None:
+            if mark is None:
+                continue
+            unreal = unrealized_margin_pct(
+                direction=direction, entry_price=entry_price, mark=mark, leverage=leverage,
+            )
+        elif mark is None:
+            try:
+                mark = float(tick.get("price") or 0) or None
+            except (TypeError, ValueError):
+                mark = None
+        if unreal > peak:
+            peak = unreal
+        if unreal < mae:
+            mae = unreal
+        if ladder:
+            for trigger, floor in ladder:
+                if peak >= float(trigger):
+                    lock = float(floor)
+        hit = None
+        if threshold is not None and unreal <= threshold:
+            hit = "ATR_STOP"
+        elif lock is not None and unreal <= lock:
+            hit = "PROFIT_LOCK_LADDER"
+        if hit:
+            exit_reason, exit_t, exit_unreal, exit_price = hit, t, unreal, mark
+            break
+        exit_t, exit_unreal, exit_price = t, unreal, mark
+    pnl_usd = None if exit_unreal is None else round((exit_unreal / 100.0) * float(margin_usdt), 4)
+    return {
+        "schema": "path_alt_sl_v1",
+        "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "live_recommendation": False,
+        "strategy": "ATR_STOP",
+        "k": float(k),
+        "atr14_pct": float(atr14_pct) if atr14_pct is not None else None,
+        "atr_margin_pct": atr_m,
+        "threshold_margin_pct": None if threshold is None else round(threshold, 4),
+        "exit_reason": exit_reason,
+        "exit_t": exit_t,
+        "exit_price": exit_price,
+        "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
+        "net_pnl_usd": pnl_usd,
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
+        "left_vs_mfe_pct": _left_on_table(peak, exit_unreal),
+        "green": bool(pnl_usd is not None and pnl_usd > 0),
+    }
+
+
+def simulate_structure_stop(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    donchian_high: Optional[float] = None,
+    donchian_low: Optional[float] = None,
+    resistance_price: Optional[float] = None,
+    support_price: Optional[float] = None,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    fill_t: float = 0.0,
+    ladder: Sequence[Sequence[float]] = (),
+) -> dict:
+    """SHORT stops if price breaks fill-time Donchian high or nearest resistance."""
+    side = str(direction or "LONG").upper()
+    if side == "SHORT":
+        levels = [level for level in (donchian_high, resistance_price) if level]
+        target = min(levels) if levels else None
+    else:
+        levels = [level for level in (donchian_low, support_price) if level]
+        target = max(levels) if levels else None
+    ordered = sorted(ticks, key=lambda tick: float(tick.get("t") or 0))
+    peak = 0.0
+    mae = 0.0
+    lock = None
+    exit_reason = "PATH_END"
+    exit_t = exit_unreal = exit_price = None
+    for tick in ordered:
+        t = float(tick.get("t") or 0)
+        if t < fill_t:
+            continue
+        mark = executable_mark(tick, direction)
+        stored = tick.get("unreal_pct")
+        try:
+            unreal = float(stored) if stored is not None else None
+        except (TypeError, ValueError):
+            unreal = None
+        if mark is None:
+            try:
+                mark = float(tick.get("price") or 0) or None
+            except (TypeError, ValueError):
+                mark = None
+        if unreal is None:
+            if mark is None:
+                continue
+            unreal = unrealized_margin_pct(
+                direction=direction, entry_price=entry_price, mark=mark, leverage=leverage,
+            )
+        if unreal > peak:
+            peak = unreal
+        if unreal < mae:
+            mae = unreal
+        if ladder:
+            for trigger, floor in ladder:
+                if peak >= float(trigger):
+                    lock = float(floor)
+        hit = None
+        if target is not None and mark is not None:
+            if side == "SHORT" and mark >= float(target):
+                hit = "STRUCTURE_STOP"
+            elif side == "LONG" and mark <= float(target):
+                hit = "STRUCTURE_STOP"
+        if hit is None and lock is not None and unreal <= lock:
+            hit = "PROFIT_LOCK_LADDER"
+        if hit:
+            exit_reason, exit_t, exit_unreal, exit_price = hit, t, unreal, mark
+            break
+        exit_t, exit_unreal, exit_price = t, unreal, mark
+    pnl_usd = None if exit_unreal is None else round((exit_unreal / 100.0) * float(margin_usdt), 4)
+    return {
+        "schema": "path_alt_sl_v1",
+        "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "live_recommendation": False,
+        "strategy": "STRUCTURE_STOP",
+        "target_price": target,
+        "exit_reason": exit_reason,
+        "exit_t": exit_t,
+        "exit_price": exit_price,
+        "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
+        "net_pnl_usd": pnl_usd,
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
+        "left_vs_mfe_pct": _left_on_table(peak, exit_unreal),
+        "green": bool(pnl_usd is not None and pnl_usd > 0),
+    }
+
+
+def first_hit_combo(tp_sim: Mapping[str, Any], sl_sim: Mapping[str, Any]) -> dict:
+    """If the stop would fire before the take-profit, that combo's PnL wins."""
+    tp_t = tp_sim.get("exit_t")
+    sl_t = sl_sim.get("exit_t")
+    tp_reason = str(tp_sim.get("exit_reason") or "PATH_END")
+    sl_reason = str(sl_sim.get("exit_reason") or "PATH_END")
+    tp_is_tp = tp_reason not in ("PATH_END", "THESIS_FAST_CUT")
+    sl_is_sl = sl_reason not in ("PATH_END", "PROFIT_LOCK_LADDER")
+    winner = "TP"
+    chosen = tp_sim
+    if sl_is_sl and sl_t is not None and (not tp_is_tp or tp_t is None or float(sl_t) <= float(tp_t or sl_t)):
+        winner = "SL"
+        chosen = sl_sim
+    elif not tp_is_tp and sl_is_sl:
+        winner = "SL"
+        chosen = sl_sim
+    return {
+        "winner": winner,
+        "tp_strategy": tp_sim.get("strategy"),
+        "sl_strategy": sl_sim.get("strategy"),
+        "tp_k": tp_sim.get("k"),
+        "sl_k": sl_sim.get("k"),
+        "exit_reason": chosen.get("exit_reason"),
+        "exit_t": chosen.get("exit_t"),
+        "exit_unreal_pct": chosen.get("exit_unreal_pct"),
+        "net_pnl_usd": chosen.get("net_pnl_usd"),
+        "green": chosen.get("green"),
+        "left_vs_mfe_pct": chosen.get("left_vs_mfe_pct"),
+        "sl_fired_first": winner == "SL",
+    }
+
+
 def _coerce_report_path(
     path: Union[Sequence[Mapping[str, Any]], Mapping[str, Any]],
     *,
@@ -542,16 +1023,28 @@ def replay_group_report(
     fill_t: float = 0.0,
     mfe_protect_pct: float = 5.0,
     include_all: bool = False,
+    atr14_pct: Optional[float] = None,
+    donchian_high: Optional[float] = None,
+    donchian_low: Optional[float] = None,
+    support_price: Optional[float] = None,
+    resistance_price: Optional[float] = None,
 ) -> dict:
     """Best 4pp thesis × stop × ladder-rung combo on one recorded path.
 
     Offline grouping only. Live Fly policy stays thesis −12 / Scenario C /
     hard-stop-does-not-close-paper. Integer 0–100 sweep remains available via
-    ``integer_thesis_sweep_0_100`` / ``integer_stop_sweep_0_100``.
+    ``integer_thesis_sweep_0_100`` / ``integer_stop_sweep_0_100``. Alt ATR /
+    chandelier / structure TP+SL are replay-only and never mutate live knobs.
     """
     ticks, direction, entry = _coerce_report_path(
         path, direction=direction, entry_price=entry_price,
     )
+    if isinstance(path, Mapping):
+        atr14_pct = atr14_pct if atr14_pct is not None else path.get("atr14_pct") or path.get("atr14_pct_3m")
+        donchian_high = donchian_high if donchian_high is not None else path.get("donchian_high") or path.get("donchian_high_3m")
+        donchian_low = donchian_low if donchian_low is not None else path.get("donchian_low") or path.get("donchian_low_3m")
+        support_price = support_price if support_price is not None else path.get("support_price")
+        resistance_price = resistance_price if resistance_price is not None else path.get("resistance_price")
     shoot = analyze_shoot_through(
         ticks,
         direction=direction,
@@ -624,6 +1117,97 @@ def replay_group_report(
     if best is not None:
         best.pop("_pnl", None)
 
+    live = simulate_policy_on_path(
+        ticks,
+        direction=direction,
+        entry_price=entry,
+        leverage=leverage,
+        margin_usdt=margin_usdt,
+        thesis_cut=LIVE_THESIS_CUT,
+        hard_stop=None,
+        ladder=LIVE_SCENARIO_C_LADDER,
+        fill_t=fill_t,
+        mfe_protect_pct=mfe_protect_pct,
+    )
+    live["left_vs_mfe_pct"] = _left_on_table(live.get("mfe_pct"), live.get("exit_unreal_pct"))
+    early_4_2 = simulate_policy_on_path(
+        ticks,
+        direction=direction,
+        entry_price=entry,
+        leverage=leverage,
+        margin_usdt=margin_usdt,
+        thesis_cut=LIVE_THESIS_CUT,
+        hard_stop=None,
+        ladder=LIVE_EARLY_LADDER_4_2,
+        fill_t=fill_t,
+        mfe_protect_pct=mfe_protect_pct,
+    )
+    early_4_2["left_vs_mfe_pct"] = _left_on_table(early_4_2.get("mfe_pct"), early_4_2.get("exit_unreal_pct"))
+
+    atr_tp = []
+    chandelier = []
+    atr_stop = []
+    first_hits = []
+    structure_tp = None
+    structure_stop = None
+    if atr14_pct is not None:
+        for k in ATR_K_GRID:
+            tp = simulate_atr_take_profit(
+                ticks, direction=direction, entry_price=entry, atr14_pct=atr14_pct,
+                k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+            )
+            tp["beat_4_2"] = _beat_row(tp, early_4_2)
+            tp["beat_live"] = _beat_row(tp, live)
+            atr_tp.append(tp)
+            sl = simulate_atr_stop(
+                ticks, direction=direction, entry_price=entry, atr14_pct=atr14_pct,
+                k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+            )
+            sl["beat_4_2"] = _beat_row(sl, early_4_2)
+            sl["beat_live"] = _beat_row(sl, live)
+            atr_stop.append(sl)
+            hit = first_hit_combo(tp, sl)
+            hit["beat_4_2"] = _beat_row(hit, early_4_2)
+            hit["beat_live"] = _beat_row(hit, live)
+            first_hits.append(hit)
+        for k in CHANDELIER_K_GRID:
+            ch = simulate_chandelier_trail(
+                ticks, direction=direction, entry_price=entry, atr14_pct=atr14_pct,
+                k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+            )
+            ch["beat_4_2"] = _beat_row(ch, early_4_2)
+            ch["beat_live"] = _beat_row(ch, live)
+            chandelier.append(ch)
+    if any(level is not None for level in (donchian_high, donchian_low, support_price, resistance_price)):
+        structure_tp = simulate_structure_take_profit(
+            ticks, direction=direction, entry_price=entry,
+            donchian_low=donchian_low, donchian_high=donchian_high,
+            support_price=support_price, resistance_price=resistance_price,
+            leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+        )
+        structure_tp["beat_4_2"] = _beat_row(structure_tp, early_4_2)
+        structure_tp["beat_live"] = _beat_row(structure_tp, live)
+        structure_stop = simulate_structure_stop(
+            ticks, direction=direction, entry_price=entry,
+            donchian_high=donchian_high, donchian_low=donchian_low,
+            resistance_price=resistance_price, support_price=support_price,
+            leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+        )
+        structure_stop["beat_4_2"] = _beat_row(structure_stop, early_4_2)
+        structure_stop["beat_live"] = _beat_row(structure_stop, live)
+        if atr_tp:
+            for tp in atr_tp:
+                hit = first_hit_combo(tp, structure_stop)
+                hit["beat_4_2"] = _beat_row(hit, early_4_2)
+                hit["beat_live"] = _beat_row(hit, live)
+                first_hits.append(hit)
+        if chandelier:
+            for ch in chandelier:
+                hit = first_hit_combo(ch, structure_stop)
+                hit["beat_4_2"] = _beat_row(hit, early_4_2)
+                hit["beat_live"] = _beat_row(hit, live)
+                first_hits.append(hit)
+
     return {
         "schema": "path_group_report_v1",
         "policy_tag": PATH_REPLAY_POLICY_TAG,
@@ -632,6 +1216,7 @@ def replay_group_report(
         "live_policy_untouched": {
             "thesis_cut": LIVE_THESIS_CUT,
             "hard_stop_does_not_close_paper": LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER,
+            "ladder": [list(rung) for rung in LIVE_SCENARIO_C_LADDER],
             "note": "4pp / 5pp numbers are analysis grouping, not a live knob grid.",
         },
         "mfe_pct": shoot["mfe_pct"],
@@ -645,5 +1230,28 @@ def replay_group_report(
         "stop_grid": list(STOP_4PP_GRID),
         "ladder_buckets": [list(bucket) for bucket in LADDER_BUCKETS],
         "integer_sweep_available": True,
+        "live": live,
+        "early_4_2": early_4_2,
+        "alt_tp": {
+            "atr_k": atr_tp,
+            "chandelier_k": chandelier,
+            "structure": structure_tp,
+            "k_grid": list(ATR_K_GRID),
+            "chandelier_k_grid": list(CHANDELIER_K_GRID),
+        },
+        "alt_sl": {
+            "atr_k": atr_stop,
+            "structure": structure_stop,
+            "k_grid": list(ATR_K_GRID),
+        },
+        "first_hit": first_hits,
+        "fill_stamps": {
+            "atr14_pct": atr14_pct,
+            "atr_margin_pct": atr_pct_to_margin_pct(atr14_pct, leverage),
+            "donchian_high": donchian_high,
+            "donchian_low": donchian_low,
+            "support_price": support_price,
+            "resistance_price": resistance_price,
+        },
         "rows": rows if include_all else [],
     }

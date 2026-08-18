@@ -12,6 +12,9 @@ from typing import Any, Mapping, Optional, Sequence
 
 
 EXHAUSTION_POLICY_TAG = "mtf_exhaustion_log_v1"
+UNIVERSE_POLICY_TAG = "cycle_3m_universe_v1"
+UNIVERSE_SCHEMA = "cycle_3m_universe_v1"
+UNIVERSE_FILE = "cycle_3m_universe.jsonl"
 DECISION_BAR_SEC = 180
 SOURCE_BAR = "1m"
 DECISION_BAR = "3m"
@@ -20,6 +23,9 @@ RSI_PERIOD = 14
 STOCH_PERIOD = 14
 STOCH_D_PERIOD = 3
 ADX_PERIOD = 14
+DONCHIAN_PERIOD = 20
+BB_PERIOD = 20
+BB_STD = 2.0
 # Research hypothesis only — LOG-ONLY conjunction. RSI-alone is not a gate
 # (winner T1 was also oversold). Hard veto stays off until n + holdout.
 SHORT_EXHAUSTION_RSI_MAX = 30.0
@@ -157,9 +163,7 @@ def stoch_rsi(
     }
 
 
-def wilder_adx(candles: Sequence[Sequence[Any]], period: int = ADX_PERIOD) -> Optional[float]:
-    if len(candles) < period + 2:
-        return None
+def _true_range_and_dm(candles: Sequence[Sequence[Any]]) -> Optional[tuple]:
     trs, plus_dm, minus_dm = [], [], []
     for prev, cur in zip(candles, candles[1:]):
         h, l, c = _finite(cur[2]), _finite(cur[3]), _finite(cur[4])
@@ -171,6 +175,106 @@ def wilder_adx(candles: Sequence[Sequence[Any]], period: int = ADX_PERIOD) -> Op
         plus_dm.append(up if up > down and up > 0 else 0.0)
         minus_dm.append(down if down > up and down > 0 else 0.0)
         trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    return trs, plus_dm, minus_dm
+
+
+def wilder_atr(candles: Sequence[Sequence[Any]], period: int = ADX_PERIOD) -> Optional[float]:
+    """Wilder ATR from the same true-range series ADX already uses."""
+    if len(candles) < period + 2:
+        return None
+    packed = _true_range_and_dm(candles)
+    if packed is None:
+        return None
+    trs, _, _ = packed
+    atr = _wilder_smooth(trs, period)
+    if not atr:
+        return None
+    return round(atr[-1], 8)
+
+
+def atr14_pct_of_price(candles: Sequence[Sequence[Any]], period: int = ADX_PERIOD) -> Optional[float]:
+    """ATR(14) as percent of last close. 0.12 means 0.12% of price."""
+    atr = wilder_atr(candles, period)
+    close = _close(candles[-1]) if candles else None
+    if atr is None or close is None or close <= 0:
+        return None
+    return round((atr / close) * 100.0, 8)
+
+
+def donchian_channel(candles: Sequence[Sequence[Any]], period: int = DONCHIAN_PERIOD) -> dict:
+    """Close location in the last ``period`` 3m highs/lows. 0=low, 1=high."""
+    empty = {"high": None, "low": None, "loc": None, "close": None, "period": period}
+    if len(candles) < 2:
+        return empty
+    window = candles[-min(period, len(candles)):]
+    highs, lows = [], []
+    for row in window:
+        h, l = _finite(row[2]) if len(row) > 2 else None, _finite(row[3]) if len(row) > 3 else None
+        if h is not None:
+            highs.append(h)
+        if l is not None:
+            lows.append(l)
+    close = _close(window[-1]) if window else None
+    if not highs or not lows or close is None:
+        return empty
+    hi, lo = max(highs), min(lows)
+    span = hi - lo
+    loc = 0.5 if span <= 1e-12 else (close - lo) / span
+    return {
+        "high": round(hi, 4),
+        "low": round(lo, 4),
+        "loc": round(loc, 6),
+        "close": round(close, 4),
+        "period": period,
+    }
+
+
+def bollinger_width(closes: Sequence[float], period: int = BB_PERIOD, num_std: float = BB_STD) -> Optional[float]:
+    """(upper - lower) / middle for a ``period`` SMA ± ``num_std`` σ band."""
+    if len(closes) < period:
+        return None
+    window = [float(v) for v in closes[-period:]]
+    mean = sum(window) / float(period)
+    if mean <= 1e-12:
+        return None
+    var = sum((value - mean) ** 2 for value in window) / float(period)
+    width = (2.0 * float(num_std) * (var ** 0.5)) / mean
+    return round(width, 8)
+
+
+def session_utc_label(ts: Optional[float] = None) -> str:
+    from datetime import datetime, timezone
+    if ts is None:
+        hour = datetime.now(timezone.utc).hour
+    else:
+        hour = datetime.fromtimestamp(float(ts), timezone.utc).hour
+    if hour < 8:
+        return "ASIA"
+    if hour < 16:
+        return "EU"
+    return "US"
+
+
+def hour_utc_bucket(ts: Optional[float] = None) -> int:
+    from datetime import datetime, timezone
+    if ts is None:
+        return datetime.now(timezone.utc).hour
+    return datetime.fromtimestamp(float(ts), timezone.utc).hour
+
+
+def cycle_bucket_3m(ts: Optional[float] = None) -> int:
+    from time import time as _now
+    stamp = float(ts if ts is not None else _now())
+    return int(stamp // DECISION_BAR_SEC) * DECISION_BAR_SEC
+
+
+def wilder_adx(candles: Sequence[Sequence[Any]], period: int = ADX_PERIOD) -> Optional[float]:
+    if len(candles) < period + 2:
+        return None
+    packed = _true_range_and_dm(candles)
+    if packed is None:
+        return None
+    trs, plus_dm, minus_dm = packed
     atr = _wilder_smooth(trs, period)
     pdm = _wilder_smooth(plus_dm, period)
     mdm = _wilder_smooth(minus_dm, period)
@@ -229,22 +333,35 @@ def format_exhaustion_line(snapshot: Mapping[str, Any]) -> str:
     )
 
 
-def compute_3m_exhaustion_snapshot(
+def format_universe_line(snapshot: Mapping[str, Any]) -> str:
+    outcome = snapshot.get("cycle_outcome") or "cycle"
+    return (
+        f"3m universe {outcome} atr%={snapshot.get('atr14_pct_3m')} "
+        f"donchian={snapshot.get('donchian_loc_3m')} bb={snapshot.get('bb_width_3m')} "
+        f"delta={snapshot.get('delta_3m')} imb={snapshot.get('imbalance_3m')} "
+        f"{snapshot.get('session_utc')} (log-only)"
+    )
+
+
+def _base_3m_snapshot(
     candles_1m: Sequence[Sequence[Any]],
     *,
     dist_to_support: Optional[float] = None,
+    dist_to_resistance: Optional[float] = None,
     structure_score: Optional[float] = None,
-) -> dict:
+) -> tuple:
     bars = resample_1m_to_3m(candles_1m)
     closes = [c for c in (_close(row) for row in bars) if c is not None]
     rsi = wilder_rsi(closes)
     stoch = stoch_rsi(closes)
     adx = wilder_adx(bars)
+    atr = wilder_atr(bars)
+    atr_pct = atr14_pct_of_price(bars)
+    donch = donchian_channel(bars)
+    bb_w = bollinger_width(closes)
     ret_3m = ret_from_closes(closes)
     block = would_block_short_3m(rsi=rsi, stoch_k=stoch.get("k"), adx=adx)
     snap = {
-        "schema": "exhaustion_3m_v1",
-        "policy_tag": EXHAUSTION_POLICY_TAG,
         "bar": DECISION_BAR,
         "source_bar": SOURCE_BAR,
         "source": SOURCE_NOTE,
@@ -252,8 +369,15 @@ def compute_3m_exhaustion_snapshot(
         "stoch_rsi_k": stoch.get("k"),
         "stoch_rsi_d": stoch.get("d"),
         "adx14": adx,
+        "atr14": atr,
+        "atr14_pct_3m": atr_pct,
+        "donchian_loc_3m": donch.get("loc"),
+        "donchian_high_3m": donch.get("high"),
+        "donchian_low_3m": donch.get("low"),
+        "bb_width_3m": bb_w,
         "ret_3m": ret_3m,
         "dist_to_support": dist_to_support,
+        "dist_to_resistance": dist_to_resistance,
         "structure_score": structure_score,
         "would_block_short": block,
         "would_block_reason": WOULD_BLOCK_SHORT_REASON if block else None,
@@ -267,5 +391,72 @@ def compute_3m_exhaustion_snapshot(
         "bar_count_3m": len(bars),
         "bar_count_1m": len(candles_1m or []),
     }
+    return snap, bars
+
+
+def compute_3m_exhaustion_snapshot(
+    candles_1m: Sequence[Sequence[Any]],
+    *,
+    dist_to_support: Optional[float] = None,
+    structure_score: Optional[float] = None,
+    dist_to_resistance: Optional[float] = None,
+) -> dict:
+    snap, _ = _base_3m_snapshot(
+        candles_1m,
+        dist_to_support=dist_to_support,
+        dist_to_resistance=dist_to_resistance,
+        structure_score=structure_score,
+    )
+    snap["schema"] = "exhaustion_3m_v1"
+    snap["policy_tag"] = EXHAUSTION_POLICY_TAG
     snap["line"] = format_exhaustion_line(snap)
+    return snap
+
+
+def compute_3m_universe_snapshot(
+    candles_1m: Sequence[Sequence[Any]],
+    *,
+    dist_to_support: Optional[float] = None,
+    dist_to_resistance: Optional[float] = None,
+    structure_score: Optional[float] = None,
+    delta_3m: Optional[float] = None,
+    imbalance_3m: Optional[float] = None,
+    support_price: Optional[float] = None,
+    resistance_price: Optional[float] = None,
+    ts: Optional[float] = None,
+    cycle_outcome: str = "SKIPPED",
+    skip_reason: Optional[str] = None,
+    decision: Optional[str] = None,
+    trade_id: Optional[str] = None,
+    direction: Optional[str] = None,
+) -> dict:
+    """Taken + skipped 3m decision-universe row. Never a live veto."""
+    snap, _ = _base_3m_snapshot(
+        candles_1m,
+        dist_to_support=dist_to_support,
+        dist_to_resistance=dist_to_resistance,
+        structure_score=structure_score,
+    )
+    stamp = float(ts) if ts is not None else None
+    snap.update({
+        "schema": UNIVERSE_SCHEMA,
+        "policy_tag": UNIVERSE_POLICY_TAG,
+        "path_replay_tag": "path_replay_v1",
+        "cycle_bucket": cycle_bucket_3m(stamp),
+        "captured_ts": stamp,
+        "session_utc": session_utc_label(stamp),
+        "hour_utc": hour_utc_bucket(stamp),
+        "delta_3m": None if delta_3m is None else _finite(delta_3m),
+        "imbalance_3m": None if imbalance_3m is None else _finite(imbalance_3m),
+        "support_price": None if support_price is None else _finite(support_price),
+        "resistance_price": None if resistance_price is None else _finite(resistance_price),
+        "cycle_outcome": str(cycle_outcome or "SKIPPED").upper(),
+        "skip_reason": skip_reason,
+        "decision": decision,
+        "trade_id": trade_id,
+        "direction": None if direction is None else str(direction).upper(),
+        "live_veto": False,
+    })
+    snap["line"] = format_universe_line(snap)
+    snap["exhaustion_line"] = format_exhaustion_line(snap)
     return snap
