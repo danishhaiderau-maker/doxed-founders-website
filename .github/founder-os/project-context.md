@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-test(fly): stub chase-window helpers in confirmed-cancel contract
+test(paper): manage paused positions via side-correct mark
 
 ## Last Activity
 
