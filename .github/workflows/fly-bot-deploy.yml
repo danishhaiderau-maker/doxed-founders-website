@@ -52,6 +52,7 @@ jobs:
           python test_ws_live_readiness_contract.py
           python -m pytest test_continuous_r2_floor.py -q
           python -m pytest test_chase_exact_bucket_controls.py -q
+          python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py

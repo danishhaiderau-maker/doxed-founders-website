@@ -1,6 +1,6 @@
 """Non-destructive, rollback-capable research epoch quarantine."""
 from __future__ import annotations
-import hashlib, json, os, uuid
+import hashlib, json, os, shutil, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,3 +46,57 @@ def quarantine_epoch(root, paths, archive_root="research_epoch_quarantine", cuto
             source.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and not source.exists(): os.replace(target, source)
         raise
+
+
+def purge_quarantine_archives(root, extra_roots=None):
+    """Permanently delete quarantine / archive trees so infected fills cannot be restored."""
+    root = Path(root).resolve()
+    names = (
+        "research_epoch_quarantine",
+        "epoch_quarantine",
+        "research_archive",
+        "research_session_archives",
+    )
+    targets = [root / name for name in names]
+    genome = root / "research" / "genome" / "epoch_quarantine"
+    targets.append(genome)
+    for extra in extra_roots or ():
+        if extra:
+            targets.append(Path(extra))
+    deleted_trees = []
+    deleted_files = 0
+    errors = []
+    seen = set()
+    for target in targets:
+        try:
+            resolved = target.resolve()
+        except OSError as exc:
+            errors.append("%s: %s" % (target, exc))
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if root not in resolved.parents and resolved != root:
+            errors.append("%s: refuses to delete outside runtime root" % resolved)
+            continue
+        if not resolved.exists():
+            continue
+        file_count = 0
+        if resolved.is_dir():
+            for _, _, files in os.walk(resolved):
+                file_count += len(files)
+            try:
+                shutil.rmtree(resolved)
+            except OSError as exc:
+                errors.append("%s: %s" % (resolved, exc))
+                continue
+        elif resolved.is_file():
+            file_count = 1
+            try:
+                resolved.unlink()
+            except OSError as exc:
+                errors.append("%s: %s" % (resolved, exc))
+                continue
+        deleted_trees.append(str(resolved))
+        deleted_files += file_count
+    return {"deleted_trees": deleted_trees, "deleted_files": deleted_files, "errors": errors}

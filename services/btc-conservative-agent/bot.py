@@ -4012,27 +4012,9 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             "research_lane": pos.get("research_lane"),
         })
 
-    if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
-        logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
-        close_position(pos, "EARLY_FAIL")
-        return True
-
-    if (pos.get("dir") == "LONG" and price <= pos.get("sl", 0)) or (pos.get("dir") == "SHORT" and price >= pos.get("sl", 0)):
-        logger.info(f"[EXIT TRIGGER] STOP_LOSS trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
-        close_position(pos, "STOP_LOSS")
-        return True
-
-    if check_type_a_first_candle_exit(pos, unreal_pct, now):
-        return True
-
-    if check_type_a_early_fail_exit(pos, unreal_pct, now):
-        return True
-
-    if check_type_a_stall_exit(pos, unreal_pct, now):
-        return True
-
-    if check_trend_weakening_exit(pos, unreal_pct, now):
-        return True
+    # Booked paper exits must reuse this same side-correct trigger, not a
+    # later book-walk VWAP that can make a stop look like a much better fill.
+    pos["_exit_eval_price"] = float(price or 0)
 
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
@@ -4093,6 +4075,34 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     pos["_prev_unreal_pct"] = unreal_pct
 
     if check_thesis_invalidation(pos, price):
+        return True
+
+    # Paper natural cycle: if ladder and thesis have not fired, never close.
+    # Hard STOP_LOSS on a 13bps last-trade tick previously skipped this cycle.
+    # POST_FILL_GRACE_SEC is intentionally not used as a hold here.
+    if _paper_natural_cycle_exits():
+        return False
+
+    if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
+        logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
+        close_position(pos, "EARLY_FAIL")
+        return True
+
+    if (pos.get("dir") == "LONG" and price <= pos.get("sl", 0)) or (pos.get("dir") == "SHORT" and price >= pos.get("sl", 0)):
+        logger.info(f"[EXIT TRIGGER] STOP_LOSS trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
+        close_position(pos, "STOP_LOSS")
+        return True
+
+    if check_type_a_first_candle_exit(pos, unreal_pct, now):
+        return True
+
+    if check_type_a_early_fail_exit(pos, unreal_pct, now):
+        return True
+
+    if check_type_a_stall_exit(pos, unreal_pct, now):
+        return True
+
+    if check_trend_weakening_exit(pos, unreal_pct, now):
         return True
 
     tp_price = pos.get("tp", 0)
@@ -5201,18 +5211,36 @@ def resolve_sim_fill_price(order: dict) -> float:
     return result["fill_price"]
 
 
+_TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
+    "PROFIT_LOCK_LADDER",
+    "THESIS_FAST_CUT",
+    "THESIS_INVALIDATED",
+})
+
+
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
-    """Exit price: ladder/taker walks book; maker only for explicit TP limit hits."""
+    """Exit price: ladder/thesis book the trigger; maker only for explicit TP limit hits."""
     qty = float(pos.get("qty") or 0)
     direction = str(pos.get("dir") or "").upper()
+    fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
+    trigger = float(pos.get("_exit_eval_price") or 0)
+    if str(exit_reason or "").upper() in _TRIGGER_CONSISTENT_EXIT_REASONS:
+        # Do not walk the book to a far-better VWAP than the side-correct
+        # trigger that actually fired the rule (the old STOP_LOSS mismatch).
+        px = trigger if trigger > 0 else fallback
+        if px <= 0:
+            px = float(pos.get("entry") or 0)
+        sim = {
+            "avg_price": round(px, 2),
+            "filled_qty": qty,
+            "fully_filled": True,
+            "source": "exit_trigger_side_correct",
+            "trigger_price": round(trigger, 2) if trigger > 0 else None,
+        }
+        return round(px, 2), sim
     refresh_bbo_state()
     refresh_order_book_state()
     fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
-    if exit_reason == "PROFIT_LOCK_LADDER":
-        exit_side = "sell" if direction == "LONG" else "buy"
-        sim = simulate_market_fill(exit_side, qty)
-        px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
-        return px, sim
     if exit_is_maker:
         tp_px = float(pos.get("tp") or 0)
         if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
@@ -6534,6 +6562,9 @@ TREND_WEAKENING_LOCK_TIGHTEN_PCT = 2.0
 TREND_WEAKENING_MIN_SIGNALS = 1
 TREND_WEAKENING_SCRATCH_UNREAL_PCT = 6.0
 POST_FILL_GRACE_SEC = int(os.getenv("POST_FILL_GRACE_SEC", "90"))
+# POST_FILL_GRACE_SEC still gates EARLY_FAIL / TREND_WEAKENING only. Paper
+# hard STOP_LOSS is not delayed by this constant — paper never closes on
+# STOP_LOSS; it waits for Scenario C ladder or thesis cut/loss.
 TREND_HEALTH_HISTORY_MAX = 12
 TREND_HEALTH_LOG_INTERVAL_SEC = 30
 SPREAD_PENALTY_ENABLED = True
@@ -17470,6 +17501,15 @@ def _force_paper_mode_active() -> bool:
     )
 
 
+def _paper_natural_cycle_exits() -> bool:
+    """Paper Showcase closes only on Scenario C ladder or thesis cut/loss.
+
+    Hard STOP_LOSS must not skip that cycle. POST_FILL_GRACE_SEC is not a
+    hold for the hard stop and is not applied here.
+    """
+    return _force_paper_mode_active()
+
+
 def _genuine_ws_transport_ready(now: float = None) -> bool:
     """True only after a connected WS and fresh exact-symbol market update."""
     now = float(now or time.time())
@@ -20139,7 +20179,7 @@ def process_positions():
         # Exit evaluation can close a position, persist research artifacts, and
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
-            mark = get_executable_mark_price(pos, fallback=price)
+            mark = get_mark_price(pos.get("dir"), fallback=price)
             _apply_position_exits(pos, mark, now)
     finally:
         position_evaluation_lock.release()
@@ -21571,7 +21611,7 @@ def _process_ws_ticker_update(payload) -> bool:
 
 
 def _tick_driven_position_exits(price: float):
-    """WS tick path — immediate exit/ladder enforcement (not only 1s poll)."""
+    """WS tick path — immediate ladder/thesis on side-correct BBO, not last-trade wicks."""
     if price is None or price <= 0:
         return
     now = time.time()
@@ -21581,7 +21621,8 @@ def _tick_driven_position_exits(price: float):
             if isinstance(p, dict) and p.get("status") == "OPEN"
         ]
     for pos in positions:
-        _apply_position_exits(pos, price, now)
+        mark = get_mark_price(pos.get("dir"), fallback=price)
+        _apply_position_exits(pos, mark, now)
 
 def safe_ws_handler(message):
     try:
@@ -24468,13 +24509,27 @@ def _reset_runtime_log_handlers():
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
 def reset_all_research_files() -> dict:
-    from research.epoch_quarantine import quarantine_epoch
-    result = quarantine_epoch(
-        os.getcwd(),
-        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True),
-        cutoff=utc_iso(),
-    )
-    return result
+    """Delete live epoch research files AND permanently purge quarantine trees.
+
+    Infected fills must not be recoverable. Previous resets only moved files
+    into research_epoch_quarantine; this path deletes both the live epoch
+    JSONL/logs and every quarantine archive under the runtime root.
+    """
+    from research.epoch_quarantine import purge_quarantine_archives
+    live_paths = all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
+    deleted, errors = _delete_paths(live_paths)
+    purge = purge_quarantine_archives(os.getcwd())
+    errors.extend(purge.get("errors") or [])
+    return {
+        "epoch_id": None,
+        "path": None,
+        "cutoff_utc": utc_iso(),
+        "moved": [],
+        "deleted": deleted,
+        "purged_quarantine": purge.get("deleted_trees") or [],
+        "purged_files": int(purge.get("deleted_files") or 0),
+        "errors": errors,
+    }
 
 def maintain_fresh_collection_files():
     """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
@@ -24659,7 +24714,9 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         recent_trades.clear()
         _canonical_source_order_market_evidence.clear()
     quarantine = reset_all_research_files()
-    moved, errors = quarantine["moved"], quarantine["errors"]
+    moved, errors = quarantine.get("moved") or [], quarantine.get("errors") or []
+    deleted = list(quarantine.get("deleted") or [])
+    purged_trees = list(quarantine.get("purged_quarantine") or [])
     # Fresh Collection is the operator boundary for every active holdout.  The
     # file wipe alone is insufficient because Tile 2 counters also live in
     # memory and would otherwise be written back with pre-reset/test values.
@@ -24677,13 +24734,17 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     load_session_trades_from_csv()
     archive_compaction = {
         "past_analysis_id": past_analysis_id,
-        "deleted_files": 0,
+        "deleted_files": len(deleted),
         "deleted_bytes": 0,
-        "raw_payloads_retained": True,
-        "quarantined_files": len(moved),
-        "quarantine_path": quarantine["path"],
+        "raw_payloads_retained": False,
+        "quarantined_files": 0,
+        "quarantine_path": None,
+        "purged_quarantine": purged_trees,
     }
-    summary = f"quarantined {len(moved)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    summary = (
+        f"deleted {len(deleted)} live file(s), purged {len(purged_trees)} quarantine tree(s)"
+        + (f", {len(errors)} error(s)" if errors else "")
+    )
     for err in errors:
         logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
     with state_lock:
@@ -24706,10 +24767,11 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             f"— local mirror will be wiped on next manifest poll [PIPELINE ENFORCEMENT]"
         )
     return {
-        "deleted": [],
-        "quarantined": moved,
-        "quarantine_path": quarantine["path"],
-        "epoch_cutoff_utc": quarantine["cutoff_utc"],
+        "deleted": deleted,
+        "quarantined": [],
+        "quarantine_path": None,
+        "purged_quarantine": purged_trees,
+        "epoch_cutoff_utc": quarantine.get("cutoff_utc"),
         "errors": errors,
         "summary": summary,
         "archive_path": archive_path,
@@ -33724,7 +33786,8 @@ def api_fresh_epoch_reset():
     return jsonify({
         "ok": bool(result.get("ok")),
         "reset": result,
-        "deleted": [],
+        "deleted": result.get("deleted") or [],
+        "purged_quarantine": result.get("purged_quarantine") or [],
         "strict_flat_checked_at": proof.get("checked_at"),
         "epoch_id": epoch_id,
         "epoch_cutoff_utc": cutoff,
@@ -36277,14 +36340,8 @@ def simulate_replay_outcome(buf: dict) -> dict:
         peak = max(peak, unreal)
         mae = min(mae, unreal)
         age_min = (t - fill_t) / 60.0
-        if early_fail and unreal <= EARLY_FAIL_PCT_THRESHOLD and age_min < EARLY_FAIL_MINUTES:
-            exit_reason = "EARLY_FAIL"
-            exit_margin_pct = unreal
-            break
-        if (direction == "LONG" and price <= sl) or (direction == "SHORT" and price >= sl):
-            exit_reason = "STOP_LOSS"
-            exit_margin_pct = -MAX_SL_MARGIN_PCT
-            break
+        # Paper natural cycle: do not close on EARLY_FAIL or hard STOP_LOSS.
+        # Those previously fired on a 13bps tick and skipped ladder/thesis.
         lock_floor = _profit_lock_floor_for_ladder(
             peak,
             trail_ladder,

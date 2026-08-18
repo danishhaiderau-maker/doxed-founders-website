@@ -40,3 +40,17 @@ def test_genome_reset_preserves_prior_database_with_manifest(tmp_path):
     assert (archives[0] / "research.db").exists()
     assert Path(store.db_path).exists()
     store.close()
+
+def test_purge_quarantine_archives_deletes_trees(tmp_path):
+    from research.epoch_quarantine import purge_quarantine_archives
+    q = tmp_path / "research_epoch_quarantine" / "epoch_old"
+    q.mkdir(parents=True)
+    (q / "raw.jsonl").write_text("infected\n", encoding="utf-8")
+    arch = tmp_path / "research_archive"
+    arch.mkdir()
+    (arch / "keep.json").write_text("{}", encoding="utf-8")
+    result = purge_quarantine_archives(tmp_path)
+    assert not (tmp_path / "research_epoch_quarantine").exists()
+    assert not arch.exists()
+    assert result["deleted_files"] >= 2
+    assert result["errors"] == []

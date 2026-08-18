@@ -192,10 +192,11 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertEqual(stale.status_code, 409)
         reset.assert_not_called()
 
-    def test_fresh_epoch_reset_calls_atomic_reset_and_never_claims_deletion(self):
+    def test_fresh_epoch_reset_calls_atomic_reset_and_returns_deleted(self):
         fake_reset = {
             "ok": True,
-            "quarantine": {"manifest_path": "/data/quarantine/manifest.json"},
+            "deleted": ["trade_outcome.jsonl"],
+            "purged_quarantine": ["/app/data/runtime/research_epoch_quarantine"],
             "fresh_collection_signal_ts": 12345.0,
         }
         with mock.patch.object(
@@ -212,7 +213,11 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.get_json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["deleted"], [])
+        self.assertEqual(body["deleted"], ["trade_outcome.jsonl"])
+        self.assertEqual(
+            body["purged_quarantine"],
+            ["/app/data/runtime/research_epoch_quarantine"],
+        )
         reset.assert_called_once_with(send_local_signal=True)
 
     def test_get_fresh_epoch_reset_is_dry_run_and_never_wipes(self):
