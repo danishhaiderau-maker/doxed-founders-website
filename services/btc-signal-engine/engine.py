@@ -116,6 +116,13 @@ from research.platform_relay_evidence import (
     _snapshot_with_platform_relay_evidence as _pure_snapshot_with_platform_relay_evidence,
     _validate_platform_relay_evidence_payload as _pure_validate_platform_relay_evidence_payload,
 )
+from research.source_market_evidence import (
+    append_market_observation as _append_source_market_observation,
+    evidence_summary as _source_market_evidence_summary,
+    load_market_evidence_index as _load_source_market_evidence_index,
+    sync_canonical_pending_order as _sync_canonical_source_pending_order,
+    update_canonical_extrema as _update_canonical_source_extrema,
+)
 from research.counterfactual_normalization import (
     canonical_profile as _canonical_counterfactual_profile,
     policy_comparability_key as _pure_policy_comparability_key,
@@ -3145,6 +3152,21 @@ def lane_register_pending_order(order: dict):
     if not order:
         return False
     ln = _ensure_lane_bucket(order)
+    # Prefer globals() so isolated characterization tests that exec() this
+    # function without the coordination helpers still exercise idempotency.
+    blocked_fn = globals().get("executable_live_copy_entries_blocked")
+    blocked, block_reason, coord = blocked_fn() if callable(blocked_fn) else (False, "", "")
+    if blocked and str(ln or "").upper() == "CONTINUOUS" and not order.get("coordination_shadow"):
+        # Keep research/shadow labelled rows; block new live-copy executable book.
+        logger.warning(
+            f"[LIVE-COPY-COORD] blocking new CONTINUOUS pending "
+            f"trade={order.get('trade_id')} state={coord} reason={block_reason} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        order["status"] = "BLOCKED"
+        order["outcome"] = LIVE_RELAY_COORDINATION_REASON
+        order["coordination_state"] = coord
+        return False
     tid = str(order.get("trade_id") or "")
     with trade_lock:
         existing = next(
@@ -3172,6 +3194,15 @@ def lane_register_pending_order(order: dict):
         lst = lane_pending_orders[ln]
         if order not in lst:
             lst.append(order)
+    hydrate = globals().get("_sync_canonical_source_pending_order")
+    store = globals().get("_canonical_source_order_market_evidence")
+    if callable(hydrate) and isinstance(store, dict):
+        hydrate(
+            store,
+            order,
+            chase_acked=False,
+            observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
+        )
     _emit_genome_execution_event("LIMIT_CREATED", {
         "trade_id": order.get("trade_id"),
         "limit_price": order.get("limit_price") or order.get("price"),
@@ -4134,6 +4165,104 @@ def circuit_breaker_cancel_pending(reason: str):
     return cancelled
 
 
+def live_copy_coordination_state() -> str:
+    """Railway↔Fly coordinated operating state for live-copy lanes."""
+    with state_lock:
+        raw = str(state.get("live_copy_coordination_state") or COORD_STATE_RUNNING_TOGETHER).upper()
+    if raw in {
+        COORD_STATE_RUNNING_TOGETHER,
+        COORD_STATE_RELAY_EXIT_ONLY,
+        COORD_STATE_SOURCE_RESEARCH_ONLY,
+        COORD_STATE_FULLY_PAUSED,
+    }:
+        return raw
+    return COORD_STATE_RUNNING_TOGETHER
+
+
+def set_live_copy_coordination_state(next_state: str, reason: str = "") -> dict:
+    """Apply coordinated state. RELAY_EXIT_ONLY blocks NEW executable CONTINUOUS entries."""
+    wanted = str(next_state or "").strip().upper()
+    if wanted not in {
+        COORD_STATE_RUNNING_TOGETHER,
+        COORD_STATE_RELAY_EXIT_ONLY,
+        COORD_STATE_SOURCE_RESEARCH_ONLY,
+        COORD_STATE_FULLY_PAUSED,
+    }:
+        raise ValueError(f"unsupported coordination state: {next_state}")
+    reason_text = str(reason or "").strip() or (
+        LIVE_RELAY_COORDINATION_REASON if wanted != COORD_STATE_RUNNING_TOGETHER else ""
+    )
+    with state_lock:
+        prev = str(state.get("live_copy_coordination_state") or COORD_STATE_RUNNING_TOGETHER)
+        state["live_copy_coordination_state"] = wanted
+        state["live_copy_coordination_reason"] = reason_text
+        state["live_copy_coordination_updated_at"] = utc_iso()
+        if wanted == COORD_STATE_FULLY_PAUSED:
+            state["manual_admin_pause"] = True
+        elif wanted == COORD_STATE_RUNNING_TOGETHER:
+            if state.get("execution_reason") == LIVE_RELAY_COORDINATION_REASON:
+                state["execution_paused"] = False
+                state["execution_reason"] = ""
+                state["_pause_priority"] = 0
+    if wanted == COORD_STATE_FULLY_PAUSED:
+        set_execution_paused(LIVE_RELAY_COORDINATION_REASON)
+    cancelled_executable = 0
+    if prev == COORD_STATE_RUNNING_TOGETHER and wanted != COORD_STATE_RUNNING_TOGETHER:
+        cancelled_executable = _expire_executable_live_copy_pendings(reason_text)
+    logger.warning(
+        f"[LIVE-COPY-COORD] {prev} -> {wanted} reason={reason_text or '-'} "
+        f"cancelled_executable={cancelled_executable} "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    return {
+        "ok": True,
+        "previous": prev,
+        "state": wanted,
+        "reason": reason_text,
+        "cancelled_executable": cancelled_executable,
+        "ui_reason": LIVE_RELAY_COORDINATION_REASON if wanted != COORD_STATE_RUNNING_TOGETHER else "",
+    }
+
+
+def _expire_executable_live_copy_pendings(reason: str) -> int:
+    """Drop already-resting CONTINUOUS copy intents when live relay pauses.
+
+    Labelled coordination_shadow / non-CONTINUOUS research stays visible.
+    Open Showcase positions are not flattened here (exit-only remains).
+    """
+    expire_reason = reason or LIVE_RELAY_COORDINATION_REASON
+    with trade_lock:
+        candidates = [
+            order for order in list(pending_orders)
+            if isinstance(order, dict)
+            and str(order.get("status") or "").upper() in ("PENDING", "CANCEL_PENDING_LIVE")
+            and order.get("coordination_shadow") is not True
+            and str(order.get("research_lane") or RESEARCH_LANE_CONTINUOUS).upper()
+            in ("", "CONTINUOUS")
+        ]
+    cancelled = 0
+    for order in candidates:
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            expire_reason,
+            record_expired=True,
+            expire_signal=True,
+        )
+        if outcome.get("finalized"):
+            cancelled += 1
+    return cancelled
+
+
+def executable_live_copy_entries_blocked() -> tuple:
+    """True when Showcase must not emit NEW executable CONTINUOUS copy intents."""
+    coord = live_copy_coordination_state()
+    if coord in {COORD_STATE_RELAY_EXIT_ONLY, COORD_STATE_FULLY_PAUSED, COORD_STATE_SOURCE_RESEARCH_ONLY}:
+        with state_lock:
+            reason = str(state.get("live_copy_coordination_reason") or LIVE_RELAY_COORDINATION_REASON)
+        return True, reason, coord
+    return False, "", coord
+
+
 def set_execution_paused(reason: str):
     global last_console_update
     cancel_reason = None
@@ -4643,6 +4772,14 @@ BOOK_FORCE_MIN_SEC = 1.5
 # This deliberately removes the old historical-price-touch fallback that could
 # create a paper fill after Bitfinex had already moved away.
 VENUE_EXECUTABLE_SHOWCASE_FILL_GATE = True
+SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
+_canonical_source_order_market_evidence = {}
+# Coordinated live-copy operating states (Railway Cheetah <-> Fly Showcase).
+COORD_STATE_RUNNING_TOGETHER = "RUNNING_TOGETHER"
+COORD_STATE_RELAY_EXIT_ONLY = "RELAY_EXIT_ONLY"
+COORD_STATE_SOURCE_RESEARCH_ONLY = "SOURCE_RESEARCH_ONLY"
+COORD_STATE_FULLY_PAUSED = "FULLY_PAUSED"
+LIVE_RELAY_COORDINATION_REASON = "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED"
 VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
 VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 FUNDING_RATE_CAP_PER_8H = 0.001
@@ -7983,6 +8120,23 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
             f"limit={limit_price} qty={exact_qty} policy={entry_limit_policy or 'MISSING'}"
         )
         return
+
+    if event == "ORDER_PLACED":
+        blocked, block_reason, coord = executable_live_copy_entries_blocked()
+        if blocked and research_lane in ("", "CONTINUOUS"):
+            logger.warning(
+                f"[LIVE-COPY-COORD] suppressing executable ORDER_PLACED "
+                f"trade={trade_id} state={coord} reason={block_reason} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+            # Downgrade to labelled non-executable research visibility only.
+            event = "APPROVE_PENDING"
+            sig = dict(sig)
+            sig["executable"] = False
+            sig["coordination_shadow"] = True
+            sig["coordination_state"] = coord
+            sig["coordination_reason"] = block_reason
+            signal = sig
 
     try:
         event_seq = int(
@@ -18783,11 +18937,44 @@ def _venue_executable_showcase_fill(
     )
     limit = float(order.get("limit_price") or 0)
     qty = float(order.get("qty") or 0)
+    try:
+        live_generation = int(order.get("limit_chase_count") or 0)
+    except (TypeError, ValueError):
+        live_generation = 0
+    store = globals().get("_canonical_source_order_market_evidence")
+    trade_id = str(order.get("trade_id") or "")
+    canonical = store.get(trade_id) if isinstance(store, dict) and trade_id else None
+    if isinstance(canonical, dict):
+        try:
+            canon_gen = int(canonical.get("limit_generation") or 0)
+        except (TypeError, ValueError):
+            canon_gen = 0
+        if canon_gen != live_generation:
+            book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
+            return False, {
+                "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
+                "checked_at_ts": round(float(now), 3),
+                "limit_price": round(limit, 2),
+                "limit_generation": canon_gen,
+                "order_generation": live_generation,
+                "requested_qty": round(qty, 8),
+                "book_age_sec": round(max(0.0, float(now) - book_ts), 3) if book_ts else None,
+                "best_bid": round(float(bid or 0), 2),
+                "best_ask": round(float(ask or 0), 2),
+                "reason": "GENERATION_MISMATCH",
+            }
+        canon_limit = canonical.get("current_limit_price")
+        if canon_limit is not None:
+            try:
+                limit = float(canon_limit)
+            except (TypeError, ValueError):
+                pass
     book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
     evidence = {
         "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
         "checked_at_ts": round(float(now), 3),
         "limit_price": round(limit, 2),
+        "limit_generation": live_generation,
         "requested_qty": round(qty, 8),
         "book_age_sec": round(max(0.0, float(now) - book_ts), 3) if book_ts else None,
         "best_bid": round(float(bid or 0), 2),
@@ -19003,6 +19190,23 @@ def _commit_relay_limit_chase(
             if tier:
                 signal["urgent_chase_tier"] = tier
             signal["fill_model"] = order["fill_model"]
+        # Canonical pending-order identity: fill gate + market evidence share
+        # this generation only after chase ACK mutated the live order.
+        sync_pending = globals().get("_sync_canonical_source_pending_order")
+        store = globals().get("_canonical_source_order_market_evidence")
+        summary_builder = globals().get("_source_market_evidence_summary")
+        if callable(sync_pending) and isinstance(store, dict):
+            if order.get("original_limit_price") is None and old_limit:
+                order["original_limit_price"] = float(old_limit)
+            canonical = sync_pending(store, order, chase_acked=True, observed_ts=now)
+            if callable(summary_builder) and canonical:
+                summary = summary_builder(canonical)
+                order["source_order_market_evidence"] = summary
+                master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+                if isinstance(master, dict):
+                    master["source_order_market_evidence"] = copy.deepcopy(summary)
+                    master["limit_price"] = new_limit
+                    master["limit_chase_count"] = chase_count
         return {
             "ts": utc_iso(),
             "limit_price": new_limit,
@@ -19288,6 +19492,19 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
             signal["relay_event_ack_at_ts"] = order["relay_event_ack_at_ts"]
             signal["marketable_fallback_depth_qty"] = available_qty
             signal["fill_model"] = order["fill_model"]
+        sync_pending = globals().get("_sync_canonical_source_pending_order")
+        store = globals().get("_canonical_source_order_market_evidence")
+        summary_builder = globals().get("_source_market_evidence_summary")
+        if callable(sync_pending) and isinstance(store, dict):
+            if order.get("original_limit_price") is None and old_limit:
+                order["original_limit_price"] = float(old_limit)
+            canonical = sync_pending(store, order, chase_acked=True, observed_ts=now)
+            if callable(summary_builder) and canonical:
+                summary = summary_builder(canonical)
+                order["source_order_market_evidence"] = summary
+                master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+                if isinstance(master, dict):
+                    master["source_order_market_evidence"] = copy.deepcopy(summary)
     logger.info(
         f"[SIM] MARKETABLE_LIMIT trade_id={order.get('trade_id')} dir={direction} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
@@ -19408,6 +19625,16 @@ def _update_pending_order_price_extremes(price: float):
             else:
                 order["max_price_since_order"] = max(float(mx), float(price))
                 order["min_price_since_order"] = min(float(order.get("min_price_since_order", price)), float(price))
+            canonical = _update_canonical_source_extrema(
+                _canonical_source_order_market_evidence, order, float(price)
+            )
+            summary = _source_market_evidence_summary(canonical)
+            order["source_order_market_evidence"] = summary
+            master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+            if isinstance(master, dict):
+                master["source_order_market_evidence"] = copy.deepcopy(summary)
+                master["min_price_since_order"] = canonical.get("market_min_price")
+                master["max_price_since_order"] = canonical.get("market_max_price")
             try:
                 from execution_funnel import funnel_update_touch
                 funnel_update_touch(order, float(price))
@@ -19459,6 +19686,37 @@ def _pending_limit_ready_for_fill(
 ) -> bool:
     """Honor relay settlement before a terminal marketable source fill."""
     now = time.time() if now is None else float(now)
+
+    def persist_market_evidence(evidence: dict):
+        append_observation = globals().get("_append_source_market_observation")
+        summary_builder = globals().get("_source_market_evidence_summary")
+        store = globals().get("_canonical_source_order_market_evidence")
+        if not callable(append_observation) or not callable(summary_builder) or not isinstance(store, dict):
+            # Isolated characterization tests compile this function without
+            # research persistence dependencies. Production imports all three.
+            return
+        canonical, observation = append_observation(
+            store,
+            order,
+            market_price=float(price or 0),
+            bid=float(bid or 0),
+            ask=float(ask or 0),
+            venue_snapshot=venue_snapshot or {},
+            gate_evidence=evidence or {},
+            observed_ts=now,
+        )
+        if not observation:
+            return
+        summary = summary_builder(canonical)
+        order["source_order_market_evidence"] = summary
+        master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+        if isinstance(master, dict):
+            master["source_order_market_evidence"] = copy.deepcopy(summary)
+        _safe_append_jsonl(
+            SOURCE_ORDER_MARKET_EVIDENCE_FILE,
+            observation,
+            label="SOURCE ORDER MARKET EVIDENCE",
+        )
     if order.get("marketable_fallback_inflight"):
         # Freeze natural source fills while the exact terminal revision is
         # crossing the platform boundary. Cancellation/TTL may still change
@@ -19486,6 +19744,7 @@ def _pending_limit_ready_for_fill(
             )
             evidence["entry_path"] = "MARKETABLE_FALLBACK"
             order["venue_fill_gate"] = evidence
+            persist_market_evidence(evidence)
             return executable
         return False
     # Isolated contract tests compile this helper without the module-level
@@ -19501,6 +19760,7 @@ def _pending_limit_ready_for_fill(
             now=now,
         )
         order["venue_fill_gate"] = evidence
+        persist_market_evidence(evidence)
         return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
 
@@ -22232,6 +22492,13 @@ def _record_expired_order(source: dict, reason: str):
             or source.get("source_trade_id")
             or master.get("source_trade_id")
         ),
+        "source_order_market_evidence": copy.deepcopy(
+            source.get("source_order_market_evidence")
+            or master.get("source_order_market_evidence")
+            or _source_market_evidence_summary(
+                _canonical_source_order_market_evidence.get(str(tid)) or {}
+            )
+        ),
     }
     with trade_lock:
         expired_orders.append(row)
@@ -23952,6 +24219,7 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
@@ -23992,6 +24260,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
         APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
@@ -24248,6 +24517,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         trades_map.clear()
         trades.clear()
         recent_trades.clear()
+        _canonical_source_order_market_evidence.clear()
     quarantine = reset_all_research_files()
     moved, errors = quarantine["moved"], quarantine["errors"]
     # Fresh Collection is the operator boundary for every active holdout.  The
@@ -24316,7 +24586,10 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100
-REPLAY_TICK_MAX = 2000
+# Align pre-exit ring with post-exit (10000 * 1s interval covers 120m + slack).
+# Compact horizon receipts are also persisted before any rotation so a truncated
+# buffer is CENSORED, never treated as $0.
+REPLAY_TICK_MAX = 10000
 FEATURE_DRIFT_INTERVAL_SEC = 3600
 _last_feature_drift_ts = 0.0
 _last_research_kpi_ts = 0.0
@@ -26821,9 +27094,9 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>Trades</h2>
-<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — export full session via /api/export_csv.</p>
+<p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -27869,7 +28142,12 @@ DASHBOARD_JS = """(function () {
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
         if (src && banner) {
-          if (d.execution_paused) {
+          if (d.live_copy_coordination_state && d.live_copy_coordination_state !== 'RUNNING_TOGETHER') {
+            src.innerHTML = (d.live_copy_coordination_ui_reason || 'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED')
+              + ' [' + d.live_copy_coordination_state + ']';
+            src.className = 'text-red-500 font-bold animate-pulse';
+            banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-orange-600';
+          } else if (d.execution_paused) {
             src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
             src.className = 'text-red-500 font-bold animate-pulse';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
@@ -28443,7 +28721,17 @@ DASHBOARD_JS = """(function () {
           psHint.innerText = ps.historical_coverage_note +
             ' Showing latest ' + pausedRecent.length + ' rows. Safety: never relay-eligible.';
         }
-        safeHTML('tradesTable', (d.trades||[]).map(t => `
+        safeHTML('tradesTable', (d.trades||[]).map(t => {
+          const truth = t.dual_execution_truth || {};
+          const show = truth.showcase_simulated || {};
+          const bf = truth.bitfinex_authenticated || {};
+          const rel = truth.relationship || {};
+          const showcaseLabel = show.status || (show.executed ? 'FILLED' : 'UNFILLED');
+          const bitfinexLabel = bf.authenticated
+            ? (bf.classification || 'AUTHENTICATED')
+            : '-';
+          const relLabel = rel.shadow_label || rel.divergence_classification || '-';
+          return `
           <tr>
             <td>${t.ts_melbourne || t.close_ts_melbourne || formatMelbourneDateTime(t.ts || t.close_ts)}</td>
             <td>${t.trade_id || '-'}</td>
@@ -28458,8 +28746,11 @@ DASHBOARD_JS = """(function () {
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
             <td>$${(t.funding_fees_usd != null ? t.funding_fees_usd : t.funding_fees)?.toFixed(2)||'-'}</td>
-          </tr>
-        `).join(''));
+            <td>${showcaseLabel}</td>
+            <td>${bitfinexLabel}</td>
+            <td>${relLabel}</td>
+          </tr>`;
+        }).join(''));
         const tradesHint = document.getElementById('tradesTableHint');
         if (tradesHint) {
           const shown = (d.trades || []).length;
@@ -31239,7 +31530,11 @@ def _analyzer_proxy_fetch(path: str, timeout: float = 6.0):
 def _external_analyzer_status_payload(endpoint: str) -> dict:
     """Truthful Fly response: analysis is uploaded, never localhost-proxied."""
     mirror_status = {}
-    mirror_dir = _analyzer_mirror_dir()
+    active = _active_analyzer_mirror_dir()
+    if active is not None:
+        mirror_dir = active
+    else:
+        mirror_dir = _analyzer_mirror_dir()
     try:
         mirror_status = json.loads(
             (mirror_dir / "status.json").read_text(encoding="utf-8")
@@ -31308,6 +31603,8 @@ _DASHBOARD_TRADE_API_KEYS = (
     "final_direction", "dir", "entry", "exit", "dur_min", "pnl",
     "net_pnl_usd", "gross_pnl_usd", "trading_fees_usd", "fees_usd",
     "funding_fees_usd", "ai_band", "exit_reason", "close_ts_melbourne",
+    "dual_execution_truth", "copy_fill_observed",
+    "exchange_confirmed_shadow_overlay",
 )
 
 
@@ -31362,7 +31659,29 @@ def _snapshot_trades_for_api(session_start: float):
         src = list(trades)
     if len(src) > _DASHBOARD_TRADES_MAX:
         src = src[-_DASHBOARD_TRADES_MAX:]
-    return list(src)
+    try:
+        from research.dual_execution_truth import split_execution_truth
+        from research.platform_relay_evidence import (
+            _platform_relay_evidence_index,
+            _snapshot_with_platform_relay_evidence,
+        )
+        index = _platform_relay_evidence_index()
+    except Exception:
+        split_execution_truth = None
+        index = {}
+    rows = []
+    for trade in src:
+        row = dict(trade) if isinstance(trade, dict) else trade
+        tid = str((row or {}).get("trade_id") or "") if isinstance(row, dict) else ""
+        if isinstance(row, dict) and tid and index and tid in index:
+            row = _snapshot_with_platform_relay_evidence(row, tid, index)
+        if isinstance(row, dict) and callable(split_execution_truth):
+            try:
+                row["dual_execution_truth"] = split_execution_truth(row)
+            except Exception:
+                pass
+        rows.append(row)
+    return rows
 
 
 def _build_api_state_snapshot():
@@ -31496,6 +31815,13 @@ def _build_api_state_snapshot():
         # /api/state (the dashboard's primary poll) cannot be silent about a
         # stale running process or a drifted ADX cap.
         snapshot["git_rev"] = _runtime_git_rev()
+        coord = live_copy_coordination_state()
+        snapshot["live_copy_coordination_state"] = coord
+        snapshot["live_copy_coordination_ui_reason"] = (
+            LIVE_RELAY_COORDINATION_REASON
+            if coord != COORD_STATE_RUNNING_TOGETHER
+            else ""
+        )
         snapshot["tile2_policy"] = tile2_policy_descriptor()
         # Section 2: Tile 2 dashboard funnel metrics (raw + derived) so the
         # tile can render the full Section 2 spec without re-deriving from
@@ -32288,6 +32614,40 @@ _RESUMABLE_PAUSE_REASONS = frozenset({
 })
 
 
+
+@app.route('/api/live-copy-coordination', methods=['POST'])
+def api_live_copy_coordination():
+    """Railway safety-pause / re-arm coordination for Showcase executable entries."""
+    if not _admin_authed():
+        resp = jsonify({"ok": False, "error": "unauthorized"})
+        resp.status_code = 401
+        return resp
+    body = request.get_json(silent=True) or {}
+    wanted = str(body.get("state") or body.get("coordination_state") or "").strip().upper()
+    reason = str(body.get("reason") or "").strip()
+    try:
+        result = set_live_copy_coordination_state(wanted, reason)
+    except ValueError as exc:
+        resp = jsonify({"ok": False, "error": str(exc)})
+        resp.status_code = 400
+        return resp
+    with state_lock:
+        result["execution_paused"] = bool(state.get("execution_paused"))
+        result["execution_reason"] = state.get("execution_reason")
+        result["live_copy_coordination_state"] = state.get("live_copy_coordination_state")
+        result["ui_reason"] = (
+            LIVE_RELAY_COORDINATION_REASON
+            if result["state"] != COORD_STATE_RUNNING_TOGETHER
+            else ""
+        )
+    _patch_api_state_cache_fields(
+        live_copy_coordination_state=result["state"],
+        live_copy_coordination_reason=result.get("reason") or "",
+        execution_paused=result.get("execution_paused"),
+        execution_reason=result.get("execution_reason") or "",
+    )
+    return jsonify(result)
+
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
     runtime = _recompute_system_readiness()
@@ -32981,6 +33341,60 @@ def wipe_fly_only():
         "fresh_collection_signal_ts": float(state.get("fresh_collection_signal_ts") or 0.0),
     })
 
+_FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"
+
+
+@app.route('/api/fresh_epoch_reset', methods=['POST'])
+def api_fresh_epoch_reset():
+    """Strict operator-only research epoch reset for the Fly execution mirror.
+
+    The ordinary warehouse routes are intentionally unavailable on Fly.  This
+    narrow controller preserves the existing hashed quarantine/reset behavior
+    while requiring a fresh, explicit cross-service flat-boundary receipt from
+    the authenticated operator.  The reset itself repeats the source-side
+    paused/disarmed/order/position checks and fails closed on any contradiction.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    data = request.get_json(silent=True) or {}
+    if data.get("confirmation") != _FRESH_EPOCH_CONFIRMATION:
+        return jsonify({
+            "ok": False,
+            "error": "explicit fresh-epoch confirmation required",
+        }), 400
+    proof = data.get("strict_flat_proof")
+    if not isinstance(proof, dict):
+        return jsonify({"ok": False, "error": "strict_flat_proof required"}), 400
+    required_zero = (
+        "showcase_positions", "showcase_pending_orders",
+        "relay_active_participants", "relay_open_lots", "relay_pending_lots",
+        "exchange_positions", "exchange_active_orders", "exchange_delta_btc",
+    )
+    if any(proof.get(key) != 0 for key in required_zero):
+        return jsonify({
+            "ok": False,
+            "error": "strict flat proof is not zero",
+            "required_zero_fields": list(required_zero),
+        }), 409
+    if proof.get("relay_paused") is not True or proof.get("relay_disarmed") is not True:
+        return jsonify({"ok": False, "error": "relay must be paused and disarmed"}), 409
+    try:
+        checked_at = datetime.fromisoformat(str(proof.get("checked_at") or "").replace("Z", "+00:00"))
+        age_s = (datetime.now(timezone.utc) - checked_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        age_s = float("inf")
+    if age_s < 0 or age_s > 60:
+        return jsonify({"ok": False, "error": "strict flat proof is stale"}), 409
+
+    result = perform_fresh_collection_reset(send_local_signal=True)
+    status = 200 if result.get("ok") else 409
+    return jsonify({
+        "ok": bool(result.get("ok")),
+        "reset": result,
+        "deleted": [],
+        "strict_flat_checked_at": proof.get("checked_at"),
+    }), status
+
 @app.get("/api/data_size")
 def api_data_size():
     """Report Fly volume data size for the dashboard cleanup panel.
@@ -33493,6 +33907,14 @@ _DATA_SYNC_EXTENSIONS = frozenset({
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
 })
+_DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
+    "research_epoch_quarantine",
+    "research_archive",
+    "research_session_archives",
+    "archive-v2",
+    "object-store",
+    "object_store",
+})
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 
 
@@ -33559,6 +33981,9 @@ def _data_sync_path_allowed(path: Path) -> bool:
     except (OSError, ValueError):
         return False
     name_lower = resolved.name.lower()
+    volume_parts = {part.lower() for part in resolved.parts}
+    if volume_parts.intersection(_DATA_SYNC_EXCLUDED_DIR_NAMES):
+        return False
     if resolved.name in _DATA_SYNC_EXCLUDED_NAMES:
         return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
@@ -33587,6 +34012,10 @@ def _data_sync_inventory() -> list:
     rows = []
     for root in _data_sync_allowed_roots():
         for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+            _dirnames[:] = [
+                name for name in _dirnames
+                if name.lower() not in _DATA_SYNC_EXCLUDED_DIR_NAMES
+            ]
             for filename in filenames:
                 path = Path(dirpath) / filename
                 try:
@@ -35476,10 +35905,12 @@ def simulate_replay_outcome(buf: dict) -> dict:
             "filled": False,
             "exit_reason": outcome_label,
             "entry_outcome": outcome_label,
-            "net_pnl_usd": 0.0,
-            "gross_pnl_margin_pct": 0.0,
-            "max_profit_margin_pct": 0.0,
-            "max_drawdown_margin_pct": 0.0,
+            "net_pnl_usd": None,
+            "gross_pnl_margin_pct": None,
+            "max_profit_margin_pct": None,
+            "max_drawdown_margin_pct": None,
+            "not_a_trade": True,
+            "avoided_exposure": True,
             "fill_delay_sec": None,
             "chase_mode": buf.get("chase_mode"),
             "limit_chase_count": int(buf.get("limit_chase_count") or 0),
@@ -35657,6 +36088,10 @@ def log_shadow_outcome_jsonl(
             "margin_usdt": buf.get("margin_usdt"),
             "start_price": buf.get("start_price"),
             "tick_count": len(buf.get("ticks", [])),
+            "origin_t_rel": buf.get("virtual_fill_t"),
+            "horizon_receipts": buf.get("horizon_receipts") or {},
+            "path_gaps": _path_gap_census(buf.get("ticks")),
+            "fill_origin": {"classification": "MISSING"} if outcome.get("filled") is not True else {"classification": "SHADOW_ESTIMATE"},
             "block_t_rel_sec": buf.get("block_t_rel"),
             "post_block_tick_count": (post_block_research or {}).get("post_block_tick_count"),
             "exit_config": buf.get("exit_config") or get_exit_config_snapshot(),
@@ -35880,7 +36315,7 @@ def append_replay_tick(
         tick_max = POST_EXIT_REPLAY_TICK_MAX if buf.get("post_exit") else REPLAY_TICK_MAX
         if len(ticks) >= tick_max:
             ticks.pop(0)
-        ticks.append({
+        tick_row = {
             "seq": buf["seq"],
             "t": t_rel,
             "price": float(price),
@@ -35889,7 +36324,9 @@ def append_replay_tick(
             "best_bid": float(best_bid) if best_bid is not None else None,
             "best_ask": float(best_ask) if best_ask is not None else None,
             "observed_ts": now,
-        })
+        }
+        ticks.append(tick_row)
+        _update_compact_horizon_receipts(buf, tick_row)
         buf["last_update"] = now
         buf["last_tick_ts"] = now
         is_post_exit = bool(buf.get("post_exit"))
@@ -36230,6 +36667,132 @@ def _load_post_exit_replays():
         )
 
 
+_HORIZON_RECEIPT_SECS = (
+    ("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("60m", 3600), ("120m", 7200),
+)
+_MAX_PATH_GAP_MS = 15_000
+
+
+def _update_compact_horizon_receipts(buf, tick):
+    """Persist 1/5/15/30/60/120m marks before the ring buffer rotates them away."""
+    if not isinstance(buf, dict) or not isinstance(tick, dict):
+        return
+    origin = _buf_float(buf.get("virtual_fill_t"), 0)
+    t_rel = _buf_float(tick.get("t"), -1)
+    if t_rel < 0:
+        return
+    direction = str(buf.get("direction") or "LONG").upper()
+    side_key = "best_bid" if direction == "LONG" else "best_ask"
+    price = _buf_float(tick.get(side_key), 0) or _buf_float(tick.get("price"), 0)
+    receipts = buf.setdefault("horizon_receipts", {"schema": "horizon_receipts_v1", "required": {}})
+    required = receipts.setdefault("required", {})
+    for label, seconds in _HORIZON_RECEIPT_SECS:
+        slot = required.setdefault(label, {"required_sec": seconds, "observed": False})
+        if slot.get("observed"):
+            continue
+        if t_rel >= origin + seconds and price > 0:
+            slot.update({
+                "observed": True,
+                "tick_t_rel": t_rel,
+                "price": price,
+                "best_bid": tick.get("best_bid"),
+                "best_ask": tick.get("best_ask"),
+                "observed_ts": tick.get("observed_ts"),
+            })
+    receipts["complete"] = all((required.get(label) or {}).get("observed") for label, _sec in _HORIZON_RECEIPT_SECS)
+    receipts["origin_t_rel"] = origin
+
+
+def _path_gap_census(ticks, window_sec=7200):
+    ordered = [tick for tick in (ticks or []) if isinstance(tick, dict)]
+    gaps = []
+    prev = None
+    stale = []
+    for tick in ordered:
+        ts = _buf_float(tick.get("observed_ts"), 0)
+        t_rel = _buf_float(tick.get("t"), 0)
+        age = tick.get("book_age_sec")
+        if age is not None:
+            try:
+                stale.append(float(age))
+            except (TypeError, ValueError):
+                pass
+        key = ts or t_rel
+        if prev is not None and key:
+            delta_ms = (key - prev) * 1000.0
+            if delta_ms > 0:
+                gaps.append(delta_ms)
+        if key:
+            prev = key
+    max_gap = max(gaps) if gaps else None
+    observed = 0.0
+    if len(ordered) >= 2:
+        observed = _buf_float(ordered[-1].get("t"), 0) - _buf_float(ordered[0].get("t"), 0)
+    censored = bool(max_gap is not None and max_gap > _MAX_PATH_GAP_MS)
+    return {
+        "schema": "path_gap_v1",
+        "tick_count": len(ordered),
+        "max_gap_ms": None if max_gap is None else round(max_gap, 3),
+        "observed_frac_of_120m": None if not window_sec else round(min(1.0, max(0.0, observed / window_sec)), 6),
+        "max_book_stale_sec": None if not stale else round(max(stale), 4),
+        "censored": censored,
+        "censor_reason": "MAX_GAP_EXCEEDED" if censored else None,
+    }
+
+
+def _compact_market_path_ref(replay, snapshot, extra=None):
+    ticks = (replay or {}).get("ticks") or []
+    evidence = (snapshot or {}).get("source_order_market_evidence") or {}
+    obs = evidence.get("observations") if isinstance(evidence, dict) else []
+    obs = obs if isinstance(obs, list) else []
+    generations = sorted({
+        int(item.get("limit_generation") or 0)
+        for item in obs if isinstance(item, dict)
+    })
+    chase_count = max(generations) if generations else int((snapshot or {}).get("limit_chase_count") or (replay or {}).get("limit_chase_count") or 0)
+    payload = {
+        "trade_id": (snapshot or {}).get("trade_id") or (replay or {}).get("trade_id"),
+        "tick_count": len(ticks),
+        "obs_count": len(obs),
+        "chase_count": chase_count,
+        "t_start": (ticks[0] or {}).get("t") if ticks else None,
+        "t_end": (ticks[-1] or {}).get("t") if ticks else None,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    digest = hashlib.sha256(blob).hexdigest()
+    ref = {
+        "schema": "content_addressed_evidence_ref_v1",
+        "evidence_schema": "market_path_v1",
+        "sha256": digest,
+        "bytes": len(blob),
+        "object_id": f"market_path_v1:{digest[:16]}",
+        "tick_count": len(ticks),
+        "observation_count": len(obs),
+        "start_offset": 0,
+        "end_offset": max(0, len(ticks) - 1),
+        "time_range": {"start_t": payload["t_start"], "end_t": payload["t_end"]},
+        "chase_count": chase_count,
+        "limit_generations": generations,
+    }
+    if extra:
+        ref.update(extra)
+    return ref
+
+
+def _compact_source_market_evidence(evidence):
+    if not isinstance(evidence, dict):
+        return {}
+    obs = evidence.get("observations") if isinstance(evidence.get("observations"), list) else []
+    compact = {key: value for key, value in evidence.items() if key != "observations"}
+    compact["observation_count"] = len(obs)
+    compact["observations_elided"] = True
+    compact["limit_generation"] = max(
+        (int(item.get("limit_generation") or 0) for item in obs if isinstance(item, dict)),
+        default=int(evidence.get("limit_generation") or 0),
+    )
+    return compact
+
+
 def close_replay_buffer(trade_id):
     with replay_lock:
         buf = replay_buffers.get(trade_id)
@@ -36268,9 +36831,11 @@ def dump_replay(trade_id: str):
                 and exit_t_rel >= 0
                 and required_post_exit_tick is not None
             )
+            has_fill_origin = buf.get("virtual_fill_t") is not None and buf.get("virtual_entry") is not None
             replay_complete = bool(
                 buf.get("closed")
                 and buf.get("ticks")
+                and has_fill_origin
                 and (not is_executed or post_exit_complete)
             )
             replay = {
@@ -36294,10 +36859,12 @@ def dump_replay(trade_id: str):
                 "replay_completion_reason": (
                     "POST_EXIT_HORIZON_COMPLETE"
                     if post_exit_complete
-                    else "BUFFER_CLOSED"
+                    else "FILL_ORIGIN_BUFFER_CLOSED"
                     if replay_complete
                     else "INCOMPLETE_EXECUTED_POST_EXIT"
                     if is_executed
+                    else "BUFFER_CLOSED_NO_FILL_ORIGIN"
+                    if buf.get("closed") and buf.get("ticks") and not has_fill_origin
                     else "INCOMPLETE_BUFFER"
                 ),
                 "terminal_provenance": (
@@ -36307,6 +36874,9 @@ def dump_replay(trade_id: str):
                 "exit_reason": buf.get("exit_reason"),
                 "virtual_entry": buf.get("virtual_entry"),
                 "virtual_fill_t": buf.get("virtual_fill_t"),
+                "origin_t_rel": buf.get("virtual_fill_t"),
+                "horizon_receipts": buf.get("horizon_receipts"),
+                "path_gaps": _path_gap_census(buf.get("ticks")),
                 "entry_price": buf.get("entry_price"),
                 "pullback_pct": buf.get("pullback_pct"),
                 "leverage": buf.get("leverage"),
@@ -36471,19 +37041,9 @@ def run_offline_research_sim():
         for tid, revision in platform_revisions.items():
             if latest_local_revisions.get(tid) != revision:
                 _sim_processed_trade_ids.discard(tid)
-        if os.path.exists(SHADOW_OUTCOME_FILE):
-            with open(SHADOW_OUTCOME_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        tid = row.get("trade_id")
-                        if tid and not platform_revisions.get(str(tid)):
-                            _sim_processed_trade_ids.add(tid)
-                    except Exception:
-                        pass
+        # Shadow rows are not a substitute for a compact counterfactual
+        # disposition. Every eligible opportunity gets a CF row or an explicit
+        # exclusion; missing evidence stays UNKNOWN, never $0.
         offline_simulator()
     except Exception as e:
         logger.error(f"[RESEARCH_SIM] {e}")
@@ -36861,6 +37421,22 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         "required_post_exit_horizons_complete": post_exit_horizons["complete"],
         "replay_complete": replay_complete,
         "replay_tick_count": len(replay.get("ticks") or []),
+        "cost_complete": bool(
+            (snapshot.get("actual_costs") or {}).get("entry_fee_usd") is not None
+            and (snapshot.get("actual_costs") or {}).get("exit_fee_usd") is not None
+        ) if isinstance(snapshot.get("actual_costs"), dict) else False,
+        "cost_missing_legs": [
+            label for key, label in (
+                ("entry_fee_usd", "entry_fee"),
+                ("exit_fee_usd", "exit_fee"),
+                ("funding_usd", "funding"),
+                ("stop_slippage_usd", "stop_slippage"),
+            )
+            if not (
+                isinstance(snapshot.get("actual_costs"), dict)
+                and snapshot.get("actual_costs", {}).get(key) is not None
+            )
+        ],
         "analysis_eligible": False,
         "analysis_exclusion_reasons": exclusion_reasons,
         "analysis_eligibility_schema": "analysis_cohorts_v1",
@@ -36958,6 +37534,12 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         signal_snapshot_file,
         target_trade_ids=platform_trade_ids,
     )
+    market_loader = globals().get("_load_source_market_evidence_index")
+    source_market_index = market_loader(
+        globals().get("SOURCE_ORDER_MARKET_EVIDENCE_FILE", "source_order_market_evidence.jsonl"),
+        target_trade_ids=set(snapshots),
+        max_rotations=globals().get("_OFFLINE_SIM_MAX_ROTATIONS", 128),
+    ) if callable(market_loader) else {}
     replays = _load_offline_sim_jsonl_revisions(
         signal_replay_file,
         target_trade_ids=set(snapshots),
@@ -36974,9 +37556,14 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         prior_platform_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
             "platform_evidence_revision"
         )
+        source_market_revision = (source_market_index.get(str(trade_id)) or {}).get("evidence_revision")
+        prior_source_market_revision = (prior_counterfactuals.get(str(trade_id)) or {}).get(
+            "source_market_evidence_revision"
+        )
         prior_exists = str(trade_id) in prior_counterfactuals
         if (trade_id in _sim_processed_trade_ids or prior_exists) and (
-            not platform_revision or prior_platform_revision == platform_revision
+            (not platform_revision or prior_platform_revision == platform_revision)
+            and (not source_market_revision or prior_source_market_revision == source_market_revision)
         ):
             _sim_processed_trade_ids.add(trade_id)
             continue
@@ -36986,6 +37573,9 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
         if not replay:
             continue
         snapshot = _snapshot_with_platform_relay_evidence(snapshot, trade_id, platform_index)
+        if str(trade_id) in source_market_index:
+            snapshot["source_order_market_evidence"] = copy.deepcopy(source_market_index[str(trade_id)])
+            snapshot["source_market_evidence_revision"] = source_market_revision
         cfg = snapshot.get("config", {})
         buf = {
             "start_price": replay.get("start_price"),
@@ -37019,6 +37609,14 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
             "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
             "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+            "source_order_market_evidence": _compact_source_market_evidence(
+                snapshot.get("source_order_market_evidence") or {}
+            ),
+            "source_market_evidence_revision": snapshot.get("source_market_evidence_revision"),
+            "market_path_ref": _compact_market_path_ref(replay, snapshot),
+            "horizon_receipts": replay.get("horizon_receipts") or buf.get("horizon_receipts"),
+            "path_gaps": replay.get("path_gaps") or _path_gap_census(replay.get("ticks")),
+            "origin_t_rel": replay.get("virtual_fill_t") or buf.get("virtual_fill_t"),
             **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
         }
         try:
@@ -37040,10 +37638,11 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
 # Coverage bug: signal_replay.jsonl rotates into .1/.2/... shards every ~20MB.
 # offline_simulator() only reads the active shard, so any APPROVE signal whose
 # replay buffer rotated before the analytics loop processed it never receives a
-# counterfactual.jsonl row. This catch-up scans ALL shards for APPROVE signals
-# that have replay data but no cf + no shadow_outcome row, then forces a
-# simulate_replay_outcome pass for each. Analytics-only — never touches the
-# trading path. Called from analytics_loop every CF_CATCHUP_EVERY_N_TICKS ticks.
+# compact counterfactual.jsonl row. Shadow_outcome is not a substitute.
+# This catch-up scans ALL shards for APPROVE signals that have replay data
+# but no compact CF disposition, then forces a simulate_replay_outcome pass.
+# Analytics-only — never touches the trading path. Called from analytics_loop
+# every CF_CATCHUP_EVERY_N_TICKS ticks.
 CF_CATCHUP_EVERY_N_TICKS = 10
 _cf_catchup_tick_counter = 0
 
@@ -37093,8 +37692,9 @@ def _find_replay_row_for_trade_id(path, target_tid, max_bytes_hint=None):
 
 def _run_counterfactual_catchup():
     """Force-simulate APPROVE signals that have replay data (in any shard) but
-    no counterfactual.jsonl and no shadow_outcome.jsonl row. Idempotent: every
-    successfully simulated trade_id is added to _sim_processed_trade_ids."""
+    no compact counterfactual.jsonl disposition. Shadow_outcome is not a
+    substitute. Idempotent: every successfully simulated trade_id is added to
+    _sim_processed_trade_ids."""
     global _sim_processed_trade_ids, write_counter
     try:
         if not os.path.exists(SIGNAL_SNAPSHOT_FILE):
@@ -37190,6 +37790,13 @@ def _run_counterfactual_catchup():
                 "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
                 "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
                 "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+                "source_order_market_evidence": _compact_source_market_evidence(
+                    snapshot.get("source_order_market_evidence") or {}
+                ),
+                "market_path_ref": _compact_market_path_ref(replay, snapshot),
+                "horizon_receipts": replay.get("horizon_receipts"),
+                "path_gaps": replay.get("path_gaps") or _path_gap_census(replay.get("ticks")),
+                "origin_t_rel": replay.get("virtual_fill_t") or buf.get("virtual_fill_t"),
                 **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
                 "catchup": True,
             }

@@ -84,7 +84,7 @@ test('profit-lock stop replacement preserves continuous exact-quantity protectio
   assert.ok(start >= 0 && end > start, 'profit-lock replacement block must exist');
   const replacement = source.slice(start, end);
 
-  const submitAt = replacement.indexOf('submitStopOrder');
+  const submitAt = replacement.indexOf('ensureDurableProtectiveStop');
   const persistAt = replacement.indexOf('PROFIT_LOCK_STOP_REPLACEMENT_ACKNOWLEDGED');
   const cancelOldAt = replacement.indexOf('Profit-lock supersede old stop');
   assert.ok(submitAt >= 0 && persistAt > submitAt && cancelOldAt > persistAt);

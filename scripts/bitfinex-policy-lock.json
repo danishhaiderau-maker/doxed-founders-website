@@ -1,6 +1,6 @@
 {
   "policyVersion": 5,
-  "updatedAt": "2026-08-17T06:44:51.348Z",
+  "updatedAt": "2026-08-18T08:25:23.207Z",
   "files": [
     {
       "path": "packages/utils/src/bitfinex-copy-policy.ts",
@@ -12,11 +12,11 @@
     },
     {
       "path": "apps/api/src/trading-agents/bot-bridge.service.ts",
-      "sha256": "618f6d93f63fa7ef1934df9c93951e0710727dfd5182af0b77f7d5f0a54a1c28"
+      "sha256": "9a4c0d634ee9d3bbd4c87877a6b1095c7bb31ff441df55d381f58882a6a71650"
     },
     {
       "path": "apps/api/src/exchanges/bitfinex-api.client.ts",
-      "sha256": "fdb4d1ba38b585c934d8f3519df7b87b8887675bb68a7d3179b8465e787c82a7"
+      "sha256": "82759a59a630d3283db3984d3abd2c9c8ef74c91787f375d8c813a8194bb1bc2"
     },
     {
       "path": "apps/api/src/exchanges/bitfinex-auth-trade-stream.ts",
