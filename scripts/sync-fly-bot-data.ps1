@@ -190,63 +190,79 @@ foreach ($row in $selectedFiles) {
   $candidate = "$local.$PID.$([guid]::NewGuid().ToString('N')).download"
   $candidateBackup = "$candidate.replace-backup"
   try {
-    if ($sameGeneration -and (Test-Path -LiteralPath $local)) {
-      [System.IO.File]::Copy($local, $candidate, $true)
-      $offset = $localSize
-    } else {
-      [System.IO.File]::WriteAllBytes($candidate, [byte[]]::new(0))
-      $offset = 0
-    }
-    while ($offset -lt $remoteSize) {
-    $limit = [Math]::Min($chunkLimit, $remoteSize - $offset)
-    $chunkComplete = $false
-    for ($attempt = 1; $attempt -le 3 -and -not $chunkComplete; $attempt++) {
-      $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
-      try {
-        $encoded = [uri]::EscapeDataString($rel)
-        $response = $downloadClient.GetAsync(
-          "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
-        ).GetAwaiter().GetResult()
-        $response.EnsureSuccessStatusCode() | Out-Null
+    $fullReplaceRetry = $false
+    while ($true) {
+      if ($sameGeneration -and -not $fullReplaceRetry -and (Test-Path -LiteralPath $local)) {
+        [System.IO.File]::Copy($local, $candidate, $true)
+        $offset = $localSize
+      } else {
+        [System.IO.File]::WriteAllBytes($candidate, [byte[]]::new(0))
+        $offset = 0
+      }
+      while ($offset -lt $remoteSize) {
+      $limit = [Math]::Min($chunkLimit, $remoteSize - $offset)
+      $chunkComplete = $false
+      for ($attempt = 1; $attempt -le 3 -and -not $chunkComplete; $attempt++) {
+        $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
         try {
-          $payload = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
-          [System.IO.File]::WriteAllBytes($tmp, $payload)
-          $expectedHash = [string](
-            $response.Headers.GetValues("X-Chunk-Sha256") | Select-Object -First 1
-          )
+          $encoded = [uri]::EscapeDataString($rel)
+          $response = $downloadClient.GetAsync(
+            "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
+          ).GetAwaiter().GetResult()
+          $response.EnsureSuccessStatusCode() | Out-Null
+          try {
+            $payload = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+            [System.IO.File]::WriteAllBytes($tmp, $payload)
+            $expectedHash = [string](
+              $response.Headers.GetValues("X-Chunk-Sha256") | Select-Object -First 1
+            )
+          } finally {
+            $response.Dispose()
+          }
+          $actualHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
+            throw "Chunk checksum mismatch for $rel at offset $offset."
+          }
+          $input = [System.IO.File]::OpenRead($tmp)
+          try {
+            $output = [System.IO.File]::Open(
+              $candidate,
+              [System.IO.FileMode]::Append,
+              [System.IO.FileAccess]::Write,
+              [System.IO.FileShare]::Read
+            )
+            try { $input.CopyTo($output) } finally { $output.Dispose() }
+          } finally { $input.Dispose() }
+          $offset = [int64](Get-Item -LiteralPath $candidate).Length
+          $chunkComplete = $true
+        } catch {
+          if ($attempt -ge 3) { throw }
+          Start-Sleep -Seconds (2 * $attempt)
         } finally {
-          $response.Dispose()
-        }
-        $actualHash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
-          throw "Chunk checksum mismatch for $rel at offset $offset."
-        }
-        $input = [System.IO.File]::OpenRead($tmp)
-        try {
-          $output = [System.IO.File]::Open(
-            $candidate,
-            [System.IO.FileMode]::Append,
-            [System.IO.FileAccess]::Write,
-            [System.IO.FileShare]::Read
-          )
-          try { $input.CopyTo($output) } finally { $output.Dispose() }
-        } finally { $input.Dispose() }
-        $offset = [int64](Get-Item -LiteralPath $candidate).Length
-        $chunkComplete = $true
-      } catch {
-        if ($attempt -ge 3) { throw }
-        Start-Sleep -Seconds (2 * $attempt)
-      } finally {
-        if (Test-Path -LiteralPath $tmp) {
-          Remove-Item -LiteralPath $tmp -Force
+          if (Test-Path -LiteralPath $tmp) {
+            Remove-Item -LiteralPath $tmp -Force
+          }
         }
       }
+      }
+      if ([int64](Get-Item -LiteralPath $candidate).Length -ne $remoteSize) {
+        throw "Incomplete Fly mirror candidate for $rel."
+      }
+      try {
+        Test-MirrorCandidate -Path $candidate -RelativePath $rel
+        break
+      } catch {
+        # Same-inode JSONL/CSV rewrites (signal_snapshot patches) keep st_ino
+        # on the Fly volume, so an incremental splice can land mid-record.
+        # Never publish that candidate; retry once as a complete-file replace.
+        if ($fullReplaceRetry -or -not $sameGeneration) { throw }
+        $fullReplaceRetry = $true
+        Write-Host (
+          "Incremental JSONL/CSV candidate failed validation for $rel; " +
+          "retrying as a complete atomic replace without deleting prior valid records."
+        )
+      }
     }
-    }
-    if ([int64](Get-Item -LiteralPath $candidate).Length -ne $remoteSize) {
-      throw "Incomplete Fly mirror candidate for $rel."
-    }
-    Test-MirrorCandidate -Path $candidate -RelativePath $rel
     Publish-MirrorCandidate -Candidate $candidate -Destination $local
   } finally {
     Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue

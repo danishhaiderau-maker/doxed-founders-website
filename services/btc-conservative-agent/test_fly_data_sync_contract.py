@@ -125,6 +125,8 @@ def test_local_mirror_download_is_validated_then_atomically_published():
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
     assert "[System.IO.File]::Copy($local, $candidate, $true)" in SYNC_SCRIPT
     assert "if (-not ($sameGeneration -and $localSize -eq $remoteSize))" in SYNC_SCRIPT
+    assert "retrying as a complete atomic replace without deleting prior valid records." in SYNC_SCRIPT
+    assert "$fullReplaceRetry = $true" in SYNC_SCRIPT
     assert "[System.IO.File]::Replace($Candidate, $Destination" in ATOMIC_HELPER.read_text(encoding="utf-8")
     assert "Remove-Item -LiteralPath $local -Force" not in SYNC_SCRIPT
 
