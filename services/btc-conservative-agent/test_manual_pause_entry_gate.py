@@ -231,18 +231,18 @@ managed = []
 original_refresh_bbo = bot.refresh_bbo_state
 original_refresh_book = bot.refresh_order_book_state
 original_funding = bot.process_funding_accrual
-original_mark = bot.get_executable_mark_price
+original_mark = bot.get_mark_price
 original_exits = bot._apply_position_exits
 bot.refresh_bbo_state = lambda: None
 bot.refresh_order_book_state = lambda: None
 bot.process_funding_accrual = lambda: None
-bot.get_executable_mark_price = lambda pos, fallback=None: float(fallback or 64_000.0)
+bot.get_mark_price = lambda direction, fallback=None: float(fallback or 64_000.0)
 bot._apply_position_exits = lambda pos, mark, now: managed.append((pos["trade_id"], mark))
 bot.process_positions()
 bot.refresh_bbo_state = original_refresh_bbo
 bot.refresh_order_book_state = original_refresh_book
 bot.process_funding_accrual = original_funding
-bot.get_executable_mark_price = original_mark
+bot.get_mark_price = original_mark
 bot._apply_position_exits = original_exits
 check("existing position still managed", managed == [("pause-existing-position-1", 64_000.0)])
 
