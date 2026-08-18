@@ -708,6 +708,13 @@ class ConfirmedCancelBehaviorTest(unittest.TestCase):
                 error=lambda *args, **kwargs: None,
                 critical=lambda *args, **kwargs: None,
             ),
+            "chase_age_window_index": lambda age: min(int(max(0.0, float(age or 0)) // 300), 5),
+            "_order_signal_age_sec": lambda order, signal, now: 0.0,
+            "SIGNAL_TTL_SEC": 1800,
+            "_next_enabled_chase_after": lambda n: None,
+            "get_chase_execution_buckets": lambda: {"2_chases": True},
+            "_signal_virtual_chase_count": lambda signal: 0,
+            "SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE": "AWAITING_DASHBOARD_CHASE",
         }
         compile_functions(
             (
