@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(research): compact CF coverage and stop ACTIVE-hire epoch sever
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
