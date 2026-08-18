@@ -97,6 +97,17 @@ from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
 )
+from path_replay_v1 import (
+    PATH_REPLAY_FILE,
+    PATH_REPLAY_POLICY_TAG,
+    PATH_REPLAY_SCHEMA,
+    build_path_sample,
+)
+from cycle_3m_indicators import (
+    EXHAUSTION_POLICY_TAG as MTF_EXHAUSTION_LOG_V1,
+    WOULD_BLOCK_SHORT_REASON as WOULD_BLOCK_SHORT_3M_REASON,
+    compute_3m_exhaustion_snapshot,
+)
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -7055,6 +7066,9 @@ POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "10000"))
 # Each line is one tick event for one trade_id; the loader on startup rebuilds
 # any buffer whose post_exit_deadline_ts has not yet passed.
 POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jsonl")
+# Dense 1s in-trade + post-exit unreal path for offline 0–100 replay.
+# Live exit knobs stay unchanged (thesis −12 / Scenario C / hard-stop-does-not-close-paper).
+# 4pp / 5pp numbers are analysis grouping in path_replay_v1, not a live knob grid.
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
 PROCESS_HEARTBEAT_INTERVAL_SEC = max(
@@ -11280,7 +11294,40 @@ def build_pure_ai_context(state_snapshot, buffers):
         logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
         return None
     ctx = enrich_ai_context_upgrade(ctx)
+    ctx = _stamp_3m_exhaustion_for_ai(ctx)
     return sanitize_ai_inputs(ctx)
+
+
+def _stamp_3m_exhaustion_for_ai(ctx: dict) -> dict:
+    """Cycle-aligned 3m RSI/Stoch/ADX. Log + payload only; never a hard veto."""
+    if not isinstance(ctx, dict):
+        return ctx
+    try:
+        candles_1m = fetch_mtf_candles("1m", limit=200)
+        ms = ctx.get("market_context") or {}
+        structure = (ms.get("market_structure") or {}) if isinstance(ms, dict) else {}
+        snap = compute_3m_exhaustion_snapshot(
+            candles_1m or [],
+            dist_to_support=ctx.get("dist_to_support") or ctx.get("distance_to_micro_support"),
+            structure_score=structure.get("structure_score"),
+        )
+        snap["policy_tag"] = MTF_EXHAUSTION_LOG_V1
+        ctx["exhaustion_3m"] = snap
+        ctx["exhaustion_3m_line"] = snap.get("line")
+        logger.info(
+            f"[3M EXHAUSTION] {snap.get('line')} tag={MTF_EXHAUSTION_LOG_V1} "
+            f"hard_veto=false path_tag={PATH_REPLAY_POLICY_TAG} [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as exc:
+        logger.warning(f"[3M EXHAUSTION] stamp failed: {exc} [PIPELINE ENFORCEMENT]")
+        ctx["exhaustion_3m"] = {
+            "status": "UNAVAILABLE",
+            "bar": "3m",
+            "source": "bitfinex_1m_resampled_to_3m",
+            "hard_veto": False,
+            "policy_tag": MTF_EXHAUSTION_LOG_V1,
+        }
+    return ctx
 
 def _structure_allows_bear_continuation(market_context: dict) -> bool:
     mc = market_context or {}
@@ -20889,6 +20936,13 @@ def process_signal(event: dict):
             )
             if signal.get("overextension_research") and sole:
                 _research_log_would_block(signal, ai, signal["overextension_research"], edge_score)
+            exh = ctx.get("exhaustion_3m") or {}
+            if (
+                str(signal.get("final_direction") or ai.get("direction") or "").upper() == "SHORT"
+                and exh.get("would_block_short")
+            ):
+                # LOG-ONLY. Does not cancel pending or flatten fills.
+                _research_log_would_block(signal, ai, WOULD_BLOCK_SHORT_3M_REASON, edge_score)
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -23870,6 +23924,9 @@ RESEARCH DATA COLLECTION MODE (active):
 - CONTINUOUS and TYPE_B_HUNTER_V1 independently accept or reject the candidate afterward.
 - Do not decide either tile's verdict and do not return any field beyond direction,
   long_score, short_score, and one short reason.
+- exhaustion_3m / exhaustion_3m_line is the cycle-aligned oscillator block
+  (3-minute bars resampled from Bitfinex 1m). Use it for this-cycle exhaustion.
+  Do not substitute 5m/15m/1h RSI — those are not the decision timeframe.
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -24400,6 +24457,7 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        PATH_REPLAY_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -24441,6 +24499,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        PATH_REPLAY_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
@@ -36686,6 +36745,7 @@ def append_replay_tick(
     best_bid: float = None,
     best_ask: float = None,
     observed_ts: float = None,
+    mark_source: str = None,
 ):
     if not trade_id or price is None or price <= 0:
         return
@@ -36709,6 +36769,9 @@ def append_replay_tick(
         tick_max = POST_EXIT_REPLAY_TICK_MAX if buf.get("post_exit") else REPLAY_TICK_MAX
         if len(ticks) >= tick_max:
             ticks.pop(0)
+        source = mark_source or (
+            "bbo" if (best_bid or 0) > 0 or (best_ask or 0) > 0 else "last_trade"
+        )
         tick_row = {
             "seq": buf["seq"],
             "t": t_rel,
@@ -36718,13 +36781,41 @@ def append_replay_tick(
             "best_bid": float(best_bid) if best_bid is not None else None,
             "best_ask": float(best_ask) if best_ask is not None else None,
             "observed_ts": now,
+            "mark_source": source,
         }
         ticks.append(tick_row)
+        if unreal_pct is not None:
+            prev_mfe = _buf_float(buf.get("peak_mfe_pct"), None)
+            prev_mae = _buf_float(buf.get("trough_mae_pct"), None)
+            mfe = float(unreal_pct) if prev_mfe is None else max(prev_mfe, float(unreal_pct))
+            mae = float(unreal_pct) if prev_mae is None else min(prev_mae, float(unreal_pct))
+            buf["peak_mfe_pct"] = mfe
+            buf["trough_mae_pct"] = mae
+        else:
+            mfe = buf.get("peak_mfe_pct")
+            mae = buf.get("trough_mae_pct")
         _update_compact_horizon_receipts(buf, tick_row)
         buf["last_update"] = now
         buf["last_tick_ts"] = now
         is_post_exit = bool(buf.get("post_exit"))
         persist_trade_id = trade_id if is_post_exit else None
+        path_row = build_path_sample(
+            trade_id=trade_id,
+            t=t_rel,
+            price=float(price),
+            unreal_pct=unreal_pct,
+            phase=phase,
+            direction=buf.get("direction") or "LONG",
+            leverage=_buf_int(buf.get("leverage"), _replay_leverage_default()),
+            best_bid=best_bid,
+            best_ask=best_ask,
+            mark_source=source,
+            peak_mfe_pct=mfe,
+            trough_mae_pct=mae,
+            observed_ts=now,
+            seq=buf["seq"],
+        )
+    _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
     if persist_trade_id is not None:
         try:
             rotate_log(POST_EXIT_REPLAY_FILE)
@@ -36740,6 +36831,9 @@ def append_replay_tick(
                     "t_rel": t_rel,
                     "best_bid": float(best_bid) if best_bid is not None else None,
                     "best_ask": float(best_ask) if best_ask is not None else None,
+                    "mark_source": source,
+                    "schema": PATH_REPLAY_SCHEMA,
+                    "policy_tag": PATH_REPLAY_POLICY_TAG,
                 }) + "\n")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
@@ -36918,8 +37012,10 @@ def service_post_exit_replays():
     with state_lock:
         price = float(state.get("price") or 0)
         book = copy.deepcopy(state.get("order_book") or {})
-    best_bid = _buf_float(book.get("best_bid") or book.get("bid"), 0)
-    best_ask = _buf_float(book.get("best_ask") or book.get("ask"), 0)
+        ticker_bid = _buf_float(state.get("bid"), 0)
+        ticker_ask = _buf_float(state.get("ask"), 0)
+    best_bid = _buf_float(book.get("best_bid") or book.get("bid") or ticker_bid, 0)
+    best_ask = _buf_float(book.get("best_ask") or book.get("ask") or ticker_ask, 0)
     if price <= 0 and best_bid <= 0 and best_ask <= 0:
         return
     with replay_lock:
@@ -36937,9 +37033,14 @@ def service_post_exit_replays():
                 continue
             direction = str(buf.get("direction") or "LONG").upper()
             executable_mark = best_bid if direction == "LONG" else best_ask
-            if executable_mark <= 0:
-                # Last trade is not executable BBO evidence. Leave this sample
-                # UNKNOWN until the direction-correct quote is present.
+            if executable_mark > 0:
+                mark_source = "bbo"
+            elif price > 0:
+                # BBO preferred for 1pp sweeps; last-trade keeps 120m dense when
+                # the book is briefly empty. Offline can filter mark_source.
+                executable_mark = price
+                mark_source = "last_trade"
+            else:
                 continue
             unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, executable_mark)
         append_replay_tick(
@@ -36948,6 +37049,7 @@ def service_post_exit_replays():
             unreal,
             best_bid=best_bid or None,
             best_ask=best_ask or None,
+            mark_source=mark_source,
         )
 
 
