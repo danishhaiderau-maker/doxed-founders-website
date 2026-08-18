@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(research): repair analyzer join and producer telemetry for a fresh collection epoch
+fix(research): compact CF coverage and stop ACTIVE-hire epoch sever
 
 ## Last Activity
 
