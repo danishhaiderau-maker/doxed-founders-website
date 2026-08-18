@@ -6978,9 +6978,16 @@ RECONCILE_WRITE_WINDOW = str(os.getenv("RECONCILE_WRITE_WINDOW", "1")).strip().l
 # Limit chase — patient maker entry then gradual convergence toward market (research sim).
 LIMIT_CHASE_START_SEC_DEFAULT = 0  # v1.1.23 fills-first: chase from order creation
 FIRST_CHASE_DELAY_SEC = 0  # v1.1.38: immediate re-anchor at order create (research)
-LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 60
+# Reprice/hold tick inside a 5-minute age window. Do not burn buckets every 60s.
+LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 180
 LIMIT_CHASE_HOLD_SEC = 0  # v1.1.23: no post-submit hold before chase
-MARKETABLE_CHASE_SEC = 600  # v1.1.23: marketable limit fallback at 10m
+# Age-window schedule (signal age, not chase-count ticks):
+#   0=0-5m, 1=5-10m, 2=10-15m, 3=15-20m, 4=20-25m, 5/5+=25-30m
+CHASE_WINDOW_SEC = 300
+CHASE_BUCKET_WINDOW_SEC = CHASE_WINDOW_SEC
+CHASE_WINDOW_MAX_INDEX = 5
+CHASE_INTRA_WINDOW_REPRICE_SEC = 180
+MARKETABLE_CHASE_SEC = 600  # historical 10m marketable fallback; not a chase stop
 PROMOTION_IN_PROGRESS_GRACE_SEC = max(
     5.0, float(os.getenv("PROMOTION_IN_PROGRESS_GRACE_SEC", "15"))
 )
@@ -8572,7 +8579,7 @@ def get_limit_chase_start_sec() -> int:
 
 
 def get_limit_chase_interval_sec() -> int:
-    return max(60, _limit_chase_config_value(
+    return max(CHASE_INTRA_WINDOW_REPRICE_SEC, _limit_chase_config_value(
         "limit_chase_interval_sec", "LIMIT_CHASE_INTERVAL_SEC", LIMIT_CHASE_INTERVAL_SEC_DEFAULT, int
     ))
 
@@ -8642,14 +8649,40 @@ def duplicate_limit_block_enabled() -> bool:
     return DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT
 
 
-def _signal_age_sec(signal: dict) -> float:
-    now = time.time()
+def _signal_age_sec(signal: dict, now: float = None) -> float:
+    now = float(time.time() if now is None else now)
+    if not isinstance(signal, dict):
+        return 0.0
     signal_ts = (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
     if signal_ts:
         try:
             return max(0.0, now - float(signal_ts))
         except (TypeError, ValueError):
             pass
+    return 0.0
+
+
+def _chase_lifecycle_age_sec(order: dict = None, signal: dict = None, now: float = None) -> float:
+    """Signal-age for chase windows (not order-age, not chase-count ticks)."""
+    now = float(time.time() if now is None else now)
+    if isinstance(signal, dict):
+        signal_ts = (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
+        if signal_ts:
+            try:
+                return max(0.0, now - float(signal_ts))
+            except (TypeError, ValueError):
+                pass
+        age = _signal_age_sec(signal, now=now)
+        if age > 0:
+            return age
+    if isinstance(order, dict):
+        for key in ("signal_created_ts", "signal_ts", "created_ts"):
+            ts = order.get(key)
+            if ts:
+                try:
+                    return max(0.0, now - float(ts))
+                except (TypeError, ValueError):
+                    continue
     return 0.0
 
 
@@ -8825,7 +8858,7 @@ def _virtual_chase_eligible(signal: dict, market_price: float, now: float) -> bo
     age_sec = now - started
     if age_sec < LIMIT_CHASE_HOLD_SEC:
         return False
-    if age_sec >= MARKETABLE_CHASE_SEC:
+    if age_sec >= LIMIT_ORDER_MAX_AGE_SEC:
         return False
     last_chase = signal.get("chase_3plus_last_virtual_chase_ts")
     if last_chase and (now - float(last_chase)) < get_limit_chase_interval_sec():
@@ -8848,6 +8881,15 @@ def _virtual_chase_eligible(signal: dict, market_price: float, now: float) -> bo
 
 
 def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: float) -> int:
+    age = _signal_age_sec(signal)
+    idx = chase_age_window_index(age)
+    current = int(signal.get("chase_3plus_virtual_chase_count") or 0)
+    # Count follows the 5-minute age window, never 60s tick burns.
+    target = idx
+    if target != current:
+        signal["chase_3plus_virtual_chase_count"] = target
+    if not chase_age_window_may_reprice(age):
+        return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     if not _virtual_chase_eligible(signal, market_price, now):
         return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     direction = _signal_direction(signal)
@@ -8860,10 +8902,9 @@ def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: floa
         return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     signal["chase_3plus_virtual_limit"] = new_limit
     signal["limit_price"] = new_limit
-    count = int(signal.get("chase_3plus_virtual_chase_count") or 0) + 1
-    signal["chase_3plus_virtual_chase_count"] = count
+    signal["chase_3plus_virtual_chase_count"] = target
     signal["chase_3plus_last_virtual_chase_ts"] = now
-    return count
+    return target
 
 
 def _chase_3plus_activation_reason(signal: dict, market_price: float) -> str:
@@ -9248,8 +9289,6 @@ def _virtual_chase_signal_eligible(signal: dict, price: float, now: float) -> bo
     chase_start = float(signal.get("chase_start_sec") or get_limit_chase_start_sec())
     if age_sec < chase_start:
         return False
-    if age_sec >= MARKETABLE_CHASE_SEC:
-        return False
     if not _chase_structure_valid(direction):
         return False
     if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
@@ -9273,9 +9312,14 @@ def _virtual_chase_lane_chase_on_order(order: dict, signal: dict, price: float, 
     if order.get("virtual_chase_6_wait_until"):
         return True
     current = int(order.get("limit_chase_count") or (signal or {}).get("limit_chase_count") or 0)
-    next_count = current + 1
-    if not chase_bucket_allowed(next_count):
+    age_sec = _order_signal_age_sec(order, signal or {}, now)
+    next_count = chase_age_window_index(age_sec)
+    if next_count < current:
+        next_count = current
+    if chase_age_window_should_cancel(age_sec):
         _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(next_count)}")
+        return True
+    if not chase_age_window_may_reprice(age_sec):
         return True
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
     old_limit = float(order.get("limit_price") or 0)
@@ -9329,8 +9373,11 @@ def process_virtual_chase_lane_virtual_signals(price: float):
         if not tid or not _virtual_chase_signal_eligible(signal, float(price), now):
             continue
         current = int(signal.get("limit_chase_count") or 0)
-        next_count = current + 1
-        if not chase_bucket_allowed(next_count):
+        age_sec = _signal_age_sec(signal)
+        next_count = chase_age_window_index(age_sec)
+        if next_count < current:
+            next_count = current
+        if not chase_age_window_may_reprice(age_sec):
             continue
         direction = str(signal.get("final_direction") or "").upper()
         old_limit = float(signal.get("limit_price") or signal.get("planned_limit_price") or 0)
@@ -16258,6 +16305,64 @@ def chase_count_bucket(chase_count) -> str:
     return "5+_chases"
 
 
+def chase_age_window_index(age_sec) -> int:
+    """Map signal age onto the 5-minute chase schedule (0..5)."""
+    try:
+        age = max(0.0, float(age_sec or 0))
+    except (TypeError, ValueError):
+        age = 0.0
+    return min(int(age // CHASE_WINDOW_SEC), CHASE_WINDOW_MAX_INDEX)
+
+
+def chase_window_start_sec(window_idx) -> int:
+    try:
+        idx = max(0, int(window_idx or 0))
+    except (TypeError, ValueError):
+        idx = 0
+    return min(idx, CHASE_WINDOW_MAX_INDEX) * CHASE_WINDOW_SEC
+
+
+def last_enabled_chase_count():
+    last = None
+    for n in range(0, CHASE_WINDOW_MAX_INDEX + 1):
+        if chase_bucket_allowed(n):
+            last = n
+    return last
+
+
+def _order_signal_age_sec(order: dict, signal: dict, now: float) -> float:
+    return _chase_lifecycle_age_sec(order, signal, now)
+
+
+def chase_age_window_should_cancel(age_sec) -> bool:
+    """Cancel only when every chase window is off.
+
+    Early disabled windows (0/1 OFF) wait to submit; they must not kill a
+    resting order just because count ticked to 5+ at ~9 min. After the last
+    enabled window (5+ OFF), rest until 30 min TTL.
+    """
+    last = last_enabled_chase_count()
+    if last is None:
+        return True
+    idx = chase_age_window_index(age_sec)
+    if idx > last:
+        return False
+    mn = min_enabled_chase_count()
+    if mn is not None and idx < mn:
+        return False
+    return not chase_bucket_allowed(idx)
+
+
+def chase_age_window_may_reprice(age_sec) -> bool:
+    idx = chase_age_window_index(age_sec)
+    last = last_enabled_chase_count()
+    if last is None:
+        return False
+    if idx > last:
+        return False
+    return chase_bucket_allowed(idx)
+
+
 def get_chase_execution_buckets() -> dict:
     with state_lock:
         raw = state.get("chase_execution_buckets")
@@ -16631,14 +16736,17 @@ def _signal_virtual_chase_count(signal: dict) -> int:
 
 
 def dashboard_virtual_chase_submit_ready(signal: dict) -> bool:
-    """True when virtual chase count is in an enabled bucket and >= minimum enabled count."""
-    vcount = _signal_virtual_chase_count(signal)
-    if not chase_bucket_allowed(vcount):
-        return False
+    """True when signal age is inside an enabled 5-minute chase window at/after the minimum."""
     mn = min_enabled_chase_count()
     if mn is None:
         return False
-    return vcount >= mn
+    age = _signal_age_sec(signal) if isinstance(signal, dict) else 0.0
+    if age < chase_window_start_sec(mn):
+        return False
+    idx = chase_age_window_index(age)
+    if not chase_bucket_allowed(idx):
+        return False
+    return idx >= mn
 
 
 def _resolve_selected_virtual_submit_limit(signal: dict) -> Optional[tuple]:
@@ -16705,6 +16813,15 @@ def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict
         "spread_gate_allowed": [k for k, v in sg.items() if v],
         "spread_gate_blocked": [k for k, v in sg.items() if not v],
         "min_chase_count_to_submit": mn,
+        "chase_window_sec": CHASE_WINDOW_SEC,
+        "chase_windows": {
+            "0": "0-5m",
+            "1": "5-10m",
+            "2": "10-15m",
+            "3": "15-20m",
+            "4": "20-25m",
+            "5+": "25-30m",
+        },
         "virtual_defer_active": dashboard_virtual_defer_required(),
         "virtual_chase_count": vcount,
         "virtual_submit_ready": dashboard_virtual_chase_submit_ready(signal or {"dashboard_virtual_chase_count": vcount}),
@@ -16820,7 +16937,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
         return False
     meta = trades_map.get(tid, {})
     signal = meta.get("signal_ref") or {}
-    chase_n = int(order.get("limit_chase_count") or 0)
+    chase_n = chase_age_window_index(_order_signal_age_sec(order, signal if isinstance(signal, dict) else {}, time.time()))
     cancel_result = _cancel_pending_order_confirmed(
         order,
         reason,
@@ -16884,12 +17001,19 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
 
 
 def enforce_dashboard_chase_gates_on_pending() -> None:
-    """Drop or block pending orders sitting in a disabled chase bucket."""
+    """Cancel pending only when the current 5-minute age window is an early disabled bucket.
+
+    After the last enabled window (e.g. 5+ OFF while 2/3/4 ON), rest until TTL.
+    Do not cancel at ~9 min just because chase-count ticked to 5+.
+    """
+    now = time.time()
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
-        chase_n = int(order.get("limit_chase_count") or 0)
-        if dashboard_chase_bucket_blocks(chase_n):
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
+        age_sec = _order_signal_age_sec(order, signal or {}, now)
+        if chase_age_window_should_cancel(age_sec):
             _cancel_pending_for_chase_gate(order)
 
 
@@ -19081,8 +19205,6 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
         chase_start = float(chase_start)
     if age_sec < chase_start:
         return False
-    if age_sec >= MARKETABLE_CHASE_SEC:
-        return False
     if not _chase_structure_valid(direction):
         return False
     if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
@@ -19240,13 +19362,18 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = int(order.get("limit_chase_count") or 0) + 1
-    if not chase_bucket_allowed(chase_count):
+    age_sec = _order_signal_age_sec(order, signal or {}, now)
+    if chase_age_window_should_cancel(age_sec):
+        idx = chase_age_window_index(age_sec)
         logger.info(
-            f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
+            f"[CHASE GATE] blocked window={chase_count_bucket(idx)} "
             f"trade_id={order.get('trade_id')} chase_count={chase_count} — cancelling pending [PIPELINE ENFORCEMENT]"
         )
-        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
+        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(idx)}")
         return False
+    if not chase_age_window_may_reprice(age_sec):
+        return False
+    chase_count = max(chase_count, chase_age_window_index(age_sec))
     relay_event = _commit_relay_limit_chase(
         order, signal, direction=direction, old_limit=old_limit,
         new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
@@ -19296,17 +19423,28 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
     step_pct, tier, use_marketable = _urgent_chase_step_for_order(order, signal)
-    next_chase_count = int(order.get("limit_chase_count") or 0) + 1
-    if not chase_bucket_allowed(next_chase_count):
+    age_sec = _order_signal_age_sec(order, signal or {}, now)
+    if chase_age_window_should_cancel(age_sec):
+        idx = chase_age_window_index(age_sec)
         logger.info(
-            f"[CHASE GATE] blocked bucket={chase_count_bucket(next_chase_count)} "
-            f"trade_id={order.get('trade_id')} chase_count={next_chase_count} "
+            f"[CHASE GATE] blocked window={chase_count_bucket(idx)} "
+            f"trade_id={order.get('trade_id')} age_sec={int(age_sec)} "
             f"— cancelling pending [PIPELINE ENFORCEMENT]"
         )
         _cancel_pending_for_chase_gate(
-            order, f"CHASE_BUCKET_{chase_count_bucket(next_chase_count)}"
+            order, f"CHASE_BUCKET_{chase_count_bucket(idx)}"
         )
         return False
+    if not chase_age_window_may_reprice(age_sec):
+        return False
+    current_count = int(order.get("limit_chase_count") or 0)
+    next_chase_count = chase_age_window_index(age_sec)
+    if next_chase_count < current_count:
+        next_chase_count = current_count
+    # Intra-window 180s ticks must advance the resting generation by exactly one
+    # so _commit_relay_limit_chase can ACK. Bucket membership stays age-based.
+    if next_chase_count != current_count + 1:
+        next_chase_count = current_count + 1
     if use_marketable:
         return _apply_urgent_marketable_chase(order, signal, price, now, tier=tier or "extreme")
     new_limit, reason = _compute_limit_chase_target(
@@ -19580,10 +19718,10 @@ def process_limit_chase(price: float):
         if _apply_limit_chase(order, signal, price, now):
             chased += 1
     # Production relay contract: never convert an unfilled maker entry into a
-    # terminal marketable reprice. Selected chase buckets stay exact, resting
-    # LIMITs; the next disallowed bucket cancels them and TTL remains the final
-    # backstop. This avoids an impossible cross-system fill/cancel transaction
-    # between Fly and Bitfinex while preserving chase-2/3/4 semantics.
+    # terminal marketable reprice. 5-minute age windows stay exact, resting
+    # LIMITs; an early disabled window cancels/defers them and TTL remains the
+    # final backstop. After the last enabled window (5+ OFF), the order rests
+    # until 30 min TTL instead of cancelling because count hit 5 at ~9 min.
     if chased:
         pipeline_state_sync()
 
@@ -19825,9 +19963,11 @@ def process_pending_orders():
                 recent_market_trades=recent_market_trades,
             ):
                 continue
-            if not chase_bucket_allowed(order.get("limit_chase_count") or 0):
+            fill_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref") or {}
+            fill_age_sec = _order_signal_age_sec(order, fill_signal, time.time())
+            if chase_age_window_should_cancel(fill_age_sec):
                 logger.debug(
-                    f"[CHASE GATE] fill blocked bucket={chase_count_bucket(order.get('limit_chase_count') or 0)} "
+                    f"[CHASE GATE] fill blocked window={chase_count_bucket(chase_age_window_index(fill_age_sec))} "
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
                 continue
@@ -26835,7 +26975,7 @@ __ADMIN_ACCESS_CONTROLS__
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
-    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipes Fly volume AND signals local sync loop to wipe its mirror. Use for a true clean restart everywhere.">Fresh Collection (Fly + Local): <span id="freshCollectionLabel">OFF</span></button>
+    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
     <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
@@ -26865,8 +27005,8 @@ __ADMIN_ACCESS_CONTROLS__
 <h3>Ultimate execution control</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
-<h3>Chase entry selector — exact virtual counts</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may exist at that exact chase count. Before the first checked count the bot counts virtually without placing a limit. If a later count is unchecked, it removes the pending limit and waits for the next checked count; if none remains, the signal expires. Example: select 3 and 4 only → virtual 0–2, submit at 3, chase at 4, cancel before 5.</p>
+<h3>Chase entry selector — 5-minute signal-age windows</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may rest in that 5-minute signal-age window (not a 60s chase-count tick). Chase 0=0–5m, 1=5–10m, 2=10–15m, 3=15–20m, 4=20–25m, 5+=25–30m. Before the first checked window the bot waits without placing a limit. Inside a window it may reprice every 3 min without leaving the window. If a later window is unchecked, the order stays on the last enabled window until the 30-minute TTL. Example: select 2, 3 and 4 only → wait 0–10m, submit at 10–15m, rest/reprice through 20–25m, hold through 25–30m if 5+ is off.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
@@ -26992,7 +27132,7 @@ __ADMIN_ACCESS_CONTROLS__
 </div>
 
 <p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
-  <strong>Fresh Collection (Fly + Local):</strong> wipes the Fly volume (research CSVs, jsonl logs, debug/log files), resets in-memory trades/session counters, AND signals the local sync loop to wipe its mirror — a true clean restart everywhere. While ON, oversized aux logs are trimmed hourly.
+  <strong>Fresh Collection (Fly epoch):</strong> one-way ON for the bound epoch. Clicking while ON does not turn it OFF — it offers <em>start a NEW fresh epoch</em>, which calls authenticated <code>POST /api/fresh_epoch_reset</code> on the Fly owner. That quarantines Fly volume research dumps (trades, snapshots, funnel, counterfactual, shadow, market evidence, analyzer generations) and bumps the desktop-sync signal so the home mirror picks up the new empty epoch without mixing quarantine into the active tree. Paper must be paused and flat; Cheetah stays paused/disarmed. While ON, oversized aux logs are trimmed hourly.
   <br><br>
   <strong>Wipe Fly Data Only:</strong> same Fly wipe + in-memory reset, but the local sync mirror is retained for offline analysis history. Use when Fly is filling up but you want to keep local data.
 </p>
@@ -27338,7 +27478,7 @@ DASHBOARD_JS = """(function () {
       const host = document.getElementById('chaseBucketControls');
       if (!host || host.dataset.ready === '1') return;
       const order = ['0_chases','1_chase','2_chases','3_chases','4_chases','5+_chases'];
-      const labels = {'0_chases':'0 (immediate)','1_chase':'1','2_chases':'2','3_chases':'3','4_chases':'4','5+_chases':'5+'};
+      const labels = {'0_chases':'0 (0–5m)','1_chase':'1 (5–10m)','2_chases':'2 (10–15m)','3_chases':'3 (15–20m)','4_chases':'4 (20–25m)','5+_chases':'5+ (25–30m)'};
       host.innerHTML = order.map(k =>
         `<label><input type="checkbox" class="chase-bucket-cb" data-bucket="${k}" onchange="updateChaseBuckets()"> ${labels[k] || k}</label>`
       ).join('');
@@ -27933,44 +28073,68 @@ DASHBOARD_JS = """(function () {
     async function toggleFreshCollection() {
       if (freshCollectionInFlight) return;
       const freshLabelEl = document.getElementById('freshCollectionLabel');
-      const currentIsOn = freshLabelEl && freshLabelEl.innerText.trim() === 'ON';
-      const turningOn = !currentIsOn;
-      if (turningOn) {
-        const ok = confirm(
-          'Fresh Collection (Fly + Local) will DELETE all research CSVs, jsonl logs, debug/log files on the Fly volume, clear open/pending trades in memory, AND signal the local sync loop to also wipe its mirror.\\n\\nThe bot keeps running and starts collecting from zero everywhere.\\n\\nContinue?'
-        );
-        if (!ok) return;
-      } else {
-        const ok = confirm(
-          'Fresh Collection is currently ON. Turning it OFF stops automatic retention checks, but does not delete Past Analysis archives.\\n\\nTurn Fresh Collection OFF?'
-        );
-        if (!ok) return;
-      }
-      freshCollectionInFlight = true;
       const freshBtn = document.getElementById('freshCollectionBtn');
+      freshCollectionInFlight = true;
       if (freshBtn) freshBtn.disabled = true;
       try {
-        const res = await post('/api/toggle_fresh_collection', {
-          enabled: turningOn,
-          expected_current: currentIsOn,
+        const statusRes = await fetch('/api/fresh_epoch_reset', {
+          method: 'GET',
+          credentials: 'same-origin',
         });
-        const body = await res.json();
-        if (body.error) {
-          alert('Fresh Collection blocked: ' + body.error);
-        } else if (body.reset && body.reset.ok === false) {
-          alert('Fresh Collection failed: ' + (body.reset.summary || body.reset.error || 'unknown'));
-        } else if (body.reset && body.reset.summary) {
-          let msg = 'Fresh collection reset complete: ' + body.reset.summary;
-          if (body.reset.archive_path) {
-            msg += '\\n\\nArchived to: ' + body.reset.archive_path;
-          }
-          if (body.reset.errors && body.reset.errors.length) {
-            msg += '\\n\\nNote: some files were locked (usually analyzer log) and will be trimmed on next run:\\n' + body.reset.errors.slice(0, 5).join('\\n');
-          }
-          alert(msg);
+        let status = {};
+        try { status = await statusRes.json(); } catch (_) { status = {}; }
+        if (statusRes.status === 401) {
+          alert('Fresh Collection needs admin login on the Fly owner dashboard (cookie/token). The click never reached POST /api/fresh_epoch_reset.');
+          return;
         }
-        if (!body.error && freshLabelEl) {
-          freshLabelEl.innerText = turningOn ? 'ON' : 'OFF';
+        if (!statusRes.ok) {
+          alert('Fresh Collection status failed: ' + (status.error || statusRes.statusText || statusRes.status));
+          return;
+        }
+        const epoch = status.epoch_id || 'unbound';
+        const alreadyOn = !!status.fresh_collection_mode;
+        const confirmMsg = alreadyOn
+          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch? That quarantines Fly volume research dumps via POST /api/fresh_epoch_reset and the desktop mirror then syncs the empty epoch (quarantine stays out of the active tree).\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
+          : ('Start a fresh collection epoch on Fly? This calls POST /api/fresh_epoch_reset: quarantines Fly volume research dumps, resets session counters, and signals the desktop mirror.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
+        if (!confirm(confirmMsg)) return;
+        const freshStatusRes = await fetch('/api/fresh_epoch_reset', {
+          method: 'GET',
+          credentials: 'same-origin',
+        });
+        try { status = await freshStatusRes.json(); } catch (_) { status = {}; }
+        if (!freshStatusRes.ok) {
+          alert('Fresh Collection re-check failed: ' + (status.error || freshStatusRes.statusText || freshStatusRes.status));
+          return;
+        }
+        if (!status.wipe_ready) {
+          alert(
+            'Cannot wipe Fly yet.\\n\\n' +
+            ((status.blockers && status.blockers.length) ? status.blockers.join('\\n') : 'not flat / not paused') +
+            '\\n\\nPause paper, wait until pending/open are zero, keep Cheetah paused/disarmed, then click again. No wipe was sent.'
+          );
+          return;
+        }
+        const res = await fetch('/api/fresh_epoch_reset', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            confirmation: status.confirmation_required,
+            strict_flat_proof: status.strict_flat_proof,
+          }),
+        });
+        const body = await res.json().catch(function () { return {}; });
+        if (!res.ok || body.error || (body.reset && body.reset.ok === false)) {
+          alert('Fresh Collection blocked: ' + (body.error || (body.reset && (body.reset.summary || body.reset.error)) || res.statusText || res.status));
+          return;
+        }
+        const epochAfter = body.epoch_id || (body.reset && body.reset.epoch_cutoff_utc) || epoch;
+        let msg = 'Fresh epoch wipe accepted on Fly: ' + (body.reset && body.reset.summary ? body.reset.summary : 'ok');
+        if (epochAfter) msg += '\\nEpoch: ' + epochAfter;
+        if (body.reset && body.reset.quarantine_path) msg += '\\nQuarantine: ' + body.reset.quarantine_path;
+        alert(msg);
+        if (freshLabelEl) {
+          freshLabelEl.innerText = body.epoch_id ? ('ON · ' + body.epoch_id) : 'ON';
         }
       } catch (e) {
         alert('Fresh Collection request failed: ' + e);
@@ -28465,20 +28629,29 @@ DASHBOARD_JS = """(function () {
         const freshBtn = document.getElementById('freshCollectionBtn');
         const freshLabel = document.getElementById('freshCollectionLabel');
         if (freshLabel) {
-          freshLabel.innerText = d.fresh_collection_mode ? 'ON' : 'OFF';
+          if (d.fresh_collection_mode) {
+            freshLabel.innerText = d.fresh_epoch_id
+              ? ('ON · ' + d.fresh_epoch_id)
+              : 'ON';
+          } else {
+            freshLabel.innerText = 'OFF';
+          }
         }
         if (freshBtn) {
           freshBtn.style.backgroundColor = d.fresh_collection_mode ? '#2563eb' : '#374151';
         }
         const freshStatus = document.getElementById('freshCollectionStatus');
         if (freshStatus) {
+          const epochNote = d.fresh_epoch_id
+            ? ('Bound epoch ' + d.fresh_epoch_id + ' — click starts a NEW Fly wipe, not OFF. ')
+            : '';
           if (d.last_fresh_reset_summary) {
-            freshStatus.innerText = 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
+            freshStatus.innerText = epochNote + 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
               (d.last_fresh_reset_ts ? ' @ ' + formatMelbourneDateTime(new Date(d.last_fresh_reset_ts * 1000).toISOString()) : '');
           } else {
             freshStatus.innerText = d.fresh_collection_mode
-              ? 'Auto-trim active — aux logs checked hourly'
-              : '';
+              ? (epochNote + 'Auto-trim active — aux logs checked hourly')
+              : 'Fresh Collection OFF — click starts a Fly epoch wipe via POST /api/fresh_epoch_reset';
           }
         }
         if (d.leverage) {
@@ -32002,6 +32175,10 @@ def _build_api_state_snapshot():
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        _epoch_id, _epoch_cutoff, _epoch_kind = _fresh_epoch_identity_from_session()
+        snapshot["fresh_epoch_id"] = _epoch_id
+        snapshot["fresh_epoch_cutoff_utc"] = _epoch_cutoff
+        snapshot["fresh_epoch_kind"] = _epoch_kind
         # Stage 1 Fix #6 (2026-08-06): when LAST_AI_PAYLOAD is empty (e.g.
         # after restart), report an honest "NO_AI_CALL_YET" status instead of
         # silently falling back to state.feature_snapshot (a live orderflow
@@ -33342,21 +33519,180 @@ def wipe_fly_only():
     })
 
 _FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"
+_FRESH_EPOCH_ZERO_FIELDS = (
+    "showcase_positions", "showcase_pending_orders",
+    "relay_active_participants", "relay_open_lots", "relay_pending_lots",
+    "exchange_positions", "exchange_active_orders", "exchange_delta_btc",
+)
 
 
-@app.route('/api/fresh_epoch_reset', methods=['POST'])
+def _utc_isoformat_ns(ts: float) -> str:
+    """Analyzer-compatible UTC isoformat (pandas ns when available)."""
+    try:
+        import pandas as pd
+        return pd.to_datetime(float(ts), unit="s", utc=True).isoformat()
+    except Exception:
+        pass
+    whole = int(ts)
+    frac = float(ts) - whole
+    nsec = int(round(frac * 1_000_000_000))
+    if nsec >= 1_000_000_000:
+        whole += 1
+        nsec = 0
+    if nsec < 0:
+        whole -= 1
+        nsec += 1_000_000_000
+    dt = datetime.fromtimestamp(whole, tz=timezone.utc)
+    base = dt.strftime("%Y-%m-%dT%H:%M:%S")
+    if nsec:
+        return f"{base}.{nsec:09d}+00:00"
+    return f"{base}+00:00"
+
+
+def _fresh_epoch_identity_from_session():
+    """Stable SHOWCASE_FRESH_COLLECTION epoch id from research_session.json."""
+    session = _load_research_session_meta() or {}
+    raw = session.get("fresh_collection_start_time")
+    if raw in (None, "", 0, 0.0):
+        return None, None, None
+    try:
+        cutoff = _utc_isoformat_ns(float(raw))
+    except (TypeError, ValueError):
+        return None, None, None
+    kind = "SHOWCASE_FRESH_COLLECTION"
+    material = f"fresh_research_epoch_v1|{kind}|{cutoff}"
+    epoch_id = "epoch-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    return epoch_id, cutoff, kind
+
+
+def _fresh_epoch_strict_flat_proof() -> dict:
+    """Fly-local books for the official POST /api/fresh_epoch_reset proof."""
+    now = datetime.now(timezone.utc)
+    with trade_lock:
+        pending_count = len(pending_orders)
+        open_count = len(open_positions)
+    with state_lock:
+        live_armed = bool(state.get("live_armed", False))
+    audit = _exchange_exposure_audit_snapshot()
+    paper_only = _force_paper_mode_active() and not live_armed
+    try:
+        exch_pos = int(audit.get("open_position_count") or 0)
+    except (TypeError, ValueError):
+        exch_pos = 0
+    try:
+        exch_ord = int(audit.get("open_order_count") or 0)
+    except (TypeError, ValueError):
+        exch_ord = 0
+    try:
+        delta = float(audit.get("delta_btc") or audit.get("net_btc") or 0)
+    except (TypeError, ValueError):
+        delta = 0.0
+    if paper_only and not audit.get("authoritative"):
+        exch_pos = 0
+        exch_ord = 0
+        delta = 0.0
+    return {
+        "checked_at": now.isoformat(),
+        "showcase_positions": int(open_count),
+        "showcase_pending_orders": int(pending_count),
+        "relay_active_participants": 0,
+        "relay_open_lots": 0,
+        "relay_pending_lots": 0,
+        "exchange_positions": exch_pos,
+        "exchange_active_orders": exch_ord,
+        "exchange_delta_btc": delta,
+        "relay_paused": (not live_armed),
+        "relay_disarmed": (not live_armed),
+        "source": "fly_local_books",
+    }
+
+
+def _fresh_epoch_proof_blockers(proof: dict) -> list:
+    blockers = []
+    if not isinstance(proof, dict):
+        return ["strict_flat_proof required"]
+    for key in _FRESH_EPOCH_ZERO_FIELDS:
+        if proof.get(key) != 0:
+            blockers.append(f"{key}={proof.get(key)}")
+    if proof.get("relay_paused") is not True:
+        blockers.append("relay_paused")
+    if proof.get("relay_disarmed") is not True:
+        blockers.append("relay_disarmed")
+    try:
+        checked_at = datetime.fromisoformat(str(proof.get("checked_at") or "").replace("Z", "+00:00"))
+        age_s = (datetime.now(timezone.utc) - checked_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        age_s = float("inf")
+    if age_s < 0 or age_s > 60:
+        blockers.append("strict_flat_proof_stale")
+    return blockers
+
+
+def _fresh_epoch_status_payload() -> dict:
+    """Read-only contract for the dashboard button — never wipes."""
+    epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
+    with state_lock:
+        paused = bool(state.get("execution_paused", False))
+        live_armed = bool(state.get("live_armed", False))
+        mode = bool(state.get("fresh_collection_mode", False))
+        invert = bool(state.get("invert_signal", False))
+    with trade_lock:
+        pending_count = len(pending_orders)
+        open_count = len(open_positions)
+    proof = _fresh_epoch_strict_flat_proof()
+    blockers = []
+    if live_armed:
+        blockers.append("LIVE_ARMED")
+    if not paused:
+        blockers.append("EXECUTION_NOT_PAUSED")
+    if pending_count:
+        blockers.append(f"PENDING_ORDERS:{pending_count}")
+    if open_count:
+        blockers.append(f"OPEN_POSITIONS:{open_count}")
+    blockers.extend(_fresh_epoch_proof_blockers(proof))
+    seen = set()
+    uniq = []
+    for item in blockers:
+        if item in seen:
+            continue
+        seen.add(item)
+        uniq.append(item)
+    return {
+        "ok": True,
+        "dry_run": True,
+        "wiped": False,
+        "fresh_collection_mode": mode,
+        "off_allowed": False,
+        "one_way_on": True,
+        "epoch_id": epoch_id,
+        "epoch_cutoff_utc": cutoff,
+        "epoch_kind": kind,
+        "invert_signal": invert,
+        "wipe_ready": not uniq,
+        "blockers": uniq,
+        "strict_flat_proof": proof,
+        "confirmation_required": _FRESH_EPOCH_CONFIRMATION,
+        "endpoint": "/api/fresh_epoch_reset",
+        "hint": (
+            "Fresh Collection stays ON for the bound epoch. "
+            "POST /api/fresh_epoch_reset with confirmation starts a NEW Fly epoch wipe."
+        ),
+    }
+
+
+@app.route('/api/fresh_epoch_reset', methods=['GET', 'POST'])
 def api_fresh_epoch_reset():
     """Strict operator-only research epoch reset for the Fly execution mirror.
 
-    The ordinary warehouse routes are intentionally unavailable on Fly.  This
-    narrow controller preserves the existing hashed quarantine/reset behavior
-    while requiring a fresh, explicit cross-service flat-boundary receipt from
-    the authenticated operator.  The reset itself repeats the source-side
-    paused/disarmed/order/position checks and fails closed on any contradiction.
+    GET (or POST dry_run=true) returns the wipe contract without mutating.
+    POST with confirmation runs the existing perform_fresh_collection_reset
+    path — the same Fly-volume quarantine used by the official epoch wipe.
     """
     if not _admin_authed_strict():
         return jsonify({"ok": False, "error": "admin token required"}), 401
     data = request.get_json(silent=True) or {}
+    if request.method == "GET" or data.get("dry_run") is True:
+        return jsonify(_fresh_epoch_status_payload())
     if data.get("confirmation") != _FRESH_EPOCH_CONFIRMATION:
         return jsonify({
             "ok": False,
@@ -33365,11 +33701,7 @@ def api_fresh_epoch_reset():
     proof = data.get("strict_flat_proof")
     if not isinstance(proof, dict):
         return jsonify({"ok": False, "error": "strict_flat_proof required"}), 400
-    required_zero = (
-        "showcase_positions", "showcase_pending_orders",
-        "relay_active_participants", "relay_open_lots", "relay_pending_lots",
-        "exchange_positions", "exchange_active_orders", "exchange_delta_btc",
-    )
+    required_zero = _FRESH_EPOCH_ZERO_FIELDS
     if any(proof.get(key) != 0 for key in required_zero):
         return jsonify({
             "ok": False,
@@ -33387,12 +33719,17 @@ def api_fresh_epoch_reset():
         return jsonify({"ok": False, "error": "strict flat proof is stale"}), 409
 
     result = perform_fresh_collection_reset(send_local_signal=True)
+    epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
     status = 200 if result.get("ok") else 409
     return jsonify({
         "ok": bool(result.get("ok")),
         "reset": result,
         "deleted": [],
         "strict_flat_checked_at": proof.get("checked_at"),
+        "epoch_id": epoch_id,
+        "epoch_cutoff_utc": cutoff,
+        "epoch_kind": kind,
+        "fresh_collection_mode": True if result.get("ok") else bool(state.get("fresh_collection_mode")),
     }), status
 
 @app.get("/api/data_size")

@@ -35,6 +35,7 @@ MIRROR_MUTATION_ALLOWLIST = {
     "/api/toggle_duplicate_limit_block",
     "/api/toggle_early_fail",
     "/api/toggle_fresh_collection",
+    "/api/fresh_epoch_reset",
     "/api/toggle_invert_signal",
     "/api/toggle_profit_gates",
     "/api/toggle_research_lane",

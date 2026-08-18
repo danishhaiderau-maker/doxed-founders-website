@@ -18,10 +18,13 @@ class FreshCollectionToggleTests(unittest.TestCase):
         self.original_mode = bool(bot.state.get("fresh_collection_mode", False))
         self.original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+        self._token_patch = mock.patch.object(bot, "_BOT_ADMIN_TOKEN", "")
+        self._token_patch.start()
         with bot.state_lock:
             bot.state["fresh_collection_mode"] = False
 
     def tearDown(self):
+        self._token_patch.stop()
         with bot.state_lock:
             bot.state["fresh_collection_mode"] = self.original_mode
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = self.original_bootstrap_complete

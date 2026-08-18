@@ -28,6 +28,10 @@ class FlyDashboardProxyContractTests(unittest.TestCase):
             "text/html",
         )
 
+    def test_fresh_epoch_reset_is_an_allowed_mirror_mutation(self):
+        self.assertIn("/api/fresh_epoch_reset", MODULE.MIRROR_MUTATION_ALLOWLIST)
+        self.assertIn("/api/toggle_invert_signal", MODULE.MIRROR_MUTATION_ALLOWLIST)
+
 
 if __name__ == "__main__":
     unittest.main()

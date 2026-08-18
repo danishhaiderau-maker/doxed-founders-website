@@ -21,7 +21,7 @@ def test_exact_chase_controls_are_rendered():
     )
     for bucket in expected:
         assert f"'{bucket}'" in BOT_SOURCE or f'"{bucket}"' in BOT_SOURCE
-    assert "select 3 and 4 only" in BOT_SOURCE
+    assert "select 2, 3 and 4 only" in BOT_SOURCE
 
 
 def test_grouped_chase_controls_are_migration_only():
@@ -36,8 +36,8 @@ def test_virtual_wait_and_cancel_paths_remain_wired():
     assert "dashboard_virtual_chase_submit_ready(signal)" in BOT_SOURCE
     assert "_cancel_pending_for_chase_gate(order" in BOT_SOURCE
     assert "process_awaiting_dashboard_virtual_chase_entries()" in BOT_SOURCE
-    assert "next_chase_count = int(order.get(\"limit_chase_count\") or 0) + 1" in BOT_SOURCE
-    assert "if not chase_bucket_allowed(next_chase_count):" in BOT_SOURCE
+    assert "next_chase_count = chase_age_window_index(age_sec)" in BOT_SOURCE
+    assert "if chase_age_window_should_cancel(age_sec):" in BOT_SOURCE
     assert "def _virtual_limit_would_fill(signal: dict, market_price: float)" in BOT_SOURCE
     assert "VIRTUAL_FILL_SKIPPED_CHASE_" in BOT_SOURCE
 
@@ -56,7 +56,7 @@ def test_production_chase_never_invokes_terminal_marketable_fallback():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "_apply_marketable_limit_fallback" not in invoked
-    assert "the next disallowed bucket cancels them" in ast.get_source_segment(
+    assert "After the last enabled window (5+ OFF), the order rests" in ast.get_source_segment(
         BOT_SOURCE, process_chase
     )
 
@@ -1187,3 +1187,101 @@ def test_decision7_chase_effectiveness_prospective_reporting_preserved():
     assert "_record_execution_settings_epoch(\"CHASE_CHANGED\")" in BOT_SOURCE
     assert "CHASE_EFFECTIVENESS_REPORT_FILE" in BOT_SOURCE
     assert "CHASE_EFFICIENCY_MATRIX_FILE" in BOT_SOURCE
+
+
+def _five_min_chase_helpers():
+    buckets = {
+        "0_chases": False,
+        "1_chase": False,
+        "2_chases": True,
+        "3_chases": True,
+        "4_chases": True,
+        "5+_chases": False,
+    }
+    namespace = {
+        "CHASE_WINDOW_SEC": 300,
+        "CHASE_WINDOW_MAX_INDEX": 5,
+        "chase_bucket_allowed": lambda n: buckets[chase_count_bucket_local(n)],
+    }
+
+    def chase_count_bucket_local(chase_count):
+        n = int(chase_count or 0)
+        if n <= 0:
+            return "0_chases"
+        if n == 1:
+            return "1_chase"
+        if n == 2:
+            return "2_chases"
+        if n == 3:
+            return "3_chases"
+        if n == 4:
+            return "4_chases"
+        return "5+_chases"
+
+    namespace["chase_count_bucket"] = chase_count_bucket_local
+    idx = _compile_function("chase_age_window_index", namespace)
+    start = _compile_function("chase_window_start_sec", namespace)
+    namespace["chase_age_window_index"] = idx
+    namespace["chase_window_start_sec"] = start
+    namespace["min_enabled_chase_count"] = lambda: 2
+    last = _compile_function("last_enabled_chase_count", namespace)
+    namespace["last_enabled_chase_count"] = last
+    cancel = _compile_function("chase_age_window_should_cancel", namespace)
+    reprice = _compile_function("chase_age_window_may_reprice", namespace)
+    ready = _compile_function("dashboard_virtual_chase_submit_ready", {
+        **namespace,
+        "_signal_age_sec": lambda signal: float(signal.get("_age_sec") or 0),
+        "min_enabled_chase_count": lambda: 2,
+        "chase_bucket_allowed": lambda n: buckets[chase_count_bucket_local(n)],
+        "chase_window_start_sec": start,
+        "chase_age_window_index": idx,
+    })
+    return idx, start, cancel, reprice, ready
+
+
+def test_chase_age_windows_are_five_minutes():
+    idx, start, _cancel, _reprice, _ready = _five_min_chase_helpers()
+    assert idx(0) == 0
+    assert idx(299) == 0
+    assert idx(300) == 1
+    assert idx(599) == 1
+    assert idx(600) == 2
+    assert idx(900) == 3
+    assert idx(1200) == 4
+    assert idx(1500) == 5
+    assert idx(1799) == 5
+    assert start(2) == 600
+    assert "CHASE_WINDOW_SEC = 300" in BOT_SOURCE
+    assert "LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 180" in BOT_SOURCE
+
+
+def test_virtual_wait_to_chase_2_takes_10_min_signal_age():
+    _idx, _start, _cancel, _reprice, ready = _five_min_chase_helpers()
+    assert ready({"_age_sec": 60}) is False
+    assert ready({"_age_sec": 599}) is False
+    assert ready({"_age_sec": 600}) is True
+    assert ready({"_age_sec": 899}) is True
+
+
+def test_chase_2_to_3_does_not_happen_at_60s():
+    idx, _start, _cancel, reprice, _ready = _five_min_chase_helpers()
+    assert idx(600) == 2
+    assert idx(660) == 2
+    assert reprice(600) is True
+    assert reprice(660) is True
+    assert idx(900) == 3
+
+
+def test_five_plus_off_does_not_cancel_chase_4_at_9_min():
+    _idx, _start, cancel, reprice, _ready = _five_min_chase_helpers()
+    assert cancel(9 * 60) is False
+    assert reprice(9 * 60) is False
+    assert cancel(22 * 60) is False
+    assert reprice(22 * 60) is True
+    assert cancel(26 * 60) is False
+    assert reprice(26 * 60) is False
+
+
+def test_limit_order_ttl_remains_30_minutes():
+    assert "LIMIT_ORDER_MAX_AGE_SEC = int(os.getenv(\"LIMIT_ORDER_MAX_AGE_SEC\", str(30 * 60)))" in BOT_SOURCE
+    assert "cleanup_expired_orders()" in BOT_SOURCE

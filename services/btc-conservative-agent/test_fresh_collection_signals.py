@@ -15,6 +15,7 @@ import os
 import sys
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -31,12 +32,17 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.original_mode = bool(bot.state.get("fresh_collection_mode", False))
         self.original_bootstrap_complete = bot._DASHBOARD_BOOTSTRAP_COMPLETE
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+        # Flask test_client is loopback. A developer machine with BOT_ADMIN_TOKEN
+        # set would otherwise 401 every mutation before the handler runs.
+        self._token_patch = mock.patch.object(bot, "_BOT_ADMIN_TOKEN", "")
+        self._token_patch.start()
         with bot.state_lock:
             bot.state["fresh_collection_signal_ts"] = 0.0
             bot.state["fresh_collection_mode"] = False
             bot.state["live_armed"] = False
 
     def tearDown(self):
+        self._token_patch.stop()
         with bot.state_lock:
             bot.state["fresh_collection_signal_ts"] = self.original_signal
             bot.state["fresh_collection_mode"] = self.original_mode
@@ -208,6 +214,43 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["deleted"], [])
         reset.assert_called_once_with(send_local_signal=True)
+
+    def test_get_fresh_epoch_reset_is_dry_run_and_never_wipes(self):
+        with mock.patch.object(bot, "perform_fresh_collection_reset") as reset:
+            with bot.app.test_client() as client:
+                response = client.get("/api/fresh_epoch_reset")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["dry_run"])
+        self.assertFalse(body["wiped"])
+        self.assertFalse(body["off_allowed"])
+        self.assertTrue(body["one_way_on"])
+        self.assertEqual(body["endpoint"], "/api/fresh_epoch_reset")
+        self.assertIn("strict_flat_proof", body)
+        self.assertEqual(body["confirmation_required"], bot._FRESH_EPOCH_CONFIRMATION)
+        reset.assert_not_called()
+
+    def test_post_dry_run_does_not_wipe(self):
+        with mock.patch.object(bot, "perform_fresh_collection_reset") as reset:
+            with bot.app.test_client() as client:
+                response = client.post("/api/fresh_epoch_reset", json={"dry_run": True})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["dry_run"])
+        self.assertFalse(body["wiped"])
+        reset.assert_not_called()
+
+    def test_dashboard_button_posts_official_epoch_reset(self):
+        src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+        start = src.index("async function toggleFreshCollection()")
+        end = src.index("async function wipeFlyOnly()", start)
+        fn = src[start:end]
+        self.assertIn("fetch('/api/fresh_epoch_reset'", fn)
+        self.assertNotIn("/api/toggle_fresh_collection", fn)
+        self.assertIn("cannot turn OFF", fn)
+        self.assertIn("method: 'GET'", fn)
+        self.assertIn("method: 'POST'", fn)
 
 
 if __name__ == "__main__":
