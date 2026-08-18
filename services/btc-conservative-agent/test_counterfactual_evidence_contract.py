@@ -488,6 +488,8 @@ def _complete_fixture():
             "actual_bitfinex_realized_pnl_usd": 1.25,
             "source_git_rev": "b99aceffb91a1345a96336ba123f651368b3be13",
             "executor_revision": "af5b912f3de5e6afbe9ca1a366f892c0f8591b31",
+            "epoch_id": "epoch-d93cddc91653a5c7bba07162",
+            "fill_gate_rev": "venue_fill_gate_v1",
             "bitfinex_evidence": evidence,
         },
         {

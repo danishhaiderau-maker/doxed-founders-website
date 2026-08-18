@@ -134,6 +134,31 @@ function btcQuantityMatches(a: number, b: number): boolean {
   return Math.abs(Math.floor(a * 1e8) - Math.floor(b * 1e8)) <= 1;
 }
 
+/** Current-generation ORDER_PLACED may reclaim an EXPIRED cycle, never a CLOSED one. */
+export function canClaimExpiredCycleForCurrentGeneration(input: {
+  status?: string | null;
+  current?: RelayLifecycleEnvelope | null;
+  incoming: ShowcaseRelayEventBody;
+}): boolean {
+  if (input.status !== SignalCycleStatus.EXPIRED) return false;
+  if (input.incoming.event !== 'ORDER_PLACED') return false;
+  if (input.current?.context?.showcase_event === 'POSITION_CLOSED') return false;
+  if (input.current?.context?.showcase_event === 'POSITION_OPENED') return false;
+  const executable =
+    input.incoming.executable === true
+    && isExecutableEntryPolicy(input.incoming.entry_limit_policy)
+    && typeof input.incoming.limit_price === 'number'
+    && Number.isFinite(input.incoming.limit_price)
+    && input.incoming.limit_price > 0
+    && typeof input.incoming.qty === 'number'
+    && Number.isFinite(input.incoming.qty)
+    && input.incoming.qty > 0;
+  if (!executable) return false;
+  return shouldApplyExactLifecycleUpdate(input.current, input.incoming);
+}
+
+const ORDER_EXPIRED_FLATTEN_REASONS = new Set(['SIGNAL_TTL_EXPIRED', 'TTL_EXPIRED']);
+
 /** Prevent a delayed webhook retry from replacing a newer canonical exact limit. */
 export function shouldApplyExactLifecycleUpdate(
   current: RelayLifecycleEnvelope | null | undefined,
@@ -644,10 +669,43 @@ export class ShowcaseRelayEventsService {
           platformReceivedAtMs: Date.parse(persistBody.platform_received_at),
         }
       : undefined;
+    const earlyNoCopyClose =
+      event === 'POSITION_CLOSED' && tradeId
+        ? await this.isShowcaseOnlyNoCopyClose(tradeId)
+        : false;
     if (event === 'POSITION_CLOSED' && signedLifecycleEvent && !signedCloseEvidence) {
-      throw new BadRequestException(
-        'Signed position close requires exact identity, sequence, price, reason, and fresh source/receipt timestamps',
-      );
+      if (earlyNoCopyClose) {
+        const noCopyAck = await this.acknowledgeShowcaseOnlyCloseIfRelayPaused(tradeId, persistBody);
+        return {
+          ok: true,
+          accepted: true,
+          action: 'NO_COPY_PARTICIPANT',
+          reason: 'SHOWCASE_ONLY_NO_COPY_PARTICIPANT',
+          exchange_mutation: false,
+          event,
+          trade_id: tradeId,
+          intentCreated: false,
+          persisted: Boolean(noCopyAck?.persisted),
+          negative_evidence: 'SHOWCASE_ONLY_NO_COPY_PARTICIPANT',
+          platform_received_at: persistBody.platform_received_at ?? null,
+          ingest_ms: Date.now() - ingestStartedAt,
+        };
+      }
+      await this.persistIncompleteCloseOutbox(tradeId, persistBody);
+      return {
+        ok: true,
+        accepted: false,
+        action: 'SCHEMA_QUEUED',
+        reason: 'SIGNED_POSITION_CLOSED_INCOMPLETE',
+        queued: true,
+        exchange_mutation: false,
+        event,
+        trade_id: tradeId,
+        intentCreated: false,
+        persisted: true,
+        platform_received_at: persistBody.platform_received_at ?? null,
+        ingest_ms: Date.now() - ingestStartedAt,
+      };
     }
     const signedOpenEvidence = event === 'POSITION_OPENED' && body.ts
       && typeof body.fill_price === 'number' && Number.isFinite(body.fill_price) && body.fill_price > 0
@@ -680,23 +738,34 @@ export class ShowcaseRelayEventsService {
           reason: body.reason as 'SIGNAL_TTL_EXPIRED' | 'TTL_EXPIRED',
         }
       : undefined;
-    if (event === 'ORDER_EXPIRED' && signedLifecycleEvent && (
-      !signedExpiryEvidence
-      || !Number.isInteger(signedExpiryEvidence.eventSeq)
-      || signedExpiryEvidence.eventSeq < 0
-      || !Number.isFinite(signedExpiryEvidence.limitPrice)
-      || signedExpiryEvidence.limitPrice <= 0
-      || !signedExpiryEvidence.eventId
-      || signedExpiryEvidence.eventId.length > 255
-      || !['SIGNAL_TTL_EXPIRED', 'TTL_EXPIRED'].includes(signedExpiryEvidence.reason)
-    )) {
-      throw new BadRequestException('Signed order expiry requires exact source expiry timestamp');
+    const expiryFlattenable = Boolean(
+      signedExpiryEvidence
+      && Number.isInteger(signedExpiryEvidence.eventSeq)
+      && signedExpiryEvidence.eventSeq >= 0
+      && Number.isFinite(signedExpiryEvidence.limitPrice)
+      && signedExpiryEvidence.limitPrice > 0
+      && signedExpiryEvidence.eventId
+      && signedExpiryEvidence.eventId.length <= 255
+      && ORDER_EXPIRED_FLATTEN_REASONS.has(signedExpiryEvidence.reason),
+    );
+    if (event === 'ORDER_EXPIRED' && signedLifecycleEvent && !expiryFlattenable) {
+      await this.persistRelayEvent('conservative-btc', persistBody);
+      return {
+        ok: true,
+        accepted: true,
+        action: 'ORDER_EXPIRED_ACKED',
+        reason: 'DURABLE_ACK_NO_FLATTEN',
+        exchange_mutation: false,
+        event,
+        trade_id: tradeId || null,
+        intentCreated: false,
+        persisted: true,
+        platform_received_at: persistBody.platform_received_at ?? null,
+        ingest_ms: Date.now() - ingestStartedAt,
+      };
     }
 
-    const noCopyClose =
-      event === 'POSITION_CLOSED' && tradeId
-        ? await this.isShowcaseOnlyRelayPausedClose(tradeId)
-        : false;
+    const noCopyClose = earlyNoCopyClose;
 
     // Start the private worker's safety preflight as soon as the signed owner
     // event is authenticated. Entry still waits for this exact cycle to become
@@ -714,7 +783,7 @@ export class ShowcaseRelayEventsService {
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
-        event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
+        event === 'ORDER_EXPIRED' && expiryFlattenable ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
       );
     }
 
@@ -743,7 +812,7 @@ export class ShowcaseRelayEventsService {
             event,
             body.trade_id ?? null,
             persistBody.platform_received_at ?? undefined,
-            event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
+            event === 'ORDER_EXPIRED' && expiryFlattenable ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
           );
           executionWakeQueued = true;
         }
@@ -766,7 +835,7 @@ export class ShowcaseRelayEventsService {
         event,
         body.trade_id ?? null,
         persistBody.platform_received_at ?? undefined,
-        event === 'ORDER_EXPIRED' ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
+        event === 'ORDER_EXPIRED' && expiryFlattenable ? signedExpiryEvidence : event === 'POSITION_OPENED' ? signedOpenEvidence : signedCloseEvidence,
       );
     }
     if (!noCopyClose && signedLifecycleEvent) {
@@ -842,27 +911,43 @@ export class ShowcaseRelayEventsService {
         select: { id: true },
       });
       if (liveParticipant) return false;
-      const activeLive = await this.prisma.tradingAgentInstance.findFirst({
+      const liveHire = await this.prisma.tradingAgentInstance.findFirst({
         where: {
           agentId: agent.id,
           exchangeProvider: 'bitfinex',
-          status: TradingAgentInstanceStatus.ACTIVE,
+          status: {
+            in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED],
+          },
         },
         select: { id: true },
       });
-      if (activeLive) return false;
-      const pausedLive = await this.prisma.tradingAgentInstance.findFirst({
-        where: {
-          agentId: agent.id,
-          exchangeProvider: 'bitfinex',
-          status: TradingAgentInstanceStatus.PAUSED,
-        },
-        select: { id: true },
-      });
-      return Boolean(pausedLive);
+      return Boolean(liveHire);
     } catch {
       // Fail closed: a lookup error must not skip the owned-lot exit wake.
       return false;
+    }
+  }
+
+  private async isShowcaseOnlyNoCopyClose(tradeId: string): Promise<boolean> {
+    return this.isShowcaseOnlyRelayPausedClose(tradeId);
+  }
+
+  private async persistIncompleteCloseOutbox(
+    tradeId: string,
+    body: ShowcaseRelayEventBody,
+  ): Promise<void> {
+    try {
+      await this.persistRelayEvent('conservative-btc', {
+        ...body,
+        event: 'POSITION_CLOSED',
+        trade_id: tradeId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `POSITION_CLOSED outbox persist failed trade=${tradeId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
     }
   }
 
@@ -910,24 +995,18 @@ export class ShowcaseRelayEventsService {
       select: { id: true, status: true },
     });
     if (liveParticipant) return null;
-    const activeLive = await this.prisma.tradingAgentInstance.findFirst({
+    const liveHire = await this.prisma.tradingAgentInstance.findFirst({
       where: {
         agentId: agent.id,
         exchangeProvider: 'bitfinex',
-        status: TradingAgentInstanceStatus.ACTIVE,
-      },
-      select: { id: true },
-    });
-    if (activeLive) return null;
-    const pausedLive = await this.prisma.tradingAgentInstance.findFirst({
-      where: {
-        agentId: agent.id,
-        exchangeProvider: 'bitfinex',
-        status: TradingAgentInstanceStatus.PAUSED,
+        status: {
+          in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED],
+        },
       },
       select: { id: true, userId: true },
     });
-    if (!pausedLive) return null;
+    if (!liveHire) return null;
+    const pausedLive = liveHire;
 
     let persistedNegative = false;
     try {
@@ -1203,6 +1282,11 @@ export class ShowcaseRelayEventsService {
                 context: { ...current.context, ...incoming.context },
               }
             : incoming;
+        const claimExpired = canClaimExpiredCycleForCurrentGeneration({
+          status: existing.status,
+          current,
+          incoming: body ?? { event: 'APPROVE_PENDING' },
+        });
         await db.signalCycle.update({
           where: { id: existing.id },
           data: {
@@ -1215,6 +1299,9 @@ export class ShowcaseRelayEventsService {
             expiresAt: body.event === 'ORDER_PLACED'
               ? new Date(Date.now() + 1_800_000)
               : undefined,
+            ...(claimExpired
+              ? { status: SignalCycleStatus.INTENT, closedAt: null }
+              : {}),
           },
         });
         intentApplied = Boolean(

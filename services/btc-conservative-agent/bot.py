@@ -24586,7 +24586,10 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100
-REPLAY_TICK_MAX = 2000
+# Align pre-exit ring with post-exit (10000 * 1s interval covers 120m + slack).
+# Compact horizon receipts are also persisted before any rotation so a truncated
+# buffer is CENSORED, never treated as $0.
+REPLAY_TICK_MAX = 10000
 FEATURE_DRIFT_INTERVAL_SEC = 3600
 _last_feature_drift_ts = 0.0
 _last_research_kpi_ts = 0.0
@@ -36085,6 +36088,10 @@ def log_shadow_outcome_jsonl(
             "margin_usdt": buf.get("margin_usdt"),
             "start_price": buf.get("start_price"),
             "tick_count": len(buf.get("ticks", [])),
+            "origin_t_rel": buf.get("virtual_fill_t"),
+            "horizon_receipts": buf.get("horizon_receipts") or {},
+            "path_gaps": _path_gap_census(buf.get("ticks")),
+            "fill_origin": {"classification": "MISSING"} if outcome.get("filled") is not True else {"classification": "SHADOW_ESTIMATE"},
             "block_t_rel_sec": buf.get("block_t_rel"),
             "post_block_tick_count": (post_block_research or {}).get("post_block_tick_count"),
             "exit_config": buf.get("exit_config") or get_exit_config_snapshot(),
@@ -36308,7 +36315,7 @@ def append_replay_tick(
         tick_max = POST_EXIT_REPLAY_TICK_MAX if buf.get("post_exit") else REPLAY_TICK_MAX
         if len(ticks) >= tick_max:
             ticks.pop(0)
-        ticks.append({
+        tick_row = {
             "seq": buf["seq"],
             "t": t_rel,
             "price": float(price),
@@ -36317,7 +36324,9 @@ def append_replay_tick(
             "best_bid": float(best_bid) if best_bid is not None else None,
             "best_ask": float(best_ask) if best_ask is not None else None,
             "observed_ts": now,
-        })
+        }
+        ticks.append(tick_row)
+        _update_compact_horizon_receipts(buf, tick_row)
         buf["last_update"] = now
         buf["last_tick_ts"] = now
         is_post_exit = bool(buf.get("post_exit"))
@@ -36658,6 +36667,132 @@ def _load_post_exit_replays():
         )
 
 
+_HORIZON_RECEIPT_SECS = (
+    ("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("60m", 3600), ("120m", 7200),
+)
+_MAX_PATH_GAP_MS = 15_000
+
+
+def _update_compact_horizon_receipts(buf, tick):
+    """Persist 1/5/15/30/60/120m marks before the ring buffer rotates them away."""
+    if not isinstance(buf, dict) or not isinstance(tick, dict):
+        return
+    origin = _buf_float(buf.get("virtual_fill_t"), 0)
+    t_rel = _buf_float(tick.get("t"), -1)
+    if t_rel < 0:
+        return
+    direction = str(buf.get("direction") or "LONG").upper()
+    side_key = "best_bid" if direction == "LONG" else "best_ask"
+    price = _buf_float(tick.get(side_key), 0) or _buf_float(tick.get("price"), 0)
+    receipts = buf.setdefault("horizon_receipts", {"schema": "horizon_receipts_v1", "required": {}})
+    required = receipts.setdefault("required", {})
+    for label, seconds in _HORIZON_RECEIPT_SECS:
+        slot = required.setdefault(label, {"required_sec": seconds, "observed": False})
+        if slot.get("observed"):
+            continue
+        if t_rel >= origin + seconds and price > 0:
+            slot.update({
+                "observed": True,
+                "tick_t_rel": t_rel,
+                "price": price,
+                "best_bid": tick.get("best_bid"),
+                "best_ask": tick.get("best_ask"),
+                "observed_ts": tick.get("observed_ts"),
+            })
+    receipts["complete"] = all((required.get(label) or {}).get("observed") for label, _sec in _HORIZON_RECEIPT_SECS)
+    receipts["origin_t_rel"] = origin
+
+
+def _path_gap_census(ticks, window_sec=7200):
+    ordered = [tick for tick in (ticks or []) if isinstance(tick, dict)]
+    gaps = []
+    prev = None
+    stale = []
+    for tick in ordered:
+        ts = _buf_float(tick.get("observed_ts"), 0)
+        t_rel = _buf_float(tick.get("t"), 0)
+        age = tick.get("book_age_sec")
+        if age is not None:
+            try:
+                stale.append(float(age))
+            except (TypeError, ValueError):
+                pass
+        key = ts or t_rel
+        if prev is not None and key:
+            delta_ms = (key - prev) * 1000.0
+            if delta_ms > 0:
+                gaps.append(delta_ms)
+        if key:
+            prev = key
+    max_gap = max(gaps) if gaps else None
+    observed = 0.0
+    if len(ordered) >= 2:
+        observed = _buf_float(ordered[-1].get("t"), 0) - _buf_float(ordered[0].get("t"), 0)
+    censored = bool(max_gap is not None and max_gap > _MAX_PATH_GAP_MS)
+    return {
+        "schema": "path_gap_v1",
+        "tick_count": len(ordered),
+        "max_gap_ms": None if max_gap is None else round(max_gap, 3),
+        "observed_frac_of_120m": None if not window_sec else round(min(1.0, max(0.0, observed / window_sec)), 6),
+        "max_book_stale_sec": None if not stale else round(max(stale), 4),
+        "censored": censored,
+        "censor_reason": "MAX_GAP_EXCEEDED" if censored else None,
+    }
+
+
+def _compact_market_path_ref(replay, snapshot, extra=None):
+    ticks = (replay or {}).get("ticks") or []
+    evidence = (snapshot or {}).get("source_order_market_evidence") or {}
+    obs = evidence.get("observations") if isinstance(evidence, dict) else []
+    obs = obs if isinstance(obs, list) else []
+    generations = sorted({
+        int(item.get("limit_generation") or 0)
+        for item in obs if isinstance(item, dict)
+    })
+    chase_count = max(generations) if generations else int((snapshot or {}).get("limit_chase_count") or (replay or {}).get("limit_chase_count") or 0)
+    payload = {
+        "trade_id": (snapshot or {}).get("trade_id") or (replay or {}).get("trade_id"),
+        "tick_count": len(ticks),
+        "obs_count": len(obs),
+        "chase_count": chase_count,
+        "t_start": (ticks[0] or {}).get("t") if ticks else None,
+        "t_end": (ticks[-1] or {}).get("t") if ticks else None,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    digest = hashlib.sha256(blob).hexdigest()
+    ref = {
+        "schema": "content_addressed_evidence_ref_v1",
+        "evidence_schema": "market_path_v1",
+        "sha256": digest,
+        "bytes": len(blob),
+        "object_id": f"market_path_v1:{digest[:16]}",
+        "tick_count": len(ticks),
+        "observation_count": len(obs),
+        "start_offset": 0,
+        "end_offset": max(0, len(ticks) - 1),
+        "time_range": {"start_t": payload["t_start"], "end_t": payload["t_end"]},
+        "chase_count": chase_count,
+        "limit_generations": generations,
+    }
+    if extra:
+        ref.update(extra)
+    return ref
+
+
+def _compact_source_market_evidence(evidence):
+    if not isinstance(evidence, dict):
+        return {}
+    obs = evidence.get("observations") if isinstance(evidence.get("observations"), list) else []
+    compact = {key: value for key, value in evidence.items() if key != "observations"}
+    compact["observation_count"] = len(obs)
+    compact["observations_elided"] = True
+    compact["limit_generation"] = max(
+        (int(item.get("limit_generation") or 0) for item in obs if isinstance(item, dict)),
+        default=int(evidence.get("limit_generation") or 0),
+    )
+    return compact
+
+
 def close_replay_buffer(trade_id):
     with replay_lock:
         buf = replay_buffers.get(trade_id)
@@ -36739,6 +36874,9 @@ def dump_replay(trade_id: str):
                 "exit_reason": buf.get("exit_reason"),
                 "virtual_entry": buf.get("virtual_entry"),
                 "virtual_fill_t": buf.get("virtual_fill_t"),
+                "origin_t_rel": buf.get("virtual_fill_t"),
+                "horizon_receipts": buf.get("horizon_receipts"),
+                "path_gaps": _path_gap_census(buf.get("ticks")),
                 "entry_price": buf.get("entry_price"),
                 "pullback_pct": buf.get("pullback_pct"),
                 "leverage": buf.get("leverage"),
@@ -36903,19 +37041,9 @@ def run_offline_research_sim():
         for tid, revision in platform_revisions.items():
             if latest_local_revisions.get(tid) != revision:
                 _sim_processed_trade_ids.discard(tid)
-        if os.path.exists(SHADOW_OUTCOME_FILE):
-            with open(SHADOW_OUTCOME_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        tid = row.get("trade_id")
-                        if tid and not platform_revisions.get(str(tid)):
-                            _sim_processed_trade_ids.add(tid)
-                    except Exception:
-                        pass
+        # Shadow rows are not a substitute for a compact counterfactual
+        # disposition. Every eligible opportunity gets a CF row or an explicit
+        # exclusion; missing evidence stays UNKNOWN, never $0.
         offline_simulator()
     except Exception as e:
         logger.error(f"[RESEARCH_SIM] {e}")
@@ -37293,6 +37421,22 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         "required_post_exit_horizons_complete": post_exit_horizons["complete"],
         "replay_complete": replay_complete,
         "replay_tick_count": len(replay.get("ticks") or []),
+        "cost_complete": bool(
+            (snapshot.get("actual_costs") or {}).get("entry_fee_usd") is not None
+            and (snapshot.get("actual_costs") or {}).get("exit_fee_usd") is not None
+        ) if isinstance(snapshot.get("actual_costs"), dict) else False,
+        "cost_missing_legs": [
+            label for key, label in (
+                ("entry_fee_usd", "entry_fee"),
+                ("exit_fee_usd", "exit_fee"),
+                ("funding_usd", "funding"),
+                ("stop_slippage_usd", "stop_slippage"),
+            )
+            if not (
+                isinstance(snapshot.get("actual_costs"), dict)
+                and snapshot.get("actual_costs", {}).get(key) is not None
+            )
+        ],
         "analysis_eligible": False,
         "analysis_exclusion_reasons": exclusion_reasons,
         "analysis_eligibility_schema": "analysis_cohorts_v1",
@@ -37465,8 +37609,14 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
             "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
             "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
-            "source_order_market_evidence": snapshot.get("source_order_market_evidence") or {},
+            "source_order_market_evidence": _compact_source_market_evidence(
+                snapshot.get("source_order_market_evidence") or {}
+            ),
             "source_market_evidence_revision": snapshot.get("source_market_evidence_revision"),
+            "market_path_ref": _compact_market_path_ref(replay, snapshot),
+            "horizon_receipts": replay.get("horizon_receipts") or buf.get("horizon_receipts"),
+            "path_gaps": replay.get("path_gaps") or _path_gap_census(replay.get("ticks")),
+            "origin_t_rel": replay.get("virtual_fill_t") or buf.get("virtual_fill_t"),
             **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
         }
         try:
@@ -37488,10 +37638,11 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
 # Coverage bug: signal_replay.jsonl rotates into .1/.2/... shards every ~20MB.
 # offline_simulator() only reads the active shard, so any APPROVE signal whose
 # replay buffer rotated before the analytics loop processed it never receives a
-# counterfactual.jsonl row. This catch-up scans ALL shards for APPROVE signals
-# that have replay data but no cf + no shadow_outcome row, then forces a
-# simulate_replay_outcome pass for each. Analytics-only — never touches the
-# trading path. Called from analytics_loop every CF_CATCHUP_EVERY_N_TICKS ticks.
+# compact counterfactual.jsonl row. Shadow_outcome is not a substitute.
+# This catch-up scans ALL shards for APPROVE signals that have replay data
+# but no compact CF disposition, then forces a simulate_replay_outcome pass.
+# Analytics-only — never touches the trading path. Called from analytics_loop
+# every CF_CATCHUP_EVERY_N_TICKS ticks.
 CF_CATCHUP_EVERY_N_TICKS = 10
 _cf_catchup_tick_counter = 0
 
@@ -37541,8 +37692,9 @@ def _find_replay_row_for_trade_id(path, target_tid, max_bytes_hint=None):
 
 def _run_counterfactual_catchup():
     """Force-simulate APPROVE signals that have replay data (in any shard) but
-    no counterfactual.jsonl and no shadow_outcome.jsonl row. Idempotent: every
-    successfully simulated trade_id is added to _sim_processed_trade_ids."""
+    no compact counterfactual.jsonl disposition. Shadow_outcome is not a
+    substitute. Idempotent: every successfully simulated trade_id is added to
+    _sim_processed_trade_ids."""
     global _sim_processed_trade_ids, write_counter
     try:
         if not os.path.exists(SIGNAL_SNAPSHOT_FILE):
@@ -37638,6 +37790,13 @@ def _run_counterfactual_catchup():
                 "gross_pnl_margin_pct": outcome.get("gross_pnl_margin_pct"),
                 "max_profit_margin_pct": outcome.get("max_profit_margin_pct"),
                 "max_drawdown_margin_pct": outcome.get("max_drawdown_margin_pct"),
+                "source_order_market_evidence": _compact_source_market_evidence(
+                    snapshot.get("source_order_market_evidence") or {}
+                ),
+                "market_path_ref": _compact_market_path_ref(replay, snapshot),
+                "horizon_receipts": replay.get("horizon_receipts"),
+                "path_gaps": replay.get("path_gaps") or _path_gap_census(replay.get("ticks")),
+                "origin_t_rel": replay.get("virtual_fill_t") or buf.get("virtual_fill_t"),
                 **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
                 "catchup": True,
             }

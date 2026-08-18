@@ -402,6 +402,8 @@ def test_policy_comparability_key_fails_closed_until_complete_snapshot():
         },
         "source_git_rev": "b99aceffb91a1345a96336ba123f651368b3be13",
         "executor_revision": "af5b912f3de5e6afbe9ca1a366f892c0f8591b31",
+        "epoch_id": "epoch-d93cddc91653a5c7bba07162",
+        "fill_gate_rev": "venue_fill_gate_v1",
     }
     key = policy_comparability_key(policy, buf, snapshot)
     assert key and key.startswith("policy_comparability_v1:")

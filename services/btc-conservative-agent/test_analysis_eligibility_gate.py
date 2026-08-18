@@ -247,6 +247,34 @@ class AnalysisEligibilityGateTests(unittest.TestCase):
             result["exclusion_reasons"][BITFINEX_COPY_FIDELITY],
         )
 
+    def test_paper_fill_and_copy_fill_is_both_executed_not_copy_only(self):
+        row = {
+            "trade_id": "cont-e86377c7f20a",
+            "executed": True,
+            "filled": True,
+            "paper_trade": {"net_pnl_usd": 0.83, "fill_price": 64100, "entry": 64100},
+            "policy_snapshot_complete": True,
+            "policy_version": 5,
+            "replay_complete": True,
+            "terminal_provenance": "SOURCE_CONFIRMED",
+            "source_fill_status": "FILLED",
+            "copy_fill_status": "FILLED",
+            "copy_fill_observed": {
+                "classification": "COPY_ONLY_FILL_AUTHENTICATED_SOURCE_UNCONFIRMED",
+            },
+        }
+        result = classify_row(row)
+        self.assertNotIn(
+            "COPY_ONLY_SOURCE_UNCONFIRMED",
+            result["exclusion_reasons"][SHOWCASE_STRATEGY],
+        )
+        self.assertFalse(result["eligible"][COPY_ONLY_EXCHANGE_FILLS])
+        self.assertTrue(result["eligible"][SHOWCASE_STRATEGY])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 if __name__ == "__main__":
     unittest.main()

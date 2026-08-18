@@ -148,6 +148,8 @@ COPY_ONLY_EXCHANGE_FILLS_REPORT_FILE = "copy_only_exchange_fills_report.json"
 REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE = "real_copy_parameter_optimisation_report.json"
 SHOWCASE_LOSING_CLUSTER_REPORT_FILE = "showcase_losing_cluster_descriptive.json"
 RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
+COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
+POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
@@ -2039,9 +2041,7 @@ def _load_jsonl_by_trade_id(path):
                         rows[tid] = row
         except Exception as e:
             print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    elif os.path.basename(str(requested_path)) != COUNTERFACTUAL_FILE:
-        return rows
-    if os.path.basename(str(requested_path)) != COUNTERFACTUAL_FILE:
+    if os.path.basename(str(requested_path)) not in {COUNTERFACTUAL_FILE, SHADOW_OUTCOME_FILE}:
         return rows
     relay_path = _agent_data_path("relay_lifecycle_evidence_v1.json")
     relay_index = _platform_relay_evidence_index(relay_path)
@@ -2100,6 +2100,8 @@ def _load_jsonl_by_trade_id(path):
                 "execution_profile": materialized.get("execution_profile") or evidence.get("execution_profile"),
                 "executor_revision": joined.get("generating_revision"),
                 "source_git_rev": materialized.get("source_git_rev") or policy.get("source_git_rev"),
+                "epoch_id": materialized.get("epoch_id") or materialized.get("fresh_epoch_id") or policy.get("epoch_id"),
+                "fill_gate_rev": materialized.get("fill_gate_rev") or policy.get("fill_gate_rev") or (evidence.get("venue_fill_gate") or {}).get("revision"),
                 "bitfinex_evidence": {
                     **evidence,
                     "generating_revision": joined.get("generating_revision"),
@@ -2132,10 +2134,48 @@ def _load_jsonl_by_trade_id(path):
         )
     except Exception:
         evidence_index = {}
+    try:
+        replays = _load_jsonl_replays()
+    except Exception:
+        replays = {}
+    paper_index = _paper_trade_index()
     for trade_id, source_row in list(rows.items()):
         attached = _attach_market_evidence(source_row, evidence_index)
-        reconstruction = _reconstruct_research_row(attached)
+        replay = replays.get(str(trade_id)) if isinstance(replays, dict) else None
+        ticks = (replay or {}).get("ticks") if isinstance(replay, dict) else None
+        paper_trade = paper_index.get(str(trade_id))
+        reconstruction = _reconstruct_research_row(
+            attached,
+            ticks=ticks,
+            paper_trade=paper_trade,
+        )
         attached["shadow_reconstruction"] = reconstruction
+        try:
+            from policy_research_engine import canonical_opportunity
+            extra = canonical_opportunity(
+                attached,
+                ticks=ticks,
+                observations=((attached.get("source_order_market_evidence") or {}).get("observations")),
+                lifecycle_events=attached.get("lifecycle_events"),
+                paper_trade=paper_trade,
+            )
+            attached["canonical_opportunity"] = extra
+            attached["chase_count"] = (extra.get("chase") or {}).get("chase_count")
+            attached["path_gaps"] = extra.get("path_gaps")
+            attached["horizon_receipts"] = extra.get("horizon_receipts")
+            attached["cost_complete"] = (extra.get("cost") or {}).get("cost_complete")
+            attached["setup_dna"] = extra.get("setup_dna")
+            attached["session_features"] = extra.get("session")
+            attached["clock_alignment"] = extra.get("clock")
+            attached["slippage_decomposition"] = extra.get("slippage")
+            attached["stop_replacement_chain"] = extra.get("stop_chain")
+            attached["microstructure"] = extra.get("microstructure")
+            attached["portfolio_path"] = extra.get("portfolio_path")
+            attached["divergence_telemetry"] = extra.get("divergence_telemetry")
+            if attached.get("limit_chase_count") in (None, 0, "0"):
+                attached["limit_chase_count"] = extra.get("chase", {}).get("chase_count")
+        except Exception:
+            pass
         if reconstruction.get("replay_complete") is False:
             attached["replay_complete"] = False
             attached["replay_completion_reason"] = reconstruction.get("replay_complete_reason")
@@ -2144,6 +2184,8 @@ def _load_jsonl_by_trade_id(path):
                 attached["not_a_trade"] = True
                 if attached.get("net_pnl_usd") in (0, 0.0) and str(attached.get("exit_reason") or "").upper() in {"NO_FILL", "TTL_EXPIRED", ""}:
                     attached["net_pnl_usd"] = None
+        if paper_trade:
+            attached["paper_trade"] = paper_trade
         rows[trade_id] = attached
     return rows
 
@@ -2273,9 +2315,64 @@ def research_jsonl_summary(datasets=None):
         print(f"  trade_lifecycle regimes={sorted(x for x in regimes if x)} trend_health={sorted(x for x in trends if x)} {PIPELINE_ENFORCEMENT_TAG}")
 
 
+def _paper_trade_index():
+    """Map trades_3factor.csv paper fills by trade_id. Missing file → empty."""
+    index = {}
+    try:
+        frame = robust_read_csv(TRADES_FILE, "paper trade index")
+        if frame is None or getattr(frame, "empty", True) or "trade_id" not in frame.columns:
+            return index
+        for _, row in frame.iterrows():
+            tid = str(row.get("trade_id") or "")
+            if not tid:
+                continue
+            index[tid] = {
+                "trade_id": tid,
+                "entry": row.get("entry") if "entry" in frame.columns else row.get("fill_price"),
+                "exit": row.get("exit") if "exit" in frame.columns else row.get("exit_price"),
+                "net_pnl_usd": row.get("net_pnl_usd"),
+                "exit_reason": row.get("exit_reason"),
+                "filled": True,
+            }
+    except Exception:
+        return {}
+    return index
+
+
+def _research_opportunity_universe():
+    """Union CF + shadow + funnel + paper CSV. One ID counted once; CF wins on overlap."""
+    rows = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
+    for tid, row in (_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {}).items():
+        if tid not in rows:
+            rows[tid] = row
+    paper = _paper_trade_index()
+    for tid, paper_row in paper.items():
+        if tid not in rows:
+            rows[tid] = {"trade_id": tid, "executed": True, "filled": True, "paper_trade": paper_row}
+        else:
+            rows[tid].setdefault("paper_trade", paper_row)
+    try:
+        from policy_research_engine import episode_tag
+        tagged = episode_tag([
+            {
+                "trade_id": tid,
+                "direction": (row or {}).get("direction") or (row or {}).get("scenario"),
+                "ts_unix": (row or {}).get("created_ts") or (row or {}).get("ts_unix"),
+                "limit_price": (row or {}).get("limit_price") or (row or {}).get("signal_price"),
+            }
+            for tid, row in rows.items()
+        ])
+        for tid, episode in tagged.items():
+            if tid in rows:
+                rows[tid].update(episode)
+    except Exception:
+        pass
+    return rows
+
+
 def _analysis_eligible_trade_ids(cohort=REAL_COPY_PARAMETER_OPTIMISATION):
     """Canonical cohort allow-list for research and policy optimizers."""
-    rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    rows = _research_opportunity_universe()
     eligible, exclusions = _cohort_eligible_trade_ids(rows, cohort)
     return eligible, exclusions, len(rows)
 
@@ -2632,7 +2729,7 @@ def _write_cohort_report(filename, cohort, eligible_ids, exclusions, evidence_ro
 
 def research_cohort_split_reports():
     """Write five non-overlapping research cohort reports. Never mix copy fills into Showcase WR."""
-    rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    rows = _research_opportunity_universe()
     reports = {}
     for cohort, filename, extra in (
         (SHOWCASE_STRATEGY, SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE, {
@@ -2770,7 +2867,7 @@ def showcase_losing_cluster_descriptive_report(trades=None, session=None):
 
 def research_horizon_maturity_report():
     """Verify 1/5/15/30/60/120m horizons without marking immature rows qualified."""
-    rows = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE)
+    rows = _research_opportunity_universe()
     slices = {
         "SHOWCASE_FILLS": [],
         "UNFILLED_SHOWCASE_ORDERS": [],
@@ -2812,6 +2909,60 @@ def research_horizon_maturity_report():
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
     print(f"  Horizon maturity slices written {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+def research_counterfactual_coverage_report():
+    """Every shadow/CF id gets a compact disposition or an explicit exclusion."""
+    from counterfactual_coverage import cover_universe
+    from policy_research_engine import build_reports, episode_tag
+
+    shadow = _load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {}
+    counter = _load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {}
+    try:
+        replays = _load_jsonl_replays()
+    except Exception:
+        replays = {}
+    coverage = cover_universe(shadow, counter, replays=replays, paper_by_id=_paper_trade_index())
+    opportunities = list((coverage.get("rows") or {}).values())
+    tagged = episode_tag([
+        {
+            "trade_id": row.get("trade_id"),
+            "direction": row.get("direction") or row.get("source_state"),
+            "ts_unix": (row.get("clock") or {}).get("source_ts"),
+            "limit_price": (row.get("slippage") or {}).get("limit"),
+        }
+        for row in opportunities
+    ])
+    for row in opportunities:
+        row.update(tagged.get(row.get("trade_id") or "", {}))
+    reports = build_reports(opportunities)
+    payload = {
+        **coverage,
+        "rows": None,
+        "n_rows_omitted_from_payload": coverage.get("n_compact_out"),
+        "policy_research_reports": reports,
+        "live_policy_change_allowed": False,
+        "live_params_unchanged": {
+            "cluster_bps": 9,
+            "thesis_cut": -12,
+            "hard_stop_pct": 13,
+            "ladder": "SCENARIO_C",
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = analyzer_report_path(COUNTERFACTUAL_COVERAGE_REPORT_FILE)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, default=str)
+    policy_path = analyzer_report_path(POLICY_RESEARCH_REPORT_FILE)
+    with open(policy_path, "w", encoding="utf-8") as handle:
+        json.dump(reports, handle, indent=2, default=str)
+    print(
+        f"  Counterfactual coverage: shadow={coverage.get('n_shadow')} "
+        f"cf_in={coverage.get('n_cf_in')} compact_out={coverage.get('n_compact_out')} "
+        f"censored={coverage.get('censored')} 120m={coverage.get('horizon_complete')} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
     return payload
 
 
@@ -17861,6 +18012,10 @@ def pre_test_analytics_reports(
     research_cohort_split_reports()
     showcase_losing_cluster_descriptive_report(trades=trades, session=session)
     research_horizon_maturity_report()
+    try:
+        research_counterfactual_coverage_report()
+    except Exception as exc:
+        print(f"  ⚠️ counterfactual coverage report skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     chase_payload_final = chase_payload
     if chase_payload_final is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
         chase_payload_final = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)

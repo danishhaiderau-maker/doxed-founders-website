@@ -30,7 +30,9 @@ def _load_functions(*names):
         "Path": Path,
         "json": json,
         "os": os,
+        "hashlib": __import__("hashlib"),
         "logger": _Logger(),
+        "_buf_float": lambda value, default=0: float(value if value is not None else default),
         "_OFFLINE_SIM_MAX_ROTATIONS": 128,
         "_OFFLINE_SIM_MAX_JSONL_ROW_BYTES": 8 * 1024 * 1024,
         "SIGNAL_SNAPSHOT_FILE": "signal_snapshot.jsonl",
@@ -78,6 +80,9 @@ def test_offline_simulator_joins_historical_rotations_and_appends_changed_platfo
         "_offline_sim_jsonl_paths",
         "_load_offline_sim_jsonl_revisions",
         "offline_simulator",
+        "_compact_source_market_evidence",
+        "_compact_market_path_ref",
+        "_path_gap_census",
     )
     snapshot = tmp_path / "signal_snapshot.jsonl"
     replay = tmp_path / "signal_replay.jsonl"

@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import test from 'node:test';
 import {
   ShowcaseRelayEventsService,
+  canClaimExpiredCycleForCurrentGeneration,
   exactLifecycleRevisionMatches,
   relayIntentEnvelope,
   shouldApplyExactLifecycleUpdate,
@@ -1104,9 +1105,12 @@ test('POSITION_CLOSED with no copy participant while relay is paused is acknowle
     tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
     signalCycleParticipant: { findFirst: async () => null },
     tradingAgentInstance: {
-      findFirst: async (args: { where?: { status?: string } }) => {
-        if (args.where?.status === 'ACTIVE') return null;
-        if (args.where?.status === 'PAUSED') return { id: 'cheetah-paused', userId: 'user-1' };
+      findFirst: async (args: { where?: { status?: string | { in?: string[] } } }) => {
+        const status = args.where?.status;
+        const allowed = typeof status === 'string' ? [status] : status?.in ?? [];
+        if (allowed.includes('PAUSED') || allowed.includes('ACTIVE')) {
+          return { id: 'cheetah-paused', userId: 'user-1' };
+        }
         return null;
       },
     },
@@ -1261,4 +1265,159 @@ test('signed POSITION_CLOSED still wakes when no-copy lookup tables are missing'
   assert.equal(result.ok, true);
   assert.equal(result.action, undefined);
   assert.deepEqual(trace, ['prewake', 'persist', 'closed', 'execution']);
+});
+
+test('ORDER_PLACED may claim a current-generation EXPIRED cycle but never a CLOSED one', () => {
+  const incoming = {
+    event: 'ORDER_PLACED' as const,
+    schema: 'dcf-showcase-intent-v1',
+    trade_id: 'cont-expired-claim',
+    executable: true,
+    entry_limit_policy: 'micro_sr_structural_limit_v1',
+    limit_price: 64_200,
+    qty: 0.031,
+    event_seq: 2,
+    ts: '2026-08-18T05:00:00.000Z',
+  };
+  assert.equal(
+    canClaimExpiredCycleForCurrentGeneration({
+      status: 'EXPIRED',
+      current: { action: 'ENTER', context: { showcase_event: 'APPROVE_PENDING', showcase_event_seq: 1 } },
+      incoming,
+    }),
+    true,
+  );
+  assert.equal(
+    canClaimExpiredCycleForCurrentGeneration({
+      status: 'CLOSED',
+      current: { action: 'ENTER', context: { showcase_event: 'APPROVE_PENDING' } },
+      incoming,
+    }),
+    false,
+  );
+  assert.equal(
+    canClaimExpiredCycleForCurrentGeneration({
+      status: 'EXPIRED',
+      current: { action: 'ENTER', context: { showcase_event: 'POSITION_CLOSED' } },
+      incoming,
+    }),
+    false,
+  );
+});
+
+test('POSITION_CLOSED with no copy participant while Cheetah is ACTIVE is acknowledged without a wake', async () => {
+  const secret = 'test-webhook-secret';
+  const createdEvents: Array<{ eventType: string; payload: Record<string, unknown> }> = [];
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycleParticipant: { findFirst: async () => null },
+    tradingAgentInstance: {
+      findFirst: async () => ({ id: 'cheetah-active', userId: 'user-1', status: 'ACTIVE' }),
+    },
+    signalCycle: {
+      findUnique: async () => ({
+        id: 'cycle-paper-only',
+        status: 'INTENT',
+        intentEnvelope: { action: 'ENTER', context: {} },
+      }),
+      findFirst: async () => ({ id: 'cycle-paper-only' }),
+      create: async () => {
+        throw new Error('must not create a retrospective cycle participant path');
+      },
+      update: async () => ({}),
+    },
+    signalCycleEvent: {
+      findFirst: async () => null,
+      create: async (args: { data: { eventType: string; payload: Record<string, unknown> } }) => {
+        createdEvents.push({ eventType: args.data.eventType, payload: args.data.payload });
+        return {};
+      },
+    },
+  };
+  const trace: string[] = [];
+  const execution = {
+    requestExecutorWake: async () => { trace.push('wake'); },
+    requestExecutorPreWake: () => { trace.push('prewake'); },
+  };
+  const cycles = {
+    wakeFromShowcase: async () => {
+      trace.push('reconcile');
+      return false;
+    },
+  };
+  const service = createService('dashboard-active', secret, { prisma, execution, cycles, trace });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_CLOSED' as const,
+    trade_id: 'cont-08224c821212',
+    research_lane: 'CONTINUOUS',
+    direction: 'SHORT',
+    exit_price: 64_249,
+    exit_reason: 'PROFIT_LOCK_LADDER',
+    event_id: 'close-cont-08224c821212-1',
+    event_seq: 4,
+    ts: new Date().toISOString(),
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  }) as Record<string, unknown>;
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'NO_COPY_PARTICIPANT');
+  assert.equal(result.exchange_mutation, false);
+  assert.equal(trace.includes('wake'), false);
+  assert.equal(trace.includes('prewake'), false);
+});
+
+test('ORDER_EXPIRED with a research TTL reason is acked without flatten wake', async () => {
+  const secret = 'test-webhook-secret';
+  const prisma = {
+    tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+    signalCycle: {
+      findFirst: async () => ({ id: 'cycle-ttl', agentId: 'agent-1', status: 'INTENT', intentEnvelope: {} }),
+      findUnique: async () => ({ id: 'cycle-ttl', agentId: 'agent-1', status: 'INTENT', intentEnvelope: {} }),
+      create: async () => ({ id: 'cycle-ttl' }),
+      update: async () => ({}),
+    },
+    signalCycleEvent: { findFirst: async () => null, create: async () => ({}) },
+    $executeRaw: async () => 1,
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
+  };
+  const trace: string[] = [];
+  const execution = {
+    requestExecutorWake: async () => { trace.push('wake'); },
+    requestExecutorPreWake: () => { trace.push('prewake'); },
+  };
+  const service = createService('dashboard-active', secret, { prisma, execution, trace });
+  const body = {
+    schema: 'dcf-showcase-intent-v1',
+    event: 'ORDER_EXPIRED' as const,
+    trade_id: 'cont-143962d491f7',
+    research_lane: 'CONTINUOUS',
+    direction: 'SHORT',
+    reason: 'VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY',
+    event_id: 'exp-1',
+    event_seq: 1,
+    limit_price: 64_278.17,
+    ts: new Date().toISOString(),
+    source_expires_at: new Date().toISOString(),
+    dashboard_owner: true,
+    bot_instance_id: 'dashboard-active',
+    dashboard_port: 7002,
+  };
+  const rawBody = Buffer.from(JSON.stringify(body));
+  const signature = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`;
+  const result = await service.ingest('conservative-btc', body, {
+    rawBody,
+    signatureHeader: signature,
+  }) as Record<string, unknown>;
+  assert.equal(result.ok, true);
+  assert.equal(result.action, 'ORDER_EXPIRED_ACKED');
+  assert.equal(result.exchange_mutation, false);
+  assert.equal(trace.includes('wake'), false);
 });

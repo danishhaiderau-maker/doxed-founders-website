@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { SignalCycleStatus } from '@prisma/client';
+import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
 import { buildShowcaseSessionEpoch, type ShowcaseSessionEpoch } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BotBridgeService } from './bot-bridge.service';
@@ -110,6 +110,27 @@ export class ShowcaseSessionSyncService implements OnModuleInit {
       await this.persistAgentEpoch(agent.id, dash, epoch, 'restart_continuity', {
         preserveResetStamp: true,
       });
+      return;
+    }
+
+    const activeLiveHire = await this.prisma.tradingAgentInstance.findFirst({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.ACTIVE,
+      },
+      select: { id: true },
+    });
+    // USER_RELAY_STOP while Cheetah stays ACTIVE is a bug: Showcase paper
+    // epoch churn must not cancel healthy current-session Bitfinex orders.
+    if (activeLiveHire) {
+      this.logger.warn(
+        `Showcase session epoch changed (${prevKey} -> ${epoch.key}) — Cheetah ACTIVE, preserving copy sessions (no USER_RELAY_STOP)`,
+      );
+      await this.persistAgentEpoch(agent.id, dash, epoch, 'active_hire_continuity', {
+        preserveResetStamp: true,
+      });
+      this.botBridge.invalidateCache();
       return;
     }
 

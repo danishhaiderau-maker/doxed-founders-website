@@ -110,6 +110,19 @@ def policy_comparability_key(policy, buf, snapshot):
         or evidence.get("generating_revision")
         or platform.get("generating_revision")
     )
+    epoch_id = (
+        snapshot.get("epoch_id")
+        or snapshot.get("fresh_epoch_id")
+        or policy.get("epoch_id")
+        or evidence.get("epoch_id")
+    )
+    fill_gate_rev = (
+        snapshot.get("fill_gate_rev")
+        or policy.get("fill_gate_rev")
+        or (snapshot.get("venue_fill_gate") or {}).get("revision")
+        or (evidence.get("venue_fill_gate") or {}).get("revision")
+        or evidence.get("fill_gate_rev")
+    )
     if (
         any(policy.get(key) is None for key in REQUIRED_POLICY_KEYS)
         or leverage is None
@@ -119,6 +132,8 @@ def policy_comparability_key(policy, buf, snapshot):
         or cluster_boundary is None
         or not source_revision
         or not executor_revision
+        or not epoch_id
+        or not fill_gate_rev
     ):
         return None
     value = {
@@ -135,6 +150,8 @@ def policy_comparability_key(policy, buf, snapshot):
         "correlated_cluster_boundary_pct": cluster_boundary,
         "source_revision": source_revision,
         "executor_revision": executor_revision,
+        "epoch_id": epoch_id,
+        "fill_gate_rev": fill_gate_rev,
     }
     digest = hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()

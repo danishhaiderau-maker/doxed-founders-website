@@ -63,7 +63,19 @@ def _copy_fill(row, evidence):
     return copy_fill
 
 
+def _showcase_filled(row):
+    paper = row.get("paper_trade") if isinstance(row.get("paper_trade"), dict) else {}
+    if row.get("executed") is True and row.get("filled") is True:
+        return True
+    if paper.get("net_pnl_usd") is not None or paper.get("fill_price") or paper.get("entry"):
+        return True
+    status = str(row.get("source_fill_status") or "").upper()
+    return status in {"FILLED", "PARTIAL"}
+
+
 def _is_copy_only(row, evidence, copy_fill):
+    if _showcase_filled(row):
+        return False
     classification = str(copy_fill.get("classification") or "").upper()
     source_model = str(copy_fill.get("source_model_fill_state") or "").upper()
     divergence = str(
