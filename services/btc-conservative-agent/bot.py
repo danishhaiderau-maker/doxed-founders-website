@@ -3985,6 +3985,15 @@ def risk_trading_allowed() -> bool:
     if stale_loss_pause or expired_loss_pause:
         set_execution_paused("")
 
+    if _paper_skips_entry_risk_pauses():
+        with state_lock:
+            paper_risk_paused = bool(state.get("execution_paused")) and state.get(
+                "execution_reason"
+            ) in ("DAILY_DRAWDOWN", "LOSS_STREAK")
+        if paper_risk_paused:
+            set_execution_paused("")
+        return True
+
     with state_lock:
         pause_until = state.get("loss_pause_until", 0)
         if pause_until > now:
@@ -17996,6 +18005,13 @@ def _force_paper_mode_active() -> bool:
     )
 
 
+def _paper_skips_entry_risk_pauses() -> bool:
+    """Showcase paper must keep collecting through losing days/streaks."""
+    if _force_paper_mode_active():
+        return True
+    return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+
+
 def _paper_natural_cycle_exits() -> bool:
     """Paper Showcase closes only on Scenario C ladder or thesis cut/loss.
 
@@ -24471,8 +24487,17 @@ _AI_DRAIN_POST_PATHS = {
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
     "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
-    "/api/analyzer/genome", "/api/download_debug_config", "/api/export_csv",
-    "/api/export_debug", "/debug_state", "/static/dashboard.js",
+    "/api/analyzer/genome", "/api/download_debug_config",
+    "/debug_state", "/static/dashboard.js",
+}
+
+# Owner warehouse dumps: public internet needs the admin cookie/header.
+# Loopback still allowed so the local Flask test client and home operator
+# can export without stuffing BOT_ADMIN_TOKEN into the URL.
+_OWNER_RESEARCH_EXPORT_PATHS = {
+    "/api/export_csv",
+    "/api/export.csv",
+    "/api/export_debug",
 }
 
 
@@ -24663,6 +24688,12 @@ def _emergency_api_guard():
     # Read-only GETs are allowed without a token (still rate-limited above).
     if method == "GET" and path in _READ_ONLY_GET_PATHS:
         return None
+    if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
+        if _admin_authed_strict():
+            return None
+        resp = jsonify({"error": "unauthorized — owner token required for research export"})
+        resp.status_code = 401
+        return resp
     if method == "OPTIONS":
         return None  # CORS preflight — let route handlers respond
 
@@ -27585,7 +27616,7 @@ __ADMIN_ACCESS_CONTROLS__
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
-    <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
+    <button onclick="window.location.href='/api/export.csv'" title="Owner-auth ZIP of CSV/JSONL collection files (same as /api/export_csv)">Download CSV Logs</button>
 </div>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -35877,7 +35908,33 @@ def export_debug():
         logger.error(f"[EXPORT ERROR] {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+def research_export_files():
+    """Owner-dashboard ZIP members: session CSV plus Fly collection JSONL."""
+    return [
+        CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
+        CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
+        SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
+        EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
+        SHADOW_LANE_OUTCOME_FILE,
+        LANE_OPPORTUNITY_CAPTURE_FILE,
+        LANE_PNL_LEDGER_FILE,
+        LANE_LAB_PNL_LEDGER_FILE,
+        TILE2_COUNTERS_FILE,
+        PATHWAY_LANE_SPECS_FILE,
+        "benchmark_vs_lanes_report.json",
+        "pathway_scorecard.json",
+        PATH_REPLAY_FILE,
+        CYCLE_3M_UNIVERSE_FILE,
+        CHASE_OFFSET_TOUCH_GRID_FILE,
+        ORDER_MULTIVERSE_FILE,
+        "execution_funnel.jsonl",
+        "execution_funnel_summary.json",
+        AI_FUNNEL_REPORT_FILE,
+    ]
+
+
 @app.route('/api/export_csv')
+@app.route('/api/export.csv')
 def export_csv():
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -35885,21 +35942,7 @@ def export_csv():
         # research lifecycle. The old export omitted these newer files, so a
         # downloaded ZIP could show replay buffers but could not prove whether
         # Tile 2 / Type B filled, expired, closed, or remained counterfactual.
-        export_files = [
-            CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
-            CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
-            SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
-            EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
-            SHADOW_LANE_OUTCOME_FILE,
-            LANE_OPPORTUNITY_CAPTURE_FILE,
-            LANE_PNL_LEDGER_FILE,
-            LANE_LAB_PNL_LEDGER_FILE,
-            TILE2_COUNTERS_FILE,
-            PATHWAY_LANE_SPECS_FILE,
-            "benchmark_vs_lanes_report.json",
-            "pathway_scorecard.json",
-        ]
-        for file in dict.fromkeys(export_files):
+        for file in dict.fromkeys(research_export_files()):
             if os.path.exists(file):
                 zip_file.write(file, arcname=os.path.basename(file))
     zip_buffer.seek(0)
@@ -39674,6 +39717,8 @@ def apply_trade_pnl(trade_row):
             state["consecutive_losses"] = state.get("consecutive_losses", 0) + 1
         else:
             state["consecutive_losses"] = 0
+        if _paper_skips_entry_risk_pauses():
+            return
         if state["consecutive_losses"] >= CONSECUTIVE_LOSS_PAUSE:
             state["loss_pause_until"] = time.time() + LOSS_PAUSE_SEC
             set_execution_paused("LOSS_STREAK")
