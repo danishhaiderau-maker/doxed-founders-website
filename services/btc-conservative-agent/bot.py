@@ -98,9 +98,15 @@ from normalized_market_indicators import (
     normalize_market_indicators,
 )
 from path_replay_v1 import (
+    COLLECTOR_VERSION,
+    CONTROL_CELL,
+    FEATURE_SCHEMA_VERSION,
+    FILL_MODEL_IDEAL_TOUCH,
     PATH_REPLAY_FILE,
     PATH_REPLAY_POLICY_TAG,
     PATH_REPLAY_SCHEMA,
+    PATH_SCHEMA_VERSION,
+    REPLAY_VERSION,
     build_path_sample,
 )
 from cycle_3m_indicators import (
@@ -121,6 +127,7 @@ from chase_offset_touch_grid import (
 )
 from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
+    TERMINAL_LIFECYCLES,
     build_order_multiverse,
     paper_multiverse_trade_id,
 )
@@ -7392,16 +7399,47 @@ def tile2_entry_policy_hash() -> str:
 
 def csv_research_meta(signal: dict = None) -> dict:
     """Columns written to research CSVs for analyzer version/exchange verification."""
+    invert_on = False
+    if signal:
+        invert_on = _coerce_invert_on(signal)
+    else:
+        try:
+            invert_on = bool(state.get("invert_signal", False))
+        except Exception:
+            invert_on = False
     meta = {
         "exchange": BOT_EXCHANGE,
         "data_symbol": SYMBOL,
         "bot_version": EXECUTION_FIX_VERSION,
         "fee_profile": EXCHANGE_FEE_PROFILE,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "invert_on": bool(invert_on),
+        "invert_signal": bool(invert_on),
     }
     if signal:
         meta.update(csv_lane_meta(signal))
     return meta
+
+
+def _coerce_invert_on(*sources) -> bool:
+    """Ticket-time invert flag. Invert is an experimental factor, not a hidden mutation."""
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        for key in ("invert_on", "invert_signal", "inverted"):
+            if src.get(key) is not None:
+                return bool(src.get(key))
+        controls = src.get("controls")
+        if isinstance(controls, dict) and controls.get("invert_signal") is not None:
+            return bool(controls.get("invert_signal"))
+        entry = src.get("entry_controls")
+        if isinstance(entry, dict) and entry.get("invert_signal") is not None:
+            return bool(entry.get("invert_signal"))
+    try:
+        with state_lock:
+            return bool(state.get("invert_signal", False))
+    except Exception:
+        return False
 ORDER_PLACEMENT_GRACE_SEC = 30
 # Patient limit entry by default; set RESEARCH_INSTANT_FILL=1 only for emergency throughput tests.
 SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
@@ -10710,6 +10748,8 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
         signal["final_direction"] = final_direction
         signal["direction"] = final_direction
         signal["inverted"] = inverted
+        signal["invert_on"] = bool(state.get("invert_signal", False))
+        signal["invert_signal"] = signal["invert_on"]
     if ai and not signal.get("_ai_logged"):
         log_ai(signal, ai)
     signal["_completed"] = True
@@ -11458,6 +11498,7 @@ _touch_grid_book = {}
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
+_order_multiverse_path_complete = {}
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
@@ -11487,6 +11528,7 @@ def _arm_chase_offset_touch_grid(signal: dict):
             signal_ts=ts,
             ttl_sec=ttl_sec,
             live_offset_pct=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+            invert_on=_coerce_invert_on(signal),
         )
         for row in rows:
             _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
@@ -11500,29 +11542,30 @@ def _arm_chase_offset_touch_grid(signal: dict):
 
 
 def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
-    if not _touch_grid_book or price is None or float(price) <= 0:
+    if price is None or float(price) <= 0:
         return
     now = time.time()
     dead = []
-    for tid, grid in list(_touch_grid_book.items()):
-        try:
-            if now > float(grid.get("expires_ts") or 0):
-                dead.append(tid)
-                continue
-            for row in poll_grid_state(
-                grid,
-                now_ts=now,
-                last=float(price),
-                high=float(price),
-                low=float(price),
-                bid=None if not bid else float(bid),
-                ask=None if not ask else float(ask),
-            ):
-                _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
-        except Exception as exc:
-            logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
-    for tid in dead:
-        _touch_grid_book.pop(tid, None)
+    if _touch_grid_book:
+        for tid, grid in list(_touch_grid_book.items()):
+            try:
+                if now > float(grid.get("expires_ts") or 0):
+                    dead.append(tid)
+                    continue
+                for row in poll_grid_state(
+                    grid,
+                    now_ts=now,
+                    last=float(price),
+                    high=float(price),
+                    low=float(price),
+                    bid=None if not bid else float(bid),
+                    ask=None if not ask else float(ask),
+                ):
+                    _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+            except Exception as exc:
+                logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
+        for tid in dead:
+            _touch_grid_book.pop(tid, None)
     _maybe_complete_pending_order_multiverse()
 
 
@@ -11535,18 +11578,14 @@ def _maybe_complete_pending_order_multiverse():
     for src in list(_order_multiverse_pending_src.values()):
         expires = float(src.get("expires_ts") or 0)
         ttl_done = expires > 0 and now >= expires
-        tid = paper_multiverse_trade_id(src.get("trade_id"), src.get("source_trade_id"))
-        has_post_fill_writer = False
-        if tid:
-            with replay_lock:
-                buf = replay_buffers.get(tid) or {}
-                has_post_fill_writer = bool(
-                    buf.get("post_exit")
-                    or buf.get("lane") == "executed"
-                    or buf.get("virtual_fill_t") is not None
-                )
-        # TTL/cancel scores now. 120m post-fill writer, if already running, may keep sampling.
-        _sync_order_multiverse(src, path_complete=bool(ttl_done and not has_post_fill_writer))
+        closed = str(src.get("status") or "").upper() in (
+            "CLOSED", "FILLED", "EXPIRED", "CANCELLED", "COMPLETE",
+        )
+        # 120m post-fill writer is extra tape. Do not block COMPLETE of paper tickets.
+        _sync_order_multiverse(
+            src,
+            path_complete=bool(ttl_done or closed or src.get("path_complete")),
+        )
 
 
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
@@ -11563,8 +11602,9 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         if not tid:
             return None
         prev = _order_multiverse_state.get(tid)
-        if prev == "COMPLETE":
-            return None
+        if prev in TERMINAL_LIFECYCLES:
+            if prev == "FUNNEL_ONLY" or _order_multiverse_path_complete.get(tid) is True:
+                return None
         price = float(
             source.get("signal_price_at_approve")
             or source.get("signal_price")
@@ -11579,9 +11619,33 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             ts = float(source.get("snapshot_ts") or time.time())
         ttl = float(source.get("expires_ts") or 0)
         ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
+        invert_on = _coerce_invert_on(source)
+        live_fill_ts = source.get("live_fill_ts") or source.get("fill_ts") or source.get("entry_ts")
+        live_fill_price = (
+            source.get("live_fill_price")
+            or source.get("fill_price")
+            or source.get("entry")
+            or source.get("entry_price")
+        )
+        status_u = str(source.get("status") or source.get("outcome") or "").upper()
+        ticket_closed = status_u in (
+            "CLOSED", "EXPIRED", "CANCELLED", "COMPLETE", "TTL_EXPIRED", "SIGNAL_TTL_EXPIRED",
+        ) or bool(source.get("ticket_closed"))
+        if live_fill_ts:
+            try:
+                live_fill_ts = float(live_fill_ts)
+            except (TypeError, ValueError):
+                live_fill_ts = None
+        if live_fill_price:
+            try:
+                live_fill_price = float(live_fill_price)
+            except (TypeError, ValueError):
+                live_fill_price = None
+            if live_fill_price is not None and live_fill_price <= 0:
+                live_fill_price = None
         candles_1m = fetch_mtf_candles("1m", limit=500) or []
         ticks_1s = []
-        replay_complete = bool(path_complete)
+        replay_complete = bool(path_complete or ticket_closed)
         with replay_lock:
             buf = replay_buffers.get(tid) or {}
             start = float(buf.get("start_ts") or ts)
@@ -11598,6 +11662,9 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
                 })
             if buf.get("post_exit") and buf.get("closed"):
                 replay_complete = True
+            if buf.get("virtual_fill_t") is not None and live_fill_ts is None:
+                live_fill_ts = start + float(buf.get("virtual_fill_t") or 0)
+                live_fill_price = live_fill_price or buf.get("virtual_entry")
         with state_lock:
             univ = dict(state.get("last_cycle_3m_universe") or {})
         record = build_order_multiverse(
@@ -11615,27 +11682,50 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             support_price=univ.get("support_price") or source.get("support_price"),
             resistance_price=univ.get("resistance_price") or source.get("resistance_price"),
             path_complete=replay_complete,
+            invert_on=invert_on,
+            live_fill_ts=live_fill_ts,
+            live_fill_price=live_fill_price,
+            ticket_closed=ticket_closed,
         )
-        if record.get("pending"):
-            _order_multiverse_pending_src[tid] = {
-                "trade_id": tid,
-                "signal_price_at_approve": price,
-                "signal_price": price,
-                "created_ts_ts": ts,
-                "expires_ts": ts + ttl_sec,
-                "final_direction": direction,
-                "atr14_pct_3m": univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
-                "donchian_high_3m": univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
-                "donchian_low_3m": univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
-                "support_price": univ.get("support_price") or source.get("support_price"),
-                "resistance_price": univ.get("resistance_price") or source.get("resistance_price"),
-            }
-            if prev == "PENDING":
+        lifecycle = str(record.get("lifecycle") or record.get("event") or "")
+        keep_collecting = bool(record.get("pending")) or lifecycle not in TERMINAL_LIFECYCLES
+        pending_payload = {
+            "trade_id": tid,
+            "signal_price_at_approve": price,
+            "signal_price": price,
+            "created_ts_ts": ts,
+            "expires_ts": ts + ttl_sec,
+            "final_direction": direction,
+            "invert_on": invert_on,
+            "live_fill_ts": live_fill_ts,
+            "live_fill_price": live_fill_price,
+            "status": "CLOSED" if ticket_closed else ("FILLED" if live_fill_ts else "PENDING"),
+            "ticket_closed": ticket_closed,
+            "atr14_pct_3m": univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+            "donchian_high_3m": univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
+            "donchian_low_3m": univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
+            "support_price": univ.get("support_price") or source.get("support_price"),
+            "resistance_price": univ.get("resistance_price") or source.get("resistance_price"),
+        }
+        if keep_collecting:
+            prev_src = _order_multiverse_pending_src.get(tid) or {}
+            _order_multiverse_pending_src[tid] = pending_payload
+            # Skip a second PENDING line unless fill/touches arrived (n_touched=0 leak).
+            if (
+                prev == "PENDING"
+                and lifecycle in ("ENTRY_RESOLVED", "PENDING", "")
+                and not live_fill_ts
+                and int(record.get("n_touched") or 0) <= int(prev_src.get("n_touched") or 0)
+            ):
                 return record
+            pending_payload["n_touched"] = record.get("n_touched") or 0
         else:
             _order_multiverse_pending_src.pop(tid, None)
         _safe_append_jsonl(ORDER_MULTIVERSE_FILE, record, label="ORDER_MULTIVERSE")
-        _order_multiverse_state[tid] = "PENDING" if record.get("pending") else "COMPLETE"
+        _order_multiverse_state[tid] = lifecycle or ("PENDING" if record.get("pending") else "COMPLETE")
+        _order_multiverse_path_complete[tid] = bool(
+            ((record.get("completeness") or {}).get("PATH_COMPLETE") is True)
+        )
         if len(_order_multiverse_state) > 64:
             oldest = next(iter(_order_multiverse_state))
             _order_multiverse_state.pop(oldest, None)
@@ -13209,10 +13299,16 @@ def capture_near_miss_on_approve(signal, ai, edge_score, ctx):
 
 HORIZON_OUTCOME_SECS = {
     "1m": 60,
+    "2m": 120,
+    "3m": 180,
     "5m": 300,
+    "10m": 600,
     "15m": 900,
+    "20m": 1200,
     "30m": 1800,
+    "45m": 2700,
     "60m": 3600,
+    "90m": 5400,
     "120m": 7200,
 }
 
@@ -21392,6 +21488,8 @@ def process_signal(event: dict):
             signal["final_direction"] = final_direction
             signal["direction"] = final_direction
             signal["inverted"] = inverted
+            signal["invert_on"] = bool(state.get("invert_signal", False))
+            signal["invert_signal"] = signal["invert_on"]
             signal["ai_decision"] = ai.get("decision")
             signal["ai_win_prob"] = ai.get("win_prob")
             signal["bull_score_at_entry"] = ai.get("bull_score", 0)
@@ -23971,9 +24069,10 @@ def close_position(pos: dict, exit_reason: str):
             "setup_type": master.get("setup_type", "UNKNOWN") if master else "UNKNOWN",
             "edge_score": edge_at_entry,
             "edge_score_at_entry": edge_at_entry,
-            "invert_signal": state.get("invert_signal", False),
+            "invert_signal": _coerce_invert_on(pos, master),
+            "invert_on": _coerce_invert_on(pos, master),
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
-            "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
+            "experiment_tag": f"INV_{_coerce_invert_on(pos, master)}_EF_{state.get('early_fail_enabled', True)}",
             "final_direction": pos.get("dir"),
             **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
@@ -24076,6 +24175,20 @@ def close_position(pos: dict, exit_reason: str):
         master["expires_ts"] = time.time() - 1
 
     persist_signal_close(trade_id, "CLOSED")
+    _sync_order_multiverse(
+        {
+            **(master or {}),
+            **(pos or {}),
+            "trade_id": trade_id,
+            "status": "CLOSED",
+            "ticket_closed": True,
+            "live_fill_ts": pos.get("entry_ts"),
+            "live_fill_price": pos.get("entry") or entry,
+            "invert_on": _coerce_invert_on(pos, master, trade_row),
+            "exit_reason": exit_reason,
+        },
+        path_complete=False,
+    )
 
     save_positions()
     save_persistent_config()
@@ -33360,6 +33473,12 @@ def health():
             "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
             "post_exit_file": POST_EXIT_REPLAY_FILE,
             "order_multiverse_file": ORDER_MULTIVERSE_FILE,
+            "collector_version": COLLECTOR_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "path_schema_version": PATH_SCHEMA_VERSION,
+            "replay_version": REPLAY_VERSION,
+            "fill_model": FILL_MODEL_IDEAL_TOUCH,
+            "control_cell": CONTROL_CELL,
             "alt_tp": ["atr_k_tp", "chandelier", "structure_tp"],
             "alt_sl": ["atr_k_stop", "structure_stop"],
             "live_exits_unchanged": True,
@@ -33909,6 +34028,19 @@ def api_reconcile_phantom_cancel():
 
     # ---- Outside the close lock: persistence + relay + audit -----------
     persist_signal_close(trade_id, "CLOSED")
+    _sync_order_multiverse(
+        {
+            **(pos or {}),
+            "trade_id": trade_id,
+            "status": "CLOSED",
+            "ticket_closed": True,
+            "live_fill_ts": (pos or {}).get("entry_ts"),
+            "live_fill_price": (pos or {}).get("entry") or entry_price,
+            "invert_on": _coerce_invert_on(pos or {}, trade_row),
+            "exit_reason": PHANTOM_CANCEL_REASON,
+        },
+        path_complete=False,
+    )
     save_positions()
     save_persistent_config()
 
@@ -36758,6 +36890,7 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
         shared_ai_call_ts=(ai or {}).get("shared_ai_call_ts") or signal.get("shared_ai_call_ts"),
         collection_mode=signal.get("collection_mode") or "ACTIVE_RESEARCH",
         paused_shadow=bool(signal.get("paused_shadow")),
+        invert_on=_coerce_invert_on(signal),
         prompt_id=ai.get("prompt_id") or signal.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         adx_at_signal=(
             ((((signal.get("context") or {}).get("market_context") or {}).get("trend_strength") or {}).get("adx"))
@@ -37323,6 +37456,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "fill_at_limit": bool(meta.get("fill_at_limit")),
             "limit_chase_count": int(meta.get("limit_chase_count") or 0),
             "exit_outcome": meta.get("exit_outcome"),
+            "invert_on": bool(meta.get("invert_on", False)),
             **fill_stamps,
         }
 
@@ -37404,6 +37538,7 @@ def append_replay_tick(
             trough_mae_pct=mae,
             observed_ts=now,
             seq=buf["seq"],
+            invert_on=bool(buf.get("invert_on", False)),
         )
     _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
     if persist_trade_id is not None:
@@ -37754,7 +37889,9 @@ def _load_post_exit_replays():
 
 
 _HORIZON_RECEIPT_SECS = (
-    ("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("60m", 3600), ("120m", 7200),
+    ("1m", 60), ("2m", 120), ("3m", 180), ("5m", 300), ("10m", 600),
+    ("15m", 900), ("20m", 1200), ("30m", 1800), ("45m", 2700),
+    ("60m", 3600), ("90m", 5400), ("120m", 7200),
 )
 _MAX_PATH_GAP_MS = 15_000
 
@@ -37983,12 +38120,22 @@ def dump_replay(trade_id: str):
                     buf.get("source_trade_id"),
                 )
                 if paper_tid:
+                    fill_t = buf.get("virtual_fill_t")
+                    start_ts = buf.get("start_ts")
+                    live_fill_ts = None
+                    if fill_t is not None and start_ts:
+                        live_fill_ts = float(start_ts) + float(fill_t)
                     mv_source = {
                         "trade_id": paper_tid,
                         "signal_price": buf.get("start_price") or buf.get("entry_price"),
                         "signal_price_at_approve": buf.get("start_price"),
                         "created_ts_ts": buf.get("start_ts"),
                         "final_direction": buf.get("direction"),
+                        "status": "CLOSED" if buf.get("closed") else "FILLED",
+                        "ticket_closed": bool(buf.get("closed")),
+                        "invert_on": bool(buf.get("invert_on", False)),
+                        "live_fill_ts": live_fill_ts,
+                        "live_fill_price": buf.get("virtual_entry") or buf.get("entry_price"),
                         "atr14_pct_3m": buf.get("atr14_pct_3m"),
                         "donchian_high_3m": buf.get("donchian_high_3m"),
                         "donchian_low_3m": buf.get("donchian_low_3m"),

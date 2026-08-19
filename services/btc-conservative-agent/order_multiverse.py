@@ -27,31 +27,51 @@ from chase_offset_touch_grid import (
     OFFSET_PCT_GRID,
     TTL_SEC_DEFAULT,
     candle_ts_sec,
+    orig_limit_price,
     simulate_touch_fill,
 )
 from path_replay_v1 import (
-    ATR_K_GRID,
-    CHANDELIER_K_GRID,
-    LIVE_EARLY_LADDER_4_2,
-    LIVE_SCENARIO_C_LADDER,
+    COLLECTOR_VERSION,
+    CONTROL_CELL,
+    FEATURE_SCHEMA_VERSION,
+    FILL_MODEL_IDEAL_TOUCH,
+    FILL_MODELS,
+    LIVE_HARD_STOP_PCT,
     LIVE_THESIS_CUT,
-    THESIS_4PP_GRID,
-    first_hit_combo,
-    simulate_atr_stop,
-    simulate_atr_take_profit,
-    simulate_chandelier_trail,
-    simulate_policy_on_path,
-    simulate_structure_stop,
-    simulate_structure_take_profit,
+    PATH_SCHEMA_VERSION,
+    REPLAY_VERSION,
+    mfe_mae_trajectory,
+    path_exit_annotations,
+    path_recovery_stats,
+    raw_1m_to_ticks,
+    zero_fill_costs,
 )
 
 
 ORDER_MULTIVERSE_SCHEMA = "order_multiverse_v1"
 ORDER_MULTIVERSE_FILE = "order_multiverse.jsonl"
 HOLD_SEC_DEFAULT = 7200.0
-SCORE_CAP = 320
+SCORE_CAP = 64
 LIVE_CHASE_ID = "w234_s25_i180"
 LAB_OR_HUNTER_PREFIXES = ("lab-", "tbh-")
+LIFECYCLE_SIGNAL = "SIGNAL"
+LIFECYCLE_ENTRY_RESOLVED = "ENTRY_RESOLVED"
+LIFECYCLE_FILLED = "FILLED"
+LIFECYCLE_PATH_COMPLETE = "PATH_COMPLETE"
+LIFECYCLE_REPLAY_COMPLETE = "REPLAY_COMPLETE"
+LIFECYCLE_TTL_UNFILLED = "TTL_UNFILLED"
+LIFECYCLE_FUNNEL_ONLY = "FUNNEL_ONLY"
+LIFECYCLE_WAITING_120M = "WAITING_120M"
+LIFECYCLE_DATA_ERROR = "DATA_ERROR"
+LIFECYCLE_COMPLETE = "COMPLETE"
+TERMINAL_LIFECYCLES = (LIFECYCLE_COMPLETE, LIFECYCLE_FUNNEL_ONLY, LIFECYCLE_REPLAY_COMPLETE)
+KEEP_COLLECTING_LIFECYCLES = (
+    LIFECYCLE_SIGNAL,
+    LIFECYCLE_ENTRY_RESOLVED,
+    LIFECYCLE_FILLED,
+    LIFECYCLE_WAITING_120M,
+    LIFECYCLE_DATA_ERROR,
+)
 
 
 def paper_multiverse_trade_id(*candidates: Any) -> str:
@@ -66,6 +86,101 @@ def paper_multiverse_trade_id(*candidates: Any) -> str:
             continue
         return tid
     return ""
+
+
+def resolve_lifecycle(
+    *,
+    signal_recorded: bool,
+    entry_outcome: str,
+    ticket_closed: bool,
+    path_complete: Optional[bool],
+    path_missing: bool,
+    exit_sweep_complete: bool = False,
+) -> tuple:
+    """Map flags onto one lifecycle label + completeness_reason.
+
+    SIGNAL → ENTRY_RESOLVED
+      ├── FILLED → PATH_COMPLETE → REPLAY_COMPLETE  (event COMPLETE when path ready)
+      └── TTL_UNFILLED → FUNNEL_ONLY
+    """
+    if not signal_recorded:
+        return LIFECYCLE_SIGNAL, "signal not recorded; not usable"
+    outcome = str(entry_outcome or "")
+    if outcome == "PENDING":
+        return LIFECYCLE_ENTRY_RESOLVED, "entry not resolved yet (waiting fill or TTL); not in exit stats"
+    if outcome == "TTL_UNFILLED":
+        return LIFECYCLE_FUNNEL_ONLY, "TTL_UNFILLED: funnel/P(fill) only; never exit-win-rate denominator"
+    if outcome == "CANCELLED":
+        return LIFECYCLE_FUNNEL_ONLY, "cancelled unfilled; funnel only; never exit-win-rate denominator"
+    if outcome == "FILLED":
+        if ticket_closed and path_missing:
+            return LIFECYCLE_DATA_ERROR, "FILLED+CLOSED but path missing; DATA_ERROR not COMPLETE"
+        if path_complete is not True:
+            if ticket_closed:
+                return LIFECYCLE_WAITING_120M, "WAITING_120M: filled but 120m path incomplete; not in exit stats"
+            return LIFECYCLE_FILLED, "IN_TRADE: filled and still open; 120m path incomplete; not in exit stats"
+        if exit_sweep_complete:
+            return LIFECYCLE_REPLAY_COMPLETE, "FILLED path complete and query replay done"
+        return LIFECYCLE_COMPLETE, "FILLED with 120m path; query-time replay; usable exit cohort"
+    return LIFECYCLE_ENTRY_RESOLVED, f"unmapped entry_outcome={outcome}"
+
+
+def tape_completeness(
+    *,
+    signal_recorded: bool,
+    entry_outcome: str,
+    path_complete: Optional[bool],
+    path_incomplete_reason: Optional[str] = None,
+    replayable: bool = False,
+    exit_sweep_complete: bool = False,
+    ticket_closed: bool = False,
+    path_missing: bool = False,
+) -> dict:
+    """P0 invariant. EXIT_SWEEP_COMPLETE is query-time, never a collector duty."""
+    known = entry_outcome in ("FILLED", "TTL_UNFILLED", "CANCELLED")
+    lifecycle, completeness_reason = resolve_lifecycle(
+        signal_recorded=signal_recorded,
+        entry_outcome=entry_outcome,
+        ticket_closed=ticket_closed,
+        path_complete=path_complete,
+        path_missing=path_missing,
+        exit_sweep_complete=exit_sweep_complete,
+    )
+    return {
+        "SIGNAL_RECORDED": bool(signal_recorded),
+        "ENTRY_OUTCOME_KNOWN": known,
+        "PATH_COMPLETE": path_complete,
+        "PATH_INCOMPLETE_REASON": path_incomplete_reason,
+        "REPLAYABLE": bool(replayable),
+        "EXIT_SWEEP_COMPLETE": bool(exit_sweep_complete),
+        "entry_outcome": entry_outcome,
+        "exit_cohort": (
+            "filled" if entry_outcome == "FILLED"
+            else ("ttl_unfilled" if entry_outcome == "TTL_UNFILLED" else "pending")
+        ),
+        "lifecycle": lifecycle,
+        "completeness_reason": completeness_reason,
+    }
+
+
+def allows_exit_expectancy(flags: Mapping[str, Any]) -> bool:
+    """TTL-unfilled and incomplete 120m paths must not enter exit win-rate / E[PnL|fill]."""
+    lifecycle = str(flags.get("lifecycle") or "")
+    if lifecycle in (
+        LIFECYCLE_FUNNEL_ONLY,
+        LIFECYCLE_WAITING_120M,
+        LIFECYCLE_DATA_ERROR,
+        LIFECYCLE_SIGNAL,
+        LIFECYCLE_ENTRY_RESOLVED,
+        LIFECYCLE_FILLED,
+        LIFECYCLE_TTL_UNFILLED,
+    ):
+        return False
+    return (
+        str(flags.get("entry_outcome") or "") == "FILLED"
+        and flags.get("PATH_COMPLETE") is True
+        and lifecycle in (LIFECYCLE_COMPLETE, LIFECYCLE_PATH_COMPLETE, LIFECYCLE_REPLAY_COMPLETE)
+    )
 
 
 def policy_reject_n1_perfect_green(n_orders: int, all_green: bool) -> bool:
@@ -83,24 +198,16 @@ def candles_to_path_ticks(
     direction: str,
     start_ts: float,
     end_ts: float,
+    as_of_ts: Optional[float] = None,
 ) -> list:
     """1m high tagged: SHORT sees high then low then close (touch, not blind shadow)."""
-    direction_u = str(direction or "SHORT").upper()
-    ticks = []
-    for row in candles_1m or []:
-        t = candle_ts_sec(row)
-        if t is None or t + 60.0 < float(start_ts):
-            continue
-        if t > float(end_ts) + 1e-9:
-            break
-        high, low, close = float(row[2]), float(row[3]), float(row[4])
-        if direction_u == "SHORT":
-            marks = ((t + 1.0, high), (t + 30.0, low), (t + 59.0, close))
-        else:
-            marks = ((t + 1.0, low), (t + 30.0, high), (t + 59.0, close))
-        for ts, px in marks:
-            ticks.append({"t": ts, "price": px, "best_bid": px, "best_ask": px})
-    return ticks
+    return raw_1m_to_ticks(
+        candles_1m,
+        direction=direction,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        as_of_ts=as_of_ts,
+    )
 
 
 def _compact_score(
@@ -110,6 +217,7 @@ def _compact_score(
     exit_id: str,
     sim: Mapping[str, Any],
     first_hit: Optional[str] = None,
+    invert_on: bool = False,
 ) -> dict:
     pnl = sim.get("net_pnl_usd")
     hit = first_hit or sim.get("exit_reason")
@@ -123,6 +231,9 @@ def _compact_score(
         "pnl": None if pnl is None else round(float(pnl), 4),
         "first_hit": hit,
         "green": bool(green),
+        "invert_on": bool(invert_on),
+        "mfe_pct": sim.get("mfe_pct"),
+        "mae_pct": sim.get("mae_pct"),
     }
 
 
@@ -138,140 +249,6 @@ def _path_horizon_ts(candles_1m, ticks_1s, signal_ts: float) -> float:
         except (TypeError, ValueError):
             continue
     return last
-
-
-def _score_live_ladders(ticks, *, direction, entry, fill_t, orig, chase_id, margin_usdt) -> list:
-    out = []
-    live_42 = simulate_policy_on_path(
-        ticks,
-        direction=direction,
-        entry_price=entry,
-        thesis_cut=LIVE_THESIS_CUT,
-        hard_stop=None,
-        ladder=LIVE_EARLY_LADDER_4_2,
-        fill_t=fill_t,
-        margin_usdt=margin_usdt,
-    )
-    out.append(_compact_score(orig=orig, chase_id=chase_id, exit_id="live_4_2_t12", sim=live_42))
-    live_c = simulate_policy_on_path(
-        ticks,
-        direction=direction,
-        entry_price=entry,
-        thesis_cut=LIVE_THESIS_CUT,
-        hard_stop=None,
-        ladder=LIVE_SCENARIO_C_LADDER,
-        fill_t=fill_t,
-        margin_usdt=margin_usdt,
-    )
-    out.append(_compact_score(orig=orig, chase_id=chase_id, exit_id="live_c_t12", sim=live_c))
-    return out
-
-
-def _score_full_exits(
-    ticks,
-    *,
-    direction,
-    entry,
-    fill_t,
-    orig,
-    chase_id,
-    margin_usdt,
-    atr14_pct,
-    donchian_high,
-    donchian_low,
-    support_price,
-    resistance_price,
-) -> list:
-    scores = _score_live_ladders(
-        ticks,
-        direction=direction,
-        entry=entry,
-        fill_t=fill_t,
-        orig=orig,
-        chase_id=chase_id,
-        margin_usdt=margin_usdt,
-    )
-    atr_tp = []
-    atr_sl = []
-    chand = []
-    if atr14_pct is not None:
-        for k in ATR_K_GRID:
-            tp = simulate_atr_take_profit(
-                ticks, direction=direction, entry_price=entry, atr14_pct=atr14_pct,
-                k=k, fill_t=fill_t, margin_usdt=margin_usdt,
-            )
-            atr_tp.append(tp)
-            scores.append(_compact_score(
-                orig=orig, chase_id=chase_id, exit_id=f"atr_tp_k{k:g}", sim=tp,
-            ))
-            sl = simulate_atr_stop(
-                ticks, direction=direction, entry_price=entry, atr14_pct=atr14_pct,
-                k=k, fill_t=fill_t, margin_usdt=margin_usdt,
-            )
-            atr_sl.append(sl)
-            scores.append(_compact_score(
-                orig=orig, chase_id=chase_id, exit_id=f"atr_sl_k{k:g}", sim=sl,
-            ))
-            hit = first_hit_combo(tp, sl)
-            scores.append(_compact_score(
-                orig=orig, chase_id=chase_id,
-                exit_id=f"fh_atr_tp_k{k:g}_atr_sl_k{k:g}",
-                sim=hit, first_hit=hit.get("exit_reason"),
-            ))
-        for k in CHANDELIER_K_GRID:
-            ch = simulate_chandelier_trail(
-                ticks, direction=direction, entry_price=entry, atr14_pct=atr14_pct,
-                k=k, fill_t=fill_t, margin_usdt=margin_usdt,
-            )
-            chand.append(ch)
-            scores.append(_compact_score(
-                orig=orig, chase_id=chase_id, exit_id=f"chand_k{k:g}", sim=ch,
-            ))
-    struct_tp = struct_sl = None
-    if any(level is not None for level in (donchian_high, donchian_low, support_price, resistance_price)):
-        struct_tp = simulate_structure_take_profit(
-            ticks, direction=direction, entry_price=entry,
-            donchian_low=donchian_low, donchian_high=donchian_high,
-            support_price=support_price, resistance_price=resistance_price,
-            fill_t=fill_t, margin_usdt=margin_usdt,
-        )
-        scores.append(_compact_score(orig=orig, chase_id=chase_id, exit_id="struct_tp", sim=struct_tp))
-        struct_sl = simulate_structure_stop(
-            ticks, direction=direction, entry_price=entry,
-            donchian_high=donchian_high, donchian_low=donchian_low,
-            resistance_price=resistance_price, support_price=support_price,
-            fill_t=fill_t, margin_usdt=margin_usdt,
-        )
-        scores.append(_compact_score(orig=orig, chase_id=chase_id, exit_id="struct_sl", sim=struct_sl))
-        for tp in atr_tp:
-            hit = first_hit_combo(tp, struct_sl)
-            scores.append(_compact_score(
-                orig=orig, chase_id=chase_id,
-                exit_id=f"fh_atr_tp_k{tp.get('k'):g}_struct_sl",
-                sim=hit, first_hit=hit.get("exit_reason"),
-            ))
-        for ch in chand:
-            hit = first_hit_combo(ch, struct_sl)
-            scores.append(_compact_score(
-                orig=orig, chase_id=chase_id,
-                exit_id=f"fh_chand_k{ch.get('k'):g}_struct_sl",
-                sim=hit, first_hit=hit.get("exit_reason"),
-            ))
-    for thesis in THESIS_4PP_GRID:
-        sim = simulate_policy_on_path(
-            ticks,
-            direction=direction,
-            entry_price=entry,
-            thesis_cut=thesis,
-            hard_stop=None,
-            ladder=LIVE_EARLY_LADDER_4_2,
-            fill_t=fill_t,
-            margin_usdt=margin_usdt,
-        )
-        scores.append(_compact_score(
-            orig=orig, chase_id=chase_id, exit_id=f"thesis_m{abs(int(thesis))}", sim=sim,
-        ))
-    return scores
 
 
 def _score_priority(row: Mapping[str, Any], live_orig: float) -> tuple:
@@ -310,6 +287,10 @@ def cap_chase_exit_scores(
                 or exit_id.startswith("struct_")
                 or exit_id.startswith("fh_")
                 or exit_id.startswith("thesis_")
+                or exit_id.startswith("stop_")
+                or exit_id.startswith("ladder_")
+                or exit_id.startswith("time_")
+                or exit_id.startswith("combo_")
             )
         ) or (
             exit_id in ("live_4_2_t12", "live_c_t12")
@@ -365,6 +346,10 @@ def build_order_multiverse(
     resistance_price: Optional[float] = None,
     margin_usdt: float = DEFAULT_MARGIN_USDT,
     path_complete: bool = False,
+    invert_on: bool = False,
+    live_fill_ts: Optional[float] = None,
+    live_fill_price: Optional[float] = None,
+    ticket_closed: bool = False,
 ) -> dict:
     direction_u = str(direction or "SHORT").upper()
     ticks_abs = list(ticks_1s or [])
@@ -401,77 +386,207 @@ def build_order_multiverse(
                 "fill_ts": float(chase_hit["touch_ts"]),
                 "fill_price": float(chase_hit["fill_price"]),
             })
+    live_key = _offset_key(live_orig)
+    if live_fill_ts is not None:
+        touches[live_key] = float(live_fill_ts)
+        fill_px = float(
+            live_fill_price
+            or orig_limit_price(signal_price, direction_u, live_orig)
+        )
+        have = {(round(float(row["orig"]), 2), row["chase_id"]) for row in fills}
+        if (round(float(live_orig), 2), "no_chase") not in have:
+            fills.append({
+                "orig": float(live_orig),
+                "chase_id": "no_chase",
+                "fill_ts": float(live_fill_ts),
+                "fill_price": fill_px,
+            })
 
     horizon = _path_horizon_ts(candles_1m, ticks_abs, signal_ts)
     ttl_end = float(signal_ts) + float(ttl_sec)
-    # COMPLETE at TTL/cancel (or when the caller already closed the ticket).
-    # Do not wait hold_sec/120m before scoring — that window is extra tape
-    # after a simulated or real fill, used when the path already has it.
-    pending = (not path_complete) and horizon + 1.0 < ttl_end
+    ttl_reached = horizon + 1.0 >= ttl_end or bool(path_complete)
+    live_filled = live_fill_ts is not None
+    # Open filled tickets stay collecting until 120m. Do not mix TTL-unfilled into exit WR.
+    if live_filled and not ticket_closed:
+        entry_outcome = "FILLED"
+    elif live_filled and ticket_closed:
+        entry_outcome = "FILLED"
+    elif ticket_closed or ttl_reached:
+        entry_outcome = "CANCELLED" if ticket_closed and not live_filled else "TTL_UNFILLED"
+        if ticket_closed and not live_filled and ttl_reached:
+            entry_outcome = "TTL_UNFILLED"
+    else:
+        entry_outcome = "PENDING"
 
-    scores = []
-    if fills and not pending:
-        for fill in fills:
-            end_ts = float(fill["fill_ts"]) + float(hold_sec)
-            path_ticks = [tick for tick in ticks_abs if float(tick.get("t") or 0) >= fill["fill_ts"] - 1e-9]
-            if not path_ticks:
-                path_ticks = candles_to_path_ticks(
-                    candles_1m, direction=direction_u, start_ts=fill["fill_ts"], end_ts=end_ts,
-                )
-            full = (
-                abs(fill["orig"] - float(live_orig)) < 1e-9
-                and fill["chase_id"] in ("no_chase", LIVE_CHASE_ID)
+    live_path_ticks = []
+    recovery = None
+    trajectory = None
+    path_complete_flag = None
+    path_incomplete_reason = None
+    path_missing = False
+    if live_filled:
+        fill_ts = float(live_fill_ts)
+        live_path_ticks = [tick for tick in ticks_abs if float(tick.get("t") or 0) >= fill_ts - 1e-9]
+        if not live_path_ticks:
+            live_path_ticks = candles_to_path_ticks(
+                candles_1m, direction=direction_u, start_ts=fill_ts,
+                end_ts=fill_ts + float(hold_sec),
             )
-            if full:
-                scores.extend(_score_full_exits(
-                    path_ticks,
-                    direction=direction_u,
-                    entry=fill["fill_price"],
-                    fill_t=fill["fill_ts"],
-                    orig=fill["orig"],
-                    chase_id=fill["chase_id"],
-                    margin_usdt=margin_usdt,
-                    atr14_pct=atr14_pct,
-                    donchian_high=donchian_high,
-                    donchian_low=donchian_low,
-                    support_price=support_price,
-                    resistance_price=resistance_price,
-                ))
+        path_missing = not bool(live_path_ticks)
+        if live_path_ticks:
+            recovery = path_recovery_stats(
+                live_path_ticks,
+                direction=direction_u,
+                entry_price=float(live_fill_price or orig_limit_price(signal_price, direction_u, live_orig)),
+                fill_t=fill_ts,
+            )
+            trajectory = mfe_mae_trajectory(
+                live_path_ticks,
+                direction=direction_u,
+                entry_price=float(live_fill_price or orig_limit_price(signal_price, direction_u, live_orig)),
+                fill_t=fill_ts,
+            )
+        if trajectory and trajectory.get("path_complete_120m") and not path_missing:
+            path_complete_flag = True
+        else:
+            path_complete_flag = False
+            if path_missing:
+                path_incomplete_reason = "MISSING_PATH"
             else:
-                scores.extend(_score_live_ladders(
-                    path_ticks,
-                    direction=direction_u,
-                    entry=fill["fill_price"],
-                    fill_t=fill["fill_ts"],
-                    orig=fill["orig"],
-                    chase_id=fill["chase_id"],
-                    margin_usdt=margin_usdt,
-                ))
-        scores = cap_chase_exit_scores(scores, live_orig=live_orig)
+                path_incomplete_reason = "WAITING_120M" if ticket_closed else "IN_TRADE"
+    elif entry_outcome in ("TTL_UNFILLED", "CANCELLED"):
+        path_complete_flag = None
+        path_incomplete_reason = "NO_FILL"
 
-    greens = [row for row in scores if row.get("green") and row.get("pnl") is not None]
-    reds = [row for row in scores if row.get("green") is False and row.get("pnl") is not None]
+    lifecycle, _reason = resolve_lifecycle(
+        signal_recorded=True,
+        entry_outcome=entry_outcome,
+        ticket_closed=ticket_closed,
+        path_complete=path_complete_flag,
+        path_missing=path_missing,
+        exit_sweep_complete=False,
+    )
+    pending = lifecycle in KEEP_COLLECTING_LIFECYCLES
+    replayable = bool(live_path_ticks) and lifecycle in (
+        LIFECYCLE_COMPLETE, LIFECYCLE_PATH_COMPLETE, LIFECYCLE_REPLAY_COMPLETE,
+    )
+    completeness = tape_completeness(
+        signal_recorded=True,
+        entry_outcome=entry_outcome,
+        path_complete=path_complete_flag,
+        path_incomplete_reason=path_incomplete_reason,
+        replayable=replayable,
+        exit_sweep_complete=False,
+        ticket_closed=ticket_closed,
+        path_missing=path_missing,
+    )
+    event = completeness["lifecycle"]
+    if event == LIFECYCLE_FILLED:
+        event = "PENDING"
+    elif event == LIFECYCLE_ENTRY_RESOLVED:
+        event = "PENDING"
+    elif event == LIFECYCLE_PATH_COMPLETE:
+        event = LIFECYCLE_COMPLETE
+    completeness_reason = completeness["completeness_reason"]
+    path_end = (
+        float(live_fill_ts) + float(hold_sec) if live_filled
+        else float(signal_ts) + max(float(ttl_sec), float(hold_sec))
+    )
+    path_1m = []
+    pre_sec = 3600.0
+    for row in candles_1m or []:
+        t = candle_ts_sec(row)
+        if t is None or t + 60.0 < float(signal_ts) - pre_sec or t > path_end + 1.0:
+            continue
+        path_1m.append([float(row[i]) if i < len(row) else None for i in range(min(6, len(row)))])
+
+    for fill in fills:
+        fill.setdefault("fill_model", FILL_MODEL_IDEAL_TOUCH)
+        fill.setdefault("fill_costs", zero_fill_costs())
+
+    exit_notes = path_exit_annotations(recovery, None)
+    mae_mfe = {
+        "MFE": None if not recovery else recovery.get("MFE"),
+        "MFE_time": None if not recovery else recovery.get("MFE_time"),
+        "MAE": None if not recovery else recovery.get("MAE"),
+        "MAE_time": None if not recovery else recovery.get("MAE_time"),
+    }
+    raw_path = {
+        "schema": PATH_SCHEMA_VERSION,
+        "path_1m": path_1m,
+        "tick_n": len(live_path_ticks),
+    }
+    derived_features = {
+        "schema": FEATURE_SCHEMA_VERSION,
+        "recovery": recovery,
+        "mfe_mae_trajectory": trajectory,
+        **mae_mfe,
+        "atr14_pct": atr14_pct,
+        "donchian_high": donchian_high,
+        "donchian_low": donchian_low,
+        "support_price": support_price,
+        "resistance_price": resistance_price,
+        **exit_notes,
+    }
+    replay_results = {
+        "schema": REPLAY_VERSION,
+        "chase_exit_scores": [],
+        "note": "query-time from raw_path; collector does not precompute exit WR",
+    }
+
     return {
         "schema": ORDER_MULTIVERSE_SCHEMA,
-        "event": "PENDING" if pending else "COMPLETE",
+        "collector_version": COLLECTOR_VERSION,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "path_schema_version": PATH_SCHEMA_VERSION,
+        "replay_version": REPLAY_VERSION,
+        "event": event,
+        "lifecycle": completeness["lifecycle"],
         "pending": pending,
+        "completeness_reason": completeness_reason,
         "trade_id": str(trade_id),
         "signal_px": float(signal_price),
         "signal_ts": float(signal_ts),
         "direction": direction_u,
+        "invert_on": bool(invert_on),
         "live_orig": float(live_orig),
+        "live_fill_ts": None if live_fill_ts is None else float(live_fill_ts),
+        "live_fill_price": None if live_fill_price is None else float(live_fill_price),
         "live_ticket_unchanged": True,
         "live_thesis_cut": LIVE_THESIS_CUT,
+        "live_hard_stop_pct": LIVE_HARD_STOP_PCT,
         "live_ladder": "4->2 then Scenario C",
+        "control_cell": dict(CONTROL_CELL),
+        "LIVE_CELL": True,
+        "fill_model": FILL_MODEL_IDEAL_TOUCH,
+        "fill_models_supported": list(FILL_MODELS),
+        "fill_costs": zero_fill_costs(),
+        "atr14_pct": atr14_pct,
+        "donchian_high": donchian_high,
+        "donchian_low": donchian_low,
+        "support_price": support_price,
+        "resistance_price": resistance_price,
         "touches": touches,
+        "hypothetical_fills": fills,
         "n_touched": sum(1 for ts in touches.values() if ts is not None),
         "n_missed": sum(1 for ts in touches.values() if ts is None),
-        "chase_exit_scores": scores,
-        "n_green": len(greens),
-        "n_red": len(reds),
-        "n": len(scores),
+        "path_1m": path_1m,
+        "raw_path": raw_path,
+        "derived_features": derived_features,
+        "replay_results": replay_results,
+        "chase_exit_scores": [],
+        "recovery": recovery,
+        "mfe_mae_trajectory": trajectory,
+        "MFE": mae_mfe["MFE"],
+        "MFE_time": mae_mfe["MFE_time"],
+        "MAE": mae_mfe["MAE"],
+        "MAE_time": mae_mfe["MAE_time"],
+        "completeness": completeness,
+        "n_green": 0,
+        "n_red": 0,
+        "n": 0,
         "policy_reject_n1_100_green": policy_reject_n1_perfect_green(1, True),
-        "note": "discrete grid only; not a live order grid; n=1 100% green is not policy",
+        "note": "collector stores tape+touches; Stage-1 exit sweep is query-time; n=1 100% green is not policy",
     }
 
 

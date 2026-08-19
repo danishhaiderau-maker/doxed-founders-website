@@ -33,10 +33,49 @@ PATH_REPLAY_POLICY_TAG = "path_replay_v1"
 PATH_REPLAY_FILE = "path_replay.jsonl"
 PATH_UNITS = "unrealized_pct_on_100x_margin"
 LIVE_LEVERAGE = 100
+COLLECTOR_VERSION = "collector_v2"
+FEATURE_SCHEMA_VERSION = "derived_features_v1"
+PATH_SCHEMA_VERSION = "raw_path_v1"
+REPLAY_VERSION = "path_replay_v1"
+FILL_MODEL_IDEAL_TOUCH = "IDEAL_TOUCH"
+FILL_MODELS = ("IDEAL_TOUCH", "REALISTIC_TOUCH", "ACTUAL_LIVE")
+FEE_MODEL_BITFINEX_ZERO = "BITFINEX_ZERO"
+FIRST_EXIT_CODES = (
+    "THESIS",
+    "HARD_STOP",
+    "LADDER",
+    "ATR_TP",
+    "ATR_SL",
+    "CHANDELIER",
+    "STRUCTURE",
+    "TIME_STOP",
+    "PATH_END",
+)
+_FIRST_EXIT_MAP = {
+    "THESIS_FAST_CUT": "THESIS",
+    "HARD_STOP": "HARD_STOP",
+    "PROFIT_LOCK_LADDER": "LADDER",
+    "ATR_TAKE_PROFIT": "ATR_TP",
+    "ATR_STOP": "ATR_SL",
+    "CHANDELIER_TRAIL": "CHANDELIER",
+    "STRUCTURE_TP": "STRUCTURE",
+    "STRUCTURE_STOP": "STRUCTURE",
+    "TIME_STOP": "TIME_STOP",
+    "PATH_END": "PATH_END",
+}
+CONTROL_CELL = {
+    "tag": "CONTROL",
+    "LIVE_CELL": True,
+    "orig_offset_pct": 0.10,
+    "thesis_cut": -12.0,
+    "ladder": "4->2",
+    "invert_on": False,
+}
 # 1pp of margin at 100x is 0.01% of price.
 MARGIN_PP_AS_PRICE_PCT = 0.01
 # Documented live policy — replay grouping must not mutate these on Fly.
 LIVE_THESIS_CUT = -12.0
+LIVE_HARD_STOP_PCT = 13.0
 LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER = True
 try:
     from scenario_c_config import TRAIL_LADDER_SCENARIO_C as LIVE_SCENARIO_C_LADDER
@@ -45,6 +84,107 @@ except Exception:  # pragma: no cover - keep replay importable in isolation
 LIVE_EARLY_LADDER_4_2 = ((4.0, 2.0),)
 ATR_K_GRID = (1.0, 1.5, 2.0, 3.0)
 CHANDELIER_K_GRID = (2.0, 3.0)
+
+
+def first_exit_code(reason: Optional[str]) -> str:
+    """Map simulator reasons onto the FIRST_EXIT contract set."""
+    raw = str(reason or "PATH_END")
+    if raw in FIRST_EXIT_CODES:
+        return raw
+    return _FIRST_EXIT_MAP.get(raw, "PATH_END")
+
+
+def zero_fill_costs(*, fee_model: str = FEE_MODEL_BITFINEX_ZERO) -> dict:
+    return {
+        "fee_usd": 0.0,
+        "spread_usd": 0.0,
+        "slippage_usd": 0.0,
+        "chase_cost_usd": 0.0,
+        "fee_model": str(fee_model or FEE_MODEL_BITFINEX_ZERO),
+    }
+
+
+def _minutes_from_fill(event_t: Optional[float], fill_t: float) -> Optional[float]:
+    if event_t is None:
+        return None
+    return round((float(event_t) - float(fill_t)) / 60.0, 4)
+
+
+def _candle_ts_sec(row: Sequence[Any]) -> Optional[float]:
+    if not row:
+        return None
+    try:
+        raw = float(row[0])
+    except (TypeError, ValueError):
+        return None
+    return raw / 1000.0 if raw > 1e12 else raw
+
+
+def raw_1m_to_ticks(
+    candles_1m: Sequence[Sequence[Any]],
+    *,
+    direction: str,
+    start_ts: float,
+    end_ts: float,
+    as_of_ts: Optional[float] = None,
+) -> list:
+    """1m high-then-low-then-close (SHORT). Never includes bars after ``as_of_ts``."""
+    direction_u = str(direction or "SHORT").upper()
+    look = float(end_ts)
+    as_of = None if as_of_ts is None else float(as_of_ts)
+    ticks = []
+    for row in candles_1m or []:
+        t = _candle_ts_sec(row)
+        if t is None or t + 60.0 < float(start_ts):
+            continue
+        if t > look + 1e-9:
+            continue
+        if as_of is not None and t > as_of + 1e-9:
+            continue
+        high, low, close = float(row[2]), float(row[3]), float(row[4])
+        if direction_u == "SHORT":
+            marks = ((t + 1.0, high), (t + 30.0, low), (t + 59.0, close))
+        else:
+            marks = ((t + 1.0, low), (t + 30.0, high), (t + 59.0, close))
+        for ts, px in marks:
+            if as_of is not None and ts > as_of + 1e-9:
+                continue
+            ticks.append({"t": ts, "price": px, "best_bid": px, "best_ask": px})
+    ticks.sort(key=lambda tick: (float(tick.get("t") or 0), int(tick.get("seq") or 0)))
+    return ticks
+
+
+def path_exit_annotations(
+    recovery: Optional[Mapping[str, Any]],
+    first_exit_reason: Optional[str] = None,
+) -> dict:
+    """Cheap second-best / recovery flags from stored path stats. No extra indicator library."""
+    stats = dict(recovery or {})
+    first = first_exit_code(first_exit_reason)
+    mfe = float(stats.get("MFE") if stats.get("MFE") is not None else stats.get("mfe_pct") or 0.0)
+    recovered = bool(
+        stats.get("would_have_recovered")
+        or stats.get("recovered_after_12")
+        or stats.get("ever_green")
+    )
+    hit_profit_later = bool(
+        stats.get("would_have_hit_profit_later")
+        or (stats.get("hit_thesis_12") and stats.get("ever_green"))
+        or (mfe > 0 and first in ("THESIS", "HARD_STOP"))
+    )
+    second = None
+    if first == "THESIS" and hit_profit_later:
+        second = "LADDER" if mfe >= 4.0 else "PATH_END"
+    elif first == "LADDER" and stats.get("hit_thesis_12"):
+        second = "THESIS"
+    elif first == "HARD_STOP" and recovered:
+        second = "PATH_END"
+    return {
+        "FIRST_EXIT": first,
+        "second_best_exit": second,
+        "would_have_recovered": recovered,
+        "would_have_hit_profit_later": hit_profit_later,
+    }
 
 
 def abs_4pp_grid(limit: int = 100) -> tuple:
@@ -72,6 +212,46 @@ STOP_4PP_GRID = abs_4pp_grid(100)
 LADDER_BUCKETS = tuple((lo, lo + 5) for lo in range(0, 100, 5))
 # Rung counts asked in the shoot-through question (3 vs 4) plus 0–2.
 LADDER_RUNG_COUNTS = (0, 1, 2, 3, 4)
+
+
+def corner_adverse_levels(limit: int = 100) -> tuple:
+    """12..30 every 1pp, then 40/50/60/80/100. Answers 12 vs 13 vs 14 and 50/100.
+
+    Full integer 0–100 remains available via ``integer_levels_0_100``. This is
+    the default COMPLETE grid so one 120m tape is scored without 89×89×N blowup.
+    """
+    cap = int(limit)
+    out = []
+    for n in list(range(12, 31)) + [40, 50, 60, 80, 100]:
+        if n <= cap and n not in out:
+            out.append(n)
+    return tuple(out)
+
+
+# Stage-1 query grid (replay layer, NOT collector). Coarse enough to search;
+# integer 0–100 remains available for Stage-2 zoom. Do not explode this in
+# order_multiverse.jsonl.
+STAGE1_ENTRY_OFFSET_PCT = (0.01, 0.03, 0.05, 0.07, 0.10, 0.15, 0.20, 0.25, 0.30)
+STAGE1_THESIS = (-12, -15, -20, -25, -30, -40, -50, -75, -100)
+STAGE1_STOP = (10, 13, 15, 18, 20)
+STAGE1_ATR_K = (1.0, 1.5, 2.0, 2.5)
+STAGE1_CHASE_COUNTS = (0, 1, 2, 3, 4, 5)
+STAGE1_TIME_STOP_SEC = (300, 1800, 3600, 7200)
+MFE_MAE_TRAJECTORY_MIN = (1, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120)
+# Live thesis −12 / stop 13 sit inside Stage 1.
+THESIS_CORNER_GRID = STAGE1_THESIS
+STOP_CORNER_GRID = STAGE1_STOP
+TIME_STOP_SEC_GRID = STAGE1_TIME_STOP_SEC
+LADDER_TABLES = {
+    "none": (),
+    "live_4_2": LIVE_EARLY_LADDER_4_2,
+    "live_c": LIVE_SCENARIO_C_LADDER,
+    "early_tight": ((2, 0.5), (3, 1), (4, 2), (5, 3), (8, 6), (12, 10)),
+    "early_loose": ((4, 1), (6, 2), (10, 5), (15, 9), (25, 17)),
+    "high_capture": ((4, 3), (6, 5), (10, 8), (15, 12), (25, 20), (40, 32)),
+    "runner_friendly": ((5, 1), (8, 3), (12, 6), (20, 12), (40, 25), (80, 55)),
+}
+STAGE1_LADDERS = ("none", "live_4_2", "live_c")
 
 
 def integer_levels_0_100(*, adverse: bool = True) -> tuple:
@@ -134,11 +314,13 @@ def build_path_sample(
     trough_mae_pct: Optional[float] = None,
     observed_ts: Optional[float] = None,
     seq: Optional[int] = None,
+    invert_on: bool = False,
 ) -> dict:
     return {
         "schema": PATH_REPLAY_SCHEMA,
         "policy_tag": PATH_REPLAY_POLICY_TAG,
         "units": PATH_UNITS,
+        "invert_on": bool(invert_on),
         "trade_id": trade_id,
         "t": round(float(t), 3),
         "price": float(price),
@@ -170,15 +352,27 @@ def simulate_policy_on_path(
     thesis_min_age_sec: float = 0.0,
     fill_t: float = 0.0,
     mfe_protect_pct: float = 5.0,
+    time_stop_sec: Optional[float] = None,
+    as_of_t: Optional[float] = None,
+    reconstruct_from_price: bool = False,
 ) -> dict:
-    """Walk a dense unreal path. First hit among hard stop, thesis, ladder lock.
+    """Walk a dense unreal path. First hit among hard stop, thesis, ladder lock, time.
 
     ``thesis_cut`` / ``hard_stop`` are unrealized margin % (e.g. -21.0), not price %.
     ``hard_stop=None`` means do not close on a hard stop (Showcase research default).
+    Chronological only: ticks after ``as_of_t`` are never read.
     """
-    ordered = sorted(ticks, key=lambda tick: float(tick.get("t") or 0))
+    ordered = sorted(
+        ticks,
+        key=lambda tick: (float(tick.get("t") or 0), int(tick.get("seq") or 0)),
+    )
+    if as_of_t is not None:
+        cap = float(as_of_t)
+        ordered = [tick for tick in ordered if float(tick.get("t") or 0) <= cap + 1e-9]
     peak = 0.0
     mae = 0.0
+    t_mfe = None
+    t_mae = None
     lock = None
     exit_reason = "PATH_END"
     exit_t = None
@@ -191,7 +385,7 @@ def simulate_policy_on_path(
         if t < fill_t:
             continue
         mark = executable_mark(tick, direction)
-        stored = tick.get("unreal_pct")
+        stored = None if reconstruct_from_price else tick.get("unreal_pct")
         unreal = None
         if stored is not None:
             try:
@@ -211,8 +405,10 @@ def simulate_policy_on_path(
                 mark = None
         if unreal > peak:
             peak = unreal
+            t_mfe = t
         if unreal < mae:
             mae = unreal
+            t_mae = t
         if ladder:
             for trigger, floor in ladder:
                 if peak >= float(trigger):
@@ -229,14 +425,22 @@ def simulate_policy_on_path(
             hit = "THESIS_FAST_CUT"
         elif lock is not None and unreal <= lock:
             hit = "PROFIT_LOCK_LADDER"
+        elif (
+            time_stop_sec is not None
+            and float(time_stop_sec) > 0
+            and age >= float(time_stop_sec)
+        ):
+            hit = "TIME_STOP"
         if hit:
             exit_reason, exit_t, exit_unreal, exit_price = hit, t, unreal, mark
             break
         exit_t, exit_unreal, exit_price = t, unreal, mark
     pnl_usd = None if exit_unreal is None else round((exit_unreal / 100.0) * float(margin_usdt), 4)
+    first_exit = first_exit_code(exit_reason)
     return {
         "schema": "path_policy_sim_v1",
         "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "replay_version": REPLAY_VERSION,
         "units": PATH_UNITS,
         "live_recommendation": False,
         "direction": str(direction).upper(),
@@ -244,15 +448,71 @@ def simulate_policy_on_path(
         "thesis_cut": thesis,
         "hard_stop": stop,
         "ladder": [list(rung) for rung in ladder],
+        "time_stop_sec": None if time_stop_sec is None else float(time_stop_sec),
         "exit_reason": exit_reason,
+        "FIRST_EXIT": first_exit,
         "exit_t": exit_t,
         "exit_price": exit_price,
         "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
         "net_pnl_usd": pnl_usd,
         "mfe_pct": round(peak, 4),
         "mae_pct": round(mae, 4),
+        "MFE": round(peak, 4),
+        "MFE_time": _minutes_from_fill(t_mfe, fill_t),
+        "MAE": round(mae, 4),
+        "MAE_time": _minutes_from_fill(t_mae, fill_t),
         "green": bool(pnl_usd is not None and pnl_usd > 0),
+        "control_cell": dict(CONTROL_CELL),
     }
+
+
+def replay_from_raw_1m(
+    candles_1m: Sequence[Sequence[Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    fill_ts: float,
+    thesis_cut: float = -12.0,
+    hard_stop: Optional[float] = None,
+    ladder: Sequence[Sequence[float]] = LIVE_EARLY_LADDER_4_2,
+    hold_sec: float = 7200.0,
+    as_of_ts: Optional[float] = None,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    time_stop_sec: Optional[float] = None,
+) -> dict:
+    """Reconstruct entry → path → first exit → PnL from raw 1m tape. No lookahead."""
+    end_ts = float(fill_ts) + float(hold_sec)
+    ticks = raw_1m_to_ticks(
+        candles_1m,
+        direction=direction,
+        start_ts=fill_ts,
+        end_ts=end_ts,
+        as_of_ts=as_of_ts,
+    )
+    sim = simulate_policy_on_path(
+        ticks,
+        direction=direction,
+        entry_price=entry_price,
+        leverage=leverage,
+        margin_usdt=margin_usdt,
+        thesis_cut=thesis_cut,
+        hard_stop=hard_stop,
+        ladder=ladder,
+        fill_t=fill_ts,
+        time_stop_sec=time_stop_sec,
+        as_of_t=as_of_ts,
+        reconstruct_from_price=True,
+    )
+    recovery = path_recovery_stats(
+        ticks, direction=direction, entry_price=entry_price, leverage=leverage, fill_t=fill_ts,
+    )
+    sim.update(path_exit_annotations(recovery, sim.get("exit_reason")))
+    sim["fill_model"] = FILL_MODEL_IDEAL_TOUCH
+    sim["fill_costs"] = zero_fill_costs()
+    sim["raw_tick_n"] = len(ticks)
+    sim["replay_from"] = "raw_1m_tape"
+    return sim
 
 
 def one_point_thesis_sweep(
@@ -979,6 +1239,7 @@ def first_hit_combo(tp_sim: Mapping[str, Any], sl_sim: Mapping[str, Any]) -> dic
         "tp_k": tp_sim.get("k"),
         "sl_k": sl_sim.get("k"),
         "exit_reason": chosen.get("exit_reason"),
+        "FIRST_EXIT": first_exit_code(chosen.get("exit_reason")),
         "exit_t": chosen.get("exit_t"),
         "exit_unreal_pct": chosen.get("exit_unreal_pct"),
         "net_pnl_usd": chosen.get("net_pnl_usd"),
@@ -1255,3 +1516,466 @@ def replay_group_report(
         },
         "rows": rows if include_all else [],
     }
+
+
+def path_recovery_stats(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    leverage: float = LIVE_LEVERAGE,
+    fill_t: float = 0.0,
+) -> dict:
+    """MFE/MAE / time-to-green / whether a wider stop would have let price recover.
+
+    One walk of the stored tape. Answers: ever green? would 50% have saved a −12 cut?
+    """
+    series = unreal_series_from_path(
+        ticks, direction=direction, entry_price=entry_price, leverage=leverage, fill_t=fill_t,
+    )
+    peak = 0.0
+    mae = 0.0
+    t_green = None
+    t_mae = None
+    t_mfe = None
+    first_hit = {}
+    green_after = {}
+    for t, unreal in series:
+        if unreal > peak:
+            peak = unreal
+            t_mfe = t
+        if unreal < mae:
+            mae = unreal
+            t_mae = t
+        if t_green is None and unreal > 0:
+            t_green = t
+        for level in (12, 13, 15, 20, 50, 100):
+            key = str(level)
+            if key not in first_hit and unreal <= -float(level):
+                first_hit[key] = t
+            if key in first_hit and key not in green_after and unreal > 0:
+                green_after[key] = t
+    ever_green = t_green is not None
+    hit_12 = "12" in first_hit
+    return {
+        "schema": "path_recovery_v1",
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
+        "MFE": round(peak, 4),
+        "MFE_time": _minutes_from_fill(t_mfe, fill_t),
+        "MAE": round(mae, 4),
+        "MAE_time": _minutes_from_fill(t_mae, fill_t),
+        "ever_green": ever_green,
+        "time_to_green_sec": None if t_green is None else round(float(t_green) - float(fill_t), 3),
+        "time_to_mfe_sec": None if t_mfe is None else round(float(t_mfe) - float(fill_t), 3),
+        "time_to_mae_sec": None if t_mae is None else round(float(t_mae) - float(fill_t), 3),
+        "hit_thesis_12": hit_12,
+        "would_stop_13_hit": mae <= -LIVE_HARD_STOP_PCT,
+        "recovered_after_12": "12" in green_after,
+        "recovered_after_13": "13" in green_after,
+        "would_50_save": bool(hit_12 and mae > -50.0 and "12" in green_after),
+        "would_100_save": bool(hit_12 and mae > -100.0 and "12" in green_after),
+        "would_have_recovered": "12" in green_after or (hit_12 and ever_green),
+        "would_have_hit_profit_later": bool(hit_12 and ever_green and peak > 0),
+        "first_hit_ts": first_hit,
+        "green_after_hit_ts": green_after,
+        "path_tick_n": len(series),
+    }
+
+
+def mfe_mae_trajectory(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    fill_t: float = 0.0,
+    leverage: float = LIVE_LEVERAGE,
+) -> dict:
+    """Running MFE/MAE at 1,2,3,5,10,15,20,30,45,60,90,120 minutes. Missing = None."""
+    series = unreal_series_from_path(
+        ticks, direction=direction, entry_price=entry_price, leverage=leverage, fill_t=fill_t,
+    )
+    peak = 0.0
+    mae = 0.0
+    t_mfe = None
+    t_mae = None
+    points = {int(m): None for m in MFE_MAE_TRAJECTORY_MIN}
+    for t, unreal in series:
+        if unreal > peak:
+            peak = unreal
+            t_mfe = t
+        if unreal < mae:
+            mae = unreal
+            t_mae = t
+        age_min = (float(t) - float(fill_t)) / 60.0
+        for minute in MFE_MAE_TRAJECTORY_MIN:
+            if points[int(minute)] is None and age_min + 1e-9 >= float(minute):
+                points[int(minute)] = {
+                    "mfe_pct": round(peak, 4),
+                    "mae_pct": round(mae, 4),
+                    "unreal_pct": round(unreal, 4),
+                }
+    return {
+        "schema": "mfe_mae_trajectory_v1",
+        "minutes": list(MFE_MAE_TRAJECTORY_MIN),
+        "points": points,
+        "final_mfe_pct": round(peak, 4),
+        "final_mae_pct": round(mae, 4),
+        "MFE": round(peak, 4),
+        "MFE_time": _minutes_from_fill(t_mfe, fill_t),
+        "MAE": round(mae, 4),
+        "MAE_time": _minutes_from_fill(t_mae, fill_t),
+        "path_complete_120m": points[120] is not None,
+        "path_tick_n": len(series),
+    }
+
+
+def _corner_sim(
+    ticks,
+    *,
+    direction,
+    entry_price,
+    fill_t,
+    leverage,
+    margin_usdt,
+    thesis_cut,
+    hard_stop,
+    ladder,
+    time_stop_sec=None,
+):
+    return simulate_policy_on_path(
+        ticks,
+        direction=direction,
+        entry_price=entry_price,
+        leverage=leverage,
+        margin_usdt=margin_usdt,
+        thesis_cut=thesis_cut,
+        hard_stop=hard_stop,
+        ladder=ladder,
+        fill_t=fill_t,
+        time_stop_sec=time_stop_sec,
+    )
+
+
+def score_all_corners(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    fill_t: float = 0.0,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    atr14_pct: Optional[float] = None,
+    donchian_high: Optional[float] = None,
+    donchian_low: Optional[float] = None,
+    support_price: Optional[float] = None,
+    resistance_price: Optional[float] = None,
+    invert_on: bool = False,
+    orig: float = 0.10,
+    chase_id: str = "no_chase",
+    include_atr: bool = True,
+    include_combo: bool = False,
+) -> dict:
+    """Score one stored 120m path across entry-adjacent exits: thesis, stop, ladder, ATR, time.
+
+    Independent axis sweeps so 12 vs 13 vs 14 and 50/100 are answered. Bounded first-hit
+    combos for live-adjacent + recovery. Never a live Fly grid. Invert is a tag, not a mutation.
+    """
+    recovery = path_recovery_stats(
+        ticks, direction=direction, entry_price=entry_price, leverage=leverage, fill_t=fill_t,
+    )
+    scores = []
+    common = {
+        "orig": round(float(orig), 2),
+        "chase": str(chase_id),
+        "invert_on": bool(invert_on),
+        "mfe_pct": recovery["mfe_pct"],
+        "mae_pct": recovery["mae_pct"],
+        "ever_green": recovery["ever_green"],
+        "time_to_green_sec": recovery["time_to_green_sec"],
+        "would_50_save": recovery["would_50_save"],
+        "would_100_save": recovery["would_100_save"],
+        "path_tick_n": recovery["path_tick_n"],
+        "live_recommendation": False,
+    }
+
+    def add(exit_id: str, sim: Mapping[str, Any], *, first_hit: Optional[str] = None):
+        pnl = sim.get("net_pnl_usd")
+        green = sim.get("green")
+        if green is None and pnl is not None:
+            green = float(pnl) > 0
+        row = dict(common)
+        row.update({
+            "exit": exit_id,
+            "pnl": None if pnl is None else round(float(pnl), 4),
+            "first_hit": first_hit or sim.get("exit_reason"),
+            "green": bool(green),
+            "exit_unreal_pct": sim.get("exit_unreal_pct"),
+            "exit_t": sim.get("exit_t"),
+            "sim_mfe_pct": sim.get("mfe_pct"),
+            "sim_mae_pct": sim.get("mae_pct"),
+        })
+        scores.append(row)
+
+    live_42 = _corner_sim(
+        ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+        leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+        hard_stop=None, ladder=LIVE_EARLY_LADDER_4_2,
+    )
+    add("live_4_2_t12", live_42)
+    live_c = _corner_sim(
+        ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+        leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+        hard_stop=None, ladder=LIVE_SCENARIO_C_LADDER,
+    )
+    add("live_c_t12", live_c)
+    live_stop13 = _corner_sim(
+        ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+        leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+        hard_stop=LIVE_HARD_STOP_PCT, ladder=LIVE_EARLY_LADDER_4_2,
+    )
+    add("live_4_2_t12_s13", live_stop13)
+
+    for thesis in THESIS_CORNER_GRID:
+        sim = _corner_sim(
+            ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+            leverage=leverage, margin_usdt=margin_usdt, thesis_cut=thesis,
+            hard_stop=None, ladder=LIVE_EARLY_LADDER_4_2,
+        )
+        add(f"thesis_m{abs(int(thesis))}", sim)
+    for stop in STOP_CORNER_GRID:
+        sim = _corner_sim(
+            ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+            leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+            hard_stop=stop, ladder=LIVE_EARLY_LADDER_4_2,
+        )
+        add(f"stop_m{int(stop)}", sim)
+    add(
+        "stop_none",
+        _corner_sim(
+            ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+            leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+            hard_stop=None, ladder=LIVE_EARLY_LADDER_4_2,
+        ),
+    )
+    for ladder_id, ladder in LADDER_TABLES.items():
+        if ladder_id in ("live_4_2", "none"):
+            continue
+        sim = _corner_sim(
+            ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+            leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+            hard_stop=None, ladder=ladder,
+        )
+        add(f"ladder_{ladder_id}", sim)
+    add(
+        "ladder_none",
+        _corner_sim(
+            ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+            leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+            hard_stop=None, ladder=(),
+        ),
+    )
+    for sec in TIME_STOP_SEC_GRID:
+        sim = _corner_sim(
+            ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+            leverage=leverage, margin_usdt=margin_usdt, thesis_cut=LIVE_THESIS_CUT,
+            hard_stop=None, ladder=LIVE_EARLY_LADDER_4_2, time_stop_sec=sec,
+        )
+        add(f"time_s{int(sec)}", sim)
+
+    if include_atr and atr14_pct is not None:
+        for k in STAGE1_ATR_K:
+            tp = simulate_atr_take_profit(
+                ticks, direction=direction, entry_price=entry_price, atr14_pct=atr14_pct,
+                k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+            )
+            add(f"atr_tp_k{k:g}", tp)
+            sl = simulate_atr_stop(
+                ticks, direction=direction, entry_price=entry_price, atr14_pct=atr14_pct,
+                k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+            )
+            add(f"atr_sl_k{k:g}", sl)
+            hit = first_hit_combo(tp, sl)
+            add(f"fh_atr_tp_k{k:g}_atr_sl_k{k:g}", hit, first_hit=hit.get("exit_reason"))
+        for k in CHANDELIER_K_GRID:
+            ch = simulate_chandelier_trail(
+                ticks, direction=direction, entry_price=entry_price, atr14_pct=atr14_pct,
+                k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+            )
+            add(f"chand_k{k:g}", ch)
+    struct_sl = None
+    if any(level is not None for level in (donchian_high, donchian_low, support_price, resistance_price)):
+        struct_tp = simulate_structure_take_profit(
+            ticks, direction=direction, entry_price=entry_price,
+            donchian_low=donchian_low, donchian_high=donchian_high,
+            support_price=support_price, resistance_price=resistance_price,
+            leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+        )
+        add("struct_tp", struct_tp)
+        struct_sl = simulate_structure_stop(
+            ticks, direction=direction, entry_price=entry_price,
+            donchian_high=donchian_high, donchian_low=donchian_low,
+            resistance_price=resistance_price, support_price=support_price,
+            leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+        )
+        add("struct_sl", struct_sl)
+        if include_atr and atr14_pct is not None:
+            for k in STAGE1_ATR_K:
+                tp = simulate_atr_take_profit(
+                    ticks, direction=direction, entry_price=entry_price, atr14_pct=atr14_pct,
+                    k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+                )
+                hit = first_hit_combo(tp, struct_sl)
+                add(f"fh_atr_tp_k{k:g}_struct_sl", hit, first_hit=hit.get("exit_reason"))
+            for k in CHANDELIER_K_GRID:
+                ch = simulate_chandelier_trail(
+                    ticks, direction=direction, entry_price=entry_price, atr14_pct=atr14_pct,
+                    k=k, leverage=leverage, margin_usdt=margin_usdt, fill_t=fill_t,
+                )
+                hit = first_hit_combo(ch, struct_sl)
+                add(f"fh_chand_k{k:g}_struct_sl", hit, first_hit=hit.get("exit_reason"))
+
+    # Stage 1 is independent axes. Cartesian zoom is Stage 2 on promising regions.
+    if include_combo:
+        for thesis in (-12, -50, -100):
+            for stop in (13, None):
+                sim = _corner_sim(
+                    ticks, direction=direction, entry_price=entry_price, fill_t=fill_t,
+                    leverage=leverage, margin_usdt=margin_usdt, thesis_cut=thesis,
+                    hard_stop=stop, ladder=LIVE_EARLY_LADDER_4_2,
+                )
+                stop_tag = "none" if stop is None else str(int(stop))
+                add(f"combo_t{abs(int(thesis))}_s{stop_tag}_live_4_2", sim)
+
+    traj = mfe_mae_trajectory(
+        ticks, direction=direction, entry_price=entry_price, leverage=leverage, fill_t=fill_t,
+    )
+    greens = [row for row in scores if row.get("green") and row.get("pnl") is not None]
+    killer = None
+    live_row = next((row for row in scores if row.get("exit") == "live_4_2_t12"), None)
+    if live_row and live_row.get("green") is False:
+        killer = live_row.get("first_hit")
+    best = None
+    for row in scores:
+        pnl = row.get("pnl")
+        if pnl is None:
+            continue
+        if best is None or float(pnl) > float(best["pnl"]):
+            best = row
+    return {
+        "schema": "stage1_replay_v1",
+        "live_recommendation": False,
+        "invert_on": bool(invert_on),
+        "units": PATH_UNITS,
+        "cohort": "filled",
+        "live_policy_untouched": {
+            "orig_offset_pct": 0.10,
+            "thesis_cut": LIVE_THESIS_CUT,
+            "hard_stop_pct": LIVE_HARD_STOP_PCT,
+            "hard_stop_does_not_close_paper": LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER,
+            "ladder": "4->2 then Scenario C",
+        },
+        "recovery": recovery,
+        "mfe_mae_trajectory": traj,
+        "n": len(scores),
+        "n_green": len(greens),
+        "what_kicked_live": killer,
+        "best_descriptive_not_policy": None if best is None else {
+            "exit": best.get("exit"),
+            "pnl": best.get("pnl"),
+            "first_hit": best.get("first_hit"),
+            "green": best.get("green"),
+            "note": "descriptive on this tape; not a live recommendation; not win-rate selection",
+        },
+        "chase_exit_scores": scores,
+        "integer_sweep_available": True,
+        "note": "Stage-1 query on stored tape. TTL-unfilled must not enter this cohort.",
+    }
+
+
+def stage1_replay(*args, **kwargs):
+    """Query engine: Stage-1 coarse grid on one stored path. Collector must not call this per tick."""
+    return score_all_corners(*args, **kwargs)
+
+
+def expectancies_from_stage1(rows: Sequence[Mapping[str, Any]], *, cohort: str) -> dict:
+    """Split P(fill) vs P(profit|fill) vs E[PnL|fill]. TTL-unfilled is fill-only."""
+    if cohort != "filled":
+        filled = [row for row in rows if row.get("touched") or row.get("filled")]
+        n = len(rows)
+        n_fill = len(filled)
+        return {
+            "schema": "stage1_expectancy_v1",
+            "cohort": cohort,
+            "p_fill": None if n == 0 else round(n_fill / n, 4),
+            "p_profit_given_fill": None,
+            "e_pnl_given_fill": None,
+            "n": n,
+            "n_fill": n_fill,
+            "note": "TTL-unfilled contributes only to P(fill|signal,entry)",
+        }
+    pnls = [float(row["pnl"]) for row in rows if row.get("pnl") is not None]
+    greens = [row for row in rows if row.get("green") and row.get("pnl") is not None]
+    return {
+        "schema": "stage1_expectancy_v1",
+        "cohort": "filled",
+        "p_fill": 1.0,
+        "p_profit_given_fill": None if not pnls else round(len(greens) / len(pnls), 4),
+        "e_pnl_given_fill": None if not pnls else round(sum(pnls) / len(pnls), 4),
+        "n": len(pnls),
+        "note": "Do not rank live policy by win rate alone. Robustness/OOS later.",
+    }
+
+
+FEATURE_FAMILY_INVENTORY = {
+    "schema": "feature_family_inventory_v1",
+    "note": "Recording / schema hooks. Not live trading rules.",
+    "already_stored": {
+        "signal_ts_price_side_score": True,
+        "invert_on": True,
+        "1s_path_replay_jsonl": True,
+        "120m_post_exit": True,
+        "1m_ohlcv_mtf": True,
+        "atr14_pct_3m_at_fill": True,
+        "donchian_3m_at_fill": True,
+        "support_resistance_at_fill": True,
+        "chase_offset_touch_0_01_to_0_30": True,
+        "order_multiverse_path_1m": True,
+        "hypothetical_touch_fills": True,
+        "mfe_mae_trajectory_1_to_120m": True,
+        "cycle_3m_rsi_stoch_adx_log_only": True,
+        "rsi_5m_log_only": True,
+        "funding_snapshot": True,
+        "session_features_policy_engine": True,
+        "maker_taker_fee_profile": True,
+    },
+    "needs_new_api_or_series": {
+        "raw_order_book_depth": "not a full L2 tape; BBO only on ticks",
+        "open_interest": "not recorded",
+        "liquidations": "not recorded",
+        "basis_perp_spot": "not recorded",
+        "atr_percentile_regime": "ATR level stored; percentile rank not stored",
+        "idealized_vs_realistic_fill_modes": "1m high-touch only so far",
+        "slippage_realized_vs_quote": "partial fill_sim on live fill only",
+    },
+    "lower_priority_oscillators": ("macd", "additional_rsi_gates"),
+}
+
+
+def ticks_from_path_replay_rows(rows: Iterable[Mapping[str, Any]], trade_id: str) -> list:
+    """Rebuild a walkable tick list from path_replay.jsonl / signal_replay ticks."""
+    out = []
+    tid = str(trade_id)
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("trade_id") or "") != tid:
+            continue
+        if row.get("ticks"):
+            out.extend(list(row.get("ticks") or []))
+            continue
+        if row.get("t") is None and row.get("price") is None:
+            continue
+        out.append(row)
+    return out
+

@@ -195,7 +195,7 @@ def simulate_touch_fill(
         if t is None or t + 60 < signal_ts:
             continue
         if t > end_ts:
-            break
+            continue
         high = float(row[2])
         low = float(row[3])
         close = float(row[4])
@@ -323,6 +323,7 @@ def arm_touch_grid_rows(
     signal_ts: float,
     ttl_sec: float = TTL_SEC_DEFAULT,
     live_offset_pct: float = LIVE_ORIG_OFFSET_PCT,
+    invert_on: bool = False,
 ) -> list:
     """One JSONL row per offset at APPROVE/TAKEN. touched starts false."""
     rows = []
@@ -342,6 +343,8 @@ def arm_touch_grid_rows(
             "would_fill_price": None,
             "live_orig_offset_pct": float(live_offset_pct),
             "places_live_order": offset_pct == float(live_offset_pct),
+            "invert_on": bool(invert_on),
+            "fill_model": "IDEAL_TOUCH",
             "note": "path-touch simulation only; one live 0.1% order",
         })
     return rows
@@ -364,6 +367,7 @@ def new_grid_state(rows: Sequence[Mapping[str, Any]]) -> dict:
         "signal_price": first["signal_price"],
         "signal_ts": first["signal_ts"],
         "expires_ts": first["expires_ts"],
+        "invert_on": bool(first.get("invert_on", False)),
         "offsets": offsets,
     }
 
@@ -408,6 +412,7 @@ def poll_grid_state(
                 "touched": True,
                 "touch_ts": now_ts,
                 "would_fill_price": slot["limit_price"],
+                "invert_on": bool(state.get("invert_on", False)),
                 "last": last,
                 "high": high,
                 "low": low,

@@ -19,6 +19,22 @@ _lock = threading.Lock()
 _states: dict[str, dict] = {}
 
 
+def _invert_on(src) -> bool:
+    """Ticket-time invert flag. Invert is an experimental factor, not a hidden mutation."""
+    if not isinstance(src, dict):
+        return False
+    if src.get("invert_on") is not None:
+        return bool(src.get("invert_on"))
+    if src.get("invert_signal") is not None:
+        return bool(src.get("invert_signal"))
+    if src.get("inverted") is not None:
+        return bool(src.get("inverted"))
+    controls = src.get("controls") if isinstance(src.get("controls"), dict) else {}
+    if controls.get("invert_signal") is not None:
+        return bool(controls.get("invert_signal"))
+    return False
+
+
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -78,6 +94,7 @@ def funnel_on_approve(signal: dict, ai: dict = None) -> None:
         "distance_from_market_pct": _distance_pct(price, limit) if limit else None,
         "ai_win_prob": (ai or {}).get("win_prob"),
         "edge_score": signal.get("edge_score_at_entry") or signal.get("edge_score"),
+        "invert_on": _invert_on(signal),
     }
     with _lock:
         _states[tid] = {**row, "order_submitted": False, "filled": False, "closed": False}
@@ -122,6 +139,7 @@ def funnel_on_order(signal: dict, order: dict) -> None:
         "effective_expires_ts": effective_expires_ts,
         "source_signal_expires_ts": signal_expires_ts or None,
         "order_max_age_sec": order_max_age_sec,
+        "invert_on": _invert_on(signal) or _invert_on(order),
     }
     with _lock:
         st = _states.setdefault(tid, {"trade_id": tid})
@@ -140,6 +158,7 @@ def funnel_on_capacity_reject(signal: dict, reason: str = "MAX_ACTIVE_SIGNALS") 
         "stage": "CAPACITY_REJECTED",
         "order_submitted": False,
         "fill_reason": reason,
+        "invert_on": _invert_on(signal),
     }
     with _lock:
         _states.setdefault(tid, {})["terminal_reason"] = reason
@@ -166,6 +185,7 @@ def funnel_on_expire(order: dict, reason: str = "TTL_EXPIRED") -> None:
         "closest_approach_pct": closest,
         "missed_by_pct": missed,
         "limit_price": order.get("limit_price"),
+        "invert_on": _invert_on(order),
     }
     with _lock:
         st = _states.setdefault(tid, {"trade_id": tid})
@@ -205,6 +225,7 @@ def funnel_on_fill(order: dict, fill_price: float = None) -> None:
         "fill_price": fill_price or order.get("fill_price") or order.get("limit_price"),
         "fill_delay_sec": round(time.time() - float(order.get("created_ts") or time.time()), 2),
         "entry_mode": order.get("entry_mode"),
+        "invert_on": _invert_on(order),
     }
     with _lock:
         st = _states.setdefault(tid, {"trade_id": tid})
@@ -225,11 +246,13 @@ def funnel_on_close(trade_id: str, exit_reason: str, net_pnl_usd: float = None, 
         "exit_reason": exit_reason,
         "net_pnl_usd": net_pnl_usd,
         "hold_sec": hold_sec,
+        "invert_on": False,
     }
     with _lock:
         st = _states.setdefault(tid, {"trade_id": tid})
         st["closed"] = True
         st["exit_reason"] = exit_reason
+        row["invert_on"] = bool(st.get("invert_on", False)) or _invert_on(st)
     _append_jsonl(FUNNEL_FILE, row)
 
 

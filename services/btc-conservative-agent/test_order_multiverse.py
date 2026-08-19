@@ -139,8 +139,11 @@ class OrderMultiverseTests(unittest.TestCase):
             atr14_pct=0.10,
         )
         self.assertFalse(done["pending"])
-        self.assertTrue(any(s["exit"] == "live_4_2_t12" for s in done["chase_exit_scores"]))
-        self.assertTrue(any(s["orig"] == 0.10 for s in done["chase_exit_scores"]))
+        self.assertEqual(done["event"], "FUNNEL_ONLY")
+        self.assertEqual(done["lifecycle"], "FUNNEL_ONLY")
+        self.assertEqual(done["completeness"]["entry_outcome"], "TTL_UNFILLED")
+        self.assertEqual(done["chase_exit_scores"], [])
+        self.assertFalse(done["completeness"]["EXIT_SWEEP_COMPLETE"])
 
     def test_cap_keeps_live_baseline(self):
         scores = []
@@ -201,15 +204,18 @@ class OrderMultiverseTests(unittest.TestCase):
             atr14_pct=0.10,
         )
         self.assertFalse(row["pending"])
-        self.assertEqual(row["event"], "COMPLETE")
+        self.assertEqual(row["event"], "FUNNEL_ONLY")
+        self.assertEqual(row["lifecycle"], "FUNNEL_ONLY")
         self.assertEqual(row["live_orig"], 0.10)
         self.assertIsNotNone(row["touches"]["0.05"])
         self.assertIsNone(row["touches"]["0.10"])
         self.assertIsNone(row["touches"]["0.30"])
-        origs = {round(float(s["orig"]), 2) for s in row["chase_exit_scores"]}
-        self.assertIn(0.05, origs)
-        self.assertNotIn(0.10, origs)
-        self.assertTrue(any(s["orig"] == 0.05 and s["green"] for s in row["chase_exit_scores"]))
+        self.assertEqual(row["chase_exit_scores"], [])
+        self.assertEqual(row["completeness"]["entry_outcome"], "TTL_UNFILLED")
+        self.assertEqual(row["completeness"]["exit_cohort"], "ttl_unfilled")
+        self.assertFalse(row["completeness"]["EXIT_SWEEP_COMPLETE"])
+        from order_multiverse import allows_exit_expectancy
+        self.assertFalse(allows_exit_expectancy(row["completeness"]))
         self.assertGreater(row["n_missed"], 0)
         # Adverse remaining path stays below 0.10% so live orig still misses.
         against = signal_price * 1.0009
@@ -227,7 +233,8 @@ class OrderMultiverseTests(unittest.TestCase):
             ttl_sec=1800.0,
         )
         self.assertFalse(red["pending"])
-        self.assertTrue(any(s["orig"] == 0.05 and s["green"] is False for s in red["chase_exit_scores"]))
+        self.assertEqual(red["completeness"]["exit_cohort"], "ttl_unfilled")
+        self.assertEqual(red["chase_exit_scores"], [])
         self.assertIsNone(red["touches"]["0.10"])
         self.assertIsNone(red["touches"]["0.30"])
 

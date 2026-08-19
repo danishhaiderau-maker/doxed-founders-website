@@ -279,5 +279,72 @@ class PathReplayAltExitTests(unittest.TestCase):
         self.assertTrue(any(hit["sl_fired_first"] for hit in report["first_hit"]))
 
 
+class PathReplayContractTests(unittest.TestCase):
+    def test_replay_never_reads_future_bars(self):
+        from path_replay_v1 import replay_from_raw_1m
+
+        fill_ts = 1_700_000_000.0
+        entry = ENTRY
+        base = []
+        for i in range(8):
+            px = price_for_short_unreal(entry, 0.0, LEV)
+            base.append([int((fill_ts + i * 60) * 1000), px, px, px, px, 1.0])
+        poison_t = fill_ts + 86_400.0
+        poison_px = price_for_short_unreal(entry, 40.0, LEV)
+        poisoned = base + [[int(poison_t * 1000), poison_px, poison_px, poison_px - 10, poison_px, 1.0]]
+        as_of = fill_ts + 7 * 60
+        a = replay_from_raw_1m(
+            base, direction="SHORT", entry_price=entry, fill_ts=fill_ts,
+            thesis_cut=-12.0, ladder=((4, 2),), as_of_ts=as_of,
+        )
+        b = replay_from_raw_1m(
+            poisoned, direction="SHORT", entry_price=entry, fill_ts=fill_ts,
+            thesis_cut=-12.0, ladder=((4, 2),), as_of_ts=as_of,
+        )
+        self.assertEqual(a["FIRST_EXIT"], b["FIRST_EXIT"])
+        self.assertEqual(a["exit_t"], b["exit_t"])
+        self.assertEqual(a["net_pnl_usd"], b["net_pnl_usd"])
+        self.assertEqual(a["FIRST_EXIT"], "PATH_END")
+        self.assertLess(a["raw_tick_n"], 40)
+
+    def test_first_hit_is_deterministic_same_path_same_params(self):
+        from path_replay_v1 import first_exit_code, replay_from_raw_1m
+
+        fill_ts = 1_700_000_000.0
+        candles = []
+        for i, unreal in enumerate((0.0, -4.0, -8.0, -12.0, -16.0, 0.0, 8.0)):
+            px = price_for_short_unreal(ENTRY, unreal, LEV)
+            adverse = price_for_short_unreal(ENTRY, min(unreal, 0.0), LEV)
+            fav = price_for_short_unreal(ENTRY, max(unreal, 0.0), LEV)
+            high = max(adverse, fav, ENTRY)
+            low = min(adverse, fav, ENTRY)
+            candles.append([int((fill_ts + i * 60) * 1000), px, high, low, px, 1.0])
+        kwargs = dict(
+            direction="SHORT", entry_price=ENTRY, fill_ts=fill_ts,
+            thesis_cut=-12.0, hard_stop=None, ladder=((4.0, 2.0),),
+        )
+        a = replay_from_raw_1m(candles, **kwargs)
+        b = replay_from_raw_1m(candles, **kwargs)
+        shuffled = list(reversed(candles))
+        c = replay_from_raw_1m(shuffled, **kwargs)
+        self.assertEqual(a, b)
+        self.assertEqual(a["FIRST_EXIT"], "THESIS")
+        self.assertEqual(first_exit_code("THESIS_FAST_CUT"), "THESIS")
+        self.assertEqual(c["FIRST_EXIT"], a["FIRST_EXIT"])
+        self.assertEqual(c["exit_t"], a["exit_t"])
+        self.assertEqual(c["net_pnl_usd"], a["net_pnl_usd"])
+        cut22 = replay_from_raw_1m(candles, **{**kwargs, "thesis_cut": -22.0})
+        cut50 = replay_from_raw_1m(candles, **{**kwargs, "thesis_cut": -50.0})
+        self.assertEqual(a["FIRST_EXIT"], "THESIS")
+        self.assertNotEqual(cut22["FIRST_EXIT"], "THESIS")
+        self.assertNotEqual(cut50["FIRST_EXIT"], "THESIS")
+        self.assertIn(a["FIRST_EXIT"], ("THESIS", "HARD_STOP", "LADDER", "ATR_TP", "ATR_SL", "CHANDELIER", "STRUCTURE", "TIME_STOP", "PATH_END"))
+        self.assertIn("would_have_recovered", a)
+        self.assertIn("would_have_hit_profit_later", a)
+        self.assertEqual(a["fill_model"], "IDEAL_TOUCH")
+        self.assertEqual(a["replay_from"], "raw_1m_tape")
+        self.assertEqual(a["control_cell"]["LIVE_CELL"], True)
+
+
 if __name__ == "__main__":
     unittest.main()

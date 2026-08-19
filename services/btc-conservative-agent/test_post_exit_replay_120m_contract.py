@@ -64,7 +64,13 @@ def test_ttl_complete_and_paper_id_hooks():
     assert "paper_multiverse_trade_id" in sync
     assert "path_complete=True" in expire
     assert "paper_multiverse_trade_id" in dump
+    assert '"ticket_closed": bool(buf.get("closed"))' in dump
+    assert '"invert_on": bool(buf.get("invert_on", False))' in dump
     assert "ttl_done" in poll
+    assert "has_post_fill_writer" not in poll
+    assert "ticket_closed" in SOURCE
+    assert "_sync_order_multiverse(" in SOURCE
+    assert "invert_on" in SOURCE
     assert "MTF_1M_REFRESH_SEC = 15" in SOURCE
     assert "_arm_chase_offset_touch_grid(signal)" in SOURCE
     assert "_sync_order_multiverse(signal, path_complete=False)" in SOURCE
