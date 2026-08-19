@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-feat(paper): record one compact multiverse per live ticket.
+chore(founder-os): sync memory (context + roadmap + tasks)
 
 ## Last Activity
 
