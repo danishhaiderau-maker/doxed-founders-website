@@ -31,8 +31,10 @@ def test_fly_standby_has_no_implicit_production_relay():
     assert 'os.getenv("FLY_REGION")' in WRAPPER
     assert "REFUSED_NON_FLY_RUNTIME" in WRAPPER
     assert 'os.environ["HOME_BOT_LOCAL"] = "0"' in WRAPPER
-    assert 'os.environ["HOME_RESEARCH_FULL"] = "0"' in WRAPPER
-    assert 'os.environ.setdefault("BLOCK_RESEARCH_WAREHOUSE", "1")' in WRAPPER
+    assert 'os.environ["HOME_RESEARCH_FULL"] = "1"' in WRAPPER
+    assert 'os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "0"' in WRAPPER
+    assert 'os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "1"' in WRAPPER
+    assert "EXECUTION_MIRROR_ONLY" in WRAPPER
     assert 'os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"' in WRAPPER
     assert '"https://doxed-btc-bot.fly.dev/analysis"' in WRAPPER
     assert "raise SystemExit(78)" in WRAPPER

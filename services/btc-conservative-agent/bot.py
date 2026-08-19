@@ -3985,6 +3985,9 @@ def risk_trading_allowed() -> bool:
     if stale_loss_pause or expired_loss_pause:
         set_execution_paused("")
 
+    # Paper/research Showcase must keep collecting. A -$20 DAILY_DRAWDOWN cap
+    # or 2h LOSS_STREAK pause stops new paper trades and starves the dataset.
+    # Live copy (FORCE_PAPER_MODE off and not unarmed RESEARCH) still uses both.
     if _paper_skips_entry_risk_pauses():
         with state_lock:
             paper_risk_paused = bool(state.get("execution_paused")) and state.get(
@@ -7010,6 +7013,8 @@ def research_dashboard_public_url() -> str:
     # Previous default :9500 was wrong — nothing listens there.
     return "http://127.0.0.1:9001/"
 
+# Live-copy only. Paper/research Showcase skips these pauses so collection
+# never stops — see _paper_skips_entry_risk_pauses().
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 MAX_DAILY_LOSS = DAILY_DRAWDOWN_PAUSE_USD
 CONSECUTIVE_LOSS_PAUSE = 4
@@ -18006,7 +18011,12 @@ def _force_paper_mode_active() -> bool:
 
 
 def _paper_skips_entry_risk_pauses() -> bool:
-    """Showcase paper must keep collecting through losing days/streaks."""
+    """True when DAILY_DRAWDOWN / LOSS_STREAK must not pause new entries.
+
+    Paper Showcase exists to collect trades. There is no point in a daily
+    loss cap or a 2h streak pause on that runtime — both starve the dataset.
+    Live copy keeps the gates: FORCE_PAPER_MODE off, and not unarmed RESEARCH.
+    """
     if _force_paper_mode_active():
         return True
     return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
@@ -39718,6 +39728,8 @@ def apply_trade_pnl(trade_row):
         else:
             state["consecutive_losses"] = 0
         if _paper_skips_entry_risk_pauses():
+            # Keep daily_pnl_usd / consecutive_losses for research stats, but
+            # never latch execution_paused. Paper needs uninterrupted data.
             return
         if state["consecutive_losses"] >= CONSECUTIVE_LOSS_PAUSE:
             state["loss_pause_until"] = time.time() + LOSS_PAUSE_SEC

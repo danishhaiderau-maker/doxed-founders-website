@@ -46,6 +46,10 @@ jobs:
         run: |
           python -m py_compile bot.py btc_conservative_agent.py fly_relay_state_pusher.py
           python test_fly_startup_contract.py
+          python test_paper_skips_risk_pauses.py
+          python test_daily_pnl_utc_rollover.py
+          python test_research_warehouse_export_mode.py
+          python test_research_export_csv.py
           python test_fly_single_owner_contract.py
           python test_fly_data_sync_contract.py
           python test_fly_relay_state_pusher_contract.py

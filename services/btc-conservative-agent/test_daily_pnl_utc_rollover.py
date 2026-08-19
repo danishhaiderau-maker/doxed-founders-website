@@ -65,6 +65,22 @@ def _force_pause_active(reason="DAILY_DRAWDOWN"):
     bot.set_execution_paused(reason)
 
 
+class _live_copy_risk_pauses:
+    """Temporarily restore live-copy DAILY_DRAWDOWN / LOSS_STREAK gates.
+
+    Module import sets FORCE_PAPER_MODE=1 (Bitfinex off). Paper now skips
+    those pauses; these tests still pin live-copy protection.
+    """
+
+    def __enter__(self):
+        self._orig = bot._paper_skips_entry_risk_pauses
+        bot._paper_skips_entry_risk_pauses = lambda: False
+        return self
+
+    def __exit__(self, *args):
+        bot._paper_skips_entry_risk_pauses = self._orig
+
+
 print("=" * 72)
 print("Daily PnL UTC-midnight rollover regression tests")
 print("=" * 72)
@@ -76,17 +92,18 @@ print("=" * 72)
 print("\n[1] Same UTC day, drawdown exceeded -> DAILY_DRAWDOWN pause fires")
 reset_risk_state()
 # Push daily PnL past the drawdown threshold on the SAME UTC day.
-with bot.state_lock:
-    bot.state["daily_pnl_usd"] = -(bot.DAILY_DRAWDOWN_PAUSE_USD + 0.01)
-    bot.state["current_trading_day"] = _dt.datetime.now(_dt.timezone.utc).date()
-allowed = bot.risk_trading_allowed()
-check("risk_trading_allowed returns False when drawdown exceeded", allowed is False)
-check("execution_paused is set", bot.state.get("execution_paused") is True)
-check(
-    "execution_reason is DAILY_DRAWDOWN",
-    bot.state.get("execution_reason") == "DAILY_DRAWDOWN",
-    detail=f"reason={bot.state.get('execution_reason')!r}",
-)
+with _live_copy_risk_pauses():
+    with bot.state_lock:
+        bot.state["daily_pnl_usd"] = -(bot.DAILY_DRAWDOWN_PAUSE_USD + 0.01)
+        bot.state["current_trading_day"] = _dt.datetime.now(_dt.timezone.utc).date()
+    allowed = bot.risk_trading_allowed()
+    check("risk_trading_allowed returns False when drawdown exceeded", allowed is False)
+    check("execution_paused is set", bot.state.get("execution_paused") is True)
+    check(
+        "execution_reason is DAILY_DRAWDOWN",
+        bot.state.get("execution_reason") == "DAILY_DRAWDOWN",
+        detail=f"reason={bot.state.get('execution_reason')!r}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,16 +155,17 @@ check("same-day rollover is a no-op", bot.state.get("daily_pnl_usd") == 0.0)
 
 # Now apply today's losing trades until drawdown trips.
 loss_per_trade = -((bot.DAILY_DRAWDOWN_PAUSE_USD / 2.0) + 0.5)  # 2 trades trips it
-bot.apply_trade_pnl({"trade_id": "loss-1", "net_pnl_usd": loss_per_trade})
-check("first loss does not yet trip drawdown", bot.state.get("execution_reason") != "DAILY_DRAWDOWN")
-bot.apply_trade_pnl({"trade_id": "loss-2", "net_pnl_usd": loss_per_trade})
-check(
-    "second loss trips DAILY_DRAWDOWN again on the new day",
-    bot.state.get("execution_reason") == "DAILY_DRAWDOWN",
-    detail=f"reason={bot.state.get('execution_reason')!r}",
-)
-check("bot is paused again", bot.state.get("execution_paused") is True)
-check("daily_pnl_usd reflects only today's losses", bot.state.get("daily_pnl_usd") < 0)
+with _live_copy_risk_pauses():
+    bot.apply_trade_pnl({"trade_id": "loss-1", "net_pnl_usd": loss_per_trade})
+    check("first loss does not yet trip drawdown", bot.state.get("execution_reason") != "DAILY_DRAWDOWN")
+    bot.apply_trade_pnl({"trade_id": "loss-2", "net_pnl_usd": loss_per_trade})
+    check(
+        "second loss trips DAILY_DRAWDOWN again on the new day",
+        bot.state.get("execution_reason") == "DAILY_DRAWDOWN",
+        detail=f"reason={bot.state.get('execution_reason')!r}",
+    )
+    check("bot is paused again", bot.state.get("execution_paused") is True)
+    check("daily_pnl_usd reflects only today's losses", bot.state.get("daily_pnl_usd") < 0)
 
 
 # ---------------------------------------------------------------------------
@@ -214,16 +232,17 @@ check("trading is allowed after stale latch clears", allowed is True)
 print("\n[7] Active LOSS_STREAK timer remains enforced")
 reset_risk_state()
 active_until = time.time() + 300.0
-with bot.state_lock:
-    bot.state["execution_paused"] = True
-    bot.state["execution_reason"] = "LOSS_STREAK"
-    bot.state["consecutive_losses"] = 0
-    bot.state["loss_pause_until"] = active_until
-allowed = bot.risk_trading_allowed()
-check("active LOSS_STREAK pause remains set", bot.state.get("execution_paused") is True)
-check("active LOSS_STREAK reason remains set", bot.state.get("execution_reason") == "LOSS_STREAK")
-check("active loss timer remains intact", bot.state.get("loss_pause_until") == active_until)
-check("trading remains blocked during active timer", allowed is False)
+with _live_copy_risk_pauses():
+    with bot.state_lock:
+        bot.state["execution_paused"] = True
+        bot.state["execution_reason"] = "LOSS_STREAK"
+        bot.state["consecutive_losses"] = 0
+        bot.state["loss_pause_until"] = active_until
+    allowed = bot.risk_trading_allowed()
+    check("active LOSS_STREAK pause remains set", bot.state.get("execution_paused") is True)
+    check("active LOSS_STREAK reason remains set", bot.state.get("execution_reason") == "LOSS_STREAK")
+    check("active loss timer remains intact", bot.state.get("loss_pause_until") == active_until)
+    check("trading remains blocked during active timer", allowed is False)
 
 
 print("\n" + "=" * 72)

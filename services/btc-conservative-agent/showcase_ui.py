@@ -14,6 +14,7 @@ from flask import Response, jsonify, render_template_string, request
 WAREHOUSE_BLOCKED_ROUTES = frozenset({
     "/api/toggle_fresh_collection",
     "/api/export_csv",
+    "/api/export.csv",
     "/api/export_debug",
     "/api/download_debug_config",
     "/api/reset",
@@ -550,24 +551,25 @@ def perform_showcase_fresh_start(bot_module) -> dict:
     }
 
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _should_block_research_warehouse(block_warehouse: bool | None) -> bool:
-    """Keep heavy warehouse exports off the canonical Fly trading process."""
+    """Block CSV/JSONL warehouse dumps on execution-mirror hosts only.
+
+    Fly ``doxed-btc-bot`` is the paper research owner (collection writers +
+    owner dashboard). SHOWCASE_AGENT must not imply EXECUTION_MIRROR.
+    """
     if block_warehouse is not None:
-        return block_warehouse
-    if os.environ.get("HOME_RESEARCH_FULL", "").lower() in ("1", "true", "yes"):
+        return bool(block_warehouse)
+    if _truthy_env("EXECUTION_MIRROR_ONLY"):
+        return True
+    if _truthy_env("HOME_RESEARCH_FULL"):
         return False
-    if os.environ.get("BLOCK_RESEARCH_WAREHOUSE", "").lower() in ("1", "true", "yes"):
+    if _truthy_env("BLOCK_RESEARCH_WAREHOUSE"):
         return True
-    # Backward-compatible read only. New production configuration uses the
-    # accurately named BLOCK_RESEARCH_WAREHOUSE variable above.
-    if os.environ.get("EXECUTION_MIRROR_ONLY", "").lower() in ("1", "true", "yes"):
-        return True
-    # Compatibility fallback for older SHOWCASE_AGENT deployments. The current
-    # Fly wrapper sets BLOCK_RESEARCH_WAREHOUSE explicitly; the desktop analyzer
-    # reads the incremental Fly data mirror instead of running a second bot.
-    return os.environ.get("SHOWCASE_AGENT", "").lower() in ("1", "true", "yes") and not os.environ.get(
-        "HOME_BOT_LOCAL", ""
-    )
+    return False
 
 
 def register_showcase_ui(app, bot_module=None, *, block_warehouse: bool | None = None) -> None:

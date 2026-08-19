@@ -143,12 +143,22 @@ os.environ.setdefault(
     "SHOWCASE_INFERENCE_USAGE_URL",
     "https://doxxedcrypto.digital/api/internal/showcase-inference-usage",
 )
-# Fly is the canonical strategy/trading owner. It must never inherit the old
-# desktop/full-warehouse identity merely because this shared entry module was
-# historically used in multiple environments.
+# Fly is the canonical strategy/trading owner and the research-data warehouse
+# (paper collection writers + owner dashboard). Do not treat this process as
+# an execution mirror: that 404s CSV/JSONL exports. Railway/live copy is the
+# only EXECUTION_MIRROR_ONLY host.
 os.environ["HOME_BOT_LOCAL"] = "0"
-os.environ["HOME_RESEARCH_FULL"] = "0"
-os.environ.setdefault("BLOCK_RESEARCH_WAREHOUSE", "1")
+os.environ["HOME_RESEARCH_FULL"] = "1"
+if os.environ.get("EXECUTION_MIRROR_ONLY", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+):
+    os.environ["HOME_RESEARCH_FULL"] = "0"
+    os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "1"
+else:
+    os.environ["BLOCK_RESEARCH_WAREHOUSE"] = "0"
 os.environ["DASHBOARD_PUBLIC_URL"] = "https://doxed-btc-bot.fly.dev/"
 os.environ["RESEARCH_DASHBOARD_PUBLIC_URL"] = (
     "https://doxed-btc-bot.fly.dev/analysis"
