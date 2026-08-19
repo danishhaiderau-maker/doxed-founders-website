@@ -64,6 +64,7 @@ class Cycle3mIndicatorTests(unittest.TestCase):
         self.assertIsNotNone(snap["rsi14"])
         self.assertIn("stoch_rsi_k", snap)
         self.assertIn("adx14", snap)
+        self.assertIn("rsi_5m_forming", snap)
         self.assertIn("3m exhaustion", snap["line"])
         stoch = stoch_rsi([c[4] for c in resample_1m_to_3m(rows)])
         self.assertIsNotNone(stoch["k"])
@@ -91,13 +92,14 @@ class Cycle3mIndicatorTests(unittest.TestCase):
 
     def test_universe_snapshot_has_collection_fields(self):
         rows = [_1m_row(i, 1000 + (i % 7), high=1010, low=990) for i in range(200)]
+        last_ts = rows[-1][0] / 1000.0
         snap = compute_3m_universe_snapshot(
             rows,
             dist_to_support=0.01,
             dist_to_resistance=0.02,
             delta_3m=12.5,
             imbalance_3m=0.4,
-            ts=1_700_000_180,
+            ts=last_ts + 10,
             cycle_outcome="SKIPPED",
             skip_reason="NO_SETUP",
         )
@@ -106,11 +108,16 @@ class Cycle3mIndicatorTests(unittest.TestCase):
         self.assertFalse(snap["hard_veto"])
         self.assertFalse(snap["live_veto"])
         for key in (
-            "rsi14", "stoch_rsi_k", "adx14", "atr14_pct_3m", "donchian_loc_3m",
+            "rsi14", "rsi_3m", "rsi_3m_forming", "rsi_3m_closed",
+            "rsi_5m_forming", "rsi_5m_closed", "stoch_rsi_k", "adx14", "atr14_pct_3m",
+            "donchian_loc_3m",
             "bb_width_3m", "delta_3m", "imbalance_3m", "dist_to_support",
             "dist_to_resistance", "session_utc", "hour_utc",
         ):
             self.assertIn(key, snap)
+        self.assertEqual(snap["rsi_3m"], snap["rsi14"])
+        self.assertEqual(snap["rsi_5m_note"].startswith("log_only"), True)
+        self.assertFalse(snap.get("live_veto"))
         self.assertEqual(snap["delta_3m"], 12.5)
         self.assertEqual(snap["cycle_outcome"], "SKIPPED")
         self.assertIsNotNone(bollinger_width([c[4] for c in resample_1m_to_3m(rows)]))

@@ -4,7 +4,8 @@ The Showcase AI cadence is ~180s. Bitfinex REST candles have 1m and 5m but not 3
 so this module resamples native 1m OHLC into 3m bars and computes Wilder RSI(14),
 StochRSI(14,14,3), and Wilder ADX(14) on that 3m series.
 
-Do not treat 5m as close enough. Higher-TF RSI is not computed here.
+Do not treat 5m as close enough for gates. 5m RSI is stamped as a log-only
+diagnostic so a 5m chart can be reconciled against the 3m decision TF.
 """
 from __future__ import annotations
 
@@ -16,9 +17,11 @@ UNIVERSE_POLICY_TAG = "cycle_3m_universe_v1"
 UNIVERSE_SCHEMA = "cycle_3m_universe_v1"
 UNIVERSE_FILE = "cycle_3m_universe.jsonl"
 DECISION_BAR_SEC = 180
+DIAGNOSTIC_5M_BAR_SEC = 300
 SOURCE_BAR = "1m"
 DECISION_BAR = "3m"
 SOURCE_NOTE = "bitfinex_1m_resampled_to_3m"
+DIAGNOSTIC_5M_NOTE = "log_only_5m_rsi_for_chart_reconcile_not_a_gate"
 RSI_PERIOD = 14
 STOCH_PERIOD = 14
 STOCH_D_PERIOD = 3
@@ -50,8 +53,9 @@ def _close(candle: Sequence[Any]) -> Optional[float]:
     return _finite(candle[4])
 
 
-def resample_1m_to_3m(candles_1m: Sequence[Sequence[Any]]) -> list:
-    """Aggregate Bitfinex 1m rows [ts_ms, o, h, l, c, v] into 3m OHLC."""
+def resample_1m_to_tf(candles_1m: Sequence[Sequence[Any]], bar_sec: int) -> list:
+    """Aggregate Bitfinex 1m rows [ts_ms, o, h, l, c, v] into ``bar_sec`` OHLC."""
+    width = int(bar_sec)
     buckets: dict[int, list] = {}
     for row in candles_1m or []:
         if not row or len(row) < 5:
@@ -62,7 +66,7 @@ def resample_1m_to_3m(candles_1m: Sequence[Sequence[Any]]) -> list:
         if ts is None or o is None or h is None or l is None or c is None:
             continue
         ts_sec = ts / 1000.0 if ts > 1e12 else ts
-        bucket = int(ts_sec // DECISION_BAR_SEC) * DECISION_BAR_SEC
+        bucket = int(ts_sec // width) * width
         buckets.setdefault(bucket, []).append((ts_sec, o, h, l, c, v or 0.0))
     out = []
     for bucket in sorted(buckets):
@@ -76,6 +80,72 @@ def resample_1m_to_3m(candles_1m: Sequence[Sequence[Any]]) -> list:
             sum(item[5] for item in rows),
         ])
     return out
+
+
+def resample_1m_to_3m(candles_1m: Sequence[Sequence[Any]]) -> list:
+    """Aggregate Bitfinex 1m rows [ts_ms, o, h, l, c, v] into 3m OHLC."""
+    return resample_1m_to_tf(candles_1m, DECISION_BAR_SEC)
+
+
+def resample_1m_to_5m(candles_1m: Sequence[Sequence[Any]]) -> list:
+    """Diagnostic 5m OHLC from the same 1m series. Not a decision TF."""
+    return resample_1m_to_tf(candles_1m, DIAGNOSTIC_5M_BAR_SEC)
+
+
+def candles_at_or_before(candles: Sequence[Sequence[Any]], ts: Optional[float]) -> list:
+    if ts is None:
+        return list(candles or [])
+    stamp = float(ts)
+    out = []
+    for row in candles or []:
+        raw = _finite(row[0]) if row else None
+        if raw is None:
+            continue
+        ts_sec = raw / 1000.0 if raw > 1e12 else raw
+        if ts_sec <= stamp + 1e-9:
+            out.append(row)
+    return out
+
+
+def split_closed_forming_bars(
+    bars: Sequence[Sequence[Any]],
+    ts: Optional[float],
+    bar_sec: int,
+) -> tuple:
+    """Return (closed_bars, forming_bars). Forming includes an incomplete last bucket."""
+    bars = list(bars or [])
+    if not bars:
+        return [], []
+    if ts is None:
+        return bars[:-1], bars
+    last_open = _finite(bars[-1][0])
+    if last_open is None:
+        return bars[:-1], bars
+    last_open_sec = last_open / 1000.0 if last_open > 1e12 else last_open
+    if last_open_sec + float(bar_sec) <= float(ts) + 1e-9:
+        return bars, bars
+    return bars[:-1], bars
+
+
+def rsi_closed_and_forming(
+    candles_1m: Sequence[Sequence[Any]],
+    *,
+    ts: Optional[float] = None,
+    bar_sec: int = DECISION_BAR_SEC,
+) -> dict:
+    """Wilder RSI(14) on last-closed vs in-progress bar at ``ts``."""
+    available = candles_at_or_before(candles_1m, ts)
+    bars = resample_1m_to_tf(available, bar_sec)
+    closed_bars, forming_bars = split_closed_forming_bars(bars, ts, bar_sec)
+    closed_closes = [c for c in (_close(row) for row in closed_bars) if c is not None]
+    forming_closes = [c for c in (_close(row) for row in forming_bars) if c is not None]
+    return {
+        "closed": wilder_rsi(closed_closes),
+        "forming": wilder_rsi(forming_closes),
+        "bar_count_closed": len(closed_bars),
+        "bar_count_forming": len(forming_bars),
+        "bar_sec": int(bar_sec),
+    }
 
 
 def _wilder_smooth(values: Sequence[float], period: int) -> list:
@@ -349,10 +419,15 @@ def _base_3m_snapshot(
     dist_to_support: Optional[float] = None,
     dist_to_resistance: Optional[float] = None,
     structure_score: Optional[float] = None,
+    ts: Optional[float] = None,
 ) -> tuple:
     bars = resample_1m_to_3m(candles_1m)
     closes = [c for c in (_close(row) for row in bars) if c is not None]
-    rsi = wilder_rsi(closes)
+    rsi_3m = rsi_closed_and_forming(candles_1m, ts=ts, bar_sec=DECISION_BAR_SEC)
+    rsi_5m = rsi_closed_and_forming(candles_1m, ts=ts, bar_sec=DIAGNOSTIC_5M_BAR_SEC)
+    rsi = rsi_3m.get("forming")
+    if rsi is None:
+        rsi = wilder_rsi(closes)
     stoch = stoch_rsi(closes)
     adx = wilder_adx(bars)
     atr = wilder_atr(bars)
@@ -366,6 +441,12 @@ def _base_3m_snapshot(
         "source_bar": SOURCE_BAR,
         "source": SOURCE_NOTE,
         "rsi14": rsi,
+        "rsi_3m": rsi_3m.get("forming"),
+        "rsi_3m_forming": rsi_3m.get("forming"),
+        "rsi_3m_closed": rsi_3m.get("closed"),
+        "rsi_5m_forming": rsi_5m.get("forming"),
+        "rsi_5m_closed": rsi_5m.get("closed"),
+        "rsi_5m_note": DIAGNOSTIC_5M_NOTE,
         "stoch_rsi_k": stoch.get("k"),
         "stoch_rsi_d": stoch.get("d"),
         "adx14": adx,
@@ -406,6 +487,7 @@ def compute_3m_exhaustion_snapshot(
         dist_to_support=dist_to_support,
         dist_to_resistance=dist_to_resistance,
         structure_score=structure_score,
+        ts=None,
     )
     snap["schema"] = "exhaustion_3m_v1"
     snap["policy_tag"] = EXHAUSTION_POLICY_TAG
@@ -436,6 +518,7 @@ def compute_3m_universe_snapshot(
         dist_to_support=dist_to_support,
         dist_to_resistance=dist_to_resistance,
         structure_score=structure_score,
+        ts=ts,
     )
     stamp = float(ts) if ts is not None else None
     snap.update({

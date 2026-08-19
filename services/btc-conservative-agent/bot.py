@@ -113,6 +113,12 @@ from cycle_3m_indicators import (
     compute_3m_universe_snapshot,
     cycle_bucket_3m,
 )
+from chase_offset_touch_grid import (
+    TOUCH_GRID_FILE as CHASE_OFFSET_TOUCH_GRID_FILE,
+    arm_touch_grid_rows,
+    new_grid_state,
+    poll_grid_state,
+)
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -5498,6 +5504,7 @@ def get_funding_snapshot_for_ai():
 # --- Phase A: balanced market context (structure, MTF, EMA facts, trend strength) ---
 MTF_REFRESH_SEC = 300
 MTF_5M_REFRESH_SEC = 60
+MTF_1M_REFRESH_SEC = 15
 STRUCTURE_PIVOT_BARS = 2
 _mtf_cache = {"1h": {"ts": 0.0, "candles": []}, "4h": {"ts": 0.0, "candles": []}}
 _last_market_context_ts = 0.0
@@ -6315,7 +6322,12 @@ def fetch_mtf_candles(timeframe: str, limit: int = 120):
     global _mtf_cache
     now = time.time()
     bucket = _mtf_cache.get(timeframe, {"ts": 0.0, "candles": []})
-    refresh_sec = MTF_5M_REFRESH_SEC if timeframe == "5m" else MTF_REFRESH_SEC
+    if timeframe == "5m":
+        refresh_sec = MTF_5M_REFRESH_SEC
+    elif timeframe == "1m":
+        refresh_sec = MTF_1M_REFRESH_SEC
+    else:
+        refresh_sec = MTF_REFRESH_SEC
     if bucket["candles"] and now - bucket["ts"] < refresh_sec:
         return bucket["candles"]
     try:
@@ -11341,6 +11353,72 @@ def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
 
 
 _cycle_3m_written_buckets = {}
+_touch_grid_book = {}
+
+
+def _arm_chase_offset_touch_grid(signal: dict):
+    """Paper path-touch grid at 0.01–0.30%. Does not change live 0.1% orig."""
+    if not isinstance(signal, dict):
+        return
+    try:
+        price = float(
+            signal.get("signal_price_at_approve")
+            or signal.get("signal_price")
+            or signal.get("price")
+            or 0
+        )
+        if price <= 0:
+            return
+        tid = str(signal.get("trade_id") or "")
+        if not tid:
+            return
+        direction = signal.get("final_direction") or signal.get("direction") or "SHORT"
+        ts = float(signal.get("created_ts_ts") or signal.get("snapshot_ts") or time.time())
+        ttl = float(signal.get("expires_ts") or 0)
+        ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
+        rows = arm_touch_grid_rows(
+            trade_id=tid,
+            direction=direction,
+            signal_price=price,
+            signal_ts=ts,
+            ttl_sec=ttl_sec,
+            live_offset_pct=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+        )
+        for row in rows:
+            _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+        _touch_grid_book[tid] = new_grid_state(rows)
+        logger.info(
+            f"[TOUCH GRID] armed trade_id={tid} offsets=0.01-0.30 live_orig="
+            f"{DETERMINISTIC_ENTRY_OFFSET_PCT * 100:.2f}% paper_only [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as exc:
+        logger.warning(f"[TOUCH GRID] arm failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
+    if not _touch_grid_book or price is None or float(price) <= 0:
+        return
+    now = time.time()
+    dead = []
+    for tid, grid in list(_touch_grid_book.items()):
+        try:
+            if now > float(grid.get("expires_ts") or 0):
+                dead.append(tid)
+                continue
+            for row in poll_grid_state(
+                grid,
+                now_ts=now,
+                last=float(price),
+                high=float(price),
+                low=float(price),
+                bid=None if not bid else float(bid),
+                ask=None if not ask else float(ask),
+            ):
+                _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+        except Exception as exc:
+            logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
+    for tid in dead:
+        _touch_grid_book.pop(tid, None)
 
 
 def _cycle_3m_flow_and_sr():
@@ -20160,6 +20238,13 @@ def process_pending_orders():
     price = state.get("price")
     if price is None or price <= 0:
         return
+    try:
+        with state_lock:
+            grid_bid = float(state.get("bid") or 0)
+            grid_ask = float(state.get("ask") or 0)
+        _poll_chase_offset_touch_grid(price, grid_bid, grid_ask)
+    except Exception:
+        pass
     process_awaiting_micro_entries()
     process_awaiting_5m_entries()
     process_awaiting_min_age_entries()
@@ -21110,6 +21195,7 @@ def process_signal(event: dict):
                 trade_id=signal.get("trade_id") or trade_id,
                 direction=signal.get("final_direction") or ai.get("direction"),
             )
+            _arm_chase_offset_touch_grid(signal)
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -24626,6 +24712,7 @@ def research_wipe_file_paths():
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         PATH_REPLAY_FILE,
         CYCLE_3M_UNIVERSE_FILE,
+        CHASE_OFFSET_TOUCH_GRID_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -24669,6 +24756,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
         PATH_REPLAY_FILE,
         CYCLE_3M_UNIVERSE_FILE,
+        CHASE_OFFSET_TOUCH_GRID_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
