@@ -3663,6 +3663,24 @@ def _compose_ai_history_reason(ai_result: dict) -> str:
     return " | ".join(parts)[:500]
 
 
+def json_for_js(value) -> str:
+    """Serialize a value as a JS expression (JSON), safe inside a script/file.
+
+    Restored AI payloads can contain backticks, quotes, and newlines. Embedding
+    them in a template literal or an unescaped Python ``\\n`` inside DASHBOARD_JS
+    breaks the dashboard file. JSON text uses double quotes, so those characters
+    stay inside string values and cannot close surrounding JS syntax.
+    """
+    blob = json.dumps(value, default=str, ensure_ascii=False)
+    return (
+        blob.replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def restore_last_ai_payload_from_log(path: str = None) -> bool:
     """After restart, LAST_AI_PAYLOAD is RAM-only. Reload the last logged context."""
     global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
@@ -3686,6 +3704,7 @@ def restore_last_ai_payload_from_log(path: str = None) -> bool:
         if not last:
             return False
         payload = copy.deepcopy(last.get("context") or {})
+        payload = json.loads(json.dumps(payload, default=str))
         payload["_dashboard_restore"] = {
             "status": "RESTORED_AFTER_RESTART",
             "message": (
@@ -27854,6 +27873,7 @@ __ADMIN_ACCESS_CONTROLS__
 
 DASHBOARD_JS = """(function () {
   try {
+    window.__LAST_AI_PAYLOAD__ = __LAST_AI_PAYLOAD_JSON__;
     function displayExitCause(reason) {
       const raw = String(reason || '').trim();
       if (!raw) return 'Not recorded';
@@ -29654,7 +29674,10 @@ DASHBOARD_JS = """(function () {
         }
         const dashPort = d.dashboard_port || __DASHBOARD_PORT__;
         const onWrongPort = (window.location.port && String(window.location.port) !== String(dashPort));
-        safeText('aiInput', JSON.stringify(d.ai_input || {}, null, 2) + (d.ai_input_time ? '\n@ ' + d.ai_input_time : ''));
+        const aiInputBody = d.ai_input && Object.keys(d.ai_input).length
+          ? d.ai_input
+          : (window.__LAST_AI_PAYLOAD__ || {});
+        safeText('aiInput', JSON.stringify(aiInputBody, null, 2) + (d.ai_input_time ? '\\n@ ' + d.ai_input_time : ''));
         safeText('features', JSON.stringify(d.feature_snapshot || {}) + ' (live — may differ from AI Input until next call)');
         if (onWrongPort) {
           const sb = document.getElementById('serverBanner');
@@ -29797,12 +29820,20 @@ DASHBOARD_JS = """(function () {
   console.info("dashboard.js loaded: true");
 })();"""
 
-@app.route('/static/dashboard.js')
-def dashboard_js():
-    js = (
+def build_dashboard_js(ai_payload=None) -> str:
+    payload = LAST_AI_PAYLOAD if ai_payload is None else ai_payload
+    if not isinstance(payload, dict):
+        payload = {}
+    return (
         DASHBOARD_JS.replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__DASHBOARD_URL__", dashboard_public_url())
+        .replace("__LAST_AI_PAYLOAD_JSON__", json_for_js(payload))
     )
+
+
+@app.route('/static/dashboard.js')
+def dashboard_js():
+    js = build_dashboard_js()
     return js, 200, {
         'Content-Type': 'application/javascript',
         'Cache-Control': 'no-store, no-cache, must-revalidate',
