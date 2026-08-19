@@ -3647,6 +3647,68 @@ def log_ai_input_full(
     except Exception as e:
         logger.error(f"[AI INPUT LOG] {e} [PIPELINE ENFORCEMENT]")
 
+
+def _compose_ai_history_reason(ai_result: dict) -> str:
+    """One dashboard line: decision plus reject/block comment."""
+    decision = str((ai_result or {}).get("decision") or "").strip()
+    reason = str((ai_result or {}).get("reason") or "").strip()
+    comment = str((ai_result or {}).get("comment") or "").strip()
+    parts = []
+    if decision:
+        parts.append(decision)
+    if reason and reason not in parts:
+        parts.append(reason)
+    if comment and comment not in parts and comment != reason:
+        parts.append(comment[:300])
+    return " | ".join(parts)[:500]
+
+
+def restore_last_ai_payload_from_log(path: str = None) -> bool:
+    """After restart, LAST_AI_PAYLOAD is RAM-only. Reload the last logged context."""
+    global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
+    path = path or AI_INPUT_LOG_FILE
+    if not os.path.isfile(path):
+        return False
+    last = None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ctx = row.get("context")
+                if isinstance(ctx, dict) and ctx:
+                    last = row
+        if not last:
+            return False
+        payload = copy.deepcopy(last.get("context") or {})
+        payload["_dashboard_restore"] = {
+            "status": "RESTORED_AFTER_RESTART",
+            "message": (
+                "Last AI payload restored from ai_input_log.jsonl after process start. "
+                "The next live scan replaces this snapshot."
+            ),
+            "logged_ts": last.get("ts"),
+            "decision": (last.get("ai") or {}).get("decision"),
+        }
+        LAST_AI_PAYLOAD = payload
+        LAST_AI_TIMESTAMP = last.get("ts") or utc_iso()
+        logger.info(
+            "[AI PAYLOAD] restored last snapshot from %s ts=%s decision=%s [PIPELINE ENFORCEMENT]",
+            path,
+            LAST_AI_TIMESTAMP,
+            (last.get("ai") or {}).get("decision"),
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"[AI PAYLOAD] restore failed: {exc} [PIPELINE ENFORCEMENT]")
+        return False
+
+
 def get_golden_stack_thresholds() -> dict:
     """Production vs research-relaxed golden stack limits."""
     if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
@@ -4684,6 +4746,7 @@ body_ratio_buffer = deque(maxlen=200)
 
 LAST_AI_PAYLOAD = {}
 LAST_AI_TIMESTAMP = None
+DASHBOARD_WS_STALE_SEC = float(os.getenv("DASHBOARD_WS_STALE_SEC", "30"))
 
 WINDOW_SIZE = 10
 
@@ -13760,7 +13823,7 @@ def _append_ai_history_row(ai_result: dict) -> None:
         "edge_threshold": get_edge_threshold(),
         "source": ai_result.get("source", "AI"),
         "comment": (ai_result.get("comment") or "")[:2000],
-        "reason": (ai_result.get("reason") or "")[:500],
+        "reason": _compose_ai_history_reason(ai_result) or (ai_result.get("reason") or "")[:500],
         "ai_error": ai_result.get("ai_error", False),
         "error_type": ai_result.get("error_type"),
         "error_detail": (ai_result.get("error_detail") or "")[:500],
@@ -13792,7 +13855,7 @@ def _append_ai_history_row(ai_result: dict) -> None:
             inserted = True
         else:
             existing.setdefault("lane_verdicts", {}).update(row["lane_verdicts"])
-        hist_limit = 50 if _sole_ai_research_mode() else 5
+        hist_limit = 50
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
     if inserted:
@@ -27651,7 +27714,8 @@ __ADMIN_ACCESS_CONTROLS__
     <p><strong>AI Cooldown:</strong> <span id="aiCooldown">-</span></p>
     <p><strong>Last Pipeline:</strong> <span id="lastPipeline">-</span></p>
     <p><strong>Heartbeat:</strong> <span id="heartbeat">-</span></p>
-    <p><strong>AI Input:</strong> <span id="aiInput">-</span></p>
+    <p><strong>AI Input (last payload sent to DeepSeek):</strong></p>
+    <pre id="aiInput" style="max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid #30363d;padding:8px;font-size:0.8em;color:#c9d1d9;">-</pre>
     <p><strong>Features:</strong> <span id="features">-</span></p>
     <p><strong>Data Quality:</strong> <span id="dataQuality">-</span></p>
 </div>
@@ -27746,6 +27810,7 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>Pending Orders</h2>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Only limits still resting on the book. Older APPROVE/TTL rows are not active — they move to Expired Orders. AI History is every scan, not every working order.</p>
 <table>
     <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th><th>Venue fill gate</th></tr></thead>
     <tbody id="ordersTable"></tbody>
@@ -27766,7 +27831,7 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Restored pre-restart calls may lack the newer per-lane verdict metadata.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. REJECT / ACCEPT is in the lane verdict and Reason columns — these rows are not pending orders. Executable orders are only in Pending Orders. After a restart, Reason still shows APPROVE/REJECT plus the block comment.</p>
 <table>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -28883,7 +28948,9 @@ DASHBOARD_JS = """(function () {
           wsAgeSec = Math.round(d.price_age);
         }
         let wsAgeText = wsAgeSec != null ? wsAgeSec + ' s' : '-';
-        const wsStale = wsAgeSec != null && wsAgeSec > 10;
+        const wsStaleSec = d.dashboard_ws_stale_sec != null ? Number(d.dashboard_ws_stale_sec) : 30;
+        const wsConnected = d.ws_transport_connected === true || d.ws_ready === true;
+        const wsStale = wsAgeSec != null && wsAgeSec > wsStaleSec && !wsConnected;
         if (wsStale) wsAgeText += ' (STALE!)';
         safeText('ws_age', wsAgeText);
         const wsBadge = document.getElementById('wsStaleBadge');
@@ -29486,7 +29553,11 @@ DASHBOARD_JS = """(function () {
           return `<span style="color:${accepted ? '#3fb950' : '#f85149'}" title="${title}">${label}${score}</span>`;
         };
         safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
-          const c = a.reason || a.comment || '';
+          const c = [a.decision, a.reason, a.comment].filter(function (part, idx, arr) {
+            const text = String(part || '').trim();
+            if (!text) return false;
+            return arr.findIndex(function (other) { return String(other || '').trim() === text; }) === idx;
+          }).join(' | ');
           const cShort = c.length > 100 ? c.substring(0, 100) + '...' : (c || '-');
           const verdicts = a.lane_verdicts || {};
           const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
@@ -29583,7 +29654,7 @@ DASHBOARD_JS = """(function () {
         }
         const dashPort = d.dashboard_port || __DASHBOARD_PORT__;
         const onWrongPort = (window.location.port && String(window.location.port) !== String(dashPort));
-        safeText('aiInput', JSON.stringify(d.ai_input || {}) + (d.ai_input_time ? ' @ ' + d.ai_input_time : '') + ' (snapshot at last AI call)');
+        safeText('aiInput', JSON.stringify(d.ai_input || {}, null, 2) + (d.ai_input_time ? '\n@ ' + d.ai_input_time : ''));
         safeText('features', JSON.stringify(d.feature_snapshot || {}) + ' (live — may differ from AI Input until next call)');
         if (onWrongPort) {
           const sb = document.getElementById('serverBanner');
@@ -32720,6 +32791,7 @@ def _build_api_state_snapshot():
                 ),
             }
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
+        snapshot["dashboard_ws_stale_sec"] = DASHBOARD_WS_STALE_SEC
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
         snapshot["data_quality"] = state.get("data_quality", 0.0)
         snapshot["edge_threshold"] = get_edge_threshold()
@@ -33062,6 +33134,13 @@ def _sanitize_public_state(state: dict) -> dict:
 
     # Explicit marker so observers know they're seeing the sanitized view.
     out["public_sanitized"] = True
+    out["ai_input"] = {
+        "status": "OWNER_ONLY",
+        "message": (
+            "Last AI payload is on the owner dashboard (login). "
+            "The public view does not include the model input."
+        ),
+    }
     return out
 
 
@@ -36190,12 +36269,17 @@ def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime
             "session_ts": bot_start_time,
             "trade_id": trade_id,
             "dir": dir_,
+            "decision": "APPROVE" if approved else "REJECT",
             "approved": approved,
             "win_prob": win_prob,
             "comment": comment,
+            "reason": (
+                f"{'APPROVE' if approved else 'REJECT'} | {comment}"
+                if comment else ("APPROVE" if approved else "REJECT")
+            )[:500],
             "event_id": event_id,
         })
-        hist_limit = 50 if _sole_ai_research_mode() else 5
+        hist_limit = 50
         if len(state["ai_history"]) > hist_limit:
             state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_decision"] = "APPROVED" if approved else "REJECTED"
@@ -39645,6 +39729,7 @@ def main():
         state["bot_start_time"] = bot_start_time
     _restore_session_ai_history_from_csv(50)
     _restore_shared_ai_lane_verdicts_from_journal()
+    restore_last_ai_payload_from_log()
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0

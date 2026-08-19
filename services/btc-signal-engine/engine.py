@@ -97,6 +97,33 @@ from normalized_market_indicators import (
     INDICATOR_NORMALIZATION_VERSION,
     normalize_market_indicators,
 )
+from path_replay_v1 import (
+    PATH_REPLAY_FILE,
+    PATH_REPLAY_POLICY_TAG,
+    PATH_REPLAY_SCHEMA,
+    build_path_sample,
+)
+from cycle_3m_indicators import (
+    EXHAUSTION_POLICY_TAG as MTF_EXHAUSTION_LOG_V1,
+    UNIVERSE_FILE as CYCLE_3M_UNIVERSE_FILE,
+    UNIVERSE_POLICY_TAG as CYCLE_3M_UNIVERSE_TAG,
+    UNIVERSE_SCHEMA as CYCLE_3M_UNIVERSE_SCHEMA,
+    WOULD_BLOCK_SHORT_REASON as WOULD_BLOCK_SHORT_3M_REASON,
+    compute_3m_exhaustion_snapshot,
+    compute_3m_universe_snapshot,
+    cycle_bucket_3m,
+)
+from chase_offset_touch_grid import (
+    TOUCH_GRID_FILE as CHASE_OFFSET_TOUCH_GRID_FILE,
+    arm_touch_grid_rows,
+    new_grid_state,
+    poll_grid_state,
+)
+from order_multiverse import (
+    ORDER_MULTIVERSE_FILE,
+    build_order_multiverse,
+    paper_multiverse_trade_id,
+)
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -1129,6 +1156,7 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_sr_state": context.get("sr_state", "UNKNOWN"),
         "entry_dist_to_resistance": context.get("dist_to_resistance", 0.0),
         "entry_dist_to_support": context.get("dist_to_support", 0.0),
+        **_fill_replay_3m_stamps(signal, context),
         "entry_bid": round(entry_bid, 2) if entry_bid > 0 else None,
         "entry_ask": round(entry_ask, 2) if entry_ask > 0 else None,
         "market_bid_ask_spread_usd_at_entry": (
@@ -3619,6 +3647,68 @@ def log_ai_input_full(
     except Exception as e:
         logger.error(f"[AI INPUT LOG] {e} [PIPELINE ENFORCEMENT]")
 
+
+def _compose_ai_history_reason(ai_result: dict) -> str:
+    """One dashboard line: decision plus reject/block comment."""
+    decision = str((ai_result or {}).get("decision") or "").strip()
+    reason = str((ai_result or {}).get("reason") or "").strip()
+    comment = str((ai_result or {}).get("comment") or "").strip()
+    parts = []
+    if decision:
+        parts.append(decision)
+    if reason and reason not in parts:
+        parts.append(reason)
+    if comment and comment not in parts and comment != reason:
+        parts.append(comment[:300])
+    return " | ".join(parts)[:500]
+
+
+def restore_last_ai_payload_from_log(path: str = None) -> bool:
+    """After restart, LAST_AI_PAYLOAD is RAM-only. Reload the last logged context."""
+    global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
+    path = path or AI_INPUT_LOG_FILE
+    if not os.path.isfile(path):
+        return False
+    last = None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ctx = row.get("context")
+                if isinstance(ctx, dict) and ctx:
+                    last = row
+        if not last:
+            return False
+        payload = copy.deepcopy(last.get("context") or {})
+        payload["_dashboard_restore"] = {
+            "status": "RESTORED_AFTER_RESTART",
+            "message": (
+                "Last AI payload restored from ai_input_log.jsonl after process start. "
+                "The next live scan replaces this snapshot."
+            ),
+            "logged_ts": last.get("ts"),
+            "decision": (last.get("ai") or {}).get("decision"),
+        }
+        LAST_AI_PAYLOAD = payload
+        LAST_AI_TIMESTAMP = last.get("ts") or utc_iso()
+        logger.info(
+            "[AI PAYLOAD] restored last snapshot from %s ts=%s decision=%s [PIPELINE ENFORCEMENT]",
+            path,
+            LAST_AI_TIMESTAMP,
+            (last.get("ai") or {}).get("decision"),
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"[AI PAYLOAD] restore failed: {exc} [PIPELINE ENFORCEMENT]")
+        return False
+
+
 def get_golden_stack_thresholds() -> dict:
     """Production vs research-relaxed golden stack limits."""
     if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
@@ -4012,27 +4102,9 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             "research_lane": pos.get("research_lane"),
         })
 
-    if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
-        logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
-        close_position(pos, "EARLY_FAIL")
-        return True
-
-    if (pos.get("dir") == "LONG" and price <= pos.get("sl", 0)) or (pos.get("dir") == "SHORT" and price >= pos.get("sl", 0)):
-        logger.info(f"[EXIT TRIGGER] STOP_LOSS trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
-        close_position(pos, "STOP_LOSS")
-        return True
-
-    if check_type_a_first_candle_exit(pos, unreal_pct, now):
-        return True
-
-    if check_type_a_early_fail_exit(pos, unreal_pct, now):
-        return True
-
-    if check_type_a_stall_exit(pos, unreal_pct, now):
-        return True
-
-    if check_trend_weakening_exit(pos, unreal_pct, now):
-        return True
+    # Booked paper exits must reuse this same side-correct trigger, not a
+    # later book-walk VWAP that can make a stop look like a much better fill.
+    pos["_exit_eval_price"] = float(price or 0)
 
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
@@ -4093,6 +4165,34 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     pos["_prev_unreal_pct"] = unreal_pct
 
     if check_thesis_invalidation(pos, price):
+        return True
+
+    # Paper natural cycle: if ladder and thesis have not fired, never close.
+    # Hard STOP_LOSS on a 13bps last-trade tick previously skipped this cycle.
+    # POST_FILL_GRACE_SEC is intentionally not used as a hold here.
+    if _paper_natural_cycle_exits():
+        return False
+
+    if state.get("early_fail_enabled", True) and not _in_post_fill_grace(pos, now) and unreal_pct <= EARLY_FAIL_PCT_THRESHOLD:
+        logger.info(f"[EXIT TRIGGER] EARLY_FAIL trade_id={pos.get('trade_id')} pnl={fmt(unreal_pct)} [PIPELINE ENFORCEMENT]")
+        close_position(pos, "EARLY_FAIL")
+        return True
+
+    if (pos.get("dir") == "LONG" and price <= pos.get("sl", 0)) or (pos.get("dir") == "SHORT" and price >= pos.get("sl", 0)):
+        logger.info(f"[EXIT TRIGGER] STOP_LOSS trade_id={pos.get('trade_id')} [PIPELINE ENFORCEMENT]")
+        close_position(pos, "STOP_LOSS")
+        return True
+
+    if check_type_a_first_candle_exit(pos, unreal_pct, now):
+        return True
+
+    if check_type_a_early_fail_exit(pos, unreal_pct, now):
+        return True
+
+    if check_type_a_stall_exit(pos, unreal_pct, now):
+        return True
+
+    if check_trend_weakening_exit(pos, unreal_pct, now):
         return True
 
     tp_price = pos.get("tp", 0)
@@ -4646,6 +4746,7 @@ body_ratio_buffer = deque(maxlen=200)
 
 LAST_AI_PAYLOAD = {}
 LAST_AI_TIMESTAMP = None
+DASHBOARD_WS_STALE_SEC = float(os.getenv("DASHBOARD_WS_STALE_SEC", "30"))
 
 WINDOW_SIZE = 10
 
@@ -5201,18 +5302,36 @@ def resolve_sim_fill_price(order: dict) -> float:
     return result["fill_price"]
 
 
+_TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
+    "PROFIT_LOCK_LADDER",
+    "THESIS_FAST_CUT",
+    "THESIS_INVALIDATED",
+})
+
+
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
-    """Exit price: ladder/taker walks book; maker only for explicit TP limit hits."""
+    """Exit price: ladder/thesis book the trigger; maker only for explicit TP limit hits."""
     qty = float(pos.get("qty") or 0)
     direction = str(pos.get("dir") or "").upper()
+    fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
+    trigger = float(pos.get("_exit_eval_price") or 0)
+    if str(exit_reason or "").upper() in _TRIGGER_CONSISTENT_EXIT_REASONS:
+        # Do not walk the book to a far-better VWAP than the side-correct
+        # trigger that actually fired the rule (the old STOP_LOSS mismatch).
+        px = trigger if trigger > 0 else fallback
+        if px <= 0:
+            px = float(pos.get("entry") or 0)
+        sim = {
+            "avg_price": round(px, 2),
+            "filled_qty": qty,
+            "fully_filled": True,
+            "source": "exit_trigger_side_correct",
+            "trigger_price": round(trigger, 2) if trigger > 0 else None,
+        }
+        return round(px, 2), sim
     refresh_bbo_state()
     refresh_order_book_state()
     fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
-    if exit_reason == "PROFIT_LOCK_LADDER":
-        exit_side = "sell" if direction == "LONG" else "buy"
-        sim = simulate_market_fill(exit_side, qty)
-        px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else fallback
-        return px, sim
     if exit_is_maker:
         tp_px = float(pos.get("tp") or 0)
         if tp_px > 0 and exit_reason in ("TAKE_PROFIT", "TP_HIT"):
@@ -5453,6 +5572,7 @@ def get_funding_snapshot_for_ai():
 # --- Phase A: balanced market context (structure, MTF, EMA facts, trend strength) ---
 MTF_REFRESH_SEC = 300
 MTF_5M_REFRESH_SEC = 60
+MTF_1M_REFRESH_SEC = 15
 STRUCTURE_PIVOT_BARS = 2
 _mtf_cache = {"1h": {"ts": 0.0, "candles": []}, "4h": {"ts": 0.0, "candles": []}}
 _last_market_context_ts = 0.0
@@ -6270,7 +6390,12 @@ def fetch_mtf_candles(timeframe: str, limit: int = 120):
     global _mtf_cache
     now = time.time()
     bucket = _mtf_cache.get(timeframe, {"ts": 0.0, "candles": []})
-    refresh_sec = MTF_5M_REFRESH_SEC if timeframe == "5m" else MTF_REFRESH_SEC
+    if timeframe == "5m":
+        refresh_sec = MTF_5M_REFRESH_SEC
+    elif timeframe == "1m":
+        refresh_sec = MTF_1M_REFRESH_SEC
+    else:
+        refresh_sec = MTF_REFRESH_SEC
     if bucket["candles"] and now - bucket["ts"] < refresh_sec:
         return bucket["candles"]
     try:
@@ -6534,6 +6659,9 @@ TREND_WEAKENING_LOCK_TIGHTEN_PCT = 2.0
 TREND_WEAKENING_MIN_SIGNALS = 1
 TREND_WEAKENING_SCRATCH_UNREAL_PCT = 6.0
 POST_FILL_GRACE_SEC = int(os.getenv("POST_FILL_GRACE_SEC", "90"))
+# POST_FILL_GRACE_SEC still gates EARLY_FAIL / TREND_WEAKENING only. Paper
+# hard STOP_LOSS is not delayed by this constant — paper never closes on
+# STOP_LOSS; it waits for Scenario C ladder or thesis cut/loss.
 TREND_HEALTH_HISTORY_MAX = 12
 TREND_HEALTH_LOG_INTERVAL_SEC = 30
 SPREAD_PENALTY_ENABLED = True
@@ -6978,9 +7106,16 @@ RECONCILE_WRITE_WINDOW = str(os.getenv("RECONCILE_WRITE_WINDOW", "1")).strip().l
 # Limit chase — patient maker entry then gradual convergence toward market (research sim).
 LIMIT_CHASE_START_SEC_DEFAULT = 0  # v1.1.23 fills-first: chase from order creation
 FIRST_CHASE_DELAY_SEC = 0  # v1.1.38: immediate re-anchor at order create (research)
-LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 60
+# Reprice/hold tick inside a 5-minute age window. Do not burn buckets every 60s.
+LIMIT_CHASE_INTERVAL_SEC_DEFAULT = 180
 LIMIT_CHASE_HOLD_SEC = 0  # v1.1.23: no post-submit hold before chase
-MARKETABLE_CHASE_SEC = 600  # v1.1.23: marketable limit fallback at 10m
+# Age-window schedule (signal age, not chase-count ticks):
+#   0=0-5m, 1=5-10m, 2=10-15m, 3=15-20m, 4=20-25m, 5/5+=25-30m
+CHASE_WINDOW_SEC = 300
+CHASE_BUCKET_WINDOW_SEC = CHASE_WINDOW_SEC
+CHASE_WINDOW_MAX_INDEX = 5
+CHASE_INTRA_WINDOW_REPRICE_SEC = 180
+MARKETABLE_CHASE_SEC = 600  # historical 10m marketable fallback; not a chase stop
 PROMOTION_IN_PROGRESS_GRACE_SEC = max(
     5.0, float(os.getenv("PROMOTION_IN_PROGRESS_GRACE_SEC", "15"))
 )
@@ -7017,6 +7152,9 @@ POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "10000"))
 # Each line is one tick event for one trade_id; the loader on startup rebuilds
 # any buffer whose post_exit_deadline_ts has not yet passed.
 POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jsonl")
+# Dense 1s in-trade + post-exit unreal path for offline 0–100 replay.
+# Live exit knobs stay unchanged (thesis −12 / Scenario C / hard-stop-does-not-close-paper).
+# 4pp / 5pp numbers are analysis grouping in path_replay_v1, not a live knob grid.
 GLOBAL_SIGNAL_COOLDOWN = 300
 HEARTBEAT_INTERVAL = 300.0
 PROCESS_HEARTBEAT_INTERVAL_SEC = max(
@@ -8572,7 +8710,7 @@ def get_limit_chase_start_sec() -> int:
 
 
 def get_limit_chase_interval_sec() -> int:
-    return max(60, _limit_chase_config_value(
+    return max(CHASE_INTRA_WINDOW_REPRICE_SEC, _limit_chase_config_value(
         "limit_chase_interval_sec", "LIMIT_CHASE_INTERVAL_SEC", LIMIT_CHASE_INTERVAL_SEC_DEFAULT, int
     ))
 
@@ -8642,14 +8780,40 @@ def duplicate_limit_block_enabled() -> bool:
     return DUPLICATE_LIMIT_BLOCK_ENABLED_DEFAULT
 
 
-def _signal_age_sec(signal: dict) -> float:
-    now = time.time()
+def _signal_age_sec(signal: dict, now: float = None) -> float:
+    now = float(time.time() if now is None else now)
+    if not isinstance(signal, dict):
+        return 0.0
     signal_ts = (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
     if signal_ts:
         try:
             return max(0.0, now - float(signal_ts))
         except (TypeError, ValueError):
             pass
+    return 0.0
+
+
+def _chase_lifecycle_age_sec(order: dict = None, signal: dict = None, now: float = None) -> float:
+    """Signal-age for chase windows (not order-age, not chase-count ticks)."""
+    now = float(time.time() if now is None else now)
+    if isinstance(signal, dict):
+        signal_ts = (signal.get("timing") or {}).get("signal_ts") or signal.get("created_ts_ts")
+        if signal_ts:
+            try:
+                return max(0.0, now - float(signal_ts))
+            except (TypeError, ValueError):
+                pass
+        age = _signal_age_sec(signal, now=now)
+        if age > 0:
+            return age
+    if isinstance(order, dict):
+        for key in ("signal_created_ts", "signal_ts", "created_ts"):
+            ts = order.get(key)
+            if ts:
+                try:
+                    return max(0.0, now - float(ts))
+                except (TypeError, ValueError):
+                    continue
     return 0.0
 
 
@@ -8825,7 +8989,7 @@ def _virtual_chase_eligible(signal: dict, market_price: float, now: float) -> bo
     age_sec = now - started
     if age_sec < LIMIT_CHASE_HOLD_SEC:
         return False
-    if age_sec >= MARKETABLE_CHASE_SEC:
+    if age_sec >= LIMIT_ORDER_MAX_AGE_SEC:
         return False
     last_chase = signal.get("chase_3plus_last_virtual_chase_ts")
     if last_chase and (now - float(last_chase)) < get_limit_chase_interval_sec():
@@ -8848,6 +9012,15 @@ def _virtual_chase_eligible(signal: dict, market_price: float, now: float) -> bo
 
 
 def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: float) -> int:
+    age = _signal_age_sec(signal)
+    idx = chase_age_window_index(age)
+    current = int(signal.get("chase_3plus_virtual_chase_count") or 0)
+    # Count follows the 5-minute age window, never 60s tick burns.
+    target = idx
+    if target != current:
+        signal["chase_3plus_virtual_chase_count"] = target
+    if not chase_age_window_may_reprice(age):
+        return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     if not _virtual_chase_eligible(signal, market_price, now):
         return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     direction = _signal_direction(signal)
@@ -8860,10 +9033,9 @@ def _tick_chase_3plus_virtual_chase(signal: dict, market_price: float, now: floa
         return int(signal.get("chase_3plus_virtual_chase_count") or 0)
     signal["chase_3plus_virtual_limit"] = new_limit
     signal["limit_price"] = new_limit
-    count = int(signal.get("chase_3plus_virtual_chase_count") or 0) + 1
-    signal["chase_3plus_virtual_chase_count"] = count
+    signal["chase_3plus_virtual_chase_count"] = target
     signal["chase_3plus_last_virtual_chase_ts"] = now
-    return count
+    return target
 
 
 def _chase_3plus_activation_reason(signal: dict, market_price: float) -> str:
@@ -9248,8 +9420,6 @@ def _virtual_chase_signal_eligible(signal: dict, price: float, now: float) -> bo
     chase_start = float(signal.get("chase_start_sec") or get_limit_chase_start_sec())
     if age_sec < chase_start:
         return False
-    if age_sec >= MARKETABLE_CHASE_SEC:
-        return False
     if not _chase_structure_valid(direction):
         return False
     if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
@@ -9273,9 +9443,14 @@ def _virtual_chase_lane_chase_on_order(order: dict, signal: dict, price: float, 
     if order.get("virtual_chase_6_wait_until"):
         return True
     current = int(order.get("limit_chase_count") or (signal or {}).get("limit_chase_count") or 0)
-    next_count = current + 1
-    if not chase_bucket_allowed(next_count):
+    age_sec = _order_signal_age_sec(order, signal or {}, now)
+    next_count = chase_age_window_index(age_sec)
+    if next_count < current:
+        next_count = current
+    if chase_age_window_should_cancel(age_sec):
         _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(next_count)}")
+        return True
+    if not chase_age_window_may_reprice(age_sec):
         return True
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
     old_limit = float(order.get("limit_price") or 0)
@@ -9329,8 +9504,11 @@ def process_virtual_chase_lane_virtual_signals(price: float):
         if not tid or not _virtual_chase_signal_eligible(signal, float(price), now):
             continue
         current = int(signal.get("limit_chase_count") or 0)
-        next_count = current + 1
-        if not chase_bucket_allowed(next_count):
+        age_sec = _signal_age_sec(signal)
+        next_count = chase_age_window_index(age_sec)
+        if next_count < current:
+            next_count = current
+        if not chase_age_window_may_reprice(age_sec):
             continue
         direction = str(signal.get("final_direction") or "").upper()
         old_limit = float(signal.get("limit_price") or signal.get("planned_limit_price") or 0)
@@ -11202,7 +11380,382 @@ def build_pure_ai_context(state_snapshot, buffers):
         logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
         return None
     ctx = enrich_ai_context_upgrade(ctx)
+    ctx = _stamp_3m_exhaustion_for_ai(ctx)
     return sanitize_ai_inputs(ctx)
+
+
+def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
+    """Freeze fill-time 3m ATR / Donchian / S-R so offline TPs do not chase ATR."""
+    ctx = context or (signal or {}).get("context") or {}
+    univ = {}
+    if isinstance(ctx, dict):
+        univ = ctx.get("cycle_3m_universe") or ctx.get("exhaustion_3m") or {}
+        if not isinstance(univ, dict) or not univ:
+            if ctx.get("atr14_pct_3m") is not None or ctx.get("donchian_high_3m") is not None:
+                univ = ctx
+    if not isinstance(univ, dict) or not univ:
+        try:
+            with state_lock:
+                univ = dict(state.get("last_cycle_3m_universe") or {})
+        except Exception:
+            univ = {}
+    sr = {}
+    try:
+        with state_lock:
+            sr = dict(state.get("support_resistance") or {})
+    except Exception:
+        sr = {}
+    atr_pct = univ.get("atr14_pct_3m")
+    return {
+        "atr14_pct_3m": atr_pct,
+        "atr14_3m": univ.get("atr14"),
+        "donchian_high_3m": univ.get("donchian_high_3m"),
+        "donchian_low_3m": univ.get("donchian_low_3m"),
+        "donchian_loc_3m": univ.get("donchian_loc_3m"),
+        "bb_width_3m": univ.get("bb_width_3m"),
+        "support_price": univ.get("support_price") or sr.get("swing_low") or sr.get("s1"),
+        "resistance_price": univ.get("resistance_price") or sr.get("swing_high") or sr.get("r1"),
+        "cycle_3m_universe_tag": CYCLE_3M_UNIVERSE_TAG,
+        "path_replay_tag": PATH_REPLAY_POLICY_TAG,
+    }
+
+
+_cycle_3m_written_buckets = {}
+_touch_grid_book = {}
+_order_multiverse_state = {}
+_order_multiverse_pending_src = {}
+_order_multiverse_last_poll = 0.0
+
+
+def _arm_chase_offset_touch_grid(signal: dict):
+    """Paper path-touch grid at 0.01–0.30%. Does not change live 0.1% orig."""
+    if not isinstance(signal, dict):
+        return
+    try:
+        price = float(
+            signal.get("signal_price_at_approve")
+            or signal.get("signal_price")
+            or signal.get("price")
+            or 0
+        )
+        if price <= 0:
+            return
+        tid = str(signal.get("trade_id") or "")
+        if not tid:
+            return
+        direction = signal.get("final_direction") or signal.get("direction") or "SHORT"
+        ts = float(signal.get("created_ts_ts") or signal.get("snapshot_ts") or time.time())
+        ttl = float(signal.get("expires_ts") or 0)
+        ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
+        rows = arm_touch_grid_rows(
+            trade_id=tid,
+            direction=direction,
+            signal_price=price,
+            signal_ts=ts,
+            ttl_sec=ttl_sec,
+            live_offset_pct=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+        )
+        for row in rows:
+            _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+        _touch_grid_book[tid] = new_grid_state(rows)
+        logger.info(
+            f"[TOUCH GRID] armed trade_id={tid} offsets=0.01-0.30 live_orig="
+            f"{DETERMINISTIC_ENTRY_OFFSET_PCT * 100:.2f}% paper_only [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as exc:
+        logger.warning(f"[TOUCH GRID] arm failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
+    if not _touch_grid_book or price is None or float(price) <= 0:
+        return
+    now = time.time()
+    dead = []
+    for tid, grid in list(_touch_grid_book.items()):
+        try:
+            if now > float(grid.get("expires_ts") or 0):
+                dead.append(tid)
+                continue
+            for row in poll_grid_state(
+                grid,
+                now_ts=now,
+                last=float(price),
+                high=float(price),
+                low=float(price),
+                bid=None if not bid else float(bid),
+                ask=None if not ask else float(ask),
+            ):
+                _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+        except Exception as exc:
+            logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
+    for tid in dead:
+        _touch_grid_book.pop(tid, None)
+    _maybe_complete_pending_order_multiverse()
+
+
+def _maybe_complete_pending_order_multiverse():
+    global _order_multiverse_last_poll
+    now = time.time()
+    if now - _order_multiverse_last_poll < 60.0:
+        return
+    _order_multiverse_last_poll = now
+    for src in list(_order_multiverse_pending_src.values()):
+        expires = float(src.get("expires_ts") or 0)
+        ttl_done = expires > 0 and now >= expires
+        tid = paper_multiverse_trade_id(src.get("trade_id"), src.get("source_trade_id"))
+        has_post_fill_writer = False
+        if tid:
+            with replay_lock:
+                buf = replay_buffers.get(tid) or {}
+                has_post_fill_writer = bool(
+                    buf.get("post_exit")
+                    or buf.get("lane") == "executed"
+                    or buf.get("virtual_fill_t") is not None
+                )
+        # TTL/cancel scores now. 120m post-fill writer, if already running, may keep sampling.
+        _sync_order_multiverse(src, path_complete=bool(ttl_done and not has_post_fill_writer))
+
+
+def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
+    """One compact JSONL row per paper TAKEN. Does not change the live 0.1% ticket."""
+    if not isinstance(source, dict):
+        return None
+    try:
+        tid = paper_multiverse_trade_id(
+            source.get("trade_id"),
+            source.get("canonical_trade_id"),
+            source.get("source_trade_id"),
+            source.get("source_order_trade_id"),
+        )
+        if not tid:
+            return None
+        prev = _order_multiverse_state.get(tid)
+        if prev == "COMPLETE":
+            return None
+        price = float(
+            source.get("signal_price_at_approve")
+            or source.get("signal_price")
+            or source.get("price")
+            or 0
+        )
+        if price <= 0:
+            return None
+        direction = source.get("final_direction") or source.get("signal_dir") or source.get("dir") or "SHORT"
+        ts = float(source.get("created_ts_ts") or source.get("created_ts") or source.get("signal_ts") or 0)
+        if ts <= 0:
+            ts = float(source.get("snapshot_ts") or time.time())
+        ttl = float(source.get("expires_ts") or 0)
+        ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
+        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        ticks_1s = []
+        replay_complete = bool(path_complete)
+        with replay_lock:
+            buf = replay_buffers.get(tid) or {}
+            start = float(buf.get("start_ts") or ts)
+            for tick in buf.get("ticks") or []:
+                t = float(tick.get("t") or 0)
+                if 0 < t < 1e11:
+                    t = start + t
+                ticks_1s.append({
+                    "t": t,
+                    "price": tick.get("price"),
+                    "best_bid": tick.get("best_bid"),
+                    "best_ask": tick.get("best_ask"),
+                    "unreal_pct": tick.get("unreal_pct"),
+                })
+            if buf.get("post_exit") and buf.get("closed"):
+                replay_complete = True
+        with state_lock:
+            univ = dict(state.get("last_cycle_3m_universe") or {})
+        record = build_order_multiverse(
+            trade_id=tid,
+            signal_price=price,
+            signal_ts=ts,
+            direction=direction,
+            candles_1m=candles_1m,
+            ticks_1s=ticks_1s or None,
+            live_orig=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+            ttl_sec=ttl_sec,
+            atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+            donchian_high=univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
+            donchian_low=univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
+            support_price=univ.get("support_price") or source.get("support_price"),
+            resistance_price=univ.get("resistance_price") or source.get("resistance_price"),
+            path_complete=replay_complete,
+        )
+        if record.get("pending"):
+            _order_multiverse_pending_src[tid] = {
+                "trade_id": tid,
+                "signal_price_at_approve": price,
+                "signal_price": price,
+                "created_ts_ts": ts,
+                "expires_ts": ts + ttl_sec,
+                "final_direction": direction,
+                "atr14_pct_3m": univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+                "donchian_high_3m": univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
+                "donchian_low_3m": univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
+                "support_price": univ.get("support_price") or source.get("support_price"),
+                "resistance_price": univ.get("resistance_price") or source.get("resistance_price"),
+            }
+            if prev == "PENDING":
+                return record
+        else:
+            _order_multiverse_pending_src.pop(tid, None)
+        _safe_append_jsonl(ORDER_MULTIVERSE_FILE, record, label="ORDER_MULTIVERSE")
+        _order_multiverse_state[tid] = "PENDING" if record.get("pending") else "COMPLETE"
+        if len(_order_multiverse_state) > 64:
+            oldest = next(iter(_order_multiverse_state))
+            _order_multiverse_state.pop(oldest, None)
+        logger.info(
+            f"[ORDER MULTIVERSE] {record.get('event')} trade_id={tid} "
+            f"touched={record.get('n_touched')} missed={record.get('n_missed')} "
+            f"scores={record.get('n')} live_orig=0.10% unchanged "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return record
+    except Exception as exc:
+        logger.warning(f"[ORDER MULTIVERSE] sync failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
+
+
+def _cycle_3m_flow_and_sr():
+    with state_lock:
+        sr = dict(state.get("support_resistance") or {})
+        paused = bool(state.get("execution_paused"))
+        pause_reason = state.get("execution_reason") or ""
+        manual = bool(state.get("manual_admin_pause"))
+    try:
+        delta = get_aggregated(delta_buffer)
+    except Exception:
+        delta = None
+    try:
+        imbalance = get_aggregated(imbalance_buffer)
+    except Exception:
+        imbalance = None
+    return {
+        "delta_3m": delta,
+        "imbalance_3m": imbalance,
+        "dist_to_support": sr.get("dist_to_support"),
+        "dist_to_resistance": sr.get("dist_to_resistance"),
+        "support_price": sr.get("swing_low") or sr.get("s1"),
+        "resistance_price": sr.get("swing_high") or sr.get("r1"),
+        "paused": paused,
+        "pause_reason": pause_reason,
+        "manual_pause": manual,
+    }
+
+
+def _record_cycle_3m_universe(
+    *,
+    outcome: str = "SKIPPED",
+    skip_reason: str = None,
+    decision: str = None,
+    trade_id: str = None,
+    direction: str = None,
+    candles_1m=None,
+    structure_score=None,
+):
+    """Append one taken-or-skipped 3m universe row. Log-only; never a veto."""
+    bucket = cycle_bucket_3m()
+    outcome_u = str(outcome or "SKIPPED").upper()
+    prev = _cycle_3m_written_buckets.get(bucket)
+    if prev == "TAKEN":
+        return None
+    if prev == "SKIPPED" and outcome_u == "SKIPPED" and not decision:
+        return None
+    try:
+        extra = _cycle_3m_flow_and_sr()
+        if candles_1m is None:
+            candles_1m = fetch_mtf_candles("1m", limit=200) or []
+        snap = compute_3m_universe_snapshot(
+            candles_1m,
+            dist_to_support=extra.get("dist_to_support"),
+            dist_to_resistance=extra.get("dist_to_resistance"),
+            structure_score=structure_score,
+            delta_3m=extra.get("delta_3m"),
+            imbalance_3m=extra.get("imbalance_3m"),
+            support_price=extra.get("support_price"),
+            resistance_price=extra.get("resistance_price"),
+            ts=time.time(),
+            cycle_outcome=outcome_u,
+            skip_reason=skip_reason,
+            decision=decision,
+            trade_id=trade_id,
+            direction=direction,
+        )
+        _safe_append_jsonl(CYCLE_3M_UNIVERSE_FILE, snap, label="CYCLE_3M_UNIVERSE")
+        _cycle_3m_written_buckets[bucket] = outcome_u
+        with state_lock:
+            state["last_cycle_3m_universe"] = copy.deepcopy(snap)
+        if len(_cycle_3m_written_buckets) > 12:
+            oldest = min(_cycle_3m_written_buckets)
+            _cycle_3m_written_buckets.pop(oldest, None)
+        logger.info(
+            f"[CYCLE 3M UNIVERSE] {snap.get('line')} bucket={bucket} "
+            f"tag={CYCLE_3M_UNIVERSE_TAG} path_tag={PATH_REPLAY_POLICY_TAG} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return snap
+    except Exception as exc:
+        logger.warning(f"[CYCLE 3M UNIVERSE] record failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
+
+
+def _maybe_record_heartbeat_cycle_3m():
+    extra = _cycle_3m_flow_and_sr()
+    reason = None
+    if extra.get("manual_pause"):
+        reason = "MANUAL_PAUSE"
+    elif extra.get("paused"):
+        reason = extra.get("pause_reason") or "EXECUTION_PAUSED"
+    _record_cycle_3m_universe(outcome="SKIPPED", skip_reason=reason or "HEARTBEAT_CYCLE")
+
+
+def _stamp_3m_exhaustion_for_ai(ctx: dict) -> dict:
+    """Cycle-aligned 3m RSI/Stoch/ADX/ATR/Donchian. Log + payload only; never a hard veto."""
+    if not isinstance(ctx, dict):
+        return ctx
+    try:
+        candles_1m = fetch_mtf_candles("1m", limit=200)
+        ms = ctx.get("market_context") or {}
+        structure = (ms.get("market_structure") or {}) if isinstance(ms, dict) else {}
+        extra = _cycle_3m_flow_and_sr()
+        snap = compute_3m_universe_snapshot(
+            candles_1m or [],
+            dist_to_support=ctx.get("dist_to_support") or ctx.get("distance_to_micro_support") or extra.get("dist_to_support"),
+            dist_to_resistance=ctx.get("dist_to_resistance") or ctx.get("distance_to_micro_resistance") or extra.get("dist_to_resistance"),
+            structure_score=structure.get("structure_score"),
+            delta_3m=ctx.get("delta") if ctx.get("delta") is not None else extra.get("delta_3m"),
+            imbalance_3m=ctx.get("imbalance") if ctx.get("imbalance") is not None else extra.get("imbalance_3m"),
+            support_price=extra.get("support_price"),
+            resistance_price=extra.get("resistance_price"),
+            ts=time.time(),
+            cycle_outcome="CYCLE",
+        )
+        snap["policy_tag"] = MTF_EXHAUSTION_LOG_V1
+        ctx["exhaustion_3m"] = snap
+        ctx["cycle_3m_universe"] = snap
+        ctx["exhaustion_3m_line"] = snap.get("exhaustion_line") or snap.get("line")
+        with state_lock:
+            state["last_cycle_3m_universe"] = copy.deepcopy(snap)
+        logger.info(
+            f"[3M EXHAUSTION] {snap.get('exhaustion_line')} tag={MTF_EXHAUSTION_LOG_V1} "
+            f"hard_veto=false path_tag={PATH_REPLAY_POLICY_TAG} "
+            f"universe={CYCLE_3M_UNIVERSE_TAG} [PIPELINE ENFORCEMENT]"
+        )
+    except Exception as exc:
+        logger.warning(f"[3M EXHAUSTION] stamp failed: {exc} [PIPELINE ENFORCEMENT]")
+        ctx["exhaustion_3m"] = {
+            "status": "UNAVAILABLE",
+            "bar": "3m",
+            "source": "bitfinex_1m_resampled_to_3m",
+            "hard_veto": False,
+            "policy_tag": MTF_EXHAUSTION_LOG_V1,
+        }
+        ctx["cycle_3m_universe"] = dict(ctx["exhaustion_3m"])
+        ctx["cycle_3m_universe"]["schema"] = CYCLE_3M_UNIVERSE_SCHEMA
+        ctx["cycle_3m_universe"]["policy_tag"] = CYCLE_3M_UNIVERSE_TAG
+    return ctx
 
 def _structure_allows_bear_continuation(market_context: dict) -> bool:
     mc = market_context or {}
@@ -13270,7 +13823,7 @@ def _append_ai_history_row(ai_result: dict) -> None:
         "edge_threshold": get_edge_threshold(),
         "source": ai_result.get("source", "AI"),
         "comment": (ai_result.get("comment") or "")[:2000],
-        "reason": (ai_result.get("reason") or "")[:500],
+        "reason": _compose_ai_history_reason(ai_result) or (ai_result.get("reason") or "")[:500],
         "ai_error": ai_result.get("ai_error", False),
         "error_type": ai_result.get("error_type"),
         "error_detail": (ai_result.get("error_detail") or "")[:500],
@@ -13302,7 +13855,7 @@ def _append_ai_history_row(ai_result: dict) -> None:
             inserted = True
         else:
             existing.setdefault("lane_verdicts", {}).update(row["lane_verdicts"])
-        hist_limit = 50 if _sole_ai_research_mode() else 5
+        hist_limit = 50
         state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_history_updated"] = time.time()
     if inserted:
@@ -16258,6 +16811,64 @@ def chase_count_bucket(chase_count) -> str:
     return "5+_chases"
 
 
+def chase_age_window_index(age_sec) -> int:
+    """Map signal age onto the 5-minute chase schedule (0..5)."""
+    try:
+        age = max(0.0, float(age_sec or 0))
+    except (TypeError, ValueError):
+        age = 0.0
+    return min(int(age // CHASE_WINDOW_SEC), CHASE_WINDOW_MAX_INDEX)
+
+
+def chase_window_start_sec(window_idx) -> int:
+    try:
+        idx = max(0, int(window_idx or 0))
+    except (TypeError, ValueError):
+        idx = 0
+    return min(idx, CHASE_WINDOW_MAX_INDEX) * CHASE_WINDOW_SEC
+
+
+def last_enabled_chase_count():
+    last = None
+    for n in range(0, CHASE_WINDOW_MAX_INDEX + 1):
+        if chase_bucket_allowed(n):
+            last = n
+    return last
+
+
+def _order_signal_age_sec(order: dict, signal: dict, now: float) -> float:
+    return _chase_lifecycle_age_sec(order, signal, now)
+
+
+def chase_age_window_should_cancel(age_sec) -> bool:
+    """Cancel only when every chase window is off.
+
+    Early disabled windows (0/1 OFF) wait to submit; they must not kill a
+    resting order just because count ticked to 5+ at ~9 min. After the last
+    enabled window (5+ OFF), rest until 30 min TTL.
+    """
+    last = last_enabled_chase_count()
+    if last is None:
+        return True
+    idx = chase_age_window_index(age_sec)
+    if idx > last:
+        return False
+    mn = min_enabled_chase_count()
+    if mn is not None and idx < mn:
+        return False
+    return not chase_bucket_allowed(idx)
+
+
+def chase_age_window_may_reprice(age_sec) -> bool:
+    idx = chase_age_window_index(age_sec)
+    last = last_enabled_chase_count()
+    if last is None:
+        return False
+    if idx > last:
+        return False
+    return chase_bucket_allowed(idx)
+
+
 def get_chase_execution_buckets() -> dict:
     with state_lock:
         raw = state.get("chase_execution_buckets")
@@ -16631,14 +17242,17 @@ def _signal_virtual_chase_count(signal: dict) -> int:
 
 
 def dashboard_virtual_chase_submit_ready(signal: dict) -> bool:
-    """True when virtual chase count is in an enabled bucket and >= minimum enabled count."""
-    vcount = _signal_virtual_chase_count(signal)
-    if not chase_bucket_allowed(vcount):
-        return False
+    """True when signal age is inside an enabled 5-minute chase window at/after the minimum."""
     mn = min_enabled_chase_count()
     if mn is None:
         return False
-    return vcount >= mn
+    age = _signal_age_sec(signal) if isinstance(signal, dict) else 0.0
+    if age < chase_window_start_sec(mn):
+        return False
+    idx = chase_age_window_index(age)
+    if not chase_bucket_allowed(idx):
+        return False
+    return idx >= mn
 
 
 def _resolve_selected_virtual_submit_limit(signal: dict) -> Optional[tuple]:
@@ -16705,6 +17319,15 @@ def get_dashboard_execution_status(signal: dict = None, ai: dict = None) -> dict
         "spread_gate_allowed": [k for k, v in sg.items() if v],
         "spread_gate_blocked": [k for k, v in sg.items() if not v],
         "min_chase_count_to_submit": mn,
+        "chase_window_sec": CHASE_WINDOW_SEC,
+        "chase_windows": {
+            "0": "0-5m",
+            "1": "5-10m",
+            "2": "10-15m",
+            "3": "15-20m",
+            "4": "20-25m",
+            "5+": "25-30m",
+        },
         "virtual_defer_active": dashboard_virtual_defer_required(),
         "virtual_chase_count": vcount,
         "virtual_submit_ready": dashboard_virtual_chase_submit_ready(signal or {"dashboard_virtual_chase_count": vcount}),
@@ -16820,7 +17443,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
         return False
     meta = trades_map.get(tid, {})
     signal = meta.get("signal_ref") or {}
-    chase_n = int(order.get("limit_chase_count") or 0)
+    chase_n = chase_age_window_index(_order_signal_age_sec(order, signal if isinstance(signal, dict) else {}, time.time()))
     cancel_result = _cancel_pending_order_confirmed(
         order,
         reason,
@@ -16884,12 +17507,19 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
 
 
 def enforce_dashboard_chase_gates_on_pending() -> None:
-    """Drop or block pending orders sitting in a disabled chase bucket."""
+    """Cancel pending only when the current 5-minute age window is an early disabled bucket.
+
+    After the last enabled window (e.g. 5+ OFF while 2/3/4 ON), rest until TTL.
+    Do not cancel at ~9 min just because chase-count ticked to 5+.
+    """
+    now = time.time()
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
-        chase_n = int(order.get("limit_chase_count") or 0)
-        if dashboard_chase_bucket_blocks(chase_n):
+        tid = order.get("trade_id")
+        signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
+        age_sec = _order_signal_age_sec(order, signal or {}, now)
+        if chase_age_window_should_cancel(age_sec):
             _cancel_pending_for_chase_gate(order)
 
 
@@ -17284,6 +17914,7 @@ def log_no_signal_with_context(signal=None, reason="NO_SETUP_DETECTED", skip_sta
     log_pipeline_event("PIPELINE", "NO_SIGNAL", reason, trade_id, edge_score, force=True)
     logger.info(f"[PIPELINE] No signal - skipping cycle | trade_id={trade_id} reason={reason} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("BLOCKED", reason, trade_id)
+    _record_cycle_3m_universe(outcome="SKIPPED", skip_reason=str(reason or "NO_SIGNAL"), trade_id=trade_id)
 
 def compute_structural_sr(candles):
     if len(candles) < 96:
@@ -17344,6 +17975,15 @@ def _force_paper_mode_active() -> bool:
     return (os.getenv("FORCE_PAPER_MODE") or "").strip().lower() in (
         "1", "true", "yes", "on",
     )
+
+
+def _paper_natural_cycle_exits() -> bool:
+    """Paper Showcase closes only on Scenario C ladder or thesis cut/loss.
+
+    Hard STOP_LOSS must not skip that cycle. POST_FILL_GRACE_SEC is not a
+    hold for the hard stop and is not applied here.
+    """
+    return _force_paper_mode_active()
 
 
 def _genuine_ws_transport_ready(now: float = None) -> bool:
@@ -19081,8 +19721,6 @@ def _limit_chase_eligible_order(order: dict, price: float, now: float) -> bool:
         chase_start = float(chase_start)
     if age_sec < chase_start:
         return False
-    if age_sec >= MARKETABLE_CHASE_SEC:
-        return False
     if not _chase_structure_valid(direction):
         return False
     if age_sec > LIMIT_ORDER_MAX_AGE_SEC:
@@ -19240,13 +19878,18 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = int(order.get("limit_chase_count") or 0) + 1
-    if not chase_bucket_allowed(chase_count):
+    age_sec = _order_signal_age_sec(order, signal or {}, now)
+    if chase_age_window_should_cancel(age_sec):
+        idx = chase_age_window_index(age_sec)
         logger.info(
-            f"[CHASE GATE] blocked bucket={chase_count_bucket(chase_count)} "
+            f"[CHASE GATE] blocked window={chase_count_bucket(idx)} "
             f"trade_id={order.get('trade_id')} chase_count={chase_count} — cancelling pending [PIPELINE ENFORCEMENT]"
         )
-        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(chase_count)}")
+        _cancel_pending_for_chase_gate(order, f"CHASE_BUCKET_{chase_count_bucket(idx)}")
         return False
+    if not chase_age_window_may_reprice(age_sec):
+        return False
+    chase_count = max(chase_count, chase_age_window_index(age_sec))
     relay_event = _commit_relay_limit_chase(
         order, signal, direction=direction, old_limit=old_limit,
         new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
@@ -19296,17 +19939,28 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
     step_pct, tier, use_marketable = _urgent_chase_step_for_order(order, signal)
-    next_chase_count = int(order.get("limit_chase_count") or 0) + 1
-    if not chase_bucket_allowed(next_chase_count):
+    age_sec = _order_signal_age_sec(order, signal or {}, now)
+    if chase_age_window_should_cancel(age_sec):
+        idx = chase_age_window_index(age_sec)
         logger.info(
-            f"[CHASE GATE] blocked bucket={chase_count_bucket(next_chase_count)} "
-            f"trade_id={order.get('trade_id')} chase_count={next_chase_count} "
+            f"[CHASE GATE] blocked window={chase_count_bucket(idx)} "
+            f"trade_id={order.get('trade_id')} age_sec={int(age_sec)} "
             f"— cancelling pending [PIPELINE ENFORCEMENT]"
         )
         _cancel_pending_for_chase_gate(
-            order, f"CHASE_BUCKET_{chase_count_bucket(next_chase_count)}"
+            order, f"CHASE_BUCKET_{chase_count_bucket(idx)}"
         )
         return False
+    if not chase_age_window_may_reprice(age_sec):
+        return False
+    current_count = int(order.get("limit_chase_count") or 0)
+    next_chase_count = chase_age_window_index(age_sec)
+    if next_chase_count < current_count:
+        next_chase_count = current_count
+    # Intra-window 180s ticks must advance the resting generation by exactly one
+    # so _commit_relay_limit_chase can ACK. Bucket membership stays age-based.
+    if next_chase_count != current_count + 1:
+        next_chase_count = current_count + 1
     if use_marketable:
         return _apply_urgent_marketable_chase(order, signal, price, now, tier=tier or "extreme")
     new_limit, reason = _compute_limit_chase_target(
@@ -19580,10 +20234,10 @@ def process_limit_chase(price: float):
         if _apply_limit_chase(order, signal, price, now):
             chased += 1
     # Production relay contract: never convert an unfilled maker entry into a
-    # terminal marketable reprice. Selected chase buckets stay exact, resting
-    # LIMITs; the next disallowed bucket cancels them and TTL remains the final
-    # backstop. This avoids an impossible cross-system fill/cancel transaction
-    # between Fly and Bitfinex while preserving chase-2/3/4 semantics.
+    # terminal marketable reprice. 5-minute age windows stay exact, resting
+    # LIMITs; an early disabled window cancels/defers them and TTL remains the
+    # final backstop. After the last enabled window (5+ OFF), the order rests
+    # until 30 min TTL instead of cancelling because count hit 5 at ~9 min.
     if chased:
         pipeline_state_sync()
 
@@ -19781,6 +20435,13 @@ def process_pending_orders():
     price = state.get("price")
     if price is None or price <= 0:
         return
+    try:
+        with state_lock:
+            grid_bid = float(state.get("bid") or 0)
+            grid_ask = float(state.get("ask") or 0)
+        _poll_chase_offset_touch_grid(price, grid_bid, grid_ask)
+    except Exception:
+        pass
     process_awaiting_micro_entries()
     process_awaiting_5m_entries()
     process_awaiting_min_age_entries()
@@ -19825,9 +20486,11 @@ def process_pending_orders():
                 recent_market_trades=recent_market_trades,
             ):
                 continue
-            if not chase_bucket_allowed(order.get("limit_chase_count") or 0):
+            fill_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref") or {}
+            fill_age_sec = _order_signal_age_sec(order, fill_signal, time.time())
+            if chase_age_window_should_cancel(fill_age_sec):
                 logger.debug(
-                    f"[CHASE GATE] fill blocked bucket={chase_count_bucket(order.get('limit_chase_count') or 0)} "
+                    f"[CHASE GATE] fill blocked window={chase_count_bucket(chase_age_window_index(fill_age_sec))} "
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
                 continue
@@ -19950,6 +20613,7 @@ def fill_order(order):
     clear_fill_handoff()
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     persist_signal(fill_snapshot, "FILLED")
+    _sync_order_multiverse(fill_snapshot or signal or order, path_complete=False)
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
     # C3 fix: persist the newly-opened position to disk immediately so a crash between
     # this fill and the next save never loses an open position (was only saved on close
@@ -19999,7 +20663,7 @@ def process_positions():
         # Exit evaluation can close a position, persist research artifacts, and
         # publish relay events. Never hold the global snapshot lock across it.
         for pos in positions:
-            mark = get_executable_mark_price(pos, fallback=price)
+            mark = get_mark_price(pos.get("dir"), fallback=price)
             _apply_position_exits(pos, mark, now)
     finally:
         position_evaluation_lock.release()
@@ -20509,6 +21173,13 @@ def process_signal(event: dict):
             if not ai_decision_should_execute(ai):
                 trade_id = ai.get("trade_id") or ctx["trade_id"]
                 ai["trade_id"] = trade_id
+                _record_cycle_3m_universe(
+                    outcome="SKIPPED",
+                    skip_reason=str(ai.get("decision") or "REJECT"),
+                    decision=ai.get("decision"),
+                    trade_id=trade_id,
+                    direction=ai.get("direction"),
+                )
                 if ai.get("decision") == "AI_ERROR":
                     block_tag = f"AI_ERROR:{ai.get('error_type', 'UNKNOWN')}"
                     skip_stage = "AI_ERROR"
@@ -20709,6 +21380,21 @@ def process_signal(event: dict):
             )
             if signal.get("overextension_research") and sole:
                 _research_log_would_block(signal, ai, signal["overextension_research"], edge_score)
+            exh = ctx.get("exhaustion_3m") or {}
+            if (
+                str(signal.get("final_direction") or ai.get("direction") or "").upper() == "SHORT"
+                and exh.get("would_block_short")
+            ):
+                # LOG-ONLY. Does not cancel pending or flatten fills.
+                _research_log_would_block(signal, ai, WOULD_BLOCK_SHORT_3M_REASON, edge_score)
+            _record_cycle_3m_universe(
+                outcome="TAKEN",
+                decision=ai.get("decision"),
+                trade_id=signal.get("trade_id") or trade_id,
+                direction=signal.get("final_direction") or ai.get("direction"),
+            )
+            _arm_chase_offset_touch_grid(signal)
+            _sync_order_multiverse(signal, path_complete=False)
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -21431,7 +22117,7 @@ def _process_ws_ticker_update(payload) -> bool:
 
 
 def _tick_driven_position_exits(price: float):
-    """WS tick path — immediate exit/ladder enforcement (not only 1s poll)."""
+    """WS tick path — immediate ladder/thesis on side-correct BBO, not last-trade wicks."""
     if price is None or price <= 0:
         return
     now = time.time()
@@ -21441,7 +22127,8 @@ def _tick_driven_position_exits(price: float):
             if isinstance(p, dict) and p.get("status") == "OPEN"
         ]
     for pos in positions:
-        _apply_position_exits(pos, price, now)
+        mark = get_mark_price(pos.get("dir"), fallback=price)
+        _apply_position_exits(pos, mark, now)
 
 def safe_ws_handler(message):
     try:
@@ -22595,6 +23282,15 @@ def _record_expired_order(source: dict, reason: str):
         "research_lane": row.get("research_lane"),
         "direction": row.get("dir"),
     })
+    _sync_order_multiverse(
+        {
+            **(master or {}),
+            **(source or {}),
+            **row,
+            "trade_id": tid,
+        },
+        path_complete=True,
+    )
     return row
 
 
@@ -23689,6 +24385,9 @@ RESEARCH DATA COLLECTION MODE (active):
 - CONTINUOUS and TYPE_B_HUNTER_V1 independently accept or reject the candidate afterward.
 - Do not decide either tile's verdict and do not return any field beyond direction,
   long_score, short_score, and one short reason.
+- exhaustion_3m / exhaustion_3m_line is the cycle-aligned oscillator block
+  (3-minute bars resampled from Bitfinex 1m). Use it for this-cycle exhaustion.
+  Do not substitute 5m/15m/1h RSI — those are not the decision timeframe.
 """
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -24219,6 +24918,10 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        PATH_REPLAY_FILE,
+        CYCLE_3M_UNIVERSE_FILE,
+        CHASE_OFFSET_TOUCH_GRID_FILE,
+        ORDER_MULTIVERSE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -24260,6 +24963,10 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        PATH_REPLAY_FILE,
+        CYCLE_3M_UNIVERSE_FILE,
+        CHASE_OFFSET_TOUCH_GRID_FILE,
+        ORDER_MULTIVERSE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
@@ -24328,13 +25035,27 @@ def _reset_runtime_log_handlers():
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
 def reset_all_research_files() -> dict:
-    from research.epoch_quarantine import quarantine_epoch
-    result = quarantine_epoch(
-        os.getcwd(),
-        all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True),
-        cutoff=utc_iso(),
-    )
-    return result
+    """Delete live epoch research files AND permanently purge quarantine trees.
+
+    Infected fills must not be recoverable. Previous resets only moved files
+    into research_epoch_quarantine; this path deletes both the live epoch
+    JSONL/logs and every quarantine archive under the runtime root.
+    """
+    from research.epoch_quarantine import purge_quarantine_archives
+    live_paths = all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
+    deleted, errors = _delete_paths(live_paths)
+    purge = purge_quarantine_archives(os.getcwd())
+    errors.extend(purge.get("errors") or [])
+    return {
+        "epoch_id": None,
+        "path": None,
+        "cutoff_utc": utc_iso(),
+        "moved": [],
+        "deleted": deleted,
+        "purged_quarantine": purge.get("deleted_trees") or [],
+        "purged_files": int(purge.get("deleted_files") or 0),
+        "errors": errors,
+    }
 
 def maintain_fresh_collection_files():
     """Periodic trim when fresh-collection mode is on (prevents silent re-accumulation)."""
@@ -24519,7 +25240,9 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         recent_trades.clear()
         _canonical_source_order_market_evidence.clear()
     quarantine = reset_all_research_files()
-    moved, errors = quarantine["moved"], quarantine["errors"]
+    moved, errors = quarantine.get("moved") or [], quarantine.get("errors") or []
+    deleted = list(quarantine.get("deleted") or [])
+    purged_trees = list(quarantine.get("purged_quarantine") or [])
     # Fresh Collection is the operator boundary for every active holdout.  The
     # file wipe alone is insufficient because Tile 2 counters also live in
     # memory and would otherwise be written back with pre-reset/test values.
@@ -24537,13 +25260,17 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     load_session_trades_from_csv()
     archive_compaction = {
         "past_analysis_id": past_analysis_id,
-        "deleted_files": 0,
+        "deleted_files": len(deleted),
         "deleted_bytes": 0,
-        "raw_payloads_retained": True,
-        "quarantined_files": len(moved),
-        "quarantine_path": quarantine["path"],
+        "raw_payloads_retained": False,
+        "quarantined_files": 0,
+        "quarantine_path": None,
+        "purged_quarantine": purged_trees,
     }
-    summary = f"quarantined {len(moved)} file(s)" + (f", {len(errors)} error(s)" if errors else "")
+    summary = (
+        f"deleted {len(deleted)} live file(s), purged {len(purged_trees)} quarantine tree(s)"
+        + (f", {len(errors)} error(s)" if errors else "")
+    )
     for err in errors:
         logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
     with state_lock:
@@ -24566,10 +25293,11 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             f"— local mirror will be wiped on next manifest poll [PIPELINE ENFORCEMENT]"
         )
     return {
-        "deleted": [],
-        "quarantined": moved,
-        "quarantine_path": quarantine["path"],
-        "epoch_cutoff_utc": quarantine["cutoff_utc"],
+        "deleted": deleted,
+        "quarantined": [],
+        "quarantine_path": None,
+        "purged_quarantine": purged_trees,
+        "epoch_cutoff_utc": quarantine.get("cutoff_utc"),
         "errors": errors,
         "summary": summary,
         "archive_path": archive_path,
@@ -26835,7 +27563,7 @@ __ADMIN_ACCESS_CONTROLS__
     <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
-    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Wipes Fly volume AND signals local sync loop to wipe its mirror. Use for a true clean restart everywhere.">Fresh Collection (Fly + Local): <span id="freshCollectionLabel">OFF</span></button>
+    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
     <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
@@ -26865,8 +27593,8 @@ __ADMIN_ACCESS_CONTROLS__
 <h3>Ultimate execution control</h3>
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Dashboard overrides all lanes for limit submit (local sim only — live trading is managed at doxxedcrypto.digital). Lane/AI decisions are still logged for analyzer.</p>
 <div id="ultimateGatePanel" style="margin:8px 0 14px 0;padding:12px;border:1px solid #30363d;border-radius:6px;background:#161b22;font-size:0.88em;line-height:1.5;"></div>
-<h3>Chase entry selector — exact virtual counts</h3>
-<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may exist at that exact chase count. Before the first checked count the bot counts virtually without placing a limit. If a later count is unchecked, it removes the pending limit and waits for the next checked count; if none remains, the signal expires. Example: select 3 and 4 only → virtual 0–2, submit at 3, chase at 4, cancel before 5.</p>
+<h3>Chase entry selector — 5-minute signal-age windows</h3>
+<p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = an order may rest in that 5-minute signal-age window (not a 60s chase-count tick). Chase 0=0–5m, 1=5–10m, 2=10–15m, 3=15–20m, 4=20–25m, 5+=25–30m. Before the first checked window the bot waits without placing a limit. Inside a window it may reprice every 3 min without leaving the window. If a later window is unchecked, the order stays on the last enabled window until the 30-minute TTL. Example: select 2, 3 and 4 only → wait 0–10m, submit at 10–15m, rest/reprice through 20–25m, hold through 25–30m if 5+ is off.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
@@ -26986,13 +27714,14 @@ __ADMIN_ACCESS_CONTROLS__
     <p><strong>AI Cooldown:</strong> <span id="aiCooldown">-</span></p>
     <p><strong>Last Pipeline:</strong> <span id="lastPipeline">-</span></p>
     <p><strong>Heartbeat:</strong> <span id="heartbeat">-</span></p>
-    <p><strong>AI Input:</strong> <span id="aiInput">-</span></p>
+    <p><strong>AI Input (last payload sent to DeepSeek):</strong></p>
+    <pre id="aiInput" style="max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid #30363d;padding:8px;font-size:0.8em;color:#c9d1d9;">-</pre>
     <p><strong>Features:</strong> <span id="features">-</span></p>
     <p><strong>Data Quality:</strong> <span id="dataQuality">-</span></p>
 </div>
 
 <p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
-  <strong>Fresh Collection (Fly + Local):</strong> wipes the Fly volume (research CSVs, jsonl logs, debug/log files), resets in-memory trades/session counters, AND signals the local sync loop to wipe its mirror — a true clean restart everywhere. While ON, oversized aux logs are trimmed hourly.
+  <strong>Fresh Collection (Fly epoch):</strong> one-way ON for the bound epoch. Clicking while ON does not turn it OFF — it offers <em>start a NEW fresh epoch</em>, which calls authenticated <code>POST /api/fresh_epoch_reset</code> on the Fly owner. That quarantines Fly volume research dumps (trades, snapshots, funnel, counterfactual, shadow, market evidence, analyzer generations) and bumps the desktop-sync signal so the home mirror picks up the new empty epoch without mixing quarantine into the active tree. Paper must be paused and flat; Cheetah stays paused/disarmed. While ON, oversized aux logs are trimmed hourly.
   <br><br>
   <strong>Wipe Fly Data Only:</strong> same Fly wipe + in-memory reset, but the local sync mirror is retained for offline analysis history. Use when Fly is filling up but you want to keep local data.
 </p>
@@ -27081,6 +27810,7 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>Pending Orders</h2>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Only limits still resting on the book. Older APPROVE/TTL rows are not active — they move to Expired Orders. AI History is every scan, not every working order.</p>
 <table>
     <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th><th>Venue fill gate</th></tr></thead>
     <tbody id="ordersTable"></tbody>
@@ -27101,7 +27831,7 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Research verdicts only — these are not orders. Executable orders appear only in Pending Orders above. Restored pre-restart calls may lack the newer per-lane verdict metadata.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. REJECT / ACCEPT is in the lane verdict and Reason columns — these rows are not pending orders. Executable orders are only in Pending Orders. After a restart, Reason still shows APPROVE/REJECT plus the block comment.</p>
 <table>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -27338,7 +28068,7 @@ DASHBOARD_JS = """(function () {
       const host = document.getElementById('chaseBucketControls');
       if (!host || host.dataset.ready === '1') return;
       const order = ['0_chases','1_chase','2_chases','3_chases','4_chases','5+_chases'];
-      const labels = {'0_chases':'0 (immediate)','1_chase':'1','2_chases':'2','3_chases':'3','4_chases':'4','5+_chases':'5+'};
+      const labels = {'0_chases':'0 (0–5m)','1_chase':'1 (5–10m)','2_chases':'2 (10–15m)','3_chases':'3 (15–20m)','4_chases':'4 (20–25m)','5+_chases':'5+ (25–30m)'};
       host.innerHTML = order.map(k =>
         `<label><input type="checkbox" class="chase-bucket-cb" data-bucket="${k}" onchange="updateChaseBuckets()"> ${labels[k] || k}</label>`
       ).join('');
@@ -27933,44 +28663,68 @@ DASHBOARD_JS = """(function () {
     async function toggleFreshCollection() {
       if (freshCollectionInFlight) return;
       const freshLabelEl = document.getElementById('freshCollectionLabel');
-      const currentIsOn = freshLabelEl && freshLabelEl.innerText.trim() === 'ON';
-      const turningOn = !currentIsOn;
-      if (turningOn) {
-        const ok = confirm(
-          'Fresh Collection (Fly + Local) will DELETE all research CSVs, jsonl logs, debug/log files on the Fly volume, clear open/pending trades in memory, AND signal the local sync loop to also wipe its mirror.\\n\\nThe bot keeps running and starts collecting from zero everywhere.\\n\\nContinue?'
-        );
-        if (!ok) return;
-      } else {
-        const ok = confirm(
-          'Fresh Collection is currently ON. Turning it OFF stops automatic retention checks, but does not delete Past Analysis archives.\\n\\nTurn Fresh Collection OFF?'
-        );
-        if (!ok) return;
-      }
-      freshCollectionInFlight = true;
       const freshBtn = document.getElementById('freshCollectionBtn');
+      freshCollectionInFlight = true;
       if (freshBtn) freshBtn.disabled = true;
       try {
-        const res = await post('/api/toggle_fresh_collection', {
-          enabled: turningOn,
-          expected_current: currentIsOn,
+        const statusRes = await fetch('/api/fresh_epoch_reset', {
+          method: 'GET',
+          credentials: 'same-origin',
         });
-        const body = await res.json();
-        if (body.error) {
-          alert('Fresh Collection blocked: ' + body.error);
-        } else if (body.reset && body.reset.ok === false) {
-          alert('Fresh Collection failed: ' + (body.reset.summary || body.reset.error || 'unknown'));
-        } else if (body.reset && body.reset.summary) {
-          let msg = 'Fresh collection reset complete: ' + body.reset.summary;
-          if (body.reset.archive_path) {
-            msg += '\\n\\nArchived to: ' + body.reset.archive_path;
-          }
-          if (body.reset.errors && body.reset.errors.length) {
-            msg += '\\n\\nNote: some files were locked (usually analyzer log) and will be trimmed on next run:\\n' + body.reset.errors.slice(0, 5).join('\\n');
-          }
-          alert(msg);
+        let status = {};
+        try { status = await statusRes.json(); } catch (_) { status = {}; }
+        if (statusRes.status === 401) {
+          alert('Fresh Collection needs admin login on the Fly owner dashboard (cookie/token). The click never reached POST /api/fresh_epoch_reset.');
+          return;
         }
-        if (!body.error && freshLabelEl) {
-          freshLabelEl.innerText = turningOn ? 'ON' : 'OFF';
+        if (!statusRes.ok) {
+          alert('Fresh Collection status failed: ' + (status.error || statusRes.statusText || statusRes.status));
+          return;
+        }
+        const epoch = status.epoch_id || 'unbound';
+        const alreadyOn = !!status.fresh_collection_mode;
+        const confirmMsg = alreadyOn
+          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch? That quarantines Fly volume research dumps via POST /api/fresh_epoch_reset and the desktop mirror then syncs the empty epoch (quarantine stays out of the active tree).\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
+          : ('Start a fresh collection epoch on Fly? This calls POST /api/fresh_epoch_reset: quarantines Fly volume research dumps, resets session counters, and signals the desktop mirror.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
+        if (!confirm(confirmMsg)) return;
+        const freshStatusRes = await fetch('/api/fresh_epoch_reset', {
+          method: 'GET',
+          credentials: 'same-origin',
+        });
+        try { status = await freshStatusRes.json(); } catch (_) { status = {}; }
+        if (!freshStatusRes.ok) {
+          alert('Fresh Collection re-check failed: ' + (status.error || freshStatusRes.statusText || freshStatusRes.status));
+          return;
+        }
+        if (!status.wipe_ready) {
+          alert(
+            'Cannot wipe Fly yet.\\n\\n' +
+            ((status.blockers && status.blockers.length) ? status.blockers.join('\\n') : 'not flat / not paused') +
+            '\\n\\nPause paper, wait until pending/open are zero, keep Cheetah paused/disarmed, then click again. No wipe was sent.'
+          );
+          return;
+        }
+        const res = await fetch('/api/fresh_epoch_reset', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            confirmation: status.confirmation_required,
+            strict_flat_proof: status.strict_flat_proof,
+          }),
+        });
+        const body = await res.json().catch(function () { return {}; });
+        if (!res.ok || body.error || (body.reset && body.reset.ok === false)) {
+          alert('Fresh Collection blocked: ' + (body.error || (body.reset && (body.reset.summary || body.reset.error)) || res.statusText || res.status));
+          return;
+        }
+        const epochAfter = body.epoch_id || (body.reset && body.reset.epoch_cutoff_utc) || epoch;
+        let msg = 'Fresh epoch wipe accepted on Fly: ' + (body.reset && body.reset.summary ? body.reset.summary : 'ok');
+        if (epochAfter) msg += '\\nEpoch: ' + epochAfter;
+        if (body.reset && body.reset.quarantine_path) msg += '\\nQuarantine: ' + body.reset.quarantine_path;
+        alert(msg);
+        if (freshLabelEl) {
+          freshLabelEl.innerText = body.epoch_id ? ('ON · ' + body.epoch_id) : 'ON';
         }
       } catch (e) {
         alert('Fresh Collection request failed: ' + e);
@@ -28194,7 +28948,9 @@ DASHBOARD_JS = """(function () {
           wsAgeSec = Math.round(d.price_age);
         }
         let wsAgeText = wsAgeSec != null ? wsAgeSec + ' s' : '-';
-        const wsStale = wsAgeSec != null && wsAgeSec > 10;
+        const wsStaleSec = d.dashboard_ws_stale_sec != null ? Number(d.dashboard_ws_stale_sec) : 30;
+        const wsConnected = d.ws_transport_connected === true || d.ws_ready === true;
+        const wsStale = wsAgeSec != null && wsAgeSec > wsStaleSec && !wsConnected;
         if (wsStale) wsAgeText += ' (STALE!)';
         safeText('ws_age', wsAgeText);
         const wsBadge = document.getElementById('wsStaleBadge');
@@ -28465,20 +29221,29 @@ DASHBOARD_JS = """(function () {
         const freshBtn = document.getElementById('freshCollectionBtn');
         const freshLabel = document.getElementById('freshCollectionLabel');
         if (freshLabel) {
-          freshLabel.innerText = d.fresh_collection_mode ? 'ON' : 'OFF';
+          if (d.fresh_collection_mode) {
+            freshLabel.innerText = d.fresh_epoch_id
+              ? ('ON · ' + d.fresh_epoch_id)
+              : 'ON';
+          } else {
+            freshLabel.innerText = 'OFF';
+          }
         }
         if (freshBtn) {
           freshBtn.style.backgroundColor = d.fresh_collection_mode ? '#2563eb' : '#374151';
         }
         const freshStatus = document.getElementById('freshCollectionStatus');
         if (freshStatus) {
+          const epochNote = d.fresh_epoch_id
+            ? ('Bound epoch ' + d.fresh_epoch_id + ' — click starts a NEW Fly wipe, not OFF. ')
+            : '';
           if (d.last_fresh_reset_summary) {
-            freshStatus.innerText = 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
+            freshStatus.innerText = epochNote + 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
               (d.last_fresh_reset_ts ? ' @ ' + formatMelbourneDateTime(new Date(d.last_fresh_reset_ts * 1000).toISOString()) : '');
           } else {
             freshStatus.innerText = d.fresh_collection_mode
-              ? 'Auto-trim active — aux logs checked hourly'
-              : '';
+              ? (epochNote + 'Auto-trim active — aux logs checked hourly')
+              : 'Fresh Collection OFF — click starts a Fly epoch wipe via POST /api/fresh_epoch_reset';
           }
         }
         if (d.leverage) {
@@ -28788,7 +29553,11 @@ DASHBOARD_JS = """(function () {
           return `<span style="color:${accepted ? '#3fb950' : '#f85149'}" title="${title}">${label}${score}</span>`;
         };
         safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
-          const c = a.reason || a.comment || '';
+          const c = [a.decision, a.reason, a.comment].filter(function (part, idx, arr) {
+            const text = String(part || '').trim();
+            if (!text) return false;
+            return arr.findIndex(function (other) { return String(other || '').trim() === text; }) === idx;
+          }).join(' | ');
           const cShort = c.length > 100 ? c.substring(0, 100) + '...' : (c || '-');
           const verdicts = a.lane_verdicts || {};
           const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
@@ -28885,7 +29654,7 @@ DASHBOARD_JS = """(function () {
         }
         const dashPort = d.dashboard_port || __DASHBOARD_PORT__;
         const onWrongPort = (window.location.port && String(window.location.port) !== String(dashPort));
-        safeText('aiInput', JSON.stringify(d.ai_input || {}) + (d.ai_input_time ? ' @ ' + d.ai_input_time : '') + ' (snapshot at last AI call)');
+        safeText('aiInput', JSON.stringify(d.ai_input || {}, null, 2) + (d.ai_input_time ? '\n@ ' + d.ai_input_time : ''));
         safeText('features', JSON.stringify(d.feature_snapshot || {}) + ' (live — may differ from AI Input until next call)');
         if (onWrongPort) {
           const sb = document.getElementById('serverBanner');
@@ -32002,6 +32771,10 @@ def _build_api_state_snapshot():
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
+        _epoch_id, _epoch_cutoff, _epoch_kind = _fresh_epoch_identity_from_session()
+        snapshot["fresh_epoch_id"] = _epoch_id
+        snapshot["fresh_epoch_cutoff_utc"] = _epoch_cutoff
+        snapshot["fresh_epoch_kind"] = _epoch_kind
         # Stage 1 Fix #6 (2026-08-06): when LAST_AI_PAYLOAD is empty (e.g.
         # after restart), report an honest "NO_AI_CALL_YET" status instead of
         # silently falling back to state.feature_snapshot (a live orderflow
@@ -32018,6 +32791,7 @@ def _build_api_state_snapshot():
                 ),
             }
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
+        snapshot["dashboard_ws_stale_sec"] = DASHBOARD_WS_STALE_SEC
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
         snapshot["data_quality"] = state.get("data_quality", 0.0)
         snapshot["edge_threshold"] = get_edge_threshold()
@@ -32360,6 +33134,13 @@ def _sanitize_public_state(state: dict) -> dict:
 
     # Explicit marker so observers know they're seeing the sanitized view.
     out["public_sanitized"] = True
+    out["ai_input"] = {
+        "status": "OWNER_ONLY",
+        "message": (
+            "Last AI payload is on the owner dashboard (login). "
+            "The public view does not include the model input."
+        ),
+    }
     return out
 
 
@@ -32500,6 +33281,20 @@ def health():
         "analyzer_sync_id": analyzer_sync_id,
         "git_rev": _runtime_git_rev(),
         "tile2_policy": tile2_policy_descriptor(),
+        "collection": {
+            "path_replay": PATH_REPLAY_POLICY_TAG,
+            "cycle_universe": CYCLE_3M_UNIVERSE_TAG,
+            "path_replay_file": PATH_REPLAY_FILE,
+            "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
+            "post_exit_file": POST_EXIT_REPLAY_FILE,
+            "order_multiverse_file": ORDER_MULTIVERSE_FILE,
+            "alt_tp": ["atr_k_tp", "chandelier", "structure_tp"],
+            "alt_sl": ["atr_k_stop", "structure_stop"],
+            "live_exits_unchanged": True,
+            "live_thesis_cut": -12.0,
+            "hard_stop_closes_paper": False,
+            "writers_hooked": True,
+        },
     })
 
 
@@ -33342,21 +34137,180 @@ def wipe_fly_only():
     })
 
 _FRESH_EPOCH_CONFIRMATION = "QUARANTINE_OBSOLETE_RESEARCH_START_FRESH_EPOCH"
+_FRESH_EPOCH_ZERO_FIELDS = (
+    "showcase_positions", "showcase_pending_orders",
+    "relay_active_participants", "relay_open_lots", "relay_pending_lots",
+    "exchange_positions", "exchange_active_orders", "exchange_delta_btc",
+)
 
 
-@app.route('/api/fresh_epoch_reset', methods=['POST'])
+def _utc_isoformat_ns(ts: float) -> str:
+    """Analyzer-compatible UTC isoformat (pandas ns when available)."""
+    try:
+        import pandas as pd
+        return pd.to_datetime(float(ts), unit="s", utc=True).isoformat()
+    except Exception:
+        pass
+    whole = int(ts)
+    frac = float(ts) - whole
+    nsec = int(round(frac * 1_000_000_000))
+    if nsec >= 1_000_000_000:
+        whole += 1
+        nsec = 0
+    if nsec < 0:
+        whole -= 1
+        nsec += 1_000_000_000
+    dt = datetime.fromtimestamp(whole, tz=timezone.utc)
+    base = dt.strftime("%Y-%m-%dT%H:%M:%S")
+    if nsec:
+        return f"{base}.{nsec:09d}+00:00"
+    return f"{base}+00:00"
+
+
+def _fresh_epoch_identity_from_session():
+    """Stable SHOWCASE_FRESH_COLLECTION epoch id from research_session.json."""
+    session = _load_research_session_meta() or {}
+    raw = session.get("fresh_collection_start_time")
+    if raw in (None, "", 0, 0.0):
+        return None, None, None
+    try:
+        cutoff = _utc_isoformat_ns(float(raw))
+    except (TypeError, ValueError):
+        return None, None, None
+    kind = "SHOWCASE_FRESH_COLLECTION"
+    material = f"fresh_research_epoch_v1|{kind}|{cutoff}"
+    epoch_id = "epoch-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    return epoch_id, cutoff, kind
+
+
+def _fresh_epoch_strict_flat_proof() -> dict:
+    """Fly-local books for the official POST /api/fresh_epoch_reset proof."""
+    now = datetime.now(timezone.utc)
+    with trade_lock:
+        pending_count = len(pending_orders)
+        open_count = len(open_positions)
+    with state_lock:
+        live_armed = bool(state.get("live_armed", False))
+    audit = _exchange_exposure_audit_snapshot()
+    paper_only = _force_paper_mode_active() and not live_armed
+    try:
+        exch_pos = int(audit.get("open_position_count") or 0)
+    except (TypeError, ValueError):
+        exch_pos = 0
+    try:
+        exch_ord = int(audit.get("open_order_count") or 0)
+    except (TypeError, ValueError):
+        exch_ord = 0
+    try:
+        delta = float(audit.get("delta_btc") or audit.get("net_btc") or 0)
+    except (TypeError, ValueError):
+        delta = 0.0
+    if paper_only and not audit.get("authoritative"):
+        exch_pos = 0
+        exch_ord = 0
+        delta = 0.0
+    return {
+        "checked_at": now.isoformat(),
+        "showcase_positions": int(open_count),
+        "showcase_pending_orders": int(pending_count),
+        "relay_active_participants": 0,
+        "relay_open_lots": 0,
+        "relay_pending_lots": 0,
+        "exchange_positions": exch_pos,
+        "exchange_active_orders": exch_ord,
+        "exchange_delta_btc": delta,
+        "relay_paused": (not live_armed),
+        "relay_disarmed": (not live_armed),
+        "source": "fly_local_books",
+    }
+
+
+def _fresh_epoch_proof_blockers(proof: dict) -> list:
+    blockers = []
+    if not isinstance(proof, dict):
+        return ["strict_flat_proof required"]
+    for key in _FRESH_EPOCH_ZERO_FIELDS:
+        if proof.get(key) != 0:
+            blockers.append(f"{key}={proof.get(key)}")
+    if proof.get("relay_paused") is not True:
+        blockers.append("relay_paused")
+    if proof.get("relay_disarmed") is not True:
+        blockers.append("relay_disarmed")
+    try:
+        checked_at = datetime.fromisoformat(str(proof.get("checked_at") or "").replace("Z", "+00:00"))
+        age_s = (datetime.now(timezone.utc) - checked_at.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        age_s = float("inf")
+    if age_s < 0 or age_s > 60:
+        blockers.append("strict_flat_proof_stale")
+    return blockers
+
+
+def _fresh_epoch_status_payload() -> dict:
+    """Read-only contract for the dashboard button — never wipes."""
+    epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
+    with state_lock:
+        paused = bool(state.get("execution_paused", False))
+        live_armed = bool(state.get("live_armed", False))
+        mode = bool(state.get("fresh_collection_mode", False))
+        invert = bool(state.get("invert_signal", False))
+    with trade_lock:
+        pending_count = len(pending_orders)
+        open_count = len(open_positions)
+    proof = _fresh_epoch_strict_flat_proof()
+    blockers = []
+    if live_armed:
+        blockers.append("LIVE_ARMED")
+    if not paused:
+        blockers.append("EXECUTION_NOT_PAUSED")
+    if pending_count:
+        blockers.append(f"PENDING_ORDERS:{pending_count}")
+    if open_count:
+        blockers.append(f"OPEN_POSITIONS:{open_count}")
+    blockers.extend(_fresh_epoch_proof_blockers(proof))
+    seen = set()
+    uniq = []
+    for item in blockers:
+        if item in seen:
+            continue
+        seen.add(item)
+        uniq.append(item)
+    return {
+        "ok": True,
+        "dry_run": True,
+        "wiped": False,
+        "fresh_collection_mode": mode,
+        "off_allowed": False,
+        "one_way_on": True,
+        "epoch_id": epoch_id,
+        "epoch_cutoff_utc": cutoff,
+        "epoch_kind": kind,
+        "invert_signal": invert,
+        "wipe_ready": not uniq,
+        "blockers": uniq,
+        "strict_flat_proof": proof,
+        "confirmation_required": _FRESH_EPOCH_CONFIRMATION,
+        "endpoint": "/api/fresh_epoch_reset",
+        "hint": (
+            "Fresh Collection stays ON for the bound epoch. "
+            "POST /api/fresh_epoch_reset with confirmation starts a NEW Fly epoch wipe."
+        ),
+    }
+
+
+@app.route('/api/fresh_epoch_reset', methods=['GET', 'POST'])
 def api_fresh_epoch_reset():
     """Strict operator-only research epoch reset for the Fly execution mirror.
 
-    The ordinary warehouse routes are intentionally unavailable on Fly.  This
-    narrow controller preserves the existing hashed quarantine/reset behavior
-    while requiring a fresh, explicit cross-service flat-boundary receipt from
-    the authenticated operator.  The reset itself repeats the source-side
-    paused/disarmed/order/position checks and fails closed on any contradiction.
+    GET (or POST dry_run=true) returns the wipe contract without mutating.
+    POST with confirmation runs the existing perform_fresh_collection_reset
+    path — the same Fly-volume quarantine used by the official epoch wipe.
     """
     if not _admin_authed_strict():
         return jsonify({"ok": False, "error": "admin token required"}), 401
     data = request.get_json(silent=True) or {}
+    if request.method == "GET" or data.get("dry_run") is True:
+        return jsonify(_fresh_epoch_status_payload())
     if data.get("confirmation") != _FRESH_EPOCH_CONFIRMATION:
         return jsonify({
             "ok": False,
@@ -33365,11 +34319,7 @@ def api_fresh_epoch_reset():
     proof = data.get("strict_flat_proof")
     if not isinstance(proof, dict):
         return jsonify({"ok": False, "error": "strict_flat_proof required"}), 400
-    required_zero = (
-        "showcase_positions", "showcase_pending_orders",
-        "relay_active_participants", "relay_open_lots", "relay_pending_lots",
-        "exchange_positions", "exchange_active_orders", "exchange_delta_btc",
-    )
+    required_zero = _FRESH_EPOCH_ZERO_FIELDS
     if any(proof.get(key) != 0 for key in required_zero):
         return jsonify({
             "ok": False,
@@ -33387,12 +34337,18 @@ def api_fresh_epoch_reset():
         return jsonify({"ok": False, "error": "strict flat proof is stale"}), 409
 
     result = perform_fresh_collection_reset(send_local_signal=True)
+    epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
     status = 200 if result.get("ok") else 409
     return jsonify({
         "ok": bool(result.get("ok")),
         "reset": result,
-        "deleted": [],
+        "deleted": result.get("deleted") or [],
+        "purged_quarantine": result.get("purged_quarantine") or [],
         "strict_flat_checked_at": proof.get("checked_at"),
+        "epoch_id": epoch_id,
+        "epoch_cutoff_utc": cutoff,
+        "epoch_kind": kind,
+        "fresh_collection_mode": True if result.get("ok") else bool(state.get("fresh_collection_mode")),
     }), status
 
 @app.get("/api/data_size")
@@ -35313,12 +36269,17 @@ def record_ai_decision(trade_id, approved, win_prob, comment, dir_, conf, regime
             "session_ts": bot_start_time,
             "trade_id": trade_id,
             "dir": dir_,
+            "decision": "APPROVE" if approved else "REJECT",
             "approved": approved,
             "win_prob": win_prob,
             "comment": comment,
+            "reason": (
+                f"{'APPROVE' if approved else 'REJECT'} | {comment}"
+                if comment else ("APPROVE" if approved else "REJECT")
+            )[:500],
             "event_id": event_id,
         })
-        hist_limit = 50 if _sole_ai_research_mode() else 5
+        hist_limit = 50
         if len(state["ai_history"]) > hist_limit:
             state["ai_history"] = state["ai_history"][-hist_limit:]
         state["ai_decision"] = "APPROVED" if approved else "REJECTED"
@@ -35727,6 +36688,7 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
     if not trade_id or not fill_price or fill_price <= 0:
         return
     fill_dynamics = None
+    fill_stamps = _fill_replay_3m_stamps()
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -35736,6 +36698,7 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
             buf["lane"] = "executed"
             buf["block_reason"] = None
             buf["virtual_entry"] = float(fill_price)
+            buf.update(fill_stamps)
             fill_t = time.time() - _buf_float(buf.get("start_ts"), time.time())
             buf["virtual_fill_t"] = fill_t
             start_price = _buf_float(buf.get("start_price"), fill_price)
@@ -35940,14 +36903,8 @@ def simulate_replay_outcome(buf: dict) -> dict:
         peak = max(peak, unreal)
         mae = min(mae, unreal)
         age_min = (t - fill_t) / 60.0
-        if early_fail and unreal <= EARLY_FAIL_PCT_THRESHOLD and age_min < EARLY_FAIL_MINUTES:
-            exit_reason = "EARLY_FAIL"
-            exit_margin_pct = unreal
-            break
-        if (direction == "LONG" and price <= sl) or (direction == "SHORT" and price >= sl):
-            exit_reason = "STOP_LOSS"
-            exit_margin_pct = -MAX_SL_MARGIN_PCT
-            break
+        # Paper natural cycle: do not close on EARLY_FAIL or hard STOP_LOSS.
+        # Those previously fired on a 13bps tick and skipped ladder/thesis.
         lock_floor = _profit_lock_floor_for_ladder(
             peak,
             trail_ladder,
@@ -36222,6 +37179,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
         chase_mode=meta.get("chase_mode") or "NONE",
         protective_exit="REDUCE_ONLY_STOP",
     )
+    fill_stamps = _fill_replay_3m_stamps(None, meta.get("entry_features") or meta)
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
@@ -36281,6 +37239,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "fill_at_limit": bool(meta.get("fill_at_limit")),
             "limit_chase_count": int(meta.get("limit_chase_count") or 0),
             "exit_outcome": meta.get("exit_outcome"),
+            **fill_stamps,
         }
 
 
@@ -36292,6 +37251,7 @@ def append_replay_tick(
     best_bid: float = None,
     best_ask: float = None,
     observed_ts: float = None,
+    mark_source: str = None,
 ):
     if not trade_id or price is None or price <= 0:
         return
@@ -36315,6 +37275,9 @@ def append_replay_tick(
         tick_max = POST_EXIT_REPLAY_TICK_MAX if buf.get("post_exit") else REPLAY_TICK_MAX
         if len(ticks) >= tick_max:
             ticks.pop(0)
+        source = mark_source or (
+            "bbo" if (best_bid or 0) > 0 or (best_ask or 0) > 0 else "last_trade"
+        )
         tick_row = {
             "seq": buf["seq"],
             "t": t_rel,
@@ -36324,13 +37287,41 @@ def append_replay_tick(
             "best_bid": float(best_bid) if best_bid is not None else None,
             "best_ask": float(best_ask) if best_ask is not None else None,
             "observed_ts": now,
+            "mark_source": source,
         }
         ticks.append(tick_row)
+        if unreal_pct is not None:
+            prev_mfe = _buf_float(buf.get("peak_mfe_pct"), None)
+            prev_mae = _buf_float(buf.get("trough_mae_pct"), None)
+            mfe = float(unreal_pct) if prev_mfe is None else max(prev_mfe, float(unreal_pct))
+            mae = float(unreal_pct) if prev_mae is None else min(prev_mae, float(unreal_pct))
+            buf["peak_mfe_pct"] = mfe
+            buf["trough_mae_pct"] = mae
+        else:
+            mfe = buf.get("peak_mfe_pct")
+            mae = buf.get("trough_mae_pct")
         _update_compact_horizon_receipts(buf, tick_row)
         buf["last_update"] = now
         buf["last_tick_ts"] = now
         is_post_exit = bool(buf.get("post_exit"))
         persist_trade_id = trade_id if is_post_exit else None
+        path_row = build_path_sample(
+            trade_id=trade_id,
+            t=t_rel,
+            price=float(price),
+            unreal_pct=unreal_pct,
+            phase=phase,
+            direction=buf.get("direction") or "LONG",
+            leverage=_buf_int(buf.get("leverage"), _replay_leverage_default()),
+            best_bid=best_bid,
+            best_ask=best_ask,
+            mark_source=source,
+            peak_mfe_pct=mfe,
+            trough_mae_pct=mae,
+            observed_ts=now,
+            seq=buf["seq"],
+        )
+    _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
     if persist_trade_id is not None:
         try:
             rotate_log(POST_EXIT_REPLAY_FILE)
@@ -36346,6 +37337,9 @@ def append_replay_tick(
                     "t_rel": t_rel,
                     "best_bid": float(best_bid) if best_bid is not None else None,
                     "best_ask": float(best_ask) if best_ask is not None else None,
+                    "mark_source": source,
+                    "schema": PATH_REPLAY_SCHEMA,
+                    "policy_tag": PATH_REPLAY_POLICY_TAG,
                 }) + "\n")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
@@ -36524,8 +37518,10 @@ def service_post_exit_replays():
     with state_lock:
         price = float(state.get("price") or 0)
         book = copy.deepcopy(state.get("order_book") or {})
-    best_bid = _buf_float(book.get("best_bid") or book.get("bid"), 0)
-    best_ask = _buf_float(book.get("best_ask") or book.get("ask"), 0)
+        ticker_bid = _buf_float(state.get("bid"), 0)
+        ticker_ask = _buf_float(state.get("ask"), 0)
+    best_bid = _buf_float(book.get("best_bid") or book.get("bid") or ticker_bid, 0)
+    best_ask = _buf_float(book.get("best_ask") or book.get("ask") or ticker_ask, 0)
     if price <= 0 and best_bid <= 0 and best_ask <= 0:
         return
     with replay_lock:
@@ -36543,9 +37539,14 @@ def service_post_exit_replays():
                 continue
             direction = str(buf.get("direction") or "LONG").upper()
             executable_mark = best_bid if direction == "LONG" else best_ask
-            if executable_mark <= 0:
-                # Last trade is not executable BBO evidence. Leave this sample
-                # UNKNOWN until the direction-correct quote is present.
+            if executable_mark > 0:
+                mark_source = "bbo"
+            elif price > 0:
+                # BBO preferred for 1pp sweeps; last-trade keeps 120m dense when
+                # the book is briefly empty. Offline can filter mark_source.
+                executable_mark = price
+                mark_source = "last_trade"
+            else:
                 continue
             unreal = _shadow_unreal_pct({**buf, "virtual_entry": entry}, executable_mark)
         append_replay_tick(
@@ -36554,6 +37555,7 @@ def service_post_exit_replays():
             unreal,
             best_bid=best_bid or None,
             best_ask=best_ask or None,
+            mark_source=mark_source,
         )
 
 
@@ -36803,6 +37805,7 @@ def close_replay_buffer(trade_id):
 
 def dump_replay(trade_id: str):
     global write_counter
+    mv_source = None
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -36890,8 +37893,28 @@ def dump_replay(trade_id: str):
                 write_counter += 1
                 if write_counter % 10 == 0:
                     os.fsync(f.fileno())
+            if replay_complete:
+                paper_tid = paper_multiverse_trade_id(
+                    trade_id,
+                    buf.get("source_trade_id"),
+                )
+                if paper_tid:
+                    mv_source = {
+                        "trade_id": paper_tid,
+                        "signal_price": buf.get("start_price") or buf.get("entry_price"),
+                        "signal_price_at_approve": buf.get("start_price"),
+                        "created_ts_ts": buf.get("start_ts"),
+                        "final_direction": buf.get("direction"),
+                        "atr14_pct_3m": buf.get("atr14_pct_3m"),
+                        "donchian_high_3m": buf.get("donchian_high_3m"),
+                        "donchian_low_3m": buf.get("donchian_low_3m"),
+                        "support_price": buf.get("support_price"),
+                        "resistance_price": buf.get("resistance_price"),
+                    }
         except Exception as e:
             logger.error(f"Replay dump failed for {trade_id}: {e}")
+    if mv_source:
+        _sync_order_multiverse(mv_source, path_complete=True)
 
 def load_policy():
     if not os.path.exists(POLICY_FILE):
@@ -38486,6 +39509,10 @@ def heartbeat_loop():
             state["heartbeat"] = now
             state["last_heartbeat"] = now
         last_heartbeat = now
+        try:
+            _maybe_record_heartbeat_cycle_3m()
+        except Exception:
+            pass
         if shutdown_event.wait(PROCESS_HEARTBEAT_INTERVAL_SEC):
             break
 
@@ -38702,6 +39729,7 @@ def main():
         state["bot_start_time"] = bot_start_time
     _restore_session_ai_history_from_csv(50)
     _restore_shared_ai_lane_verdicts_from_journal()
+    restore_last_ai_payload_from_log()
     last_signal_create_global = time.time() - 31
     state["last_ai_signal_time"] = 0
     last_ai_call_ts = 0.0
