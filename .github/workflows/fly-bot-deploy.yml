@@ -50,6 +50,7 @@ jobs:
           python test_fly_data_sync_contract.py
           python test_fly_relay_state_pusher_contract.py
           python test_ws_live_readiness_contract.py
+          python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py -q
           python -m pytest test_continuous_r2_floor.py -q
           python -m pytest test_chase_exact_bucket_controls.py -q
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q

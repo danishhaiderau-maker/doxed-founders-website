@@ -119,6 +119,10 @@ from chase_offset_touch_grid import (
     new_grid_state,
     poll_grid_state,
 )
+from order_multiverse import (
+    ORDER_MULTIVERSE_FILE,
+    build_order_multiverse,
+)
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -11354,6 +11358,9 @@ def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
 
 _cycle_3m_written_buckets = {}
 _touch_grid_book = {}
+_order_multiverse_state = {}
+_order_multiverse_pending_src = {}
+_order_multiverse_last_poll = 0.0
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
@@ -11419,6 +11426,114 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
             logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
     for tid in dead:
         _touch_grid_book.pop(tid, None)
+    _maybe_complete_pending_order_multiverse()
+
+
+def _maybe_complete_pending_order_multiverse():
+    global _order_multiverse_last_poll
+    now = time.time()
+    if now - _order_multiverse_last_poll < 60.0:
+        return
+    _order_multiverse_last_poll = now
+    for src in list(_order_multiverse_pending_src.values()):
+        _sync_order_multiverse(src, path_complete=False)
+
+
+def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
+    """One compact JSONL row per TAKEN. Does not change the live 0.1% ticket."""
+    if not isinstance(source, dict):
+        return None
+    try:
+        tid = str(source.get("trade_id") or "")
+        if not tid:
+            return None
+        prev = _order_multiverse_state.get(tid)
+        if prev == "COMPLETE":
+            return None
+        price = float(
+            source.get("signal_price_at_approve")
+            or source.get("signal_price")
+            or source.get("price")
+            or 0
+        )
+        if price <= 0:
+            return None
+        direction = source.get("final_direction") or source.get("signal_dir") or source.get("dir") or "SHORT"
+        ts = float(source.get("created_ts_ts") or source.get("created_ts") or source.get("signal_ts") or 0)
+        if ts <= 0:
+            ts = float(source.get("snapshot_ts") or time.time())
+        ttl = float(source.get("expires_ts") or 0)
+        ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
+        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        ticks_1s = []
+        replay_complete = bool(path_complete)
+        with replay_lock:
+            buf = replay_buffers.get(tid) or {}
+            start = float(buf.get("start_ts") or ts)
+            for tick in buf.get("ticks") or []:
+                t = float(tick.get("t") or 0)
+                if 0 < t < 1e11:
+                    t = start + t
+                ticks_1s.append({
+                    "t": t,
+                    "price": tick.get("price"),
+                    "best_bid": tick.get("best_bid"),
+                    "best_ask": tick.get("best_ask"),
+                    "unreal_pct": tick.get("unreal_pct"),
+                })
+            if buf.get("post_exit") and buf.get("closed"):
+                replay_complete = True
+        with state_lock:
+            univ = dict(state.get("last_cycle_3m_universe") or {})
+        record = build_order_multiverse(
+            trade_id=tid,
+            signal_price=price,
+            signal_ts=ts,
+            direction=direction,
+            candles_1m=candles_1m,
+            ticks_1s=ticks_1s or None,
+            live_orig=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+            ttl_sec=ttl_sec,
+            atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+            donchian_high=univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
+            donchian_low=univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
+            support_price=univ.get("support_price") or source.get("support_price"),
+            resistance_price=univ.get("resistance_price") or source.get("resistance_price"),
+            path_complete=replay_complete,
+        )
+        if record.get("pending"):
+            _order_multiverse_pending_src[tid] = {
+                "trade_id": tid,
+                "signal_price_at_approve": price,
+                "signal_price": price,
+                "created_ts_ts": ts,
+                "expires_ts": ts + ttl_sec,
+                "final_direction": direction,
+                "atr14_pct_3m": univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+                "donchian_high_3m": univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
+                "donchian_low_3m": univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
+                "support_price": univ.get("support_price") or source.get("support_price"),
+                "resistance_price": univ.get("resistance_price") or source.get("resistance_price"),
+            }
+            if prev == "PENDING":
+                return record
+        else:
+            _order_multiverse_pending_src.pop(tid, None)
+        _safe_append_jsonl(ORDER_MULTIVERSE_FILE, record, label="ORDER_MULTIVERSE")
+        _order_multiverse_state[tid] = "PENDING" if record.get("pending") else "COMPLETE"
+        if len(_order_multiverse_state) > 64:
+            oldest = next(iter(_order_multiverse_state))
+            _order_multiverse_state.pop(oldest, None)
+        logger.info(
+            f"[ORDER MULTIVERSE] {record.get('event')} trade_id={tid} "
+            f"touched={record.get('n_touched')} missed={record.get('n_missed')} "
+            f"scores={record.get('n')} live_orig=0.10% unchanged "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return record
+    except Exception as exc:
+        logger.warning(f"[ORDER MULTIVERSE] sync failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
 
 
 def _cycle_3m_flow_and_sr():
@@ -20416,6 +20531,7 @@ def fill_order(order):
     clear_fill_handoff()
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     persist_signal(fill_snapshot, "FILLED")
+    _sync_order_multiverse(fill_snapshot or signal or order, path_complete=False)
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
     # C3 fix: persist the newly-opened position to disk immediately so a crash between
     # this fill and the next save never loses an open position (was only saved on close
@@ -23083,6 +23199,7 @@ def _record_expired_order(source: dict, reason: str):
         "research_lane": row.get("research_lane"),
         "direction": row.get("dir"),
     })
+    _sync_order_multiverse({**row, **(source or {}), **(master or {})}, path_complete=False)
     return row
 
 
@@ -24713,6 +24830,7 @@ def research_wipe_file_paths():
         PATH_REPLAY_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
+        ORDER_MULTIVERSE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -24757,6 +24875,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         PATH_REPLAY_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
+        ORDER_MULTIVERSE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
@@ -33061,6 +33180,7 @@ def health():
             "path_replay_file": PATH_REPLAY_FILE,
             "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
             "post_exit_file": POST_EXIT_REPLAY_FILE,
+            "order_multiverse_file": ORDER_MULTIVERSE_FILE,
             "alt_tp": ["atr_k_tp", "chandelier", "structure_tp"],
             "alt_sl": ["atr_k_stop", "structure_stop"],
             "live_exits_unchanged": True,
@@ -37573,6 +37693,7 @@ def close_replay_buffer(trade_id):
 
 def dump_replay(trade_id: str):
     global write_counter
+    mv_source = None
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if not buf:
@@ -37660,8 +37781,23 @@ def dump_replay(trade_id: str):
                 write_counter += 1
                 if write_counter % 10 == 0:
                     os.fsync(f.fileno())
+            if replay_complete:
+                mv_source = {
+                    "trade_id": trade_id,
+                    "signal_price": buf.get("start_price") or buf.get("entry_price"),
+                    "signal_price_at_approve": buf.get("start_price"),
+                    "created_ts_ts": buf.get("start_ts"),
+                    "final_direction": buf.get("direction"),
+                    "atr14_pct_3m": buf.get("atr14_pct_3m"),
+                    "donchian_high_3m": buf.get("donchian_high_3m"),
+                    "donchian_low_3m": buf.get("donchian_low_3m"),
+                    "support_price": buf.get("support_price"),
+                    "resistance_price": buf.get("resistance_price"),
+                }
         except Exception as e:
             logger.error(f"Replay dump failed for {trade_id}: {e}")
+    if mv_source:
+        _sync_order_multiverse(mv_source, path_complete=True)
 
 def load_policy():
     if not os.path.exists(POLICY_FILE):
