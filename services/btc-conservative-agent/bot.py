@@ -122,6 +122,7 @@ from chase_offset_touch_grid import (
 from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
     build_order_multiverse,
+    paper_multiverse_trade_id,
 )
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -11436,15 +11437,33 @@ def _maybe_complete_pending_order_multiverse():
         return
     _order_multiverse_last_poll = now
     for src in list(_order_multiverse_pending_src.values()):
-        _sync_order_multiverse(src, path_complete=False)
+        expires = float(src.get("expires_ts") or 0)
+        ttl_done = expires > 0 and now >= expires
+        tid = paper_multiverse_trade_id(src.get("trade_id"), src.get("source_trade_id"))
+        has_post_fill_writer = False
+        if tid:
+            with replay_lock:
+                buf = replay_buffers.get(tid) or {}
+                has_post_fill_writer = bool(
+                    buf.get("post_exit")
+                    or buf.get("lane") == "executed"
+                    or buf.get("virtual_fill_t") is not None
+                )
+        # TTL/cancel scores now. 120m post-fill writer, if already running, may keep sampling.
+        _sync_order_multiverse(src, path_complete=bool(ttl_done and not has_post_fill_writer))
 
 
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
-    """One compact JSONL row per TAKEN. Does not change the live 0.1% ticket."""
+    """One compact JSONL row per paper TAKEN. Does not change the live 0.1% ticket."""
     if not isinstance(source, dict):
         return None
     try:
-        tid = str(source.get("trade_id") or "")
+        tid = paper_multiverse_trade_id(
+            source.get("trade_id"),
+            source.get("canonical_trade_id"),
+            source.get("source_trade_id"),
+            source.get("source_order_trade_id"),
+        )
         if not tid:
             return None
         prev = _order_multiverse_state.get(tid)
@@ -21312,6 +21331,7 @@ def process_signal(event: dict):
                 direction=signal.get("final_direction") or ai.get("direction"),
             )
             _arm_chase_offset_touch_grid(signal)
+            _sync_order_multiverse(signal, path_complete=False)
             logger.info(
                 f"[TREND HEALTH] trade_id={trade_id} state={health.get('trend_state')} "
                 f"weaken={health.get('weaken_signals')} vel={health.get('velocity')} "
@@ -23199,7 +23219,15 @@ def _record_expired_order(source: dict, reason: str):
         "research_lane": row.get("research_lane"),
         "direction": row.get("dir"),
     })
-    _sync_order_multiverse({**row, **(source or {}), **(master or {})}, path_complete=False)
+    _sync_order_multiverse(
+        {
+            **(master or {}),
+            **(source or {}),
+            **row,
+            "trade_id": tid,
+        },
+        path_complete=True,
+    )
     return row
 
 
@@ -37782,18 +37810,23 @@ def dump_replay(trade_id: str):
                 if write_counter % 10 == 0:
                     os.fsync(f.fileno())
             if replay_complete:
-                mv_source = {
-                    "trade_id": trade_id,
-                    "signal_price": buf.get("start_price") or buf.get("entry_price"),
-                    "signal_price_at_approve": buf.get("start_price"),
-                    "created_ts_ts": buf.get("start_ts"),
-                    "final_direction": buf.get("direction"),
-                    "atr14_pct_3m": buf.get("atr14_pct_3m"),
-                    "donchian_high_3m": buf.get("donchian_high_3m"),
-                    "donchian_low_3m": buf.get("donchian_low_3m"),
-                    "support_price": buf.get("support_price"),
-                    "resistance_price": buf.get("resistance_price"),
-                }
+                paper_tid = paper_multiverse_trade_id(
+                    trade_id,
+                    buf.get("source_trade_id"),
+                )
+                if paper_tid:
+                    mv_source = {
+                        "trade_id": paper_tid,
+                        "signal_price": buf.get("start_price") or buf.get("entry_price"),
+                        "signal_price_at_approve": buf.get("start_price"),
+                        "created_ts_ts": buf.get("start_ts"),
+                        "final_direction": buf.get("direction"),
+                        "atr14_pct_3m": buf.get("atr14_pct_3m"),
+                        "donchian_high_3m": buf.get("donchian_high_3m"),
+                        "donchian_low_3m": buf.get("donchian_low_3m"),
+                        "support_price": buf.get("support_price"),
+                        "resistance_price": buf.get("resistance_price"),
+                    }
         except Exception as e:
             logger.error(f"Replay dump failed for {trade_id}: {e}")
     if mv_source:

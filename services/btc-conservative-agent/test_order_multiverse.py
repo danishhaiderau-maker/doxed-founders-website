@@ -10,6 +10,7 @@ from order_multiverse import (
     build_order_multiverse,
     cap_chase_exit_scores,
     compact_json_line,
+    paper_multiverse_trade_id,
     policy_reject_n1_perfect_green,
     write_order_multiverse,
 )
@@ -170,6 +171,65 @@ class OrderMultiverseTests(unittest.TestCase):
         self.assertTrue(policy_reject_n1_perfect_green(1, True))
         self.assertFalse(policy_reject_n1_perfect_green(12, True))
         self.assertTrue(policy_reject_n1_perfect_green(0, False))
+
+    def test_paper_id_not_lab_hunter_substitute(self):
+        self.assertEqual(
+            paper_multiverse_trade_id("lab-hunter-abc", "cont-deadbeef"),
+            "cont-deadbeef",
+        )
+        self.assertEqual(paper_multiverse_trade_id("lab-continuous-xyz"), "")
+        self.assertEqual(paper_multiverse_trade_id("tbh-hunter-1"), "")
+        self.assertEqual(paper_multiverse_trade_id("cont-paper"), "cont-paper")
+
+    def test_ttl_complete_without_waiting_120m_when_live_01_never_fills(self):
+        signal_price = 100000.0
+        signal_ts = 1_700_000_000.0
+        high_05 = orig_limit_price(signal_price, "SHORT", 0.05)
+        # ~35m of 1m path (covers TTL 30m). 0.05% high-touches; 0.10% and 0.30% never.
+        candles = [
+            _1m(i, high_05 if i == 4 else signal_price, signal_price - 25, signal_price)
+            for i in range(35)
+        ]
+        row = build_order_multiverse(
+            trade_id="cont-ttl-unfilled",
+            signal_price=signal_price,
+            signal_ts=signal_ts,
+            direction="SHORT",
+            candles_1m=candles,
+            path_complete=False,
+            ttl_sec=1800.0,
+            atr14_pct=0.10,
+        )
+        self.assertFalse(row["pending"])
+        self.assertEqual(row["event"], "COMPLETE")
+        self.assertEqual(row["live_orig"], 0.10)
+        self.assertIsNotNone(row["touches"]["0.05"])
+        self.assertIsNone(row["touches"]["0.10"])
+        self.assertIsNone(row["touches"]["0.30"])
+        origs = {round(float(s["orig"]), 2) for s in row["chase_exit_scores"]}
+        self.assertIn(0.05, origs)
+        self.assertNotIn(0.10, origs)
+        self.assertTrue(any(s["orig"] == 0.05 and s["green"] for s in row["chase_exit_scores"]))
+        self.assertGreater(row["n_missed"], 0)
+        # Adverse remaining path stays below 0.10% so live orig still misses.
+        against = signal_price * 1.0009
+        red_candles = [
+            _1m(i, (high_05 if i == 4 else against if i >= 8 else signal_price), signal_price - 5, signal_price)
+            for i in range(35)
+        ]
+        red = build_order_multiverse(
+            trade_id="cont-ttl-unfilled-red",
+            signal_price=signal_price,
+            signal_ts=signal_ts,
+            direction="SHORT",
+            candles_1m=red_candles,
+            path_complete=True,
+            ttl_sec=1800.0,
+        )
+        self.assertFalse(red["pending"])
+        self.assertTrue(any(s["orig"] == 0.05 and s["green"] is False for s in red["chase_exit_scores"]))
+        self.assertIsNone(red["touches"]["0.10"])
+        self.assertIsNone(red["touches"]["0.30"])
 
 
 if __name__ == "__main__":

@@ -56,8 +56,23 @@ def test_missing_future_horizons_are_unknown_not_last_tick_substitutions():
     assert 'executable_key = (' in NORMALIZATION_SOURCE
 
 
+def test_ttl_complete_and_paper_id_hooks():
+    sync = _function_source("_sync_order_multiverse")
+    expire = _function_source("_record_expired_order")
+    dump = _function_source("dump_replay")
+    poll = _function_source("_maybe_complete_pending_order_multiverse")
+    assert "paper_multiverse_trade_id" in sync
+    assert "path_complete=True" in expire
+    assert "paper_multiverse_trade_id" in dump
+    assert "ttl_done" in poll
+    assert "MTF_1M_REFRESH_SEC = 15" in SOURCE
+    assert "_arm_chase_offset_touch_grid(signal)" in SOURCE
+    assert "_sync_order_multiverse(signal, path_complete=False)" in SOURCE
+
+
 if __name__ == "__main__":
     test_post_exit_ring_survives_pre_exit_cap_and_covers_120m()
     test_executable_bbo_marks_and_restart_sidecar_are_persisted()
     test_missing_future_horizons_are_unknown_not_last_tick_substitutions()
+    test_ttl_complete_and_paper_id_hooks()
     print("PASS: 120m replay collection and truthful horizon contract")

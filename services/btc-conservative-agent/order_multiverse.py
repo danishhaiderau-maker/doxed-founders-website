@@ -8,6 +8,10 @@ simulate the discrete grid of that same signal's price path:
   chase variants on actual path touches
   first-hit exits vs live 4→2+thesis−12, ATR, chandelier, structure, thesis grid, stops
 
+TTL (~30m) is when an unfilled paper ticket COMPLETE's on the signal→expire
+path. 120m is extra tape AFTER a simulated/real fill, not a delay before
+scoring. COMPLETE the paper cont-* id; lab-hunter ids are not a substitute.
+
 Storage: one compact JSON line per TAKEN in ``order_multiverse.jsonl``.
 n=1 100% green is not a policy result.
 """
@@ -47,6 +51,21 @@ ORDER_MULTIVERSE_FILE = "order_multiverse.jsonl"
 HOLD_SEC_DEFAULT = 7200.0
 SCORE_CAP = 320
 LIVE_CHASE_ID = "w234_s25_i180"
+LAB_OR_HUNTER_PREFIXES = ("lab-", "tbh-")
+
+
+def paper_multiverse_trade_id(*candidates: Any) -> str:
+    """Paper cont-* wins. Lab-hunter ids never substitute for the paper ticket."""
+    ids = [str(raw or "").strip() for raw in candidates]
+    ids = [tid for tid in ids if tid]
+    for tid in ids:
+        if tid.startswith("cont-"):
+            return tid
+    for tid in ids:
+        if any(tid.startswith(prefix) for prefix in LAB_OR_HUNTER_PREFIXES):
+            continue
+        return tid
+    return ""
 
 
 def policy_reject_n1_perfect_green(n_orders: int, all_green: bool) -> bool:
@@ -384,14 +403,11 @@ def build_order_multiverse(
             })
 
     horizon = _path_horizon_ts(candles_1m, ticks_abs, signal_ts)
-    any_fill = bool(fills)
-    earliest_fill = min((row["fill_ts"] for row in fills), default=None)
-    need_until = (
-        float(signal_ts) + float(ttl_sec)
-        if not any_fill
-        else float(earliest_fill) + float(hold_sec)
-    )
-    pending = (not path_complete) and horizon + 1.0 < need_until
+    ttl_end = float(signal_ts) + float(ttl_sec)
+    # COMPLETE at TTL/cancel (or when the caller already closed the ticket).
+    # Do not wait hold_sec/120m before scoring — that window is extra tape
+    # after a simulated or real fill, used when the path already has it.
+    pending = (not path_complete) and horizon + 1.0 < ttl_end
 
     scores = []
     if fills and not pending:
