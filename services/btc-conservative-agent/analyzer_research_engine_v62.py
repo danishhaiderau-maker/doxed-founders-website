@@ -479,6 +479,7 @@ TRADE_LIFECYCLE_FILE = "trade_lifecycle.jsonl"
 EXECUTION_FUNNEL_FILE = "execution_funnel.jsonl"
 LANE_OPPORTUNITY_CAPTURE_FILE = "lane_opportunity_capture.jsonl"
 LANE_OPPORTUNITY_REPORT_FILE = "lane_opportunity_capture.json"
+COLLECTOR_V21_REPORT_FILE = "collector_v21_opportunity_capture.json"
 AI_FUNNEL_REPORT_FILE = "ai_funnel_report.json"
 AI_CONFIDENCE_EXPECTANCY_FILE = "ai_confidence_expectancy.json"
 AI_DECISION_FINGERPRINT_REPORT_FILE = "ai_decision_fingerprint_report.json"
@@ -629,6 +630,7 @@ ANALYZER_JSON_REPORT_FILES = (
     HORIZON_COUNTERFACTUAL_REPORT_FILE,
     HORIZON_PROFITABILITY_REPORT_FILE,
     LANE_OPPORTUNITY_REPORT_FILE,
+    COLLECTOR_V21_REPORT_FILE,
     MISSED_OPPORTUNITY_HEATMAP_FILE,
     PATHWAY_SURVIVAL_REPORT_FILE,
     REAL_EDGE_SUMMARY_FILE,
@@ -693,6 +695,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Horizon Counterfactual", HORIZON_COUNTERFACTUAL_REPORT_FILE, "What-if hold horizons on exits"),
     ("Horizon Recovery", HORIZON_PROFITABILITY_REPORT_FILE, "Would losers have turned green later?"),
     ("Lane Opportunity", LANE_OPPORTUNITY_REPORT_FILE, "Missed lane capture vs shadow fills"),
+    ("collector_v2.1 Opportunity Capture", COLLECTOR_V21_REPORT_FILE, "Four cohorts: actual / unfilled / rejected / hypothetical; CONTROL vs Stage-1"),
     ("Missed Opportunities", MISSED_OPPORTUNITY_HEATMAP_FILE, "Blocked signals by reason and $ left"),
     ("Pathway Survival", PATHWAY_SURVIVAL_REPORT_FILE, "Pathway stage survival and drop rates"),
     ("Real Edge / Gate Damage", REAL_EDGE_SUMMARY_FILE, "APPROVE funnel, executed vs blocked shadow PnL"),
@@ -8887,6 +8890,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
                 all_trades=all_trades_unfiltered, decisions=decisions, ai_log=ai_log,
             )
             lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
+            collector_v21_opportunity_capture_report()
             ai_funnel_report(trades=trades, session=session)
             pre_test_analytics_reports(
                 trades=trades,
@@ -8998,6 +9002,7 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             all_trades=all_trades_unfiltered,
         )
         lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
+        collector_v21_opportunity_capture_report()
         ai_funnel_report(trades=trades, session=session)
         pre_test_analytics_reports(
             trades=trades,
@@ -11686,6 +11691,48 @@ def ai_calibration_report(trades=None, session=None):
     except Exception as e:
         print(f"\n  ⚠️ Could not write {AI_CALIBRATION_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     print(PIPELINE_ENFORCEMENT_TAG)
+    return report
+
+
+def collector_v21_opportunity_capture_report():
+    """Default 30-min collector_v2.1 four-cohort report. Empty epoch is zeros, not a crash."""
+    print(f"\n=== COLLECTOR V2.1 OPPORTUNITY CAPTURE {PIPELINE_ENFORCEMENT_TAG} ===")
+    try:
+        from opportunity_capture_v21 import analyze_opportunity_capture
+        report = analyze_opportunity_capture(data_dir=os.getcwd())
+    except Exception as exc:
+        report = {
+            "schema": "collector_v21_analyzer_report_v1",
+            "empty_epoch": True,
+            "error": str(exc),
+            "cohorts": {
+                "ACTUAL_FILLED": {"n": 0},
+                "SUBMITTED_UNFILLED": {"n": 0},
+                "REJECTED_SIGNAL": {"n": 0},
+                "HYPOTHETICAL_FILLED": {"n": 0},
+            },
+            "message": "empty or unreadable epoch — zeros, not a crash",
+        }
+        print(f"  ⚠️ collector_v2.1 report degraded: {exc}")
+    cohorts = report.get("cohorts") or {}
+    print(
+        f"  A ACTUAL_FILLED n={((cohorts.get('ACTUAL_FILLED') or {}).get('n') or 0)} | "
+        f"B SUBMITTED_UNFILLED n={((cohorts.get('SUBMITTED_UNFILLED') or {}).get('n') or 0)} | "
+        f"C REJECTED_SIGNAL n={((cohorts.get('REJECTED_SIGNAL') or {}).get('n') or 0)} | "
+        f"D HYPOTHETICAL_FILLED n={((cohorts.get('HYPOTHETICAL_FILLED') or {}).get('n') or 0)}"
+    )
+    print("  CONTROL knobs unchanged. FUNNEL_ONLY / WAITING_120M / DATA_ERROR out of exit WR.")
+    print("  ATR TP/SL, chandelier, thesis grid, chase, orig offsets: query-time. RSI persisted, not a live veto.")
+    if report.get("empty_epoch"):
+        print(f"  empty epoch — zeros, not a crash {PIPELINE_ENFORCEMENT_TAG}")
+    out_path = analyzer_report_path(COLLECTOR_V21_REPORT_FILE)
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        print(f"  ✅ Wrote {COLLECTOR_V21_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as exc:
+        print(f"  ⚠️ Could not write {COLLECTOR_V21_REPORT_FILE}: {exc}")
     return report
 
 

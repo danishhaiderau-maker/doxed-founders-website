@@ -29,6 +29,7 @@ def main():
         bot.CYCLE_3M_UNIVERSE_FILE,
         bot.CHASE_OFFSET_TOUCH_GRID_FILE,
         bot.ORDER_MULTIVERSE_FILE,
+        bot.OPPORTUNITY_CAPTURE_FILE,
         "execution_funnel.jsonl",
     }
     previous = os.getcwd()

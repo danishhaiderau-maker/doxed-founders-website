@@ -51,6 +51,7 @@ from path_replay_v1 import (
 ORDER_MULTIVERSE_SCHEMA = "order_multiverse_v1"
 ORDER_MULTIVERSE_FILE = "order_multiverse.jsonl"
 HOLD_SEC_DEFAULT = 7200.0
+POST_TTL_LOOKAHEAD_SEC = 1800.0
 SCORE_CAP = 64
 LIVE_CHASE_ID = "w234_s25_i180"
 LAB_OR_HUNTER_PREFIXES = ("lab-", "tbh-")
@@ -350,11 +351,51 @@ def build_order_multiverse(
     live_fill_ts: Optional[float] = None,
     live_fill_price: Optional[float] = None,
     ticket_closed: bool = False,
+    rsi_at_signal: Optional[float] = None,
+    would_block: Optional[bool] = None,
+    would_block_reason: Optional[str] = None,
+    decision_tree: Optional[Mapping[str, Any]] = None,
+    submitted: bool = True,
+    exact_reason: Optional[str] = None,
+    post_ttl_lookahead_sec: float = POST_TTL_LOOKAHEAD_SEC,
 ) -> dict:
     direction_u = str(direction or "SHORT").upper()
     ticks_abs = list(ticks_1s or [])
     touches = {}
+    alternative_touches = {}
     fills = []
+    alt_ttl = float(ttl_sec) + float(post_ttl_lookahead_sec)
+    ttl_end_for_labels = float(signal_ts) + float(ttl_sec)
+
+    def _fill_labels(fill_ts, offset_pct, chase_id):
+        if fill_ts is None:
+            return {
+                "original_order_fill": False,
+                "alternative_entry_fill": False,
+                "fill_window": "NONE",
+                "record_kind": "unfilled_order",
+            }
+        within_ttl = float(fill_ts) <= ttl_end_for_labels + 1e-9
+        control_no_chase = (
+            abs(float(offset_pct) - float(live_orig)) < 1e-9
+            and str(chase_id) == "no_chase"
+        )
+        if within_ttl and control_no_chase:
+            return {
+                "original_order_fill": True,
+                "alternative_entry_fill": False,
+                "fill_window": "WITHIN_TTL",
+                "record_kind": "actual_trade",
+            }
+        window = "WITHIN_TTL" if within_ttl else "POST_TTL"
+        return {
+            "original_order_fill": False,
+            "alternative_entry_fill": True,
+            "fill_window": window,
+            "record_kind": "hypothetical_fill",
+            "note": None if within_ttl else "no lookahead into the original TTL order",
+        }
+
     for offset_pct in OFFSET_PCT_GRID:
         hit = simulate_touch_fill(
             candles_1m,
@@ -366,7 +407,21 @@ def build_order_multiverse(
             chase={"no_chase": True},
             ticks_1s=ticks_abs or None,
         )
+        hit_alt = simulate_touch_fill(
+            candles_1m,
+            signal_ts=signal_ts,
+            signal_price=signal_price,
+            direction=direction_u,
+            offset_pct=offset_pct,
+            ttl_sec=alt_ttl,
+            chase={"no_chase": True},
+            ticks_1s=ticks_abs or None,
+        )
         touches[_offset_key(offset_pct)] = hit.get("touch_ts")
+        if not hit.get("touched") and hit_alt.get("touched"):
+            alternative_touches[_offset_key(offset_pct)] = hit_alt.get("touch_ts")
+        else:
+            alternative_touches[_offset_key(offset_pct)] = None
         for policy in CHASE_POLICIES:
             chase_hit = simulate_touch_fill(
                 candles_1m,
@@ -378,13 +433,28 @@ def build_order_multiverse(
                 chase=policy,
                 ticks_1s=ticks_abs or None,
             )
+            chosen = chase_hit
             if not chase_hit.get("touched"):
+                chosen = simulate_touch_fill(
+                    candles_1m,
+                    signal_ts=signal_ts,
+                    signal_price=signal_price,
+                    direction=direction_u,
+                    offset_pct=offset_pct,
+                    ttl_sec=alt_ttl,
+                    chase=policy,
+                    ticks_1s=ticks_abs or None,
+                )
+            if not chosen.get("touched"):
                 continue
+            labels = _fill_labels(chosen.get("touch_ts"), offset_pct, policy["id"])
             fills.append({
                 "orig": float(offset_pct),
                 "chase_id": policy["id"],
-                "fill_ts": float(chase_hit["touch_ts"]),
-                "fill_price": float(chase_hit["fill_price"]),
+                "fill_ts": float(chosen["touch_ts"]),
+                "hyp_fill_ts": float(chosen["touch_ts"]),
+                "fill_price": float(chosen["fill_price"]),
+                **labels,
             })
     live_key = _offset_key(live_orig)
     if live_fill_ts is not None:
@@ -395,11 +465,14 @@ def build_order_multiverse(
         )
         have = {(round(float(row["orig"]), 2), row["chase_id"]) for row in fills}
         if (round(float(live_orig), 2), "no_chase") not in have:
+            labels = _fill_labels(live_fill_ts, live_orig, "no_chase")
             fills.append({
                 "orig": float(live_orig),
                 "chase_id": "no_chase",
                 "fill_ts": float(live_fill_ts),
+                "hyp_fill_ts": float(live_fill_ts),
                 "fill_price": fill_px,
+                **labels,
             })
 
     horizon = _path_horizon_ts(candles_1m, ticks_abs, signal_ts)
@@ -467,6 +540,11 @@ def build_order_multiverse(
         exit_sweep_complete=False,
     )
     pending = lifecycle in KEEP_COLLECTING_LIFECYCLES
+    post_ttl_end = float(signal_ts) + float(ttl_sec) + float(post_ttl_lookahead_sec)
+    post_ttl_pending = (
+        entry_outcome in ("TTL_UNFILLED", "CANCELLED")
+        and horizon + 1.0 < post_ttl_end
+    )
     replayable = bool(live_path_ticks) and lifecycle in (
         LIFECYCLE_COMPLETE, LIFECYCLE_PATH_COMPLETE, LIFECYCLE_REPLAY_COMPLETE,
     )
@@ -567,6 +645,60 @@ def build_order_multiverse(
         "support_price": support_price,
         "resistance_price": resistance_price,
         "touches": touches,
+        "alternative_touches": alternative_touches,
+        "original_order_fill": bool(live_filled),
+        "alternative_entry_fill": any(ts is not None for ts in alternative_touches.values()),
+        "post_ttl_pending": bool(post_ttl_pending),
+        "post_ttl_end": post_ttl_end,
+        "cohort": (
+            "REJECTED_SIGNAL" if not submitted
+            else ("ACTUAL_FILLED" if live_filled else "SUBMITTED_UNFILLED")
+        ),
+        "record_kind": (
+            "rejected_opportunity" if not submitted
+            else ("actual_trade" if live_filled else "unfilled_order")
+        ),
+        "rsi_at_signal": rsi_at_signal,
+        "would_block": would_block,
+        "would_block_reason": would_block_reason,
+        "decision_tree": dict(decision_tree) if decision_tree else None,
+        "exact_reason": exact_reason,
+        "envelope": {
+            "schema": "opportunity_capture_v2.1",
+            "collector_version": COLLECTOR_VERSION,
+            "trade_id": str(trade_id),
+            "signal_ts": float(signal_ts),
+            "signal_price": float(signal_price),
+            "direction": direction_u,
+            "path_from": "signal_ts",
+            "branch": (
+                "REJECTED_BLOCKED" if not submitted
+                else ("ACCEPTED_FILL" if live_filled else "ACCEPTED_NEVER_FILL")
+            ),
+            "cohort": (
+                "REJECTED_SIGNAL" if not submitted
+                else ("ACTUAL_FILLED" if live_filled else "SUBMITTED_UNFILLED")
+            ),
+            "record_kind": (
+                "rejected_opportunity" if not submitted
+                else ("actual_trade" if live_filled else "unfilled_order")
+            ),
+            "submitted": bool(submitted),
+            "live_filled": bool(live_filled),
+            "entry_outcome": entry_outcome,
+            "original_order_fill": bool(live_filled),
+            "alternative_entry_fill": any(ts is not None for ts in alternative_touches.values()),
+            "exact_reason": exact_reason,
+            "decision_tree": dict(decision_tree) if decision_tree else None,
+            "rsi_at_signal": rsi_at_signal,
+            "would_block": would_block,
+            "would_block_reason": would_block_reason,
+            "control_cell": dict(CONTROL_CELL),
+            "fill_model": FILL_MODEL_IDEAL_TOUCH,
+            "fill_models_supported": list(FILL_MODELS),
+            "units": "unrealized_pct_on_100x_margin",
+            "live_knobs_unchanged": True,
+        },
         "hypothetical_fills": fills,
         "n_touched": sum(1 for ts in touches.values() if ts is not None),
         "n_missed": sum(1 for ts in touches.values() if ts is None),

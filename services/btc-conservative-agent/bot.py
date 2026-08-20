@@ -127,9 +127,16 @@ from chase_offset_touch_grid import (
 )
 from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
+    POST_TTL_LOOKAHEAD_SEC,
     TERMINAL_LIFECYCLES,
     build_order_multiverse,
     paper_multiverse_trade_id,
+)
+from opportunity_capture_v21 import (
+    OPPORTUNITY_CAPTURE_FILE,
+    build_decision_tree,
+    build_rejected_capture,
+    filter_node,
 )
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -10780,6 +10787,7 @@ def exit_pipeline(signal: dict, ai: dict = None, reason: str = "UNKNOWN"):
         if not signal.get("_logged_BLOCKED"):
             enforce_log(signal, "BLOCKED", reason, skip_stage="POST_AI")
     log_blocked_signal(signal, ai, reason)
+    persist_rejected_opportunity(signal, ai, reason, would_block_only=False)
     finalize_signal(signal, ai, "BLOCKED")
     full_pipeline_trace("BLOCKED", reason, signal.get("trade_id"))
     clear_pending_trade()
@@ -11499,6 +11507,7 @@ _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
 _order_multiverse_path_complete = {}
+_order_multiverse_post_ttl_done = {}
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
@@ -11578,13 +11587,15 @@ def _maybe_complete_pending_order_multiverse():
     for src in list(_order_multiverse_pending_src.values()):
         expires = float(src.get("expires_ts") or 0)
         ttl_done = expires > 0 and now >= expires
+        post_ttl_done = expires > 0 and now >= (expires + float(POST_TTL_LOOKAHEAD_SEC))
         closed = str(src.get("status") or "").upper() in (
             "CLOSED", "FILLED", "EXPIRED", "CANCELLED", "COMPLETE",
         )
-        # 120m post-fill writer is extra tape. Do not block COMPLETE of paper tickets.
+        # Keep collecting after TTL so a later 0.10% touch (e.g. t=37m) is
+        # labeled alternative_entry_fill without lookahead into the 30m order.
         _sync_order_multiverse(
             src,
-            path_complete=bool(ttl_done or closed or src.get("path_complete")),
+            path_complete=bool(post_ttl_done or closed or src.get("path_complete")),
         )
 
 
@@ -11602,9 +11613,11 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         if not tid:
             return None
         prev = _order_multiverse_state.get(tid)
-        if prev in TERMINAL_LIFECYCLES:
-            if prev == "FUNNEL_ONLY" or _order_multiverse_path_complete.get(tid) is True:
+        if prev in TERMINAL_LIFECYCLES and prev != "FUNNEL_ONLY":
+            if _order_multiverse_path_complete.get(tid) is True:
                 return None
+        if prev == "FUNNEL_ONLY" and _order_multiverse_post_ttl_done.get(tid) is True:
+            return None
         price = float(
             source.get("signal_price_at_approve")
             or source.get("signal_price")
@@ -11667,6 +11680,17 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
                 live_fill_price = live_fill_price or buf.get("virtual_entry")
         with state_lock:
             univ = dict(state.get("last_cycle_3m_universe") or {})
+        rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m") or source.get("rsi14")
+        would_block = univ.get("would_block_short")
+        would_block_reason = univ.get("would_block_reason")
+        tree = build_decision_tree(
+            rsi=rsi_at_signal,
+            rsi_threshold=30.0,
+            adx=univ.get("adx14"),
+            atr=univ.get("atr14_pct_3m"),
+            would_block=would_block,
+            would_block_reason=would_block_reason,
+        )
         record = build_order_multiverse(
             trade_id=tid,
             signal_price=price,
@@ -11686,9 +11710,18 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             live_fill_ts=live_fill_ts,
             live_fill_price=live_fill_price,
             ticket_closed=ticket_closed,
+            rsi_at_signal=rsi_at_signal,
+            would_block=would_block,
+            would_block_reason=would_block_reason,
+            decision_tree=tree,
+            submitted=True,
         )
         lifecycle = str(record.get("lifecycle") or record.get("event") or "")
-        keep_collecting = bool(record.get("pending")) or lifecycle not in TERMINAL_LIFECYCLES
+        keep_collecting = (
+            bool(record.get("pending"))
+            or bool(record.get("post_ttl_pending"))
+            or lifecycle not in TERMINAL_LIFECYCLES
+        )
         pending_payload = {
             "trade_id": tid,
             "signal_price_at_approve": price,
@@ -11726,6 +11759,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         _order_multiverse_path_complete[tid] = bool(
             ((record.get("completeness") or {}).get("PATH_COMPLETE") is True)
         )
+        _order_multiverse_post_ttl_done[tid] = not bool(record.get("post_ttl_pending"))
         if len(_order_multiverse_state) > 64:
             oldest = next(iter(_order_multiverse_state))
             _order_multiverse_state.pop(oldest, None)
@@ -11738,6 +11772,89 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         return record
     except Exception as exc:
         logger.warning(f"[ORDER MULTIVERSE] sync failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
+
+
+def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "REJECTED", *, would_block_only: bool = False):
+    """First-class rejected/WOULD_BLOCK candidate. Not a live veto."""
+    if not isinstance(signal, dict):
+        return None
+    try:
+        tid = str(signal.get("trade_id") or "")
+        if not tid:
+            return None
+        price = float(
+            signal.get("signal_price_at_approve")
+            or signal.get("signal_price")
+            or signal.get("price")
+            or 0
+        )
+        if price <= 0:
+            with state_lock:
+                price = float(state.get("price") or 0)
+        if price <= 0:
+            return None
+        ts = float(signal.get("created_ts_ts") or signal.get("created_ts") or signal.get("signal_ts") or 0)
+        if ts <= 0:
+            ts = float(signal.get("snapshot_ts") or time.time())
+        direction = signal.get("final_direction") or (ai or {}).get("direction") or "SHORT"
+        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        with state_lock:
+            univ = dict(state.get("last_cycle_3m_universe") or {})
+        rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m")
+        would_block = univ.get("would_block_short")
+        would_block_reason = univ.get("would_block_reason") or (None if not would_block_only else reason)
+        tree = build_decision_tree(
+            reason=reason,
+            hard_reject=not would_block_only,
+            rsi=rsi_at_signal,
+            rsi_threshold=30.0,
+            adx=univ.get("adx14"),
+            atr=univ.get("atr14_pct_3m"),
+            would_block=would_block or would_block_only,
+            would_block_reason=would_block_reason or reason,
+            edge=signal.get("edge_score_at_entry"),
+            approval=(ai or {}).get("decision"),
+            filters=[
+                filter_node(
+                    "WOULD_BLOCK" if would_block_only else "APPROVAL",
+                    value=reason,
+                    result="would_block" if would_block_only else "fail",
+                    hard_gate=not would_block_only,
+                    would_block_only=would_block_only,
+                )
+            ],
+        )
+        record = build_rejected_capture(
+            trade_id=tid,
+            signal_price=price,
+            signal_ts=ts,
+            direction=direction,
+            reason=reason,
+            decision_tree=tree,
+            candles_1m=candles_1m,
+            rsi_at_signal=rsi_at_signal,
+            would_block=would_block or would_block_only,
+            would_block_reason=would_block_reason or reason,
+            atr14_pct=univ.get("atr14_pct_3m"),
+            submitted=False,
+        )
+        if would_block_only:
+            record["event"] = "WOULD_BLOCK_CANDIDATE"
+            record["lifecycle"] = "WOULD_BLOCK_CANDIDATE"
+            record["hard_reject"] = False
+            record["would_block_only"] = True
+        else:
+            record["hard_reject"] = True
+            record["would_block_only"] = False
+        _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
+        logger.info(
+            f"[OPPORTUNITY CAPTURE] {record.get('event')} trade_id={tid} reason={reason} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return record
+    except Exception as exc:
+        logger.warning(f"[OPPORTUNITY CAPTURE] persist failed: {exc} [PIPELINE ENFORCEMENT]")
         return None
 
 
@@ -13645,6 +13762,7 @@ def _research_log_would_block(signal, ai, reason, edge_score=None):
     trade_id = (signal or {}).get("trade_id")
     if trade_id and (ai or {}).get("decision") == "APPROVE":
         defer_shadow_research(trade_id, tag)
+        persist_rejected_opportunity(signal, ai, reason, would_block_only=True)
         log_lane_opportunity_event(
             (signal or {}).get("research_lane"),
             "WOULD_BLOCK",
@@ -25075,6 +25193,7 @@ def _analyzer_output_wipe_globs() -> list:
         "pathway_lane_specs.json",
         "ai_confidence_expectancy.json",
         "lane_opportunity_capture.json",
+        "collector_v21_opportunity_capture.json",
         "approve_outcome_confidence_direction.json",
         "scenario_c_capture_ratio.json",
         "execution_funnel_summary.json",
@@ -25095,6 +25214,7 @@ def research_wipe_file_paths():
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -25140,6 +25260,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
@@ -27630,6 +27751,18 @@ def log_event_rejection(event):
         with csv_lock:
             row = {"ts": utc_iso(), "type": "REJECTED_SIGNAL", "edge": event.get("edge",0), "threshold": event.get("threshold",2.9), "reason": "EDGE_BELOW_THRESHOLD"}
             dynamic_csv_writer(CSV_BLOCKS, row)
+            persist_rejected_opportunity(
+                {
+                    "trade_id": event.get("trade_id") or f"edge-{int(time.time())}",
+                    "price": event.get("price") or state.get("price"),
+                    "signal_price": event.get("price") or state.get("price"),
+                    "final_direction": event.get("direction") or event.get("dir"),
+                    "edge_score_at_entry": event.get("edge"),
+                    "created_ts_ts": time.time(),
+                },
+                {"decision": "REJECT"},
+                "EDGE_BELOW_THRESHOLD",
+            )
     except:
         pass
 
@@ -36069,6 +36202,7 @@ def research_export_files():
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        OPPORTUNITY_CAPTURE_FILE,
         "execution_funnel.jsonl",
         "execution_funnel_summary.json",
         AI_FUNNEL_REPORT_FILE,
