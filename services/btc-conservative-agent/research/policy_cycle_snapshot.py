@@ -10,6 +10,8 @@ from pathlib import Path
 from collector_v22_schema import RESEARCH_EVENTS_FILE
 from microstructure_tape import FILE_NAME as MICROSTRUCTURE_FILE, validate_window
 
+CONSERVATIVE_FILL_REPORT_FILE = "conservative_fill_descriptive_report.json"
+
 
 def _load_microstructure_snapshot(data_dir=".") -> dict:
     path = Path(data_dir) / MICROSTRUCTURE_FILE
@@ -124,6 +126,9 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
     return {
         "events": tuple(events), "receipt": receipt,
         "microstructure": _microstructure_evidence(events, tape_snapshot),
+        # Private pinned payload for builders in this cycle. It is never
+        # reloaded from the growing mirror after this boundary.
+        "microstructure_snapshot": tape_snapshot,
     }
 
 
@@ -131,6 +136,7 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
     """Generate candidate then best from one pinned event tuple."""
     from research.policy_candidate_oos import build_policy_candidate_oos_report
     from research.best_policy_research import build_best_policy_research_report
+    from research.conservative_fill_cohort import build_conservative_fill_cohort
 
     snapshot = load_policy_cycle_snapshot(data_dir)
     candidate = build_policy_candidate_oos_report(
@@ -145,7 +151,23 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
     )
+    conservative_fill = build_conservative_fill_cohort(
+        snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
+    )
+    conservative_fill.update({
+        "cycle_snapshot": snapshot["receipt"],
+        "microstructure_snapshot": snapshot["microstructure_snapshot"]["receipt"],
+        "epoch_id": snapshot["receipt"].get("epoch_id"),
+        "policy_epoch_id": snapshot["receipt"].get("policy_epoch_id"),
+        "policy_signature": snapshot["receipt"].get("policy_signature"),
+    })
+    report_path = Path(report_dir) / CONSERVATIVE_FILL_REPORT_FILE
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = report_path.with_suffix(report_path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(conservative_fill, indent=2), encoding="utf-8")
+    temp_path.replace(report_path)
     return {
         "candidate": candidate, "best": best, "cycle_snapshot": snapshot["receipt"],
         "microstructure": snapshot["microstructure"],
+        "conservative_fill": conservative_fill,
     }

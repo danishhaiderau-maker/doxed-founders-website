@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
-from conservative_limit_fill import evaluate_limit_fill
+try:
+    from .conservative_limit_fill import evaluate_limit_fill
+except ImportError:  # direct script/test execution
+    from conservative_limit_fill import evaluate_limit_fill
 from microstructure_tape import validate_window
 
 

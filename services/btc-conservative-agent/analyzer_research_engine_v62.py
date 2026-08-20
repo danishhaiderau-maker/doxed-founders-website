@@ -152,6 +152,7 @@ SHOWCASE_LOSING_CLUSTER_REPORT_FILE = "showcase_losing_cluster_descriptive.json"
 RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
 COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
 POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
+CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
@@ -673,11 +674,13 @@ ANALYZER_JSON_REPORT_FILES = (
     SHOWCASE_LOSING_CLUSTER_REPORT_FILE,
     RESEARCH_HORIZON_MATURITY_REPORT_FILE,
     BEST_POLICY_RESEARCH_REPORT_FILE,
+    CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
+    ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),

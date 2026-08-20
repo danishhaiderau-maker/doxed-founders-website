@@ -154,6 +154,7 @@ PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
+CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -1789,6 +1790,22 @@ def api_decision_readiness():
 @app.route("/api/best-policy-research")
 def api_best_policy_research():
     return jsonify(_best_policy_research_payload())
+
+
+@app.route("/api/conservative-fill-research")
+def api_conservative_fill_research():
+    """Read-only descriptive receipts; never a policy qualification endpoint."""
+    payload = _read_json(CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, {}) or {}
+    if not payload:
+        payload = {
+            "schema": "conservative_fill_descriptive_cohort_v1",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "qualification_effect": "NONE",
+            "qualification_promotion_allowed": False,
+            "counts": {"events": 0, "fill": 0, "partial_fill": 0, "no_fill": 0, "unsupported": 0},
+            "receipts": [],
+        }
+    return jsonify(payload)
 
 
 def _policy_detail_is_current(detail: dict, best: dict) -> bool:
