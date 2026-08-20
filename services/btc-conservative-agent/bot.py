@@ -35742,6 +35742,7 @@ _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
     "expired_orders_3factor.csv", "blocked_signals_3factor.csv",
     "ai_tranche_log.csv", "setup_log_3factor.csv", "candles_3factor.csv",
     "pipeline_events_3factor.csv", "ai_errors_3factor.csv",
+    "trend_health.csv",
 })
 
 
@@ -37531,9 +37532,7 @@ def log_golden_stack_rejection(
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        rotate_log(GOLDEN_STACK_REJECTIONS_FILE)
-        with open(GOLDEN_STACK_REJECTIONS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(GOLDEN_STACK_REJECTIONS_FILE, row, label="GS_REJECTION")
         logger.info(
             f"[GS_REJECTION] trade_id={trade_id} pass={row['golden_stack_pass']} "
             f"would_fail={row['would_fail']} block={block_reason} "
@@ -37585,9 +37584,7 @@ def log_golden_stack_rejection_outcome(
         "bot_version": EXECUTION_FIX_VERSION,
     }
     try:
-        rotate_log(GOLDEN_STACK_REJECTIONS_FILE)
-        with open(GOLDEN_STACK_REJECTIONS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(GOLDEN_STACK_REJECTIONS_FILE, row, label="GS_REJECTION_OUTCOME")
     except Exception as e:
         logger.error(f"[GS_REJECTION] outcome log failed: {e}")
 
@@ -37601,22 +37598,19 @@ def log_trend_health_csv():
     _last_trend_health_csv_ts = now
     try:
         health = compute_trend_health()
-        header = (
-            "ts,bull_score,bear_score,velocity,delta,volume_ratio,weaken_signals,"
-            "trend_state,base_state,structure_score,mtf_agreement\n"
-        )
-        row = (
-            f"{utc_iso()},{health.get('bull_score')},{health.get('bear_score')},"
-            f"{health.get('velocity')},{health.get('delta')},{health.get('volume_ratio')},"
-            f"{health.get('weaken_signals')},{health.get('trend_state')},"
-            f"{health.get('base_state')},{health.get('structure_score')},"
-            f"{health.get('mtf_agreement')}\n"
-        )
-        write_header = not os.path.exists(TREND_HEALTH_CSV_FILE) or os.path.getsize(TREND_HEALTH_CSV_FILE) == 0
-        with open(TREND_HEALTH_CSV_FILE, "a", encoding="utf-8") as f:
-            if write_header:
-                f.write(header)
-            f.write(row)
+        dynamic_csv_writer(TREND_HEALTH_CSV_FILE, {
+            "ts": utc_iso(),
+            "bull_score": health.get("bull_score"),
+            "bear_score": health.get("bear_score"),
+            "velocity": health.get("velocity"),
+            "delta": health.get("delta"),
+            "volume_ratio": health.get("volume_ratio"),
+            "weaken_signals": health.get("weaken_signals"),
+            "trend_state": health.get("trend_state"),
+            "base_state": health.get("base_state"),
+            "structure_score": health.get("structure_score"),
+            "mtf_agreement": health.get("mtf_agreement"),
+        })
     except Exception as e:
         logger.error(f"[TREND_HEALTH_CSV] {e}")
 

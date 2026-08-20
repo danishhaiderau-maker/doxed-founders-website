@@ -210,6 +210,13 @@ def test_dynamic_csv_schema_expansion_is_an_atomic_inode_change():
         assert rows == [{"a": "1", "b": ""}, {"a": "2", "b": "3"}]
 
 
+def test_trend_health_and_golden_stack_use_serialized_ledger_writers():
+    assert "dynamic_csv_writer(TREND_HEALTH_CSV_FILE" in BOT
+    assert '_safe_append_jsonl(GOLDEN_STACK_REJECTIONS_FILE, row, label="GS_REJECTION")' in BOT
+    assert 'label="GS_REJECTION_OUTCOME"' in BOT
+    assert '"trend_health.csv"' in BOT.split("_DATA_SYNC_APPEND_PREFIX_NAMES", 1)[1].split("})", 1)[0]
+
+
 def test_append_prefix_mode_is_narrow_and_allows_only_same_inode_growth():
     namespace = _load_bot_functions(
         "_data_sync_consistency_mode", "_data_sync_append_prefix_matches"
