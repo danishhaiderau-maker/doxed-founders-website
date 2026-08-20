@@ -48,6 +48,7 @@ def test_runtime_capture_is_research_only_and_started_once():
     assert BOT.count("target=safe_thread(microstructure_capture_loop)") == 1
     assert 'state["bid_qty"] = bid_qty' in BOT
     assert 'state["ask_qty"] = ask_qty' in BOT
+    assert 'float(state.get("rest_price_ts") or state.get("rest_last_tick") or 0.0)' in BOT
     assert "MICROSTRUCTURE_TAPE_FILE" in BOT
 
 

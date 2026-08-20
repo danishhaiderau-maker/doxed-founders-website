@@ -22761,7 +22761,13 @@ def microstructure_capture_loop():
             bid_qty = state.get("bid_qty")
             ask_qty = state.get("ask_qty")
             last = state.get("price")
-            source_ts = state.get("ws_last_tick")
+            # Quotes in shared state may come from either the public WebSocket
+            # or the independently bounded REST ticker worker. Attribute the
+            # bucket to whichever source updated that quote most recently.
+            source_ts = max(
+                float(state.get("ws_last_tick") or 0.0),
+                float(state.get("rest_price_ts") or state.get("rest_last_tick") or 0.0),
+            )
         with venue_fill_trade_tape_lock:
             bucket_trades = [
                 dict(row) for row in venue_fill_trade_tape
