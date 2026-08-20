@@ -191,7 +191,7 @@ REPORT_NAV_GROUPS = (
         ("regime", "Regime & ADX", "regime_leaderboard.json"),
     )),
     ("lanes-group", "Lanes & AI", (
-        ("lanes", "Laboratory", "benchmark_vs_lanes_report.json"),
+        ("lanes", "Current Type-B", "benchmark_vs_lanes_report.json"),
         ("lanes-retire", "Retirement", "lane_retirement_report.json"),
         ("lanes-def", "Definitions", "lane_definition_report.json"),
         ("ai", "Direction & Gap", "ai_calibration_report.json"),
@@ -202,21 +202,21 @@ REPORT_NAV_GROUPS = (
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("chase-delay", "Delay", "chase_delay_report.json"),
         ("chase-iso", "Isolation", "lane_chase_isolation_report.json"),
-        ("combos", "Top Combos", "top_combinations_report.json"),
-        ("spread-perf", "Gap Performance", "top_combinations_report.json"),
+        ("combos", "Policy Grid & Legacy", "top_combinations_report.json"),
+        ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
         ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
-        ("exits", "Exit Leakage", "top_leakage_report.json"),
+        ("exits", "Historical Exit Leakage", "top_leakage_report.json"),
     )),
     ("deep-group", "Genome & Reports", (
-        ("genome", "Genome", "genome/genome_analysis_report.json"),
+        ("genome", "Genome (Unavailable)", "genome/genome_analysis_report.json"),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
         ("archives", "Archives", None),
         ("download", "Downloads", None),
         ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
-        ("horizon", "Recovery", "horizon_profitability_report.json"),
+        ("horizon", "Historical Recovery", "horizon_profitability_report.json"),
     )),
 )
 
@@ -1087,6 +1087,125 @@ def _regime_key_known(regime) -> bool:
     return True
 
 
+def _wilson_interval_95(wins: int, total: int) -> tuple[float | None, float | None]:
+    """Return a descriptive 95% Wilson interval for an observed OOS win rate."""
+    if total <= 0:
+        return None, None
+    z = 1.959963984540054
+    p = max(0.0, min(1.0, float(wins) / float(total)))
+    denom = 1.0 + (z * z / total)
+    center = (p + (z * z / (2.0 * total))) / denom
+    margin = z * ((p * (1.0 - p) / total + z * z / (4.0 * total * total)) ** 0.5) / denom
+    return round(max(0.0, center - margin) * 100.0, 2), round(min(1.0, center + margin) * 100.0, 2)
+
+
+def _decode_counterfactual_policy_id(policy_id: str) -> dict:
+    """Decode the versioned policy-grid ID without inventing unavailable fields."""
+    text = str(policy_id or "")
+    match = re.match(r"^OFFSET_([0-9.]+)_CHASE_([^|]+)\|(.+)$", text)
+    if not match:
+        return {
+            "entry_offset_pct": None, "chase_policy": None, "exit_policy": None,
+            "fill_model": "IDEAL_TOUCH_REPLAY", "protection_model": "UNKNOWN",
+        }
+    offset, chase, exit_policy = match.groups()
+    chase_match = re.match(r"^(w234|all_on|w01_on|w5plus_on)_s([0-9]+)_i([0-9]+)$", chase)
+    windows = {
+        "w234": "2, 3, 4",
+        "all_on": "all",
+        "w01_on": "0, 1",
+        "w5plus_on": "5+",
+    }
+    decoded = {
+        "entry_offset_pct": float(offset),
+        "chase_policy": chase,
+        "exit_policy": exit_policy,
+        "chase_windows": None,
+        "chase_remaining_gap_step_pct": None,
+        "reprice_interval_sec": None,
+        "fill_model": "IDEAL_TOUCH_REPLAY",
+        "protection_model": "POLICY_SPECIFIC",
+        "exit_behavior": exit_policy,
+    }
+    if chase_match:
+        window_key, step_bps, interval = chase_match.groups()
+        window_ages = {
+            "w234": "10–25 min",
+            "all_on": "all enabled windows",
+            "w01_on": "0–10 min",
+            "w5plus_on": "25–30 min",
+        }
+        decoded.update({
+            "chase_windows": windows.get(window_key, window_key),
+            "chase_window_ages": window_ages.get(window_key),
+            "chase_remaining_gap_step_pct": float(step_bps),
+            "reprice_interval_sec": int(interval),
+        })
+    atr_tp = re.match(r"^atr_tp_k([0-9.]+)$", exit_policy)
+    if atr_tp:
+        k = float(atr_tp.group(1))
+        decoded.update({
+            "atr_take_profit_multiple": k,
+            "exit_behavior": (
+                f"Take profit at {k:g}x fill-time 3m ATR (leveraged margin); "
+                "otherwise close at recorded path end"
+            ),
+            "protection_model": "NO_LADDER_NO_THESIS_NO_HARD_STOP",
+        })
+    return decoded
+
+
+def _current_policy_grid_rows(limit: int = 50) -> dict:
+    """Expose pinned current-epoch OOS leaders separately from legacy trade combos."""
+    best = _best_policy_research_payload()
+    detail = _read_json("policy_candidate_oos_report.json")
+    current = _policy_detail_is_current(detail, best)
+    challenger = (detail.get("descriptive_challenger") or {}) if current else {}
+    rows = []
+    for rank, item in enumerate(challenger.get("profitable_static_policies") or [], start=1):
+        train = item.get("train") or {}
+        oos = item.get("oos") or {}
+        episodes = int(oos.get("independent_episodes") or 0)
+        wins = int(oos.get("wins") or 0)
+        losses = int(oos.get("losses") or 0)
+        low, high = _wilson_interval_95(wins, max(episodes, wins + losses))
+        rows.append({
+            "rank": rank,
+            "policy_id": item.get("policy_id"),
+            **_decode_counterfactual_policy_id(item.get("policy_id")),
+            "train_episodes": int(train.get("independent_episodes") or 0),
+            "oos_episodes": episodes,
+            "oos_fills": int(oos.get("fills") or 0),
+            "oos_wins": wins,
+            "oos_losses": losses,
+            "oos_win_probability_pct": round((wins / episodes * 100.0), 2) if episodes else None,
+            "oos_win_probability_ci95_low_pct": low,
+            "oos_win_probability_ci95_high_pct": high,
+            "oos_net_pnl_usd": round(float(oos.get("net_pnl_usd") or 0.0), 4),
+            "oos_expectancy_usd": round(float(oos.get("expectancy_usd") or 0.0), 6),
+            "oos_max_drawdown_usd": round(float(oos.get("max_drawdown_usd") or 0.0), 4),
+            "qualification": item.get("qualification") or "DESCRIPTIVE_ONLY",
+        })
+        if len(rows) >= max(1, limit):
+            break
+    evidence = detail.get("evidence") or {}
+    return {
+        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_CURRENT_EPOCH_POLICY_REPORT",
+        "rows": rows,
+        "epoch_id": detail.get("epoch_id") if current else best.get("epoch_id"),
+        "policy_epoch_id": detail.get("policy_epoch_id") if current else best.get("policy_epoch_id"),
+        "policy_signature": detail.get("evidence_policy_signature") if current else None,
+        "cycle_snapshot": detail.get("cycle_snapshot") if current else None,
+        "evidence": evidence if current else {},
+        "blockers": best.get("blockers") or [],
+        "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
+        "warning": (
+            "Counterfactual OOS replay only. Empirical win probability includes a 95% Wilson interval; "
+            "it is not a forecast. Rows cannot authorize live trading until every qualification gate passes."
+        ),
+    }
+
+
 def _combos_payload():
     rep = _read_report("top_combinations_report.json")
     top = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
@@ -1098,6 +1217,7 @@ def _combos_payload():
         "dimensions": rep.get("dimensions") or [],
         "filter_note": rep.get("filter_note") or "Known ADX × score gap × entry × lane cohorts only (no UNKNOWN/TYPE_B/OTHER)",
         "top": top[:50],
+        "policy_grid": _current_policy_grid_rows(limit=50),
     }
 
 
@@ -2181,17 +2301,47 @@ def _genome_payload():
     # writer publishes under agent/research/genome. Embedded/legacy mode may
     # instead set ROOT directly to agent/research. Support both layouts so a
     # fresh Genome report cannot be hidden by the dashboard launch mode.
+    source_status = _read_json(str(Path("research") / "genome" / "genome_source_status.json"))
+    if not source_status:
+        source_status = _read_json(str(Path("genome") / "genome_source_status.json"))
+    unavailable = source_status.get("status") == "GENOME_SOURCE_UNAVAILABLE"
     candidates = (
         Path("research") / "genome" / "genome_analysis_report.json",
         Path("genome") / "genome_analysis_report.json",
         Path("research") / "genome_analysis_report.json",
         Path("genome_analysis_report.json"),
     )
+    preserved = {}
     for candidate in candidates:
         rep = _read_json(str(candidate))
         if rep and rep.get("schema"):
-            return rep
-    return {}
+            preserved = rep
+            break
+    if unavailable:
+        return {
+            "schema": "genome_dashboard_status_v1",
+            "available": False,
+            "status": "GENOME_SOURCE_UNAVAILABLE",
+            "source_status": source_status,
+            "preserved_report_available": bool(preserved),
+            "preserved_report_generated_at": preserved.get("generated_at") if preserved else None,
+            "warning": (
+                "Current Genome conclusions are blocked because the required raw source tables are missing. "
+                "Any preserved prior report is historical and is not rendered as current evidence."
+            ),
+        }
+    if preserved:
+        preserved = dict(preserved)
+        preserved["available"] = True
+        preserved["source_status"] = source_status or {"status": "SOURCE_STATUS_NOT_EMITTED"}
+        return preserved
+    return {
+        "schema": "genome_dashboard_status_v1",
+        "available": False,
+        "status": "GENOME_SOURCE_UNAVAILABLE",
+        "source_status": source_status or {"status": "SOURCE_STATUS_MISSING"},
+        "preserved_report_available": False,
+    }
 
 
 @app.route("/api/genome")
@@ -3179,25 +3329,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
-    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
+    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
     <div class="kpis" id="chase-kpis"></div>
     <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
     <h2>Chase Threshold Analysis</h2>
     <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
     <h2>Chase Delay (Pathway Lab)</h2>
     <p class="note" id="chase-delay-note">COMBO Direct vs Chase 3+ — delayed virtual-chase entry within each AI/spread tier.</p>
     <div class="kpis" id="chase-delay-kpis"></div>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
   </section>
   <section id="sec-chase-iso">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
     <h2>Chase Isolation</h2>
     <p class="note" id="chase-iso-note">COMBO Direct vs Chase 3+ — fill_model and chase policy per tile pair.</p>
     <div class="kpis" id="chase-iso-kpis"></div>
@@ -3206,7 +3356,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-combos">
     <h2>Top Combinations</h2>
-    <p class="note" id="combos-note">Direction-only cohorts: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
+    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid — pinned chronological OOS results. Descriptive only until every qualification gate passes.</p>
+    <div class="kpis" id="policy-grid-kpis"></div>
+    <table><thead><tr><th>#</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <h3>Observed executed-lane combinations</h3>
+    <p class="note" id="combos-note">Separate legacy direction-only cohort: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
     <div class="kpis" id="combos-kpis"></div>
     <table><thead><tr><th>Combo</th><th>ADX</th><th>Score gap</th><th>Entry</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="combos-body"></tbody></table>
   </section>
@@ -3339,6 +3493,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
+const EVIDENCE_SCOPES = {
+  summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
+  findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current v2.2 counterfactual policy grid.'],
+  regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
+  lanes: ['CURRENT TYPE-B — MIXED PAPER/SHADOW CHILD EVIDENCE', 'One causal opportunity is counted once; child modes remain separated and do not imply live execution.'],
+  'lanes-retire': ['LEGACY CONFIGURATION', 'Historical lane retirement and roster evidence.'],
+  'lanes-def': ['LEGACY CONFIGURATION', 'Definitions retained for audit compatibility; retired lanes are not active strategies.'],
+  ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
+  typeb: ['LEGACY EXECUTED', 'Historical MFE outcome cohort; not the current v2.2 policy search.'],
+  chase: ['LEGACY EXECUTED', 'Historical executed-lane chase attribution.'],
+  'chase-threshold': ['LEGACY EXECUTED', 'Historical executed-lane chase thresholds.'],
+  'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
+  'chase-iso': ['LEGACY EXECUTED', 'Historical pathway-lab chase isolation comparison.'],
+  combos: ['MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED', 'The first table is pinned current-epoch counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
+  'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
+  'exit-combos': ['LEGACY EXECUTED', 'Historical executed-lane exit combinations.'],
+  'exit-reason-leak': ['LEGACY HINDSIGHT', 'Peak-to-close hindsight gap; not directly capturable profit or a policy recommendation.'],
+  'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current 12,601-policy v2.2 grid.'],
+  exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
+  genome: ['SOURCE UNAVAILABLE', 'The required six raw Genome source tables are missing. Prior artifacts are preserved but current conclusions are blocked.'],
+  edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
+  explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
+  archives: ['PRESERVED HISTORY', 'Sealed prior reports and sessions; not current-epoch policy evidence.'],
+  download: ['MIXED EVIDENCE BUNDLE', 'Bundle may contain current and historical artifacts; manifest timestamps and per-report provenance remain authoritative.'],
+  'pathway-audit': ['MIXED INTEGRITY REPORTS', 'Combines current runtime checks with historical lane/report contracts.'],
+  horizon: ['LEGACY POST-EXIT REPLAY', 'Historical recovery/horizon evidence; not the current pinned policy grid.'],
+};
 const navEl = document.getElementById('nav');
 const subnavEl = document.getElementById('subnav');
 let _rdPrefs = {};
@@ -3405,7 +3586,17 @@ function show(id) {
   activeGroup = sectionGroup(id);
   document.querySelectorAll('main section').forEach(s => s.classList.remove('active'));
   const sec = document.getElementById('sec-' + id);
-  if (sec) sec.classList.add('active');
+  if (sec) {
+    sec.classList.add('active');
+    const scope = EVIDENCE_SCOPES[id] || ['SCOPE UNCLASSIFIED', 'This panel has not yet been mapped to an authoritative evidence cohort.'];
+    let banner = sec.querySelector(':scope > .evidence-scope-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.className = 'empty-state evidence-scope-banner';
+      sec.insertBefore(banner, sec.firstChild);
+    }
+    banner.innerHTML = `<b>Evidence scope: ${scope[0]}</b><br>${scope[1]}`;
+  }
   renderNav();
   savePrefs();
   void refreshActiveSection();
@@ -3722,6 +3913,25 @@ async function loadCombos() {
     const combo = `${fmtAdxBucket(c.adx_bucket)} + gap ${c.spread_bucket||''} + ${c.entry_mode||''} + ${c.lane||''}`;
     return `<tr class="${cls}"><td>${combo}</td><td>${fmtAdxBucket(c.adx_bucket)}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
+  const pg = d.policy_grid || {};
+  const pe = pg.evidence || {};
+  const pgNote = document.getElementById('policy-grid-note');
+  if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
+  document.getElementById('policy-grid-kpis').innerHTML = [
+    ['Policies shown', (pg.rows||[]).length],
+    ['Independent episodes', pe.independent_episodes ?? 0],
+    ['Train / OOS', `${pe.training_episodes ?? 0} / ${pe.oos_episodes ?? 0}`],
+    ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('policy-grid-body').innerHTML = (pg.rows||[]).map(p => {
+    const ci = p.oos_win_probability_ci95_low_pct == null ? 'n/a' :
+      `${p.oos_win_probability_pct}% (${p.oos_win_probability_ci95_low_pct}–${p.oos_win_probability_ci95_high_pct}%)`;
+    const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
+    return `<tr><td>${p.rank}</td><td><strong>${p.policy_id||'—'}</strong><br><small>${params}</small></td>`
+      + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>${p.oos_wins||0} / ${p.oos_losses||0}</td>`
+      + `<td>${ci}</td><td>$${fmtUsd(p.oos_net_pnl_usd)}</td><td>$${fmtUsd(p.oos_expectancy_usd)}</td>`
+      + `<td>$${fmtUsd(p.oos_max_drawdown_usd)}</td><td class="bad">${p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
+  }).join('') || '<tr><td colspan="10">No current-epoch OOS policy grid is available yet.</td></tr>';
 }
 
 async function loadSpreadPerf() {
@@ -4061,11 +4271,13 @@ async function loadGenome() {
   const d = await r.json();
   const empty = document.getElementById('genome-empty');
   const content = document.getElementById('genome-content');
-  if (!d || !d.schema) {
+  if (!d || !d.schema || d.available === false) {
     content.style.display = 'none';
     empty.style.display = 'block';
-    empty.textContent = 'Genome report is not available yet. The analyzer will rebuild it on its next cycle; bot execution is unaffected.';
-    document.getElementById('genome-note').textContent = 'Advisory research only — never relay eligible.';
+    const src = (d && d.source_status) || {};
+    const missing = (src.missing_tables || []).join(', ');
+    empty.textContent = (d && d.warning) || `Genome source unavailable: ${src.reason || src.status || 'unknown reason'}.`;
+    document.getElementById('genome-note').textContent = `SOURCE UNAVAILABLE · missing tables: ${missing || 'not reported'} · prior artifacts preserved but blocked · execution unaffected.`;
     return;
   }
   empty.style.display = 'none';

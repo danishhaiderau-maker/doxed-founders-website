@@ -66,6 +66,96 @@ def _write_fixture(tmp_path: Path, events, report):
     )
 
 
+def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
+    monkeypatch.setattr(dashboard, "_read_report", lambda name: {
+        "top": [{
+            "adx_bucket": "30+", "spread_bucket": "5+", "entry_mode": "DIRECT",
+            "lane": "CONTINUOUS", "trades": 3, "wr_pct": 33.3,
+            "pnl_usd": -8.68, "ev_usd": -2.89,
+        }],
+        "dimensions": ["adx_bucket"],
+    })
+    monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
+        "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "live_policy_change_allowed": False,
+        "blockers": ["QUALIFICATION_GATE_FAILED:conservative_execution"],
+    })
+    monkeypatch.setattr(dashboard, "_read_json", lambda name: {
+        "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "cycle_snapshot": {"snapshot_id": "snap-1"},
+        "evidence": {"independent_episodes": 133, "training_episodes": 93, "oos_episodes": 40},
+        "descriptive_challenger": {"profitable_static_policies": [{
+            "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "train": {"independent_episodes": 93},
+            "oos": {
+                "independent_episodes": 40, "fills": 40, "wins": 30, "losses": 10,
+                "net_pnl_usd": 101.7442, "expectancy_usd": 2.543605,
+                "max_drawdown_usd": -100.5837,
+            },
+        }]},
+    })
+
+    payload = dashboard._combos_payload()
+
+    assert len(payload["top"]) == 1
+    grid = payload["policy_grid"]
+    assert grid["live_policy_change_allowed"] is False
+    assert grid["evidence"]["oos_episodes"] == 40
+    row = grid["rows"][0]
+    assert row["entry_offset_pct"] == 0.29
+    assert row["chase_windows"] == "2, 3, 4"
+    assert row["chase_window_ages"] == "10–25 min"
+    assert row["chase_remaining_gap_step_pct"] == 25.0
+    assert row["reprice_interval_sec"] == 60
+    assert row["exit_policy"] == "atr_tp_k2.5"
+    assert row["atr_take_profit_multiple"] == 2.5
+    assert row["fill_model"] == "IDEAL_TOUCH_REPLAY"
+    assert row["protection_model"] == "NO_LADDER_NO_THESIS_NO_HARD_STOP"
+    assert row["oos_win_probability_pct"] == 75.0
+    assert row["oos_win_probability_ci95_low_pct"] < 75 < row["oos_win_probability_ci95_high_pct"]
+    assert row["oos_expectancy_usd"] == 2.543605
+
+
+def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
+    client = dashboard.app.test_client()
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Current-epoch counterfactual policy grid" in html
+    assert "Win probability (95% CI)" in html
+    assert "MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED" in html
+    assert "LEGACY EXECUTED" in html
+    assert "SOURCE UNAVAILABLE" in html
+    assert "Policy Grid &amp; Legacy" not in html  # labels are rendered client-side JSON
+    assert "Policy Grid & Legacy" in html
+
+
+def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monkeypatch):
+    def fake_read(name):
+        text = str(name).replace("\\", "/")
+        if text.endswith("genome_source_status.json"):
+            return {
+                "schema": "genome_source_status_v1",
+                "status": "GENOME_SOURCE_UNAVAILABLE",
+                "reason": "REQUIRED_SOURCE_TABLES_MISSING",
+                "missing_tables": ["decision_genome", "market_genome"],
+            }
+        if text.endswith("genome_analysis_report.json"):
+            return {"schema": "genome_analysis_v1", "generated_at": "old"}
+        return {}
+    monkeypatch.setattr(dashboard, "_read_json", fake_read)
+
+    payload = dashboard._genome_payload()
+
+    assert payload["available"] is False
+    assert payload["status"] == "GENOME_SOURCE_UNAVAILABLE"
+    assert payload["preserved_report_available"] is True
+    assert "not rendered as current evidence" in payload["warning"]
+
+
 def test_best_policy_is_hidden_until_current_epoch_oos_is_qualified(tmp_path, monkeypatch):
     events = [
         _event("filled", "ACCEPTED_FILLED", "episode-1"),
