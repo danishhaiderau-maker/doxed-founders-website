@@ -68,6 +68,9 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp).resolve()
         (root / "signal_snapshot.jsonl").write_text("{}\n", encoding="utf-8")
+        (root / "research_events_v22.provisional.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
         excluded = [
             root / "research_epoch_quarantine" / "epoch_1" / "old.jsonl",
             root / "research_archive" / "session_1" / "old.json",
@@ -81,7 +84,9 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
             "Path": Path,
             "os": os,
             "_DATA_SYNC_EXTENSIONS": frozenset({".json", ".jsonl"}),
-            "_DATA_SYNC_EXCLUDED_NAMES": frozenset({"manifest.json"}),
+            "_DATA_SYNC_EXCLUDED_NAMES": frozenset({
+                "manifest.json", "research_events_v22.provisional.json"
+            }),
             "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({
                 "research_epoch_quarantine", "research_archive",
                 "research_session_archives", "archive-v2", "object-store", "object_store",

@@ -35545,6 +35545,9 @@ _DATA_SYNC_EXTENSIONS = frozenset({
 })
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
+    # Mutable crash-recovery state belongs only to the Fly collector. It can
+    # change between chunk requests and is not research/analyzer evidence.
+    "research_events_v22.provisional.json",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "research_epoch_quarantine",
