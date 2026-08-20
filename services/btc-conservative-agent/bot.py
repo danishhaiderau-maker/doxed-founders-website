@@ -16070,7 +16070,7 @@ def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
 
 
 def spawn_shadow_collecting_lanes_from_ai_scan(
-    ctx, ai, edge_score, features, source_lane: str, final_direction: str, spread: int,
+    ctx, ai, edge_score, features, source_lane: str, executed_direction: str, spread: int,
 ):
     """Shadow sim lanes — virtual attribution from AI scan (no live orders)."""
     if not PATHWAY_SHADOW_COLLECTING_ENABLED:
@@ -16081,24 +16081,25 @@ def spawn_shadow_collecting_lanes_from_ai_scan(
             continue
         if not is_research_lane_enabled(lane):
             continue
-        if not legacy_lane_matches(lane, ai, edge_score, features, final_direction, spread):
+        if not legacy_lane_matches(lane, ai, edge_score, features, executed_direction, spread):
             continue
         _spawn_shadow_collecting_lane(
-            ctx, ai, edge_score, features, lane, source_lane, final_direction,
+            ctx, ai, edge_score, features, lane, source_lane,
+            raw_direction=str(ai.get("direction") or "LONG").upper(),
+            executed_direction=str(executed_direction or ai.get("direction") or "LONG").upper(),
         )
 
 
 def _spawn_shadow_collecting_lane(
-    ctx, ai, edge_score, features, target_lane: str, source_lane: str, final_direction: str,
+    ctx, ai, edge_score, features, target_lane: str, source_lane: str,
+    raw_direction: str, executed_direction: str,
 ):
     prefix = SHADOW_COLLECTING_ID_PREFIX.get(target_lane, "shcol")
     study_id = f"{prefix}-{uuid.uuid4().hex[:12]}"
-    direction = str(final_direction or ai.get("direction") or "LONG").upper()
-    if state.get("invert_signal", False):
-        if direction == "LONG":
-            direction = "SHORT"
-        elif direction == "SHORT":
-            direction = "LONG"
+    # The caller has already applied the ticket-time invert exactly once.
+    # Keep both sides explicit so this shadow cannot silently flip back.
+    direction = str(executed_direction or raw_direction or "LONG").upper()
+    raw_direction = str(raw_direction or direction).upper()
     price = float(nz(state.get("price")) or 0)
     if price <= 0:
         return
@@ -16108,6 +16109,9 @@ def _spawn_shadow_collecting_lane(
         price,
         lane=f"shadow_collect_{target_lane}",
         direction=direction,
+        raw_direction=raw_direction,
+        executed_direction=direction,
+        invert_on=bool(raw_direction in ("LONG", "SHORT") and direction != raw_direction),
         leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
         margin_usdt=float(FIXED_MARGIN_USDT),
         pullback_pct=float(state.get("pullback_threshold", 0.001)),

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import threading
 import uuid
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -72,6 +73,7 @@ from path_replay_v1 import (
     raw_1m_to_ticks,
     zero_fill_costs,
 )
+from replay_eligibility import LEGACY_PREMATURE, validate_replay_eligibility
 
 BYTES_PER_EVENT_TYPICAL = 210_000
 BYTES_PRE_SIGNAL_CONTEXT_TYPICAL = 117_000
@@ -192,20 +194,20 @@ def assess_tape_coverage(
 ) -> dict:
     """Independently prove chronological, duplicate-free 1m coverage.
 
-    Coverage begins at the candle containing the signal.  Pre-signal context is
-    useful evidence, but is deliberately not part of the future-path maturity
-    gate.
+    Maturity begins at the signal, but every row retained in the canonical tape
+    is integrity checked so a pre-signal gap cannot pass here and fail replay.
     """
     raw_ts = [candle_ts_sec(row) for row in (candles_1m or [])]
     timestamps = [float(ts) for ts in raw_ts if ts is not None]
-    relevant = [ts for ts in timestamps if ts + 60.0 > float(signal_ts) - 1e-9 and ts < float(required_end_ts)]
+    relevant = [ts for ts in timestamps if ts < float(required_end_ts)]
     ordered = all(b > a for a, b in zip(relevant, relevant[1:]))
     duplicate = len(relevant) != len(set(relevant))
     gaps = [
         {"after_ts": a, "before_ts": b, "gap_sec": b - a}
         for a, b in zip(relevant, relevant[1:]) if b - a > 60.0 + 1.0
     ]
-    first = relevant[0] if relevant else None
+    future = [ts for ts in relevant if ts + 60.0 > float(signal_ts) - 1e-9]
+    first = future[0] if future else None
     last_end = relevant[-1] + 60.0 if relevant else None
     starts_in_time = first is not None and first <= float(signal_ts) + 1.0 and first + 60.0 > float(signal_ts) - 1.0
     reaches_end = last_end is not None and last_end + 1.0 >= float(required_end_ts)
@@ -227,31 +229,11 @@ def assess_tape_coverage(
 
 
 def event_replay_eligibility(event: Mapping[str, Any]) -> dict:
-    """Recalculate eligibility from evidence; never trust a terminal flag."""
-    signal_ts = float((event.get("envelope") or {}).get("signal_ts") or event.get("signal_ts") or 0)
-    fills = [
-        float(child["fill_ts"]) for child in (event.get("entry_children") or [])
-        if child.get("fill_ts") is not None
-    ]
-    if event.get("live_fill_ts") is not None:
-        fills.append(float(event["live_fill_ts"]))
-    required_end = signal_ts + MAX_ENTRY_WINDOW_SEC
-    if fills:
-        required_end = max(required_end, max(fills) + MAX_HOLD_PERIOD_SEC)
-    result = assess_tape_coverage(
-        (event.get("canonical_tape") or {}).get("path_1m") or [],
-        signal_ts=signal_ts,
-        required_end_ts=required_end,
-    )
-    if not result["eligible"] and str(event.get("observation_status") or "") in (
-        OBS_FUNNEL_COMPLETE, OBS_COMPLETE,
-    ):
-        result.update({
-            "replay_status": REPLAY_INELIGIBLE,
-            "integrity_code": LEGACY_PREMATURE_FINALIZATION,
-        })
-    else:
-        result["replay_status"] = "REPLAY_ELIGIBLE" if result["eligible"] else REPLAY_INELIGIBLE
+    """Use the exact same fail-closed receipt consumed by replay/analyzer."""
+    result = dict(validate_replay_eligibility(event))
+    result["replay_status"] = result.get("status")
+    if result.get("classification") == LEGACY_PREMATURE:
+        result["integrity_code"] = LEGACY_PREMATURE_FINALIZATION
     return result
 
 
@@ -750,18 +732,68 @@ def _load_event_index(path: str) -> dict:
     return {"schema": "research_event_index_v1", "events": {}}
 
 
+_EVENT_WRITER_LOCK = threading.RLock()
+
+
+def _scan_durable_event_rows(events_path: str) -> dict:
+    """Rebuild event identity from the append-only source of truth."""
+    found = {}
+    if not os.path.isfile(events_path):
+        return found
+    with open(events_path, encoding="utf-8", errors="replace") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            event_id = str(row.get("event_id") or row.get("trade_id") or "")
+            if not event_id or event_id in found:
+                continue
+            found[event_id] = {
+                "written_at": (row.get("envelope") or {}).get("signal_ts"),
+                "observation_status": row.get("observation_status"),
+                "bytes": len(line.encode("utf-8")),
+                "line_number": line_number,
+            }
+    return found
+
+
+def _reconcile_event_index(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> dict:
+    """Repair missing, corrupt, or stale indexes from durable JSONL rows."""
+    index_path = os.path.join(root, EVENT_INDEX_FILE)
+    events_path = os.path.join(root, events_file)
+    durable_size = os.path.getsize(events_path) if os.path.isfile(events_path) else 0
+    index = _load_event_index(index_path)
+    indexed_size = index.get("events_file_size")
+    if indexed_size is not None and int(indexed_size) == durable_size:
+        return index
+    durable = _scan_durable_event_rows(events_path)
+    index = {
+        "schema": "research_event_index_v1",
+        "events_file_size": durable_size,
+        "events": durable,
+    }
+    os.makedirs(root, exist_ok=True)
+    _save_event_index(index_path, index)
+    return index
+
+
 def _save_event_index(path: str, index: dict) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
         json.dump(index, handle, separators=(",", ":"), sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
 
 
 def event_already_written(event_id: str, *, data_dir: Optional[str] = None) -> bool:
     root = data_dir or os.getcwd()
-    index_path = os.path.join(root, EVENT_INDEX_FILE)
-    index = _load_event_index(index_path)
-    return str(event_id) in (index.get("events") or {})
+    with _EVENT_WRITER_LOCK:
+        index = _reconcile_event_index(root)
+        return str(event_id) in (index.get("events") or {})
 
 
 def write_research_event_once(
@@ -779,25 +811,37 @@ def write_research_event_once(
     eligibility = event_replay_eligibility(record)
     if not terminal_observation(status) or not eligibility.get("eligible"):
         return False, "provisional or replay-ineligible event"
-    index_path = os.path.join(root, EVENT_INDEX_FILE)
-    index = _load_event_index(index_path)
-    if event_id in (index.get("events") or {}):
-        return False, "duplicate event_id"
-    events_path = os.path.join(root, events_file)
-    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
-    if "\n" in line:
-        raise ValueError("research event must be one JSON line")
-    os.makedirs(root, exist_ok=True)
-    with open(events_path, "a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
-        handle.flush()
-    index.setdefault("events", {})[event_id] = {
-        "written_at": record.get("envelope", {}).get("signal_ts"),
-        "observation_status": record.get("observation_status"),
-        "bytes": len(line.encode("utf-8")),
-    }
-    _save_event_index(index_path, index)
-    return True, "written"
+    with _EVENT_WRITER_LOCK:
+        index_path = os.path.join(root, EVENT_INDEX_FILE)
+        index = _reconcile_event_index(root, events_file)
+        if event_id in (index.get("events") or {}):
+            return False, "duplicate event_id"
+        events_path = os.path.join(root, events_file)
+        line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
+        if "\n" in line:
+            raise ValueError("research event must be one JSON line")
+        os.makedirs(root, exist_ok=True)
+        with open(events_path, "ab+") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell():
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    handle.seek(0, os.SEEK_END)
+                    handle.write(b"\n")
+            encoded = (line + "\n").encode("utf-8")
+            handle.seek(0, os.SEEK_END)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        index.setdefault("events", {})[event_id] = {
+            "written_at": record.get("envelope", {}).get("signal_ts"),
+            "observation_status": record.get("observation_status"),
+            "bytes": len(line.encode("utf-8")),
+            "line_number": len(index.get("events") or {}) + 1,
+        }
+        index["events_file_size"] = os.path.getsize(events_path)
+        _save_event_index(index_path, index)
+        return True, "written"
 
 
 def terminal_observation(status: str) -> bool:
