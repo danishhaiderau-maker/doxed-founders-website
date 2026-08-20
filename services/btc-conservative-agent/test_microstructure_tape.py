@@ -39,6 +39,24 @@ def test_window_requires_every_unique_fresh_second():
     assert validate_window(rows + [rows[0]], ref)["eligible"] is False
 
 
+def test_window_bucket_index_preserves_duplicate_and_stale_checks():
+    ref = window_reference(100, 103)
+    indexed = {
+        ts: [build_bucket(bucket_ts=ts, bid=99, ask=101, bid_qty=1,
+                          ask_qty=1, last=100, source_ts=ts + .5)]
+        for ts in range(100, 103)
+    }
+    assert validate_window(indexed, ref)["eligible"] is True
+    indexed[101].append(dict(indexed[101][0]))
+    duplicate = validate_window(indexed, ref)
+    assert duplicate["eligible"] is False
+    assert duplicate["duplicate_buckets"] == [101]
+    indexed[101] = [dict(indexed[101][0], fresh=False)]
+    stale = validate_window(indexed, ref)
+    assert stale["eligible"] is False
+    assert stale["invalid_or_stale_buckets"] == [101]
+
+
 def test_runtime_capture_is_research_only_and_started_once():
     start = BOT.index("def microstructure_capture_loop():")
     end = BOT.index("\ndef ", start + 5)

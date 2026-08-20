@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 
 SCHEMA = "market_microstructure_1s_v1"
 FILE_NAME = "market_microstructure_1s.jsonl"
@@ -89,7 +90,19 @@ def validate_window(rows, reference) -> dict:
     end = int(reference.get("required_end_ts") or 0)
     expected = set(range(start, end))
     seen, duplicate, invalid = set(), set(), []
-    for row in rows or ():
+    if isinstance(rows, Mapping):
+        relevant_rows = []
+        for ts in expected:
+            bucket_rows = rows.get(ts, ())
+            if isinstance(bucket_rows, dict):
+                bucket_rows = (bucket_rows,)
+            bucket_rows = tuple(bucket_rows or ())
+            if len(bucket_rows) > 1:
+                duplicate.add(ts)
+            relevant_rows.extend(bucket_rows)
+    else:
+        relevant_rows = rows or ()
+    for row in relevant_rows:
         try:
             ts = int(row.get("bucket_ts"))
         except (TypeError, ValueError, AttributeError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +44,12 @@ def _load_microstructure_snapshot(data_dir=".") -> dict:
 
 def _microstructure_evidence(events, tape_snapshot) -> dict:
     rows = tape_snapshot["rows"]
+    rows_by_bucket = defaultdict(list)
+    for row in rows:
+        try:
+            rows_by_bucket[int(row.get("bucket_ts"))].append(row)
+        except (TypeError, ValueError, AttributeError):
+            continue
     referenced = complete = incomplete = 0
     complete_ids = []
     for event in events:
@@ -58,7 +65,7 @@ def _microstructure_evidence(events, tape_snapshot) -> dict:
         if not valid_reference:
             incomplete += 1
             continue
-        result = validate_window(rows, reference)
+        result = validate_window(rows_by_bucket, reference)
         if result.get("eligible") is True:
             complete += 1
             complete_ids.append(str(event.get("event_id") or ""))
