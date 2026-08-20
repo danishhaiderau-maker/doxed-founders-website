@@ -138,6 +138,16 @@ from opportunity_capture_v21 import (
     build_rejected_capture,
     filter_node,
 )
+from collector_v22_schema import COLLECTOR_VERSION as COLLECTOR_V22_VERSION
+from collector_v22 import (
+    build_decision_tree_v22,
+    build_research_event,
+    event_already_written,
+    terminal_observation,
+    write_research_event_once,
+)
+from collector_storage import storage_blocks_new_events, storage_state, project_capacity
+from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -11508,6 +11518,51 @@ _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
 _order_multiverse_path_complete = {}
 _order_multiverse_post_ttl_done = {}
+_order_multiverse_written = set()
+# v2.2: dense 1s path_replay off Fly volume by default (~309 KB/filled event saved).
+COLLECTOR_V22_PATH_REPLAY_1S = os.getenv("COLLECTOR_V22_PATH_REPLAY_1S", "").strip().lower() in ("1", "true", "yes")
+_RESEARCH_RAW_JSONL_NEVER_PRUNE = frozenset({
+    "order_multiverse.jsonl",
+    "research_events_v22.jsonl",
+    "opportunity_capture.jsonl",
+    "path_replay.jsonl",
+    "post_exit_replay.jsonl",
+    "source_order_market_evidence.jsonl",
+    "signal_replay.jsonl",
+})
+
+
+def _collector_v22_epoch_id() -> str:
+    """Stable epoch-v22-* id for reproducible research datasets."""
+    session = _load_research_session_meta() or {}
+    bound = session.get("collector_v22_epoch_id")
+    if bound:
+        return str(bound)
+    raw = session.get("collector_v22_epoch_ts") or session.get("fresh_collection_start_time") or bot_start_time
+    try:
+        anchor = float(raw or bot_start_time or time.time())
+    except (TypeError, ValueError):
+        anchor = float(bot_start_time or time.time())
+    material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
+    return "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def _ensure_collector_v22_epoch() -> str:
+    """Bind a fresh epoch-v22-* on first v2.2 startup (does not wipe v2.1 data)."""
+    meta = dict(_load_research_session_meta() or {})
+    if meta.get("collector_v22_epoch_ts"):
+        return str(meta.get("collector_v22_epoch_id") or _collector_v22_epoch_id())
+    anchor = time.time()
+    meta["collector_v22_epoch_ts"] = anchor
+    material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
+    meta["collector_v22_epoch_id"] = "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+    meta["collector_version"] = COLLECTOR_V22_VERSION
+    try:
+        with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, indent=2)
+    except OSError as exc:
+        logger.warning(f"[COLLECTOR_V22] epoch bind failed: {exc} [PIPELINE ENFORCEMENT]")
+    return str(meta["collector_v22_epoch_id"])
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
@@ -11600,8 +11655,13 @@ def _maybe_complete_pending_order_multiverse():
 
 
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
-    """One compact JSONL row per paper TAKEN. Does not change the live 0.1% ticket."""
+    """v2.2: write-once immutable research event per event_id (~210 KB)."""
     if not isinstance(source, dict):
+        return None
+    if storage_blocks_new_events() and not event_already_written(
+        str(source.get("trade_id") or source.get("canonical_trade_id") or "")
+    ):
+        logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping new research event [PIPELINE ENFORCEMENT]")
         return None
     try:
         tid = paper_multiverse_trade_id(
@@ -11612,11 +11672,10 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         )
         if not tid:
             return None
+        if tid in _order_multiverse_written:
+            return None
         prev = _order_multiverse_state.get(tid)
-        if prev in TERMINAL_LIFECYCLES and prev != "FUNNEL_ONLY":
-            if _order_multiverse_path_complete.get(tid) is True:
-                return None
-        if prev == "FUNNEL_ONLY" and _order_multiverse_post_ttl_done.get(tid) is True:
+        if prev in TERMINAL_LIFECYCLES and tid in _order_multiverse_written:
             return None
         price = float(
             source.get("signal_price_at_approve")
@@ -11656,23 +11715,24 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
                 live_fill_price = None
             if live_fill_price is not None and live_fill_price <= 0:
                 live_fill_price = None
-        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        candles_1m = fetch_mtf_candles("1m", limit=2000) or []
         ticks_1s = []
         replay_complete = bool(path_complete or ticket_closed)
         with replay_lock:
             buf = replay_buffers.get(tid) or {}
             start = float(buf.get("start_ts") or ts)
-            for tick in buf.get("ticks") or []:
-                t = float(tick.get("t") or 0)
-                if 0 < t < 1e11:
-                    t = start + t
-                ticks_1s.append({
-                    "t": t,
-                    "price": tick.get("price"),
-                    "best_bid": tick.get("best_bid"),
-                    "best_ask": tick.get("best_ask"),
-                    "unreal_pct": tick.get("unreal_pct"),
-                })
+            if COLLECTOR_V22_PATH_REPLAY_1S:
+                for tick in buf.get("ticks") or []:
+                    t = float(tick.get("t") or 0)
+                    if 0 < t < 1e11:
+                        t = start + t
+                    ticks_1s.append({
+                        "t": t,
+                        "price": tick.get("price"),
+                        "best_bid": tick.get("best_bid"),
+                        "best_ask": tick.get("best_ask"),
+                        "unreal_pct": tick.get("unreal_pct"),
+                    })
             if buf.get("post_exit") and buf.get("closed"):
                 replay_complete = True
             if buf.get("virtual_fill_t") is not None and live_fill_ts is None:
@@ -11683,16 +11743,19 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m") or source.get("rsi14")
         would_block = univ.get("would_block_short")
         would_block_reason = univ.get("would_block_reason")
-        tree = build_decision_tree(
+        tree = build_decision_tree_v22(
+            reason=source.get("exact_reason"),
             rsi=rsi_at_signal,
             rsi_threshold=30.0,
             adx=univ.get("adx14"),
             atr=univ.get("atr14_pct_3m"),
             would_block=would_block,
             would_block_reason=would_block_reason,
+            short_circuit=True,
         )
-        record = build_order_multiverse(
+        record = build_research_event(
             trade_id=tid,
+            epoch_id=_collector_v22_epoch_id(),
             signal_price=price,
             signal_ts=ts,
             direction=direction,
@@ -11700,28 +11763,22 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             ticks_1s=ticks_1s or None,
             live_orig=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
             ttl_sec=ttl_sec,
-            atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
-            donchian_high=univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
-            donchian_low=univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
-            support_price=univ.get("support_price") or source.get("support_price"),
-            resistance_price=univ.get("resistance_price") or source.get("resistance_price"),
-            path_complete=replay_complete,
-            invert_on=invert_on,
             live_fill_ts=live_fill_ts,
             live_fill_price=live_fill_price,
             ticket_closed=ticket_closed,
+            path_complete=replay_complete,
+            submitted=True,
+            rejected=False,
+            decision_tree=tree,
             rsi_at_signal=rsi_at_signal,
             would_block=would_block,
             would_block_reason=would_block_reason,
-            decision_tree=tree,
-            submitted=True,
+            atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+            invert_on=invert_on,
+            include_ticks_1s=COLLECTOR_V22_PATH_REPLAY_1S,
         )
-        lifecycle = str(record.get("lifecycle") or record.get("event") or "")
-        keep_collecting = (
-            bool(record.get("pending"))
-            or bool(record.get("post_ttl_pending"))
-            or lifecycle not in TERMINAL_LIFECYCLES
-        )
+        obs = str(record.get("observation_status") or "")
+        keep_collecting = not terminal_observation(obs)
         pending_payload = {
             "trade_id": tid,
             "signal_price_at_approve": price,
@@ -11734,44 +11791,30 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "live_fill_price": live_fill_price,
             "status": "CLOSED" if ticket_closed else ("FILLED" if live_fill_ts else "PENDING"),
             "ticket_closed": ticket_closed,
-            "atr14_pct_3m": univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
-            "donchian_high_3m": univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
-            "donchian_low_3m": univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
-            "support_price": univ.get("support_price") or source.get("support_price"),
-            "resistance_price": univ.get("resistance_price") or source.get("resistance_price"),
+            "path_complete": replay_complete,
         }
         if keep_collecting:
-            prev_src = _order_multiverse_pending_src.get(tid) or {}
             _order_multiverse_pending_src[tid] = pending_payload
-            # Skip a second PENDING line unless fill/touches arrived (n_touched=0 leak).
-            if (
-                prev == "PENDING"
-                and lifecycle in ("ENTRY_RESOLVED", "PENDING", "")
-                and not live_fill_ts
-                and int(record.get("n_touched") or 0) <= int(prev_src.get("n_touched") or 0)
-            ):
-                return record
-            pending_payload["n_touched"] = record.get("n_touched") or 0
-        else:
-            _order_multiverse_pending_src.pop(tid, None)
-        _safe_append_jsonl(ORDER_MULTIVERSE_FILE, record, label="ORDER_MULTIVERSE")
-        _order_multiverse_state[tid] = lifecycle or ("PENDING" if record.get("pending") else "COMPLETE")
-        _order_multiverse_path_complete[tid] = bool(
-            ((record.get("completeness") or {}).get("PATH_COMPLETE") is True)
-        )
-        _order_multiverse_post_ttl_done[tid] = not bool(record.get("post_ttl_pending"))
-        if len(_order_multiverse_state) > 64:
-            oldest = next(iter(_order_multiverse_state))
-            _order_multiverse_state.pop(oldest, None)
-        logger.info(
-            f"[ORDER MULTIVERSE] {record.get('event')} trade_id={tid} "
-            f"touched={record.get('n_touched')} missed={record.get('n_missed')} "
-            f"scores={record.get('n')} live_orig=0.10% unchanged "
-            f"[PIPELINE ENFORCEMENT]"
-        )
+            _order_multiverse_state[tid] = obs or "PENDING"
+            return record
+        _order_multiverse_pending_src.pop(tid, None)
+        written, reason = write_research_event_once(record)
+        if written:
+            _order_multiverse_written.add(tid)
+            compact = dict(record)
+            compact["event"] = obs
+            compact["lifecycle"] = obs
+            _safe_append_jsonl(ORDER_MULTIVERSE_FILE, compact, label="ORDER_MULTIVERSE")
+            logger.info(
+                f"[COLLECTOR_V22] write-once event_id={tid} obs={obs} bytes~{reason} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+        _order_multiverse_state[tid] = obs
+        _order_multiverse_path_complete[tid] = obs in ("COMPLETE", "PATH_COMPLETE")
+        _order_multiverse_post_ttl_done[tid] = obs == "FUNNEL_COMPLETE"
         return record
     except Exception as exc:
-        logger.warning(f"[ORDER MULTIVERSE] sync failed: {exc} [PIPELINE ENFORCEMENT]")
+        logger.warning(f"[COLLECTOR_V22] sync failed: {exc} [PIPELINE ENFORCEMENT]")
         return None
 
 
@@ -11804,7 +11847,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m")
         would_block = univ.get("would_block_short")
         would_block_reason = univ.get("would_block_reason") or (None if not would_block_only else reason)
-        tree = build_decision_tree(
+        tree = build_decision_tree_v22(
             reason=reason,
             hard_reject=not would_block_only,
             rsi=rsi_at_signal,
@@ -11815,42 +11858,44 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             would_block_reason=would_block_reason or reason,
             edge=signal.get("edge_score_at_entry"),
             approval=(ai or {}).get("decision"),
-            filters=[
-                filter_node(
-                    "WOULD_BLOCK" if would_block_only else "APPROVAL",
-                    value=reason,
-                    result="would_block" if would_block_only else "fail",
-                    hard_gate=not would_block_only,
-                    would_block_only=would_block_only,
-                )
-            ],
+            short_circuit=not would_block_only,
         )
-        record = build_rejected_capture(
+        if storage_blocks_new_events():
+            logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping rejected capture [PIPELINE ENFORCEMENT]")
+            return None
+        tid = str(signal.get("trade_id") or "")
+        if tid in _order_multiverse_written:
+            return None
+        record = build_research_event(
             trade_id=tid,
+            epoch_id=_collector_v22_epoch_id(),
             signal_price=price,
             signal_ts=ts,
             direction=direction,
-            reason=reason,
-            decision_tree=tree,
             candles_1m=candles_1m,
+            ttl_sec=1800.0,
+            submitted=False,
+            rejected=True,
+            decision_tree=tree,
             rsi_at_signal=rsi_at_signal,
             would_block=would_block or would_block_only,
             would_block_reason=would_block_reason or reason,
+            exact_reason=reason,
             atr14_pct=univ.get("atr14_pct_3m"),
-            submitted=False,
         )
         if would_block_only:
-            record["event"] = "WOULD_BLOCK_CANDIDATE"
-            record["lifecycle"] = "WOULD_BLOCK_CANDIDATE"
-            record["hard_reject"] = False
             record["would_block_only"] = True
+            record["hard_reject"] = False
         else:
             record["hard_reject"] = True
             record["would_block_only"] = False
-        _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
+        written, _reason = write_research_event_once(record)
+        if written:
+            _order_multiverse_written.add(tid)
+            _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
         logger.info(
-            f"[OPPORTUNITY CAPTURE] {record.get('event')} trade_id={tid} reason={reason} "
-            f"[PIPELINE ENFORCEMENT]"
+            f"[COLLECTOR_V22] {record.get('primary_outcome')} trade_id={tid} reason={reason} "
+            f"written={written} [PIPELINE ENFORCEMENT]"
         )
         return record
     except Exception as exc:
@@ -34705,8 +34750,18 @@ def api_data_size():
             "message": "admin token required",
         }), 401
 
-    volume_total_mb = 1024.0
     runtime_root = _data_sync_volume_root()
+    volume_total_mb = 1024.0
+    try:
+        usage = shutil.disk_usage(runtime_root)
+        volume_total_mb = round(float(usage.total) / (1024.0 * 1024.0), 2)
+    except OSError:
+        env_mb = os.getenv("FLY_VOLUME_MB", "").strip()
+        if env_mb:
+            try:
+                volume_total_mb = float(env_mb)
+            except ValueError:
+                pass
     runtime_path = str(runtime_root)
 
     def _run(cmd, timeout=10):
@@ -34836,6 +34891,14 @@ def api_data_size():
         elif volume_pct > 60.0:
             cleanup_status = "warn"
 
+    storage_payload = {}
+    capacity_payload = {}
+    try:
+        storage_payload = storage_state(str(runtime_root))
+        capacity_payload = project_capacity(data_dir=str(runtime_root))
+    except Exception as exc:
+        logger.warning("[DATA SIZE] storage/capacity probe failed: %s", exc)
+
     return jsonify({
         "status": "ok",
         "source": "fly" if os.path.exists("/.dockerenv") or os.path.exists("/app/fly-entrypoint.sh") else "local",
@@ -34848,6 +34911,9 @@ def api_data_size():
         "line_counts": line_counts,
         "key_files": key_files,
         "computed_at": int(time.time()),
+        "collector_version": COLLECTOR_V22_VERSION,
+        "storage_state": storage_payload,
+        "capacity_projection": capacity_payload,
     })
 
 def _arm_live_control() -> tuple:
@@ -35360,16 +35426,13 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
 
     Active files and the newest numeric rotations are never touched.
     Unacknowledged evidence is never deleted, even under disk pressure.
-    Rotation generations increase monotonically and may contain gaps after
-    retention, so ``.1``/``.2`` are not necessarily the newest.
 
-    Under volume pressure (used_pct ≥ 70), keep only the single newest
-    acknowledged rotation per family and shorten the age cutoff so Fly stays
-    below the 1 GB hard limit — still never deletes active/open files.
+    v2.2: raw research JSONL is NEVER pruned here — archive checksum ack required
+    first. Aggressive 70% pruning disabled to prevent silent tape loss.
     """
     removed = []
-    keep_newest = 1 if (volume_used_pct is not None and volume_used_pct >= 70.0) else 2
-    age_hours = 1 if (volume_used_pct is not None and volume_used_pct >= 70.0) else 24
+    keep_newest = 2
+    age_hours = 24
     cutoff = time.time() - (age_hours * 3600)
     newest_by_family = {}
     for rel, ack in list((acks or {}).items()):
@@ -35379,6 +35442,8 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
         try:
             path = _data_sync_resolve_relpath(rel)
             base_name, rotation_index = rotation
+            if base_name in _RESEARCH_RAW_JSONL_NEVER_PRUNE:
+                continue
             family_key = (path.parent, base_name)
             newest_kept = newest_by_family.get(family_key)
             if newest_kept is None:
@@ -35505,8 +35570,8 @@ def api_data_sync_ack():
         "removed_acknowledged_rotations": removed,
         "volume_used_pct": volume_used_pct,
         "policy": (
-            "acknowledged rotations older than the age cutoff are pruned except the newest "
-            "kept generations (2 normally, 1 when volume ≥70%); active/unacked files retained"
+            "acknowledged rotations older than 24h are pruned except newest 2 generations; "
+            "raw research JSONL never pruned without archive ack; STORAGE_PRESSURE at 85%"
         ),
     })
 
@@ -37674,7 +37739,8 @@ def append_replay_tick(
             seq=buf["seq"],
             invert_on=bool(buf.get("invert_on", False)),
         )
-    _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
+    if COLLECTOR_V22_PATH_REPLAY_1S:
+        _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
     if persist_trade_id is not None:
         try:
             rotate_log(POST_EXIT_REPLAY_FILE)
@@ -40053,6 +40119,7 @@ def main():
     dashboard_httpd = _create_dashboard_server()
     threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
     prune_aux_logs_on_startup()
+    _ensure_collector_v22_epoch()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()

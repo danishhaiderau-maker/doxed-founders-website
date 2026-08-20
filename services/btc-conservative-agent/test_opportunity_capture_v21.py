@@ -67,7 +67,7 @@ class OpportunityCaptureV21Tests(unittest.TestCase):
         self.assertEqual(row["event"], "REJECTED_SIGNAL")
         self.assertEqual(row["cohort"], COHORT_REJECTED_SIGNAL)
         self.assertEqual(row["record_kind"], "rejected_opportunity")
-        self.assertEqual(row["collector_version"], "collector_v2.1")
+        self.assertEqual(row["collector_version"], "collector_v2.2")
         self.assertEqual(row["envelope"]["path_from"], "signal_ts")
         self.assertEqual(row["decision_tree"]["exact_reason"], "SPREAD_BUCKET_BLOCKED")
         self.assertFalse(row["envelope"]["control_cell"]["invert_on"])
@@ -138,7 +138,7 @@ class OpportunityCaptureV21Tests(unittest.TestCase):
         self.assertEqual(report["cohorts"][COHORT_SUBMITTED_UNFILLED]["n"], 0)
         self.assertEqual(report["cohorts"][COHORT_REJECTED_SIGNAL]["n"], 0)
         self.assertEqual(report["cohorts"][COHORT_HYPOTHETICAL_FILLED]["n"], 0)
-        self.assertEqual(COLLECTOR_VERSION, "collector_v2.1")
+        self.assertEqual(COLLECTOR_VERSION, "collector_v2.2")
         self.assertEqual(FILL_MODEL_CONSERVATIVE_TOUCH, "CONSERVATIVE_TOUCH")
 
     def test_analyzer_splits_four_cohorts(self):
