@@ -325,6 +325,39 @@ def test_jsonl_writer_is_serialized_and_corruption_is_preserved_not_deleted():
     assert "os.replace(key, target)" in BOT
     assert '"corrupt_evidence_quarantine"' in BOT
     assert "os.fsync(f.fileno())" in BOT
+
+
+def test_all_direct_append_opens_are_bounded_writer_internals_or_diagnostics():
+    """Research ledgers must use the shared serialized JSONL/CSV writers."""
+    tree = ast.parse(BOT)
+    direct_append_functions = set()
+    for function in (
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ):
+        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+            if not isinstance(call.func, ast.Name) or call.func.id != "open":
+                continue
+            mode = None
+            if len(call.args) > 1 and isinstance(call.args[1], ast.Constant):
+                mode = call.args[1].value
+            for keyword in call.keywords:
+                if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                    mode = keyword.value.value
+            if isinstance(mode, str) and "a" in mode:
+                direct_append_functions.add(function.name)
+    assert direct_append_functions == {
+        "_agent_dbg",                 # bounded ordinary diagnostic log
+        "_dynamic_csv_writer_once",   # serialized by dynamic_csv_writer/csv_lock
+        "_safe_append_jsonl",         # serialized by the per-path JSONL lock
+        "dump_system_state",          # crash diagnostics, not research evidence
+    }
+
+
+def test_csv_fallback_uses_non_recursive_serialized_jsonl_writer():
+    assert '_safe_append_jsonl(\n            CSV_FALLBACK_JSONL' in BOT
+    assert 'label="CSV_FALLBACK", fallback_on_error=False' in BOT
+    assert "if fallback_on_error:\n        _csv_write_fallback(path, row, last_err)" in BOT
     assert "_jsonl_serialized_append_targets.add(os.path.abspath(path))" in BOT
 
 

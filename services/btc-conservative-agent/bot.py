@@ -3669,10 +3669,7 @@ def log_ai_input_full(
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        rotate_log(AI_INPUT_LOG_FILE)
-        with open(AI_INPUT_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
-            f.flush()
+        _safe_append_jsonl(AI_INPUT_LOG_FILE, row, label="AI_INPUT")
         logger.info(
             f"[AI INPUT LOGGED] lane={research_lane} trade_id={row.get('trade_id')} "
             f"decision={ai_result.get('decision')} dir={ai_result.get('direction')} "
@@ -10512,8 +10509,9 @@ def _csv_write_fallback(filename, row, err: BaseException) -> None:
             "error": str(err),
             "bot_version": EXECUTION_FIX_VERSION,
         }
-        with open(CSV_FALLBACK_JSONL, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, default=str) + "\n")
+        _safe_append_jsonl(
+            CSV_FALLBACK_JSONL, payload, label="CSV_FALLBACK", fallback_on_error=False,
+        )
     except Exception as fe:
         logger.error(f"[CSV FALLBACK FAILED] {fe} [PIPELINE ENFORCEMENT]")
 
@@ -13720,9 +13718,7 @@ def log_near_miss(signal, ai, miss_type, margin, edge_score):
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        rotate_log(NEAR_MISS_FILE)
-        with open(NEAR_MISS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(NEAR_MISS_FILE, row, label="NEAR_MISS")
     except Exception as e:
         logger.error(f"[NEAR_MISS] log failed: {e}")
 
@@ -14055,9 +14051,7 @@ def start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_ta
         "analyzer_sync_id": ANALYZER_SYNC_ID,
     }
     try:
-        rotate_log(SOFT_REJECT_SHADOW_FILE)
-        with open(SOFT_REJECT_SHADOW_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(SOFT_REJECT_SHADOW_FILE, row, label="SOFT_REJECT")
     except Exception as e:
         logger.error(f"[SOFT_REJECT] log failed: {e}")
     start_replay_buffer(
@@ -17577,8 +17571,7 @@ def _record_execution_settings_epoch(reason: str, force: bool = False) -> None:
             pass
         if not force and last and last.get("signature") == signature:
             return
-        with open(EXECUTION_SETTINGS_HISTORY_FILE, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+        _safe_append_jsonl(EXECUTION_SETTINGS_HISTORY_FILE, row, label="EXECUTION_SETTINGS")
     _settings_breakdown_cache["key"] = None
     _cached_pathway_lane_specs = {}
 
@@ -21387,9 +21380,7 @@ def log_edge_census(edge_score: float, stage: str, reason: str, features: dict =
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        rotate_log(EDGE_CENSUS_FILE)
-        with open(EDGE_CENSUS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(EDGE_CENSUS_FILE, row, label="EDGE_CENSUS")
     except Exception as e:
         logger.error(f"[EDGE_CENSUS] log failed: {e} [PIPELINE ENFORCEMENT]")
 
@@ -37480,9 +37471,7 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
                 "imbalance": feat.get("imbalance"),
             }
         with signal_snapshot_lock:
-            rotate_log(SIGNAL_SNAPSHOT_FILE)
-            with open(SIGNAL_SNAPSHOT_FILE, "a", encoding="utf-8") as f:
-                f.write(json.dumps(snapshot) + "\n")
+            _safe_append_jsonl(SIGNAL_SNAPSHOT_FILE, snapshot, label="SIGNAL_SNAPSHOT")
         logger.info(f"[SIGNAL_SNAPSHOT] trade_id={trade_id} dir={snapshot['direction']} price={fmt(price)} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"[SIGNAL_SNAPSHOT] failed: {e}")
@@ -38018,9 +38007,7 @@ def log_shadow_outcome_jsonl(
             "post_block_research": post_block_research or {},
             **outcome,
         }
-        rotate_log(SHADOW_OUTCOME_FILE)
-        with open(SHADOW_OUTCOME_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        _safe_append_jsonl(SHADOW_OUTCOME_FILE, row, label="SHADOW_OUTCOME")
         _record_type_b_research_v2_child(
             "OUTCOME",
             str(row.get("shared_ai_call_id") or ""),
@@ -38290,23 +38277,21 @@ def append_replay_tick(
         _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
     if persist_trade_id is not None:
         try:
-            rotate_log(POST_EXIT_REPLAY_FILE)
-            with open(POST_EXIT_REPLAY_FILE, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "kind": "tick",
-                    "trade_id": persist_trade_id,
-                    "ts": now,
-                    "price": float(price),
-                    "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
-                    "phase": "post_exit",
-                    "seq": int(buf["seq"]) if is_post_exit else None,
-                    "t_rel": t_rel,
-                    "best_bid": float(best_bid) if best_bid is not None else None,
-                    "best_ask": float(best_ask) if best_ask is not None else None,
-                    "mark_source": source,
-                    "schema": PATH_REPLAY_SCHEMA,
-                    "policy_tag": PATH_REPLAY_POLICY_TAG,
-                }) + "\n")
+            _safe_append_jsonl(POST_EXIT_REPLAY_FILE, {
+                "kind": "tick",
+                "trade_id": persist_trade_id,
+                "ts": now,
+                "price": float(price),
+                "unreal_pct": round(float(unreal_pct), 4) if unreal_pct is not None else None,
+                "phase": "post_exit",
+                "seq": int(buf["seq"]) if is_post_exit else None,
+                "t_rel": t_rel,
+                "best_bid": float(best_bid) if best_bid is not None else None,
+                "best_ask": float(best_ask) if best_ask is not None else None,
+                "mark_source": source,
+                "schema": PATH_REPLAY_SCHEMA,
+                "policy_tag": PATH_REPLAY_POLICY_TAG,
+            }, label="POST_EXIT_REPLAY_TICK")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] tick persist failed tid={persist_trade_id}: {e}")
 
@@ -38380,9 +38365,7 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
         }
-        rotate_log(TRADE_OUTCOME_FILE)
-        with open(TRADE_OUTCOME_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(outcome) + "\n")
+        _safe_append_jsonl(TRADE_OUTCOME_FILE, outcome, label="TRADE_OUTCOME")
     except Exception as e:
         logger.error(f"[TRADE_OUTCOME] log failed: {e}")
 
@@ -38448,29 +38431,27 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
         # Persist the post-exit trade header to the sidecar so a restart can
         # rebuild this buffer before the deadline elapses.
         try:
-            rotate_log(POST_EXIT_REPLAY_FILE)
-            with open(POST_EXIT_REPLAY_FILE, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "kind": "post_exit_header",
-                    "trade_id": trade_id,
-                    "ts": now,
-                    "post_exit_deadline_ts": buf.get("post_exit_deadline_ts"),
-                    "post_exit_started_ts": buf.get("post_exit_started_ts"),
-                    "entry_price": buf.get("entry_price"),
-                    "virtual_entry": buf.get("virtual_entry"),
-                    "direction": buf.get("direction"),
-                    "leverage": buf.get("leverage"),
-                    "exit_reason": buf.get("exit_reason"),
-                    "start_ts": buf.get("start_ts"),
-                    "exit_t_rel": buf.get("exit_t_rel"),
-                    "virtual_fill_t": buf.get("virtual_fill_t"),
-                    "margin_usdt": buf.get("margin_usdt"),
-                    "policy_version": buf.get("policy_version"),
-                    "exit_config": copy.deepcopy(buf.get("exit_config") or {}),
-                    "bitfinex_evidence": copy.deepcopy(buf.get("bitfinex_evidence") or {}),
-                    "fee_model": buf.get("fee_model"),
-                    "execution_profile": buf.get("execution_profile"),
-                }) + "\n")
+            _safe_append_jsonl(POST_EXIT_REPLAY_FILE, {
+                "kind": "post_exit_header",
+                "trade_id": trade_id,
+                "ts": now,
+                "post_exit_deadline_ts": buf.get("post_exit_deadline_ts"),
+                "post_exit_started_ts": buf.get("post_exit_started_ts"),
+                "entry_price": buf.get("entry_price"),
+                "virtual_entry": buf.get("virtual_entry"),
+                "direction": buf.get("direction"),
+                "leverage": buf.get("leverage"),
+                "exit_reason": buf.get("exit_reason"),
+                "start_ts": buf.get("start_ts"),
+                "exit_t_rel": buf.get("exit_t_rel"),
+                "virtual_fill_t": buf.get("virtual_fill_t"),
+                "margin_usdt": buf.get("margin_usdt"),
+                "policy_version": buf.get("policy_version"),
+                "exit_config": copy.deepcopy(buf.get("exit_config") or {}),
+                "bitfinex_evidence": copy.deepcopy(buf.get("bitfinex_evidence") or {}),
+                "fee_model": buf.get("fee_model"),
+                "execution_profile": buf.get("execution_profile"),
+            }, label="POST_EXIT_REPLAY_HEADER")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] header persist failed tid={trade_id}: {e}")
     logger.info(
@@ -39616,15 +39597,10 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             **build_counterfactual_observability_fields(buf, snapshot, replay, outcome),
         }
         try:
-            rotate_log(output_file)
-            with open(output_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(counterfactual) + "\n")
-                f.flush()
+            if _safe_append_jsonl(output_file, counterfactual, label="COUNTERFACTUAL"):
                 write_counter += 1
-                if write_counter % 10 == 0:
-                    os.fsync(f.fileno())
-            _sim_processed_trade_ids.add(trade_id)
-            written += 1
+                _sim_processed_trade_ids.add(trade_id)
+                written += 1
         except Exception as e:
             logger.error(f"Counterfactual log failed: {e}")
     if written:
@@ -39797,15 +39773,12 @@ def _run_counterfactual_catchup():
                 "catchup": True,
             }
             try:
-                rotate_log(COUNTERFACTUAL_FILE)
-                with open(COUNTERFACTUAL_FILE, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(counterfactual) + "\n")
-                    f.flush()
+                if _safe_append_jsonl(
+                    COUNTERFACTUAL_FILE, counterfactual, label="COUNTERFACTUAL_CATCHUP",
+                ):
                     write_counter += 1
-                    if write_counter % 10 == 0:
-                        os.fsync(f.fileno())
-                _sim_processed_trade_ids.add(tid)
-                written += 1
+                    _sim_processed_trade_ids.add(tid)
+                    written += 1
             except Exception as e:
                 logger.error(f"[CF_CATCHUP] counterfactual log failed tid={tid}: {e}")
         if written:
@@ -40214,7 +40187,9 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
     return False
 
 
-def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
+def _safe_append_jsonl(
+    path: str, row: dict, label: str = "JSONL", *, fallback_on_error: bool = True,
+):
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
     line = json.dumps(row, default=str) + "\n"
     last_err = None
@@ -40236,7 +40211,8 @@ def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
                     continue
                 break
     logger.error(f"[{label}] append failed ({path}): {last_err} [PIPELINE ENFORCEMENT]")
-    _csv_write_fallback(path, row, last_err)
+    if fallback_on_error:
+        _csv_write_fallback(path, row, last_err)
     return False
 
 
