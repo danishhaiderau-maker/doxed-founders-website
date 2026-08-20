@@ -26,7 +26,8 @@ Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data pre
 """
 from __future__ import annotations
 
-# [CLEAN 2026-07-30] Only CONTINUOUS + Type B remain executable.
+# No combo lane is currently executable. CONTINUOUS is configured separately
+# as the benchmark; retired specs below remain available for historical decode.
 from scenario_c_config import (
     SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
     SCENARIO_C_LEGACY_10_6_PROFILE_ID,
@@ -35,9 +36,10 @@ from scenario_c_config import (
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
-# Research candidates. Type B shares the benchmark direction call but owns its
-# policy, order book, chase lifecycle, and outcome ledger.
+# Historical research lane identifiers. They remain stable so immutable rows
+# and archived reports continue to decode after a lane is retired.
 RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
+RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
 RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
@@ -54,17 +56,65 @@ RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 )
 
+# Retired lanes must never reappear as active tiles through stale persisted config.
 COMBO_TILE_DISPLAY_ORDER = (
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 )
 
 COMBO_LANE_SPECS = {
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: {
+        "label": "0.29% Patient Chase · ATR 2.5×",
+        "subtitle": (
+            "PAPER ONLY — independent local order, position, capacity and ledger; "
+            "never eligible for Bitfinex relay"
+        ),
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+        "ai_min": 0,
+        "ai_max": 101,
+        "spread_min": -99,
+        "spread_max": 99,
+        "entry_mode": "IMMEDIATE",
+        "is_benchmark": False,
+        "is_research_candidate": True,
+        "is_legacy": False,
+        "is_independent_ai": False,
+        "uses_shared_ai_direction": True,
+        "paper_only": True,
+        "id_prefix": "o29atr",
+        "entry_offset_pct": 0.29,
+        "initial_rest_sec": 600,
+        "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500),
+        "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0,
+        "entry_ttl_sec": 1800,
+        "atr_tp_multiple": 2.5,
+        "atr_source": "frozen fill-time 3m ATR(14)",
+        "path_end_sec": 7200,
+        "exit_profile_id": "ATR_TP_2.5X_PATH_END_120M_V1",
+        "promotion_criteria": (
+            "PAPER RESEARCH ONLY: independent OOS evidence across multiple regimes, "
+            "conservative execution parity and explicit operator authorization"
+        ),
+        "kill_criteria": (
+            "Remain paper-only; stop new entries on integrity, lifecycle, or evidence mismatch"
+        ),
+        "hypothesis": (
+            "A patient 0.29% maker anchor followed by 25% remaining-gap reprices may "
+            "retain entry quality while a frozen 3m ATR 2.5x target captures movement."
+        ),
+        "research_question": (
+            "Does OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5 retain positive "
+            "out-of-sample EV under conservative paper execution?"
+        ),
+    },
     # =====================================================================
-    # Active paper-research candidate: TYPE_B_HUNTER_V1.
-    # Other entries below are retained only for historical CSV/outcome decoding.
+    # Retired paper-research candidate: TYPE_B_HUNTER_V1.
+    # This entry is retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
         "label": "Type B Hunter — shared direction / fixed policy",

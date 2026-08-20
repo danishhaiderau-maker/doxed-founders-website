@@ -68,6 +68,7 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_CHASE,
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V2,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
@@ -109,6 +110,7 @@ from path_replay_v1 import (
     REPLAY_VERSION,
     build_path_sample,
 )
+import paper_policy_offset029 as offset029_policy
 from microstructure_tape import (
     FILE_NAME as MICROSTRUCTURE_TAPE_FILE,
     SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
@@ -372,6 +374,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "DATA_RETIRED",
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "DATA_RETIRED",
     RESEARCH_LANE_TYPE_B_HUNTER_V1: "RETIRED",
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "RETIRED",
@@ -414,6 +417,7 @@ RESEARCH_SPAWN_LANES = ()
 # v11.8: the persisted toggle map is deliberately an allowlist.  Historical rows
 # remain readable, but a stale config flag cannot revive a retired lane.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: True,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
 }
 
@@ -426,6 +430,9 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
+})
+PAPER_ONLY_RESEARCH_LANES = frozenset({
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 })
 # A relay event must prove both its declared lane and its trade-id namespace.
 # Keep this deliberately smaller than the research lane prefix registry: adding a
@@ -448,6 +455,7 @@ _lane_locks = {
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: threading.Lock(),
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: threading.Lock(),
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: threading.Lock(),
     RESEARCH_LANE_HIGH_EDGE_RUNNER: threading.Lock(),
     RESEARCH_LANE_EXTREME_EDGE: threading.Lock(),
     RESEARCH_LANE_EDGE_ACCELERATION: threading.Lock(),
@@ -467,6 +475,7 @@ _lane_locks = {
 PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES
 LEGACY_PATHWAY_LANES = (
     RESEARCH_LANE_CONTINUOUS,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
     RESEARCH_LANE_EXTREME_EDGE,
     RESEARCH_LANE_EDGE_PLUS_STACK,
@@ -1243,6 +1252,10 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "entry_path": signal.get("entry_path"),
         "entry_reason": signal.get("entry_reason"),
         "entry_limit_policy": signal.get("entry_limit_policy"),
+        "raw_policy_id": signal.get("raw_policy_id") or order.get("raw_policy_id"),
+        "policy_id": signal.get("policy_id") or order.get("policy_id"),
+        "paper_only": bool(signal.get("paper_only") or order.get("paper_only")),
+        "relay_eligible": bool(signal.get("relay_eligible", order.get("relay_eligible", True))),
         "fill_model": order.get("fill_model") or _resolve_fill_model(signal, order),
         "limit_chase_count": int(order.get("limit_chase_count") or signal.get("limit_chase_count") or 0),
         "urgent_chase_tier": order.get("urgent_chase_tier") or signal.get("urgent_chase_tier"),
@@ -1716,6 +1729,8 @@ def get_lane_ladder(research_lane: str = None):
 def get_exit_config_snapshot(research_lane: str = None) -> dict:
     """Active exit/thesis/ladder params — logged per trade for analyzer sweeps."""
     lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
+    if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return offset029_policy.exit_config(ANALYZER_SYNC_ID)
     thesis_pct = THESIS_FAST_EXIT_UNREAL_PCT
     mfe_protect = THESIS_MFE_PROTECT_PCT
     if lane == RESEARCH_LANE_HIGH_EDGE_RUNNER:
@@ -2876,6 +2891,12 @@ def execution_mode_for_lane(lane: str = None) -> str:
     # Keeping these lanes PAPER here also prevents the legacy source executor
     # and the platform relay from submitting the same trade twice.
     if lane in PLATFORM_RELAY_ELIGIBLE_LANES:
+        return EXEC_MODE_PAPER
+
+    # This candidate owns a complete local paper lifecycle but can never enter
+    # either live-money route.  Keep the invariant independent of the global
+    # Bitfinex switch so arming another lane cannot promote it accidentally.
+    if lane in PAPER_ONLY_RESEARCH_LANES:
         return EXEC_MODE_PAPER
 
     # Tile ON. Now decide PAPER vs LIVE based on Bitfinex state.
@@ -4150,6 +4171,32 @@ def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: flo
         f"unreal={unreal_pct:.2f}% crossed={crossed} [PIPELINE ENFORCEMENT]"
     )
 
+def _apply_offset_029_atr_exit(pos: dict, price: float, now: float) -> bool:
+    """Exact paper exit for the selected replay policy, without Scenario C."""
+    if str(pos.get("research_lane") or "").upper() != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return False
+    entry = float(pos.get("entry") or 0)
+    direction = str(pos.get("dir") or "").upper()
+    entry_ts = float(pos.get("entry_ts") or 0)
+    atr_abs = _buf_float(pos.get("atr14_3m"), 0.0)
+    atr_pct = _buf_float(pos.get("atr14_pct_3m"), 0.0)
+    reason, target = offset029_policy.exit_decision(
+        entry=entry, direction=direction, price=price, atr_abs=atr_abs,
+        atr_pct=atr_pct, age_sec=(now - entry_ts if entry_ts else 0),
+    )
+    if target is not None:
+        pos["atr_tp_price"] = round(target, 2)
+    if reason:
+        pos["exit_policy_id"] = offset029_policy.POLICY_ID
+        if reason == "PATH_END_120M":
+            pos["path_end_mark_price"] = float(price)
+        close_position(pos, reason)
+        return True
+    if target is None:
+        pos["atr_tp_unavailable"] = True
+    return False
+
+
 def _apply_position_exits(pos: dict, price: float, now: float = None):
     if now is None:
         now = time.time()
@@ -4201,6 +4248,9 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     # Booked paper exits must reuse this same side-correct trigger, not a
     # later book-walk VWAP that can make a stop look like a much better fill.
     pos["_exit_eval_price"] = float(price or 0)
+
+    if str(pos.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return _apply_offset_029_atr_exit(pos, price, now)
 
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
@@ -6393,6 +6443,21 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
         "entry_reason": entry_reason,
         "entry_path": "AI_DIRECT",
         "ai_direct_limit": limit_price,
+        "await_micro_confirm": False,
+    }
+
+
+def compute_offset_029_atr_entry(signal: dict) -> dict:
+    """Thin lifecycle adapter over the immutable policy module."""
+    direction = str(signal.get("final_direction") or "").upper()
+    price = float(signal.get("signal_price") or state.get("price") or 0)
+    signal.update(offset029_policy.entry_fields(direction, price))
+    signal["entry_mode"] = ENTRY_MODE_AI_DIRECT
+    return {
+        "entry_mode": ENTRY_MODE_AI_DIRECT,
+        "entry_reason": signal["entry_reason"],
+        "entry_path": signal["entry_path"],
+        "ai_direct_limit": signal.get("ai_direct_limit"),
         "await_micro_confirm": False,
     }
 
@@ -16220,7 +16285,10 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         # deterministic gate remains the sole entry authority.
         if (
             is_independent_ai_lane(lane)
-            or is_shared_ai_direction_lane(lane)
+            or (
+                is_shared_ai_direction_lane(lane)
+                and lane != RESEARCH_LANE_OFFSET_029_ATR_TP_25
+            )
             or is_deterministic_bracket_lane(lane)
         ):
             continue
@@ -18217,6 +18285,8 @@ def enforce_dashboard_chase_gates_on_pending() -> None:
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
+        if str(order.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+            continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
         age_sec = _order_signal_age_sec(order, signal or {}, now)
@@ -19701,6 +19771,17 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "last_chase_ts": order_created_ts,
         "dashboard_exact_chase_managed": dashboard_exact_chase_managed,
         "dashboard_chase_activation_count": signal.get("dashboard_chase_activation_count"),
+        "raw_policy_id": signal.get("raw_policy_id"),
+        "policy_id": signal.get("policy_id"),
+        "paper_only": bool(signal.get("paper_only")),
+        "relay_eligible": bool(signal.get("relay_eligible", True)),
+        "chase_start_sec": signal.get("chase_start_sec"),
+        "chase_end_sec": signal.get("chase_end_sec"),
+        "chase_interval_sec": signal.get("chase_interval_sec"),
+        "chase_remaining_gap_step": signal.get("chase_remaining_gap_step"),
+        "entry_expires_ts": order_created_ts + float(
+            signal.get("entry_ttl_sec") or LIMIT_ORDER_MAX_AGE_SEC
+        ),
     }
     features = signal.get("features") or {}
     order["entry_velocity"] = float(features.get("velocity") or 0)
@@ -20960,6 +21041,10 @@ def process_limit_chase(price: float):
             continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
+        if str(order.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+            if _apply_offset_029_policy_chase(order, signal, price, now):
+                chased += 1
+            continue
         if is_virtual_chase_entry_lane(order.get("research_lane")):
             if _virtual_chase_lane_chase_on_order(order, signal, price, now):
                 chased += 1
@@ -22144,7 +22229,9 @@ def process_signal(event: dict):
             signal["pullback_pct"] = state.get("pullback_threshold", 0.001)
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
-            if research_lane in AI_DIRECT_RESEARCH_LANES and continuous_ai_direct_entry_enabled():
+            if research_lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+                compute_offset_029_atr_entry(signal)
+            elif research_lane in AI_DIRECT_RESEARCH_LANES and continuous_ai_direct_entry_enabled():
                 compute_continuous_ai_direct_entry(signal)
             else:
                 signal["entry_path"] = "MICRO_SR"
@@ -22902,6 +22989,69 @@ def _process_ws_ticker_update(payload) -> bool:
             "| ws_ready=True [PIPELINE ENFORCEMENT]"
         )
     _recompute_system_readiness(tick_now)
+    return True
+
+
+def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
+    """Reprice 25% of the remaining gap each minute from age 10m through 25m."""
+    if str(order.get("research_lane") or "").upper() != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return False
+    if order.get("status") != "PENDING" or price <= 0:
+        return False
+    created = float(order.get("created_ts") or 0)
+    last_chase = float(order.get("last_chase_ts") or created or 0)
+    if not offset029_policy.chase_due(
+        created_ts=created, last_chase_ts=last_chase, now=now,
+    ):
+        return False
+    age_sec = now - created
+    direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+    old_limit = float(order.get("limit_price") or 0)
+    original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
+    if direction not in ("LONG", "SHORT") or old_limit <= 0:
+        return False
+    if _pending_limit_touched(order, price):
+        return False
+    new_limit, reason = _compute_limit_chase_target(
+        direction, old_limit, float(price), original,
+        step_pct=offset029_policy.CHASE_STEP,
+    )
+    if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
+        return False
+    chase_count = int(order.get("limit_chase_count") or 0) + 1
+    committed = _commit_relay_limit_chase(
+        order,
+        signal,
+        direction=direction,
+        old_limit=old_limit,
+        new_limit=new_limit,
+        chase_count=chase_count,
+        now=now,
+        reference_price=price,
+    )
+    if committed is None:
+        return False
+    # Deliberately do not publish LIMIT_UPDATED: this lane is local paper only.
+    order["relay_eligible"] = False
+    if isinstance(signal, dict):
+        signal["relay_eligible"] = False
+    try:
+        from execution_funnel import funnel_on_limit_chase
+        funnel_on_limit_chase(
+            order,
+            old_limit,
+            new_limit,
+            round(age_sec / 60.0, 2),
+            round(_limit_chase_market_gap(direction, new_limit, price) / max(price, 1.0) * 100.0, 4),
+            chase_count,
+        )
+    except Exception as exc:
+        logger.debug(f"[OFFSET029] funnel chase log failed: {exc}")
+    logger.info(
+        f"[OFFSET029 PAPER] LIMIT_CHASE trade_id={order.get('trade_id')} "
+        f"age_min={age_sec / 60.0:.2f} old={fmt(old_limit)} new={fmt(new_limit)} "
+        f"step=25pct_remaining generation={chase_count} [PIPELINE ENFORCEMENT]"
+    )
     return True
 
 
@@ -23804,7 +23954,22 @@ def create_limit_order(signal):
         "entry_type": "LIMIT",
         "signal_price": signal.get("signal_price"),
         "signal_ts": signal.get("created_ts"),
-        "fee_type": "MAKER"
+        "fee_type": "MAKER",
+        "original_limit_price": limit_price,
+        "planned_limit_price": limit_price,
+        "last_chase_ts": time.time(),
+        "limit_chase_count": 0,
+        "raw_policy_id": signal.get("raw_policy_id"),
+        "policy_id": signal.get("policy_id"),
+        "paper_only": bool(signal.get("paper_only")),
+        "relay_eligible": bool(signal.get("relay_eligible", True)),
+        "chase_start_sec": signal.get("chase_start_sec"),
+        "chase_end_sec": signal.get("chase_end_sec"),
+        "chase_interval_sec": signal.get("chase_interval_sec"),
+        "chase_remaining_gap_step": signal.get("chase_remaining_gap_step"),
+        "entry_expires_ts": time.time() + float(
+            signal.get("entry_ttl_sec") or LIMIT_ORDER_MAX_AGE_SEC
+        ),
     }
     signal["limit_price"] = limit_price
     signal["order_created_ts"] = time.time()
@@ -26456,6 +26621,7 @@ def build_static_pathway_lane_specs() -> dict:
         )
         static_bracket = is_static_bracket_lane(lane_id)
         type_b_hunter = lane_id == RESEARCH_LANE_TYPE_B_HUNTER_V1
+        offset_029 = lane_id == RESEARCH_LANE_OFFSET_029_ATR_TP_25
         ai_lo, ai_hi = spec["ai_min"], spec["ai_max"]
         sp_lo, sp_hi = spec["spread_min"], spec["spread_max"]
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
@@ -26466,7 +26632,10 @@ def build_static_pathway_lane_specs() -> dict:
             ("Bracket Limit" if bracket_limit else
             ("Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous"))))
         )
-        if deterministic_bracket:
+        if offset_029:
+            trigger = "Every shared AI_SCAN APPROVE direction; independent paper capacity"
+            execution = "Local PAPER limit only; structurally ineligible for Bitfinex relay"
+        elif deterministic_bracket:
             trigger = "Structural envelope + midpoint guard · tick 10–30s or pivot change"
             if static_bracket:
                 execution = (
@@ -26506,7 +26675,16 @@ def build_static_pathway_lane_specs() -> dict:
         lane_kill = spec.get("kill_criteria") or kill
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
-        if deterministic_bracket:
+        if offset_029:
+            policy_view = offset029_policy.dashboard_policy()
+            filter_chips = policy_view["filter_chips"]
+            hypothesis = spec.get("hypothesis")
+            research_q = spec.get("research_question")
+            strategy_extra = policy_view["strategy_detail"]
+            offset_entry = {**policy_view["entry"], "ai_cadence": ai_cadence,
+                            "margin_usd": shared["margin_usd"], "filters": spec}
+            scenario_c = policy_view["exit"]
+        elif deterministic_bracket:
             # Per-lane ADX cap (v12): STATIC=40, V2 full-chase=40 (both retained
             # at 40 after re-analysis showed 35-40 was the second-best cohort).
             from sr_micro_tile_v2 import (
@@ -26802,7 +26980,9 @@ def build_static_pathway_lane_specs() -> dict:
             }
             v2_entry = None
         badge = "PROBATION - OPERATIONAL WHEN ON" if lane_status == "PROBATION" else (RESEARCH_CANDIDATE_ROLE if is_candidate else "")
-        if deterministic_bracket:
+        if offset_029:
+            entry_block = offset_entry
+        elif deterministic_bracket:
             entry_block = bracket_entry
         elif type_b_hunter:
             entry_block = type_b_entry
@@ -26837,7 +27017,10 @@ def build_static_pathway_lane_specs() -> dict:
             "research_question": research_q,
             "entry": entry_block,
             "exit": scenario_c,
-            "exit_path": "Scenario C frozen — exit combo optimization next",
+            "exit_path": (
+                "Frozen 3m ATR(14) × 2.5 target; otherwise 120m PATH_END"
+                if offset_029 else "Scenario C frozen — exit combo optimization next"
+            ),
             "promotion_criteria": lane_promote,
             "kill_criteria": lane_kill,
             "expected_advantage": (
@@ -26936,7 +27119,7 @@ def build_static_pathway_lane_specs() -> dict:
                     )
                 )
             ),
-            "strategy_detail": _strategy_detail_lines(
+            "strategy_detail": strategy_extra if offset_029 else _strategy_detail_lines(
                 {
                     "spawn": (
                         "Deterministic bracket evaluator · never shares AI_SCAN clock"
@@ -28505,7 +28688,6 @@ __ADMIN_ACCESS_CONTROLS__
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
-  <p style="color:#6e7681;font-size:0.82em;margin:0 0 10px 0;">2-lane paper-research stack — CONTINUOUS benchmark + TYPE_B_HUNTER_V1 candidate. Retired studies remain in the archive only.</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
   <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
     <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>

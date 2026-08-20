@@ -1,0 +1,65 @@
+from pathlib import Path
+
+import paper_policy_offset029 as policy
+from combo_pathway_config import (
+    COMBO_EXECUTION_LANES,
+    COMBO_LANE_SPECS,
+    COMBO_TILE_DISPLAY_ORDER,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+)
+
+
+def test_exact_anchor_and_chase_windows():
+    assert policy.initial_limit("LONG", 70_000) == 69_797.0
+    assert policy.initial_limit("SHORT", 70_000) == 70_203.0
+    assert not policy.chase_due(created_ts=0, last_chase_ts=0, now=599)
+    assert policy.chase_due(created_ts=0, last_chase_ts=0, now=600)
+    assert not policy.chase_due(created_ts=0, last_chase_ts=1_440, now=1_499)
+    assert policy.chase_due(created_ts=0, last_chase_ts=1_439, now=1_499)
+    assert not policy.chase_due(created_ts=0, last_chase_ts=1_439, now=1_500)
+
+
+def test_atr_target_and_path_end_are_exact():
+    assert policy.atr_target(100, "LONG", atr_abs=2) == 105
+    assert policy.atr_target(100, "SHORT", atr_abs=2) == 95
+    assert policy.exit_decision(
+        entry=100, direction="LONG", price=105, atr_abs=2, atr_pct=0, age_sec=30,
+    ) == ("ATR_TP_2_5X", 105)
+    assert policy.exit_decision(
+        entry=100, direction="LONG", price=99, atr_abs=2, atr_pct=0, age_sec=7_200,
+    ) == ("PATH_END_120M", 105)
+    assert policy.exit_decision(
+        entry=100, direction="LONG", price=99, atr_abs=0, atr_pct=0, age_sec=7_199,
+    ) == (None, None)
+
+
+def test_active_roster_contains_only_new_candidate_and_not_retired_type_b():
+    assert COMBO_EXECUTION_LANES == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,)
+    assert COMBO_TILE_DISPLAY_ORDER == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,)
+    spec = COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25]
+    assert spec["raw_policy_id"] == policy.POLICY_ID
+    assert spec["paper_only"] is True
+    assert spec["uses_shared_ai_direction"] is True
+    assert spec["is_independent_ai"] is False
+    assert spec["is_legacy"] is False
+    assert RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_EXECUTION_LANES
+    assert COMBO_LANE_SPECS[RESEARCH_LANE_TYPE_B_HUNTER_V1]["is_legacy"] is True
+
+
+def test_bot_adapter_is_paper_only_and_never_relay_allowlisted():
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    relay_block = source.split("PLATFORM_RELAY_ELIGIBLE_LANES =", 1)[1].split(")", 1)[0]
+    assert "RESEARCH_LANE_OFFSET_029_ATR_TP_25" not in relay_block
+    assert "if lane in PAPER_ONLY_RESEARCH_LANES:\n        return EXEC_MODE_PAPER" in source
+    assert "return _apply_offset_029_atr_exit(pos, price, now)" in source
+    assert "and lane != RESEARCH_LANE_OFFSET_029_ATR_TP_25" in source
+
+
+def test_dashboard_copy_is_truthful_and_complete():
+    view = policy.dashboard_policy()
+    joined = " ".join(view["strategy_detail"])
+    assert "No Scenario C ladder" in joined
+    assert "Bitfinex relay" in joined
+    assert "120m PATH_END" in joined
+    assert "0.29%" in joined
