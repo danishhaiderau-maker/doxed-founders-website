@@ -2512,16 +2512,7 @@ def evaluate_entry_quality_filter(direction: str, ctx: dict, ai: dict, features:
 def evaluate_evidence_entry_filter(
     direction: str, ctx: dict, ai: dict, features: dict, edge_score: float
 ) -> tuple:
-    """v63 analyzer gates: momentum chop, edge dead zone (both directions)."""
-    edge_score = round(float(edge_score or 0), 1)
-    if (
-        not EDGE_RESEARCH_TELEMETRY_ONLY
-        and not is_research_data_collection()
-        and not _sole_ai_research_mode()
-    ):
-        if EDGE_DEAD_ZONE_LOW < edge_score <= EDGE_DEAD_ZONE_HIGH:
-            return True, f"EDGE_DEAD_ZONE_{edge_score:.1f}"
-
+    """Evidence gate retained for non-Edge momentum/chop checks."""
     features = features or ctx.get("features") or {}
     if not RESEARCH_FREE_RUN_DISABLE_CHOP_GATE:
         mom = _compute_momentum_metric(features)
@@ -8006,28 +7997,9 @@ def _edge_range_label() -> str:
     return f"{lo:.1f}–{hi:.1f}"
 
 def edge_range_allows(edge_score: float) -> tuple:
-    """Return (allowed, block_reason). Uses effective min + optional dashboard max."""
-    edge_score = round(float(edge_score), 1)
-    if EDGE_RESEARCH_TELEMETRY_ONLY:
-        return True, "EDGE_OBSERVER_ONLY"
-    if _sole_ai_research_mode():
-        if edge_score <= 0.0:
-            return False, "EDGE_BELOW_THRESHOLD"
-        return True, "EDGE_SOLE_RESEARCH_LOG_ONLY"
-    eff_thr = get_effective_edge_threshold()
-    if eff_thr <= 0.0:
-        if edge_score <= 0.0:
-            return False, "EDGE_BELOW_THRESHOLD"
-    elif edge_score < eff_thr - 1e-9:
-        return False, "EDGE_BELOW_THRESHOLD"
-    edge_max = get_edge_threshold_max()
-    if edge_max is not None and edge_score > edge_max + 1e-9:
-        return False, "EDGE_ABOVE_MAX"
+    """Compatibility field for research rows; Edge never gates runtime work."""
+    float(edge_score)
     return True, "EDGE_IN_RANGE"
-
-def get_pre_ai_min_score() -> float:
-    """Pre-AI gate follows dashboard edge threshold (research tuning knob)."""
-    return get_edge_threshold()
 
 def get_dynamic_flat_momentum_floor(base: float = None) -> float:
     """
@@ -8780,96 +8752,6 @@ def get_effective_edge_threshold() -> float:
         state["debug_state"]["edge_components"] = comps
     return round(eff, 1)
 
-def _sync_edge_arm_state(edge_score: float):
-    """Hysteresis: re-arm only after edge falls meaningfully below threshold."""
-    edge_score = round(float(edge_score), 1)
-    eff_thr = get_effective_edge_threshold()
-    rearm_below = round(max(0.5, eff_thr - EDGE_HYSTERESIS_DROP), 1)
-    with state_lock:
-        prev = round(float(state.get("edge_prev", state.get("last_edge", 0)) or 0), 1)
-        state["edge_prev"] = edge_score
-        if edge_score < rearm_below:
-            state["edge_trigger_armed"] = True
-        armed = state.get("edge_trigger_armed", True)
-        range_hi = get_edge_threshold_max()
-        range_cap = f"{range_hi:.1f}" if range_hi is not None else f"{EDGE_SCORE_MAX:.1f}+"
-        state["debug_state"]["edge_progress"] = (
-            f"{edge_score:.1f}/{eff_thr:.1f}–{range_cap} armed={armed}"
-        )
-        state["debug_state"]["last_edge_score"] = edge_score
-    return prev, armed, eff_thr
-
-def is_edge_valid(edge_score: float) -> bool:
-    edge_score_rounded = round(edge_score, 1)
-    if _sole_ai_research_mode():
-        valid = edge_score_rounded > 0.0
-        _sync_edge_arm_state(edge_score_rounded)
-        with state_lock:
-            state["debug_state"]["edge_above_threshold"] = valid
-        logger.info(
-            f"[EDGE GATE] edge={edge_score_rounded:.1f} valid={valid} "
-            f"sole_research=log_only min=0 [PIPELINE ENFORCEMENT]"
-        )
-        return valid
-    eff_thr = get_effective_edge_threshold()
-    valid, _reason = edge_range_allows(edge_score_rounded)
-    _sync_edge_arm_state(edge_score_rounded)
-    with state_lock:
-        state["debug_state"]["edge_above_threshold"] = valid
-    logger.info(
-        f"[EDGE GATE] edge={edge_score_rounded:.1f} valid={valid} "
-        f"range={_edge_range_label()} effective_min={eff_thr} [PIPELINE ENFORCEMENT]"
-    )
-    return valid
-
-def _edge_candle_bucket() -> int:
-    return int(time.time() // CANDLE_INTERVAL_SEC)
-
-def should_trigger_edge_event(edge_score: float) -> tuple:
-    """
-    Decide if this cycle should open the pipeline (and eventually AI).
-    Cross-only mode avoids calling AI on every tick while edge stays high.
-    In RESEARCH mode, re-arm once per closed 15m candle bucket when edge stays elevated.
-    """
-    edge_score = round(float(edge_score), 1)
-    prev, armed, eff_thr = _sync_edge_arm_state(edge_score)
-    allowed, block_reason = edge_range_allows(edge_score)
-    if not allowed:
-        return False, block_reason
-    candle_bucket = _edge_candle_bucket()
-    with state_lock:
-        last_candle_bucket = int(state.get("last_edge_trigger_candle_bucket", -1))
-        research_candle_rearm = (
-            EDGE_CANDLE_REARM_RESEARCH
-            and state.get("strategy_mode") == "RESEARCH"
-            and candle_bucket > last_candle_bucket
-        )
-    spike = (edge_score - prev) >= EDGE_MIN_SPIKE_DELTA
-    if EDGE_CROSS_ONLY_TRIGGER:
-        if armed or research_candle_rearm:
-            with state_lock:
-                state["edge_trigger_armed"] = False
-                state["last_edge_trigger_candle_bucket"] = candle_bucket
-                state["last_edge_trigger_prev"] = prev
-                state["last_edge_trigger_score"] = edge_score
-            if prev < eff_thr:
-                reason = "EDGE_CROSS"
-            elif spike:
-                reason = "EDGE_SPIKE"
-            elif research_candle_rearm and not armed:
-                reason = "CANDLE_REARM"
-            else:
-                reason = "EDGE_ARMED"
-            logger.info(
-                f"[EDGE TRIGGER] {reason} edge={edge_score} prev={prev} thr={eff_thr} "
-                f"candle_bucket={candle_bucket} [PIPELINE ENFORCEMENT]"
-            )
-            return True, reason
-        return False, "EDGE_SUSTAINED_NO_REARM"
-    if spike or prev < eff_thr:
-        return True, "EDGE_PASS"
-    return True, "EDGE_PASS"
-
 def is_profit_gates_lane(research_lane) -> bool:
     return str(research_lane or "") == RESEARCH_LANE_PROFIT_GATES
 
@@ -8907,14 +8789,7 @@ def _research_execute_log_only(research_lane=None) -> bool:
 def evaluate_profitability_entry_gates(
     signal: dict, ai: dict, edge_score: float, research_lane=None
 ) -> tuple:
-    """Profit gates mirror dashboard edge/AI thresholds — hard block only on PROFIT_GATES lane in research."""
-    edge_score = round(float(edge_score or 0), 1)
-    edge_min = round(float(get_edge_threshold()), 1)
-    if not EDGE_RESEARCH_TELEMETRY_ONLY and edge_score < edge_min:
-        reason = f"PROFIT_GATE_EDGE_LT_{edge_min}"
-        if is_research_data_collection():
-            return is_profit_gates_lane(research_lane), reason
-        return True, reason
+    """Non-Edge profitability gates; Edge is descriptive evidence only."""
     prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
     if dashboard_ai_band_blocks(prob):
         reason = "PROFIT_GATE_AI_BAND"
@@ -8948,43 +8823,6 @@ def research_lanes_independent() -> bool:
     """True when research lanes use per-lane cooldown/rearm (capacity is still global)."""
     return research_isolation_enabled() or _sole_ai_research_mode()
 
-
-def evaluate_pre_ai_gate(edge_score: float, features: dict = None) -> tuple:
-    """Cheap structural gate — blocks AI without an API call."""
-    if EDGE_RESEARCH_TELEMETRY_ONLY:
-        return False, None
-    if _sole_ai_research_mode():
-        return False, None
-    edge_score = round(float(edge_score), 1)
-    allowed, block_reason = edge_range_allows(edge_score)
-    if not allowed:
-        if block_reason == "EDGE_ABOVE_MAX":
-            return True, f"PRE_AI_EDGE_ABOVE_MAX_{edge_score}"
-        return True, f"PRE_AI_EDGE_LOW_{edge_score}"
-    pre_ai_min = get_pre_ai_min_score()
-    if edge_score < pre_ai_min:
-        return True, f"PRE_AI_EDGE_LOW_{edge_score}"
-    if is_research_data_collection():
-        return False, None
-    update_market_context()
-    with state_lock:
-        mc = state.get("market_context") or {}
-    mtf = (mc.get("multi_tf") or {})
-    ts = (mc.get("trend_strength") or {})
-    agreement = str(mtf.get("agreement", ""))
-    adx = float(ts.get("adx") or 0)
-    sr_state = ""
-    if features:
-        sr_state = str(features.get("sr_state", "")).upper()
-    if not sr_state:
-        sr_state = str((state.get("support_resistance") or {}).get("sr_state", "")).upper()
-    if agreement == "CONFLICTED" and edge_score < PRE_AI_BLOCK_CONFLICTED_BELOW:
-        return True, "PRE_AI_MTF_CONFLICTED"
-    if "COMPRESSION" in sr_state and edge_score < PRE_AI_BLOCK_COMPRESSION_BELOW:
-        return True, "PRE_AI_RANGE_COMPRESSION"
-    if adx < PRE_AI_MIN_ADX and edge_score < PRE_AI_BLOCK_LOW_ADX_BELOW:
-        return True, f"PRE_AI_LOW_ADX_{adx:.1f}"
-    return False, None
 
 def get_research_ai_cooldown_sec(lane: str = None) -> int:
     """Continuous-lane AI interval (seconds). CONTINUOUS benchmark frozen at 180s."""
@@ -9959,7 +9797,7 @@ def reserve_ai_cooldown_slot(lane: str = RESEARCH_LANE_CONTINUOUS) -> tuple:
     return True, "RESERVED"
 
 def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple:
-    """Final gate before DeepSeek — edge event + pre-AI blocks; cooldown enforced via reserve_ai_cooldown_slot()."""
+    """Final non-Edge gate before the single direction AI call."""
     if state.get("force_ai_every_signal"):
         return True, "FORCE_AI"
     if _sole_ai_research_mode():
@@ -9976,11 +9814,8 @@ def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple
     if ai_cooldown_remaining_sec() > 0:
         return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec()}s"
     if not event_trigger:
-        return False, "NO_EDGE_TRIGGER"
-    blocked, reason = evaluate_pre_ai_gate(edge_score, ctx)
-    if blocked:
-        return False, reason
-    return True, "EDGE_EVENT"
+        return False, "NO_PERIODIC_TRIGGER"
+    return True, "PERIODIC_DIRECTION_AI"
 
 def compute_ret_1m():
     if len(price_buffer) < 2:
@@ -17802,65 +17637,6 @@ def _load_spread_analytics_snapshot() -> dict:
         "definition": "normalized directional score gap = abs(LONG score - SHORT score) // 10",
     }
 
-def set_edge_threshold(value):
-    value = round(float(value), 1)
-    if value not in [round(x, 1) for x in EDGE_OPTIONS]:
-        logger.warning(f"[EDGE SET] Invalid value {value} - rejected [PIPELINE ENFORCEMENT]")
-        return
-    with state_lock:
-        state["edge_threshold"] = value
-        edge_max = state.get("edge_threshold_max")
-        if edge_max is not None and value > float(edge_max) + 1e-9:
-            state["edge_threshold_max"] = value
-        state["edge_range_preset"] = "custom"
-        save_persistent_config()
-        logger.info(
-            f"[SET] EDGE min={state['edge_threshold']} max={state.get('edge_threshold_max')} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-        enforce_edge_threshold_options()
-
-def set_edge_threshold_max(value):
-    if value is None or value == "" or (isinstance(value, str) and value.lower() in ("none", "null", "no_cap")):
-        with state_lock:
-            state["edge_threshold_max"] = None
-            state["edge_range_preset"] = "custom"
-            save_persistent_config()
-        logger.info("[SET] EDGE max cleared (min-only gate) [PIPELINE ENFORCEMENT]")
-        return
-    value = round(float(value), 1)
-    if value not in [round(x, 1) for x in EDGE_OPTIONS]:
-        logger.warning(f"[EDGE SET] Invalid max {value} - rejected [PIPELINE ENFORCEMENT]")
-        return
-    with state_lock:
-        if float(state["edge_threshold"]) > value + 1e-9:
-            state["edge_threshold"] = value
-        state["edge_threshold_max"] = value
-        state["edge_range_preset"] = "custom"
-        save_persistent_config()
-    logger.info(f"[SET] EDGE max={value} min={get_edge_threshold()} [PIPELINE ENFORCEMENT]")
-    enforce_edge_threshold_options()
-
-def apply_edge_range_preset(preset_id: str):
-    preset = next((p for p in EDGE_RANGE_PRESETS if p["id"] == preset_id), None)
-    if not preset:
-        logger.warning(f"[EDGE SET] Unknown preset {preset_id} [PIPELINE ENFORCEMENT]")
-        return
-    if preset_id == "custom":
-        with state_lock:
-            state["edge_range_preset"] = "custom"
-            save_persistent_config()
-        return
-    with state_lock:
-        state["edge_threshold"] = round(float(preset["min"]), 1)
-        state["edge_threshold_max"] = None if preset["max"] is None else round(float(preset["max"]), 1)
-        state["edge_range_preset"] = preset_id
-        save_persistent_config()
-    enforce_edge_threshold_options()
-    logger.info(
-        f"[SET] EDGE preset={preset_id} range={_edge_range_label()} [PIPELINE ENFORCEMENT]"
-    )
-
 def hash_context(ctx):
     try:
         return hash((
@@ -18493,51 +18269,42 @@ def detect_event_light():
         if now - last_event_trigger < 0.5:
             return {"event_trigger": False, "edge_score": edge_score, "price": price, "timestamp": utc_iso(), "features": features}
 
-        is_edge_valid(edge_score)
-        if _sole_ai_research_mode():
-            if not any_combo_execution_enabled(
-                research_lane_enabled_map(), continuous_ai_research_enabled()
-            ):
-                event_trigger, trigger_reason = False, "ALL_COMBO_OFF"
-            else:
-                cd_rem = ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN)
-                if cd_rem == 0 and round(edge_score, 1) >= 0.0:
-                    event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
-                elif cd_rem > 0:
-                    event_trigger, trigger_reason = False, f"AI_COOLDOWN_{cd_rem}s"
-                else:
-                    event_trigger, trigger_reason = False, "EDGE_BELOW_MIN"
+        if not any_combo_execution_enabled(
+            research_lane_enabled_map(), continuous_ai_research_enabled()
+        ):
+            event_trigger, trigger_reason = False, "ALL_COMBO_OFF"
         else:
-            event_trigger, trigger_reason = should_trigger_edge_event(edge_score)
+            cd_rem = ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN)
+            if cd_rem == 0:
+                event_trigger, trigger_reason = True, "PERIODIC_RESEARCH_AI"
+            else:
+                event_trigger, trigger_reason = False, f"AI_COOLDOWN_{cd_rem}s"
 
         last_event_trigger = now
 
         logger.info(
-            f"[EVENT LIGHT V2] edge={edge_score:.1f} trigger={event_trigger} "
-            f"reason={trigger_reason} effective_thr={get_effective_edge_threshold():.1f} "
+            f"[EVENT LIGHT] descriptive_edge={edge_score:.1f} trigger={event_trigger} "
+            f"reason={trigger_reason} "
             f"[PIPELINE ENFORCEMENT]"
         )
 
-        eff_thr = get_effective_edge_threshold()
         with state_lock:
             ds = state["debug_state"]
             ds["last_edge_score"] = edge_score
             ds["pipeline_event_trigger"] = event_trigger
             ds["edge_trigger_reason"] = trigger_reason
-            ds["edge_above_threshold"] = edge_score >= eff_thr
+            ds["edge_above_threshold"] = None
             ag = dict(ds.get("ai_gate") or {"called": False, "reason": "", "edge": 0.0, "threshold": 0.0})
             if not ag.get("called"):
-                ag["reason"] = trigger_reason if not event_trigger else "EDGE_EVENT_ARMED"
+                ag["reason"] = trigger_reason
                 ag["edge"] = edge_score
-                ag["threshold"] = eff_thr
+                ag["threshold"] = None
                 ds["ai_gate"] = ag
             ds["pipeline_idle_reason"] = trigger_reason if not event_trigger else None
             if not event_trigger:
                 ds["skip_reason"] = trigger_reason
                 idle_only = (
                     str(trigger_reason).startswith("AI_COOLDOWN")
-                    or trigger_reason == "EDGE_SUSTAINED_NO_REARM"
-                    or trigger_reason == "EDGE_BELOW_MIN"
                 )
                 if not (idle_only and _ai_gate_was_called(ds)):
                     ds["last_block_reason"] = trigger_reason
@@ -18551,12 +18318,10 @@ def detect_event_light():
             {"edge": edge_score, "pipeline_event_trigger": event_trigger, "edge_trigger_reason": trigger_reason},
         )
         log_pipeline_event(
-            "EDGE", "TRIGGER" if event_trigger else "WAIT",
+            "PERIODIC_AI", "TRIGGER" if event_trigger else "WAIT",
             trigger_reason, None, edge_score,
-            {"effective_threshold": eff_thr, "edge_threshold_max": get_edge_threshold_max()},
+            {"edge_observer_only": True},
         )
-        if not event_trigger and trigger_reason in ("EDGE_BELOW_THRESHOLD", "EDGE_ABOVE_MAX"):
-            log_edge_census(edge_score, "EDGE_EVENT", trigger_reason, features)
 
         return {
             "event_trigger": event_trigger,
@@ -21142,63 +20907,31 @@ def process_signal(event: dict):
             if features is None or not is_valid_feature_set(features):
                 logger.warning("[PIPELINE] LOW_QUALITY_ENV - continuing for research [PIPELINE ENFORCEMENT]")
             edge_score = compute_edge_score(features)
-            logger.info(f"[PIPELINE] edge computed = {edge_score:.1f} [PIPELINE ENFORCEMENT]")
+            logger.info(f"[PIPELINE] descriptive edge={edge_score:.1f} (observer only)")
 
             if edge_score >= 0.5:
                 log_near_edge(features, edge_score)
-            allowed_edge, edge_block = edge_range_allows(edge_score)
-            if not allowed_edge:
-                log_edge_census(edge_score, "PIPELINE", edge_block, features)
 
             event_obj = event if event else detect_event_light()
             if not event_obj:
                 event_obj = {"event_trigger": False, "edge_score": edge_score, "price": nz(state.get("price")), "timestamp": utc_iso(), "features": features}
 
-            eff_thr = get_effective_edge_threshold()
-            pipeline_eff_thr = eff_thr
+            # Compatibility field only: Edge no longer has an execution threshold.
+            pipeline_eff_thr = 0.0
             sole = _sole_ai_research_mode()
-            if EDGE_RESEARCH_TELEMETRY_ONLY:
-                with state_lock:
-                    state["debug_state"]["edge_telemetry_only"] = True
-            elif edge_score < eff_thr:
-                logger.info(
-                    f"[EDGE GATE] edge_score={edge_score:.1f} < effective_threshold={eff_thr} - NO_SIGNAL "
-                    f"[PIPELINE ENFORCEMENT]"
-                )
-                log_no_signal_with_context(reason="EDGE_FAIL")
-                full_pipeline_trace("BLOCKED", "EDGE_FAIL", None)
-                with state_lock:
-                    state["debug_state"]["last_block_reason"] = "EDGE_FAIL"
-                    state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                    state["debug_state"]["skip_reason"] = "EDGE_FAIL"
-                update_debug_state_always("EDGE_FAIL", {"edge": edge_score})
-                state["last_pipeline_stage"] = "IDLE"
-                return
-
-            if EDGE_RESEARCH_TELEMETRY_ONLY:
-                trigger_reason = event_obj.get("edge_trigger_reason") or (
-                    "SHARED_DIRECTION_SPAWN" if skip_ai else "PERIODIC_DIRECTION_AI"
-                )
-                ai_rem = ai_cooldown_remaining_sec(research_lane)
-                if not skip_ai and is_ai_scan_lane(research_lane) and ai_rem > 0:
-                    trigger_ok = False
-                    trigger_reason = f"AI_COOLDOWN_{ai_rem}s"
-                else:
-                    trigger_ok = True
-            elif event_obj.get("event_trigger") and event:
-                trigger_ok = True
-                trigger_reason = event_obj.get("edge_trigger_reason", "EDGE_EVENT_PASSTHROUGH")
+            with state_lock:
+                state["debug_state"]["edge_telemetry_only"] = True
+            trigger_reason = "SHARED_DIRECTION_SPAWN" if skip_ai else "PERIODIC_DIRECTION_AI"
+            ai_rem = ai_cooldown_remaining_sec(research_lane)
+            if not skip_ai and is_ai_scan_lane(research_lane) and ai_rem > 0:
+                trigger_ok = False
+                trigger_reason = f"AI_COOLDOWN_{ai_rem}s"
             else:
-                trigger_ok, trigger_reason = should_trigger_edge_event(edge_score)
+                trigger_ok = True
             if not trigger_ok:
-                if str(trigger_reason).startswith("AI_COOLDOWN"):
-                    increment_pipeline_funnel("COOLDOWN_BLOCK")
-                elif trigger_reason == "EDGE_SUSTAINED_NO_REARM":
-                    increment_pipeline_funnel("REARM_BLOCK")
-                elif str(trigger_reason).startswith("EDGE"):
-                    increment_pipeline_funnel("EDGE_BLOCK")
+                increment_pipeline_funnel("COOLDOWN_BLOCK")
                 logger.info(
-                    f"[EDGE GATE] edge={edge_score:.1f} >= {eff_thr} but no trigger ({trigger_reason}) - skip AI "
+                    f"[AI] periodic direction call skipped ({trigger_reason}) "
                     f"[PIPELINE ENFORCEMENT]"
                 )
                 log_no_signal_with_context(reason=trigger_reason)
@@ -21210,10 +20943,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            logger.info(
-                f"[PIPELINE] EDGE TRIGGER {trigger_reason} -> candidate stage (AI only if pre-gates pass) "
-                f"[PIPELINE ENFORCEMENT]"
-            )
+            logger.info(f"[PIPELINE] {trigger_reason} -> candidate stage")
 
             safe_clear_pending()
             now = time.time()
@@ -21349,25 +21079,6 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                if (
-                    not EDGE_RESEARCH_TELEMETRY_ONLY
-                    and not (sole and is_research_data_collection())
-                    and round(float(edge_score), 1) < round(float(pipeline_eff_thr), 1)
-                ):
-                    logger.info(
-                        f"[EDGE GATE] edge={edge_score:.1f} < frozen effective={pipeline_eff_thr:.1f} "
-                        f"- skip before AI [PIPELINE ENFORCEMENT]"
-                    )
-                    log_no_signal_with_context(reason=f"EDGE_BELOW_{pipeline_eff_thr}", skip_stage="PRE_AI")
-                    full_pipeline_trace("BLOCKED", "EDGE_BELOW_THRESHOLD", None)
-                    with state_lock:
-                        state["debug_state"]["last_block_reason"] = "EDGE_BELOW_THRESHOLD"
-                        state["debug_state"]["skip_reason"] = f"EDGE_BELOW_{pipeline_eff_thr}"
-                    update_debug_state_always("EDGE_BELOW_THRESHOLD", {"edge": edge_score, "effective_threshold": pipeline_eff_thr})
-                    _set_lane_pipeline_stage(research_lane, "IDLE")
-                    state["last_pipeline_stage"] = "IDLE"
-                    return
-
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:
                     logger.info(
@@ -21383,7 +21094,7 @@ def process_signal(event: dict):
                             "called": False,
                             "reason": ai_gate_reason,
                             "edge": edge_score,
-                            "threshold": eff_thr,
+                            "threshold": None,
                         }
                     update_debug_state_always(ai_gate_reason, {"edge": edge_score})
                     _set_lane_pipeline_stage(research_lane, "IDLE")
@@ -21806,28 +21517,6 @@ def process_signal(event: dict):
                     update_debug_state_always(ev_reason, {"edge": edge_score})
                     state["last_pipeline_stage"] = "IDLE"
                     return
-
-            setup_type = signal.get("setup_type") or classify_setup(signal.get("features") or {})
-            weak_min_edge = get_weak_setup_min_edge()
-            if (
-                not EDGE_RESEARCH_TELEMETRY_ONLY
-                and setup_type == "WEAK_SETUP"
-                and edge_score < weak_min_edge
-            ):
-                weak_reason = f"WEAK_SETUP_LOW_EDGE_{edge_score:.1f}_LT_{weak_min_edge}"
-                if not is_research_data_collection() or is_profit_gates_lane(research_lane):
-                    logger.info(f"[SETUP GATE] {weak_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-                    log_pipeline_event("POST_AI", "BLOCKED", weak_reason, trade_id, edge_score, {"setup_type": setup_type, "min_edge": weak_min_edge}, force=True)
-                    log_blocked_signal(signal, ai, weak_reason)
-                    exit_pipeline(signal, ai, weak_reason)
-                    with state_lock:
-                        state["debug_state"]["last_block_reason"] = weak_reason
-                        state["debug_state"]["last_pipeline_stage"] = "BLOCKED"
-                        state["debug_state"]["skip_reason"] = weak_reason
-                    update_debug_state_always(weak_reason, {"edge": edge_score})
-                    state["last_pipeline_stage"] = "IDLE"
-                    return
-                _research_log_would_block(signal, ai, weak_reason, edge_score)
 
             if research_isolation_enabled():
                 if not ensure_directional_capacity(final_direction, research_lane):
@@ -23139,17 +22828,16 @@ def state_monitor_loop():
                         features = build_full_feature_snapshot()
                         if features:
                             edge_score = compute_edge_score(features)
-                            if round(edge_score, 1) >= 0.0:
-                                process_signal({
-                                    "event_trigger": True,
-                                    "research_lane": RESEARCH_LANE_AI_SCAN,
-                                    "edge_trigger_reason": "PERIODIC_RESEARCH_AI",
-                                    "edge_score": round(edge_score, 1),
-                                    "price": nz(state.get("price")),
-                                    "timestamp": utc_iso(),
-                                    "features": features,
-                                })
-                                _lane_last_ts['CONTINUOUS'] = time.time()
+                            process_signal({
+                                "event_trigger": True,
+                                "research_lane": RESEARCH_LANE_AI_SCAN,
+                                "edge_trigger_reason": "PERIODIC_RESEARCH_AI",
+                                "edge_score": round(edge_score, 1),
+                                "price": nz(state.get("price")),
+                                "timestamp": utc_iso(),
+                                "features": features,
+                            })
+                            _lane_last_ts['CONTINUOUS'] = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
             # Type B consumes the same three-minute AI_SCAN result as Continuous.
@@ -24881,8 +24569,6 @@ _AI_DRAIN_POST_PATHS = {
     "/api/toggle_continuous_ai_direct",
     "/api/toggle_research_lane",
     "/api/set_threshold",
-    "/api/set_edge_threshold",
-    "/api/set_edge_range",
     "/api/live_arm",
     "/api/bitfinex_live",
     "/api/reset",
@@ -26738,7 +26424,7 @@ def build_static_pathway_lane_specs() -> dict:
         })
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "v15 roster — Continuous + Type B share one direction AI call but keep separate policies/books; retired S/R history remains archived",
+        "architecture_freeze_note": "Current roster — Continuous + 0.29% Patient Chase share one periodic direction AI call and lifecycle engine; retired lane history remains analyzer-only",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -28131,48 +27817,6 @@ __ADMIN_ACCESS_CONTROLS__
 <p id="edgeDeprecatedBanner" style="margin:8px 0;padding:10px 12px;background:#1c2128;border:1px solid #f0b429;border-radius:6px;color:#f0b429;">
   <strong>EDGE STATUS: DEPRECATED</strong> — analytics only. Edge no longer gates execution, AI calls, or approvals. Score still logged to CSV/reports.
 </p>
-<div id="edgeControlsLegacy" style="display:none;">
-<label>Edge range preset:</label>
-<select id="edgeRangePreset">
-  <option value="min_only" selected>Any ≥ min (no upper cap) — v80 collection</option>
-  <option value="2.0_2.5">2.0 – 2.5 (sweet spot experiment)</option>
-  <option value="2.0_3.0">2.0 – 3.0</option>
-  <option value="2.5_3.5">2.5 – 3.5</option>
-  <option value="3.0_4.0">3.0 – 4.0</option>
-  <option value="custom">Custom min / max</option>
-</select><br>
-<div id="edgeCustomRange" style="display:none;margin:6px 0;padding:8px;border:1px solid #30363d;border-radius:6px;">
-<label>Min edge:</label>
-<select id="edgeThreshold">
-  <option value="0.5" selected>0.5</option>
-  <option value="1.0">1.0</option>
-  <option value="1.5">1.5</option>
-  <option value="2.0">2.0</option>
-  <option value="2.5">2.5</option>
-  <option value="3.0">3.0</option>
-  <option value="3.5">3.5</option>
-  <option value="4.0">4.0</option>
-  <option value="4.5">4.5</option>
-  <option value="5.0">5.0</option>
-  <option value="5.5">5.5</option>
-  <option value="6.0">6.0</option>
-</select>
-<label style="margin-left:12px;">Max edge:</label>
-<select id="edgeThresholdMax">
-  <option value="no_cap" selected>No cap</option>
-  <option value="2.0">2.0</option>
-  <option value="2.5">2.5</option>
-  <option value="3.0">3.0</option>
-  <option value="3.5">3.5</option>
-  <option value="4.0">4.0</option>
-  <option value="4.5">4.5</option>
-  <option value="5.0">5.0</option>
-  <option value="5.5">5.5</option>
-  <option value="6.0">6.0</option>
-</select>
-</div>
-</div>
-<p style="display:none;color:#8b949e;font-size:0.85em;margin:4px 0;">Only signals with edge inside the range trigger AI. High edge (e.g. 3.5+) is blocked when max is set.</p>
 <p id="executionGateHint" style="margin:8px 0;color:#8b949e;">—</p>
 </div></details>
 
@@ -28203,7 +27847,7 @@ __ADMIN_ACCESS_CONTROLS__
 <p><strong>AI Direction (raw):</strong> <span id="aiDirRaw">-</span></p>
 <p><strong>Final Direction (after invert):</strong> <span id="finalDir">-</span></p>
 <p><strong>Inverted:</strong> <span id="inverted">-</span></p>
-<p><strong>Edge range (gate):</strong> <span id="edgeThresholdDisplay">DEPRECATED — analytics only</span></p>
+<p><strong>Edge score:</strong> <span id="edgeThresholdDisplay">analytics only</span></p>
 <p><strong>Last APPROVE Outcome:</strong> <span id="approveOutcome">-</span></p>
 <p><strong>AI Reason:</strong> <span id="aiReason">-</span></p>
 
@@ -28225,7 +27869,7 @@ __ADMIN_ACCESS_CONTROLS__
     <p><strong>Edge Score:</strong> <span id="edgeScore">-</span></p>
     <p><strong>Edge Progress (score / min required, max 6):</strong> <span id="edgeProgress">-</span></p>
     <p><strong>Flags:</strong> <span id="flags">-</span></p>
-    <p><strong>Pipeline trigger (edge event):</strong> <span id="trigger">-</span></p>
+    <p><strong>Pipeline trigger (periodic shared AI):</strong> <span id="trigger">-</span></p>
     <p><strong>AI Gate (DeepSeek):</strong> <span id="aiGateStatus">-</span></p>
     <p><strong>Skip Reason:</strong> <span id="skipReason">-</span></p>
     <p><strong>Signal Attempt:</strong> <span id="signalAttempt">-</span></p>
@@ -28723,77 +28367,6 @@ DASHBOARD_JS = """(function () {
           <td>${b.sum_pnl_usd != null ? b.sum_pnl_usd : '—'}</td>
           <td>${b.ev_usd != null ? b.ev_usd : '—'}</td>
         </tr>`).join('') || '<tr><td colspan="5">No spread stats yet — run analyzer</td></tr>';
-    }
-    function normalizeEdgeOptionValue(value) {
-      const n = parseFloat(value);
-      if (Number.isNaN(n)) return null;
-      return n.toFixed(1);
-    }
-    function syncEdgeThresholdSelect(threshold) {
-      const edgeSel = document.getElementById('edgeThreshold');
-      if (!edgeSel || threshold == null || threshold === '') return;
-      const normalized = normalizeEdgeOptionValue(threshold);
-      if (!normalized) return;
-      edgeSel.value = normalized;
-      if (!edgeSel.value) {
-        const opt = document.createElement('option');
-        opt.value = normalized;
-        opt.textContent = normalized;
-        edgeSel.appendChild(opt);
-        edgeSel.value = normalized;
-      }
-    }
-    function syncEdgeThresholdMaxSelect(maxVal) {
-      const maxSel = document.getElementById('edgeThresholdMax');
-      if (!maxSel) return;
-      if (maxVal == null || maxVal === '' || maxVal === undefined) {
-        maxSel.value = 'no_cap';
-        return;
-      }
-      const normalized = normalizeEdgeOptionValue(maxVal);
-      if (!normalized) return;
-      maxSel.value = normalized;
-      if (!maxSel.value) maxSel.value = 'no_cap';
-    }
-    function toggleEdgeCustomPanel(presetId) {
-      const panel = document.getElementById('edgeCustomRange');
-      if (panel) panel.style.display = presetId === 'custom' ? 'block' : 'none';
-    }
-    function syncEdgeRangePreset(presetId) {
-      const presetSel = document.getElementById('edgeRangePreset');
-      if (!presetSel || !presetId) return;
-      presetSel.value = presetId;
-      if (!presetSel.value) {
-        const opt = document.createElement('option');
-        opt.value = presetId;
-        opt.textContent = presetId;
-        presetSel.appendChild(opt);
-        presetSel.value = presetId;
-      }
-      toggleEdgeCustomPanel(presetId);
-    }
-    async function updateEdgeRangePreset(presetId) {
-      await post('/api/set_edge_range', {preset: presetId});
-      syncEdgeRangePreset(presetId);
-      refresh();
-    }
-    async function updateEdgeRangeCustom() {
-      const minSel = document.getElementById('edgeThreshold');
-      const maxSel = document.getElementById('edgeThresholdMax');
-      const minVal = minSel ? parseFloat(normalizeEdgeOptionValue(minSel.value)) : null;
-      const maxRaw = maxSel ? maxSel.value : 'no_cap';
-      const maxVal = maxRaw === 'no_cap' ? null : parseFloat(normalizeEdgeOptionValue(maxRaw));
-      await post('/api/set_edge_range', {preset: 'custom', min: minVal, max: maxVal});
-      syncEdgeRangePreset('custom');
-      refresh();
-    }
-    async function updateEdge(value) {
-      const normalized = normalizeEdgeOptionValue(value);
-      if (!normalized) return;
-      await post('/api/set_edge_threshold', {value: parseFloat(normalized)});
-      syncEdgeThresholdSelect(normalized);
-      syncEdgeRangePreset('custom');
-      refresh();
     }
     async function toggleEarlyFail() {
       await post('/api/toggle_early_fail');
@@ -30246,10 +29819,7 @@ DASHBOARD_JS = """(function () {
     document.addEventListener('DOMContentLoaded', () => {
       const dropdowns = {
         'leverage': '/api/set_leverage',
-        'maxConcurrentPositions': '/api/set_max_active_signals',
-        'edgeThreshold': '/api/set_edge_range',
-        'edgeThresholdMax': '/api/set_edge_range',
-        'edgeRangePreset': '/api/set_edge_range'
+        'maxConcurrentPositions': '/api/set_max_active_signals'
       };
       function debounce(fn, ms) {
         let t;
@@ -30269,14 +29839,6 @@ DASHBOARD_JS = """(function () {
             refresh();
           }, 400);
           el.addEventListener('change', function() {
-            if (id === 'edgeRangePreset') {
-              updateEdgeRangePreset(this.value);
-              return;
-            }
-            if (id === 'edgeThreshold' || id === 'edgeThresholdMax') {
-              updateEdgeRangeCustom();
-              return;
-            }
             if (el.type === 'number') {
               return;
             }
@@ -35495,47 +35057,6 @@ def set_spread_gate_api():
     set_spread_gate(gate)
     return jsonify({"status": "ok", "spread_gate": get_spread_gate()})
 
-@app.route('/api/set_edge_threshold', methods=['POST'])
-def api_set_edge_threshold():
-    data = request.get_json() or {}
-    value = round(float(data.get("value", 3.0)), 1)
-    if value not in [round(x, 1) for x in EDGE_OPTIONS]:
-        logger.warning(f"[EDGE SET API] Invalid value {value} rejected [PIPELINE ENFORCEMENT]")
-        return jsonify({"status": "error", "msg": "invalid threshold"}), 400
-    set_edge_threshold(value)
-    return jsonify({
-        "status": "ok",
-        "new_value": value,
-        "edge_threshold": get_edge_threshold(),
-        "edge_threshold_max": get_edge_threshold_max(),
-        "edge_threshold_display": _edge_range_label(),
-    })
-
-@app.route('/api/set_edge_range', methods=['POST'])
-def api_set_edge_range():
-    data = request.get_json() or {}
-    preset = data.get("preset")
-    if preset and preset != "custom":
-        apply_edge_range_preset(str(preset))
-    else:
-        if "min" in data and data.get("min") is not None:
-            set_edge_threshold(round(float(data["min"]), 1))
-        if "max" in data:
-            set_edge_threshold_max(data.get("max"))
-        elif preset == "custom":
-            with state_lock:
-                state["edge_range_preset"] = "custom"
-                save_persistent_config()
-    with state_lock:
-        preset_out = state.get("edge_range_preset")
-    return jsonify({
-        "status": "ok",
-        "edge_threshold": get_edge_threshold(),
-        "edge_threshold_max": get_edge_threshold_max(),
-        "edge_range_preset": preset_out,
-        "edge_threshold_display": _edge_range_label(),
-    })
-
 @app.route('/api/download_debug_config')
 def download_debug_config():
     with state_lock:
@@ -40489,7 +40010,7 @@ def periodic_pipeline_loop():
         if _sole_ai_research_mode():
             logger.info("[HEARTBEAT] v83 periodic AI check [PIPELINE ENFORCEMENT]")
             event = detect_event_light()
-            if event and round(event.get("edge_score", 0), 1) >= 0:
+            if event and event.get("event_trigger"):
                 process_signal(event)
             continue
         logger.info("[HEARTBEAT] Periodic pipeline check (no direct AI call) [PIPELINE ENFORCEMENT]")
