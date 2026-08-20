@@ -40247,6 +40247,13 @@ def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
     _csv_write_fallback(path, row, last_err)
     return False
 
+
+def _validate_research_ledgers_on_startup():
+    """Quarantine known active research corruption before mirror discovery."""
+    for path, label in ((SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP"),):
+        with _jsonl_path_lock(path):
+            _validate_or_quarantine_jsonl(path, label)
+
 def _port_is_open(host: str, port: int) -> bool:
     import socket
     try:
@@ -40770,6 +40777,7 @@ def main():
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
+    _validate_research_ledgers_on_startup()
     _restore_collector_v22_provisionals()
     load_persistent_config()
     _apply_env_live_gating()

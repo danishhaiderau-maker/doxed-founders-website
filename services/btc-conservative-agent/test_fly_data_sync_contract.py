@@ -307,6 +307,15 @@ def test_jsonl_writer_is_serialized_and_corruption_is_preserved_not_deleted():
     assert "os.fsync(f.fileno())" in BOT
 
 
+def test_shadow_jsonl_is_validated_before_startup_collection_and_sync():
+    assert "def _validate_research_ledgers_on_startup():" in BOT
+    assert '(SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP")' in BOT
+    main_start = BOT.index("def main():")
+    assert BOT.index("_validate_research_ledgers_on_startup()", main_start) < BOT.index(
+        "_restore_collector_v22_provisionals()", main_start
+    )
+
+
 def test_fly_runtime_cwd_is_volume_backed():
     assert 'RUNTIME_DIR="$DATA_DIR/runtime"' in ENTRYPOINT
     assert 'export BOT_SINGLETON_DIR="$DATA_DIR/locks"' in ENTRYPOINT
