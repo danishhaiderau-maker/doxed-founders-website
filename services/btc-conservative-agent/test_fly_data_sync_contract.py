@@ -222,6 +222,7 @@ def test_every_static_serialized_jsonl_target_is_declared_before_first_write():
     assert observed_constants <= declared_constants
     assert observed_literals <= declared_literals
     assert "FILL_QUALITY_FILE" in declared_constants
+    assert "TYPE_B_RESEARCH_V2_EVENT_FILE" in declared_constants
 
 
 def test_dynamic_csv_schema_expansion_is_an_atomic_inode_change():

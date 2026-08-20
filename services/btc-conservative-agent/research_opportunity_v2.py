@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import threading
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -333,6 +334,8 @@ def append_event(base: Any, row: Mapping[str, Any]) -> None:
             path.replace(path.with_name(f"{path.name}.1"))
         with path.open("a", encoding="utf-8") as handle:
             handle.write(encoded + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def load_events(path: Any) -> list[dict]:
