@@ -16,7 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 EVIDENCE_SCHEMA = "market_microstructure_1s_v1"
 RECEIPT_SCHEMA = "conservative_limit_fill_receipt_v1"
-EVALUATOR_VERSION = "public-tape-conservative-v1"
+EVALUATOR_VERSION = "public-tape-conservative-v2"
 MAX_AGGRESSOR_WINDOW_SEC = 5
 
 
@@ -49,6 +49,7 @@ def _base_receipt(direction: str, qty: Any, window: Any) -> dict[str, Any]:
         "side_correct_quote": None,
         "visible_executable_qty": 0.0,
         "matching_aggressor_qty": 0.0,
+        "aggressor_corroborated": False,
         "fill_price": None,
         "queue_position_model": "NONE",
         "scope": "PUBLIC_TAPE_COUNTERFACTUAL_NOT_EXCHANGE_CONFIRMATION",
@@ -104,9 +105,12 @@ def evaluate_limit_fill(
 ) -> dict[str, Any]:
     """Return a deterministic fill/no-fill/partial/unsupported receipt.
 
-    LONG represents a resting buy: ask must be at/below limit and public sell
-    volume must print at/through it. SHORT is the exact mirror using bid and buy
-    volume. A partial receipt never promotes to a full simulated fill.
+    LONG represents a buy limit: a fresh ask at/below the limit is immediately
+    executable against visible ask depth. SHORT is the exact mirror using bid
+    depth. Same-bucket aggressor prints are retained as corroboration, but are
+    not required once the opposite BBO itself is marketable. A candle/last-price
+    touch is never sufficient. A partial receipt never promotes to a full
+    simulated fill.
     """
 
     receipt = _base_receipt(direction, requested_qty, aggressor_window_sec)
@@ -212,11 +216,12 @@ def evaluate_limit_fill(
         if window_invalid:
             continue
 
-        # Do not transport volume or depth across time. The trigger bucket
-        # itself must contain all three facts: crossed BBO, visible executable
-        # depth, and the matching aggressor print. Earlier buckets are retained
-        # only as bounded completeness/context evidence. This avoids inventing
-        # queue persistence between a prior trade and a later quote crossing.
+        # Do not transport volume or depth across time. The trigger bucket's
+        # fresh opposite BBO is the executable offer for this hypothetical
+        # incoming limit. Requiring another aggressor print would double-count
+        # proof: a LONG limit with ask <= limit can take that displayed ask
+        # immediately (and vice versa for SHORT). Prints remain corroboration
+        # only. Earlier buckets are bounded completeness/context evidence.
         aggressor_qty = 0.0
         ambiguous = False
         qty_field, vwap_field = (("sell_qty", "sell_vwap") if side == "LONG" else ("buy_qty", "buy_vwap"))
@@ -241,24 +246,22 @@ def evaluate_limit_fill(
                     aggressor_qty = amount
                 elif side == "SHORT" and vwap >= limit:
                     aggressor_qty = amount
-        if ambiguous:
-            incomplete.add("AGGRESSOR_PRICE_AMBIGUOUS")
-            continue
         if aggressor_qty <= 0:
             counters["no_matching_aggressor"] += 1
-            continue
         if visible < qty:
             counters["insufficient_visible_qty"] += 1
 
-        # The only supported quantity is contemporaneously bounded by both
-        # visible top-of-book depth and the exact aggressor print quantity.
-        filled = min(qty, visible, aggressor_qty)
+        # The supported quantity is bounded by contemporaneous visible
+        # opposite top-of-book depth. We intentionally do not accumulate the
+        # same displayed quantity across seconds or claim queue priority.
+        filled = min(qty, visible)
         evidence = {
             "interval": interval,
             "ts": ts,
             "quote": quote,
             "visible": visible,
             "aggressor": aggressor_qty,
+            "aggressor_ambiguous": ambiguous,
             "filled": filled,
             "bucket_ids": window_ts,
         }
@@ -285,6 +288,7 @@ def evaluate_limit_fill(
             "side_correct_quote": best_partial["quote"],
             "visible_executable_qty": best_partial["visible"],
             "matching_aggressor_qty": best_partial["aggressor"],
+            "aggressor_corroborated": bool(best_partial["aggressor"] > 0),
             "fill_price": interval["limit_price"],
             "negative_reasons": [] if filled >= qty else ["PARTIAL_ONLY_INSUFFICIENT_PROVABLE_QTY"],
         })

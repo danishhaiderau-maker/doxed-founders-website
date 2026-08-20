@@ -50,15 +50,16 @@ def test_insufficient_visible_depth_is_partial_not_full():
     assert got["filled_qty"] == .4 and got["remaining_qty"] == .6
 
 
-def test_no_aggressor_is_supported_no_fill():
+def test_marketable_bbo_with_visible_depth_fills_without_aggressor_print():
     rows = [row(100), row(101), row(102, ask=100)]
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
-    assert got["outcome"] == "NO_FILL"
-    assert "NO_MATCHING_AGGRESSOR_AT_OR_THROUGH_LIMIT" in got["negative_reasons"]
+    assert got["outcome"] == "FILL"
+    assert got["aggressor_corroborated"] is False
+    assert got["matching_aggressor_qty"] == 0
 
 
-def test_partial_aggressor_is_explicit_partial():
-    rows = [row(100), row(101), row(102, ask=100, sell_qty=.25, sell_vwap=100)]
+def test_thin_visible_depth_with_matching_aggressor_is_explicit_partial():
+    rows = [row(100), row(101), row(102, ask=100, ask_qty=.25, sell_qty=.25, sell_vwap=100)]
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
     assert got["outcome"] == "PARTIAL_FILL" and got["filled_qty"] == .25
 
@@ -87,30 +88,30 @@ def test_chase_boundary_window_ambiguity_fails_closed():
     assert "CHASE_INTERVAL_WINDOW_AMBIGUOUS" in got["negative_reasons"]
 
 
-def test_missing_aggressor_price_is_ambiguous_not_fill():
+def test_missing_aggressor_price_does_not_override_marketable_bbo_proof():
     rows = [row(100), row(101), row(102, ask=100, sell_qty=1, sell_vwap=None)]
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
-    assert got["outcome"] == "UNSUPPORTED"
-    assert "AGGRESSOR_PRICE_AMBIGUOUS" in got["negative_reasons"]
+    assert got["outcome"] == "FILL"
+    assert got["aggressor_corroborated"] is False
 
 
-def test_multi_print_vwap_cannot_prove_at_through_quantity():
+def test_multi_print_vwap_is_not_needed_when_marketable_bbo_is_proven():
     rows = [row(100), row(101), row(102, ask=100, sell_qty=2, sell_vwap=99, trade_count=2)]
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
-    assert got["outcome"] == "UNSUPPORTED"
-    assert "AGGRESSOR_PRICE_AMBIGUOUS" in got["negative_reasons"]
+    assert got["outcome"] == "FILL"
+    assert got["aggressor_corroborated"] is False
 
 
-def test_prior_uncrossed_print_plus_later_quote_only_is_not_a_fill():
+def test_prior_uncrossed_print_does_not_matter_when_later_bbo_is_marketable():
     rows = [
         row(100, ask=101, sell_qty=2, sell_vwap=99),
         row(101, ask=101),
         row(102, ask=100),
     ]
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
-    assert got["outcome"] == "NO_FILL"
-    assert got["filled_qty"] == 0
-    assert "NO_MATCHING_AGGRESSOR_AT_OR_THROUGH_LIMIT" in got["negative_reasons"]
+    assert got["outcome"] == "FILL"
+    assert got["filled_qty"] == 1
+    assert got["aggressor_corroborated"] is False
 
 
 def test_prior_depth_does_not_support_current_print():
@@ -124,3 +125,20 @@ def test_prior_depth_does_not_support_current_print():
     assert got["filled_qty"] == .2
     assert got["trigger_bucket_ts"] == 102
     assert got["visible_executable_qty"] == .2
+
+
+def test_last_price_touch_without_opposite_bbo_cross_is_not_a_fill():
+    rows = [row(100), row(101), row(102, ask=101, sell_qty=1, sell_vwap=100)]
+    got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
+    assert got["outcome"] == "NO_FILL"
+    assert got["filled_qty"] == 0
+    assert "BBO_NEVER_CROSSED_LIMIT" in got["negative_reasons"]
+
+
+def test_marketable_bbo_thin_depth_is_partial_without_print():
+    rows = [row(100), row(101), row(102, ask=100, ask_qty=.125)]
+    got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
+    assert got["outcome"] == "PARTIAL_FILL"
+    assert got["filled_qty"] == .125
+    assert got["remaining_qty"] == .875
+    assert got["aggressor_corroborated"] is False
