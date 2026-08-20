@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(research): separate profit winner from relative leader
+fix(sync): serialize JSONL writes and sync log prefixes
 
 ## Last Activity
 
