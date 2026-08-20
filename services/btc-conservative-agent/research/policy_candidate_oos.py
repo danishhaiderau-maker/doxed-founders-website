@@ -172,7 +172,7 @@ def _evaluate(policy_id: str, rows: list[dict], cache: dict[str, dict[str, float
     }
 
 
-def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None) -> dict:
+def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
     events = list(events) if events is not None else _read_events(Path(data_dir) / RESEARCH_EVENTS_FILE)
     latest = max(events, key=_signal_ts, default={})
     epoch = str(latest.get("epoch_id") or (latest.get("envelope") or {}).get("epoch_id") or "")
@@ -340,6 +340,7 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
         "evidence_policy_signature": signature or None,
         "search_manifest_signature": POLICY_SEARCH_MANIFEST["signature"],
         "cycle_snapshot": cycle_snapshot,
+        "conservative_microstructure_evidence": microstructure_evidence,
         "status": "QUALIFIED" if candidate else "BLOCKED",
         "independent_oos_qualified": False,
         "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,

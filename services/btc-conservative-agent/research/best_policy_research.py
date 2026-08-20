@@ -107,7 +107,7 @@ def _events(path: Path) -> list[dict]:
     return rows
 
 
-def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None) -> dict:
+def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
     data_root = Path(data_dir)
     report_root = Path(report_dir)
     rows = list(events) if events is not None else _events(data_root / RESEARCH_EVENTS_FILE)
@@ -190,6 +190,7 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
     report = {
         "schema": "best_policy_research_v1",
         "cycle_snapshot": cycle_snapshot,
+        "conservative_microstructure_evidence": microstructure_evidence,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "epoch_id": epoch_id or None,
         "policy_epoch_id": current_policy_epoch or None,
