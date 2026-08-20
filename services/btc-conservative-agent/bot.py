@@ -10465,10 +10465,7 @@ def _transient_csv_lock_error(exc: BaseException) -> bool:
 def _dynamic_csv_writer_once(filename, row):
     file_exists = os.path.exists(filename)
     if not file_exists:
-        with open(filename, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-            writer.writeheader()
-            writer.writerow(safe_csv_row(row))
+        _atomic_write_csv_rows(filename, list(row.keys()), [safe_csv_row(row)])
         return
     with open(filename, "r", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
@@ -10477,16 +10474,33 @@ def _dynamic_csv_writer_once(filename, row):
     if set(new_fields) != set(existing):
         with open(filename, "r", encoding="utf-8", errors="replace") as f:
             old_rows = list(csv.DictReader(f))
-        with open(filename, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=new_fields)
-            writer.writeheader()
-            for old in old_rows:
-                writer.writerow(old)
-            writer.writerow(safe_csv_row(row))
+        _atomic_write_csv_rows(
+            filename, new_fields, [*old_rows, safe_csv_row(row)],
+        )
     else:
         with open(filename, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=existing)
             writer.writerow(safe_csv_row(row))
+
+
+def _atomic_write_csv_rows(filename, fieldnames, rows):
+    """Publish CSV creation/schema expansion with an inode-changing replace."""
+    target = os.path.abspath(filename)
+    candidate = f"{target}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(candidate, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(fieldnames))
+            writer.writeheader()
+            writer.writerows(rows)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate, target)
+    finally:
+        try:
+            if os.path.exists(candidate):
+                os.remove(candidate)
+        except OSError:
+            pass
 
 
 def _csv_write_fallback(filename, row, err: BaseException) -> None:
@@ -35723,6 +35737,12 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "corrupt_evidence_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
+_DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
+    "decisions_3factor.csv", "trades_3factor.csv",
+    "expired_orders_3factor.csv", "blocked_signals_3factor.csv",
+    "ai_tranche_log.csv", "setup_log_3factor.csv", "candles_3factor.csv",
+    "pipeline_events_3factor.csv", "ai_errors_3factor.csv",
+})
 
 
 def _data_sync_rotation_parts(raw_name: str):
@@ -35846,7 +35866,11 @@ def _data_sync_consistency_mode(path: Path) -> str:
     rewrite those files in place. Runtime .log files are logging-handler-owned
     append streams; rotation changes the inode and is therefore still fenced.
     """
-    return "append_prefix_v1" if path.suffix.lower() == ".log" else "strict_generation_v1"
+    append_prefix = (
+        path.suffix.lower() == ".log"
+        or path.name in _DATA_SYNC_APPEND_PREFIX_NAMES
+    )
+    return "append_prefix_v1" if append_prefix else "strict_generation_v1"
 
 
 def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> bool:

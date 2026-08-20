@@ -53,6 +53,7 @@ def _load_bot_functions(*names):
         "_DATA_SYNC_EXTENSIONS": frozenset(
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
         ),
+        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({"pipeline_events_3factor.csv"}),
         "_RESEARCH_RAW_JSONL_NEVER_PRUNE": frozenset({"research_events_v22.jsonl"}),
         "_pure_validate_platform_relay_evidence_payload": pure_validate_relay,
     }
@@ -95,6 +96,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
             "Path": Path,
             "os": os,
             "_DATA_SYNC_EXTENSIONS": frozenset({".json", ".jsonl"}),
+            "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({"pipeline_events_3factor.csv"}),
             "_DATA_SYNC_EXCLUDED_NAMES": frozenset({
                 "manifest.json", "research_events_v22.provisional.json",
                 "collector_storage_state.json",
@@ -138,6 +140,7 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
             "Path": Path,
             "os": os,
             "_DATA_SYNC_EXTENSIONS": frozenset({".jsonl"}),
+            "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({"pipeline_events_3factor.csv"}),
             "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
             "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
             "_data_sync_volume_root": lambda: root,
@@ -163,6 +166,36 @@ def test_data_sync_generation_fence_rejects_every_generation_change():
     assert not matches(original, size=101, mtime_ns=200, inode=300)
     assert not matches(original, size=100, mtime_ns=201, inode=300)
     assert not matches(original, size=100, mtime_ns=200, inode=301)
+
+
+def test_only_declared_dynamic_csv_ledgers_use_append_prefix_mode():
+    mode = _load_bot_functions("_data_sync_consistency_mode")["_data_sync_consistency_mode"]
+    assert mode(Path("pipeline_events_3factor.csv")) == "append_prefix_v1"
+    assert mode(Path("signal_snapshot.csv")) == "strict_generation_v1"
+    assert mode(Path("research_events_v22.jsonl")) == "strict_generation_v1"
+
+
+def test_dynamic_csv_schema_expansion_is_an_atomic_inode_change():
+    tree = ast.parse(BOT)
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in {
+            "_atomic_write_csv_rows", "_dynamic_csv_writer_once"
+        }
+    ]
+    namespace = {
+        "os": os, "csv": __import__("csv"), "threading": threading,
+        "safe_csv_row": lambda row: dict(row),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "pipeline_events_3factor.csv"
+        namespace["_dynamic_csv_writer_once"](str(target), {"a": 1})
+        first_inode = target.stat().st_ino
+        namespace["_dynamic_csv_writer_once"](str(target), {"a": 2, "b": 3})
+        assert target.stat().st_ino != first_inode
+        rows = list(__import__("csv").DictReader(target.open(encoding="utf-8")))
+        assert rows == [{"a": "1", "b": ""}, {"a": "2", "b": "3"}]
 
 
 def test_append_prefix_mode_is_narrow_and_allows_only_same_inode_growth():
@@ -303,7 +336,8 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "[int64]$previous.mtime_ns -eq [int64]$row.mtime_ns" in SYNC_SCRIPT
     assert "def _data_sync_rotation_parts" in BOT
     assert '"consistency_mode": _data_sync_consistency_mode(resolved)' in BOT
-    assert 'return "append_prefix_v1" if path.suffix.lower() == ".log"' in BOT
+    assert 'path.name in _DATA_SYNC_APPEND_PREFIX_NAMES' in BOT
+    assert 'return "append_prefix_v1" if append_prefix' in BOT
     assert 'limit = min(limit, max(0, published_boundary - offset))' in BOT
     assert "_data_sync_rotation_parts(resolved.name) is not None" in BOT
     assert 'path.startswith("/api/data-sync/")' in BOT
