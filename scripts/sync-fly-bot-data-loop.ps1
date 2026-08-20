@@ -173,23 +173,8 @@ try {
 }
 Set-Content -LiteralPath $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 
-if (Test-Path -LiteralPath $vaultEnv) {
-  foreach ($configName in @(
-    "BOT_ADMIN_TOKEN", "PLATFORM_API_BASE_URL",
-    "PLATFORM_RELAY_AGENT_SLUG", "PLATFORM_RELAY_USER_ID"
-  )) {
-    $configLine = Get-Content -LiteralPath $vaultEnv | Where-Object {
-      $_ -match "^\s*$([regex]::Escape($configName))="
-    } | Select-Object -Last 1
-    $shouldLoad = $configName -eq "BOT_ADMIN_TOKEN" -or
-      -not [Environment]::GetEnvironmentVariable($configName, 'Process')
-    if ($configLine -match '^\s*[^=]+=(.*)$' -and $shouldLoad) {
-      [Environment]::SetEnvironmentVariable(
-        $configName, $matches[1].Trim().Trim('"').Trim("'"), 'Process'
-      )
-    }
-  }
-}
+. (Join-Path $scriptDir "home-bot-vault-env.ps1")
+Import-HomeBotVaultConfig -VaultEnvPath $vaultEnv
 if (-not $env:BOT_ADMIN_TOKEN) {
   throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }

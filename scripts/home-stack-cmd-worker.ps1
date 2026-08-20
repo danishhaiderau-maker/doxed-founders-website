@@ -1,4 +1,4 @@
-# Runs slow bridge commands off the :7810 listener thread (prevents bridge freeze).
+﻿# Runs slow bridge commands off the :7810 listener thread (prevents bridge freeze).
 param(
   [Parameter(Mandatory = $true)]
   [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "reset-home-stack", "wipe-research", "pause-trading", "resume-trading")]
@@ -25,18 +25,8 @@ if ($AnalyzerPort -le 0 -or ($AnalyzerPort -eq 9500 -and $StackMode -eq "product
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 function Get-BotAdminHeaders {
-  $token = (Get-Item -Path "env:BOT_ADMIN_TOKEN" -ErrorAction SilentlyContinue).Value
-  if (-not $token) {
-    $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
-    if (Test-Path -LiteralPath $vaultEnv) {
-      foreach ($line in Get-Content -LiteralPath $vaultEnv -ErrorAction SilentlyContinue) {
-        if ($line -match '^\s*BOT_ADMIN_TOKEN=(.*)$') {
-          $token = [string]$matches[1].Trim().Trim('"').Trim("'")
-          break
-        }
-      }
-    }
-  }
+  . (Join-Path $scriptDir "home-bot-vault-env.ps1")
+  $token = Resolve-CanonicalBotAdminToken
   if ($token) { return @{ "X-Bot-Admin-Token" = [string]$token } }
   return @{}
 }

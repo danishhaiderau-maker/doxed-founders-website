@@ -1,4 +1,4 @@
-# Local command bridge — Agent Hub admin panel → home PC (bot, analyzer, tunnel, wire).
+﻿# Local command bridge â€” Agent Hub admin panel â†’ home PC (bot, analyzer, tunnel, wire).
 # Listen: http://127.0.0.1:7810
 # Run once: RESTART-LAUNCHER.cmd
 
@@ -106,16 +106,8 @@ function Invoke-ResetFlyDesktopMirror {
 }
 
 function Import-BotAdminToken {
-  $token = (Get-Item -Path "env:BOT_ADMIN_TOKEN" -ErrorAction SilentlyContinue).Value
-  if ($token) { return [string]$token }
-  $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
-  if (-not (Test-Path -LiteralPath $vaultEnv)) { return "" }
-  foreach ($line in Get-Content -LiteralPath $vaultEnv -ErrorAction SilentlyContinue) {
-    if ($line -match '^\s*BOT_ADMIN_TOKEN=(.*)$') {
-      return [string]$matches[1].Trim().Trim('"').Trim("'")
-    }
-  }
-  return ""
+  . (Join-Path $scriptDir "home-bot-vault-env.ps1")
+  return (Resolve-CanonicalBotAdminToken)
 }
 
 $script:BotAdminToken = Import-BotAdminToken
@@ -201,7 +193,7 @@ function Get-FullStatus {
   $botUrl = "http://127.0.0.1:$BotPort/api/ping"
   $anUrl = "http://127.0.0.1:$AnalyzerPort/"
   # Parallel HTTP probes (async) so the two local pings complete in ~1.5s instead of ~3s
-  # — halves the window during which the single-threaded listener could delay a /health.
+  # â€” halves the window during which the single-threaded listener could delay a /health.
   $live = Test-HttpAliveParallel @($botUrl, $anUrl) 1500
   $botOnline = $live[$botUrl]
   $analyzerRunning = $live[$anUrl]

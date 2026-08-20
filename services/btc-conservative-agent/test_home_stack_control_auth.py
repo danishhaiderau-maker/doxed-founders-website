@@ -4,12 +4,15 @@ from pathlib import Path
 
 root = Path(__file__).parents[2]
 launcher = (root / "scripts" / "home-stack-launcher.ps1").read_text(encoding="utf-8")
+vault_helper = (root / "scripts" / "home-bot-vault-env.ps1").read_text(encoding="utf-8")
 worker = (root / "scripts" / "home-stack-cmd-worker.ps1").read_text(encoding="utf-8")
 
 checks = {
     "bridge loads BOT_ADMIN_TOKEN from the external vault": (
         "function Import-BotAdminToken" in launcher
-        and "doxedcryptofounder-secrets\\vault\\home-bot.env" in launcher
+        and "home-bot-vault-env.ps1" in launcher
+        and "doxedcryptofounder-secrets" in vault_helper
+        and "home-bot.env" in vault_helper
     ),
     "bridge authenticates pause/resume requests": (
         '"X-Bot-Admin-Token"' in launcher
@@ -18,6 +21,7 @@ checks = {
     "background worker loads admin headers": (
         "function Get-BotAdminHeaders" in worker
         and '"X-Bot-Admin-Token"' in worker
+        and "home-bot-vault-env.ps1" in worker
     ),
     "background worker authenticates both controls": (
         worker.count("-Headers (Get-BotAdminHeaders)") == 2

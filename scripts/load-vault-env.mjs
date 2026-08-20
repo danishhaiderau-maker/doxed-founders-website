@@ -1,4 +1,4 @@
-import fs from 'fs';
+﻿import fs from 'fs';
 import path from 'path';
 import { getVaultDir } from './secrets-vault-path.mjs';
 
@@ -38,4 +38,23 @@ export function resolveWebEnvLocal(repoRoot) {
   if (fs.existsSync(vault)) return vault;
   if (fs.existsSync(local)) return local;
   return null;
+}
+/** Vault home-bot.env is canonical for Fly admin; overrides stale shell BOT_ADMIN_TOKEN. */
+export function loadCanonicalBotAdminToken() {
+  const homeBot = path.join(getVaultDir(), 'home-bot.env');
+  if (!fs.existsSync(homeBot)) return null;
+  for (const line of fs.readFileSync(homeBot, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (!trimmed.startsWith('BOT_ADMIN_TOKEN=')) continue;
+    let val = trimmed.slice('BOT_ADMIN_TOKEN='.length).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (val) {
+      process.env.BOT_ADMIN_TOKEN = val;
+      return val;
+    }
+  }
+  return process.env.BOT_ADMIN_TOKEN?.trim() || null;
 }

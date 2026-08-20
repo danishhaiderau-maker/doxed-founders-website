@@ -17,14 +17,12 @@ $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
 }
+. (Join-Path $scriptDir "home-bot-vault-env.ps1")
 if (-not $AdminToken) {
-  $AdminToken = [Environment]::GetEnvironmentVariable(
-    "BOT_ADMIN_TOKEN",
-    [EnvironmentVariableTarget]::Process
-  )
+  $AdminToken = Import-CanonicalBotAdminToken
 }
 if (-not $AdminToken) {
-  throw "AdminToken is required (parameter or BOT_ADMIN_TOKEN environment variable)."
+  throw "AdminToken is required (parameter, vault home-bot.env, or BOT_ADMIN_TOKEN)."
 }
 
 $targetRoot = [System.IO.Path]::GetFullPath($TargetDir)
