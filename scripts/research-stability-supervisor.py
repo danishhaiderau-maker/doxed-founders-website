@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
+MAX_PENDING_EVENT_DELTA = 100
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
 
@@ -182,6 +183,67 @@ def report_count_contract(filename: str, report: dict[str, Any]) -> dict[str, in
     raise ValueError(f"unsupported report count contract: {filename}")
 
 
+def bounded_pending_parity(
+    expected: dict[str, dict[str, int]],
+    observed: dict[str, dict[str, int]],
+    *,
+    reports_fresh: bool,
+    mirror_after_reports: bool,
+    identity_ok: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Accept only append-only growth awaiting the next fresh analyzer cycle."""
+    candidate_name = "policy_candidate_oos_report.json"
+    best_name = "best_policy_research_report.json"
+    candidate = observed[candidate_name]
+    best = observed[best_name]
+    candidate_expected = expected[candidate_name]
+    best_expected = expected[best_name]
+
+    baseline_consistent = (
+        candidate["current_events"] == best["current_events"]
+        and candidate["eligible_events"] == best["eligible_events"]
+        and best["current_events"] == best["eligible_events"] + best["ineligible_events"]
+        and candidate["eligible_events"] <= candidate["current_events"]
+    )
+    deltas = {
+        "current_events": best_expected["current_events"] - best["current_events"],
+        "eligible_events": best_expected["eligible_events"] - best["eligible_events"],
+        "ineligible_events": best_expected["ineligible_events"] - best["ineligible_events"],
+        "all_independent_episodes": (
+            best_expected["all_independent_episodes"] - best["all_independent_episodes"]
+        ),
+        "eligible_independent_episodes": (
+            candidate_expected["eligible_independent_episodes"]
+            - candidate["eligible_independent_episodes"]
+        ),
+    }
+    nonnegative = all(value >= 0 for value in deltas.values())
+    bounded = (
+        deltas["current_events"] <= MAX_PENDING_EVENT_DELTA
+        and deltas["eligible_events"] <= deltas["current_events"]
+        and deltas["ineligible_events"] <= deltas["current_events"]
+        and deltas["eligible_events"] + deltas["ineligible_events"] == deltas["current_events"]
+        and deltas["all_independent_episodes"] <= deltas["current_events"]
+        and deltas["eligible_independent_episodes"] <= deltas["eligible_events"]
+    )
+    pending = (
+        reports_fresh and mirror_after_reports and identity_ok
+        and baseline_consistent and nonnegative and bounded
+        and deltas["current_events"] > 0
+    )
+    return pending, {
+        "status": "PENDING_NEXT_ANALYZER_CYCLE" if pending else "MISMATCH",
+        "deltas": deltas,
+        "reports_fresh": reports_fresh,
+        "mirror_after_reports": mirror_after_reports,
+        "identity_ok": identity_ok,
+        "baseline_consistent": baseline_consistent,
+        "nonnegative": nonnegative,
+        "bounded": bounded,
+        "max_pending_event_delta": MAX_PENDING_EVENT_DELTA,
+    }
+
+
 @dataclass
 class Supervisor:
     repo: Path
@@ -280,14 +342,20 @@ class Supervisor:
             add("mirror_schema_and_freshness", False, f"{type(exc).__name__}: {exc}")
 
         reports: dict[str, dict[str, Any]] = {}
+        report_times: dict[str, datetime] = {}
+        report_freshness: dict[str, bool] = {}
         for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
             path = self.report_dir / filename
             try:
                 report = read_json(path)
                 generated = parse_time(report.get("generated_at"))
                 age = (self.now() - generated).total_seconds() if generated else float("inf")
-                add(f"report_fresh:{filename}", age <= REPORT_MAX_AGE_SECONDS, {"age_seconds": round(age, 1)})
+                fresh = age <= REPORT_MAX_AGE_SECONDS
+                add(f"report_fresh:{filename}", fresh, {"age_seconds": round(age, 1)})
                 reports[filename] = report
+                if generated:
+                    report_times[filename] = generated
+                report_freshness[filename] = fresh
             except Exception as exc:
                 add(f"report_fresh:{filename}", False, type(exc).__name__)
 
@@ -305,9 +373,6 @@ class Supervisor:
                     "all_independent_episodes": event_summary["all_independent_episodes"],
                 },
             }
-            observed = {name: report_count_contract(name, report) for name, report in reports.items()}
-            add("report_count_parity", all(observed[name] == expected[name] for name in expected),
-                {"expected": expected, "reports": observed})
             expected_epoch = event_summary["epoch_id"]
             expected_policy_epochs = event_summary["policy_epoch_ids"]
             expected_signatures = event_summary["policy_signatures"]
@@ -317,6 +382,25 @@ class Supervisor:
                 and report.get("evidence_policy_signature") in expected_signatures
                 for report in reports.values()
             )
+            observed = {name: report_count_contract(name, report) for name, report in reports.items()}
+            exact = all(observed[name] == expected[name] for name in expected)
+            mirror_time = datetime.fromtimestamp(events_path.stat().st_mtime, tz=timezone.utc)
+            mirror_after_reports = (
+                len(report_times) == 2
+                and all(mirror_time > generated for generated in report_times.values())
+            )
+            pending, pending_detail = bounded_pending_parity(
+                expected, observed,
+                reports_fresh=len(report_freshness) == 2 and all(report_freshness.values()),
+                mirror_after_reports=mirror_after_reports,
+                identity_ok=identity_ok,
+            )
+            add("report_count_parity", exact or pending, {
+                "status": "EXACT" if exact else pending_detail["status"],
+                "expected": expected,
+                "reports": observed,
+                "pending": pending_detail,
+            })
             add("report_epoch_policy_signature_parity", identity_ok, {
                 "expected_epoch": expected_epoch, "expected_policy_epochs": expected_policy_epochs,
                 "expected_policy_signatures": expected_signatures,

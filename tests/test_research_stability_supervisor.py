@@ -135,6 +135,83 @@ def test_negative_evidence_denominator_swap_fails_closed(tmp_path):
     assert result["healthy"] is False
 
 
+def make_one_event_pending(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    from datetime import timedelta
+    for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
+        report = json.loads((reports / filename).read_text())
+        report["generated_at"] = (NOW - timedelta(minutes=5)).isoformat()
+        write_json(reports / filename, report)
+    events_path = mirror / "research_events_v22.jsonl"
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    events.append({
+        "schema": "research_event_v2.2", "collector_version": "collector_v2.2",
+        "epoch_id": "epoch-new", "policy_epoch_id": "policy-epoch-a",
+        "policy_signature": "policy-a", "event_episode_id": "episode-new",
+        "observation_status": "COMPLETE",
+    })
+    events_path.write_text("\n".join(json.dumps(x) for x in events), encoding="utf-8")
+    import os
+    os.utime(events_path, (NOW.timestamp(), NOW.timestamp()))
+    return repo, mirror, reports
+
+
+def test_one_event_forward_lag_is_pending_not_unhealthy(tmp_path):
+    repo, mirror, reports = make_one_event_pending(tmp_path)
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is True
+    assert parity["detail"]["status"] == "PENDING_NEXT_ANALYZER_CYCLE"
+    assert parity["detail"]["pending"]["deltas"]["current_events"] == 1
+    assert result["healthy"] is True
+
+
+def test_pending_lag_fails_when_reports_are_stale(tmp_path):
+    repo, mirror, reports = make_one_event_pending(tmp_path)
+    from datetime import timedelta
+    for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
+        report = json.loads((reports / filename).read_text())
+        report["generated_at"] = (NOW - timedelta(minutes=46)).isoformat()
+        write_json(reports / filename, report)
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is False
+    assert result["healthy"] is False
+
+
+def test_pending_lag_fails_on_report_overshoot(tmp_path):
+    repo, mirror, reports = make_one_event_pending(tmp_path)
+    best = json.loads((reports / "best_policy_research_report.json").read_text())
+    best["evidence"].update(current_epoch_events=5, replay_eligible_events=5,
+                            replay_ineligible_events=0, independent_episode_count=3)
+    write_json(reports / "best_policy_research_report.json", best)
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is False
+    assert parity["detail"]["pending"]["nonnegative"] is False
+
+
+def test_pending_lag_fails_on_identity_drift(tmp_path):
+    repo, mirror, reports = make_one_event_pending(tmp_path)
+    candidate = json.loads((reports / "policy_candidate_oos_report.json").read_text())
+    candidate["evidence_policy_signature"] = "policy-old"
+    write_json(reports / "policy_candidate_oos_report.json", candidate)
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is False
+    assert parity["detail"]["pending"]["identity_ok"] is False
+    identity = next(x for x in result["checks"] if x["name"] == "report_epoch_policy_signature_parity")
+    assert identity["ok"] is False
+
+
 def test_count_or_signature_mismatch_fails_closed_without_restart(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     report = json.loads((reports / "best_policy_research_report.json").read_text())
