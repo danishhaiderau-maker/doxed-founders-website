@@ -190,10 +190,12 @@ class Supervisor:
         def add(name: str, ok: bool, detail: Any) -> None:
             checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
+        source_revision = None
         try:
             manifest = self.fetcher(self.fly_url.rstrip("/") + "/api/data-sync/manifest", self.token, 20)
+            source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
             add("fly_collector_manifest", bool(manifest.get("files")) and int(manifest.get("total_bytes") or 0) > 0, {
-                "total_bytes": manifest.get("total_bytes"), "source_revision": manifest.get("source_revision"),
+                "total_bytes": manifest.get("total_bytes"), "source_revision": source_revision,
                 "fresh_collection_signal_ts": manifest.get("fresh_collection_signal_ts")})
         except Exception as exc:
             add("fly_collector_manifest", False, type(exc).__name__)
@@ -205,14 +207,25 @@ class Supervisor:
             add("fly_storage", False, type(exc).__name__)
 
         heartbeat_path = (self.runtime_repo or self.repo) / ".fly-data-sync-loop.heartbeat.json"
+        sync_revision = None
         try:
             heartbeat = read_json(heartbeat_path)
             stamp = parse_time(heartbeat.get("syncedAt"))
             age = (self.now() - stamp).total_seconds() if stamp else float("inf")
+            sync_revision = heartbeat.get("sourceRevision") or heartbeat.get("source_revision")
             add("atomic_sync_heartbeat", heartbeat.get("ok") is True and age <= SYNC_MAX_AGE_SECONDS,
-                {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": heartbeat.get("sourceRevision")})
+                {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": sync_revision})
         except Exception as exc:
             add("atomic_sync_heartbeat", False, type(exc).__name__)
+        revision_match = bool(source_revision and sync_revision and (
+            source_revision == sync_revision
+            or source_revision.startswith(sync_revision)
+            or sync_revision.startswith(source_revision)
+        ))
+        add("fly_sync_revision_parity", revision_match, {
+            "fly_source_revision": source_revision,
+            "sync_source_revision": sync_revision,
+        })
 
         try:
             inventory = classify_processes(self.process_reader())

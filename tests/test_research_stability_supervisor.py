@@ -54,7 +54,7 @@ def make_fixture(tmp_path):
 
 def fetcher(url, token, timeout):
     if url.endswith("manifest"):
-        return {"files": [{"path": "research_events_v22.jsonl"}], "total_bytes": 100, "source_revision": "a" * 40}
+        return {"files": [{"path": "research_events_v22.jsonl"}], "total_bytes": 100, "source_git_rev": "a" * 40}
     return {"volume_pct": 15.0, "cleanup_status": "ok"}
 
 
@@ -73,6 +73,10 @@ def test_healthy_separate_data_and_report_directories(tmp_path):
                                 fetcher=fetcher, process_reader=processes)
     result = checker.check()
     assert result["healthy"] is True
+    fly_manifest = next(x for x in result["checks"] if x["name"] == "fly_collector_manifest")
+    assert fly_manifest["detail"]["source_revision"] == "a" * 40
+    revision_parity = next(x for x in result["checks"] if x["name"] == "fly_sync_revision_parity")
+    assert revision_parity["ok"] is True
     parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
     assert parity["detail"]["expected"] == (3, 2)
 
@@ -91,6 +95,19 @@ def test_count_or_signature_mismatch_fails_closed_without_restart(tmp_path):
     assert result["healthy"] is False
     assert calls == []
     assert result["repairs"] == []
+
+
+def test_fly_and_sync_revision_mismatch_fails_closed(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    heartbeat = json.loads((repo / ".fly-data-sync-loop.heartbeat.json").read_text())
+    heartbeat["sourceRevision"] = "b" * 40
+    write_json(repo / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    assert result["healthy"] is False
+    parity = next(x for x in result["checks"] if x["name"] == "fly_sync_revision_parity")
+    assert parity["ok"] is False
 
 
 def test_only_missing_sync_and_analyzer_use_safe_launchers(tmp_path):
