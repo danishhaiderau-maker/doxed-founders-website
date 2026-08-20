@@ -1,8 +1,12 @@
 """collector_v2.2 — locked schema constants and research horizon policy."""
 from __future__ import annotations
 
+import hashlib
+import json
+
 COLLECTOR_VERSION = "collector_v2.2"
 POLICY_ID = "CONTROL_V1"
+POLICY_IDENTITY_SCHEMA = "policy_identity_v1"
 PATH_WINDOW_POLICY_ID = "PATH_V1_60M_ENTRY_120M_HOLD"
 DECISION_TREE_SCHEMA = "decision_tree_v2.2"
 EVENT_SCHEMA = "research_event_v2.2"
@@ -77,3 +81,33 @@ RESEARCH_HORIZON_V1 = {
     "max_hold_period_sec": MAX_HOLD_PERIOD_SEC,
     "path_window_policy_id": PATH_WINDOW_POLICY_ID,
 }
+
+
+def build_policy_identity(*, epoch_id: str, control_cell: dict, invert_on: bool) -> dict:
+    """Canonical identity for the policy that generated an observation.
+
+    Collection epochs describe storage/reset boundaries. Policy epochs describe
+    homogeneous decision treatment and therefore split whenever invert or any
+    strategy parameter changes.
+    """
+    policy_spec = {
+        "base_policy_id": POLICY_ID,
+        "invert_on": bool(invert_on),
+        "orig_offset_pct": control_cell.get("orig_offset_pct"),
+        "thesis_cut": control_cell.get("thesis_cut"),
+        "ladder": control_cell.get("ladder"),
+        "hard_stop_pct": control_cell.get("hard_stop_pct"),
+        "path_window_policy_id": PATH_WINDOW_POLICY_ID,
+    }
+    material = json.dumps(policy_spec, sort_keys=True, separators=(",", ":"))
+    signature = "policy-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    epoch_material = f"{epoch_id}|{signature}"
+    policy_epoch_id = "policy-epoch-" + hashlib.sha256(epoch_material.encode("utf-8")).hexdigest()[:24]
+    return {
+        "schema": POLICY_IDENTITY_SCHEMA,
+        "base_policy_id": POLICY_ID,
+        "policy_signature": signature,
+        "policy_epoch_id": policy_epoch_id,
+        "collection_epoch_id": str(epoch_id),
+        "policy_spec": policy_spec,
+    }

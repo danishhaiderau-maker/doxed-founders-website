@@ -45,9 +45,17 @@ from flask import Flask, jsonify, render_template_string, send_file, abort, requ
 try:
     from collector_v22_schema import RESEARCH_EVENTS_FILE
     from replay_eligibility import validate_replay_eligibility
+    from research.best_policy_research import (
+        QUALIFICATION_GATE_SCHEMA,
+        candidate_contract_blockers,
+        qualification_gate_blockers,
+    )
 except ImportError:
     RESEARCH_EVENTS_FILE = "research_events_v22.jsonl"
     validate_replay_eligibility = None
+    QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v1"
+    candidate_contract_blockers = lambda candidate: ["CANDIDATE_VALIDATOR_UNAVAILABLE"]
+    qualification_gate_blockers = lambda gates: ["QUALIFICATION_GATE_VALIDATOR_UNAVAILABLE"]
 
 try:
     from combo_pathway_config import (
@@ -1644,9 +1652,17 @@ def _best_policy_research_payload():
 
     newest = max(events, key=signal_ts, default={})
     current_epoch = str(newest.get("epoch_id") or (newest.get("envelope") or {}).get("epoch_id") or "")
+    current_policy_epoch = str(
+        newest.get("policy_epoch_id") or (newest.get("envelope") or {}).get("policy_epoch_id") or ""
+    )
+    current_policy_signature = str(
+        newest.get("policy_signature") or (newest.get("envelope") or {}).get("policy_signature") or ""
+    )
     current = [row for row in events if str(
         row.get("epoch_id") or (row.get("envelope") or {}).get("epoch_id") or ""
-    ) == current_epoch] if current_epoch else []
+    ) == current_epoch and str(
+        row.get("policy_epoch_id") or (row.get("envelope") or {}).get("policy_epoch_id") or ""
+    ) == current_policy_epoch] if current_epoch and current_policy_epoch else []
     outcomes = {"ACCEPTED_FILLED": 0, "ACCEPTED_UNFILLED": 0, "REJECTED": 0}
     eligible = []
     ineligible = []
@@ -1671,7 +1687,7 @@ def _best_policy_research_payload():
     candidate = policy_report.get("current_candidate") or policy_report.get("candidate")
     blockers = list(policy_report.get("blockers") or [])
     gate_values = policy_report.get("qualification_gates") or {}
-    all_declared_gates_pass = bool(gate_values) and all(value is True for value in gate_values.values())
+    gate_blockers = qualification_gate_blockers(gate_values)
     independent_oos = bool(
         policy_report.get("independent_oos_qualified") or evidence.get("independent_oos_qualified")
     )
@@ -1690,18 +1706,22 @@ def _best_policy_research_payload():
         blockers.append("BEST_POLICY_REPORT_MISSING")
     elif not report_epoch or report_epoch != current_epoch:
         blockers.append("BEST_POLICY_REPORT_EPOCH_MISMATCH")
+    if str(policy_report.get("policy_epoch_id") or "") != current_policy_epoch:
+        blockers.append("BEST_POLICY_REPORT_POLICY_EPOCH_MISMATCH")
+    if str(policy_report.get("evidence_policy_signature") or "") != current_policy_signature:
+        blockers.append("BEST_POLICY_REPORT_POLICY_SIGNATURE_MISMATCH")
     if not independent_oos:
         blockers.append("INDEPENDENT_OOS_EVIDENCE_MISSING")
-    if not all_declared_gates_pass:
-        blockers.append("QUALIFICATION_GATES_INCOMPLETE")
-    if not candidate:
-        blockers.append("QUALIFIED_CANDIDATE_MISSING")
+    if policy_report.get("qualification_gate_schema") != QUALIFICATION_GATE_SCHEMA:
+        blockers.append("QUALIFICATION_GATE_SCHEMA_MISMATCH")
+    blockers.extend(gate_blockers)
+    blockers.extend(candidate_contract_blockers(candidate))
 
     blockers = sorted(set(blockers))
     qualified = bool(
         str(policy_report.get("status") or "").upper() == "QUALIFIED"
         and candidate and current_epoch and report_epoch == current_epoch
-        and independent_oos and all_declared_gates_pass and not blockers
+        and independent_oos and not gate_blockers and not blockers
     )
     last_analysis = policy_report.get("generated_at") or manifest.get("generated_at")
     payload = {
@@ -1710,6 +1730,8 @@ def _best_policy_research_payload():
         "live_policy_change_allowed": qualified,
         "current_candidate": candidate if qualified else None,
         "epoch_id": current_epoch or None,
+        "policy_epoch_id": current_policy_epoch or None,
+        "evidence_policy_signature": current_policy_signature or None,
         "last_analysis": last_analysis,
         "last_analysis_melbourne": format_melbourne_dt(last_analysis),
         "evidence": {
@@ -3349,9 +3371,15 @@ async function loadDecisionReadiness() {
   const coverage = e.outcome_coverage || {};
   const candidate = d.current_candidate || {};
   const candidateName = candidate.policy_id || candidate.name || 'Hidden until qualified';
+  const candidateKind = candidate.kind || '—';
+  const dynamicSummary = candidate.kind === 'DYNAMIC'
+    ? `${Object.keys(candidate.regime_policy_map || {}).length} regimes · fallback ${candidate.fallback || 'missing'} · drift ${candidate.drift_action || 'missing'}`
+    : (candidate.kind === 'STATIC' ? (candidate.policy_signature || 'signature missing') : '—');
   const cards = [
     ['Research result', d.status || 'NO QUALIFIED POLICY', d.status === 'QUALIFIED' ? 'green' : 'amber'],
     ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
+    ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
+    ['Policy design', dynamicSummary, ''],
     ['Completed paths', `${e.completed_paths || 0} / ${e.current_epoch_events || 0}`, ''],
     ['Independent episodes', e.independent_episode_count || 0, ''],
     ['Filled / Unfilled / Rejected', `${coverage.ACCEPTED_FILLED || 0} / ${coverage.ACCEPTED_UNFILLED || 0} / ${coverage.REJECTED || 0}`, ''],
@@ -3361,7 +3389,8 @@ async function loadDecisionReadiness() {
     `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`
   ).join('');
   document.getElementById('decision-readiness-provenance').textContent =
-    `Epoch: ${d.epoch_id || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
+    `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
+    + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
     + `Blockers: ${(d.blockers || []).join(', ') || 'none'} · ${d.note || ''}`;
 }
 

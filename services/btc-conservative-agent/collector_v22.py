@@ -60,6 +60,7 @@ from collector_v22_schema import (
     RESEARCH_EVENTS_FILE,
     RESEARCH_HORIZON_V1,
     REPLAY_INELIGIBLE,
+    build_policy_identity,
 )
 from path_replay_v1 import (
     CONTROL_CELL,
@@ -650,20 +651,34 @@ def build_research_event(
         path_origin_type = PATH_ORIGIN_ACTUAL_FILL
         path_origin_ts = float(live_fill_ts)
     tree = dict(decision_tree or build_decision_tree_v22(reason=exact_reason))
+    control_cell = dict(CONTROL_CELL)
+    control_cell["invert_on"] = bool(invert_on)
+    policy_identity = build_policy_identity(
+        epoch_id=str(epoch_id), control_cell=control_cell, invert_on=bool(invert_on),
+    )
+    raw_direction = (
+        "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
+    ) if invert_on else direction_u
     envelope = {
         "event_id": event_id,
         "event_episode_id": episode["event_episode_id"],
         "epoch_id": str(epoch_id),
         "policy_id": POLICY_ID,
+        "base_policy_id": POLICY_ID,
+        "policy_signature": policy_identity["policy_signature"],
+        "policy_epoch_id": policy_identity["policy_epoch_id"],
+        "policy_identity": policy_identity,
         "signal_ts": float(signal_ts),
         "direction": direction_u,
+        "raw_direction": raw_direction,
+        "executed_direction": direction_u,
         "primary_outcome": primary,
         "observation_status": obs,
         "path_origin_type": path_origin_type,
         "path_origin_ts": path_origin_ts,
         "path_window_policy_id": PATH_WINDOW_POLICY_ID,
         "collector_version": COLLECTOR_VERSION,
-        "control_cell": dict(CONTROL_CELL),
+        "control_cell": control_cell,
     }
     ticks_bounded = []
     if include_ticks_1s and ticks_1s and live_fill_ts:
@@ -683,6 +698,10 @@ def build_research_event(
         "event_episode": episode,
         "trade_id": str(trade_id),
         "epoch_id": str(epoch_id),
+        "base_policy_id": POLICY_ID,
+        "policy_signature": policy_identity["policy_signature"],
+        "policy_epoch_id": policy_identity["policy_epoch_id"],
+        "policy_identity": policy_identity,
         "envelope": envelope,
         "decision_tree_snapshot": tree,
         "pre_signal_context": pre_signal,

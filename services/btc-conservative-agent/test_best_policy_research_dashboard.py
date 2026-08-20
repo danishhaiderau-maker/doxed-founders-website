@@ -2,10 +2,32 @@ import json
 from pathlib import Path
 
 from research import research_dashboard as dashboard
-from research.best_policy_research import build_best_policy_research_report
+from research.best_policy_research import (
+    QUALIFICATION_GATE_SCHEMA,
+    REQUIRED_QUALIFICATION_GATES,
+    build_best_policy_research_report,
+    candidate_contract_blockers,
+)
+
+POLICY_EPOCH = "policy-epoch-control-off"
+EVIDENCE_SIGNATURE = "policy-control-off"
 
 
-def _event(event_id, outcome, episode_id, *, complete=True):
+def _gates(value=True):
+    return {gate: value for gate in REQUIRED_QUALIFICATION_GATES}
+
+
+def _static_candidate():
+    return {
+        "kind": "STATIC",
+        "policy_id": "policy-oos-1",
+        "policy_signature": "candidate-static-1",
+        "policy_spec": {"entry_offset_pct": 0.08, "invert_on": False},
+    }
+
+
+def _event(event_id, outcome, episode_id, *, complete=True,
+           policy_epoch=POLICY_EPOCH, policy_signature=EVIDENCE_SIGNATURE):
     signal_ts = 1_800_000_000.0
     candle_count = 60 if complete else 10
     path = [
@@ -16,10 +38,17 @@ def _event(event_id, outcome, episode_id, *, complete=True):
         "event_id": event_id,
         "epoch_id": "epoch-clean",
         "event_episode_id": episode_id,
+        "policy_epoch_id": policy_epoch,
+        "policy_signature": policy_signature,
         "collector_version": "collector_v2.2",
         "primary_outcome": outcome,
         "observation_status": "PATH_COMPLETE",
-        "envelope": {"signal_ts": signal_ts, "epoch_id": "epoch-clean"},
+        "envelope": {
+            "signal_ts": signal_ts,
+            "epoch_id": "epoch-clean",
+            "policy_epoch_id": policy_epoch,
+            "policy_signature": policy_signature,
+        },
         "canonical_tape": {"path_1m": path},
         "entry_children": [],
     }
@@ -45,10 +74,13 @@ def test_best_policy_is_hidden_until_current_epoch_oos_is_qualified(tmp_path, mo
     ]
     _write_fixture(tmp_path, events, {
         "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
         "status": "PROVISIONAL",
-        "candidate": {"policy_id": "tempting-but-unqualified"},
+        "candidate": _static_candidate(),
         "evidence": {"qualified_oos_episodes": 9},
-        "qualification_gates": {"chronological_oos": False},
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(False),
     })
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
 
@@ -73,10 +105,13 @@ def test_best_policy_requires_complete_paths_and_exact_epoch(tmp_path, monkeypat
     ]
     _write_fixture(tmp_path, events, {
         "epoch_id": "epoch-old",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
         "status": "QUALIFIED",
-        "candidate": {"policy_id": "must-not-leak"},
+        "candidate": _static_candidate(),
         "independent_oos_qualified": True,
-        "qualification_gates": {"chronological_oos": True, "costed_expectancy": True},
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(),
     })
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
 
@@ -97,15 +132,14 @@ def test_exact_epoch_qualified_oos_report_can_show_candidate(tmp_path, monkeypat
     ]
     _write_fixture(tmp_path, events, {
         "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
         "status": "QUALIFIED",
-        "candidate": {"policy_id": "policy-oos-1"},
+        "candidate": _static_candidate(),
         "independent_oos_qualified": True,
         "evidence": {"qualified_oos_episodes": 3},
-        "qualification_gates": {
-            "chronological_oos": True,
-            "costed_expectancy": True,
-            "parameter_stability": True,
-        },
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(),
     })
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
 
@@ -113,7 +147,7 @@ def test_exact_epoch_qualified_oos_report_can_show_candidate(tmp_path, monkeypat
     compatibility = dashboard._decision_readiness_payload()
 
     assert payload["status"] == "QUALIFIED"
-    assert payload["current_candidate"] == {"policy_id": "policy-oos-1"}
+    assert payload["current_candidate"] == _static_candidate()
     assert payload["live_policy_change_allowed"] is True
     assert compatibility["questions"][0]["key"] == "best_policy_research"
     assert len(compatibility["questions"]) == 1
@@ -140,9 +174,12 @@ def test_analyzer_adapter_emits_fail_closed_current_epoch_artifact(tmp_path):
     )
     (tmp_path / "policy_candidate_oos_report.json").write_text(json.dumps({
         "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
         "status": "PROVISIONAL",
-        "candidate": {"policy_id": "not-yet"},
-        "qualification_gates": {"chronological_oos": False},
+        "candidate": _static_candidate(),
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(False),
     }), encoding="utf-8")
 
     report = build_best_policy_research_report(tmp_path, tmp_path)
@@ -152,3 +189,87 @@ def test_analyzer_adapter_emits_fail_closed_current_epoch_artifact(tmp_path):
     assert report["current_candidate"] is None
     assert report["evidence"]["completed_paths"] == 3
     assert written == report
+
+
+def test_same_collection_epoch_is_stratified_by_policy_epoch(tmp_path, monkeypatch):
+    events = [
+        _event("old-invert", "ACCEPTED_FILLED", "episode-old",
+               policy_epoch="policy-epoch-invert-on", policy_signature="policy-invert-on"),
+        _event("filled", "ACCEPTED_FILLED", "episode-1"),
+        _event("unfilled", "ACCEPTED_UNFILLED", "episode-2"),
+        _event("rejected", "REJECTED", "episode-3"),
+    ]
+    # Ensure the latest event selects the OFF policy epoch.
+    events[0]["envelope"]["signal_ts"] -= 60
+    _write_fixture(tmp_path, events, {
+        "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "status": "QUALIFIED",
+        "candidate": _static_candidate(),
+        "independent_oos_qualified": True,
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(),
+    })
+    monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
+
+    payload = dashboard._best_policy_research_payload()
+
+    assert payload["status"] == "QUALIFIED"
+    assert payload["policy_epoch_id"] == POLICY_EPOCH
+    assert payload["evidence"]["current_epoch_events"] == 3
+
+
+def test_matching_collection_epoch_but_wrong_policy_signature_blocks(tmp_path, monkeypatch):
+    events = [
+        _event("filled", "ACCEPTED_FILLED", "episode-1"),
+        _event("unfilled", "ACCEPTED_UNFILLED", "episode-2"),
+        _event("rejected", "REJECTED", "episode-3"),
+    ]
+    _write_fixture(tmp_path, events, {
+        "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": "wrong-signature",
+        "status": "QUALIFIED",
+        "candidate": _static_candidate(),
+        "independent_oos_qualified": True,
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(),
+    })
+    monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
+
+    payload = dashboard._best_policy_research_payload()
+    assert payload["status"] == "NO QUALIFIED POLICY"
+    assert "BEST_POLICY_REPORT_POLICY_SIGNATURE_MISMATCH" in payload["blockers"]
+
+
+def test_arbitrary_true_gate_cannot_qualify():
+    from research.best_policy_research import qualification_gate_blockers
+
+    blockers = qualification_gate_blockers({"anything": True})
+    assert "QUALIFICATION_GATE_FAILED:chronological_untouched_oos" in blockers
+
+
+def test_dynamic_candidate_requires_frozen_mapping_fallback_and_regime_oos():
+    valid = {
+        "kind": "DYNAMIC",
+        "policy_id": "dynamic-1",
+        "policy_signature": "candidate-dynamic-1",
+        "regime_classifier": {"id": "regime-v1", "version": "1", "feature_schema": "causal-v1"},
+        "regime_policy_map": {"TREND": "static-a", "RANGE": "static-b"},
+        "fallback": "CONTROL",
+        "drift_action": "NO_TRADE",
+        "training_cutoff": "2026-08-01T00:00:00Z",
+        "supported_domain": "BTCUSD",
+        "per_regime_oos": {
+            "TREND": {"independent_episodes": 10},
+            "RANGE": {"independent_episodes": 8},
+        },
+    }
+    assert candidate_contract_blockers(valid) == []
+    broken = dict(valid)
+    broken["fallback"] = "BEST_AVAILABLE"
+    broken["per_regime_oos"] = {"TREND": {"independent_episodes": 10}}
+    blockers = candidate_contract_blockers(broken)
+    assert "DYNAMIC_FALLBACK_INVALID" in blockers
+    assert "DYNAMIC_REGIME_OOS_MISSING:RANGE" in blockers
