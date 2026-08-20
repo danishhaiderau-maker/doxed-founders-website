@@ -35706,6 +35706,10 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     # Mutable crash-recovery state belongs only to the Fly collector. It can
     # change between chunk requests and is not research/analyzer evidence.
     "research_events_v22.provisional.json",
+    # High-frequency operational storage telemetry is exposed through the
+    # status API; it is not research evidence and is replaced too frequently
+    # to belong to a generation-consistent evidence mirror.
+    "collector_storage_state.json",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "research_epoch_quarantine",

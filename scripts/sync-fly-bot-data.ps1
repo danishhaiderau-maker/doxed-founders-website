@@ -214,7 +214,10 @@ foreach ($row in $selectedFiles) {
             "&expected_physical_size=$expectedPhysicalSize&expected_published_size=$expectedPublishedSize" +
             "&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode&consistency_mode=$consistencyMode"
           ).GetAwaiter().GetResult()
-          $response.EnsureSuccessStatusCode() | Out-Null
+          if (-not $response.IsSuccessStatusCode) {
+            $errorBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+            throw "Fly sync HTTP $([int]$response.StatusCode) for $rel at offset ${offset}: $errorBody"
+          }
           try {
             $payload = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
             [System.IO.File]::WriteAllBytes($tmp, $payload)
