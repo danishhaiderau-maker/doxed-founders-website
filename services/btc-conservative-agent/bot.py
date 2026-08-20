@@ -114,6 +114,11 @@ from microstructure_tape import (
     SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
     build_bucket as build_microstructure_bucket,
 )
+from research_order_schedule import (
+    append_reprice_interval as append_research_reprice_interval,
+    close_order_schedule as close_research_order_schedule,
+    initialize_order_schedule as initialize_research_order_schedule,
+)
 from cycle_3m_indicators import (
     EXHAUSTION_POLICY_TAG as MTF_EXHAUSTION_LOG_V1,
     UNIVERSE_FILE as CYCLE_3M_UNIVERSE_FILE,
@@ -1139,6 +1144,12 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "dir": direction,
         "entry": entry,
         "qty": order.get("qty") or signal.get("qty"),
+        "research_chase_schedule": copy.deepcopy(
+            order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+        ),
+        "chase_schedule_authoritative": bool(
+            order.get("chase_schedule_authoritative") or signal.get("chase_schedule_authoritative")
+        ),
         "leverage": _state_leverage(),
         "entry_ts": fill_ts,
         # Preserve the source entity's birth watermark after a pending order
@@ -3264,6 +3275,16 @@ def lane_register_pending_order(order: dict):
         lst = lane_pending_orders[ln]
         if order not in lst:
             lst.append(order)
+    trades_store = globals().get("trades_map") or {}
+    master_signal = trades_store.get(tid, {}).get("signal_ref") if tid else None
+    schedule_initializer = globals().get("initialize_research_order_schedule")
+    if callable(schedule_initializer):
+        schedule_initializer(
+            order,
+            master_signal if isinstance(master_signal, dict) else None,
+            now=float(order.get("created_ts") or time.time()),
+            registered=True,
+        )
     hydrate = globals().get("_sync_canonical_source_pending_order")
     store = globals().get("_canonical_source_order_market_evidence")
     if callable(hydrate) and isinstance(store, dict):
@@ -20416,6 +20437,7 @@ def _commit_relay_limit_chase(
     now: float,
     tier: str = None,
     urgent_marketable: bool = False,
+    reference_price: float = None,
 ) -> dict | None:
     """Atomically commit a still-pending chase and snapshot its causal event.
 
@@ -20456,6 +20478,17 @@ def _commit_relay_limit_chase(
             if tier:
                 signal["urgent_chase_tier"] = tier
             signal["fill_model"] = order["fill_model"]
+        schedule_reprice = globals().get("append_research_reprice_interval")
+        if callable(schedule_reprice):
+            schedule_reprice(
+                order,
+                signal if isinstance(signal, dict) else None,
+                now=now,
+                chase_step_index=chase_count,
+                reference_price=reference_price or old_limit,
+                limit_price=new_limit,
+                reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
+            )
         # Canonical pending-order identity: fill gate + market evidence share
         # this generation only after chase ACK mutated the live order.
         sync_pending = globals().get("_sync_canonical_source_pending_order")
@@ -20522,6 +20555,7 @@ def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now:
         order, signal, direction=direction, old_limit=old_limit,
         new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
         urgent_marketable=True,
+        reference_price=price,
     )
     if relay_event is None:
         return False
@@ -20602,6 +20636,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     relay_event = _commit_relay_limit_chase(
         order, signal, direction=direction, old_limit=old_limit,
         new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
+        reference_price=price,
     )
     if relay_event is None:
         return False
@@ -20774,6 +20809,17 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
             signal["relay_event_ack_at_ts"] = order["relay_event_ack_at_ts"]
             signal["marketable_fallback_depth_qty"] = available_qty
             signal["fill_model"] = order["fill_model"]
+        schedule_reprice = globals().get("append_research_reprice_interval")
+        if callable(schedule_reprice):
+            schedule_reprice(
+                order,
+                signal if isinstance(signal, dict) else None,
+                now=now,
+                chase_step_index=chase_count,
+                reference_price=price,
+                limit_price=new_limit,
+                reason="MARKETABLE_LIMIT_FALLBACK",
+            )
         sync_pending = globals().get("_sync_canonical_source_pending_order")
         store = globals().get("_canonical_source_order_market_evidence")
         summary_builder = globals().get("_source_market_evidence_summary")
@@ -21141,6 +21187,14 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
+            schedule_close = globals().get("close_research_order_schedule")
+            if callable(schedule_close):
+                schedule_close(
+                    order,
+                    fill_signal if isinstance(fill_signal, dict) else None,
+                    now=time.time(),
+                    reason="FILLED",
+                )
             order["fill_handoff_in_progress"] = True
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
@@ -21159,6 +21213,15 @@ def fill_order(order):
     if manual_admin_pause_active():
         lane_unregister_pending_order(order)
         order["status"] = "CANCELLED"
+        paused_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+        schedule_close = globals().get("close_research_order_schedule")
+        if callable(schedule_close):
+            schedule_close(
+                order,
+                paused_signal if isinstance(paused_signal, dict) else None,
+                now=time.time(),
+                reason="ADMIN_MANUAL_PAUSE",
+            )
         _record_expired_order(order, "ADMIN_MANUAL_PAUSE")
         expire_signal_for_order(order, "ADMIN_MANUAL_PAUSE")
         logger.warning(
@@ -24127,6 +24190,15 @@ def _cancel_pending_order_confirmed(
         order["cancel_confirmed_reason"] = reason
         order["cancel_confirmed_ts"] = time.time()
         order.pop("cancel_pending_reason", None)
+        master_signal = trades_map.get(tid, {}).get("signal_ref") if tid else None
+        schedule_close = globals().get("close_research_order_schedule")
+        if callable(schedule_close):
+            schedule_close(
+                order,
+                master_signal if isinstance(master_signal, dict) else None,
+                now=float(order["cancel_confirmed_ts"]),
+                reason=reason,
+            )
 
     result["confirmed"] = True
     result["finalized"] = True
@@ -31925,6 +31997,8 @@ def _relay_signal_ref_lite(sig: dict) -> dict:
         "created_ts": sig.get("created_ts"),
         "created_ts_ts": sig.get("created_ts_ts"),
         "research_lane": sig.get("research_lane"),
+        "research_chase_schedule": copy.deepcopy(sig.get("research_chase_schedule")),
+        "chase_schedule_authoritative": bool(sig.get("chase_schedule_authoritative")),
     }
 
 
@@ -31939,6 +32013,7 @@ _DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
     "chase_3plus_virtual_chase_count", "chase_3plus_activation_reason",
     "entry_path", "order_placed", "pull_req", "max_pull", "regime_birth",
     "directional_spread", "score_gap",
+    "research_chase_schedule", "chase_schedule_authoritative", "qty",
 })
 
 
