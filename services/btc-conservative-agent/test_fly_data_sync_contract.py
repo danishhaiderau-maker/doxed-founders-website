@@ -310,6 +310,8 @@ def test_jsonl_writer_is_serialized_and_corruption_is_preserved_not_deleted():
 def test_shadow_jsonl_is_validated_before_startup_collection_and_sync():
     assert "def _validate_research_ledgers_on_startup():" in BOT
     assert '(SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP")' in BOT
+    assert '(SIGNAL_REPLAY_FILE, "SIGNAL_REPLAY_STARTUP")' in BOT
+    assert '_safe_append_jsonl(SIGNAL_REPLAY_FILE, replay, label="SIGNAL_REPLAY")' in BOT
     main_start = BOT.index("def main():")
     assert BOT.index("_validate_research_ledgers_on_startup()", main_start) < BOT.index(
         "_restore_collector_v22_provisionals()", main_start

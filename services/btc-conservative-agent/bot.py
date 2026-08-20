@@ -38859,13 +38859,8 @@ def dump_replay(trade_id: str):
                 "margin_usdt": buf.get("margin_usdt"),
                 "ticks": list(buf["ticks"]),
             }
-            rotate_log(SIGNAL_REPLAY_FILE)
-            with open(SIGNAL_REPLAY_FILE, 'a') as f:
-                f.write(json.dumps(replay) + "\n")
-                f.flush()
+            if _safe_append_jsonl(SIGNAL_REPLAY_FILE, replay, label="SIGNAL_REPLAY"):
                 write_counter += 1
-                if write_counter % 10 == 0:
-                    os.fsync(f.fileno())
             if replay_complete:
                 paper_tid = paper_multiverse_trade_id(
                     trade_id,
@@ -40250,7 +40245,11 @@ def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
 
 def _validate_research_ledgers_on_startup():
     """Quarantine known active research corruption before mirror discovery."""
-    for path, label in ((SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP"),):
+    ledgers = (
+        (SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP"),
+        (SIGNAL_REPLAY_FILE, "SIGNAL_REPLAY_STARTUP"),
+    )
+    for path, label in ledgers:
         with _jsonl_path_lock(path):
             _validate_or_quarantine_jsonl(path, label)
 
