@@ -33087,7 +33087,13 @@ def _build_api_state_snapshot():
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
         finally:
             state_lock.release()
-        runtime = _recompute_system_readiness(now_ts)
+        # Snapshot construction can take long enough for newer WS ticks to
+        # arrive after ``now_ts`` was captured.  Reusing that older timestamp
+        # makes the fresh tick appear to have a negative age, which resets the
+        # readiness-stability epoch on every dashboard refresh.  Readiness is
+        # execution state, not presentation snapshot state, so always evaluate
+        # it against a fresh wall-clock receipt after the state copy completes.
+        runtime = _recompute_system_readiness()
         snapshot["strategy_price"] = snapshot.get("price")
         snapshot["strategy_price_ts"] = snapshot.get("price_ts")
         rest_display_price = float(snapshot.get("rest_price") or 0)
