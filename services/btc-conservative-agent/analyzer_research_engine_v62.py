@@ -19809,12 +19809,19 @@ def finalize_analyzer_outputs(
         from research.genome.run_analyzer import run_genome_analyzer
 
         genome_payload = run_genome_analyzer()
-        print(
-            "  ✅ Trading Genome: "
-            f"{len(genome_payload.get('genome_library') or [])} genomes | "
-            f"{(genome_payload.get('validation') or {}).get('verdict', 'UNKNOWN')} | "
-            f"{genome_payload.get('architecture_frozen', 'schema unknown')}"
-        )
+        if genome_payload.get("status") == "GENOME_SOURCE_UNAVAILABLE":
+            print(
+                "  ℹ️ Trading Genome: GENOME_SOURCE_UNAVAILABLE | "
+                f"reason={genome_payload.get('reason', 'UNKNOWN')} | "
+                "prior valid Genome artifacts preserved | static/dynamic/shadow continue"
+            )
+        else:
+            print(
+                "  ✅ Trading Genome: "
+                f"{len(genome_payload.get('genome_library') or [])} genomes | "
+                f"{(genome_payload.get('validation') or {}).get('verdict', 'UNKNOWN')} | "
+                f"{genome_payload.get('architecture_frozen', 'schema unknown')}"
+            )
     except Exception as exc:
         # Research generation must never interrupt the analyzer or bot. The
         # dashboard exposes the missing artifact as degraded/empty evidence.

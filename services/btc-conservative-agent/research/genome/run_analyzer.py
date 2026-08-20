@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -36,10 +38,76 @@ GENOME_REPORT_FILE = "genome_analysis_report.json"
 GENOME_LIBRARY_FILE = "genome_library.json"
 GENOME_DISCOVERIES_FILE = "genome_discoveries.json"
 ARCHITECTURE_FROZEN = "v11.0-genome-architecture-v1"
+GENOME_SOURCE_STATUS_FILE = "genome_source_status.json"
+REQUIRED_SOURCE_TABLES = frozenset({
+    "environment_genome", "market_genome", "decision_genome",
+    "execution_genome", "lifecycle_genome", "trade_genome",
+})
 
 
 def _agent_root() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _atomic_json(path: str, payload: Dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", suffix=".tmp",
+                                     dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _source_preflight(db_path: str) -> Dict[str, Any]:
+    """Inspect raw Genome evidence read-only; never initialize it in place."""
+    generated_at = datetime.now(timezone.utc).isoformat()
+    if not os.path.isfile(db_path):
+        return {
+            "schema": "genome_source_status_v1", "status": "GENOME_SOURCE_UNAVAILABLE",
+            "generated_at": generated_at, "reason": "SOURCE_DB_MISSING",
+            "source_label": os.path.basename(db_path), "required_tables": sorted(REQUIRED_SOURCE_TABLES),
+            "available_tables": [], "missing_tables": sorted(REQUIRED_SOURCE_TABLES),
+            "execution_affected": False, "other_research_pages_affected": False,
+        }
+    try:
+        uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as connection:
+            available = {
+                str(row[0]) for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+    except sqlite3.Error as exc:
+        return {
+            "schema": "genome_source_status_v1", "status": "GENOME_SOURCE_UNAVAILABLE",
+            "generated_at": generated_at, "reason": "SOURCE_DB_UNREADABLE",
+            "error_type": type(exc).__name__, "source_label": os.path.basename(db_path),
+            "required_tables": sorted(REQUIRED_SOURCE_TABLES), "available_tables": [],
+            "missing_tables": sorted(REQUIRED_SOURCE_TABLES),
+            "execution_affected": False, "other_research_pages_affected": False,
+        }
+    missing = REQUIRED_SOURCE_TABLES - available
+    return {
+        "schema": "genome_source_status_v1",
+        "status": "GENOME_SOURCE_UNAVAILABLE" if missing else "AVAILABLE",
+        "generated_at": generated_at,
+        "reason": "REQUIRED_SOURCE_TABLES_MISSING" if missing else None,
+        "source_label": os.path.basename(db_path),
+        "required_tables": sorted(REQUIRED_SOURCE_TABLES),
+        "available_tables": sorted(available),
+        "missing_tables": sorted(missing),
+        "execution_affected": False,
+        "other_research_pages_affected": False,
+    }
 
 
 def _summarize_decision_dna(layers: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -212,6 +280,7 @@ def run_genome_analyzer(
     db_path: str | None = None,
     out_dir: str | None = None,
     *,
+    memory_db_path: str | None = None,
     publish_root_artifacts: bool = True,
 ) -> dict:
     agent_root = _agent_root()
@@ -219,8 +288,19 @@ def run_genome_analyzer(
     out = out_dir or os.path.join(agent_root, "research", "genome")
     os.makedirs(out, exist_ok=True)
 
+    source_status = _source_preflight(db)
+    _atomic_json(os.path.join(out, GENOME_SOURCE_STATUS_FILE), source_status)
+    if source_status["status"] != "AVAILABLE":
+        # Do not overwrite a prior valid analysis/library/discovery artifact.
+        # The caller receives a structured, non-throwing status so unrelated
+        # static, dynamic, and shadow report generation continues normally.
+        return source_status
+
     validation = validate_genome_integrity(db)
-    store = GenomeLibraryStore(db)
+    memory_db = memory_db_path or os.path.join(out, "genome_memory.db")
+    if os.path.abspath(memory_db) == os.path.abspath(db):
+        raise ValueError("Genome derived memory DB must be separate from the read-only source DB")
+    store = GenomeLibraryStore(memory_db)
     layers = load_all_layers(db)
     trades = layers.get("trade") or []
     markets = layers.get("market") or []
@@ -283,6 +363,7 @@ def run_genome_analyzer(
             "continuous": summarize_trades(cont_trades),
         },
         "migration_note": "v62 CSV reports still run in parallel until Genome reproduces all required metrics (Priority 13).",
+        "source_status": source_status,
     }
 
     for fname, key in (
