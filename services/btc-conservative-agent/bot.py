@@ -25414,6 +25414,7 @@ process_lock = threading.RLock()
 positions_file_lock = threading.RLock()
 config_file_lock = threading.RLock()
 signal_snapshot_lock = threading.RLock()
+pathway_specs_file_lock = threading.RLock()
 last_ohlcv_fetch = time.time() - 60
 last_processed_candle_ts = 0.0
 last_ai_evaluation_ts = 0.0
@@ -27276,8 +27277,12 @@ def write_static_pathway_lane_specs(cwd: str = None) -> dict:
             pass
     merged = _merge_pathway_specs_with_session_stats(payload, existing)
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, indent=2)
+        _atomic_file_replace(
+            path,
+            lambda handle: json.dump(merged, handle, indent=2),
+            pathway_specs_file_lock,
+            label="PATHWAY_LANE_SPECS",
+        )
     except Exception as e:
         logger.debug(f"[PATHWAY_LANE_SPECS] write failed: {e}")
     return merged

@@ -18199,8 +18199,20 @@ def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, 
         "lanes": tiles,
     }
     try:
-        with open(PATHWAY_LANE_SPECS_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        candidate = f"{PATHWAY_LANE_SPECS_FILE}.{os.getpid()}.tmp"
+        try:
+            with open(candidate, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(candidate, PATHWAY_LANE_SPECS_FILE)
+        finally:
+            try:
+                if os.path.exists(candidate):
+                    os.remove(candidate)
+            except OSError:
+                pass
         print(f"  ✅ Wrote {PATHWAY_LANE_SPECS_FILE} ({len(tiles)} lane tiles) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {PATHWAY_LANE_SPECS_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
