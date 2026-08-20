@@ -180,8 +180,12 @@ test('production wrapper refuses every non-Fly runtime before importing bot.py',
   assert.ok(botImport > guard, 'non-Fly refusal must run before bot.py import');
   assert.match(wrapper, /raise SystemExit\(78\)/);
   assert.match(wrapper, /os\.environ\["HOME_BOT_LOCAL"\]\s*=\s*"0"/);
-  assert.match(wrapper, /os\.environ\["HOME_RESEARCH_FULL"\]\s*=\s*"0"/);
-  assert.match(wrapper, /os\.environ\.setdefault\("BLOCK_RESEARCH_WAREHOUSE",\s*"1"\)/);
+  assert.match(wrapper, /os\.environ\["HOME_RESEARCH_FULL"\]\s*=\s*"1"/);
+  assert.match(
+    wrapper,
+    /if os\.environ\.get\("EXECUTION_MIRROR_ONLY"[\s\S]*os\.environ\["HOME_RESEARCH_FULL"\]\s*=\s*"0"[\s\S]*os\.environ\["BLOCK_RESEARCH_WAREHOUSE"\]\s*=\s*"1"/,
+  );
+  assert.match(wrapper, /else:[\s\S]*os\.environ\["BLOCK_RESEARCH_WAREHOUSE"\]\s*=\s*"0"/);
 
   const python = process.platform === 'win32' ? 'python.exe' : 'python';
   const result = spawnSync(python, [fileURLToPath(wrapperPath)], {
