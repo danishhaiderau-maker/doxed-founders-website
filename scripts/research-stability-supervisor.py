@@ -26,6 +26,7 @@ from typing import Any, Callable
 REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
 MAX_PENDING_EVENT_DELTA = 100
+READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
 
@@ -244,6 +245,108 @@ def bounded_pending_parity(
     }
 
 
+def runtime_counts(payload: dict[str, Any]) -> dict[str, int | None]:
+    def count(explicit: tuple[str, ...], collections: tuple[str, ...]) -> int | None:
+        for key in explicit:
+            if payload.get(key) is not None:
+                try:
+                    return int(payload[key])
+                except (TypeError, ValueError):
+                    return None
+        for key in collections:
+            if isinstance(payload.get(key), list):
+                return len(payload[key])
+        return None
+
+    return {
+        "virtual_count": count(
+            ("virtual_count", "virtual_candidate_count", "active_signal_count"),
+            ("virtual_chase_candidates", "active_signals"),
+        ),
+        "pending_count": count(
+            ("pending_count", "pending_order_count"), ("pending_orders",),
+        ),
+        "position_count": count(
+            ("position_count", "open_position_count"), ("positions",),
+        ),
+    }
+
+
+def evaluate_runtime_readiness(
+    status: dict[str, Any],
+    prior: dict[str, Any],
+    *,
+    now: datetime,
+    counts: dict[str, int | None],
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    runtime = status.get("runtime_readiness") or {}
+    reasons = [str(value) for value in (runtime.get("readiness_reasons") or [])]
+    signal_ready = bool(status.get("signal_generation_ready", runtime.get("signal_generation_ready")))
+    process_alive = bool(status.get("process_alive"))
+    data_reasons = {
+        "NO_PRICE", "WS_NOT_READY", "REST_ENTRY_QUOTE_NOT_READY", "OHLCV_NOT_READY",
+        "EMA_NOT_READY", "CANDLE_STALE", "BUFFERS_NOT_READY",
+    }
+    starvation_reasons = sorted(set(reasons) & data_reasons)
+    paused_only = bool(set(reasons) & {"ADMIN_MANUAL_PAUSE", "EXECUTION_PAUSED"}) and not starvation_reasons
+    stabilizing = (
+        not signal_ready
+        and bool(runtime.get("prerequisites_ready"))
+        and "READINESS_STABILIZING" in reasons
+        and not starvation_reasons
+    )
+    identity = str(status.get("git_rev") or status.get("bot_version") or "UNKNOWN")
+    prior_identity = str(prior.get("runtime_identity") or "")
+    prior_first = parse_time(prior.get("first_starved_at")) if prior_identity == identity else None
+
+    if signal_ready or paused_only or stabilizing or not process_alive or not starvation_reasons:
+        first = None
+        duration = 0.0
+    else:
+        first = prior_first or now
+        duration = max(0.0, (now - first).total_seconds())
+
+    persistent = bool(first and duration >= READINESS_STARVATION_THRESHOLD_SECONDS)
+    if not process_alive:
+        state = "PROCESS_NOT_ALIVE"
+    elif signal_ready:
+        state = "READY"
+    elif stabilizing:
+        state = "STABILIZING"
+    elif paused_only:
+        state = "PAUSED_NOT_STARVATION"
+    elif persistent:
+        state = "PERSISTENT_COLLECTION_STARVATION"
+    elif starvation_reasons:
+        state = "TRANSIENT_NOT_READY"
+    else:
+        state = "NOT_READY_NON_DATA_REASON"
+
+    next_state = {
+        "schema": "research_runtime_readiness_state_v1",
+        "runtime_identity": identity,
+        "observed_at": now.isoformat(),
+        "first_starved_at": first.isoformat() if first else None,
+        "starved_duration_seconds": round(duration, 1),
+        "state": state,
+        "reasons": reasons,
+    }
+    detail = {
+        **next_state,
+        "threshold_seconds": READINESS_STARVATION_THRESHOLD_SECONDS,
+        "process_alive": process_alive,
+        "signal_generation_ready": signal_ready,
+        "system_ready": bool(status.get("system_ready", runtime.get("system_ready"))),
+        "ws_ready": bool(status.get("ws_ready", runtime.get("ws_transport_ready"))),
+        "rest_entry_quote_ready": runtime.get("rest_entry_quote_ready"),
+        "ohlcv_ready": status.get("ohlcv_ready", runtime.get("ohlcv_ready")),
+        "ohlcv_age_sec": runtime.get("ohlcv_age_sec"),
+        "readiness_reasons": reasons,
+        **counts,
+    }
+    return process_alive and not persistent, detail, next_state
+
+
 @dataclass
 class Supervisor:
     repo: Path
@@ -257,6 +360,7 @@ class Supervisor:
     process_reader: Callable[[], list[dict[str, Any]]] = process_inventory
     launcher: Callable[..., subprocess.Popen[Any]] = subprocess.Popen
     runtime_repo: Path | None = None
+    readiness_state_file: Path | None = None
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -293,6 +397,30 @@ class Supervisor:
             add("fly_storage", pct < 85.0, {"volume_pct": pct, "cleanup_status": size.get("cleanup_status")})
         except Exception as exc:
             add("fly_storage", False, type(exc).__name__)
+
+        readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
+        try:
+            status = self.fetcher(self.fly_url.rstrip("/") + "/api/status", self.token, 20)
+            count_payload = status
+            counts = runtime_counts(count_payload)
+            if any(value is None for value in counts.values()):
+                try:
+                    state_payload = self.fetcher(self.fly_url.rstrip("/") + "/api/state", self.token, 20)
+                    state_counts = runtime_counts(state_payload)
+                    counts = {key: counts[key] if counts[key] is not None else state_counts[key] for key in counts}
+                except Exception:
+                    pass
+            try:
+                prior_readiness = read_json(readiness_path)
+            except (FileNotFoundError, ValueError, json.JSONDecodeError):
+                prior_readiness = {}
+            readiness_ok, readiness_detail, next_readiness = evaluate_runtime_readiness(
+                status, prior_readiness, now=self.now(), counts=counts,
+            )
+            atomic_json(readiness_path, next_readiness)
+            add("persistent_runtime_readiness", readiness_ok, readiness_detail)
+        except Exception as exc:
+            add("persistent_runtime_readiness", False, type(exc).__name__)
 
         heartbeat_path = (self.runtime_repo or self.repo) / ".fly-data-sync-loop.heartbeat.json"
         sync_revision = None

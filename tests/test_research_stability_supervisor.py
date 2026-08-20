@@ -60,6 +60,13 @@ def make_fixture(tmp_path):
 def fetcher(url, token, timeout):
     if url.endswith("manifest"):
         return {"files": [{"path": "research_events_v22.jsonl"}], "total_bytes": 100, "source_git_rev": "a" * 40}
+    if url.endswith("/api/status"):
+        return {
+            "process_alive": True, "system_ready": True, "signal_generation_ready": True,
+            "ws_ready": True, "git_rev": "a" * 40,
+            "runtime_readiness": {"signal_generation_ready": True, "readiness_reasons": []},
+            "virtual_count": 2, "pending_count": 1, "position_count": 0,
+        }
     return {"volume_pct": 15.0, "cleanup_status": "ok"}
 
 
@@ -294,3 +301,98 @@ def test_runtime_repo_owns_sync_heartbeat_and_launcher(tmp_path):
     assert str(runtime_repo / "scripts" / "sync-fly-bot-data-loop.ps1") in calls[0][0][0]
     heartbeat_check = next(x for x in result["checks"] if x["name"] == "atomic_sync_heartbeat")
     assert heartbeat_check["ok"] is True
+
+
+def starvation_status():
+    return {
+        "process_alive": True, "system_ready": False, "signal_generation_ready": False,
+        "ws_ready": True, "git_rev": "a" * 40,
+        "runtime_readiness": {
+            "prerequisites_ready": False, "signal_generation_ready": False,
+            "rest_entry_quote_ready": False, "ohlcv_ready": False, "ohlcv_age_sec": 480,
+            "readiness_reasons": ["REST_ENTRY_QUOTE_NOT_READY", "OHLCV_NOT_READY", "CANDLE_STALE"],
+        },
+        "virtual_count": 4, "pending_count": 0, "position_count": 0,
+    }
+
+
+def test_runtime_starvation_is_transient_before_conservative_threshold(tmp_path):
+    from datetime import timedelta
+    state_file = tmp_path / "runtime-state.json"
+    prior = {
+        "runtime_identity": "a" * 40,
+        "first_starved_at": (NOW - timedelta(minutes=7)).isoformat(),
+    }
+    write_json(state_file, prior)
+    ok, detail, persisted = module.evaluate_runtime_readiness(
+        starvation_status(), prior, now=NOW, counts={"virtual_count": 4, "pending_count": 0, "position_count": 0},
+    )
+    assert ok is True
+    assert detail["state"] == "TRANSIENT_NOT_READY"
+    assert detail["starved_duration_seconds"] == 420
+    assert detail["virtual_count"] == 4
+    assert persisted["first_starved_at"] == prior["first_starved_at"]
+
+
+def test_runtime_starvation_becomes_unhealthy_after_threshold(tmp_path):
+    from datetime import timedelta
+    prior = {"runtime_identity": "a" * 40, "first_starved_at": (NOW - timedelta(minutes=16)).isoformat()}
+    ok, detail, _ = module.evaluate_runtime_readiness(
+        starvation_status(), prior, now=NOW, counts={"virtual_count": 4, "pending_count": 0, "position_count": 0},
+    )
+    assert ok is False
+    assert detail["state"] == "PERSISTENT_COLLECTION_STARVATION"
+    assert detail["starved_duration_seconds"] == 960
+
+
+def test_readiness_recovery_clears_persistent_starvation_clock(tmp_path):
+    from datetime import timedelta
+    prior = {"runtime_identity": "a" * 40, "first_starved_at": (NOW - timedelta(minutes=30)).isoformat()}
+    ready = starvation_status()
+    ready.update(system_ready=True, signal_generation_ready=True)
+    ready["runtime_readiness"] = {"prerequisites_ready": True, "signal_generation_ready": True, "readiness_reasons": []}
+    ok, detail, persisted = module.evaluate_runtime_readiness(
+        ready, prior, now=NOW, counts={"virtual_count": 0, "pending_count": 0, "position_count": 0},
+    )
+    assert ok is True
+    assert detail["state"] == "READY"
+    assert persisted["first_starved_at"] is None
+
+
+def test_stabilization_and_admin_pause_are_not_collection_starvation(tmp_path):
+    stabilizing = starvation_status()
+    stabilizing["runtime_readiness"] = {
+        "prerequisites_ready": True, "signal_generation_ready": False,
+        "readiness_reasons": ["READINESS_STABILIZING"],
+    }
+    ok, detail, _ = module.evaluate_runtime_readiness(
+        stabilizing, {}, now=NOW, counts={"virtual_count": None, "pending_count": None, "position_count": None},
+    )
+    assert ok is True and detail["state"] == "STABILIZING"
+    paused = starvation_status()
+    paused["runtime_readiness"]["readiness_reasons"] = ["ADMIN_MANUAL_PAUSE"]
+    ok, detail, _ = module.evaluate_runtime_readiness(
+        paused, {}, now=NOW, counts={"virtual_count": 0, "pending_count": 0, "position_count": 1},
+    )
+    assert ok is True and detail["state"] == "PAUSED_NOT_STARVATION"
+
+
+def test_runtime_identity_change_does_not_inherit_old_starvation_duration(tmp_path):
+    from datetime import timedelta
+    prior = {"runtime_identity": "b" * 40, "first_starved_at": (NOW - timedelta(hours=2)).isoformat()}
+    ok, detail, _ = module.evaluate_runtime_readiness(
+        starvation_status(), prior, now=NOW, counts={"virtual_count": 1, "pending_count": 0, "position_count": 0},
+    )
+    assert ok is True
+    assert detail["starved_duration_seconds"] == 0
+
+
+def test_dead_runtime_fails_immediately_without_remote_repair(tmp_path):
+    dead = starvation_status()
+    dead["process_alive"] = False
+    ok, detail, persisted = module.evaluate_runtime_readiness(
+        dead, {}, now=NOW, counts={"virtual_count": None, "pending_count": None, "position_count": None},
+    )
+    assert ok is False
+    assert detail["state"] == "PROCESS_NOT_ALIVE"
+    assert persisted["first_starved_at"] is None
