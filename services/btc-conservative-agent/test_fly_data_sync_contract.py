@@ -53,7 +53,9 @@ def _load_bot_functions(*names):
         "_DATA_SYNC_EXTENSIONS": frozenset(
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
         ),
-        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({"pipeline_events_3factor.csv"}),
+        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({
+            "pipeline_events_3factor.csv", "trades_3factor.csv"
+        }),
         "_RESEARCH_RAW_JSONL_NEVER_PRUNE": frozenset({"research_events_v22.jsonl"}),
         "_pure_validate_platform_relay_evidence_payload": pure_validate_relay,
     }
@@ -175,6 +177,16 @@ def test_only_declared_dynamic_csv_ledgers_use_append_prefix_mode():
     assert mode(Path("research_events_v22.jsonl")) == "strict_generation_v1"
 
 
+def test_serialized_jsonl_writer_targets_are_append_prefix_eligible(tmp_path):
+    namespace = _load_bot_functions("_data_sync_consistency_mode")
+    target = (tmp_path / "reversal_study.jsonl").resolve()
+    namespace["_jsonl_serialized_append_targets"] = {str(target)}
+    assert namespace["_data_sync_consistency_mode"](target) == "append_prefix_v1"
+    assert namespace["_data_sync_consistency_mode"](
+        tmp_path / "unregistered.jsonl"
+    ) == "strict_generation_v1"
+
+
 def test_dynamic_csv_schema_expansion_is_an_atomic_inode_change():
     tree = ast.parse(BOT)
     selected = [
@@ -206,7 +218,7 @@ def test_append_prefix_mode_is_narrow_and_allows_only_same_inode_growth():
     matches = namespace["_data_sync_append_prefix_matches"]
     assert mode(Path("bot_runtime.log")) == "append_prefix_v1"
     assert mode(Path("research_events_v22.jsonl")) == "strict_generation_v1"
-    assert mode(Path("trades_3factor.csv")) == "strict_generation_v1"
+    assert mode(Path("trades_3factor.csv")) == "append_prefix_v1"
     assert mode(Path("state.json")) == "strict_generation_v1"
     grown = SimpleNamespace(st_size=130, st_mtime_ns=999, st_ino=7)
     assert matches(grown, minimum_size=100, inode=7)
@@ -243,6 +255,7 @@ def _load_jsonl_writer(tmp_path):
         "_jsonl_append_locks_guard": threading.Lock(),
         "_jsonl_append_locks": {},
         "_jsonl_validated_targets": set(),
+        "_jsonl_serialized_append_targets": set(),
         "rotate_log": lambda _path: None,
         "_transient_csv_lock_error": lambda _error: False,
         "_csv_write_fallback": lambda *_args: None,
@@ -305,6 +318,7 @@ def test_jsonl_writer_is_serialized_and_corruption_is_preserved_not_deleted():
     assert "os.replace(key, target)" in BOT
     assert '"corrupt_evidence_quarantine"' in BOT
     assert "os.fsync(f.fileno())" in BOT
+    assert "_jsonl_serialized_append_targets.add(os.path.abspath(path))" in BOT
 
 
 def test_shadow_jsonl_is_validated_before_startup_collection_and_sync():

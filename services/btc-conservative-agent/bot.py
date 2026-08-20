@@ -35869,6 +35869,7 @@ def _data_sync_consistency_mode(path: Path) -> str:
     append_prefix = (
         path.suffix.lower() == ".log"
         or path.name in _DATA_SYNC_APPEND_PREFIX_NAMES
+        or str(path.resolve()) in globals().get("_jsonl_serialized_append_targets", set())
     )
     return "append_prefix_v1" if append_prefix else "strict_generation_v1"
 
@@ -40136,6 +40137,7 @@ def rotate_log(file):
 _jsonl_append_locks_guard = threading.Lock()
 _jsonl_append_locks = {}
 _jsonl_validated_targets = set()
+_jsonl_serialized_append_targets = set()
 
 
 def _jsonl_path_lock(path: str):
@@ -40223,6 +40225,7 @@ def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
     line = json.dumps(row, default=str) + "\n"
     last_err = None
     with _jsonl_path_lock(path):
+        _jsonl_serialized_append_targets.add(os.path.abspath(path))
         for attempt in range(CSV_WRITE_RETRIES):
             try:
                 _validate_or_quarantine_jsonl(path, label)
