@@ -22937,17 +22937,13 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
         logger.info(f"[WS] FIRST TICK RECEIVED - Price: {price} | ws_ready=True [PIPELINE ENFORCEMENT]")
     _recompute_system_readiness(tick_now)
     _update_pending_order_price_extremes(price)
-    with trade_lock:
-        has_open = any(
-            isinstance(p, dict) and p.get("status") == "OPEN" for p in open_positions
-        )
-        has_pending = any(
-            isinstance(o, dict) and o.get("status") == "PENDING" for o in pending_orders
-        )
-    if has_pending:
-        process_pending_orders()
-    if has_open:
-        _tick_driven_position_exits(price)
+    # Never run lifecycle mutation on websocket-client's sole reader thread.
+    # process_pending_orders can perform REST, persistence, reconciliation and
+    # collector work; when it ran here, the reader stopped consuming pongs for
+    # minutes and the watchdog could not complete its reconnect until the
+    # callback returned.  The normal position manager owns pending-order work.
+    # Exact trade-tick exits are handed to one bounded/coalescing worker below.
+    _enqueue_ws_tick_lifecycle(price, tick_now)
 
 def _process_ws_ticker_update(payload) -> bool:
     """Use a live exact-symbol ticker update as fresh WS market data.
@@ -23104,19 +23100,74 @@ def microstructure_capture_loop():
             _microstructure_write_failures += 1
 
 
+def _enqueue_ws_tick_lifecycle(price: float, received_ts: float = None) -> bool:
+    """Offer only the latest genuine trade tick to the lifecycle worker."""
+    try:
+        item = (float(received_ts or time.time()), float(price))
+    except (TypeError, ValueError):
+        return False
+    if item[1] <= 0:
+        return False
+    try:
+        ws_tick_lifecycle_queue.put_nowait(item)
+        return True
+    except Full:
+        try:
+            ws_tick_lifecycle_queue.get_nowait()
+            ws_tick_lifecycle_queue.task_done()
+        except Empty:
+            pass
+        try:
+            ws_tick_lifecycle_queue.put_nowait(item)
+            return True
+        except Full:
+            return False
+
+
 def _tick_driven_position_exits(price: float):
     """WS tick path — immediate ladder/thesis on side-correct BBO, not last-trade wicks."""
     if price is None or price <= 0:
-        return
-    now = time.time()
-    with trade_lock:
-        positions = [
-            p for p in open_positions
-            if isinstance(p, dict) and p.get("status") == "OPEN"
-        ]
-    for pos in positions:
-        mark = get_mark_price(pos.get("dir"), fallback=price)
-        _apply_position_exits(pos, mark, now)
+        return False
+    # The normal position manager uses the same lock. A tick worker skips a
+    # busy cycle instead of evaluating/closing the same position twice.
+    if not position_evaluation_lock.acquire(timeout=0.25):
+        return False
+    try:
+        now = time.time()
+        with trade_lock:
+            positions = [
+                p for p in open_positions
+                if isinstance(p, dict) and p.get("status") == "OPEN"
+            ]
+        for pos in positions:
+            mark = get_mark_price(pos.get("dir"), fallback=price)
+            _apply_position_exits(pos, mark, now)
+        return True
+    finally:
+        position_evaluation_lock.release()
+
+
+def ws_tick_lifecycle_worker():
+    """Single bounded consumer for exact WS tick exits.
+
+    Pending-order fill/chase work remains on position_manager/state_monitor.
+    This preserves tick-sensitive exits without allowing slow close/persistence
+    work to block the WebSocket reader.
+    """
+    while not shutdown_event.is_set():
+        try:
+            received_ts, price = ws_tick_lifecycle_queue.get(timeout=0.5)
+        except Empty:
+            continue
+        try:
+            # Do not apply an old tick to a position created while this worker
+            # was busy. Current-price protection remains in process_positions.
+            if time.time() - float(received_ts) <= WS_TICK_LIFECYCLE_MAX_AGE_SEC:
+                _tick_driven_position_exits(float(price))
+        except Exception as exc:
+            logger.error(f"[WS TICK WORKER] lifecycle error: {exc}")
+        finally:
+            ws_tick_lifecycle_queue.task_done()
 
 def safe_ws_handler(message):
     try:
@@ -28462,6 +28513,8 @@ last_block_log = 0.0
 first_ai_done = False
 last_event_trigger = 0.0
 ws_retry = 1
+WS_TICK_LIFECYCLE_MAX_AGE_SEC = 5.0
+ws_tick_lifecycle_queue = Queue(maxsize=1)
 last_ai_call_ts = 0.0
 last_signal_process_ts = 0.0
 bootstrap_done = False
@@ -41569,6 +41622,7 @@ def main():
     )
     sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
+    threading.Thread(target=safe_thread(ws_tick_lifecycle_worker), daemon=True).start()
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bbo_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()

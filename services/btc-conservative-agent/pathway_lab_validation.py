@@ -22,6 +22,7 @@ from combo_pathway_config import (
     EXPECTED_EXCHANGE,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI_SCAN,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     any_combo_execution_enabled,
@@ -389,14 +390,11 @@ def run_ai_scan_role_validation() -> dict:
     Prove AI_SCAN is coordinator-only: not an execution lane, not a spawn target.
     """
     spawn_src = ""
-    exp_spawn_src = ""
     try:
         import bot
         spawn_src = inspect.getsource(bot.spawn_combo_lanes_from_ai_scan)
-        exp_spawn_src = inspect.getsource(bot.spawn_experimental_lanes_from_ai_scan)
     except Exception as exc:
         spawn_src = f"import_error:{exc}"
-        exp_spawn_src = spawn_src
 
     checks = [
         {
@@ -420,22 +418,14 @@ def run_ai_scan_role_validation() -> dict:
             "detail": "combo fan-out iterates COMBO_EXECUTION_LANES only",
         },
         {
-            "check": "spawn_combo_lanes_from_ai_scan also calls spawn_experimental_lanes_from_ai_scan",
-            "passed": "spawn_experimental_lanes_from_ai_scan" in spawn_src,
-            "detail": "experimental lanes fan out after combo match loop",
+            "check": "shared AI fan-out has no legacy experimental dispatcher",
+            "passed": "spawn_experimental_lanes_from_ai_scan" not in spawn_src,
+            "detail": "historical experimental lanes are analyzer-only",
         },
         {
-            "check": "spawn_experimental_lanes_from_ai_scan retired or uses EXPERIMENTAL lane specs",
-            "passed": (
-                "EXPERIMENTAL_LANE_SPECS" in exp_spawn_src
-                or "_spawn_experimental_lane" in exp_spawn_src
-                or "APPROVE-spawn experimental lanes retired" in exp_spawn_src
-            ),
-            "detail": (
-                "experimental approve-spawn retired (v9.83 stub)"
-                if "APPROVE-spawn experimental lanes retired" in exp_spawn_src
-                else "experimental spawn path is separate from combo matcher"
-            ),
+            "check": "shared AI fan-out has no legacy shadow dispatcher",
+            "passed": "spawn_shadow_collecting_lanes_from_ai_scan" not in spawn_src,
+            "detail": "historical shadow lanes are analyzer-only",
         },
         {
             "check": "combo_lane_matches has no AI_SCAN lane spec",
@@ -904,10 +894,11 @@ def verify_repo_version_sync() -> dict:
 
 def run_independent_v1_post_ai_spawn_validation() -> dict:
     """
-    Prove Type B consumes the shared direction call exactly once.
+    Prove the active offset candidate consumes the shared direction call once.
 
-    Catches duplicate DeepSeek calls, missing explicit Type B fan-out, confidence
-    leakage, and accidental inheritance through the generic combo router.
+    The legacy function/artifact name is preserved for report compatibility.
+    Catches duplicate DeepSeek calls, alternate prompt paths and accidental
+    reanimation of Type B or another retired lane.
     """
     checks = []
 
@@ -919,58 +910,56 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
     else:
         import_err = None
 
-    shared_spawn_src = ""
-    compatibility_tick_src = ""
     generic_spawn_src = ""
     process_signal_src = ""
     if bot is not None:
         try:
-            shared_spawn_src = inspect.getsource(bot.spawn_type_b_lane_from_shared_ai)
-            compatibility_tick_src = inspect.getsource(bot.maybe_tick_type_b_hunter_v1_research)
             generic_spawn_src = inspect.getsource(bot.spawn_combo_lanes_from_ai_scan)
             process_signal_src = inspect.getsource(bot.process_signal)
         except Exception as exc:
-            shared_spawn_src = f"inspect_error:{exc}"
+            generic_spawn_src = f"inspect_error:{exc}"
 
     checks.extend([
         {
-            "check": "Type B is declared as a shared-direction lane",
-            "passed": is_shared_ai_direction_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1),
-            "detail": f"lane={RESEARCH_LANE_TYPE_B_HUNTER_V1}",
+            "check": "offset candidate is the only executable combo lane",
+            "passed": tuple(COMBO_EXECUTION_LANES) == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,),
+            "detail": f"execution_lanes={tuple(COMBO_EXECUTION_LANES)}",
         },
         {
-            "check": "shared Type B router uses the existing AI payload without another API call",
+            "check": "offset candidate is declared as a shared-direction lane",
             "passed": (
-                "_spawn_independent_v1_lane_after_ai" in shared_spawn_src
-                and "evaluate_signal_with_ai" not in shared_spawn_src
+                is_shared_ai_direction_lane(RESEARCH_LANE_OFFSET_029_ATR_TP_25)
+                and not is_independent_ai_lane(RESEARCH_LANE_OFFSET_029_ATR_TP_25)
             ),
-            "detail": "shared router forwards the existing AI_SCAN result",
+            "detail": "candidate consumes AI_SCAN direction; no independent prompt",
         },
         {
-            "check": "shared Type B router neutralizes AI confidence",
+            "check": "generic fan-out routes only the executable allowlist",
             "passed": (
-                'shared_ai["win_prob"] = 0' in shared_spawn_src
-                and 'shared_ai["confidence_used_for_entry"] = False' in shared_spawn_src
+                "for lane in COMBO_EXECUTION_LANES" in generic_spawn_src
+                and "_spawn_combo_lane" in generic_spawn_src
             ),
-            "detail": "win probability is audit-only and cannot gate entry",
+            "detail": "CONTINUOUS and offset candidate share the completed AI payload",
         },
         {
-            "check": "legacy Type B timer is a compatibility no-op",
+            "check": "process_signal contains one shared AI evaluator call",
             "passed": (
-                "evaluate_signal_with_ai" not in compatibility_tick_src
-                and "return" in compatibility_tick_src
+                process_signal_src.count("evaluate_signal_with_ai(") == 1
             ),
-            "detail": "no second Type B prompt/timer remains",
+            "detail": "one direction call feeds the two active paper strategies",
         },
         {
-            "check": "AI_SCAN explicitly fans the one result into Type B",
-            "passed": "spawn_type_b_lane_from_shared_ai" in process_signal_src,
-            "detail": "Continuous and Type B receive the same completed AI result",
+            "check": "retired Type B has no process_signal fan-out",
+            "passed": "spawn_type_b_lane_from_shared_ai" not in process_signal_src,
+            "detail": "Type B history remains readable but cannot receive new work",
         },
         {
-            "check": "generic combo fan-out excludes shared-direction lanes",
-            "passed": "is_shared_ai_direction_lane" in generic_spawn_src,
-            "detail": "prevents duplicate Type B spawn from the same AI result",
+            "check": "legacy dispatchers are absent from active shared fan-out",
+            "passed": (
+                "spawn_experimental_lanes_from_ai_scan" not in generic_spawn_src
+                and "spawn_shadow_collecting_lanes_from_ai_scan" not in generic_spawn_src
+            ),
+            "detail": "history is analyzer-only and cannot alter execution",
         },
     ])
 
