@@ -89,24 +89,13 @@ class CollectorIntegrityTests(unittest.TestCase):
         self.assertEqual(writer["status"], replay["status"])
         self.assertEqual(writer["reasons"], replay["reasons"])
 
-    def test_shadow_collecting_uses_executed_direction_without_second_invert(self):
-        captured = {}
-        old_price = bot.state.get("price")
-        bot.state["price"] = 100000.0
-        try:
-            with mock.patch.object(bot, "start_replay_buffer", side_effect=lambda *a, **kw: captured.update(kw)), \
-                 mock.patch.object(bot, "append_replay_tick"), \
-                 mock.patch.object(bot, "log_lane_opportunity_event"):
-                bot._spawn_shadow_collecting_lane(
-                    {"trade_id": "source"}, {"direction": "LONG", "win_prob": 60}, 4.0, {},
-                    "TEST_LANE", "AI_SCAN", raw_direction="LONG", executed_direction="SHORT",
-                )
-        finally:
-            bot.state["price"] = old_price
-        self.assertEqual(captured["raw_direction"], "LONG")
-        self.assertEqual(captured["executed_direction"], "SHORT")
-        self.assertEqual(captured["direction"], "SHORT")
-        self.assertTrue(captured["invert_on"])
+    def test_retired_shadow_order_fanout_is_not_callable(self):
+        # Shadow evidence remains readable by the analyzer, but the retired
+        # runtime lane must not be callable from the money/paper execution
+        # process.  The active execution-graph contract separately proves that
+        # one AI decision feeds only CONTINUOUS and OFFSET_029_ATR_TP_25.
+        self.assertFalse(hasattr(bot, "_spawn_shadow_collecting_lane"))
+        self.assertFalse(hasattr(bot, "spawn_shadow_collecting_lanes_from_ai_scan"))
 
     def test_control_invert_remains_off(self):
         self.assertFalse(bot.state["invert_signal"])
