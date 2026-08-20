@@ -99,3 +99,28 @@ def test_multi_print_vwap_cannot_prove_at_through_quantity():
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
     assert got["outcome"] == "UNSUPPORTED"
     assert "AGGRESSOR_PRICE_AMBIGUOUS" in got["negative_reasons"]
+
+
+def test_prior_uncrossed_print_plus_later_quote_only_is_not_a_fill():
+    rows = [
+        row(100, ask=101, sell_qty=2, sell_vwap=99),
+        row(101, ask=101),
+        row(102, ask=100),
+    ]
+    got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
+    assert got["outcome"] == "NO_FILL"
+    assert got["filled_qty"] == 0
+    assert "NO_MATCHING_AGGRESSOR_AT_OR_THROUGH_LIMIT" in got["negative_reasons"]
+
+
+def test_prior_depth_does_not_support_current_print():
+    rows = [
+        row(100, ask=100, ask_qty=2),
+        row(101, ask=100, ask_qty=2),
+        row(102, ask=100, ask_qty=.2, sell_qty=2, sell_vwap=100),
+    ]
+    got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))
+    assert got["outcome"] == "PARTIAL_FILL"
+    assert got["filled_qty"] == .2
+    assert got["trigger_bucket_ts"] == 102
+    assert got["visible_executable_qty"] == .2

@@ -212,17 +212,20 @@ def evaluate_limit_fill(
         if window_invalid:
             continue
 
+        # Do not transport volume or depth across time. The trigger bucket
+        # itself must contain all three facts: crossed BBO, visible executable
+        # depth, and the matching aggressor print. Earlier buckets are retained
+        # only as bounded completeness/context evidence. This avoids inventing
+        # queue persistence between a prior trade and a later quote crossing.
         aggressor_qty = 0.0
         ambiguous = False
         qty_field, vwap_field = (("sell_qty", "sell_vwap") if side == "LONG" else ("buy_qty", "buy_vwap"))
-        for candidate in window_rows:
-            amount = _finite_positive(candidate.get(qty_field)) or 0.0
-            if amount == 0:
-                continue
+        amount = _finite_positive(row.get(qty_field)) or 0.0
+        if amount > 0:
             opposite_field = "buy_qty" if qty_field == "sell_qty" else "sell_qty"
-            opposite = _finite_positive(candidate.get(opposite_field)) or 0.0
+            opposite = _finite_positive(row.get(opposite_field)) or 0.0
             try:
-                trade_count = int(candidate.get("trade_count"))
+                trade_count = int(row.get("trade_count"))
             except (TypeError, ValueError):
                 trade_count = -1
             # v1 stores side VWAP rather than price-stratified volume. One
@@ -230,15 +233,14 @@ def evaluate_limit_fill(
             # VWAP hide volume on the wrong side of the limit, so fail closed.
             if trade_count != 1 or opposite > 0:
                 ambiguous = True
-                break
-            vwap = _finite_positive(candidate.get(vwap_field))
-            if vwap is None:
-                ambiguous = True
-                break
-            if side == "LONG" and vwap <= limit:
-                aggressor_qty += amount
-            elif side == "SHORT" and vwap >= limit:
-                aggressor_qty += amount
+            else:
+                vwap = _finite_positive(row.get(vwap_field))
+                if vwap is None:
+                    ambiguous = True
+                elif side == "LONG" and vwap <= limit:
+                    aggressor_qty = amount
+                elif side == "SHORT" and vwap >= limit:
+                    aggressor_qty = amount
         if ambiguous:
             incomplete.add("AGGRESSOR_PRICE_AMBIGUOUS")
             continue
@@ -248,6 +250,8 @@ def evaluate_limit_fill(
         if visible < qty:
             counters["insufficient_visible_qty"] += 1
 
+        # The only supported quantity is contemporaneously bounded by both
+        # visible top-of-book depth and the exact aggressor print quantity.
         filled = min(qty, visible, aggressor_qty)
         evidence = {
             "interval": interval,
