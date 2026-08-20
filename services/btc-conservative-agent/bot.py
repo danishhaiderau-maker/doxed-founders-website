@@ -3294,6 +3294,12 @@ def lane_register_pending_order(order: dict):
             chase_acked=False,
             observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
         )
+    collector_bridge = globals().get("_promote_collector_v22_registered_order")
+    if callable(collector_bridge):
+        collector_bridge(
+            order,
+            master_signal if isinstance(master_signal, dict) else None,
+        )
     _emit_genome_execution_event("LIMIT_CREATED", {
         "trade_id": order.get("trade_id"),
         "limit_price": order.get("limit_price") or order.get("price"),
@@ -12101,6 +12107,48 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     except Exception as exc:
         logger.warning(f"[COLLECTOR_V22] sync failed: {exc} [PIPELINE ENFORCEMENT]")
         return None
+
+
+def _promote_collector_v22_registered_order(order: dict, signal: dict = None):
+    """Replace a provisional reject envelope once a real paper order exists.
+
+    Research free-run records can truthfully retain a would-block decision and
+    still proceed to a real paper order.  The earlier rejected provisional is
+    not authoritative for execution after registration: leaving it in place
+    discards the exact order quantity and authoritative chase intervals at
+    maturation.  Rebuild through the normal accepted collector path so its
+    bounded durable payload remains the single restart source of truth.
+    """
+    if not isinstance(order, dict):
+        return None
+    tid = str(order.get("trade_id") or "")
+    if not tid or str(order.get("status") or "").upper() != "PENDING":
+        return None
+    existing = _order_multiverse_pending_src.get(tid)
+    source = dict(existing) if isinstance(existing, dict) else {}
+    original_rejected = bool(source.get("collector_rejected"))
+    original_reason = source.get("collector_reject_reason")
+    if isinstance(signal, dict):
+        for key, value in signal.items():
+            source.setdefault(key, value)
+    source.update(order)
+    source["trade_id"] = tid
+    source["status"] = "PENDING"
+    source["collector_rejected"] = False
+    source.pop("collector_ai", None)
+    source.pop("collector_reject_reason", None)
+    source.pop("collector_would_block_only", None)
+    if original_rejected:
+        source["collector_original_would_block"] = True
+        source["collector_original_would_block_reason"] = original_reason
+    result = _sync_order_multiverse(source, path_complete=False)
+    logger.info(
+        f"[COLLECTOR_V22] registered paper order promoted provisional "
+        f"trade_id={tid} qty={order.get('qty')} "
+        f"schedule_authoritative={bool(order.get('chase_schedule_authoritative'))} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return result
 
 
 def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "REJECTED", *, would_block_only: bool = False):
