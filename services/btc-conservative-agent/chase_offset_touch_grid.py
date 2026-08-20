@@ -146,6 +146,23 @@ def simulate_touch_fill(
     if windows is not None:
         windows = {int(w) for w in windows}
 
+    # This is the authoritative history of the limits actually used below.
+    # Consumers must persist this result instead of reconstructing a schedule
+    # from policy metadata after the simulation has finished.
+    chase_schedule = [{
+        "chase_step_index": 0,
+        "active_from_ts": float(signal_ts),
+        "active_until_ts": None,
+        "reference_price": float(signal_price),
+        "limit_price": float(limit),
+        "offset_pct": float(offset_pct),
+        "reason": "INITIAL_LIMIT",
+    }]
+
+    def close_schedule(at_ts: float) -> None:
+        if chase_schedule[-1]["active_until_ts"] is None:
+            chase_schedule[-1]["active_until_ts"] = float(at_ts)
+
     def maybe_chase(now_ts: float, market: float) -> None:
         nonlocal limit, last_chase_ts
         if no_chase or not windows:
@@ -157,14 +174,26 @@ def simulate_touch_fill(
             return
         new_limit = _chase_target(direction_u, limit, market, step_pct)
         if abs(new_limit - limit) >= 0.01:
+            close_schedule(now_ts)
             limit = new_limit
             last_chase_ts = now_ts
+            chase_schedule.append({
+                "chase_step_index": len(chase_schedule),
+                "active_from_ts": float(now_ts),
+                "active_until_ts": None,
+                "reference_price": float(market),
+                "limit_price": float(limit),
+                "offset_pct": float(offset_pct),
+                "reason": "CHASE_INTERVAL",
+            })
 
+    latest_tick_ts = None
     if ticks_1s:
         for tick in sorted(ticks_1s, key=lambda row: float(row.get("t") or 0)):
             t = float(tick.get("t") or 0)
             if t < signal_ts or t > end_ts:
                 continue
+            latest_tick_ts = t if latest_tick_ts is None else max(latest_tick_ts, t)
             last = tick.get("price")
             bid = tick.get("best_bid") or tick.get("bid")
             ask = tick.get("best_ask") or tick.get("ask")
@@ -179,12 +208,14 @@ def simulate_touch_fill(
                 bid=None if bid in (None, 0) else float(bid),
                 ask=None if ask in (None, 0) else float(ask),
             ):
+                close_schedule(t)
                 return {
                     "touched": True,
                     "touch_ts": t,
                     "fill_price": float(limit),
                     "offset_pct": float(offset_pct),
                     "source": "1s",
+                    "chase_schedule": chase_schedule,
                 }
             if last is not None:
                 maybe_chase(t, float(last))
@@ -196,20 +227,29 @@ def simulate_touch_fill(
             continue
         if t > end_ts:
             continue
+        # A 1m OHLC bar overlapping a consumed 1s observation would otherwise
+        # rewind the simulation and could invent a touch before a chase already
+        # recorded from the higher-resolution stream.
+        if latest_tick_ts is not None and t <= latest_tick_ts:
+            continue
         high = float(row[2])
         low = float(row[3])
         close = float(row[4])
         if pending_limit_touched(
             side=side, limit_price=limit, last=close, high=high, low=low,
         ):
+            fill_ts = max(t, float(signal_ts))
+            close_schedule(fill_ts)
             return {
                 "touched": True,
-                "touch_ts": max(t, float(signal_ts)),
+                "touch_ts": fill_ts,
                 "fill_price": float(limit),
                 "offset_pct": float(offset_pct),
                 "source": "1m",
+                "chase_schedule": chase_schedule,
             }
         maybe_chase(t + 60.0, close)
+    close_schedule(end_ts)
     return {
         "touched": False,
         "touch_ts": None,
@@ -218,6 +258,7 @@ def simulate_touch_fill(
         "source": "1m",
         "resting_limit": float(limit),
         "original_limit": float(original),
+        "chase_schedule": chase_schedule,
     }
 
 

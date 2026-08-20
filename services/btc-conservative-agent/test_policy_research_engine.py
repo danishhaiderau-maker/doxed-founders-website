@@ -84,7 +84,7 @@ class ExtraCollectorsTests(unittest.TestCase):
         self.assertEqual(timed["exit_reason"], "TIME_STOP")
         nostop = replay_path(ticks, direction="SHORT", entry_price=64110, fill_t=0, qty=0.03, leverage=10, ladder=(), thesis_cut=-99, thesis_min_age=0, hard_stop=None)
         self.assertTrue(nostop["research_only_no_stop"])
-        self.assertEqual(LIVE_HARD_STOP_PCT, 13.0)
+        self.assertEqual(LIVE_HARD_STOP_PCT, 30.0)
 
     def test_ambiguous_same_sample_uses_conservative_order(self):
         ticks = [

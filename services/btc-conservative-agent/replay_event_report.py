@@ -24,6 +24,7 @@ from path_replay_v1 import (
     raw_1m_to_ticks,
     path_recovery_stats,
 )
+from replay_eligibility import validate_replay_eligibility
 
 
 AMBIGUOUS_SAME_BAR = "AMBIGUOUS_SAME_BAR"
@@ -77,7 +78,7 @@ def _control_replay(
         (s for s in scores if s.get("exit") in ("live_4_2_t12", "thesis_m12", "live_c_t12")),
         scores[0] if scores else None,
     )
-    return {
+    result = {
         "exit_policy": live.get("exit") if live else None,
         "first_hit": live.get("first_hit") if live else None,
         "pnl": live.get("pnl") if live else None,
@@ -88,6 +89,27 @@ def _control_replay(
         "structure_mode": ATR_FROZEN,
         "same_bar_ambiguity": sweep.get("same_bar_ambiguity") or False,
     }
+    # A profit-lock label with negative replay PnL is not self-explanatory.
+    # Real venues can gap/slip through a stop, but this ideal 1m replay has no
+    # authenticated execution evidence capable of proving that mechanism.
+    # Fail closed instead of publishing a semantically impossible winner label.
+    profit_lock_labels = {"PROFIT_LOCK_LADDER", "PROFIT_LOCK", "PROFIT_LOCK_TRAIL"}
+    try:
+        negative = result["pnl"] is not None and float(result["pnl"]) < 0.0
+    except (TypeError, ValueError):
+        negative = False
+    if negative and (
+        str(result.get("exit_policy") or "").upper() in profit_lock_labels
+        or str(result.get("first_hit") or "").upper() in profit_lock_labels
+    ):
+        result.update({
+            "exit_policy": "SEMANTICALLY_INVALID_TERMINAL",
+            "first_hit": "SEMANTICALLY_INVALID_TERMINAL",
+            "replay_status": "REPLAY_INELIGIBLE",
+            "semantic_error": "NEGATIVE_PNL_WITH_PROFIT_LOCK_LABEL",
+            "green": False,
+        })
+    return result
 
 
 def _delta_vs_control(control: Optional[Mapping], alt: Optional[Mapping]) -> dict:
@@ -114,13 +136,29 @@ def _delta_vs_control(control: Optional[Mapping], alt: Optional[Mapping]) -> dic
 
 def replay_event_report(event: Mapping[str, Any], *, data_dir: Optional[str] = None) -> dict:
     obs = str(event.get("observation_status") or "")
+    eligibility = validate_replay_eligibility(event)
+    if not eligibility["eligible"]:
+        return {
+            "schema": "replay_event_report_v1",
+            "collector_version": COLLECTOR_VERSION,
+            "event_id": event.get("event_id"),
+            "replay_status": "REPLAY_INELIGIBLE",
+            "observation_status": obs,
+            "eligibility": eligibility,
+            "control_outcome": None,
+            "hypothetical_entries": [],
+            "note": "never partially score — eligibility is derived from timestamps, not lifecycle labels",
+        }
     if obs in (OBS_WAITING_120M, OBS_INSUFFICIENT_PATH, OBS_UNSUPPORTED_HORIZON):
         return {
             "schema": "replay_event_report_v1",
             "collector_version": COLLECTOR_VERSION,
             "event_id": event.get("event_id"),
             "replay_status": obs,
-            "note": "never partially score — tape incomplete or horizon unsupported",
+            "eligibility": eligibility,
+            "control_outcome": None,
+            "hypothetical_entries": [],
+            "note": "complete tape is present, but lifecycle or requested-horizon status prohibits scoring",
         }
     tape = event.get("canonical_tape") or {}
     path_1m = tape.get("path_1m") or []
@@ -198,6 +236,8 @@ def replay_event_report(event: Mapping[str, Any], *, data_dir: Optional[str] = N
         "path_window_policy_id": PATH_WINDOW_POLICY_ID,
         "primary_outcome": event.get("primary_outcome"),
         "observation_status": obs,
+        "replay_status": "REPLAY_ELIGIBLE",
+        "eligibility": eligibility,
         "signal_ts": (event.get("envelope") or {}).get("signal_ts"),
         "decision_tree": event.get("decision_tree_snapshot"),
         "control_outcome": control_outcome,

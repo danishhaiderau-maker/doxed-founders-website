@@ -98,9 +98,15 @@ from normalized_market_indicators import (
     normalize_market_indicators,
 )
 from path_replay_v1 import (
+    COLLECTOR_VERSION,
+    CONTROL_CELL,
+    FEATURE_SCHEMA_VERSION,
+    FILL_MODEL_IDEAL_TOUCH,
     PATH_REPLAY_FILE,
     PATH_REPLAY_POLICY_TAG,
     PATH_REPLAY_SCHEMA,
+    PATH_SCHEMA_VERSION,
+    REPLAY_VERSION,
     build_path_sample,
 )
 from cycle_3m_indicators import (
@@ -121,9 +127,32 @@ from chase_offset_touch_grid import (
 )
 from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
+    POST_TTL_LOOKAHEAD_SEC,
+    TERMINAL_LIFECYCLES,
     build_order_multiverse,
     paper_multiverse_trade_id,
 )
+from opportunity_capture_v21 import (
+    OPPORTUNITY_CAPTURE_FILE,
+    build_decision_tree,
+    build_rejected_capture,
+    filter_node,
+)
+from collector_v22_schema import COLLECTOR_VERSION as COLLECTOR_V22_VERSION
+from collector_v22 import (
+    build_decision_tree_v22,
+    build_research_event,
+    event_already_written,
+    terminal_observation,
+    write_research_event_once,
+)
+from collector_storage import storage_blocks_new_events, storage_state, project_capacity
+from collector_v22_provisional import (
+    load_provisional_events,
+    remove_provisional_event,
+    upsert_provisional_event,
+)
+from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
     EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
@@ -2037,6 +2066,34 @@ def unrealized_margin_pct(pos: dict, price: float = None) -> float:
     price_move = ((mark - entry) / entry) * dir_factor
     return price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * 100
 
+
+def _check_phase_margin_stop(pos: dict, unreal_pct: float, age_sec: float) -> bool:
+    """Phase-aware margin stop: thesis -12% during window, hard -30% after.
+
+    Thesis window = THESIS_MIN_AGE_SEC (5 minutes) from entry. During the window
+    the -12% thesis stop is armed immediately with no MFE bypass. After the
+    window expires only the final -MAX_SL_MARGIN_PCT hard stop applies.
+    """
+    if age_sec < THESIS_MIN_AGE_SEC:
+        if unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT:
+            logger.info(
+                f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+                f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m "
+                f"thesis_window={THESIS_MIN_AGE_SEC/60:.0f}m [PIPELINE ENFORCEMENT]"
+            )
+            close_position(pos, "THESIS_FAST_CUT")
+            return True
+        return False
+    if unreal_pct <= -MAX_SL_MARGIN_PCT:
+        logger.info(
+            f"[EXIT TRIGGER] HARD_STOP trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m cap=-{MAX_SL_MARGIN_PCT:.1f}% "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        close_position(pos, "STOP_LOSS")
+        return True
+    return False
+
 def check_thesis_invalidation(pos: dict, price: float) -> bool:
     if not THESIS_INVALIDATION_ENABLED:
         return False
@@ -2060,32 +2117,6 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     if peak >= TRAIL_LADDER[0][0]:
         return False
-    fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
-    if fast_cut:
-        # Section 5: route the MFE fast-cut skip through the shared helper so
-        # live and replay always agree on whether the floor was reached.
-        if should_skip_fast_cut_for_mfe_protection(
-            unreal_pct=unreal_pct,
-            peak_mfe_pct=peak,
-            mfe_protect_pct=THESIS_MFE_PROTECT_PCT,
-            fast_cut_pct=THESIS_FAST_EXIT_UNREAL_PCT,
-        ):
-            now_ts = time.time()
-            last_log = float(pos.get("_mfe_protect_log_ts") or 0)
-            if now_ts - last_log >= 30.0:
-                pos["_mfe_protect_log_ts"] = now_ts
-                logger.info(
-                    f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-                    f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
-                    f"floor={THESIS_MFE_PROTECT_PCT:.1f}% [PIPELINE ENFORCEMENT]"
-                )
-            return False
-        logger.info(
-            f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-            f"unreal={unreal_pct:.1f}% peak={peak:.1f}% age={age_sec/60:.1f}m [PIPELINE ENFORCEMENT]"
-        )
-        close_position(pos, "THESIS_FAST_CUT")
-        return True
     if age_sec < THESIS_MIN_AGE_SEC:
         return False
     update_market_context()
@@ -2130,7 +2161,7 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
     if flip:
         logger.info(
             f"[THESIS_INVALIDATED] trade_id={pos.get('trade_id')} dir={direction} "
-            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m fast={fast_cut} "
+            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m "
             f"entry bull/bear={entry_bull}/{entry_bear} live={cur_bull}/{cur_bear} "
             f"mtf {entry_mtf}->{cur_mtf} struct {entry_struct}->{cur_struct} "
             f"[PIPELINE ENFORCEMENT]"
@@ -3663,6 +3694,24 @@ def _compose_ai_history_reason(ai_result: dict) -> str:
     return " | ".join(parts)[:500]
 
 
+def json_for_js(value) -> str:
+    """Serialize a value as a JS expression (JSON), safe inside a script/file.
+
+    Restored AI payloads can contain backticks, quotes, and newlines. Embedding
+    them in a template literal or an unescaped Python ``\\n`` inside DASHBOARD_JS
+    breaks the dashboard file. JSON text uses double quotes, so those characters
+    stay inside string values and cannot close surrounding JS syntax.
+    """
+    blob = json.dumps(value, default=str, ensure_ascii=False)
+    return (
+        blob.replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 def restore_last_ai_payload_from_log(path: str = None) -> bool:
     """After restart, LAST_AI_PAYLOAD is RAM-only. Reload the last logged context."""
     global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
@@ -3686,6 +3735,7 @@ def restore_last_ai_payload_from_log(path: str = None) -> bool:
         if not last:
             return False
         payload = copy.deepcopy(last.get("context") or {})
+        payload = json.loads(json.dumps(payload, default=str))
         payload["_dashboard_restore"] = {
             "status": "RESTORED_AFTER_RESTART",
             "message": (
@@ -3966,6 +4016,18 @@ def risk_trading_allowed() -> bool:
     if stale_loss_pause or expired_loss_pause:
         set_execution_paused("")
 
+    # Paper/research Showcase must keep collecting. A -$20 DAILY_DRAWDOWN cap
+    # or 2h LOSS_STREAK pause stops new paper trades and starves the dataset.
+    # Live copy (FORCE_PAPER_MODE off and not unarmed RESEARCH) still uses both.
+    if _paper_skips_entry_risk_pauses():
+        with state_lock:
+            paper_risk_paused = bool(state.get("execution_paused")) and state.get(
+                "execution_reason"
+            ) in ("DAILY_DRAWDOWN", "LOSS_STREAK")
+        if paper_risk_paused:
+            set_execution_paused("")
+        return True
+
     with state_lock:
         pause_until = state.get("loss_pause_until", 0)
         if pause_until > now:
@@ -4105,6 +4167,10 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     # Booked paper exits must reuse this same side-correct trigger, not a
     # later book-walk VWAP that can make a stop look like a much better fill.
     pos["_exit_eval_price"] = float(price or 0)
+
+    age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
+    if _check_phase_margin_stop(pos, unreal_pct, age_sec):
+        return True
 
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
@@ -4796,9 +4862,9 @@ def compute_exposure():
 FIXED_MARGIN_USDT = 20.0
 # v79: always deploy full $20 margin — conviction/regime/ADX scaling disabled (logged for analyzer)
 FLAT_MARGIN_EVERY_TRADE = True
-# Final fail-safe loss cap for every Continuous position.  Thesis/ladder exits
-# may close earlier, but no trade may remain open beyond this margin loss.
-MAX_SL_MARGIN_PCT = 13.0
+# Final fail-safe loss cap after the thesis window expires. During the first
+# THESIS_MIN_AGE_SEC the -12% thesis stop is the binding loss cap instead.
+MAX_SL_MARGIN_PCT = 30.0
 
 def sl_price_pct(leverage: int = None) -> float:
     lev = max(int(leverage or _state_leverage()), 1)
@@ -6716,9 +6782,9 @@ LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
 THESIS_INVALIDATION_ENABLED = True
 THESIS_SCORE_FLIP_MARGIN = 1
 THESIS_EARLY_DECAY_DELTA = 2
-THESIS_MIN_AGE_SEC = 5 * 60
+THESIS_MIN_AGE_SEC = 5 * 60  # thesis stop window: -12% armed from open until this expires
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
-THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
+THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # thesis stop (margin unreal) — active only during THESIS_MIN_AGE_SEC
 # Stage 1 Fix #5 (2026-08-06): raised from 2.0% to 5.0%. A +2% MFE spike is
 # chop noise (the 3 recent losers each spiked +2% early as fakeout breakouts
 # then bled to -$6). When 2% triggered, the -12% fast-cut was bypassed and
@@ -6982,6 +7048,8 @@ def research_dashboard_public_url() -> str:
     # Previous default :9500 was wrong — nothing listens there.
     return "http://127.0.0.1:9001/"
 
+# Live-copy only. Paper/research Showcase skips these pauses so collection
+# never stops — see _paper_skips_entry_risk_pauses().
 DAILY_DRAWDOWN_PAUSE_USD = 20.0
 MAX_DAILY_LOSS = DAILY_DRAWDOWN_PAUSE_USD
 CONSECUTIVE_LOSS_PAUSE = 4
@@ -7359,16 +7427,47 @@ def tile2_entry_policy_hash() -> str:
 
 def csv_research_meta(signal: dict = None) -> dict:
     """Columns written to research CSVs for analyzer version/exchange verification."""
+    invert_on = False
+    if signal:
+        invert_on = _coerce_invert_on(signal)
+    else:
+        try:
+            invert_on = bool(state.get("invert_signal", False))
+        except Exception:
+            invert_on = False
     meta = {
         "exchange": BOT_EXCHANGE,
         "data_symbol": SYMBOL,
         "bot_version": EXECUTION_FIX_VERSION,
         "fee_profile": EXCHANGE_FEE_PROFILE,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "invert_on": bool(invert_on),
+        "invert_signal": bool(invert_on),
     }
     if signal:
         meta.update(csv_lane_meta(signal))
     return meta
+
+
+def _coerce_invert_on(*sources) -> bool:
+    """Ticket-time invert flag. Invert is an experimental factor, not a hidden mutation."""
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        for key in ("invert_on", "invert_signal", "inverted"):
+            if src.get(key) is not None:
+                return bool(src.get(key))
+        controls = src.get("controls")
+        if isinstance(controls, dict) and controls.get("invert_signal") is not None:
+            return bool(controls.get("invert_signal"))
+        entry = src.get("entry_controls")
+        if isinstance(entry, dict) and entry.get("invert_signal") is not None:
+            return bool(entry.get("invert_signal"))
+    try:
+        with state_lock:
+            return bool(state.get("invert_signal", False))
+    except Exception:
+        return False
 ORDER_PLACEMENT_GRACE_SEC = 30
 # Patient limit entry by default; set RESEARCH_INSTANT_FILL=1 only for emergency throughput tests.
 SIGNAL_STATUS_AWAITING_MICRO = "AWAITING_MICRO"
@@ -10677,6 +10776,8 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
         signal["final_direction"] = final_direction
         signal["direction"] = final_direction
         signal["inverted"] = inverted
+        signal["invert_on"] = bool(state.get("invert_signal", False))
+        signal["invert_signal"] = signal["invert_on"]
     if ai and not signal.get("_ai_logged"):
         log_ai(signal, ai)
     signal["_completed"] = True
@@ -10707,6 +10808,7 @@ def exit_pipeline(signal: dict, ai: dict = None, reason: str = "UNKNOWN"):
         if not signal.get("_logged_BLOCKED"):
             enforce_log(signal, "BLOCKED", reason, skip_stage="POST_AI")
     log_blocked_signal(signal, ai, reason)
+    persist_rejected_opportunity(signal, ai, reason, would_block_only=False)
     finalize_signal(signal, ai, "BLOCKED")
     full_pipeline_trace("BLOCKED", reason, signal.get("trade_id"))
     clear_pending_trade()
@@ -11425,6 +11527,78 @@ _touch_grid_book = {}
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
+_order_multiverse_path_complete = {}
+_order_multiverse_post_ttl_done = {}
+_order_multiverse_written = set()
+# v2.2: dense 1s path_replay off Fly volume by default (~309 KB/filled event saved).
+COLLECTOR_V22_PATH_REPLAY_1S = os.getenv("COLLECTOR_V22_PATH_REPLAY_1S", "").strip().lower() in ("1", "true", "yes")
+_RESEARCH_RAW_JSONL_NEVER_PRUNE = frozenset({
+    "order_multiverse.jsonl",
+    "research_events_v22.jsonl",
+    "opportunity_capture.jsonl",
+    "path_replay.jsonl",
+    "post_exit_replay.jsonl",
+    "source_order_market_evidence.jsonl",
+    "signal_replay.jsonl",
+})
+
+
+def _restore_collector_v22_provisionals() -> int:
+    """Rehydrate same-epoch maturation sources after a process restart."""
+    epoch_id = _collector_v22_epoch_id()
+    restored = 0
+    for event_id, source in load_provisional_events(epoch_id=epoch_id).items():
+        if event_already_written(event_id):
+            # Reconcile a crash after final commit but before journal cleanup.
+            remove_provisional_event(event_id)
+            _order_multiverse_written.add(event_id)
+            continue
+        if event_id in _order_multiverse_pending_src:
+            continue
+        source = dict(source)
+        source["trade_id"] = event_id
+        _order_multiverse_pending_src[event_id] = source
+        _order_multiverse_state[event_id] = str(source.get("observation_status") or "RESTORED_PROVISIONAL")
+        restored += 1
+    if restored:
+        logger.info(
+            f"[COLLECTOR_V22] restored provisional_events={restored} epoch_id={epoch_id} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return restored
+
+
+def _collector_v22_epoch_id() -> str:
+    """Stable epoch-v22-* id for reproducible research datasets."""
+    session = _load_research_session_meta() or {}
+    bound = session.get("collector_v22_epoch_id")
+    if bound:
+        return str(bound)
+    raw = session.get("collector_v22_epoch_ts") or session.get("fresh_collection_start_time") or bot_start_time
+    try:
+        anchor = float(raw or bot_start_time or time.time())
+    except (TypeError, ValueError):
+        anchor = float(bot_start_time or time.time())
+    material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
+    return "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def _ensure_collector_v22_epoch() -> str:
+    """Bind a fresh epoch-v22-* on first v2.2 startup (does not wipe v2.1 data)."""
+    meta = dict(_load_research_session_meta() or {})
+    if meta.get("collector_v22_epoch_ts"):
+        return str(meta.get("collector_v22_epoch_id") or _collector_v22_epoch_id())
+    anchor = time.time()
+    meta["collector_v22_epoch_ts"] = anchor
+    material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
+    meta["collector_v22_epoch_id"] = "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+    meta["collector_version"] = COLLECTOR_V22_VERSION
+    try:
+        with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, indent=2)
+    except OSError as exc:
+        logger.warning(f"[COLLECTOR_V22] epoch bind failed: {exc} [PIPELINE ENFORCEMENT]")
+    return str(meta["collector_v22_epoch_id"])
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
@@ -11454,6 +11628,7 @@ def _arm_chase_offset_touch_grid(signal: dict):
             signal_ts=ts,
             ttl_sec=ttl_sec,
             live_offset_pct=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+            invert_on=_coerce_invert_on(signal),
         )
         for row in rows:
             _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
@@ -11467,29 +11642,30 @@ def _arm_chase_offset_touch_grid(signal: dict):
 
 
 def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
-    if not _touch_grid_book or price is None or float(price) <= 0:
+    if price is None or float(price) <= 0:
         return
     now = time.time()
     dead = []
-    for tid, grid in list(_touch_grid_book.items()):
-        try:
-            if now > float(grid.get("expires_ts") or 0):
-                dead.append(tid)
-                continue
-            for row in poll_grid_state(
-                grid,
-                now_ts=now,
-                last=float(price),
-                high=float(price),
-                low=float(price),
-                bid=None if not bid else float(bid),
-                ask=None if not ask else float(ask),
-            ):
-                _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
-        except Exception as exc:
-            logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
-    for tid in dead:
-        _touch_grid_book.pop(tid, None)
+    if _touch_grid_book:
+        for tid, grid in list(_touch_grid_book.items()):
+            try:
+                if now > float(grid.get("expires_ts") or 0):
+                    dead.append(tid)
+                    continue
+                for row in poll_grid_state(
+                    grid,
+                    now_ts=now,
+                    last=float(price),
+                    high=float(price),
+                    low=float(price),
+                    bid=None if not bid else float(bid),
+                    ask=None if not ask else float(ask),
+                ):
+                    _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+            except Exception as exc:
+                logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
+        for tid in dead:
+            _touch_grid_book.pop(tid, None)
     _maybe_complete_pending_order_multiverse()
 
 
@@ -11500,25 +11676,36 @@ def _maybe_complete_pending_order_multiverse():
         return
     _order_multiverse_last_poll = now
     for src in list(_order_multiverse_pending_src.values()):
+        if src.get("collector_rejected"):
+            persist_rejected_opportunity(
+                src,
+                ai=src.get("collector_ai") if isinstance(src.get("collector_ai"), dict) else None,
+                reason=str(src.get("collector_reject_reason") or "REJECTED"),
+                would_block_only=bool(src.get("collector_would_block_only")),
+            )
+            continue
         expires = float(src.get("expires_ts") or 0)
         ttl_done = expires > 0 and now >= expires
-        tid = paper_multiverse_trade_id(src.get("trade_id"), src.get("source_trade_id"))
-        has_post_fill_writer = False
-        if tid:
-            with replay_lock:
-                buf = replay_buffers.get(tid) or {}
-                has_post_fill_writer = bool(
-                    buf.get("post_exit")
-                    or buf.get("lane") == "executed"
-                    or buf.get("virtual_fill_t") is not None
-                )
-        # TTL/cancel scores now. 120m post-fill writer, if already running, may keep sampling.
-        _sync_order_multiverse(src, path_complete=bool(ttl_done and not has_post_fill_writer))
+        post_ttl_done = expires > 0 and now >= (expires + float(POST_TTL_LOOKAHEAD_SEC))
+        closed = str(src.get("status") or "").upper() in (
+            "CLOSED", "FILLED", "EXPIRED", "CANCELLED", "COMPLETE",
+        )
+        # Keep collecting after TTL so a later 0.10% touch (e.g. t=37m) is
+        # labeled alternative_entry_fill without lookahead into the 30m order.
+        _sync_order_multiverse(
+            src,
+            path_complete=bool(post_ttl_done or closed or src.get("path_complete")),
+        )
 
 
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
-    """One compact JSONL row per paper TAKEN. Does not change the live 0.1% ticket."""
+    """v2.2: write-once immutable research event per event_id (~210 KB)."""
     if not isinstance(source, dict):
+        return None
+    if storage_blocks_new_events() and not event_already_written(
+        str(source.get("trade_id") or source.get("canonical_trade_id") or "")
+    ):
+        logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping new research event [PIPELINE ENFORCEMENT]")
         return None
     try:
         tid = paper_multiverse_trade_id(
@@ -11529,8 +11716,10 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         )
         if not tid:
             return None
+        if tid in _order_multiverse_written:
+            return None
         prev = _order_multiverse_state.get(tid)
-        if prev == "COMPLETE":
+        if prev in TERMINAL_LIFECYCLES and tid in _order_multiverse_written:
             return None
         price = float(
             source.get("signal_price_at_approve")
@@ -11546,29 +11735,71 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             ts = float(source.get("snapshot_ts") or time.time())
         ttl = float(source.get("expires_ts") or 0)
         ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
-        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        invert_on = _coerce_invert_on(source)
+        live_fill_ts = source.get("live_fill_ts") or source.get("fill_ts") or source.get("entry_ts")
+        live_fill_price = (
+            source.get("live_fill_price")
+            or source.get("fill_price")
+            or source.get("entry")
+            or source.get("entry_price")
+        )
+        status_u = str(source.get("status") or source.get("outcome") or "").upper()
+        ticket_closed = status_u in (
+            "CLOSED", "EXPIRED", "CANCELLED", "COMPLETE", "TTL_EXPIRED", "SIGNAL_TTL_EXPIRED",
+        ) or bool(source.get("ticket_closed"))
+        if live_fill_ts:
+            try:
+                live_fill_ts = float(live_fill_ts)
+            except (TypeError, ValueError):
+                live_fill_ts = None
+        if live_fill_price:
+            try:
+                live_fill_price = float(live_fill_price)
+            except (TypeError, ValueError):
+                live_fill_price = None
+            if live_fill_price is not None and live_fill_price <= 0:
+                live_fill_price = None
+        candles_1m = fetch_mtf_candles("1m", limit=2000) or []
         ticks_1s = []
-        replay_complete = bool(path_complete)
+        replay_complete = bool(path_complete or ticket_closed)
         with replay_lock:
             buf = replay_buffers.get(tid) or {}
             start = float(buf.get("start_ts") or ts)
-            for tick in buf.get("ticks") or []:
-                t = float(tick.get("t") or 0)
-                if 0 < t < 1e11:
-                    t = start + t
-                ticks_1s.append({
-                    "t": t,
-                    "price": tick.get("price"),
-                    "best_bid": tick.get("best_bid"),
-                    "best_ask": tick.get("best_ask"),
-                    "unreal_pct": tick.get("unreal_pct"),
-                })
+            if COLLECTOR_V22_PATH_REPLAY_1S:
+                for tick in buf.get("ticks") or []:
+                    t = float(tick.get("t") or 0)
+                    if 0 < t < 1e11:
+                        t = start + t
+                    ticks_1s.append({
+                        "t": t,
+                        "price": tick.get("price"),
+                        "best_bid": tick.get("best_bid"),
+                        "best_ask": tick.get("best_ask"),
+                        "unreal_pct": tick.get("unreal_pct"),
+                    })
             if buf.get("post_exit") and buf.get("closed"):
                 replay_complete = True
+            if buf.get("virtual_fill_t") is not None and live_fill_ts is None:
+                live_fill_ts = start + float(buf.get("virtual_fill_t") or 0)
+                live_fill_price = live_fill_price or buf.get("virtual_entry")
         with state_lock:
             univ = dict(state.get("last_cycle_3m_universe") or {})
-        record = build_order_multiverse(
+        rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m") or source.get("rsi14")
+        would_block = univ.get("would_block_short")
+        would_block_reason = univ.get("would_block_reason")
+        tree = build_decision_tree_v22(
+            reason=source.get("exact_reason"),
+            rsi=rsi_at_signal,
+            rsi_threshold=30.0,
+            adx=univ.get("adx14"),
+            atr=univ.get("atr14_pct_3m"),
+            would_block=would_block,
+            would_block_reason=would_block_reason,
+            short_circuit=True,
+        )
+        record = build_research_event(
             trade_id=tid,
+            epoch_id=_collector_v22_epoch_id(),
             signal_price=price,
             signal_ts=ts,
             direction=direction,
@@ -11576,45 +11807,183 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             ticks_1s=ticks_1s or None,
             live_orig=DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
             ttl_sec=ttl_sec,
-            atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
-            donchian_high=univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
-            donchian_low=univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
-            support_price=univ.get("support_price") or source.get("support_price"),
-            resistance_price=univ.get("resistance_price") or source.get("resistance_price"),
+            live_fill_ts=live_fill_ts,
+            live_fill_price=live_fill_price,
+            ticket_closed=ticket_closed,
             path_complete=replay_complete,
+            submitted=True,
+            rejected=False,
+            decision_tree=tree,
+            rsi_at_signal=rsi_at_signal,
+            would_block=would_block,
+            would_block_reason=would_block_reason,
+            atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
+            invert_on=invert_on,
+            include_ticks_1s=COLLECTOR_V22_PATH_REPLAY_1S,
+            symbol=source.get("symbol") or source.get("pair") or "BTCUSD",
+            shared_ai_call_id=source.get("shared_ai_call_id"),
         )
-        if record.get("pending"):
-            _order_multiverse_pending_src[tid] = {
+        obs = str(record.get("observation_status") or "")
+        keep_collecting = not terminal_observation(obs)
+        pending_payload = {
+            "trade_id": tid,
+            "signal_price_at_approve": price,
+            "signal_price": price,
+            "created_ts_ts": ts,
+            "expires_ts": ts + ttl_sec,
+            "final_direction": direction,
+            "invert_on": invert_on,
+            "live_fill_ts": live_fill_ts,
+            "live_fill_price": live_fill_price,
+            "status": "CLOSED" if ticket_closed else ("FILLED" if live_fill_ts else "PENDING"),
+            "ticket_closed": ticket_closed,
+            "path_complete": replay_complete,
+            "symbol": source.get("symbol") or source.get("pair") or "BTCUSD",
+            "shared_ai_call_id": source.get("shared_ai_call_id"),
+        }
+        if keep_collecting:
+            _order_multiverse_pending_src[tid] = pending_payload
+            _order_multiverse_state[tid] = obs or "PENDING"
+            pending_payload["observation_status"] = obs or "PENDING"
+            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id())
+            return record
+        _order_multiverse_pending_src.pop(tid, None)
+        written, reason = write_research_event_once(record)
+        if written:
+            remove_provisional_event(tid)
+            _order_multiverse_written.add(tid)
+            compact = dict(record)
+            compact["event"] = obs
+            compact["lifecycle"] = obs
+            _safe_append_jsonl(ORDER_MULTIVERSE_FILE, compact, label="ORDER_MULTIVERSE")
+            logger.info(
+                f"[COLLECTOR_V22] write-once event_id={tid} obs={obs} bytes~{reason} "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+        _order_multiverse_state[tid] = obs
+        _order_multiverse_path_complete[tid] = obs in ("COMPLETE", "PATH_COMPLETE")
+        _order_multiverse_post_ttl_done[tid] = obs == "FUNNEL_COMPLETE"
+        return record
+    except Exception as exc:
+        logger.warning(f"[COLLECTOR_V22] sync failed: {exc} [PIPELINE ENFORCEMENT]")
+        return None
+
+
+def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "REJECTED", *, would_block_only: bool = False):
+    """First-class rejected/WOULD_BLOCK candidate. Not a live veto."""
+    if not isinstance(signal, dict):
+        return None
+    try:
+        tid = str(signal.get("trade_id") or "")
+        if not tid:
+            return None
+        price = float(
+            signal.get("signal_price_at_approve")
+            or signal.get("signal_price")
+            or signal.get("price")
+            or 0
+        )
+        if price <= 0:
+            with state_lock:
+                price = float(state.get("price") or 0)
+        if price <= 0:
+            return None
+        ts = float(signal.get("created_ts_ts") or signal.get("created_ts") or signal.get("signal_ts") or 0)
+        if ts <= 0:
+            ts = float(signal.get("snapshot_ts") or time.time())
+        direction = signal.get("final_direction") or (ai or {}).get("direction") or "SHORT"
+        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        with state_lock:
+            univ = dict(state.get("last_cycle_3m_universe") or {})
+        rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m")
+        would_block = univ.get("would_block_short")
+        would_block_reason = univ.get("would_block_reason") or (None if not would_block_only else reason)
+        tree = build_decision_tree_v22(
+            reason=reason,
+            hard_reject=not would_block_only,
+            rsi=rsi_at_signal,
+            rsi_threshold=30.0,
+            adx=univ.get("adx14"),
+            atr=univ.get("atr14_pct_3m"),
+            would_block=would_block or would_block_only,
+            would_block_reason=would_block_reason or reason,
+            edge=signal.get("edge_score_at_entry"),
+            approval=(ai or {}).get("decision"),
+            short_circuit=not would_block_only,
+        )
+        if storage_blocks_new_events():
+            logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping rejected capture [PIPELINE ENFORCEMENT]")
+            return None
+        tid = str(signal.get("trade_id") or "")
+        if tid in _order_multiverse_written:
+            return None
+        record = build_research_event(
+            trade_id=tid,
+            epoch_id=_collector_v22_epoch_id(),
+            signal_price=price,
+            signal_ts=ts,
+            direction=direction,
+            candles_1m=candles_1m,
+            ttl_sec=1800.0,
+            submitted=False,
+            rejected=True,
+            decision_tree=tree,
+            rsi_at_signal=rsi_at_signal,
+            would_block=would_block or would_block_only,
+            would_block_reason=would_block_reason or reason,
+            exact_reason=reason,
+            atr14_pct=univ.get("atr14_pct_3m"),
+            symbol=signal.get("symbol") or signal.get("pair") or "BTCUSD",
+            shared_ai_call_id=signal.get("shared_ai_call_id"),
+        )
+        if would_block_only:
+            record["would_block_only"] = True
+            record["hard_reject"] = False
+        else:
+            record["hard_reject"] = True
+            record["would_block_only"] = False
+        obs = str(record.get("observation_status") or "")
+        if not terminal_observation(obs):
+            # Keep the recovery payload JSON-only and bounded.  These are the
+            # causal fields required to rebuild the same rejected envelope;
+            # arbitrary runtime references from ``signal`` do not belong in
+            # durable collector state.
+            pending_payload = {
                 "trade_id": tid,
                 "signal_price_at_approve": price,
-                "signal_price": price,
                 "created_ts_ts": ts,
-                "expires_ts": ts + ttl_sec,
+                "expires_ts": ts + 1800.0,
                 "final_direction": direction,
-                "atr14_pct_3m": univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
-                "donchian_high_3m": univ.get("donchian_high_3m") or source.get("donchian_high_3m"),
-                "donchian_low_3m": univ.get("donchian_low_3m") or source.get("donchian_low_3m"),
-                "support_price": univ.get("support_price") or source.get("support_price"),
-                "resistance_price": univ.get("resistance_price") or source.get("resistance_price"),
+                "invert_on": _coerce_invert_on(signal),
+                "edge_score_at_entry": signal.get("edge_score_at_entry"),
+                "status": "REJECTED",
+                "collector_rejected": True,
+                "collector_reject_reason": reason,
+                "collector_would_block_only": bool(would_block_only),
+                "collector_ai": dict(ai or {}),
             }
-            if prev == "PENDING":
-                return record
-        else:
+            _order_multiverse_pending_src[tid] = pending_payload
+            _order_multiverse_state[tid] = obs
+            pending_payload["observation_status"] = obs
+            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id())
+            logger.info(
+                f"[COLLECTOR_V22] REJECTED provisional trade_id={tid} obs={obs}; awaiting complete tape "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            return record
+        written, _reason = write_research_event_once(record)
+        if written:
             _order_multiverse_pending_src.pop(tid, None)
-        _safe_append_jsonl(ORDER_MULTIVERSE_FILE, record, label="ORDER_MULTIVERSE")
-        _order_multiverse_state[tid] = "PENDING" if record.get("pending") else "COMPLETE"
-        if len(_order_multiverse_state) > 64:
-            oldest = next(iter(_order_multiverse_state))
-            _order_multiverse_state.pop(oldest, None)
+            remove_provisional_event(tid)
+            _order_multiverse_written.add(tid)
+            _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
         logger.info(
-            f"[ORDER MULTIVERSE] {record.get('event')} trade_id={tid} "
-            f"touched={record.get('n_touched')} missed={record.get('n_missed')} "
-            f"scores={record.get('n')} live_orig=0.10% unchanged "
-            f"[PIPELINE ENFORCEMENT]"
+            f"[COLLECTOR_V22] {record.get('primary_outcome')} trade_id={tid} reason={reason} "
+            f"written={written} [PIPELINE ENFORCEMENT]"
         )
         return record
     except Exception as exc:
-        logger.warning(f"[ORDER MULTIVERSE] sync failed: {exc} [PIPELINE ENFORCEMENT]")
+        logger.warning(f"[OPPORTUNITY CAPTURE] persist failed: {exc} [PIPELINE ENFORCEMENT]")
         return None
 
 
@@ -13176,10 +13545,16 @@ def capture_near_miss_on_approve(signal, ai, edge_score, ctx):
 
 HORIZON_OUTCOME_SECS = {
     "1m": 60,
+    "2m": 120,
+    "3m": 180,
     "5m": 300,
+    "10m": 600,
     "15m": 900,
+    "20m": 1200,
     "30m": 1800,
+    "45m": 2700,
     "60m": 3600,
+    "90m": 5400,
     "120m": 7200,
 }
 
@@ -13516,6 +13891,7 @@ def _research_log_would_block(signal, ai, reason, edge_score=None):
     trade_id = (signal or {}).get("trade_id")
     if trade_id and (ai or {}).get("decision") == "APPROVE":
         defer_shadow_research(trade_id, tag)
+        persist_rejected_opportunity(signal, ai, reason, would_block_only=True)
         log_lane_opportunity_event(
             (signal or {}).get("research_lane"),
             "WOULD_BLOCK",
@@ -17977,6 +18353,18 @@ def _force_paper_mode_active() -> bool:
     )
 
 
+def _paper_skips_entry_risk_pauses() -> bool:
+    """True when DAILY_DRAWDOWN / LOSS_STREAK must not pause new entries.
+
+    Paper Showcase exists to collect trades. There is no point in a daily
+    loss cap or a 2h streak pause on that runtime — both starve the dataset.
+    Live copy keeps the gates: FORCE_PAPER_MODE off, and not unarmed RESEARCH.
+    """
+    if _force_paper_mode_active():
+        return True
+    return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+
+
 def _paper_natural_cycle_exits() -> bool:
     """Paper Showcase closes only on Scenario C ladder or thesis cut/loss.
 
@@ -21347,6 +21735,8 @@ def process_signal(event: dict):
             signal["final_direction"] = final_direction
             signal["direction"] = final_direction
             signal["inverted"] = inverted
+            signal["invert_on"] = bool(state.get("invert_signal", False))
+            signal["invert_signal"] = signal["invert_on"]
             signal["ai_decision"] = ai.get("decision")
             signal["ai_win_prob"] = ai.get("win_prob")
             signal["bull_score_at_entry"] = ai.get("bull_score", 0)
@@ -23926,9 +24316,10 @@ def close_position(pos: dict, exit_reason: str):
             "setup_type": master.get("setup_type", "UNKNOWN") if master else "UNKNOWN",
             "edge_score": edge_at_entry,
             "edge_score_at_entry": edge_at_entry,
-            "invert_signal": state.get("invert_signal", False),
+            "invert_signal": _coerce_invert_on(pos, master),
+            "invert_on": _coerce_invert_on(pos, master),
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
-            "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
+            "experiment_tag": f"INV_{_coerce_invert_on(pos, master)}_EF_{state.get('early_fail_enabled', True)}",
             "final_direction": pos.get("dir"),
             **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
@@ -24031,6 +24422,20 @@ def close_position(pos: dict, exit_reason: str):
         master["expires_ts"] = time.time() - 1
 
     persist_signal_close(trade_id, "CLOSED")
+    _sync_order_multiverse(
+        {
+            **(master or {}),
+            **(pos or {}),
+            "trade_id": trade_id,
+            "status": "CLOSED",
+            "ticket_closed": True,
+            "live_fill_ts": pos.get("entry_ts"),
+            "live_fill_price": pos.get("entry") or entry,
+            "invert_on": _coerce_invert_on(pos, master, trade_row),
+            "exit_reason": exit_reason,
+        },
+        path_complete=False,
+    )
 
     save_positions()
     save_persistent_config()
@@ -24452,8 +24857,17 @@ _AI_DRAIN_POST_PATHS = {
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
     "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
-    "/api/analyzer/genome", "/api/download_debug_config", "/api/export_csv",
-    "/api/export_debug", "/debug_state", "/static/dashboard.js",
+    "/api/analyzer/genome", "/api/download_debug_config",
+    "/debug_state", "/static/dashboard.js",
+}
+
+# Owner warehouse dumps: public internet needs the admin cookie/header.
+# Loopback still allowed so the local Flask test client and home operator
+# can export without stuffing BOT_ADMIN_TOKEN into the URL.
+_OWNER_RESEARCH_EXPORT_PATHS = {
+    "/api/export_csv",
+    "/api/export.csv",
+    "/api/export_debug",
 }
 
 
@@ -24644,6 +25058,12 @@ def _emergency_api_guard():
     # Read-only GETs are allowed without a token (still rate-limited above).
     if method == "GET" and path in _READ_ONLY_GET_PATHS:
         return None
+    if method == "GET" and path in _OWNER_RESEARCH_EXPORT_PATHS:
+        if _admin_authed_strict():
+            return None
+        resp = jsonify({"error": "unauthorized — owner token required for research export"})
+        resp.status_code = 401
+        return resp
     if method == "OPTIONS":
         return None  # CORS preflight — let route handlers respond
 
@@ -24902,6 +25322,7 @@ def _analyzer_output_wipe_globs() -> list:
         "pathway_lane_specs.json",
         "ai_confidence_expectancy.json",
         "lane_opportunity_capture.json",
+        "collector_v21_opportunity_capture.json",
         "approve_outcome_confidence_direction.json",
         "scenario_c_capture_ratio.json",
         "execution_funnel_summary.json",
@@ -24922,6 +25343,7 @@ def research_wipe_file_paths():
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
@@ -24967,6 +25389,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
@@ -27457,6 +27880,18 @@ def log_event_rejection(event):
         with csv_lock:
             row = {"ts": utc_iso(), "type": "REJECTED_SIGNAL", "edge": event.get("edge",0), "threshold": event.get("threshold",2.9), "reason": "EDGE_BELOW_THRESHOLD"}
             dynamic_csv_writer(CSV_BLOCKS, row)
+            persist_rejected_opportunity(
+                {
+                    "trade_id": event.get("trade_id") or f"edge-{int(time.time())}",
+                    "price": event.get("price") or state.get("price"),
+                    "signal_price": event.get("price") or state.get("price"),
+                    "final_direction": event.get("direction") or event.get("dir"),
+                    "edge_score_at_entry": event.get("edge"),
+                    "created_ts_ts": time.time(),
+                },
+                {"decision": "REJECT"},
+                "EDGE_BELOW_THRESHOLD",
+            )
     except:
         pass
 
@@ -27566,7 +28001,7 @@ __ADMIN_ACCESS_CONTROLS__
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
-    <button onclick="window.location.href='/api/export_csv'">Download CSV Logs</button>
+    <button onclick="window.location.href='/api/export.csv'" title="Owner-auth ZIP of CSV/JSONL collection files (same as /api/export_csv)">Download CSV Logs</button>
 </div>
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -27854,6 +28289,7 @@ __ADMIN_ACCESS_CONTROLS__
 
 DASHBOARD_JS = """(function () {
   try {
+    window.__LAST_AI_PAYLOAD__ = __LAST_AI_PAYLOAD_JSON__;
     function displayExitCause(reason) {
       const raw = String(reason || '').trim();
       if (!raw) return 'Not recorded';
@@ -29654,7 +30090,10 @@ DASHBOARD_JS = """(function () {
         }
         const dashPort = d.dashboard_port || __DASHBOARD_PORT__;
         const onWrongPort = (window.location.port && String(window.location.port) !== String(dashPort));
-        safeText('aiInput', JSON.stringify(d.ai_input || {}, null, 2) + (d.ai_input_time ? '\n@ ' + d.ai_input_time : ''));
+        const aiInputBody = d.ai_input && Object.keys(d.ai_input).length
+          ? d.ai_input
+          : (window.__LAST_AI_PAYLOAD__ || {});
+        safeText('aiInput', JSON.stringify(aiInputBody, null, 2) + (d.ai_input_time ? '\\n@ ' + d.ai_input_time : ''));
         safeText('features', JSON.stringify(d.feature_snapshot || {}) + ' (live — may differ from AI Input until next call)');
         if (onWrongPort) {
           const sb = document.getElementById('serverBanner');
@@ -29797,12 +30236,20 @@ DASHBOARD_JS = """(function () {
   console.info("dashboard.js loaded: true");
 })();"""
 
-@app.route('/static/dashboard.js')
-def dashboard_js():
-    js = (
+def build_dashboard_js(ai_payload=None) -> str:
+    payload = LAST_AI_PAYLOAD if ai_payload is None else ai_payload
+    if not isinstance(payload, dict):
+        payload = {}
+    return (
         DASHBOARD_JS.replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__DASHBOARD_URL__", dashboard_public_url())
+        .replace("__LAST_AI_PAYLOAD_JSON__", json_for_js(payload))
     )
+
+
+@app.route('/static/dashboard.js')
+def dashboard_js():
+    js = build_dashboard_js()
     return js, 200, {
         'Content-Type': 'application/javascript',
         'Cache-Control': 'no-store, no-cache, must-revalidate',
@@ -33288,6 +33735,12 @@ def health():
             "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
             "post_exit_file": POST_EXIT_REPLAY_FILE,
             "order_multiverse_file": ORDER_MULTIVERSE_FILE,
+            "collector_version": COLLECTOR_VERSION,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "path_schema_version": PATH_SCHEMA_VERSION,
+            "replay_version": REPLAY_VERSION,
+            "fill_model": FILL_MODEL_IDEAL_TOUCH,
+            "control_cell": CONTROL_CELL,
             "alt_tp": ["atr_k_tp", "chandelier", "structure_tp"],
             "alt_sl": ["atr_k_stop", "structure_stop"],
             "live_exits_unchanged": True,
@@ -33837,6 +34290,19 @@ def api_reconcile_phantom_cancel():
 
     # ---- Outside the close lock: persistence + relay + audit -----------
     persist_signal_close(trade_id, "CLOSED")
+    _sync_order_multiverse(
+        {
+            **(pos or {}),
+            "trade_id": trade_id,
+            "status": "CLOSED",
+            "ticket_closed": True,
+            "live_fill_ts": (pos or {}).get("entry_ts"),
+            "live_fill_price": (pos or {}).get("entry") or entry_price,
+            "invert_on": _coerce_invert_on(pos or {}, trade_row),
+            "exit_reason": PHANTOM_CANCEL_REASON,
+        },
+        path_complete=False,
+    )
     save_positions()
     save_persistent_config()
 
@@ -34368,8 +34834,18 @@ def api_data_size():
             "message": "admin token required",
         }), 401
 
-    volume_total_mb = 1024.0
     runtime_root = _data_sync_volume_root()
+    volume_total_mb = 1024.0
+    try:
+        usage = shutil.disk_usage(runtime_root)
+        volume_total_mb = round(float(usage.total) / (1024.0 * 1024.0), 2)
+    except OSError:
+        env_mb = os.getenv("FLY_VOLUME_MB", "").strip()
+        if env_mb:
+            try:
+                volume_total_mb = float(env_mb)
+            except ValueError:
+                pass
     runtime_path = str(runtime_root)
 
     def _run(cmd, timeout=10):
@@ -34499,6 +34975,14 @@ def api_data_size():
         elif volume_pct > 60.0:
             cleanup_status = "warn"
 
+    storage_payload = {}
+    capacity_payload = {}
+    try:
+        storage_payload = storage_state(str(runtime_root))
+        capacity_payload = project_capacity(data_dir=str(runtime_root))
+    except Exception as exc:
+        logger.warning("[DATA SIZE] storage/capacity probe failed: %s", exc)
+
     return jsonify({
         "status": "ok",
         "source": "fly" if os.path.exists("/.dockerenv") or os.path.exists("/app/fly-entrypoint.sh") else "local",
@@ -34511,6 +34995,9 @@ def api_data_size():
         "line_counts": line_counts,
         "key_files": key_files,
         "computed_at": int(time.time()),
+        "collector_version": COLLECTOR_V22_VERSION,
+        "storage_state": storage_payload,
+        "capacity_projection": capacity_payload,
     })
 
 def _arm_live_control() -> tuple:
@@ -35023,16 +35510,13 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
 
     Active files and the newest numeric rotations are never touched.
     Unacknowledged evidence is never deleted, even under disk pressure.
-    Rotation generations increase monotonically and may contain gaps after
-    retention, so ``.1``/``.2`` are not necessarily the newest.
 
-    Under volume pressure (used_pct ≥ 70), keep only the single newest
-    acknowledged rotation per family and shorten the age cutoff so Fly stays
-    below the 1 GB hard limit — still never deletes active/open files.
+    v2.2: raw research JSONL is NEVER pruned here — archive checksum ack required
+    first. Aggressive 70% pruning disabled to prevent silent tape loss.
     """
     removed = []
-    keep_newest = 1 if (volume_used_pct is not None and volume_used_pct >= 70.0) else 2
-    age_hours = 1 if (volume_used_pct is not None and volume_used_pct >= 70.0) else 24
+    keep_newest = 2
+    age_hours = 24
     cutoff = time.time() - (age_hours * 3600)
     newest_by_family = {}
     for rel, ack in list((acks or {}).items()):
@@ -35042,6 +35526,8 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
         try:
             path = _data_sync_resolve_relpath(rel)
             base_name, rotation_index = rotation
+            if base_name in _RESEARCH_RAW_JSONL_NEVER_PRUNE:
+                continue
             family_key = (path.parent, base_name)
             newest_kept = newest_by_family.get(family_key)
             if newest_kept is None:
@@ -35168,8 +35654,8 @@ def api_data_sync_ack():
         "removed_acknowledged_rotations": removed,
         "volume_used_pct": volume_used_pct,
         "policy": (
-            "acknowledged rotations older than the age cutoff are pruned except the newest "
-            "kept generations (2 normally, 1 when volume ≥70%); active/unacked files retained"
+            "acknowledged rotations older than 24h are pruned except newest 2 generations; "
+            "raw research JSONL never pruned without archive ack; STORAGE_PRESSURE at 85%"
         ),
     })
 
@@ -35846,7 +36332,34 @@ def export_debug():
         logger.error(f"[EXPORT ERROR] {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+def research_export_files():
+    """Owner-dashboard ZIP members: session CSV plus Fly collection JSONL."""
+    return [
+        CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
+        CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
+        SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
+        EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
+        SHADOW_LANE_OUTCOME_FILE,
+        LANE_OPPORTUNITY_CAPTURE_FILE,
+        LANE_PNL_LEDGER_FILE,
+        LANE_LAB_PNL_LEDGER_FILE,
+        TILE2_COUNTERS_FILE,
+        PATHWAY_LANE_SPECS_FILE,
+        "benchmark_vs_lanes_report.json",
+        "pathway_scorecard.json",
+        PATH_REPLAY_FILE,
+        CYCLE_3M_UNIVERSE_FILE,
+        CHASE_OFFSET_TOUCH_GRID_FILE,
+        ORDER_MULTIVERSE_FILE,
+        OPPORTUNITY_CAPTURE_FILE,
+        "execution_funnel.jsonl",
+        "execution_funnel_summary.json",
+        AI_FUNNEL_REPORT_FILE,
+    ]
+
+
 @app.route('/api/export_csv')
+@app.route('/api/export.csv')
 def export_csv():
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -35854,21 +36367,7 @@ def export_csv():
         # research lifecycle. The old export omitted these newer files, so a
         # downloaded ZIP could show replay buffers but could not prove whether
         # Tile 2 / Type B filled, expired, closed, or remained counterfactual.
-        export_files = [
-            CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
-            CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
-            SIGNAL_SNAPSHOT_FILE, SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, COUNTERFACTUAL_FILE,
-            EDGE_CENSUS_FILE, "signal_persist.log", "near_edge.log",
-            SHADOW_LANE_OUTCOME_FILE,
-            LANE_OPPORTUNITY_CAPTURE_FILE,
-            LANE_PNL_LEDGER_FILE,
-            LANE_LAB_PNL_LEDGER_FILE,
-            TILE2_COUNTERS_FILE,
-            PATHWAY_LANE_SPECS_FILE,
-            "benchmark_vs_lanes_report.json",
-            "pathway_scorecard.json",
-        ]
-        for file in dict.fromkeys(export_files):
+        for file in dict.fromkeys(research_export_files()):
             if os.path.exists(file):
                 zip_file.write(file, arcname=os.path.basename(file))
     zip_buffer.seek(0)
@@ -36674,6 +37173,7 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
         shared_ai_call_ts=(ai or {}).get("shared_ai_call_ts") or signal.get("shared_ai_call_ts"),
         collection_mode=signal.get("collection_mode") or "ACTIVE_RESEARCH",
         paused_shadow=bool(signal.get("paused_shadow")),
+        invert_on=_coerce_invert_on(signal),
         prompt_id=ai.get("prompt_id") or signal.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         adx_at_signal=(
             ((((signal.get("context") or {}).get("market_context") or {}).get("trend_strength") or {}).get("adx"))
@@ -36902,9 +37402,18 @@ def simulate_replay_outcome(buf: dict) -> dict:
         last_unreal = unreal
         peak = max(peak, unreal)
         mae = min(mae, unreal)
-        age_min = (t - fill_t) / 60.0
-        # Paper natural cycle: do not close on EARLY_FAIL or hard STOP_LOSS.
-        # Those previously fired on a 13bps tick and skipped ladder/thesis.
+        age_sec = t - fill_t
+        # Paper still skips EARLY_FAIL / last-trade price SL. Phase-aware margin
+        # stop: thesis -12% in the first 5 minutes (no MFE bypass), hard -30% after.
+        if age_sec < THESIS_MIN_AGE_SEC:
+            if unreal <= fast_cut:
+                exit_reason = "THESIS_FAST_CUT"
+                exit_margin_pct = fast_cut
+                break
+        elif unreal <= -MAX_SL_MARGIN_PCT:
+            exit_reason = "STOP_LOSS"
+            exit_margin_pct = -MAX_SL_MARGIN_PCT
+            break
         lock_floor = _profit_lock_floor_for_ladder(
             peak,
             trail_ladder,
@@ -36918,23 +37427,6 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "PROFIT_LOCK_LADDER"
             exit_margin_pct = lock_floor
             break
-        mfe_protect = _buf_float(exit_config.get("thesis_mfe_protect_pct"), THESIS_MFE_PROTECT_PCT)
-        if peak < trail_ladder[0][0] and unreal <= fast_cut:
-            # Section 5: route through the SAME MFE-protection helper used by
-            # the live exit path. Historical bug checked `unreal >= mfe_protect`
-            # which can never be true when `unreal <= fast_cut` (= -12); the
-            # correct check is `peak >= mfe_protect`. The fast-cut P&L of 29
-            # of the 69 historical fast-cut rows is not trustworthy under the
-            # displayed policy until this fix lands.
-            if not should_skip_fast_cut_for_mfe_protection(
-                unreal_pct=unreal,
-                peak_mfe_pct=peak,
-                mfe_protect_pct=mfe_protect,
-                fast_cut_pct=fast_cut,
-            ):
-                exit_reason = "THESIS_FAST_CUT"
-                exit_margin_pct = fast_cut
-                break
         if unreal >= TP_EMERGENCY_MARGIN_PCT:
             exit_reason = "TAKE_PROFIT"
             exit_margin_pct = TP_EMERGENCY_MARGIN_PCT
@@ -37239,6 +37731,7 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "fill_at_limit": bool(meta.get("fill_at_limit")),
             "limit_chase_count": int(meta.get("limit_chase_count") or 0),
             "exit_outcome": meta.get("exit_outcome"),
+            "invert_on": bool(meta.get("invert_on", False)),
             **fill_stamps,
         }
 
@@ -37320,8 +37813,10 @@ def append_replay_tick(
             trough_mae_pct=mae,
             observed_ts=now,
             seq=buf["seq"],
+            invert_on=bool(buf.get("invert_on", False)),
         )
-    _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
+    if COLLECTOR_V22_PATH_REPLAY_1S:
+        _safe_append_jsonl(PATH_REPLAY_FILE, path_row, label="PATH_REPLAY")
     if persist_trade_id is not None:
         try:
             rotate_log(POST_EXIT_REPLAY_FILE)
@@ -37670,7 +38165,9 @@ def _load_post_exit_replays():
 
 
 _HORIZON_RECEIPT_SECS = (
-    ("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("60m", 3600), ("120m", 7200),
+    ("1m", 60), ("2m", 120), ("3m", 180), ("5m", 300), ("10m", 600),
+    ("15m", 900), ("20m", 1200), ("30m", 1800), ("45m", 2700),
+    ("60m", 3600), ("90m", 5400), ("120m", 7200),
 )
 _MAX_PATH_GAP_MS = 15_000
 
@@ -37899,12 +38396,22 @@ def dump_replay(trade_id: str):
                     buf.get("source_trade_id"),
                 )
                 if paper_tid:
+                    fill_t = buf.get("virtual_fill_t")
+                    start_ts = buf.get("start_ts")
+                    live_fill_ts = None
+                    if fill_t is not None and start_ts:
+                        live_fill_ts = float(start_ts) + float(fill_t)
                     mv_source = {
                         "trade_id": paper_tid,
                         "signal_price": buf.get("start_price") or buf.get("entry_price"),
                         "signal_price_at_approve": buf.get("start_price"),
                         "created_ts_ts": buf.get("start_ts"),
                         "final_direction": buf.get("direction"),
+                        "status": "CLOSED" if buf.get("closed") else "FILLED",
+                        "ticket_closed": bool(buf.get("closed")),
+                        "invert_on": bool(buf.get("invert_on", False)),
+                        "live_fill_ts": live_fill_ts,
+                        "live_fill_price": buf.get("virtual_entry") or buf.get("entry_price"),
                         "atr14_pct_3m": buf.get("atr14_pct_3m"),
                         "donchian_high_3m": buf.get("donchian_high_3m"),
                         "donchian_low_3m": buf.get("donchian_low_3m"),
@@ -39643,6 +40150,10 @@ def apply_trade_pnl(trade_row):
             state["consecutive_losses"] = state.get("consecutive_losses", 0) + 1
         else:
             state["consecutive_losses"] = 0
+        if _paper_skips_entry_risk_pauses():
+            # Keep daily_pnl_usd / consecutive_losses for research stats, but
+            # never latch execution_paused. Paper needs uninterrupted data.
+            return
         if state["consecutive_losses"] >= CONSECUTIVE_LOSS_PAUSE:
             state["loss_pause_until"] = time.time() + LOSS_PAUSE_SEC
             set_execution_paused("LOSS_STREAK")
@@ -39684,6 +40195,7 @@ def main():
     dashboard_httpd = _create_dashboard_server()
     threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
     prune_aux_logs_on_startup()
+    _ensure_collector_v22_epoch()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()
@@ -39694,6 +40206,7 @@ def main():
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
+    _restore_collector_v22_provisionals()
     load_persistent_config()
     _apply_env_live_gating()
     reset_transient_runtime_state()

@@ -100,8 +100,8 @@ def test_duplicate_audit_keeps_allowed_nearby_intents_in_the_denominator():
     assert '"SUPPRESS_CANONICAL_INTENT"' in rejection
 
 
-def test_final_hard_stop_is_thirteen_percent_margin_loss():
-    assert "MAX_SL_MARGIN_PCT = 13.0" in SOURCE
+def test_final_hard_stop_is_thirty_percent_margin_loss():
+    assert "MAX_SL_MARGIN_PCT = 30.0" in SOURCE
     helper = _route("sl_price_pct", "SL_PCT = sl_price_pct")
     assert "MAX_SL_MARGIN_PCT / (lev * 100.0)" in helper
     strategy_lines = _route("_strategy_detail_lines", "def _annotate_lanes_with_exec_mode")
@@ -116,10 +116,10 @@ def test_execution_and_research_hard_stop_policy_stay_in_parity():
         return float(match.group(1))
 
     expected = assigned_value(SOURCE, "MAX_SL_MARGIN_PCT")
-    assert expected == 13.0
+    assert expected == 30.0
     assert assigned_value(ENGINE_SOURCE, "MAX_SL_MARGIN_PCT") == expected
     assert assigned_value(CANONICAL_ANALYZER_SOURCE, "HARD_STOP_MARGIN_PCT") == expected
-    assert "Hard SL margin cap: 30%" not in CANONICAL_ANALYZER_SOURCE
+    assert "Hard SL margin cap: {HARD_STOP_MARGIN_PCT:g}%" in CANONICAL_ANALYZER_SOURCE
 
 
 def test_legacy_analyzer_is_a_minimal_fail_closed_stub():

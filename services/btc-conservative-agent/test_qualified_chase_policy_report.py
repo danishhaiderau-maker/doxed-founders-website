@@ -74,12 +74,11 @@ def test_qualified_chase_report_fails_closed_without_chronological_identity():
     assert report["live_policy_change_allowed"] is False
 
 
-def test_question_readiness_uses_question_specific_qualified_reports():
+def test_chase_report_remains_available_but_dashboard_uses_one_best_policy_gate():
     assert analyzer.QUALIFIED_CHASE_POLICY_REPORT_FILE in analyzer.ANALYZER_JSON_REPORT_FILES
     assert analyzer.QUALIFIED_CHASE_POLICY_REPORT_FILE in {row[1] for row in analyzer.DEEP_DIVE_REPORT_CATALOG}
-    assert '"qualified_chase_policy_report.json"' in DASHBOARD_SOURCE
-    assert 'bool(cluster.get("conclusion_allowed")), False' in DASHBOARD_SOURCE
-    assert '"qualified_exit_policy_grid_report.json",\n                 bool(policy_grid.get("selected_on_train")), grid_ready' in DASHBOARD_SOURCE
-    assert '"LIVE_POLICY_QUALIFIED" if live_ready else "DESCRIPTIVE_QUALIFIED"' in DASHBOARD_SOURCE
-    assert 'blockers.append("INSUFFICIENT_QUESTION_SPECIFIC_HOLDOUT")' in DASHBOARD_SOURCE
-    assert 'evidence_scope="SHOWCASE_STRATEGY"' in DASHBOARD_SOURCE
+    assert 'BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"' in DASHBOARD_SOURCE
+    assert '"status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY"' in DASHBOARD_SOURCE
+    assert 'blockers.append("INDEPENDENT_OOS_EVIDENCE_MISSING")' in DASHBOARD_SOURCE
+    assert 'blockers.append("REPLAY_INELIGIBLE_PATHS_PRESENT")' in DASHBOARD_SOURCE
+    assert '"question": "Best Policy Research"' in DASHBOARD_SOURCE

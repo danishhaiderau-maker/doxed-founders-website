@@ -147,6 +147,11 @@ from collector_v22 import (
     write_research_event_once,
 )
 from collector_storage import storage_blocks_new_events, storage_state, project_capacity
+from collector_v22_provisional import (
+    load_provisional_events,
+    remove_provisional_event,
+    upsert_provisional_event,
+)
 from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -2061,6 +2066,34 @@ def unrealized_margin_pct(pos: dict, price: float = None) -> float:
     price_move = ((mark - entry) / entry) * dir_factor
     return price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * 100
 
+
+def _check_phase_margin_stop(pos: dict, unreal_pct: float, age_sec: float) -> bool:
+    """Phase-aware margin stop: thesis -12% during window, hard -30% after.
+
+    Thesis window = THESIS_MIN_AGE_SEC (5 minutes) from entry. During the window
+    the -12% thesis stop is armed immediately with no MFE bypass. After the
+    window expires only the final -MAX_SL_MARGIN_PCT hard stop applies.
+    """
+    if age_sec < THESIS_MIN_AGE_SEC:
+        if unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT:
+            logger.info(
+                f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+                f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m "
+                f"thesis_window={THESIS_MIN_AGE_SEC/60:.0f}m [PIPELINE ENFORCEMENT]"
+            )
+            close_position(pos, "THESIS_FAST_CUT")
+            return True
+        return False
+    if unreal_pct <= -MAX_SL_MARGIN_PCT:
+        logger.info(
+            f"[EXIT TRIGGER] HARD_STOP trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
+            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m cap=-{MAX_SL_MARGIN_PCT:.1f}% "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        close_position(pos, "STOP_LOSS")
+        return True
+    return False
+
 def check_thesis_invalidation(pos: dict, price: float) -> bool:
     if not THESIS_INVALIDATION_ENABLED:
         return False
@@ -2084,32 +2117,6 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
         return False
     if peak >= TRAIL_LADDER[0][0]:
         return False
-    fast_cut = unreal_pct <= THESIS_FAST_EXIT_UNREAL_PCT
-    if fast_cut:
-        # Section 5: route the MFE fast-cut skip through the shared helper so
-        # live and replay always agree on whether the floor was reached.
-        if should_skip_fast_cut_for_mfe_protection(
-            unreal_pct=unreal_pct,
-            peak_mfe_pct=peak,
-            mfe_protect_pct=THESIS_MFE_PROTECT_PCT,
-            fast_cut_pct=THESIS_FAST_EXIT_UNREAL_PCT,
-        ):
-            now_ts = time.time()
-            last_log = float(pos.get("_mfe_protect_log_ts") or 0)
-            if now_ts - last_log >= 30.0:
-                pos["_mfe_protect_log_ts"] = now_ts
-                logger.info(
-                    f"[THESIS_MFE_PROTECT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-                    f"skip fast cut unreal={unreal_pct:.1f}% peak={peak:.1f}% "
-                    f"floor={THESIS_MFE_PROTECT_PCT:.1f}% [PIPELINE ENFORCEMENT]"
-                )
-            return False
-        logger.info(
-            f"[THESIS_FAST_CUT] trade_id={pos.get('trade_id')} dir={pos.get('dir')} "
-            f"unreal={unreal_pct:.1f}% peak={peak:.1f}% age={age_sec/60:.1f}m [PIPELINE ENFORCEMENT]"
-        )
-        close_position(pos, "THESIS_FAST_CUT")
-        return True
     if age_sec < THESIS_MIN_AGE_SEC:
         return False
     update_market_context()
@@ -2154,7 +2161,7 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
     if flip:
         logger.info(
             f"[THESIS_INVALIDATED] trade_id={pos.get('trade_id')} dir={direction} "
-            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m fast={fast_cut} "
+            f"unreal={unreal_pct:.1f}% age={age_sec/60:.1f}m "
             f"entry bull/bear={entry_bull}/{entry_bear} live={cur_bull}/{cur_bear} "
             f"mtf {entry_mtf}->{cur_mtf} struct {entry_struct}->{cur_struct} "
             f"[PIPELINE ENFORCEMENT]"
@@ -4161,6 +4168,10 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     # later book-walk VWAP that can make a stop look like a much better fill.
     pos["_exit_eval_price"] = float(price or 0)
 
+    age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
+    if _check_phase_margin_stop(pos, unreal_pct, age_sec):
+        return True
+
     peak = pos.get("max_pnl_pct", 0.0)
     lock_floor = _effective_profit_lock_floor(pos, peak)
     ladder = _position_trail_ladder(pos)
@@ -4851,9 +4862,9 @@ def compute_exposure():
 FIXED_MARGIN_USDT = 20.0
 # v79: always deploy full $20 margin — conviction/regime/ADX scaling disabled (logged for analyzer)
 FLAT_MARGIN_EVERY_TRADE = True
-# Final fail-safe loss cap for every Continuous position.  Thesis/ladder exits
-# may close earlier, but no trade may remain open beyond this margin loss.
-MAX_SL_MARGIN_PCT = 13.0
+# Final fail-safe loss cap after the thesis window expires. During the first
+# THESIS_MIN_AGE_SEC the -12% thesis stop is the binding loss cap instead.
+MAX_SL_MARGIN_PCT = 30.0
 
 def sl_price_pct(leverage: int = None) -> float:
     lev = max(int(leverage or _state_leverage()), 1)
@@ -6771,9 +6782,9 @@ LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
 THESIS_INVALIDATION_ENABLED = True
 THESIS_SCORE_FLIP_MARGIN = 1
 THESIS_EARLY_DECAY_DELTA = 2
-THESIS_MIN_AGE_SEC = 5 * 60
+THESIS_MIN_AGE_SEC = 5 * 60  # thesis stop window: -12% armed from open until this expires
 THESIS_EXIT_IF_ABOVE_UNREAL_PCT = 8.0
-THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # v1.1.21 Scenario C thesis stop
+THESIS_FAST_EXIT_UNREAL_PCT = -12.0  # thesis stop (margin unreal) — active only during THESIS_MIN_AGE_SEC
 # Stage 1 Fix #5 (2026-08-06): raised from 2.0% to 5.0%. A +2% MFE spike is
 # chop noise (the 3 recent losers each spiked +2% early as fakeout breakouts
 # then bled to -$6). When 2% triggered, the -12% fast-cut was bypassed and
@@ -11532,6 +11543,31 @@ _RESEARCH_RAW_JSONL_NEVER_PRUNE = frozenset({
 })
 
 
+def _restore_collector_v22_provisionals() -> int:
+    """Rehydrate same-epoch maturation sources after a process restart."""
+    epoch_id = _collector_v22_epoch_id()
+    restored = 0
+    for event_id, source in load_provisional_events(epoch_id=epoch_id).items():
+        if event_already_written(event_id):
+            # Reconcile a crash after final commit but before journal cleanup.
+            remove_provisional_event(event_id)
+            _order_multiverse_written.add(event_id)
+            continue
+        if event_id in _order_multiverse_pending_src:
+            continue
+        source = dict(source)
+        source["trade_id"] = event_id
+        _order_multiverse_pending_src[event_id] = source
+        _order_multiverse_state[event_id] = str(source.get("observation_status") or "RESTORED_PROVISIONAL")
+        restored += 1
+    if restored:
+        logger.info(
+            f"[COLLECTOR_V22] restored provisional_events={restored} epoch_id={epoch_id} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+    return restored
+
+
 def _collector_v22_epoch_id() -> str:
     """Stable epoch-v22-* id for reproducible research datasets."""
     session = _load_research_session_meta() or {}
@@ -11640,6 +11676,14 @@ def _maybe_complete_pending_order_multiverse():
         return
     _order_multiverse_last_poll = now
     for src in list(_order_multiverse_pending_src.values()):
+        if src.get("collector_rejected"):
+            persist_rejected_opportunity(
+                src,
+                ai=src.get("collector_ai") if isinstance(src.get("collector_ai"), dict) else None,
+                reason=str(src.get("collector_reject_reason") or "REJECTED"),
+                would_block_only=bool(src.get("collector_would_block_only")),
+            )
+            continue
         expires = float(src.get("expires_ts") or 0)
         ttl_done = expires > 0 and now >= expires
         post_ttl_done = expires > 0 and now >= (expires + float(POST_TTL_LOOKAHEAD_SEC))
@@ -11776,6 +11820,8 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             atr14_pct=univ.get("atr14_pct_3m") or source.get("atr14_pct_3m"),
             invert_on=invert_on,
             include_ticks_1s=COLLECTOR_V22_PATH_REPLAY_1S,
+            symbol=source.get("symbol") or source.get("pair") or "BTCUSD",
+            shared_ai_call_id=source.get("shared_ai_call_id"),
         )
         obs = str(record.get("observation_status") or "")
         keep_collecting = not terminal_observation(obs)
@@ -11792,14 +11838,19 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "status": "CLOSED" if ticket_closed else ("FILLED" if live_fill_ts else "PENDING"),
             "ticket_closed": ticket_closed,
             "path_complete": replay_complete,
+            "symbol": source.get("symbol") or source.get("pair") or "BTCUSD",
+            "shared_ai_call_id": source.get("shared_ai_call_id"),
         }
         if keep_collecting:
             _order_multiverse_pending_src[tid] = pending_payload
             _order_multiverse_state[tid] = obs or "PENDING"
+            pending_payload["observation_status"] = obs or "PENDING"
+            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id())
             return record
         _order_multiverse_pending_src.pop(tid, None)
         written, reason = write_research_event_once(record)
         if written:
+            remove_provisional_event(tid)
             _order_multiverse_written.add(tid)
             compact = dict(record)
             compact["event"] = obs
@@ -11882,6 +11933,8 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             would_block_reason=would_block_reason or reason,
             exact_reason=reason,
             atr14_pct=univ.get("atr14_pct_3m"),
+            symbol=signal.get("symbol") or signal.get("pair") or "BTCUSD",
+            shared_ai_call_id=signal.get("shared_ai_call_id"),
         )
         if would_block_only:
             record["would_block_only"] = True
@@ -11889,8 +11942,39 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         else:
             record["hard_reject"] = True
             record["would_block_only"] = False
+        obs = str(record.get("observation_status") or "")
+        if not terminal_observation(obs):
+            # Keep the recovery payload JSON-only and bounded.  These are the
+            # causal fields required to rebuild the same rejected envelope;
+            # arbitrary runtime references from ``signal`` do not belong in
+            # durable collector state.
+            pending_payload = {
+                "trade_id": tid,
+                "signal_price_at_approve": price,
+                "created_ts_ts": ts,
+                "expires_ts": ts + 1800.0,
+                "final_direction": direction,
+                "invert_on": _coerce_invert_on(signal),
+                "edge_score_at_entry": signal.get("edge_score_at_entry"),
+                "status": "REJECTED",
+                "collector_rejected": True,
+                "collector_reject_reason": reason,
+                "collector_would_block_only": bool(would_block_only),
+                "collector_ai": dict(ai or {}),
+            }
+            _order_multiverse_pending_src[tid] = pending_payload
+            _order_multiverse_state[tid] = obs
+            pending_payload["observation_status"] = obs
+            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id())
+            logger.info(
+                f"[COLLECTOR_V22] REJECTED provisional trade_id={tid} obs={obs}; awaiting complete tape "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            return record
         written, _reason = write_research_event_once(record)
         if written:
+            _order_multiverse_pending_src.pop(tid, None)
+            remove_provisional_event(tid)
             _order_multiverse_written.add(tid)
             _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
         logger.info(
@@ -37318,9 +37402,18 @@ def simulate_replay_outcome(buf: dict) -> dict:
         last_unreal = unreal
         peak = max(peak, unreal)
         mae = min(mae, unreal)
-        age_min = (t - fill_t) / 60.0
-        # Paper natural cycle: do not close on EARLY_FAIL or hard STOP_LOSS.
-        # Those previously fired on a 13bps tick and skipped ladder/thesis.
+        age_sec = t - fill_t
+        # Paper still skips EARLY_FAIL / last-trade price SL. Phase-aware margin
+        # stop: thesis -12% in the first 5 minutes (no MFE bypass), hard -30% after.
+        if age_sec < THESIS_MIN_AGE_SEC:
+            if unreal <= fast_cut:
+                exit_reason = "THESIS_FAST_CUT"
+                exit_margin_pct = fast_cut
+                break
+        elif unreal <= -MAX_SL_MARGIN_PCT:
+            exit_reason = "STOP_LOSS"
+            exit_margin_pct = -MAX_SL_MARGIN_PCT
+            break
         lock_floor = _profit_lock_floor_for_ladder(
             peak,
             trail_ladder,
@@ -37334,23 +37427,6 @@ def simulate_replay_outcome(buf: dict) -> dict:
             exit_reason = "PROFIT_LOCK_LADDER"
             exit_margin_pct = lock_floor
             break
-        mfe_protect = _buf_float(exit_config.get("thesis_mfe_protect_pct"), THESIS_MFE_PROTECT_PCT)
-        if peak < trail_ladder[0][0] and unreal <= fast_cut:
-            # Section 5: route through the SAME MFE-protection helper used by
-            # the live exit path. Historical bug checked `unreal >= mfe_protect`
-            # which can never be true when `unreal <= fast_cut` (= -12); the
-            # correct check is `peak >= mfe_protect`. The fast-cut P&L of 29
-            # of the 69 historical fast-cut rows is not trustworthy under the
-            # displayed policy until this fix lands.
-            if not should_skip_fast_cut_for_mfe_protection(
-                unreal_pct=unreal,
-                peak_mfe_pct=peak,
-                mfe_protect_pct=mfe_protect,
-                fast_cut_pct=fast_cut,
-            ):
-                exit_reason = "THESIS_FAST_CUT"
-                exit_margin_pct = fast_cut
-                break
         if unreal >= TP_EMERGENCY_MARGIN_PCT:
             exit_reason = "TAKE_PROFIT"
             exit_margin_pct = TP_EMERGENCY_MARGIN_PCT
@@ -40130,6 +40206,7 @@ def main():
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
     _wipe_research_on_startup_if_needed()
+    _restore_collector_v22_provisionals()
     load_persistent_config()
     _apply_env_live_gating()
     reset_transient_runtime_state()

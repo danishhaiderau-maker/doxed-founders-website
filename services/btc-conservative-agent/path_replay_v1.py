@@ -83,12 +83,12 @@ CONTROL_CELL = {
 MARGIN_PP_AS_PRICE_PCT = 0.01
 # Documented live policy — replay grouping must not mutate these on Fly.
 LIVE_THESIS_CUT = -12.0
-LIVE_HARD_STOP_PCT = 13.0
+LIVE_HARD_STOP_PCT = 30.0
 LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER = True
 try:
     from scenario_c_config import TRAIL_LADDER_SCENARIO_C as LIVE_SCENARIO_C_LADDER
 except Exception:  # pragma: no cover - keep replay importable in isolation
-    LIVE_SCENARIO_C_LADDER = ((4, 2), (5, 3), (8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))
+    LIVE_SCENARIO_C_LADDER = ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))
 LIVE_EARLY_LADDER_4_2 = ((4.0, 2.0),)
 ATR_K_GRID = (1.0, 1.5, 2.0, 3.0)
 CHANDELIER_K_GRID = (2.0, 3.0)

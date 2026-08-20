@@ -108,6 +108,7 @@ RESEARCH_FINDINGS_FILE = "research_findings.txt"
 RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
+BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
 REAL_EDGE_SUMMARY_FILE = "real_edge_summary.json"
@@ -670,9 +671,11 @@ ANALYZER_JSON_REPORT_FILES = (
     REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE,
     SHOWCASE_LOSING_CLUSTER_REPORT_FILE,
     RESEARCH_HORIZON_MATURITY_REPORT_FILE,
+    BEST_POLICY_RESEARCH_REPORT_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
+    ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
     ("AI Decision Fingerprints", AI_DECISION_FINGERPRINT_REPORT_FILE, "Cluster fingerprints driving APPROVE/REJECT"),
@@ -754,7 +757,8 @@ PEAK_NEVER_LOSER_MIN_PEAK = 40.0
 PEAK_NEVER_LOSER_FLOOR = 10.0
 DEFAULT_PULLBACK_THRESHOLDS = [0.0, 0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004, 0.005, 0.006]
 THESIS_FAST_EXIT_DEFAULT = -12.0
-HARD_STOP_MARGIN_PCT = 13.0
+HARD_STOP_MARGIN_PCT = 30.0
+THESIS_MIN_AGE_SEC = 5 * 60
 DEFAULT_PULLBACK_PCT = 0.001
 THESIS_EXIT_ABOVE_DEFAULT = 8.0
 THESIS_FAST_CUT_CANDIDATES = [-6, -8, -10, -12, -14, -16, -18, -20, -25, -30, -40, -50, -60, -80, -100, -120, -150, -180]
@@ -3665,18 +3669,18 @@ def _simulate_ticks_fast_cut_ladder(
             _, lock = _ladder_lock_for_peak_custom(peak, ladder)
             if lock is not None and unreal <= lock:
                 return _margin_pct_to_usd(lock, margin_usdt), "PROFIT_LOCK_LADDER", peak
-        hard_stop = -abs(float(hard_stop_margin_pct))
-        if unreal <= hard_stop:
-            return _margin_pct_to_usd(hard_stop, margin_usdt), "HARD_STOP", peak
+        age_sec = (t_rel - float(fill_t)) if fill_t is not None else 0.0
+        if age_sec < THESIS_MIN_AGE_SEC:
+            if unreal <= fast_cut_pct:
+                return _margin_pct_to_usd(fast_cut_pct, margin_usdt), "THESIS_FAST_CUT", peak
+        else:
+            hard_stop = -abs(float(hard_stop_margin_pct))
+            if unreal <= hard_stop:
+                return _margin_pct_to_usd(hard_stop, margin_usdt), "HARD_STOP", peak
         if unreal > thesis_exit_above:
             continue
         if peak >= ladder[0][0]:
             continue
-        if unreal <= fast_cut_pct:
-            if mfe_protect_pct is not None and mfe_protect_pct > 0 and peak >= mfe_protect_pct:
-                last_unreal = unreal
-                continue
-            return _margin_pct_to_usd(fast_cut_pct, margin_usdt), "THESIS_FAST_CUT", peak
         last_unreal = unreal
     if ticks:
         return _margin_pct_to_usd(last_unreal, margin_usdt), "REPLAY_END", peak
@@ -18804,6 +18808,14 @@ def write_report_manifest(payload=None):
     manifest_generated_at = datetime.now(timezone.utc)
     current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
     """Manifest for research dashboard — no hardcoded report list in UI."""
+    try:
+        from research.best_policy_research import build_best_policy_research_report
+
+        build_best_policy_research_report(data_dir=".", report_dir=".")
+    except Exception as exc:
+        # A missing/corrupt v2.2 input must degrade to no report, never interrupt
+        # the established analyzer cycle or leak a stale policy candidate.
+        print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
     cohort_summary = {}
     for cohort in (
         SHOWCASE_STRATEGY,

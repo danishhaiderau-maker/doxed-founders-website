@@ -43,6 +43,13 @@ def format_melbourne_dt(value) -> str:
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
 
 try:
+    from collector_v22_schema import RESEARCH_EVENTS_FILE
+    from replay_eligibility import validate_replay_eligibility
+except ImportError:
+    RESEARCH_EVENTS_FILE = "research_events_v22.jsonl"
+    validate_replay_eligibility = None
+
+try:
     from combo_pathway_config import (
         ANALYZER_SYNC_ID as EXPECTED_ANALYZER_SYNC_ID,
         BENCHMARK_LANE,
@@ -138,6 +145,7 @@ BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND_PORT}")
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
+BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -1600,105 +1608,158 @@ def api_status():
     })
 
 
-def _decision_readiness_payload():
-    """Question-specific readiness; historical evidence cannot authorize policy."""
+def _read_research_events_v22() -> list[dict]:
+    """Read the freshest local mirror. A malformed line is never evidence."""
+    candidates = [path for path in _data_file_candidates(RESEARCH_EVENTS_FILE) if path.is_file()]
+    if not candidates:
+        return []
+    path = max(candidates, key=lambda item: item.stat().st_mtime)
+    rows = []
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows
+
+
+def _best_policy_research_payload():
+    """One fail-closed answer based only on the newest qualified v2.2 epoch."""
     manifest = _read_json(REPORT_MANIFEST_FILE)
-    provenance = manifest.get("analysis_provenance") or {}
-    cohorts = provenance.get("cohorts") or {}
-    showcase = cohorts.get("SHOWCASE_STRATEGY") or {}
-    real_copy = cohorts.get("REAL_COPY_PARAMETER_OPTIMISATION") or {}
-    showcase_n = int(showcase.get("included_row_count") or 0)
-    qualified_n = int(real_copy.get("included_row_count") or 0)
-    exclusions = real_copy.get("exclusion_reason_counts") or {}
-    revision = provenance.get("generation_revision") or manifest.get("generation_revision")
-    evidence_inputs = provenance.get("evidence_inputs") or {}
-    counterfactual_available = bool(
-        (evidence_inputs.get("counterfactual.jsonl") or {}).get("available")
-    )
-    manifest_files = {
-        row.get("file") for row in (manifest.get("reports") or []) if isinstance(row, dict)
-    }
-    cluster = _read_json("correlated_price_cluster_report.json")
-    ladder = _read_json("exit_ladder_simulator_report.json")
-    fast_cut = _read_json("fast_cut_sweep_report.json")
-    chase = _read_json("chase_effectiveness_report.json")
-    qualified_chase = _read_json("qualified_chase_policy_report.json")
-    policy_grid = _read_json("qualified_exit_policy_grid_report.json")
-    grid_ready = bool(policy_grid.get("live_policy_change_allowed"))
+    policy_report = _read_json(BEST_POLICY_RESEARCH_REPORT_FILE)
+    events = _read_research_events_v22()
 
-    def question(key, text, report, descriptive_ready, live_ready, qualified_detail,
-                 extra_blockers=None, evidence_scope="REAL_COPY_PARAMETER_OPTIMISATION"):
-        blockers = list(extra_blockers or [])
-        if not counterfactual_available:
-            blockers.append("COUNTERFACTUAL_EVIDENCE_MISSING")
-        if report not in manifest_files:
-            blockers.append("REPORT_NOT_CURRENT_MANIFEST")
-        descriptive_ready = bool(descriptive_ready and counterfactual_available and report in manifest_files)
-        live_ready = bool(live_ready and descriptive_ready)
-        if not descriptive_ready:
-            blockers.append("INSUFFICIENT_QUESTION_SPECIFIC_HOLDOUT")
-        return {
-            "key": key,
-            "question": text,
-            "status": "LIVE_POLICY_QUALIFIED" if live_ready else "DESCRIPTIVE_QUALIFIED" if descriptive_ready else "BLOCKED",
-            "descriptive_answer_available": descriptive_ready,
-            "live_policy_change_allowed": live_ready,
-            "current_epoch_qualified_rows": qualified_n,
-            "historical_showcase_rows": showcase_n,
-            "evidence_scope": evidence_scope,
-            "report": report,
-            "detail": qualified_detail if descriptive_ready else "No question-specific qualified holdout; live changes remain fail-closed.",
-            "exclusion_reason_counts": exclusions,
-            "blockers": sorted(set(blockers)),
+    def signal_ts(row):
+        envelope = row.get("envelope") or {}
+        try:
+            return float(envelope.get("signal_ts") or row.get("signal_ts") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    newest = max(events, key=signal_ts, default={})
+    current_epoch = str(newest.get("epoch_id") or (newest.get("envelope") or {}).get("epoch_id") or "")
+    current = [row for row in events if str(
+        row.get("epoch_id") or (row.get("envelope") or {}).get("epoch_id") or ""
+    ) == current_epoch] if current_epoch else []
+    outcomes = {"ACCEPTED_FILLED": 0, "ACCEPTED_UNFILLED": 0, "REJECTED": 0}
+    eligible = []
+    ineligible = []
+    explicit_episodes = set()
+    missing_episode_ids = 0
+    for row in current:
+        outcome = str(row.get("primary_outcome") or (row.get("envelope") or {}).get("primary_outcome") or "")
+        if outcome in outcomes:
+            outcomes[outcome] += 1
+        episode_id = row.get("event_episode_id") or (row.get("envelope") or {}).get("event_episode_id")
+        if episode_id:
+            explicit_episodes.add(str(episode_id))
+        else:
+            missing_episode_ids += 1
+        receipt = validate_replay_eligibility(row) if validate_replay_eligibility else {
+            "eligible": False, "reasons": ["REPLAY_ELIGIBILITY_VALIDATOR_UNAVAILABLE"]
         }
+        (eligible if receipt.get("eligible") else ineligible).append((row, receipt))
 
-    questions = [
-        question("cluster_distance", "Cluster distance", "correlated_price_cluster_report.json",
-                 bool(cluster.get("conclusion_allowed")), False,
-                 f"Qualified 120-minute cost-complete rows: {int(cluster.get('qualified_120m_cost_complete') or 0)}.",
-                 evidence_scope="SHOWCASE_STRATEGY"),
-        question("thesis_fast_cut", "Thesis fast-cut", "qualified_exit_policy_grid_report.json",
-                 bool(policy_grid.get("selected_on_train")), grid_ready,
-                 f"Qualified costed replays: {int(policy_grid.get('qualified_costed_replays') or 0)}; train-selected candidates remain preliminary until holdout qualifies."),
-        question("hard_stop", "Physical hard stop", "qualified_exit_policy_grid_report.json",
-                 policy_grid.get("physical_hard_stop_invariant_pct") is not None, False,
-                 "The 13% physical hard stop is a fixed safety invariant, not an optimisation axis; this does not authorize widening it."),
-        question("scenario_c", "Scenario C ladder", "qualified_exit_policy_grid_report.json",
-                 bool(policy_grid.get("selected_on_train")), grid_ready,
-                 f"Qualified costed replays: {int(policy_grid.get('qualified_costed_replays') or 0)}; Scenario C candidates share the chronological exit-policy holdout."),
-        question("chase", "Chase timing and limits", "qualified_chase_policy_report.json",
-                 bool(qualified_chase.get("descriptive_conclusion_allowed")), False,
-                 f"Qualified real-copy rows: {int(qualified_chase.get('qualified_rows') or 0)}; historical buckets: {len(chase.get('buckets') or {})}."),
-    ]
-    return {
-        "schema": "question_specific_readiness_v1",
-        "generation_revision": revision,
-        "cohort_schema": provenance.get("cohort_schema"),
-        "current_qualified_epoch": {
-            "real_copy_rows": qualified_n,
-            "showcase_strategy_rows": showcase_n,
-            "live_policy_changes_allowed": bool(questions) and all(q["live_policy_change_allowed"] for q in questions),
+    report_epoch = str(policy_report.get("epoch_id") or "")
+    evidence = policy_report.get("evidence") or {}
+    candidate = policy_report.get("current_candidate") or policy_report.get("candidate")
+    blockers = list(policy_report.get("blockers") or [])
+    gate_values = policy_report.get("qualification_gates") or {}
+    all_declared_gates_pass = bool(gate_values) and all(value is True for value in gate_values.values())
+    independent_oos = bool(
+        policy_report.get("independent_oos_qualified") or evidence.get("independent_oos_qualified")
+    )
+    if not current_epoch:
+        blockers.append("NO_CURRENT_V22_EPOCH")
+    if not current:
+        blockers.append("NO_CURRENT_EPOCH_EVENTS")
+    if ineligible:
+        blockers.append("REPLAY_INELIGIBLE_PATHS_PRESENT")
+    if missing_episode_ids:
+        blockers.append("EVENT_EPISODE_ID_MISSING")
+    for name, count in outcomes.items():
+        if count == 0:
+            blockers.append(f"{name}_COVERAGE_MISSING")
+    if not policy_report:
+        blockers.append("BEST_POLICY_REPORT_MISSING")
+    elif not report_epoch or report_epoch != current_epoch:
+        blockers.append("BEST_POLICY_REPORT_EPOCH_MISMATCH")
+    if not independent_oos:
+        blockers.append("INDEPENDENT_OOS_EVIDENCE_MISSING")
+    if not all_declared_gates_pass:
+        blockers.append("QUALIFICATION_GATES_INCOMPLETE")
+    if not candidate:
+        blockers.append("QUALIFIED_CANDIDATE_MISSING")
+
+    blockers = sorted(set(blockers))
+    qualified = bool(
+        str(policy_report.get("status") or "").upper() == "QUALIFIED"
+        and candidate and current_epoch and report_epoch == current_epoch
+        and independent_oos and all_declared_gates_pass and not blockers
+    )
+    last_analysis = policy_report.get("generated_at") or manifest.get("generated_at")
+    payload = {
+        "schema": "best_policy_research_v1",
+        "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
+        "live_policy_change_allowed": qualified,
+        "current_candidate": candidate if qualified else None,
+        "epoch_id": current_epoch or None,
+        "last_analysis": last_analysis,
+        "last_analysis_melbourne": format_melbourne_dt(last_analysis),
+        "evidence": {
+            "current_epoch_events": len(current),
+            "replay_eligible_events": len(eligible),
+            "completed_paths": len(eligible),
+            "replay_ineligible_events": len(ineligible),
+            "independent_episode_count": len(explicit_episodes),
+            "events_missing_episode_id": missing_episode_ids,
+            "qualified_oos_episodes": int(evidence.get("qualified_oos_episodes") or 0),
+            "outcome_coverage": outcomes,
         },
-        "fresh_epoch": manifest.get("fresh_epoch") or {
-            "status": "UNAVAILABLE", "epoch_id": None, "cutoff_utc": None,
-        },
-        "evidence_availability": {
-            "counterfactual_jsonl": counterfactual_available,
-            "relay_lifecycle_evidence_v1": bool(
-                (evidence_inputs.get("relay_lifecycle_evidence_v1.json") or {}).get("available")
-            ),
-        },
+        "blockers": blockers,
+        "note": (
+            "A candidate appears only after replay-eligible, independent, untouched out-of-sample "
+            "evidence passes every declared qualification gate for this exact epoch."
+        ),
         "legacy_historical": {
-            "status": "DESCRIPTIVE_ONLY",
-            "note": "Historical and legacy results remain visible for context but cannot authorize live policy changes.",
+            "status": "EXCLUDED_FROM_QUALIFICATION",
+            "event_count_outside_current_epoch": max(0, len(events) - len(current)),
         },
-        "questions": questions,
     }
+    return payload
+
+
+def _decision_readiness_payload():
+    """Compatibility wrapper for clients of the retired five-card endpoint."""
+    payload = _best_policy_research_payload()
+    evidence = payload["evidence"]
+    payload["questions"] = [{
+        "key": "best_policy_research",
+        "question": "Best Policy Research",
+        "status": payload["status"],
+        "live_policy_change_allowed": payload["live_policy_change_allowed"],
+        "current_epoch_qualified_rows": evidence["replay_eligible_events"],
+        "historical_showcase_rows": 0,
+        "blockers": payload["blockers"],
+        "detail": payload["note"],
+    }]
+    return payload
 
 
 @app.route("/api/decision-readiness")
 def api_decision_readiness():
     return jsonify(_decision_readiness_payload())
+
+
+@app.route("/api/best-policy-research")
+def api_best_policy_research():
+    return jsonify(_best_policy_research_payload())
 
 
 @app.route("/api/summary")
@@ -2860,8 +2921,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="cohort-note"></p>
-    <h2>Live-policy question readiness</h2>
-    <p class="note">Current qualified epoch is evaluated separately from legacy and historical reports. BLOCKED means evidence is incomplete, not that a policy performed badly.</p>
+    <h2>Best Policy Research</h2>
+    <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
@@ -3282,25 +3343,26 @@ async function loadSummary() {
 }
 
 async function loadDecisionReadiness() {
-  const r = await fetch('/api/decision-readiness');
+  const r = await fetch('/api/best-policy-research');
   const d = await r.json();
-  const rows = d.questions || [];
-  document.getElementById('decision-readiness').innerHTML = rows.map(q => {
-    const cls = q.status === 'QUALIFIED' ? 'green' : 'amber';
-    return `<div class="kpi"><div class="lbl">${q.question}</div>`
-      + `<div class="val ${cls}">${q.status}</div>`
-      + `<div class="note">Current qualified: ${q.current_epoch_qualified_rows || 0}`
-      + ` · Historical Showcase: ${q.historical_showcase_rows || 0}</div>`
-      + `<div class="note">Blockers: ${(q.blockers || []).join(', ') || 'none'}</div>`
-      + `<div class="note">${q.detail || ''}</div></div>`;
-  }).join('');
-  const epoch = d.current_qualified_epoch || {};
-  const fresh = d.fresh_epoch || {};
+  const e = d.evidence || {};
+  const coverage = e.outcome_coverage || {};
+  const candidate = d.current_candidate || {};
+  const candidateName = candidate.policy_id || candidate.name || 'Hidden until qualified';
+  const cards = [
+    ['Research result', d.status || 'NO QUALIFIED POLICY', d.status === 'QUALIFIED' ? 'green' : 'amber'],
+    ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
+    ['Completed paths', `${e.completed_paths || 0} / ${e.current_epoch_events || 0}`, ''],
+    ['Independent episodes', e.independent_episode_count || 0, ''],
+    ['Filled / Unfilled / Rejected', `${coverage.ACCEPTED_FILLED || 0} / ${coverage.ACCEPTED_UNFILLED || 0} / ${coverage.REJECTED || 0}`, ''],
+    ['Qualified OOS episodes', e.qualified_oos_episodes || 0, ''],
+  ];
+  document.getElementById('decision-readiness').innerHTML = cards.map(([label, value, cls]) =>
+    `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`
+  ).join('');
   document.getElementById('decision-readiness-provenance').textContent =
-    `Current qualified epoch: ${epoch.real_copy_rows || 0} real-copy rows · `
-    + `Legacy/historical: ${(d.legacy_historical || {}).status || 'DESCRIPTIVE_ONLY'} · `
-    + `Revision: ${d.generation_revision || 'UNKNOWN'} · Cohort: ${d.cohort_schema || 'UNKNOWN'} · `
-    + `Fresh epoch: ${fresh.epoch_id || 'UNAVAILABLE'} from ${fresh.cutoff_utc || 'unknown cutoff'}`;
+    `Epoch: ${d.epoch_id || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
+    + `Blockers: ${(d.blockers || []).join(', ') || 'none'} · ${d.note || ''}`;
 }
 
 async function loadFindings() {

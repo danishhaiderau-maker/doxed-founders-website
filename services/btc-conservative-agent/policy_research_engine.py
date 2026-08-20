@@ -14,7 +14,7 @@ from statistics import median
 
 SCHEMA = "policy_research_engine_v1"
 HORIZONS_SEC = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "120m": 7200}
-LIVE_HARD_STOP_PCT = 13.0
+LIVE_HARD_STOP_PCT = 30.0
 LIVE_THESIS_CUT = -12.0
 LIVE_CLUSTER_BPS = 9
 LIVE_LADDER = ((4, 2), (5, 3), (8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))

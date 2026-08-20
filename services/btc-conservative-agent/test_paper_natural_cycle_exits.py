@@ -165,5 +165,5 @@ def test_paper_helper_is_force_paper_mode():
     assert bot._force_paper_mode_active() is True
     assert bot._paper_natural_cycle_exits() is True
     assert bot.THESIS_FAST_EXIT_UNREAL_PCT == -12.0
-    assert bot.MAX_SL_MARGIN_PCT == 13.0
-    assert bot.TRAIL_LADDER_SCENARIO_C[0] == (4, 2)
+    assert bot.MAX_SL_MARGIN_PCT == 30.0
+    assert bot.TRAIL_LADDER_SCENARIO_C[0] == (8, 5)

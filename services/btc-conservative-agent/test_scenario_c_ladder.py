@@ -1,8 +1,8 @@
 """
 Scenario C profit-lock ladder contract tests.
 
-Locks in the 2026-08-13 operator decision: both lanes start with the early
-profit-lock rungs (4, 2) and (5, 3), ahead of the existing (8, 5) rung.
+Locks in the 2026-08-20 operator decision: revert to the mature-trend ladder
+starting at (8, 5) — no early (4, 2) / (5, 3) rungs.
 """
 from scenario_c_config import (
     TRAIL_LADDER_SCENARIO_C,
@@ -12,17 +12,22 @@ from scenario_c_config import (
 )
 
 
-def test_continuous_starts_with_early_profit_lock_rungs():
-    assert TRAIL_LADDER_SCENARIO_C[:3] == [(4, 2), (5, 3), (8, 5)]
+def test_continuous_starts_at_eight_five_rung():
+    assert TRAIL_LADDER_SCENARIO_C[0] == (8, 5)
+    assert (4, 2) not in TRAIL_LADDER_SCENARIO_C
+    assert (5, 3) not in TRAIL_LADDER_SCENARIO_C
 
 
-def test_type_b_starts_with_early_profit_lock_rungs():
-    assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6[:3] == [(4, 2), (5, 3), (8, 5)]
+def test_type_b_starts_at_eight_five_rung():
+    assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6[0] == (8, 5)
+    assert (4, 2) not in TRAIL_LADDER_SCENARIO_C_LEGACY_10_6
+    assert (5, 3) not in TRAIL_LADDER_SCENARIO_C_LEGACY_10_6
 
 
 def test_labels_show_8_5_first():
     assert "8→5" in SCENARIO_C_LADDER_LABEL
     assert "8→5" in SCENARIO_C_LEGACY_10_6_LADDER_LABEL
+    assert "4→2" not in SCENARIO_C_LADDER_LABEL
 
 
 def test_ladders_remain_monotonically_increasing():

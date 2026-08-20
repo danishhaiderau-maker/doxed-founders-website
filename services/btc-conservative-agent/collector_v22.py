@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import uuid
 from typing import Any, Iterable, Mapping, Optional, Sequence
@@ -26,6 +27,8 @@ from collector_v22_schema import (
     EVAL_PASS,
     EVENT_INDEX_FILE,
     EVENT_SCHEMA,
+    EPISODE_FALLBACK_WINDOW_SEC,
+    EPISODE_SCHEMA,
     GATE_ADMIN,
     GATE_EXECUTION,
     GATE_RISK,
@@ -33,12 +36,16 @@ from collector_v22_schema import (
     GATE_STRATEGY,
     MAX_ENTRY_WINDOW_SEC,
     MAX_HOLD_PERIOD_SEC,
+    LIFECYCLE_EVENT_FINALIZED,
+    LIFECYCLE_OBSERVATION_APPEND,
+    LEGACY_PREMATURE_FINALIZATION,
     OBS_COMPLETE,
     OBS_DATA_ERROR,
     OBS_FUNNEL_COMPLETE,
     OBS_INSUFFICIENT_PATH,
     OBS_PENDING,
     OBS_WAITING_120M,
+    OBS_WAITING_ENTRY_WINDOW,
     PATH_ORIGIN_ACTUAL_FILL,
     PATH_ORIGIN_HYPOTHETICAL_FILL,
     PATH_ORIGIN_SIGNAL,
@@ -52,6 +59,7 @@ from collector_v22_schema import (
     PRIMARY_REJECTED,
     RESEARCH_EVENTS_FILE,
     RESEARCH_HORIZON_V1,
+    REPLAY_INELIGIBLE,
 )
 from path_replay_v1 import (
     CONTROL_CELL,
@@ -173,6 +181,77 @@ def canonical_tape_bounds(
         hold_end = latest_fill + MAX_HOLD_PERIOD_SEC
         return float(signal_ts) - MAX_ENTRY_WINDOW_SEC, max(entry_end, hold_end)
     return float(signal_ts) - MAX_ENTRY_WINDOW_SEC, entry_end
+
+
+def assess_tape_coverage(
+    candles_1m: Sequence[Sequence[Any]],
+    *,
+    signal_ts: float,
+    required_end_ts: float,
+) -> dict:
+    """Independently prove chronological, duplicate-free 1m coverage.
+
+    Coverage begins at the candle containing the signal.  Pre-signal context is
+    useful evidence, but is deliberately not part of the future-path maturity
+    gate.
+    """
+    raw_ts = [candle_ts_sec(row) for row in (candles_1m or [])]
+    timestamps = [float(ts) for ts in raw_ts if ts is not None]
+    relevant = [ts for ts in timestamps if ts + 60.0 > float(signal_ts) - 1e-9 and ts < float(required_end_ts)]
+    ordered = all(b > a for a, b in zip(relevant, relevant[1:]))
+    duplicate = len(relevant) != len(set(relevant))
+    gaps = [
+        {"after_ts": a, "before_ts": b, "gap_sec": b - a}
+        for a, b in zip(relevant, relevant[1:]) if b - a > 60.0 + 1.0
+    ]
+    first = relevant[0] if relevant else None
+    last_end = relevant[-1] + 60.0 if relevant else None
+    starts_in_time = first is not None and first <= float(signal_ts) + 1.0 and first + 60.0 > float(signal_ts) - 1.0
+    reaches_end = last_end is not None and last_end + 1.0 >= float(required_end_ts)
+    eligible = bool(relevant and ordered and not duplicate and not gaps and starts_in_time and reaches_end)
+    return {
+        "eligible": eligible,
+        "required_start_ts": float(signal_ts),
+        "required_end_ts": float(required_end_ts),
+        "actual_first_ts": first,
+        "actual_last_end_ts": last_end,
+        "ordered": ordered,
+        "duplicate": duplicate,
+        "gaps": gaps,
+        "reason": "COMPLETE" if eligible else (
+            "DUPLICATE_OR_OUT_OF_ORDER" if duplicate or not ordered else
+            "CANDLE_GAP" if gaps else "INSUFFICIENT_PATH"
+        ),
+    }
+
+
+def event_replay_eligibility(event: Mapping[str, Any]) -> dict:
+    """Recalculate eligibility from evidence; never trust a terminal flag."""
+    signal_ts = float((event.get("envelope") or {}).get("signal_ts") or event.get("signal_ts") or 0)
+    fills = [
+        float(child["fill_ts"]) for child in (event.get("entry_children") or [])
+        if child.get("fill_ts") is not None
+    ]
+    if event.get("live_fill_ts") is not None:
+        fills.append(float(event["live_fill_ts"]))
+    required_end = signal_ts + MAX_ENTRY_WINDOW_SEC
+    if fills:
+        required_end = max(required_end, max(fills) + MAX_HOLD_PERIOD_SEC)
+    result = assess_tape_coverage(
+        (event.get("canonical_tape") or {}).get("path_1m") or [],
+        signal_ts=signal_ts,
+        required_end_ts=required_end,
+    )
+    if not result["eligible"] and str(event.get("observation_status") or "") in (
+        OBS_FUNNEL_COMPLETE, OBS_COMPLETE,
+    ):
+        result.update({
+            "replay_status": REPLAY_INELIGIBLE,
+            "integrity_code": LEGACY_PREMATURE_FINALIZATION,
+        })
+    else:
+        result["replay_status"] = "REPLAY_ELIGIBLE" if result["eligible"] else REPLAY_INELIGIBLE
+    return result
 
 
 def slice_canonical_tape_1m(
@@ -331,13 +410,6 @@ def build_entry_children(
     for offset_pct in OFFSET_PCT_GRID:
         for policy in CHASE_POLICIES:
             chase_id = policy["id"]
-            schedule = [{
-                "chase_step_index": 0,
-                "active_from_ts": float(signal_ts),
-                "active_until_ts": float(signal_ts) + float(ttl_sec),
-                "limit_price": orig_limit_price(signal_price, direction_u, offset_pct),
-                "offset_pct": float(offset_pct),
-            }]
             hit = simulate_touch_fill(
                 candles_1m, signal_ts=signal_ts, signal_price=signal_price,
                 direction=direction_u, offset_pct=offset_pct, ttl_sec=ttl_sec,
@@ -355,6 +427,7 @@ def build_entry_children(
             )
             fill_ts = chosen.get("touch_ts") if labels["within_policy"] else None
             obs_ts = chosen.get("touch_ts") if labels["post_ttl_observation"] else None
+            schedule = [dict(interval) for interval in (chosen.get("chase_schedule") or [])]
             children.append({
                 "entry_policy_id": f"OFFSET_{offset_pct:.2f}_CHASE_{chase_id}",
                 "hypothetical_order_start_ts": float(signal_ts),
@@ -362,6 +435,12 @@ def build_entry_children(
                 "offset_pct": float(offset_pct),
                 "chase_id": chase_id,
                 "chase_schedule": schedule,
+                "chase_schedule_source": "SIMULATOR_ACTUAL_INTERVALS",
+                "chase_schedule_policy_end_ts": float(signal_ts) + float(ttl_sec),
+                "chase_schedule_note": (
+                    "Intervals after policy_end_ts are counterfactual post-TTL observation only; "
+                    "they do not represent an active order."
+                ),
                 "fill_ts": None if fill_ts is None else float(fill_ts),
                 "fill_price": None if fill_ts is None else float(chosen.get("fill_price") or 0),
                 "fill_model": FILL_MODEL_IDEAL_TOUCH,
@@ -370,6 +449,47 @@ def build_entry_children(
                 **labels,
             })
     return children
+
+
+def make_event_episode(
+    *,
+    signal_ts: float,
+    direction: str,
+    symbol: str = "BTCUSD",
+    shared_ai_call_id: Optional[str] = None,
+) -> dict:
+    """Return a stable causal cohort without altering or deduplicating signals.
+
+    A shared upstream AI/scan call is the strongest available causal identity
+    across lanes.  When it is absent, signals are grouped only when symbol,
+    direction and the same fixed five-minute UTC window agree.  The fixed
+    window makes IDs reproducible across restarts; raw events remain distinct.
+    """
+    direction_u = str(direction or "UNKNOWN").upper()
+    symbol_u = str(symbol or "BTCUSD").upper()
+    shared = str(shared_ai_call_id or "").strip()
+    if shared:
+        grouping_basis = "SHARED_AI_CALL"
+        causal_key = f"shared:{symbol_u}:{direction_u}:{shared}"
+        window_start_ts = None
+        window_end_ts = None
+    else:
+        grouping_basis = "TIME_DIRECTION_SYMBOL_FALLBACK"
+        window_start_ts = float(int(float(signal_ts) // EPISODE_FALLBACK_WINDOW_SEC) * EPISODE_FALLBACK_WINDOW_SEC)
+        window_end_ts = window_start_ts + EPISODE_FALLBACK_WINDOW_SEC
+        causal_key = f"fallback:{symbol_u}:{direction_u}:{int(window_start_ts)}"
+    digest = hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
+    return {
+        "schema": EPISODE_SCHEMA,
+        "event_episode_id": f"episode-{digest}",
+        "grouping_basis": grouping_basis,
+        "symbol": symbol_u,
+        "direction": direction_u,
+        "shared_ai_call_id": shared or None,
+        "fallback_window_start_ts": window_start_ts,
+        "fallback_window_end_ts": window_end_ts,
+        "raw_signal_preserved": True,
+    }
 
 
 def classify_primary_outcome(
@@ -396,19 +516,17 @@ def resolve_observation_status(
     post_ttl_pending: bool,
     tape_end: float,
     data_horizon_ts: float,
+    entry_window_complete: bool = False,
+    tape_eligible: bool = False,
 ) -> str:
-    if primary_outcome == PRIMARY_REJECTED:
-        if data_horizon_ts + 1.0 >= tape_end:
-            return OBS_FUNNEL_COMPLETE
-        return OBS_PENDING
-    if primary_outcome == PRIMARY_ACCEPTED_UNFILLED:
-        if post_ttl_pending:
-            return OBS_PENDING
+    if not entry_window_complete:
+        return OBS_WAITING_ENTRY_WINDOW
+    if primary_outcome in (PRIMARY_REJECTED, PRIMARY_ACCEPTED_UNFILLED):
+        if post_ttl_pending or not tape_eligible:
+            return OBS_WAITING_120M
         return OBS_FUNNEL_COMPLETE
     if live_filled:
-        if path_missing:
-            return OBS_DATA_ERROR
-        if path_complete is not True:
+        if path_missing or path_complete is not True or not tape_eligible:
             return OBS_WAITING_120M if ticket_closed else OBS_PENDING
         return OBS_COMPLETE
     return OBS_PENDING
@@ -439,10 +557,18 @@ def build_research_event(
     atr14_pct: Optional[float] = None,
     invert_on: bool = False,
     include_ticks_1s: bool = False,
+    symbol: str = "BTCUSD",
+    shared_ai_call_id: Optional[str] = None,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
     event_id = make_event_id(trade_id, signal_ts)
+    episode = make_event_episode(
+        signal_ts=signal_ts,
+        direction=direction_u,
+        symbol=symbol,
+        shared_ai_call_id=shared_ai_call_id,
+    )
     entry_children = build_entry_children(
         candles_1m=candles_1m,
         signal_ts=signal_ts,
@@ -494,6 +620,15 @@ def build_research_event(
         live_filled=live_filled,
         entry_outcome=entry_outcome,
     )
+    required_end_ts = float(signal_ts) + MAX_ENTRY_WINDOW_SEC
+    if latest_hyp is not None:
+        required_end_ts = max(required_end_ts, float(latest_hyp) + MAX_HOLD_PERIOD_SEC)
+    if live_fill_ts is not None:
+        required_end_ts = max(required_end_ts, float(live_fill_ts) + MAX_HOLD_PERIOD_SEC)
+    coverage = assess_tape_coverage(
+        path_1m, signal_ts=signal_ts, required_end_ts=required_end_ts,
+    )
+    entry_window_complete = horizon_ts + 1.0 >= float(signal_ts) + MAX_ENTRY_WINDOW_SEC
     if live_filled and path_complete_flag is False and ticket_closed:
         obs = OBS_WAITING_120M
     else:
@@ -506,6 +641,8 @@ def build_research_event(
             post_ttl_pending=post_ttl_pending,
             tape_end=tape_end,
             data_horizon_ts=horizon_ts,
+            entry_window_complete=entry_window_complete,
+            tape_eligible=bool(coverage["eligible"]),
         )
     path_origin_type = PATH_ORIGIN_SIGNAL
     path_origin_ts = float(signal_ts)
@@ -515,6 +652,7 @@ def build_research_event(
     tree = dict(decision_tree or build_decision_tree_v22(reason=exact_reason))
     envelope = {
         "event_id": event_id,
+        "event_episode_id": episode["event_episode_id"],
         "epoch_id": str(epoch_id),
         "policy_id": POLICY_ID,
         "signal_ts": float(signal_ts),
@@ -541,6 +679,8 @@ def build_research_event(
         "path_schema_version": PATH_SCHEMA_VERSION,
         "replay_version": REPLAY_VERSION,
         "event_id": event_id,
+        "event_episode_id": episode["event_episode_id"],
+        "event_episode": episode,
         "trade_id": str(trade_id),
         "epoch_id": str(epoch_id),
         "envelope": envelope,
@@ -555,6 +695,7 @@ def build_research_event(
             "replay_status": obs,
             "ticks_1s_optional": ticks_bounded if include_ticks_1s else [],
             "ticks_1s_note": "optional bounded; replay must not require 1s",
+            "coverage": coverage,
         },
         "entry_children": entry_children,
         "primary_outcome": primary,
@@ -571,8 +712,9 @@ def build_research_event(
         "exact_reason": exact_reason,
         "fill_model": FILL_MODEL_IDEAL_TOUCH,
         "fill_models_supported": list(FILL_MODELS),
-        "write_once": True,
-        "immutable": True,
+        "lifecycle": LIFECYCLE_EVENT_FINALIZED if terminal_observation(obs) else LIFECYCLE_OBSERVATION_APPEND,
+        "write_once": terminal_observation(obs),
+        "immutable": terminal_observation(obs),
     }
 
 
@@ -614,6 +756,10 @@ def write_research_event_once(
     event_id = str(record.get("event_id") or record.get("trade_id") or "")
     if not event_id:
         return False, "missing event_id"
+    status = str(record.get("observation_status") or "")
+    eligibility = event_replay_eligibility(record)
+    if not terminal_observation(status) or not eligibility.get("eligible"):
+        return False, "provisional or replay-ineligible event"
     index_path = os.path.join(root, EVENT_INDEX_FILE)
     index = _load_event_index(index_path)
     if event_id in (index.get("events") or {}):
