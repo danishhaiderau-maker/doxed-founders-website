@@ -4958,6 +4958,7 @@ VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 FUNDING_RATE_CAP_PER_8H = 0.001
 _last_funding_refresh_ts = 0.0
 _last_bbo_refresh_ts = 0.0
+_last_rest_entry_recovery_attempt_ts = 0.0
 _last_book_refresh_ts = 0.0
 _bbo_refresh_lock = threading.Lock()
 _book_refresh_lock = threading.Lock()
@@ -9369,9 +9370,11 @@ def _expire_skipped_virtual_fill(signal: dict) -> None:
     )
 
 
-def process_awaiting_dashboard_virtual_chase_entries():
-    """Global virtual defer — submit limit only when dashboard chase bucket allows."""
-    if not can_progress_new_entry()[0]:
+def process_awaiting_dashboard_virtual_chase_entries(
+    *, allow_submit: bool = True, promotion_block_reason: str = ""
+):
+    """Advance virtual evidence; submit only behind the full readiness gate."""
+    if allow_submit and not can_progress_new_entry()[0]:
         logger.debug(
             "[WS ENTRY FREEZE] virtual chase approvals retained while genuine WS is unavailable "
             "[PIPELINE ENFORCEMENT]"
@@ -9430,13 +9433,22 @@ def process_awaiting_dashboard_virtual_chase_entries():
             continue
         _tick_dashboard_virtual_chase(signal, market, now)
         vcount = _signal_virtual_chase_count(signal)
+        signal["current_age_bucket"] = chase_age_window_index(_signal_age_sec(signal))
+        signal["next_enabled_bucket"] = _next_enabled_chase_after(vcount)
         if not dashboard_virtual_chase_submit_ready(signal):
+            continue
+        if not allow_submit:
+            signal["promotion_block_reason"] = (
+                promotion_block_reason or "NEW_ENTRY_NOT_READY"
+            )
             continue
         if not ensure_signal_capacity():
             continue
         allowed, reason, _ = evaluate_dashboard_execution_gate(signal, ai, stage="submit")
         if not allowed:
+            signal["promotion_block_reason"] = reason
             continue
+        signal["promotion_block_reason"] = None
         logger.info(
             f"[DASHBOARD GATE] virtual chase ready trade_id={tid} "
             f"virtual_chase={vcount} bucket={chase_count_bucket(vcount)} "
@@ -18502,6 +18514,24 @@ def _fresh_rest_entry_quote_ready(now: float = None) -> bool:
     )
 
 
+def ensure_fresh_rest_entry_quote(now: float = None) -> bool:
+    """Recover a stale REST entry quote without weakening the dual-feed gate.
+
+    `refresh_bbo_state()` normally rate-limits by its last successful request.
+    A stale in-memory receipt must never make that throttle suppress recovery
+    indefinitely.  Force one bounded retry when the actual quote fails the
+    freshness contract, then re-evaluate the same strict predicate.
+    """
+    global _last_rest_entry_recovery_attempt_ts
+    now = float(now or time.time())
+    if _fresh_rest_entry_quote_ready(now):
+        return True
+    if (now - float(_last_rest_entry_recovery_attempt_ts or 0)) >= BBO_REFRESH_SEC:
+        _last_rest_entry_recovery_attempt_ts = now
+        refresh_bbo_state(force=True)
+    return _fresh_rest_entry_quote_ready(time.time())
+
+
 def _runtime_readiness_components(now: float = None) -> dict:
     """One non-mutating definition of strategy readiness."""
     now = float(now or time.time())
@@ -20897,7 +20927,17 @@ def process_pending_orders():
         circuit_breaker_cancel_pending("ADMIN_MANUAL")
         return
     refresh_bbo_state()
-    if not can_progress_new_entry()[0]:
+    ensure_fresh_rest_entry_quote()
+    progress_ok, progress_reason, runtime = can_progress_new_entry()
+    if not progress_ok:
+        # When the genuine WS tape is healthy, continue recording virtual age,
+        # touch and chase evidence.  Promotion remains fail-closed until the
+        # independent REST/OHLCV readiness contract also recovers.
+        if runtime.get("ws_transport_ready"):
+            process_awaiting_dashboard_virtual_chase_entries(
+                allow_submit=False,
+                promotion_block_reason=progress_reason,
+            )
         # REST BBO is still refreshed for dashboards and existing-position
         # exits, but it cannot virtually touch, chase, or fill a new entry.
         logger.debug(
@@ -31904,6 +31944,8 @@ def _collect_dashboard_active_signals(
             "awaiting_dashboard_chase": s.get("status") == SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
             "dashboard_virtual_chase_count": s.get("dashboard_virtual_chase_count") or s.get("chase_3plus_virtual_chase_count"),
             "chase_3plus_virtual_chase_count": s.get("chase_3plus_virtual_chase_count"),
+            "current_age_bucket": chase_age_window_index(max(0.0, now - created_ts)),
+            "promotion_block_reason": s.get("promotion_block_reason"),
             "next_enabled_chase": _next_enabled_chase_after(
                 int(
                     s.get("dashboard_virtual_chase_count")

@@ -18815,8 +18815,16 @@ def write_report_manifest(payload=None):
         from research.policy_candidate_oos import build_policy_candidate_oos_report
         from research.best_policy_research import build_best_policy_research_report
 
-        build_policy_candidate_oos_report(data_dir=".", report_dir=".")
-        build_best_policy_research_report(data_dir=".", report_dir=".")
+        policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
+        policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
+        build_policy_candidate_oos_report(
+            data_dir=policy_data_dir,
+            report_dir=policy_report_dir,
+        )
+        build_best_policy_research_report(
+            data_dir=policy_data_dir,
+            report_dir=policy_report_dir,
+        )
     except Exception as exc:
         # A missing/corrupt v2.2 input must degrade to no report, never interrupt
         # the established analyzer cycle or leak a stale policy candidate.

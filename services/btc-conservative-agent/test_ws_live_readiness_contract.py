@@ -137,6 +137,7 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
                 "_genuine_ws_transport_ready",
                 "_market_data_health_snapshot",
                 "_fresh_rest_entry_quote_ready",
+                "ensure_fresh_rest_entry_quote",
                 "_runtime_readiness_components",
                 "_recompute_system_readiness",
                 "can_progress_new_entry",
@@ -151,6 +152,30 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             ),
             self.namespace,
         )
+
+    def test_stale_rest_quote_forces_one_bounded_recovery(self):
+        self.state["rest_price_ts"] = self.now - 60.0
+        self.state["rest_last_tick"] = self.now - 60.0
+        self.state["bbo_ts"] = self.now - 60.0
+        calls = []
+
+        def refresh(*, force=False):
+            calls.append(force)
+            self.state["rest_price_ts"] = self.now
+            self.state["rest_last_tick"] = self.now
+            self.state["bbo_ts"] = self.now
+
+        self.namespace.update({
+            "_last_rest_entry_recovery_attempt_ts": 0.0,
+            "BBO_REFRESH_SEC": 3.0,
+            "refresh_bbo_state": refresh,
+        })
+        self.namespace["time"] = SimpleNamespace(time=lambda: self.now)
+
+        self.assertTrue(self.namespace["ensure_fresh_rest_entry_quote"](self.now))
+        self.assertEqual(calls, [True])
+        self.assertTrue(self.namespace["ensure_fresh_rest_entry_quote"](self.now))
+        self.assertEqual(calls, [True])
 
     def _make_ws_ready(self):
         self.state.update(

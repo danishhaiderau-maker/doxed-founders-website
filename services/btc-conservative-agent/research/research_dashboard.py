@@ -1786,6 +1786,145 @@ def api_best_policy_research():
     return jsonify(_best_policy_research_payload())
 
 
+def _policy_detail_is_current(detail: dict, best: dict) -> bool:
+    return bool(
+        detail
+        and detail.get("epoch_id") == best.get("epoch_id")
+        and detail.get("policy_epoch_id") == best.get("policy_epoch_id")
+        and detail.get("evidence_policy_signature")
+        == best.get("evidence_policy_signature")
+    )
+
+
+@app.route("/api/static-policy-research")
+def api_static_policy_research():
+    best = _best_policy_research_payload()
+    detail = _read_json("policy_candidate_oos_report.json")
+    current = _policy_detail_is_current(detail, best)
+    challenger = (detail.get("descriptive_challenger") or {}) if current else {}
+    rows = challenger.get("profitable_static_policies") or []
+    return jsonify({
+        "schema": "static_policy_dashboard_v1",
+        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_EVIDENCE",
+        "qualification": "QUALIFIED" if best.get("live_policy_change_allowed") else "DESCRIPTIVE_ONLY",
+        "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
+        "epoch_id": best.get("epoch_id"),
+        "policy_epoch_id": best.get("policy_epoch_id"),
+        "independent_episodes": (detail.get("evidence") or {}).get("independent_episodes", 0) if current else 0,
+        "training_episodes": (detail.get("evidence") or {}).get("training_episodes", 0) if current else 0,
+        "oos_episodes": (detail.get("evidence") or {}).get("oos_episodes", 0) if current else 0,
+        "profitable_policies": rows,
+        "warning": challenger.get("multiple_testing_warning") or (
+            "No current static policy report is available yet."
+        ),
+        "blockers": best.get("blockers") or [],
+    })
+
+
+@app.route("/api/dynamic-policy-research")
+def api_dynamic_policy_research():
+    best = _best_policy_research_payload()
+    detail = _read_json("policy_candidate_oos_report.json")
+    current = _policy_detail_is_current(detail, best)
+    challenger = (detail.get("descriptive_challenger") or {}) if current else {}
+    rows = challenger.get("dynamic_regimes") or []
+    return jsonify({
+        "schema": "dynamic_policy_dashboard_v1",
+        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_REGIME_COVERAGE",
+        "qualification": "QUALIFIED" if best.get("live_policy_change_allowed") else "DESCRIPTIVE_ONLY",
+        "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
+        "epoch_id": best.get("epoch_id"),
+        "policy_epoch_id": best.get("policy_epoch_id"),
+        "winner_kind": challenger.get("winner_kind"),
+        "static_oos": challenger.get("static_oos"),
+        "dynamic_oos": challenger.get("dynamic_oos"),
+        "regimes": rows,
+        "required_market_families": ["BULL", "BEAR", "SIDEWAYS"],
+        "fallback": "CONTROL_OR_NO_TRADE",
+        "warning": challenger.get("multiple_testing_warning") or (
+            "Dynamic selection remains unavailable until causal regimes have later OOS evidence."
+        ),
+        "blockers": best.get("blockers") or [],
+    })
+
+
+@app.route("/api/shadow-policy-research")
+def api_shadow_policy_research():
+    best = _best_policy_research_payload()
+    detail = _read_json("policy_candidate_oos_report.json")
+    current = _policy_detail_is_current(detail, best)
+    shadow = (detail.get("shadow_research") or {}) if current else {}
+    paused = _read_json("paused_shadow_research_report.json")
+    real_edge = _read_json("real_edge_summary.json")
+    return jsonify({
+        "schema": "shadow_policy_dashboard_v1",
+        "status": "DESCRIPTIVE_ONLY",
+        "live_policy_change_allowed": False,
+        "epoch_id": best.get("epoch_id"),
+        "current_epoch_rejected": ((best.get("evidence") or {}).get("outcome_coverage") or {}).get("REJECTED", 0),
+        "v22_shadow": shadow,
+        "paused_shadow": paused,
+        "real_edge": real_edge,
+        "warning": (
+            "Shadow and rejected-path PnL is counterfactual. It is never merged with actual "
+            "executed PnL and cannot authorize a live policy."
+        ),
+    })
+
+
+def _research_page(title: str, endpoint: str, mode: str):
+    return render_template_string("""
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ title }}</title><style>
+body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}
+.wrap{max-width:1500px;margin:auto}.note{padding:14px;border:1px solid #8b6f19;background:#2d260f;border-radius:8px}
+.kpis{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}.kpi{background:#161b22;border:1px solid #30363d;padding:12px;border-radius:8px;min-width:170px}
+table{width:100%;border-collapse:collapse;background:#161b22}th,td{padding:9px;border:1px solid #30363d;text-align:left;font-size:13px}th{background:#21262d}.bad{color:#f2cc60}.good{color:#3fb950}
+</style></head><body><div class="wrap"><p><a href="/">← Research Dashboard</a></p><h1>{{ title }}</h1>
+<div id="note" class="note">Loading current-epoch evidence…</div><div id="kpis" class="kpis"></div><table><thead id="head"></thead><tbody id="body"></tbody></table></div>
+<script>
+const mode={{ mode|tojson }}; const endpoint={{ endpoint|tojson }};
+const money=v=>v==null?'—':'$'+Number(v).toFixed(4); const pct=(w,n)=>n?((100*w/n).toFixed(1)+'%'):'—';
+fetch(endpoint).then(r=>r.json()).then(d=>{
+ document.getElementById('note').textContent=(d.warning||'')+' Status: '+(d.status||'—')+' · Live policy changes: '+(d.live_policy_change_allowed?'YES':'NO');
+ let cards=[]; let rows=[];
+ if(mode==='static'){
+  cards=[['Epoch',d.epoch_id],['Independent episodes',d.independent_episodes],['Train / OOS',d.training_episodes+' / '+d.oos_episodes],['Profitable descriptive policies',(d.profitable_policies||[]).length]];
+  document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
+  rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.train.independent_episodes}</td><td>${pct(x.train.wins,x.train.independent_episodes)}</td><td>${money(x.train.net_pnl_usd)}</td><td>${x.oos.independent_episodes}</td><td>${pct(x.oos.wins,x.oos.independent_episodes)}</td><td>${money(x.oos.net_pnl_usd)}</td><td>${money(x.oos.expectancy_usd)}</td><td>${money(x.oos.max_drawdown_usd)}</td><td class="bad">${x.qualification}</td></tr>`);
+ } else if(mode==='dynamic'){
+  cards=[['Epoch',d.epoch_id],['Descriptive winner',d.winner_kind||'—'],['Static OOS EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic OOS EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
+  document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
+  rows=(d.regimes||[]).map(x=>`<tr><td>${x.regime}</td><td>${x.selected_policy_id}</td><td>${(x.train||{}).independent_episodes||0}</td><td>${money((x.train||{}).net_pnl_usd)}</td><td>${(x.oos||{}).independent_episodes||0}</td><td>${money((x.oos||{}).net_pnl_usd)}</td><td>${money((x.oos||{}).expectancy_usd)}</td><td>${x.fallback?'YES':'NO'}</td><td class="bad">${x.qualification}</td></tr>`);
+ } else {
+  const s=d.v22_shadow||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{};
+  cards=[['Current rejected paths',d.current_epoch_rejected||0],['Independent v2.2 shadows',s.independent_episodes||0],['Paused-shadow closed',o.closed||0],['Paused-shadow WR',pct(o.wins,o.closed)],['Paused-shadow PnL',money(o.net_pnl_usd)],['Executed PnL',money(re.executed_pnl_usd)]];
+  document.getElementById('head').innerHTML='<tr><th>Policy / lane</th><th>Episodes</th><th>Fills</th><th>Wins</th><th>Losses</th><th>Net PnL</th><th>EV</th><th>Status</th></tr>';
+  rows=(s.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.independent_episodes}</td><td>${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.expectancy_usd)}</td><td class="bad">${x.qualification}</td></tr>`);
+  rows=rows.concat((p.by_lane||[]).map(x=>`<tr><td>${x.lane}</td><td>${x.closed}</td><td>${x.filled}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_usd)}</td><td class="bad">PAUSED_SHADOW</td></tr>`));
+ }
+ document.getElementById('kpis').innerHTML=cards.map(x=>`<div class="kpi"><small>${x[0]}</small><div>${x[1]??'—'}</div></div>`).join('');
+ document.getElementById('body').innerHTML=rows.join('')||'<tr><td colspan="10">Waiting for sufficient current-epoch evidence.</td></tr>';
+});
+</script></body></html>
+""", title=title, endpoint=endpoint, mode=mode)
+
+
+@app.route("/static-policies")
+def static_policy_page():
+    return _research_page("Static Profitable Policy Research", "/api/static-policy-research", "static")
+
+
+@app.route("/dynamic-policies")
+def dynamic_policy_page():
+    return _research_page("Dynamic Market-Regime Policy Research", "/api/dynamic-policy-research", "dynamic")
+
+
+@app.route("/shadow-research")
+def shadow_policy_page():
+    return _research_page("Shadow and Rejected-Opportunity Research", "/api/shadow-policy-research", "shadow")
+
+
 @app.route("/api/summary")
 def api_summary():
     compact = _read_json(COMPACT_SUMMARY_FILE)
@@ -2947,6 +3086,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="cohort-note"></p>
     <h2>Best Policy Research</h2>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
+    <p class="note"><a href="/static-policies">Static profitable-policy research</a> · <a href="/dynamic-policies">Dynamic market-regime research</a> · <a href="/shadow-research">Shadow and rejected-opportunity research</a></p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>

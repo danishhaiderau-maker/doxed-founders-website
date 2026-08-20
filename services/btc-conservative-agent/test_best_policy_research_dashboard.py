@@ -273,3 +273,66 @@ def test_dynamic_candidate_requires_frozen_mapping_fallback_and_regime_oos():
     blockers = candidate_contract_blockers(broken)
     assert "DYNAMIC_FALLBACK_INVALID" in blockers
     assert "DYNAMIC_REGIME_OOS_MISSING:RANGE" in blockers
+
+
+def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tmp_path, monkeypatch):
+    events = [
+        _event("filled", "ACCEPTED_FILLED", "episode-1"),
+        _event("rejected", "REJECTED", "episode-2"),
+    ]
+    _write_fixture(tmp_path, events, {
+        "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "status": "NO QUALIFIED POLICY",
+        "candidate": None,
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": _gates(False),
+    })
+    detail = {
+        "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "evidence": {"independent_episodes": 2, "training_episodes": 1, "oos_episodes": 1},
+        "descriptive_challenger": {
+            "winner_kind": "STATIC",
+            "profitable_static_policies": [{"policy_id": "policy-a"}],
+            "dynamic_regimes": [{"regime": "BULL", "selected_policy_id": "policy-a"}],
+        },
+        "shadow_research": {"independent_episodes": 1, "profitable_policies": []},
+    }
+    (tmp_path / "policy_candidate_oos_report.json").write_text(json.dumps(detail), encoding="utf-8")
+    (tmp_path / "paused_shadow_research_report.json").write_text(json.dumps({"overall": {"closed": 3}}), encoding="utf-8")
+    (tmp_path / "real_edge_summary.json").write_text(json.dumps({"executed_pnl_usd": -2.5}), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
+
+    client = dashboard.app.test_client()
+    static = client.get("/api/static-policy-research").get_json()
+    dynamic = client.get("/api/dynamic-policy-research").get_json()
+    shadow = client.get("/api/shadow-policy-research").get_json()
+
+    assert static["profitable_policies"][0]["policy_id"] == "policy-a"
+    assert static["live_policy_change_allowed"] is False
+    assert dynamic["regimes"][0]["regime"] == "BULL"
+    assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
+    assert shadow["v22_shadow"]["independent_episodes"] == 1
+    assert shadow["paused_shadow"]["overall"]["closed"] == 3
+    assert shadow["live_policy_change_allowed"] is False
+    assert client.get("/static-policies").status_code == 200
+    assert client.get("/dynamic-policies").status_code == 200
+    assert client.get("/shadow-research").status_code == 200
+
+
+def test_main_dashboard_links_to_all_policy_research_pages():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert 'href="/static-policies"' in source
+    assert 'href="/dynamic-policies"' in source
+    assert 'href="/shadow-research"' in source
+
+
+def test_analyzer_policy_reports_use_configured_data_and_report_roots():
+    analyzer = Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8")
+    assert 'policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."' in analyzer
+    assert 'policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."' in analyzer
+    assert "data_dir=policy_data_dir" in analyzer
+    assert "report_dir=policy_report_dir" in analyzer

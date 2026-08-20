@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 from typing import Any, Mapping, Optional
 
 from collector_v22_schema import (
@@ -53,11 +54,31 @@ def storage_state(data_dir: Optional[str] = None) -> dict:
         "note": "At pressure: pause new research events; allow open paths to complete",
         "prev_pressure": prev.get("pressure"),
     }
+    candidate_path = None
     try:
-        with open(state_path, "w", encoding="utf-8") as handle:
+        # The Fly mirror may read this receipt while the collector is updating
+        # it.  Publishing directly to the final path exposed partial JSON and
+        # correctly stopped the whole mirror as corrupt.  Build and fsync a
+        # same-directory candidate, then replace atomically so readers see the
+        # complete previous or complete next receipt, never half a document.
+        fd, candidate_path = tempfile.mkstemp(
+            prefix=f".{STORAGE_STATE_FILE}.", suffix=".tmp", dir=root
+        )
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(state, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(candidate_path, state_path)
+        candidate_path = None
     except OSError:
         pass
+    finally:
+        if candidate_path:
+            try:
+                os.unlink(candidate_path)
+            except OSError:
+                pass
     return state
 
 

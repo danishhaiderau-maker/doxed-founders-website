@@ -25,6 +25,7 @@ from policy_search_manifest import POLICY_SEARCH_MANIFEST
 MIN_TRAIN_EPISODES = 30
 MIN_OOS_EPISODES = 20
 MIN_PROMOTION_EPISODES = 100
+MAX_DESCRIPTIVE_STATIC_ROWS = 100
 
 
 def _read_events(path: Path) -> list[dict]:
@@ -78,6 +79,14 @@ def _episode_rows(events: list[dict]) -> list[dict]:
     return list(earliest.values())
 
 
+def _primary_outcome(event: dict) -> str:
+    return str(
+        event.get("primary_outcome")
+        or (event.get("envelope") or {}).get("primary_outcome")
+        or ""
+    )
+
+
 def _policy_outcomes(event: dict) -> dict[str, float]:
     report = replay_event_report(event)
     if report.get("replay_status") != "REPLAY_ELIGIBLE":
@@ -125,7 +134,15 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
     epoch = str(latest.get("epoch_id") or (latest.get("envelope") or {}).get("epoch_id") or "")
     policy_epoch = str(latest.get("policy_epoch_id") or (latest.get("envelope") or {}).get("policy_epoch_id") or "")
     signature = str(latest.get("policy_signature") or (latest.get("envelope") or {}).get("policy_signature") or "")
-    current = [row for row in events if str(row.get("epoch_id") or "") == epoch and str(row.get("policy_epoch_id") or "") == policy_epoch]
+    current = [
+        row for row in events
+        if str(row.get("epoch_id") or (row.get("envelope") or {}).get("epoch_id") or "") == epoch
+        and str(
+            row.get("policy_epoch_id")
+            or (row.get("envelope") or {}).get("policy_epoch_id")
+            or ""
+        ) == policy_epoch
+    ]
     eligible = [row for row in current if validate_replay_eligibility(row).get("eligible")]
     episodes = _episode_rows(eligible)
     cache = {str(row.get("event_id")): _policy_outcomes(row) for row in episodes}
@@ -137,6 +154,25 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
     train_rank = sorted((_evaluate(policy, train, cache) for policy in policies), key=lambda row: (row["expectancy_usd"] or -1e9, row["net_pnl_usd"]), reverse=True)
     static_id = train_rank[0]["policy_id"] if train_rank else None
     static_oos = _evaluate(static_id, oos, cache) if static_id else None
+    static_train = _evaluate(static_id, train, cache) if static_id else None
+    # Rank on the training partition only, then expose the untouched OOS result.
+    # Filtering or sorting directly on OOS would turn the dashboard into a
+    # multiple-testing winner picker and make attractive noise look causal.
+    profitable_static = []
+    for train_result in train_rank:
+        if (train_result.get("expectancy_usd") or 0) <= 0:
+            continue
+        oos_result = _evaluate(train_result["policy_id"], oos, cache)
+        if (oos_result.get("expectancy_usd") or 0) <= 0:
+            continue
+        profitable_static.append({
+            "policy_id": train_result["policy_id"],
+            "train": train_result,
+            "oos": oos_result,
+            "qualification": "DESCRIPTIVE_ONLY",
+        })
+        if len(profitable_static) >= MAX_DESCRIPTIVE_STATIC_ROWS:
+            break
 
     regime_train = defaultdict(list)
     for row in train:
@@ -159,6 +195,55 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
         "net_pnl_usd": round(sum(dynamic_values), 4),
         "expectancy_usd": None if not dynamic_values else round(sum(dynamic_values) / len(dynamic_values), 6),
     }
+    dynamic_regimes = []
+    for regime, train_rows in sorted(regime_train.items()):
+        chosen = regime_map.get(regime, "CONTROL")
+        oos_rows = [row for row in oos if _regime_key(row) == regime]
+        dynamic_regimes.append({
+            "regime": regime,
+            "selected_policy_id": chosen,
+            "train": _evaluate(chosen, train_rows, cache),
+            "oos": _evaluate(chosen, oos_rows, cache),
+            "fallback": False,
+            "qualification": "DESCRIPTIVE_ONLY",
+        })
+    unknown_oos = [row for row in oos if _regime_key(row) not in regime_map]
+    if unknown_oos:
+        dynamic_regimes.append({
+            "regime": "UNKNOWN_OR_UNSEEN",
+            "selected_policy_id": "CONTROL",
+            "train": None,
+            "oos": _evaluate("CONTROL", unknown_oos, cache),
+            "fallback": True,
+            "qualification": "DESCRIPTIVE_ONLY",
+        })
+
+    # Rejected opportunities form the clean shadow cohort in v2.2: no real
+    # order was allowed, but the same immutable path is available for replay.
+    shadow_rows = _episode_rows([
+        row for row in eligible if _primary_outcome(row) == "REJECTED"
+    ])
+    shadow_cache = {
+        str(row.get("event_id")): _policy_outcomes(row) for row in shadow_rows
+    }
+    for row in shadow_rows:
+        row["event_id"] = str(row.get("event_id"))
+    shadow_policies = sorted({
+        policy for values in shadow_cache.values() for policy in values
+    })
+    shadow_rank = sorted(
+        (_evaluate(policy, shadow_rows, shadow_cache) for policy in shadow_policies),
+        key=lambda row: (
+            row["expectancy_usd"] or -1e9,
+            row["net_pnl_usd"],
+        ),
+        reverse=True,
+    )
+    profitable_shadow = [
+        {**row, "qualification": "SHADOW_DESCRIPTIVE_ONLY"}
+        for row in shadow_rank
+        if (row.get("expectancy_usd") or 0) > 0
+    ][:MAX_DESCRIPTIVE_STATIC_ROWS]
 
     enough = len(train) >= MIN_TRAIN_EPISODES and len(oos) >= MIN_OOS_EPISODES
     gates = {name: False for name in REQUIRED_QUALIFICATION_GATES}
@@ -176,9 +261,17 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
         use_dynamic = dynamic_oos.get("expectancy_usd") is not None and dynamic_oos["expectancy_usd"] > (static_oos.get("expectancy_usd") or -1e9)
         descriptive = {
             "winner_kind": "DYNAMIC" if use_dynamic else "STATIC",
+            "static_train": static_train,
             "static_oos": static_oos,
             "dynamic_oos": dynamic_oos,
             "regime_policy_map": regime_map,
+            "profitable_static_policies": profitable_static,
+            "dynamic_regimes": dynamic_regimes,
+            "multiple_testing_warning": (
+                "Policies are ranked on training only and shown with later OOS. "
+                "They remain descriptive until stability, conservative execution, "
+                "cost and minimum-sample gates pass."
+            ),
             "note": "Descriptive only; ideal-touch paths and small OOS cannot authorize trading.",
         }
     report = {
@@ -198,6 +291,17 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
             "current_events": len(current), "eligible_events": len(eligible),
             "independent_episodes": len(episodes), "training_episodes": len(train),
             "oos_episodes": len(oos), "policies_observed": len(policies),
+            "shadow_independent_episodes": len(shadow_rows),
+        },
+        "shadow_research": {
+            "scope": "REJECTED_CURRENT_EPOCH_REPLAY",
+            "independent_episodes": len(shadow_rows),
+            "profitable_policies": profitable_shadow,
+            "qualification": "DESCRIPTIVE_ONLY",
+            "note": (
+                "Rejected opportunities are replayed as shadow evidence and "
+                "never merged with actual executed PnL."
+            ),
         },
         "blockers": sorted(set(blockers)),
     }
