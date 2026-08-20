@@ -3,9 +3,11 @@ Quality pathway roster -- v15-typeb-opportunity-v2 (2026-07-26).
 
 Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)
-  - TYPE_B_HUNTER_V1 (research candidate, shared 3-minute direction AI)
-    shared AI direction; ADX-flipped, volume-inverted, regime-aware fixed policy.
   + AI_SCAN (internal scanner, no orders)
+
+Retired 2026-08-21:
+  TYPE_B_HUNTER_V1 -- active tile and execution fan-out removed; immutable
+  evidence and historical analyzer decoding are preserved.
 
 Retired 2026-07-30:
   SR_MICRO_TILE_V2_STATIC -- negative shadow expectancy; historical evidence and
@@ -31,7 +33,6 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
 DASHBOARD_PRIMARY_LANES = (
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
 )
 
 LIVE_PATHWAY_TILE_ORDER = DASHBOARD_PRIMARY_LANES
@@ -41,6 +42,7 @@ DASHBOARD_PATHWAY_LANES = DASHBOARD_PRIMARY_LANES
 # CSV / historical-data decoding. They are marked is_legacy=True so every
 # execution / dashboard gate rejects them.
 RETIRED_PATHWAY_LANES = frozenset((
+    RESEARCH_LANE_TYPE_B_HUNTER_V1,  # retired 2026-08-21; historical evidence preserved
     RESEARCH_LANE_SR_MICRO_TILE_V1,  # retired 2026-07-16 v12 overhaul (47% WR, negative PnL)
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,  # retired 2026-07-30; negative shadow expectancy
 ))
@@ -51,9 +53,9 @@ DATA_RETIRED_PATHWAY_LANES = frozenset((
 
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v15-continuous-typeb-only"
+ROSTER_PHASE = "v15-continuous-only"
 ROSTER_NOTES = (
-    "Active research stack: CONTINUOUS + TYPE_B_HUNTER_V1 (fixed policy). "
+    "Active research stack: CONTINUOUS only. TYPE_B_HUNTER_V1 retired 2026-08-21; "
     "SR_MICRO_TILE_V2_STATIC retired 2026-07-30 for negative shadow expectancy; "
     "history/code preserved. SR_MICRO_TILE_V1 and full-chase S/R V2 are historical-only."
 )

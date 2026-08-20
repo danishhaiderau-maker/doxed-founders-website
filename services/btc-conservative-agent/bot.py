@@ -371,7 +371,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_COMBO_604_SP4_DIRECT: "RETIRED",
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "DATA_RETIRED",
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "DATA_RETIRED",
-    RESEARCH_LANE_TYPE_B_HUNTER_V1: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_TYPE_B_HUNTER_V1: "RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "RETIRED",
@@ -414,7 +414,6 @@ RESEARCH_SPAWN_LANES = ()
 # v11.8: the persisted toggle map is deliberately an allowlist.  Historical rows
 # remain readable, but a stale config flag cannot revive a retired lane.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
-    RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
 }
 
@@ -21946,9 +21945,6 @@ def process_signal(event: dict):
                 )
                 if is_ai_scan_lane(research_lane) and ai:
                     spawn_continuous_lane_from_ai_scan(
-                        ctx, ai, edge_score, features, research_lane,
-                    )
-                    spawn_type_b_lane_from_shared_ai(
                         ctx, ai, edge_score, features, research_lane,
                     )
 

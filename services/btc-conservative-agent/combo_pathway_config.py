@@ -2,8 +2,10 @@
 Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
-TYPE_B_HUNTER_V1: research candidate — shared direction AI + independent fixed gate.
-  v12 policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
+
+Retired 2026-08-21:
+  TYPE_B_HUNTER_V1 — active tile and execution fan-out removed. Historical
+  specs and evidence remain readable for archive/analyzer compatibility.
 
 Retired 2026-07-30:
   SR_MICRO_TILE_V2_STATIC — negative shadow expectancy; code/spec/history retained.
@@ -77,7 +79,8 @@ COMBO_LANE_SPECS = {
         "spread_max": 99,
         "entry_mode": "IMMEDIATE",
         "is_benchmark": False,
-        "is_research_candidate": True,
+        "is_research_candidate": False,
+        "is_legacy": True,
         "is_independent_ai": False,
         "uses_shared_ai_direction": True,
         "id_prefix": "tbhv1",
@@ -239,7 +242,8 @@ COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chas
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static (retired)"
 
 _COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
-# Research candidates start OFF (shadow collecting)
+# Retired compatibility keys remain explicitly false. They are not allowlisted
+# by COMBO_EXECUTION_LANES and therefore cannot become executable.
 _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
