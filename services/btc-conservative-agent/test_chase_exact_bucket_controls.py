@@ -1029,8 +1029,10 @@ def test_edge_is_telemetry_only_even_outside_paper_research_mode():
         },
     )
     assert evidence_gate("LONG", {}, {}, {}, 1.0) == (False, None)
-    assert "if EDGE_RESEARCH_TELEMETRY_ONLY:" in BOT_SOURCE
-    assert "not EDGE_RESEARCH_TELEMETRY_ONLY" in BOT_SOURCE
+    # Edge is now descriptive compatibility metadata only.  There must be no
+    # conditional branch that can turn it back into an execution gate.
+    assert "if EDGE_RESEARCH_TELEMETRY_ONLY:" not in BOT_SOURCE
+    assert "not EDGE_RESEARCH_TELEMETRY_ONLY" not in BOT_SOURCE
 
 
 def test_pending_intent_is_non_executable_and_only_published_after_exact_limit_policy():
