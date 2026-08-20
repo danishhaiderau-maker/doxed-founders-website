@@ -63,3 +63,12 @@ def test_dashboard_copy_is_truthful_and_complete():
     assert "Bitfinex relay" in joined
     assert "120m PATH_END" in joined
     assert "0.29%" in joined
+
+
+def test_rendered_tile_has_exact_policy_copy_without_retired_defaults():
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert '"0.29% Patient Chase" if offset_029' in source
+    assert '"Tests patient entry quality and ATR-normalized profit capture"' in source
+    assert '"Paper-only; no protective hard stop. Path-end losses and execution uncertainty remain"' in source
+    assert '"Entry: 0.29% patient maker anchor vs Continuous 0.10% benchmark"' in source
+    assert '"Exit: 2.5× frozen 3m ATR target; otherwise 120m path end"' in source

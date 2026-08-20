@@ -26017,10 +26017,11 @@ def build_static_pathway_lane_specs() -> dict:
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
         ai_label = "60+" if (virtual_chase or ai_lo >= 60) else ("65+" if ai_lo >= 65 else "60-65")
         entry_mode_label = (
-            "Bounded Limit Chase" if type_b_hunter else
+            "0.29% Patient Chase" if offset_029 else
+            ("Bounded Limit Chase" if type_b_hunter else
             ("Static Bracket" if static_bracket else
             ("Bracket Limit" if bracket_limit else
-            ("Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous"))))
+            ("Virtual Chase" if virtual_chase else ("Chase 3+" if chase else "Continuous")))))
         )
         if offset_029:
             trigger = "Every shared AI_SCAN APPROVE direction; independent paper capacity"
@@ -26414,6 +26415,8 @@ def build_static_pathway_lane_specs() -> dict:
             "promotion_criteria": lane_promote,
             "kill_criteria": lane_kill,
             "expected_advantage": (
+                "Tests patient entry quality and ATR-normalized profit capture"
+                if offset_029 else (
                 (
                     "Cleaner fill location at exact S/R · isolates chase damage vs V2"
                     if static_bracket
@@ -26429,8 +26432,11 @@ def build_static_pathway_lane_specs() -> dict:
                         else "Historical winners: strong AI + spread ≥4 at entry"
                     )
                 )
+                )
             ),
             "expected_risk": (
+                "Paper-only; no protective hard stop. Path-end losses and execution uncertainty remain"
+                if offset_029 else (
                 (
                     "Lower fill rate (TTL_EXPIRED) · missed moves that chase would catch"
                     if static_bracket
@@ -26446,8 +26452,11 @@ def build_static_pathway_lane_specs() -> dict:
                         else "TYPE_A drag if filters too loose — monitor exit leakage"
                     )
                 )
+                )
             ),
             "benchmark_comparison": (
+                "Paper-only comparison with Continuous on the same shared AI directions"
+                if offset_029 else (
                 (
                     "Paper-only comparison vs CONTINUOUS over the same window"
                     if static_bracket
@@ -26464,8 +26473,16 @@ def build_static_pathway_lane_specs() -> dict:
                         else f"vs {COMPARISON_BENCHMARK_LANE} yardstick"
                     )
                 )
+                )
             ),
             "diff_vs_benchmark": (
+                [
+                    "Entry: 0.29% patient maker anchor vs Continuous 0.10% benchmark",
+                    "Chase: rest 10m, then move 25% of the remaining gap every 60s during 10–25m",
+                    "Exit: 2.5× frozen 3m ATR target; otherwise 120m path end",
+                    "Paper-only; independent orders, lifecycle and ledger; never relayed to Bitfinex",
+                ]
+                if offset_029 else (
                 (
                     [
                         "No DeepSeek calls",
@@ -26507,6 +26524,7 @@ def build_static_pathway_lane_specs() -> dict:
                             "Beat benchmark on EV/appr to promote",
                         ]
                     )
+                )
                 )
             ),
             "strategy_detail": strategy_extra if offset_029 else _strategy_detail_lines(
