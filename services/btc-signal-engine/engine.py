@@ -35542,6 +35542,8 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
                         generations.append(sibling_rotation[1])
                 newest_kept = frozenset(sorted(generations)[-keep_newest:])
                 newest_by_family[family_key] = newest_kept
+            # Retention invariant: active/unacked files retained. The newest
+            # rotations are active evidence and cannot be removed by cleanup.
             if rotation_index in newest_kept:
                 continue
             stat = path.stat()

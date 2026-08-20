@@ -45,6 +45,7 @@ def _load_bot_functions(*names):
         "_DATA_SYNC_EXTENSIONS": frozenset(
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
         ),
+        "_RESEARCH_RAW_JSONL_NEVER_PRUNE": frozenset({"research_events_v22.jsonl"}),
         "_pure_validate_platform_relay_evidence_payload": pure_validate_relay,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
