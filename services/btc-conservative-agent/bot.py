@@ -12028,6 +12028,9 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             shared_ai_call_id=source.get("shared_ai_call_id"),
             feature_snapshot=feature_snapshot,
             evaluation_ts=time.time(),
+            requested_qty=source.get("qty"),
+            chase_schedule=source.get("research_chase_schedule") or source.get("chase_schedule"),
+            chase_schedule_authoritative=bool(source.get("chase_schedule_authoritative")),
         )
         obs = str(record.get("observation_status") or "")
         keep_collecting = not terminal_observation(obs)
@@ -12046,6 +12049,9 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "path_complete": replay_complete,
             "symbol": source.get("symbol") or source.get("pair") or "BTCUSD",
             "shared_ai_call_id": source.get("shared_ai_call_id"),
+            "qty": source.get("qty"),
+            "research_chase_schedule": source.get("research_chase_schedule") or source.get("chase_schedule"),
+            "chase_schedule_authoritative": bool(source.get("chase_schedule_authoritative")),
             "research_feature_snapshot": feature_snapshot,
         }
         if keep_collecting:
@@ -12145,6 +12151,9 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             shared_ai_call_id=signal.get("shared_ai_call_id"),
             feature_snapshot=feature_snapshot,
             evaluation_ts=time.time(),
+            requested_qty=signal.get("qty"),
+            chase_schedule=signal.get("research_chase_schedule") or signal.get("chase_schedule"),
+            chase_schedule_authoritative=bool(signal.get("chase_schedule_authoritative")),
         )
         if would_block_only:
             record["would_block_only"] = True
@@ -12172,6 +12181,9 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 "collector_would_block_only": bool(would_block_only),
                 "research_feature_snapshot": feature_snapshot,
                 "collector_ai": dict(ai or {}),
+                "qty": signal.get("qty"),
+                "research_chase_schedule": signal.get("research_chase_schedule") or signal.get("chase_schedule"),
+                "chase_schedule_authoritative": bool(signal.get("chase_schedule_authoritative")),
             }
             _order_multiverse_pending_src[tid] = pending_payload
             _order_multiverse_state[tid] = obs

@@ -79,6 +79,7 @@ from microstructure_tape import window_reference as microstructure_window_refere
 
 BYTES_PER_EVENT_TYPICAL = 210_000
 BYTES_PRE_SIGNAL_CONTEXT_TYPICAL = 117_000
+STANDARD_RESEARCH_NOTIONAL_USD = 2_000.0
 
 GATE_CLASS_BY_FILTER = {
     "ADX": GATE_STRATEGY,
@@ -546,6 +547,10 @@ def build_research_event(
     shared_ai_call_id: Optional[str] = None,
     feature_snapshot: Optional[Mapping[str, Any]] = None,
     evaluation_ts: Optional[float] = None,
+    requested_qty: Optional[float] = None,
+    research_notional_usd: Optional[float] = STANDARD_RESEARCH_NOTIONAL_USD,
+    chase_schedule: Optional[Sequence[Mapping[str, Any]]] = None,
+    chase_schedule_authoritative: bool = False,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
@@ -648,6 +653,58 @@ def build_research_event(
     raw_direction = (
         "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
     ) if invert_on else direction_u
+    exact_requested_qty = None
+    try:
+        exact_requested_qty = float(requested_qty) if requested_qty is not None else None
+    except (TypeError, ValueError):
+        exact_requested_qty = None
+    if exact_requested_qty is not None and exact_requested_qty <= 0:
+        exact_requested_qty = None
+    standardized_notional = None
+    try:
+        standardized_notional = float(research_notional_usd) if research_notional_usd is not None else None
+    except (TypeError, ValueError):
+        standardized_notional = None
+    if standardized_notional is not None and standardized_notional <= 0:
+        standardized_notional = None
+    if exact_requested_qty is not None:
+        research_qty = exact_requested_qty
+        qty_provenance = "SOURCE_TICKET_QTY"
+        exchange_qty_claim = True
+    elif standardized_notional is not None and float(signal_price) > 0:
+        research_qty = standardized_notional / float(signal_price)
+        qty_provenance = "STANDARDIZED_RESEARCH_NOTIONAL"
+        exchange_qty_claim = False
+    else:
+        research_qty = None
+        qty_provenance = "MISSING"
+        exchange_qty_claim = False
+    execution_basis = {
+        "schema": "research_execution_basis_v1",
+        "requested_qty": research_qty,
+        "requested_qty_provenance": qty_provenance,
+        "source_ticket_qty": exact_requested_qty,
+        "standardized_notional_usd": standardized_notional if exact_requested_qty is None else None,
+        "signal_price": float(signal_price),
+        "exchange_qty_claim": exchange_qty_claim,
+        "note": (
+            "Exact source ticket quantity" if exchange_qty_claim else
+            "Research-only standardized notional; not an exchange quantity claim"
+        ),
+    }
+    schedule_rows = (
+        chase_schedule.get("intervals") if isinstance(chase_schedule, Mapping)
+        else chase_schedule
+    ) or []
+    schedule_is_authoritative = bool(
+        chase_schedule_authoritative
+        or (isinstance(chase_schedule, Mapping) and chase_schedule.get("authoritative") is True)
+    )
+    serialized_chase_schedule = {
+        "schema": "research_chase_schedule_v1",
+        "authoritative": schedule_is_authoritative,
+        "intervals": [dict(row) for row in schedule_rows if isinstance(row, Mapping)],
+    }
     envelope = {
         "event_id": event_id,
         "event_episode_id": episode["event_episode_id"],
@@ -669,6 +726,8 @@ def build_research_event(
         "collector_version": COLLECTOR_VERSION,
         "control_cell": control_cell,
         "policy_search": compact_search_receipt(),
+        "research_execution_basis": execution_basis,
+        "research_chase_schedule": serialized_chase_schedule,
     }
     ticks_bounded = []
     if include_ticks_1s and ticks_1s and live_fill_ts:
@@ -710,6 +769,8 @@ def build_research_event(
         "microstructure_window": microstructure_window_reference(
             signal_ts, required_end_ts,
         ),
+        "research_execution_basis": execution_basis,
+        "research_chase_schedule": serialized_chase_schedule,
         "entry_children": entry_children,
         "primary_outcome": primary,
         "observation_status": obs,
