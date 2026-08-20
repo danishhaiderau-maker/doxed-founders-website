@@ -109,6 +109,7 @@ RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
+POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
 REAL_EDGE_SUMMARY_FILE = "real_edge_summary.json"
@@ -672,10 +673,12 @@ ANALYZER_JSON_REPORT_FILES = (
     SHOWCASE_LOSING_CLUSTER_REPORT_FILE,
     RESEARCH_HORIZON_MATURITY_REPORT_FILE,
     BEST_POLICY_RESEARCH_REPORT_FILE,
+    POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
+    ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
     ("AI Decision Fingerprints", AI_DECISION_FINGERPRINT_REPORT_FILE, "Cluster fingerprints driving APPROVE/REJECT"),
@@ -18809,8 +18812,10 @@ def write_report_manifest(payload=None):
     current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
     """Manifest for research dashboard — no hardcoded report list in UI."""
     try:
+        from research.policy_candidate_oos import build_policy_candidate_oos_report
         from research.best_policy_research import build_best_policy_research_report
 
+        build_policy_candidate_oos_report(data_dir=".", report_dir=".")
         build_best_policy_research_report(data_dir=".", report_dir=".")
     except Exception as exc:
         # A missing/corrupt v2.2 input must degrade to no report, never interrupt

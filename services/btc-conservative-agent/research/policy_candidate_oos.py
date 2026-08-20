@@ -1,0 +1,210 @@
+"""Chronological, episode-deduped static-versus-dynamic policy research.
+
+This producer is deliberately fail-closed. It emits descriptive challengers
+from complete stored paths, but cannot qualify ideal-touch evidence for live
+activation. Qualification still requires conservative/actual execution,
+costs, adequate independent OOS episodes, stability, and drawdown gates.
+"""
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+from collector_v22_schema import RESEARCH_EVENTS_FILE
+from replay_eligibility import validate_replay_eligibility
+from replay_event_report import replay_event_report
+from research.best_policy_research import (
+    POLICY_CANDIDATE_OOS_REPORT_FILE,
+    QUALIFICATION_GATE_SCHEMA,
+    REQUIRED_QUALIFICATION_GATES,
+)
+from policy_search_manifest import POLICY_SEARCH_MANIFEST
+
+MIN_TRAIN_EPISODES = 30
+MIN_OOS_EPISODES = 20
+MIN_PROMOTION_EPISODES = 100
+
+
+def _read_events(path: Path) -> list[dict]:
+    rows = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    except OSError:
+        pass
+    return rows
+
+
+def _signal_ts(row: dict) -> float:
+    try:
+        return float((row.get("envelope") or {}).get("signal_ts") or row.get("signal_ts") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _regime_key(event: dict) -> str:
+    snap = event.get("feature_snapshot_at_signal") or {}
+    cycle = snap.get("cycle_3m_universe") or {}
+    source = snap.get("source_features") or {}
+    context = snap.get("market_context") or source.get("market_context") or {}
+    regime = str(cycle.get("regime") or context.get("regime_label") or source.get("regime") or "UNKNOWN").upper()
+    try:
+        adx = float(cycle.get("adx14") or 0)
+    except (TypeError, ValueError):
+        adx = 0.0
+    adx_bucket = "ADX_LT20" if adx < 20 else "ADX_20_25" if adx < 25 else "ADX_25_30" if adx < 30 else "ADX_GE30"
+    try:
+        atr = float(cycle.get("atr14_pct_3m") or 0)
+    except (TypeError, ValueError):
+        atr = 0.0
+    atr_bucket = "ATR_LOW" if atr < 0.08 else "ATR_MID" if atr < 0.16 else "ATR_HIGH"
+    session = str(cycle.get("session_utc") or source.get("session_bucket") or "UNKNOWN").upper()
+    return f"{regime}|{adx_bucket}|{atr_bucket}|{session}"
+
+
+def _episode_rows(events: list[dict]) -> list[dict]:
+    earliest = {}
+    for row in sorted(events, key=_signal_ts):
+        episode = str(row.get("event_episode_id") or (row.get("envelope") or {}).get("event_episode_id") or "")
+        if episode and episode not in earliest:
+            earliest[episode] = row
+    return list(earliest.values())
+
+
+def _policy_outcomes(event: dict) -> dict[str, float]:
+    report = replay_event_report(event)
+    if report.get("replay_status") != "REPLAY_ELIGIBLE":
+        return {}
+    outcomes = {}
+    control = report.get("control_outcome") or {}
+    if control.get("pnl") is not None:
+        outcomes["CONTROL"] = float(control["pnl"])
+    for entry in report.get("hypothetical_entries") or []:
+        entry_id = str(entry.get("entry_policy_id") or "")
+        if not entry_id:
+            continue
+        for score in entry.get("stage1_scores") or []:
+            exit_id = str(score.get("exit") or "")
+            pnl = score.get("pnl")
+            if exit_id and pnl is not None:
+                outcomes[f"{entry_id}|{exit_id}"] = float(pnl)
+    return outcomes
+
+
+def _evaluate(policy_id: str, rows: list[dict], cache: dict[str, dict[str, float]]) -> dict:
+    values = [cache[row["event_id"]].get(policy_id, 0.0) for row in rows]
+    running = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for value in values:
+        running += value
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+    return {
+        "policy_id": policy_id,
+        "independent_episodes": len(values),
+        "fills": sum(1 for value in values if value != 0),
+        "wins": sum(1 for value in values if value > 0),
+        "losses": sum(1 for value in values if value < 0),
+        "net_pnl_usd": round(sum(values), 4),
+        "expectancy_usd": None if not values else round(sum(values) / len(values), 6),
+        "max_drawdown_usd": round(max_drawdown, 4),
+    }
+
+
+def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
+    events = _read_events(Path(data_dir) / RESEARCH_EVENTS_FILE)
+    latest = max(events, key=_signal_ts, default={})
+    epoch = str(latest.get("epoch_id") or (latest.get("envelope") or {}).get("epoch_id") or "")
+    policy_epoch = str(latest.get("policy_epoch_id") or (latest.get("envelope") or {}).get("policy_epoch_id") or "")
+    signature = str(latest.get("policy_signature") or (latest.get("envelope") or {}).get("policy_signature") or "")
+    current = [row for row in events if str(row.get("epoch_id") or "") == epoch and str(row.get("policy_epoch_id") or "") == policy_epoch]
+    eligible = [row for row in current if validate_replay_eligibility(row).get("eligible")]
+    episodes = _episode_rows(eligible)
+    cache = {str(row.get("event_id")): _policy_outcomes(row) for row in episodes}
+    for row in episodes:
+        row["event_id"] = str(row.get("event_id"))
+    split = max(1, int(len(episodes) * 0.7)) if episodes else 0
+    train, oos = episodes[:split], episodes[split:]
+    policies = sorted({policy for values in cache.values() for policy in values})
+    train_rank = sorted((_evaluate(policy, train, cache) for policy in policies), key=lambda row: (row["expectancy_usd"] or -1e9, row["net_pnl_usd"]), reverse=True)
+    static_id = train_rank[0]["policy_id"] if train_rank else None
+    static_oos = _evaluate(static_id, oos, cache) if static_id else None
+
+    regime_train = defaultdict(list)
+    for row in train:
+        regime_train[_regime_key(row)].append(row)
+    regime_map = {}
+    for regime, rows in regime_train.items():
+        ranked = sorted((_evaluate(policy, rows, cache) for policy in policies), key=lambda item: (item["expectancy_usd"] or -1e9), reverse=True)
+        if ranked:
+            regime_map[regime] = ranked[0]["policy_id"]
+    dynamic_values = []
+    per_regime_oos = defaultdict(list)
+    for row in oos:
+        regime = _regime_key(row)
+        policy = regime_map.get(regime, "CONTROL")
+        value = cache[row["event_id"]].get(policy, 0.0)
+        dynamic_values.append(value)
+        per_regime_oos[regime].append(value)
+    dynamic_oos = {
+        "independent_episodes": len(dynamic_values),
+        "net_pnl_usd": round(sum(dynamic_values), 4),
+        "expectancy_usd": None if not dynamic_values else round(sum(dynamic_values) / len(dynamic_values), 6),
+    }
+
+    enough = len(train) >= MIN_TRAIN_EPISODES and len(oos) >= MIN_OOS_EPISODES
+    gates = {name: False for name in REQUIRED_QUALIFICATION_GATES}
+    gates.update({
+        "chronological_untouched_oos": enough,
+        "minimum_independent_episodes": len(episodes) >= MIN_PROMOTION_EPISODES,
+        "regime_diversity": len(regime_train) >= 3,
+        "no_data_integrity_defects": len(eligible) == len(current) and bool(current),
+        "control_benchmark_comparison": bool(static_oos and static_oos.get("expectancy_usd") is not None),
+    })
+    blockers = [f"QUALIFICATION_GATE_FAILED:{name}" for name, passed in gates.items() if not passed]
+    candidate = None
+    descriptive = None
+    if static_oos:
+        use_dynamic = dynamic_oos.get("expectancy_usd") is not None and dynamic_oos["expectancy_usd"] > (static_oos.get("expectancy_usd") or -1e9)
+        descriptive = {
+            "winner_kind": "DYNAMIC" if use_dynamic else "STATIC",
+            "static_oos": static_oos,
+            "dynamic_oos": dynamic_oos,
+            "regime_policy_map": regime_map,
+            "note": "Descriptive only; ideal-touch paths and small OOS cannot authorize trading.",
+        }
+    report = {
+        "schema": "policy_candidate_oos_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "epoch_id": epoch or None,
+        "policy_epoch_id": policy_epoch or None,
+        "evidence_policy_signature": signature or None,
+        "search_manifest_signature": POLICY_SEARCH_MANIFEST["signature"],
+        "status": "QUALIFIED" if candidate else "BLOCKED",
+        "independent_oos_qualified": False,
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gates": gates,
+        "candidate": candidate,
+        "descriptive_challenger": descriptive,
+        "evidence": {
+            "current_events": len(current), "eligible_events": len(eligible),
+            "independent_episodes": len(episodes), "training_episodes": len(train),
+            "oos_episodes": len(oos), "policies_observed": len(policies),
+        },
+        "blockers": sorted(set(blockers)),
+    }
+    root = Path(report_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / POLICY_CANDIDATE_OOS_REPORT_FILE
+    temp = target.with_suffix(target.suffix + ".tmp")
+    temp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    temp.replace(target)
+    return report

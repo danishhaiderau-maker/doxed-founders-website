@@ -1729,6 +1729,7 @@ def _best_policy_research_payload():
         "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
         "live_policy_change_allowed": qualified,
         "current_candidate": candidate if qualified else None,
+        "descriptive_challenger": policy_report.get("descriptive_challenger"),
         "epoch_id": current_epoch or None,
         "policy_epoch_id": current_policy_epoch or None,
         "evidence_policy_signature": current_policy_signature or None,
@@ -1753,6 +1754,7 @@ def _best_policy_research_payload():
             "status": "EXCLUDED_FROM_QUALIFICATION",
             "event_count_outside_current_epoch": max(0, len(events) - len(current)),
         },
+        "research_design": policy_report.get("research_design") or {},
     }
     return payload
 
@@ -3370,6 +3372,9 @@ async function loadDecisionReadiness() {
   const e = d.evidence || {};
   const coverage = e.outcome_coverage || {};
   const candidate = d.current_candidate || {};
+  const challenger = d.descriptive_challenger || {};
+  const design = d.research_design || {};
+  const searchCounts = design.counts || {};
   const candidateName = candidate.policy_id || candidate.name || 'Hidden until qualified';
   const candidateKind = candidate.kind || '—';
   const dynamicSummary = candidate.kind === 'DYNAMIC'
@@ -3384,6 +3389,12 @@ async function loadDecisionReadiness() {
     ['Independent episodes', e.independent_episode_count || 0, ''],
     ['Filled / Unfilled / Rejected', `${coverage.ACCEPTED_FILLED || 0} / ${coverage.ACCEPTED_UNFILLED || 0} / ${coverage.REJECTED || 0}`, ''],
     ['Qualified OOS episodes', e.qualified_oos_episodes || 0, ''],
+    ['Entry policies', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString(), ''],
+    ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString(), ''],
+    ['Static vs dynamic', (design.static_vs_dynamic || {}).required ? 'Required · OOS decides' : 'Manifest unavailable', ''],
+    ['Current descriptive leader', challenger.winner_kind || 'Waiting for matured OOS', ''],
+    ['Static OOS expectancy', challenger.static_oos && challenger.static_oos.expectancy_usd != null ? '$' + Number(challenger.static_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
+    ['Dynamic OOS expectancy', challenger.dynamic_oos && challenger.dynamic_oos.expectancy_usd != null ? '$' + Number(challenger.dynamic_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
   ];
   document.getElementById('decision-readiness').innerHTML = cards.map(([label, value, cls]) =>
     `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`

@@ -11587,6 +11587,38 @@ _RESEARCH_RAW_JSONL_NEVER_PRUNE = frozenset({
 })
 
 
+def _collector_feature_snapshot(source, *, signal_ts):
+    """Freeze causal signal-time features; never rebuild them at maturation."""
+    src = source if isinstance(source, dict) else {}
+    existing = src.get("research_feature_snapshot")
+    if isinstance(existing, dict) and existing:
+        return dict(existing)
+    with state_lock:
+        cycle = dict(state.get("last_cycle_3m_universe") or {})
+        market_context = dict(state.get("market_context") or {})
+    selected = {}
+    for key in (
+        "entry_features", "ai_input_upgrade", "market_context", "funding", "order_book",
+        "edge_score", "edge_score_at_entry", "session_bucket", "regime", "entry_regime",
+        "shared_ai_call_id", "raw_direction", "executed_direction", "final_direction",
+    ):
+        value = src.get(key)
+        if value is not None:
+            selected[key] = value
+    nested = src.get("_type_b_research_v2_entry_context")
+    if isinstance(nested, dict):
+        selected["type_b_entry_context"] = nested
+    return {
+        "schema": "research_feature_snapshot_v1",
+        "captured_for_signal_ts": float(signal_ts),
+        "cycle_3m_universe": cycle,
+        "market_context": selected.get("market_context") or market_context,
+        "source_features": selected,
+        "point_in_time": True,
+        "maturation_rebuild_forbidden": True,
+    }
+
+
 def _restore_collector_v22_provisionals() -> int:
     """Rehydrate same-epoch maturation sources after a process restart."""
     epoch_id = _collector_v22_epoch_id()
@@ -11780,6 +11812,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         ttl = float(source.get("expires_ts") or 0)
         ttl_sec = max(60.0, ttl - ts) if ttl > ts else 1800.0
         invert_on = _coerce_invert_on(source)
+        feature_snapshot = _collector_feature_snapshot(source, signal_ts=ts)
         live_fill_ts = source.get("live_fill_ts") or source.get("fill_ts") or source.get("entry_ts")
         live_fill_price = (
             source.get("live_fill_price")
@@ -11866,6 +11899,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             include_ticks_1s=COLLECTOR_V22_PATH_REPLAY_1S,
             symbol=source.get("symbol") or source.get("pair") or "BTCUSD",
             shared_ai_call_id=source.get("shared_ai_call_id"),
+            feature_snapshot=feature_snapshot,
         )
         obs = str(record.get("observation_status") or "")
         keep_collecting = not terminal_observation(obs)
@@ -11884,6 +11918,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "path_complete": replay_complete,
             "symbol": source.get("symbol") or source.get("pair") or "BTCUSD",
             "shared_ai_call_id": source.get("shared_ai_call_id"),
+            "research_feature_snapshot": feature_snapshot,
         }
         if keep_collecting:
             _order_multiverse_pending_src[tid] = pending_payload
@@ -11939,6 +11974,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         candles_1m = fetch_mtf_candles("1m", limit=500) or []
         with state_lock:
             univ = dict(state.get("last_cycle_3m_universe") or {})
+        feature_snapshot = _collector_feature_snapshot(signal, signal_ts=ts)
         rsi_at_signal = univ.get("rsi14") or univ.get("rsi_3m")
         would_block = univ.get("would_block_short")
         would_block_reason = univ.get("would_block_reason") or (None if not would_block_only else reason)
@@ -11979,6 +12015,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             atr14_pct=univ.get("atr14_pct_3m"),
             symbol=signal.get("symbol") or signal.get("pair") or "BTCUSD",
             shared_ai_call_id=signal.get("shared_ai_call_id"),
+            feature_snapshot=feature_snapshot,
         )
         if would_block_only:
             record["would_block_only"] = True
@@ -12004,6 +12041,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 "collector_rejected": True,
                 "collector_reject_reason": reason,
                 "collector_would_block_only": bool(would_block_only),
+                "research_feature_snapshot": feature_snapshot,
                 "collector_ai": dict(ai or {}),
             }
             _order_multiverse_pending_src[tid] = pending_payload

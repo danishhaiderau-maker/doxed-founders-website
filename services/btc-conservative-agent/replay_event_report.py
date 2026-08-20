@@ -88,6 +88,7 @@ def _control_replay(
         "atr_mode": ATR_FROZEN,
         "structure_mode": ATR_FROZEN,
         "same_bar_ambiguity": sweep.get("same_bar_ambiguity") or False,
+        "stage1_scores": list(scores),
     }
     # A profit-lock label with negative replay PnL is not self-explanatory.
     # Real venues can gap/slip through a stop, but this ideal 1m replay has no
@@ -217,6 +218,9 @@ def replay_event_report(event: Mapping[str, Any], *, data_dir: Optional[str] = N
             invert_on=invert_on,
         )
         alt["entry_policy_id"] = child.get("entry_policy_id")
+        alt["offset_pct"] = child.get("offset_pct")
+        alt["chase_id"] = child.get("chase_id")
+        alt["fill_window"] = child.get("fill_window")
         alt["fill_ts"] = fill_ts
         alt.update(_delta_vs_control(control_outcome, alt))
         if alt.get("same_bar_ambiguity"):

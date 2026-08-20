@@ -12,9 +12,11 @@ from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
 from replay_eligibility import validate_replay_eligibility
+from policy_search_manifest import POLICY_SEARCH_MANIFEST
 
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 POLICY_CANDIDATE_OOS_REPORT_FILE = "policy_candidate_oos_report.json"
+POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v1"
 REQUIRED_QUALIFICATION_GATES = (
     "chronological_untouched_oos",
@@ -189,6 +191,7 @@ def build_best_policy_research_report(data_dir=".", report_dir=".") -> dict:
         "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
         "independent_oos_qualified": qualified,
         "current_candidate": candidate if qualified else None,
+        "descriptive_challenger": oos.get("descriptive_challenger"),
         "qualification_gates": gates,
         "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
         "evidence": {
@@ -205,8 +208,27 @@ def build_best_policy_research_report(data_dir=".", report_dir=".") -> dict:
         },
         "blockers": blockers,
         "source_oos_report": POLICY_CANDIDATE_OOS_REPORT_FILE,
+        "research_design": {
+            "search_manifest_schema": POLICY_SEARCH_MANIFEST["schema"],
+            "search_manifest_version": POLICY_SEARCH_MANIFEST["version"],
+            "search_manifest_signature": POLICY_SEARCH_MANIFEST["signature"],
+            "counts": POLICY_SEARCH_MANIFEST["counts"],
+            "indicator_families": POLICY_SEARCH_MANIFEST["indicator_families"],
+            "causal_regime_features": POLICY_SEARCH_MANIFEST["causal_regime_features"],
+            "static_vs_dynamic": {
+                "required": True,
+                "static_candidate": "one frozen policy across all supported regimes",
+                "dynamic_candidate": "frozen causal regime classifier and regime-policy map",
+                "winner_rule": "untouched chronological OOS expectancy and drawdown after execution costs",
+                "fallback": "CONTROL or NO_TRADE for unknown or drifting regimes",
+            },
+        },
     }
     report_root.mkdir(parents=True, exist_ok=True)
+    manifest_target = report_root / POLICY_SEARCH_MANIFEST_FILE
+    manifest_temp = manifest_target.with_suffix(manifest_target.suffix + ".tmp")
+    manifest_temp.write_text(json.dumps(POLICY_SEARCH_MANIFEST, indent=2), encoding="utf-8")
+    manifest_temp.replace(manifest_target)
     target = report_root / BEST_POLICY_RESEARCH_REPORT_FILE
     temp = target.with_suffix(target.suffix + ".tmp")
     temp.write_text(json.dumps(report, indent=2), encoding="utf-8")

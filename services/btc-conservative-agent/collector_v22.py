@@ -74,6 +74,7 @@ from path_replay_v1 import (
     zero_fill_costs,
 )
 from replay_eligibility import LEGACY_PREMATURE, validate_replay_eligibility
+from policy_search_manifest import compact_search_receipt
 
 BYTES_PER_EVENT_TYPICAL = 210_000
 BYTES_PRE_SIGNAL_CONTEXT_TYPICAL = 117_000
@@ -542,6 +543,7 @@ def build_research_event(
     include_ticks_1s: bool = False,
     symbol: str = "BTCUSD",
     shared_ai_call_id: Optional[str] = None,
+    feature_snapshot: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
@@ -661,6 +663,7 @@ def build_research_event(
         "path_window_policy_id": PATH_WINDOW_POLICY_ID,
         "collector_version": COLLECTOR_VERSION,
         "control_cell": control_cell,
+        "policy_search": compact_search_receipt(),
     }
     ticks_bounded = []
     if include_ticks_1s and ticks_1s and live_fill_ts:
@@ -687,6 +690,7 @@ def build_research_event(
         "envelope": envelope,
         "decision_tree_snapshot": tree,
         "pre_signal_context": pre_signal,
+        "feature_snapshot_at_signal": dict(feature_snapshot or {}),
         "research_horizon": dict(RESEARCH_HORIZON_V1),
         "canonical_tape": {
             "path_1m": path_1m,
