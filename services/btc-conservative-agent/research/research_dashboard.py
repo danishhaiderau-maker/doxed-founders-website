@@ -1724,8 +1724,21 @@ def _best_policy_research_payload():
         and independent_oos and not gate_blockers and not blockers
     )
     last_analysis = policy_report.get("generated_at") or manifest.get("generated_at")
+    live_evidence = {
+        "current_epoch_events": len(current),
+        "replay_eligible_events": len(eligible),
+        "completed_paths": len(eligible),
+        "replay_ineligible_events": len(ineligible),
+        "independent_episode_count": len(explicit_episodes),
+        "events_missing_episode_id": missing_episode_ids,
+        "qualified_oos_episodes": int(evidence.get("qualified_oos_episodes") or 0),
+        "outcome_coverage": outcomes,
+    }
+    cycle_snapshot = policy_report.get("cycle_snapshot")
+    analyzed_evidence = dict(evidence) if cycle_snapshot and evidence else live_evidence
     payload = {
         "schema": "best_policy_research_v1",
+        "cycle_snapshot": cycle_snapshot,
         "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
         "live_policy_change_allowed": qualified,
         "current_candidate": candidate if qualified else None,
@@ -1735,16 +1748,8 @@ def _best_policy_research_payload():
         "evidence_policy_signature": current_policy_signature or None,
         "last_analysis": last_analysis,
         "last_analysis_melbourne": format_melbourne_dt(last_analysis),
-        "evidence": {
-            "current_epoch_events": len(current),
-            "replay_eligible_events": len(eligible),
-            "completed_paths": len(eligible),
-            "replay_ineligible_events": len(ineligible),
-            "independent_episode_count": len(explicit_episodes),
-            "events_missing_episode_id": missing_episode_ids,
-            "qualified_oos_episodes": int(evidence.get("qualified_oos_episodes") or 0),
-            "outcome_coverage": outcomes,
-        },
+        "evidence": analyzed_evidence,
+        "live_observed_evidence": live_evidence,
         "blockers": blockers,
         "note": (
             "A candidate appears only after replay-eligible, independent, untouched out-of-sample "

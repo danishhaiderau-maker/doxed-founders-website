@@ -107,10 +107,10 @@ def _events(path: Path) -> list[dict]:
     return rows
 
 
-def build_best_policy_research_report(data_dir=".", report_dir=".") -> dict:
+def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None) -> dict:
     data_root = Path(data_dir)
     report_root = Path(report_dir)
-    rows = _events(data_root / RESEARCH_EVENTS_FILE)
+    rows = list(events) if events is not None else _events(data_root / RESEARCH_EVENTS_FILE)
 
     def signal_ts(row):
         try:
@@ -149,6 +149,11 @@ def build_best_policy_research_report(data_dir=".", report_dir=".") -> dict:
     oos = _json(report_root / POLICY_CANDIDATE_OOS_REPORT_FILE)
     gates = oos.get("qualification_gates") or {}
     blockers = list(oos.get("blockers") or [])
+    if cycle_snapshot and (
+        (oos.get("cycle_snapshot") or {}).get("snapshot_id")
+        != cycle_snapshot.get("snapshot_id")
+    ):
+        blockers.append("POLICY_CYCLE_SNAPSHOT_MISMATCH")
     if not epoch_id:
         blockers.append("NO_CURRENT_V22_EPOCH")
     if eligible != len(current):
@@ -184,6 +189,7 @@ def build_best_policy_research_report(data_dir=".", report_dir=".") -> dict:
     qualified = bool(str(oos.get("status") or "").upper() == "QUALIFIED" and not blockers)
     report = {
         "schema": "best_policy_research_v1",
+        "cycle_snapshot": cycle_snapshot,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "epoch_id": epoch_id or None,
         "policy_epoch_id": current_policy_epoch or None,

@@ -18812,17 +18812,12 @@ def write_report_manifest(payload=None):
     current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
     """Manifest for research dashboard — no hardcoded report list in UI."""
     try:
-        from research.policy_candidate_oos import build_policy_candidate_oos_report
-        from research.best_policy_research import build_best_policy_research_report
+        from research.policy_cycle_snapshot import build_policy_cycle_reports
         from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
-        build_policy_candidate_oos_report(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
-        )
-        build_best_policy_research_report(
+        build_policy_cycle_reports(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
         )
