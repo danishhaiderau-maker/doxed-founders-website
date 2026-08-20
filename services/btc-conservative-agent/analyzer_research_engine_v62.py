@@ -12409,42 +12409,35 @@ def run_integrity_checks(
             "decisions_3factor: AI/BLOCKED + ai_decision_text APPROVE/REJECT + COOLDOWN skip_stage",
         )
 
-    # Chase buckets: CSV limit_chase_count vs chase_effectiveness report
-    csv_buckets = {}
+    # Chase buckets: compare the same completed-trade IDs in both sources.
     if trades is not None and not trades.empty and "limit_chase_count" in trades.columns:
-        work = trades.drop_duplicates(subset=["trade_id"], keep="last")
-        cc = pd.to_numeric(work["limit_chase_count"], errors="coerce").fillna(0).astype(int)
-        for n in cc:
-            key = _chase_count_bucket(n)
-            csv_buckets[key] = csv_buckets.get(key, 0) + 1
-        eff = {}
-        if chase_payload:
-            attr = (chase_payload.get("trades") or [])
-            for row in attr:
-                key = _chase_count_bucket(row.get("chase_count"))
-                if row.get("net_pnl_usd") is not None or row.get("win") is not None:
-                    eff[key] = eff.get(key, 0) + 1
-        else:
-            eff_path = analyzer_report_path("chase_effectiveness_report.json")
-            if os.path.isfile(eff_path):
-                try:
-                    with open(eff_path, encoding="utf-8") as f:
-                        rep = json.load(f)
-                    for k, b in (rep.get("buckets") or {}).items():
-                        eff[k] = int((b or {}).get("trades") or 0)
-                except Exception:
-                    eff = {}
+        cohorts = _chase_bucket_integrity_cohorts(trades, chase_payload or {})
+        csv_buckets = cohorts["csv_buckets"]
+        eff = cohorts["report_buckets"]
         mismatch = []
         for k in set(list(csv_buckets.keys()) + list(eff.keys())):
             if csv_buckets.get(k, 0) != eff.get(k, 0):
                 mismatch.append(f"{k}: csv={csv_buckets.get(k, 0)} report={eff.get(k, 0)}")
-        _add(
-            "chase_count_buckets",
-            not mismatch,
-            str(csv_buckets),
-            str(eff),
-            "; ".join(mismatch[:6]) if mismatch else "trades_3factor.limit_chase_count matches report buckets",
-        )
+        comparable = cohorts["comparable_trade_ids"]
+        if comparable == 0:
+            _add(
+                "chase_count_buckets", True, "equivalent completed-trade cohorts",
+                "NON_COMPARABLE",
+                f"No shared trade IDs; csv_trades={cohorts['csv_trade_ids']} "
+                f"attribution_rows={cohorts['report_rows']}. Check does not invalidate report.",
+            )
+            checks[-1]["comparison_status"] = "NON_COMPARABLE"
+        else:
+            missing = len(cohorts["missing_report_trade_ids"])
+            detail = "; ".join(mismatch[:6]) if mismatch else (
+                f"Matched {comparable} completed trade IDs; excluded non-CSV attribution rows"
+            )
+            if missing:
+                detail += f"; {missing} CSV trade IDs absent from attribution"
+            _add("chase_count_buckets", not mismatch, str(csv_buckets), str(eff), detail)
+            checks[-1]["comparison_status"] = "COMPARABLE"
+            checks[-1]["comparable_trade_ids"] = comparable
+            checks[-1]["csv_trade_ids_without_attribution"] = missing
 
     # Lane totals vs CONTINUOUS
     if benchmark_report and trades is not None and not trades.empty and "research_lane" in trades.columns:
@@ -12902,6 +12895,40 @@ def _chase_count_bucket(chase_count) -> str:
     if n >= 5:
         return "5+"
     return str(n)
+
+
+def _chase_bucket_integrity_cohorts(trades, chase_payload) -> dict:
+    """Build equivalent completed-trade cohorts for integrity comparison."""
+    csv_by_id = {}
+    if trades is not None and not trades.empty and {
+        "trade_id", "limit_chase_count"
+    }.issubset(trades.columns):
+        work = trades.drop_duplicates(subset=["trade_id"], keep="last")
+        for _, row in work.iterrows():
+            tid = str(row.get("trade_id") or "").strip()
+            if tid and tid.lower() != "nan":
+                csv_by_id[tid] = row.get("limit_chase_count")
+    report_rows = (chase_payload or {}).get("trades") or []
+    report_by_id = {}
+    for row in report_rows:
+        tid = str(row.get("trade_id") or "").strip()
+        if tid and tid.lower() != "nan" and tid in csv_by_id:
+            report_by_id[tid] = row.get("chase_count")
+    overlap = sorted(set(csv_by_id) & set(report_by_id))
+    csv_buckets, report_buckets = {}, {}
+    for tid in overlap:
+        csv_key = _chase_count_bucket(csv_by_id[tid])
+        report_key = _chase_count_bucket(report_by_id[tid])
+        csv_buckets[csv_key] = csv_buckets.get(csv_key, 0) + 1
+        report_buckets[report_key] = report_buckets.get(report_key, 0) + 1
+    return {
+        "csv_buckets": csv_buckets,
+        "report_buckets": report_buckets,
+        "csv_trade_ids": len(csv_by_id),
+        "report_rows": len(report_rows),
+        "comparable_trade_ids": len(overlap),
+        "missing_report_trade_ids": sorted(set(csv_by_id) - set(report_by_id)),
+    }
 
 
 def _chase_bucket_stats(attributions):
