@@ -113,6 +113,49 @@ class CollectorIntegrityTests(unittest.TestCase):
         self.assertNotIn("INVERT_SIGNAL_DEFAULT", vars(bot))
         self.assertNotIn("_ensure_invert_live_default", vars(bot))
 
+    def test_startup_and_poll_self_heal_missing_same_epoch_provisionals(self):
+        saved_pending = dict(bot._order_multiverse_pending_src)
+        saved_state = dict(bot._order_multiverse_state)
+        saved_written = set(bot._order_multiverse_written)
+        saved_poll = bot._order_multiverse_last_poll
+        try:
+            bot._order_multiverse_pending_src.clear()
+            bot._order_multiverse_state.clear()
+            bot._order_multiverse_written.clear()
+            source = {
+                "trade_id": "journal-overdue",
+                "created_ts_ts": SIGNAL_TS,
+                "expires_ts": SIGNAL_TS + 1800,
+                "status": "REJECTED",
+                "collector_rejected": True,
+            }
+            with mock.patch.object(bot, "_collector_v22_epoch_id", return_value="epoch-integrity"), \
+                 mock.patch.object(bot, "load_provisional_events", return_value={"journal-overdue": source}), \
+                 mock.patch.object(bot, "event_already_written", return_value=False):
+                self.assertEqual(bot._restore_collector_v22_provisionals(), 1)
+                self.assertIsNot(bot._order_multiverse_pending_src["journal-overdue"], source)
+                # Active memory wins over an older journal snapshot.
+                bot._order_multiverse_pending_src["journal-overdue"]["status"] = "ACTIVE_MEMORY"
+                self.assertEqual(bot._merge_collector_v22_provisionals(reason="TEST"), 0)
+                self.assertEqual(bot._order_multiverse_pending_src["journal-overdue"]["status"], "ACTIVE_MEMORY")
+
+                # Simulate a later runtime-map loss: the bounded poll restores
+                # the source before iteration and sends it through maturation.
+                bot._order_multiverse_pending_src.clear()
+                bot._order_multiverse_last_poll = 0.0
+                processed = []
+                with mock.patch.object(bot, "persist_rejected_opportunity", side_effect=lambda src, **kw: processed.append(dict(src))):
+                    bot._maybe_complete_pending_order_multiverse()
+                self.assertEqual(processed[0]["trade_id"], "journal-overdue")
+        finally:
+            bot._order_multiverse_pending_src.clear()
+            bot._order_multiverse_pending_src.update(saved_pending)
+            bot._order_multiverse_state.clear()
+            bot._order_multiverse_state.update(saved_state)
+            bot._order_multiverse_written.clear()
+            bot._order_multiverse_written.update(saved_written)
+            bot._order_multiverse_last_poll = saved_poll
+
     def test_overdue_gapped_path_terminalizes_as_unranked_negative_evidence(self):
         candles = [_bar(i) for i in range(-60, 181) if i != -30]
         event = build_research_event(

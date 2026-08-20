@@ -11631,8 +11631,8 @@ def _collector_feature_snapshot(source, *, signal_ts):
     }
 
 
-def _restore_collector_v22_provisionals() -> int:
-    """Rehydrate same-epoch maturation sources after a process restart."""
+def _merge_collector_v22_provisionals(*, reason: str) -> int:
+    """Self-heal missing same-epoch maturation sources from durable journal."""
     epoch_id = _collector_v22_epoch_id()
     restored = 0
     for event_id, source in load_provisional_events(epoch_id=epoch_id).items():
@@ -11650,10 +11650,16 @@ def _restore_collector_v22_provisionals() -> int:
         restored += 1
     if restored:
         logger.info(
-            f"[COLLECTOR_V22] restored provisional_events={restored} epoch_id={epoch_id} "
+            f"[COLLECTOR_V22] recovered provisional_events={restored} epoch_id={epoch_id} "
+            f"reason={reason} "
             f"[PIPELINE ENFORCEMENT]"
         )
     return restored
+
+
+def _restore_collector_v22_provisionals() -> int:
+    """Startup recovery; bounded polls repeat this merge as a safety net."""
+    return _merge_collector_v22_provisionals(reason="STARTUP")
 
 
 def _collector_v22_epoch_id() -> str:
@@ -11763,6 +11769,7 @@ def _maybe_complete_pending_order_multiverse():
     if now - _order_multiverse_last_poll < 60.0:
         return
     _order_multiverse_last_poll = now
+    _merge_collector_v22_provisionals(reason="MATURATION_POLL")
     for src in list(_order_multiverse_pending_src.values()):
         if src.get("collector_rejected"):
             persist_rejected_opportunity(
