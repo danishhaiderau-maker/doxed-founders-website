@@ -14,6 +14,7 @@ from collector_v22_schema import (
     PRIMARY_ACCEPTED_UNFILLED,
     PRIMARY_REJECTED,
 )
+from replay_eligibility import validate_replay_eligibility
 
 
 def _load_jsonl(path: str) -> list:
@@ -54,6 +55,14 @@ def analyze_v22_events(
     unfilled = [r for r in rows if r.get("primary_outcome") == PRIMARY_ACCEPTED_UNFILLED]
     rejected = [r for r in rows if r.get("primary_outcome") == PRIMARY_REJECTED]
     reasons = Counter(str(r.get("exact_reason") or "UNKNOWN") for r in rejected)
+    eligibility_receipts = [validate_replay_eligibility(row) for row in rows]
+    replay_eligible = sum(1 for receipt in eligibility_receipts if receipt.get("eligible"))
+    integrity_blockers = Counter(
+        reason
+        for receipt in eligibility_receipts if not receipt.get("eligible")
+        for reason in (receipt.get("reasons") or ["UNKNOWN_REPLAY_BLOCKER"])
+    )
+    observation_statuses = Counter(str(row.get("observation_status") or "UNKNOWN") for row in rows)
     events_per_day = max(5.0, len(rows)) if len(rows) < 7 else len(rows) / 7.0
     capacity = project_capacity(
         data_dir=root,
@@ -81,6 +90,14 @@ def analyze_v22_events(
             },
         },
         "capacity_projection": capacity,
+        "replay_integrity": {
+            "eligible_events": replay_eligible,
+            "ineligible_events": len(rows) - replay_eligible,
+            "observation_statuses": dict(observation_statuses),
+            "blockers": dict(integrity_blockers),
+            "ranking_denominator": replay_eligible,
+            "note": "INSUFFICIENT_PATH/DATA_ERROR are immutable negative evidence, never scored outcomes",
+        },
         "bytes_per_event_budget": {
             "typical_om_write_once_kb": round(BYTES_PER_EVENT_TYPICAL / 1024, 1),
             "pre_signal_context_kb": 117,

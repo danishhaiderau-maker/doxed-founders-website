@@ -19,6 +19,7 @@ from collector_v22 import (
 from collector_v22_schema import (
     COLLECTOR_VERSION,
     OBS_FUNNEL_COMPLETE,
+    OBS_INSUFFICIENT_PATH,
     OBS_WAITING_120M,
     OBS_WAITING_ENTRY_WINDOW,
     PRIMARY_ACCEPTED_FILLED,
@@ -209,7 +210,9 @@ class CollectorV22Tests(unittest.TestCase):
             rejected=True,
             ticket_closed=True,
         )
-        self.assertEqual(event["observation_status"], OBS_WAITING_120M)
+        self.assertEqual(event["observation_status"], OBS_INSUFFICIENT_PATH)
+        self.assertTrue(event["negative_evidence"])
+        self.assertFalse(event["ranking_eligible"])
         event["observation_status"] = OBS_FUNNEL_COMPLETE
         eligibility = event_replay_eligibility(event)
         self.assertEqual(eligibility["replay_status"], "REPLAY_INELIGIBLE")

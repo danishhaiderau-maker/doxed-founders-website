@@ -9,6 +9,8 @@ import collector_v22
 from collector_v22 import build_research_event, event_already_written, event_replay_eligibility, write_research_event_once
 from collector_v22_provisional import load_provisional_events, remove_provisional_event, upsert_provisional_event
 from collector_v22_schema import EVENT_INDEX_FILE, RESEARCH_EVENTS_FILE
+from collector_v22_schema import OBS_INSUFFICIENT_PATH, OBS_WAITING_120M
+from opportunity_capture_v22 import analyze_v22_events
 from replay_eligibility import validate_replay_eligibility
 
 
@@ -110,6 +112,56 @@ class CollectorIntegrityTests(unittest.TestCase):
         self.assertFalse(bot.state["invert_signal"])
         self.assertNotIn("INVERT_SIGNAL_DEFAULT", vars(bot))
         self.assertNotIn("_ensure_invert_live_default", vars(bot))
+
+    def test_overdue_gapped_path_terminalizes_as_unranked_negative_evidence(self):
+        candles = [_bar(i) for i in range(-60, 181) if i != -30]
+        event = build_research_event(
+            trade_id="overdue-gap", epoch_id="epoch-integrity", signal_ts=SIGNAL_TS,
+            signal_price=100000.0, candles_1m=candles, submitted=False,
+            rejected=True, ticket_closed=True, evaluation_ts=SIGNAL_TS + 181 * 60,
+        )
+        self.assertEqual(event["observation_status"], OBS_INSUFFICIENT_PATH)
+        self.assertTrue(event["immutable"])
+        self.assertTrue(event["negative_evidence"])
+        self.assertFalse(event["ranking_eligible"])
+        self.assertFalse(event["replay_eligibility"]["eligible"])
+        self.assertEqual(event["replay_outcomes"], [])
+
+    def test_not_yet_due_incomplete_hold_stays_waiting(self):
+        candles = []
+        for i in range(-60, 101):
+            row = _bar(i)
+            if i == 30:
+                row[2] = 100200.0  # SHORT alternative entry fills at minute 30.
+            candles.append(row)
+        event = build_research_event(
+            trade_id="not-due", epoch_id="epoch-integrity", signal_ts=SIGNAL_TS,
+            signal_price=100000.0, candles_1m=candles, ticket_closed=True,
+            evaluation_ts=SIGNAL_TS + 100 * 60,
+        )
+        self.assertEqual(event["observation_status"], OBS_WAITING_120M)
+        self.assertFalse(event["immutable"])
+
+    def test_terminal_negative_write_once_survives_crash_and_analyzer_excludes_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            event = build_research_event(
+                trade_id="negative-crash", epoch_id="epoch-integrity", signal_ts=SIGNAL_TS,
+                signal_price=100000.0,
+                candles_1m=[_bar(i) for i in range(-60, 181) if i != 20],
+                submitted=False, rejected=True, ticket_closed=True,
+                evaluation_ts=SIGNAL_TS + 181 * 60,
+            )
+            self.assertFalse(event_already_written("negative-crash", data_dir=root))
+            with mock.patch.object(collector_v22, "_save_event_index", side_effect=OSError("crash after negative append")):
+                with self.assertRaisesRegex(OSError, "crash after negative append"):
+                    write_research_event_once(event, data_dir=root)
+            self.assertEqual(write_research_event_once(event, data_dir=root), (False, "duplicate event_id"))
+            report = analyze_v22_events(data_dir=root)
+            integrity = report["replay_integrity"]
+            self.assertEqual(integrity["eligible_events"], 0)
+            self.assertEqual(integrity["ineligible_events"], 1)
+            self.assertEqual(integrity["observation_statuses"][OBS_INSUFFICIENT_PATH], 1)
+            self.assertGreater(sum(integrity["blockers"].values()), 0)
 
 
 if __name__ == "__main__":

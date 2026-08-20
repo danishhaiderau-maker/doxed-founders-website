@@ -11912,6 +11912,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             symbol=source.get("symbol") or source.get("pair") or "BTCUSD",
             shared_ai_call_id=source.get("shared_ai_call_id"),
             feature_snapshot=feature_snapshot,
+            evaluation_ts=time.time(),
         )
         obs = str(record.get("observation_status") or "")
         keep_collecting = not terminal_observation(obs)
@@ -12028,6 +12029,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             symbol=signal.get("symbol") or signal.get("pair") or "BTCUSD",
             shared_ai_call_id=signal.get("shared_ai_call_id"),
             feature_snapshot=feature_snapshot,
+            evaluation_ts=time.time(),
         )
         if would_block_only:
             record["would_block_only"] = True

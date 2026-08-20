@@ -544,6 +544,7 @@ def build_research_event(
     symbol: str = "BTCUSD",
     shared_ai_call_id: Optional[str] = None,
     feature_snapshot: Optional[Mapping[str, Any]] = None,
+    evaluation_ts: Optional[float] = None,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
@@ -613,8 +614,11 @@ def build_research_event(
     coverage = assess_tape_coverage(
         path_1m, signal_ts=signal_ts, required_end_ts=required_end_ts,
     )
+    deadline_reached = max(horizon_ts, float(evaluation_ts or horizon_ts)) + 1.0 >= required_end_ts
     entry_window_complete = horizon_ts + 1.0 >= float(signal_ts) + MAX_ENTRY_WINDOW_SEC
-    if live_filled and path_complete_flag is False and ticket_closed:
+    if deadline_reached and not coverage["eligible"]:
+        obs = OBS_INSUFFICIENT_PATH
+    elif live_filled and path_complete_flag is False and ticket_closed:
         obs = OBS_WAITING_120M
     else:
         obs = resolve_observation_status(
@@ -672,7 +676,7 @@ def build_research_event(
             t = float(tick.get("t") or 0)
             if t >= float(live_fill_ts) - 1e-9 and t <= cap + 1e-9:
                 ticks_bounded.append(tick)
-    return {
+    record = {
         "schema": EVENT_SCHEMA,
         "collector_version": COLLECTOR_VERSION,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
@@ -721,6 +725,12 @@ def build_research_event(
         "write_once": terminal_observation(obs),
         "immutable": terminal_observation(obs),
     }
+    eligibility = event_replay_eligibility(record)
+    record["replay_eligibility"] = eligibility
+    record["ranking_eligible"] = bool(eligibility.get("eligible"))
+    record["negative_evidence"] = obs in (OBS_INSUFFICIENT_PATH, OBS_DATA_ERROR)
+    record["replay_outcomes"] = []
+    return record
 
 
 def _load_event_index(path: str) -> dict:
@@ -813,7 +823,8 @@ def write_research_event_once(
         return False, "missing event_id"
     status = str(record.get("observation_status") or "")
     eligibility = event_replay_eligibility(record)
-    if not terminal_observation(status) or not eligibility.get("eligible"):
+    negative_evidence = status in (OBS_INSUFFICIENT_PATH, OBS_DATA_ERROR)
+    if not terminal_observation(status) or (not eligibility.get("eligible") and not negative_evidence):
         return False, "provisional or replay-ineligible event"
     with _EVENT_WRITER_LOCK:
         index_path = os.path.join(root, EVENT_INDEX_FILE)
