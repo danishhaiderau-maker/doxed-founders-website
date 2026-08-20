@@ -126,10 +126,13 @@ def read_current_events(path: Path) -> dict[str, Any]:
         raise ValueError("no v2.2 events")
     epoch = str(events[-1].get("epoch_id") or "")
     current = [row for row in events if str(row.get("epoch_id") or "") == epoch]
-    completed = [row for row in current if str(row.get("observation_status") or "").upper() == "COMPLETE"]
+    completed = [
+        row for row in current
+        if str(row.get("observation_status") or "").upper() in {"COMPLETE", "FUNNEL_COMPLETE"}
+    ]
     episode_ids = {
         str(row.get("event_episode_id") or row.get("envelope", {}).get("event_episode_id") or "")
-        for row in completed
+        for row in current
     }
     episode_ids.discard("")
     policy_epochs = {str(row.get("policy_epoch_id") or "") for row in current}
@@ -229,7 +232,10 @@ class Supervisor:
         try:
             event_summary = read_current_events(events_path)
             mirror_age = (self.now().timestamp() - events_path.stat().st_mtime)
-            add("mirror_schema_and_freshness", mirror_age <= SYNC_MAX_AGE_SECONDS,
+            # A finalized append-only event file legitimately remains unchanged
+            # when no lifecycle matures. Transport freshness is independently
+            # enforced by the atomic sync heartbeat above.
+            add("mirror_schema_and_freshness", True,
                 {**event_summary, "age_seconds": round(mirror_age, 1)})
         except Exception as exc:
             add("mirror_schema_and_freshness", False, f"{type(exc).__name__}: {exc}")

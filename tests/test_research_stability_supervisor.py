@@ -34,7 +34,7 @@ def make_fixture(tmp_path):
             "schema": "research_event_v2.2", "collector_version": "collector_v2.2",
             "epoch_id": "epoch-new", "policy_epoch_id": "policy-epoch-a",
             "policy_signature": "policy-a", "event_episode_id": f"episode-{index // 2}",
-            "observation_status": "COMPLETE",
+            "observation_status": "FUNNEL_COMPLETE" if index == 2 else "COMPLETE",
         })
     (mirror / "research_events_v22.jsonl").write_text("\n".join(json.dumps(x) for x in events), encoding="utf-8")
     timestamp = NOW.timestamp()
