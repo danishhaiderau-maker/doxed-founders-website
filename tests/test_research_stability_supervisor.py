@@ -122,3 +122,27 @@ def test_duplicate_process_is_reported_and_never_killed(tmp_path):
     assert calls == []
     row = next(x for x in result["checks"] if x["name"] == "unique_analyzer_process")
     assert row["detail"]["count"] == 2
+
+
+def test_runtime_repo_owns_sync_heartbeat_and_launcher(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    runtime_repo = tmp_path / "runtime-owner"
+    (runtime_repo / "scripts").mkdir(parents=True)
+    heartbeat = repo / ".fly-data-sync-loop.heartbeat.json"
+    heartbeat.replace(runtime_repo / heartbeat.name)
+    calls = []
+    rows = [
+        {"ProcessId": 2, "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},
+        {"ProcessId": 3, "CommandLine": "python research_dashboard.py --standalone"},
+    ]
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", repair=True,
+        now=lambda: NOW, fetcher=fetcher, process_reader=lambda: rows,
+        launcher=lambda *args, **kwargs: calls.append((args, kwargs)),
+        runtime_repo=runtime_repo,
+    )
+    result = checker.check()
+    assert len(calls) == 1
+    assert str(runtime_repo / "scripts" / "sync-fly-bot-data-loop.ps1") in calls[0][0][0]
+    heartbeat_check = next(x for x in result["checks"] if x["name"] == "atomic_sync_heartbeat")
+    assert heartbeat_check["ok"] is True

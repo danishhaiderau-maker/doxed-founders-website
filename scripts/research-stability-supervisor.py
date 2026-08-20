@@ -165,12 +165,14 @@ class Supervisor:
     fetcher: Callable[[str, str, int], dict[str, Any]] = fetch_json
     process_reader: Callable[[], list[dict[str, Any]]] = process_inventory
     launcher: Callable[..., subprocess.Popen[Any]] = subprocess.Popen
+    runtime_repo: Path | None = None
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
             return False
         if kind == "sync":
-            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.repo / "scripts" / "sync-fly-bot-data-loop.ps1")]
+            owner_repo = self.runtime_repo or self.repo
+            args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(owner_repo / "scripts" / "sync-fly-bot-data-loop.ps1")]
         elif kind == "analyzer":
             args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.repo / "scripts" / "start-home-analyzer.ps1"), "-NoWait", "-Port", "9001"]
         else:
@@ -199,7 +201,7 @@ class Supervisor:
         except Exception as exc:
             add("fly_storage", False, type(exc).__name__)
 
-        heartbeat_path = self.repo / ".fly-data-sync-loop.heartbeat.json"
+        heartbeat_path = (self.runtime_repo or self.repo) / ".fly-data-sync-loop.heartbeat.json"
         try:
             heartbeat = read_json(heartbeat_path)
             stamp = parse_time(heartbeat.get("syncedAt"))
@@ -283,6 +285,7 @@ def default_paths(repo: Path) -> tuple[Path, Path]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--runtime-repo", type=Path)
     parser.add_argument("--mirror", type=Path)
     parser.add_argument("--report-dir", type=Path)
     parser.add_argument("--fly-url", default="https://doxed-btc-bot.fly.dev")
@@ -297,8 +300,11 @@ def main() -> int:
     token = os.environ.get("BOT_ADMIN_TOKEN", "")
     if not token:
         raise SystemExit("BOT_ADMIN_TOKEN is required; load it through the existing vault launcher")
-    supervisor = Supervisor(repo, args.mirror or mirror_default, args.report_dir or report_default,
-                            args.fly_url, token, repair=args.repair_missing_local)
+    supervisor = Supervisor(
+        repo, args.mirror or mirror_default, args.report_dir or report_default,
+        args.fly_url, token, repair=args.repair_missing_local,
+        runtime_repo=args.runtime_repo.resolve() if args.runtime_repo else None,
+    )
     while True:
         payload = supervisor.check()
         atomic_json(status_file, payload)

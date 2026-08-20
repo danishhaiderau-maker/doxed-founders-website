@@ -1,4 +1,4 @@
-param([switch]$Once, [switch]$RepairMissingLocal, [int]$IntervalSec = 300, [string]$VaultEnv = "")
+param([switch]$Once, [switch]$RepairMissingLocal, [int]$IntervalSec = 300, [string]$VaultEnv = "", [string]$RuntimeRepo = "")
 
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -16,6 +16,7 @@ Import-HomeBotVaultConfig -VaultEnvPath $vaultEnv
 if (-not $env:BOT_ADMIN_TOKEN) { throw "BOT_ADMIN_TOKEN is required." }
 
 $argsList = @((Join-Path $scriptDir "research-stability-supervisor.py"), "--repo", $repoRoot, "--interval-seconds", "$IntervalSec")
+if ($RuntimeRepo) { $argsList += @("--runtime-repo", $RuntimeRepo) }
 if (-not $Once) { $argsList += "--loop" }
 if ($RepairMissingLocal) { $argsList += "--repair-missing-local" }
 
