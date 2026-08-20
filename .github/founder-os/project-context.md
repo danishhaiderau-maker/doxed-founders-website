@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(research): tolerate bounded analyzer cycle lag
+fix(research): separate profit winner from relative leader
 
 ## Last Activity
 
