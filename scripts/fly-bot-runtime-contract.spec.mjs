@@ -372,6 +372,14 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   assert.match(launcher, /unowned listener\(s\)/);
   assert.match(syncLoop, /FileShare\]::None/);
   assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
+  assert.match(
+    syncLoop,
+    /reason = "below_threshold"[\s\S]*sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
+  );
+  assert.match(
+    syncLoop,
+    /sourceRevision = \$\(if \(\$result\.SourceRevision\)[\s\S]*\$manifest\.source_git_rev/,
+  );
   assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
   assert.match(sync, /\[System\.IO\.File\]::Replace\(\$stateTmp, \$statePath/);
   assert.match(sync, /\$stateBackup\s*=\s*"\$stateTmp\.bak"/);

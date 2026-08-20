@@ -338,6 +338,7 @@ try {
           currentTotalBytes = $currentTotalBytes
           lastSyncedTotalBytes = $lastSyncedTotalBytes
           elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
+          sourceRevision = $(if ($manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
           relayEvidence = $relayEvidenceStatus
         }
         $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
@@ -391,7 +392,7 @@ try {
         source = $SourceUrl
         files = $result.Files
         bytes = $result.Bytes
-        sourceRevision = $result.SourceRevision
+        sourceRevision = $(if ($result.SourceRevision) { $result.SourceRevision } elseif ($manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
         analyzerPublished = $result.AnalyzerPublished
         relayEvidence = $relayEvidenceStatus
         prunedRotations = $result.PrunedRotations
