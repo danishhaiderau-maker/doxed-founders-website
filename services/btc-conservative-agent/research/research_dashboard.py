@@ -1835,14 +1835,22 @@ def api_dynamic_policy_research():
         "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
         "epoch_id": best.get("epoch_id"),
         "policy_epoch_id": best.get("policy_epoch_id"),
-        "winner_kind": challenger.get("winner_kind"),
+        "winner_kind": challenger.get("winner_kind") or "NONE",
+        "winner_status": challenger.get("winner_status") or "NO_PROFITABLE_OOS_WINNER",
+        "relative_leader_kind": challenger.get("relative_leader_kind") or "NONE",
+        "comparison_delta": challenger.get("comparison_delta") or {},
         "static_oos": challenger.get("static_oos"),
         "dynamic_oos": challenger.get("dynamic_oos"),
         "regimes": rows,
         "required_market_families": ["BULL", "BEAR", "SIDEWAYS"],
         "fallback": "CONTROL_OR_NO_TRADE",
-        "warning": challenger.get("multiple_testing_warning") or (
-            "Dynamic selection remains unavailable until causal regimes have later OOS evidence."
+        "warning": (
+            "No profitable OOS winner. A relative leader may only be less negative; it is not a winning strategy. "
+            + (challenger.get("multiple_testing_warning") or
+               "Dynamic selection remains unavailable until causal regimes have later OOS evidence.")
+        ) if challenger.get("winner_kind") in (None, "NONE") else (
+            challenger.get("multiple_testing_warning") or
+            "Any profitable descriptive result remains unavailable for live policy changes."
         ),
         "blockers": best.get("blockers") or [],
     })
@@ -1895,9 +1903,9 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
   document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
   rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.train.independent_episodes}</td><td>${pct(x.train.wins,x.train.independent_episodes)}</td><td>${money(x.train.net_pnl_usd)}</td><td>${x.oos.independent_episodes}</td><td>${pct(x.oos.wins,x.oos.independent_episodes)}</td><td>${money(x.oos.net_pnl_usd)}</td><td>${money(x.oos.expectancy_usd)}</td><td>${money(x.oos.max_drawdown_usd)}</td><td class="bad">${x.qualification}</td></tr>`);
  } else if(mode==='dynamic'){
-  cards=[['Epoch',d.epoch_id],['Descriptive winner',d.winner_kind||'—'],['Static OOS EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic OOS EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
+  cards=[['Epoch',d.epoch_id],['Profitable OOS winner',d.winner_kind==='NONE'?'NONE — both candidates unprofitable':(d.winner_kind||'NONE')],['Relative leader only',d.relative_leader_kind||'NONE'],['Static OOS EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic OOS EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
-  rows=(d.regimes||[]).map(x=>`<tr><td>${x.regime}</td><td>${x.selected_policy_id}</td><td>${(x.train||{}).independent_episodes||0}</td><td>${money((x.train||{}).net_pnl_usd)}</td><td>${(x.oos||{}).independent_episodes||0}</td><td>${money((x.oos||{}).net_pnl_usd)}</td><td>${money((x.oos||{}).expectancy_usd)}</td><td>${x.fallback?'YES':'NO'}</td><td class="bad">${x.qualification}</td></tr>`);
+  rows=(d.regimes||[]).map(x=>`<tr><td>${x.regime}</td><td>${x.selected_policy_id}${x.research_candidate_policy_id?'<br><small>research candidate: '+x.research_candidate_policy_id+'</small>':''}</td><td>${(x.train||{}).independent_episodes||0}</td><td>${money((x.train||{}).net_pnl_usd)}</td><td>${(x.oos||{}).independent_episodes||0}</td><td>${money((x.oos||{}).net_pnl_usd)}</td><td>${money((x.oos||{}).expectancy_usd)}</td><td>${x.fallback?'YES · '+(x.fallback_reason||'insufficient evidence'):'NO'}</td><td class="bad">${x.qualification}</td></tr>`);
  } else {
   const s=d.v22_shadow||{}, c=d.comprehensive_shadow_lanes||{}, cov=c.coverage||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{};
   cards=[['Current rejected paths',d.current_epoch_rejected||0],['Independent shared-AI episodes',cov.independent_shared_ai_episodes||0],['Deduped lane records',cov.deduped_lane_records||0],['Paired episodes',cov.paired_multi_lane_episodes||0],['Provisional exclusions',(c.cohorts||[]).reduce((n,x)=>n+(x.provisional_excluded||0),0)],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
@@ -3534,7 +3542,8 @@ async function loadDecisionReadiness() {
     ['Entry policies', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString(), ''],
     ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString(), ''],
     ['Static vs dynamic', (design.static_vs_dynamic || {}).required ? 'Required · OOS decides' : 'Manifest unavailable', ''],
-    ['Current descriptive leader', challenger.winner_kind || 'Waiting for matured OOS', ''],
+    ['Profitable OOS winner', challenger.winner_kind === 'NONE' ? 'NONE — no profitable OOS candidate' : (challenger.winner_kind || 'Waiting for matured OOS'), ''],
+    ['Relative leader only', challenger.relative_leader_kind || 'Unavailable', ''],
     ['Static OOS expectancy', challenger.static_oos && challenger.static_oos.expectancy_usd != null ? '$' + Number(challenger.static_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
     ['Dynamic OOS expectancy', challenger.dynamic_oos && challenger.dynamic_oos.expectancy_usd != null ? '$' + Number(challenger.dynamic_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
   ];

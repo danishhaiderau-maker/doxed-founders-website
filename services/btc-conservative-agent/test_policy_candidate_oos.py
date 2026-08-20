@@ -1,7 +1,39 @@
 import json
 
 from research import policy_candidate_oos as policy_oos
-from research.policy_candidate_oos import build_policy_candidate_oos_report, _regime_key
+from research.policy_candidate_oos import (
+    _oos_policy_comparison,
+    _regime_key,
+    build_policy_candidate_oos_report,
+)
+
+
+def _score(episodes, expectancy, net):
+    return {"independent_episodes": episodes, "expectancy_usd": expectancy, "net_pnl_usd": net}
+
+
+def test_oos_comparison_requires_absolute_profitability():
+    negative = _oos_policy_comparison(_score(15, -3.7646, -56.4694), _score(15, -0.7179, -10.7684))
+    assert negative["winner_kind"] == "NONE"
+    assert negative["winner_status"] == "NO_PROFITABLE_OOS_WINNER"
+    assert negative["relative_leader_kind"] == "DYNAMIC"
+    assert negative["comparison_delta"]["dynamic_minus_static_expectancy_usd"] > 0
+
+    positive = _oos_policy_comparison(_score(10, 1.0, 10.0), _score(10, 2.0, 20.0))
+    assert positive["winner_kind"] == "DYNAMIC"
+    assert positive["winner_status"] == "PROFITABLE_OOS_WINNER"
+
+    positive_tie = _oos_policy_comparison(_score(10, 1.0, 10.0), _score(10, 1.0, 10.0))
+    assert positive_tie["winner_kind"] == "TIE"
+    assert positive_tie["winner_status"] == "PROFITABLE_OOS_WINNER"
+
+    tie = _oos_policy_comparison(_score(10, -1.0, -10.0), _score(10, -1.0, -10.0))
+    assert tie["winner_kind"] == "NONE"
+    assert tie["relative_leader_kind"] == "TIE"
+
+    empty = _oos_policy_comparison(_score(0, None, 0.0), _score(0, None, 0.0))
+    assert empty["winner_kind"] == "NONE"
+    assert empty["relative_leader_kind"] == "NONE"
 
 
 def test_empty_dataset_fails_closed(tmp_path):
@@ -64,6 +96,9 @@ def test_descriptive_pages_use_train_rank_and_include_rejected_shadow(tmp_path, 
     challenger = report["descriptive_challenger"]
     assert [row["policy_id"] for row in challenger["profitable_static_policies"]] == ["POLICY_GOOD"]
     assert challenger["dynamic_regimes"]
+    assert all(row["fallback"] is True for row in challenger["dynamic_regimes"])
+    assert all(row["selected_policy_id"] == "CONTROL_OR_NO_TRADE" for row in challenger["dynamic_regimes"])
+    assert all("research_candidate_policy_id" in row for row in challenger["dynamic_regimes"])
     assert report["evidence"]["independent_episodes"] == 10
     assert report["shadow_research"]["independent_episodes"] == 2
     assert report["shadow_research"]["profitable_policies"][0]["policy_id"] == "POLICY_GOOD"

@@ -28,6 +28,50 @@ MIN_PROMOTION_EPISODES = 100
 MAX_DESCRIPTIVE_STATIC_ROWS = 100
 
 
+def _oos_policy_comparison(static_oos, dynamic_oos) -> dict:
+    """Separate absolute profitability from merely being less unprofitable."""
+    static = static_oos or {}
+    dynamic = dynamic_oos or {}
+    static_n = int(static.get("independent_episodes") or 0)
+    dynamic_n = int(dynamic.get("independent_episodes") or 0)
+    static_ev = static.get("expectancy_usd")
+    dynamic_ev = dynamic.get("expectancy_usd")
+    static_net = static.get("net_pnl_usd")
+    dynamic_net = dynamic.get("net_pnl_usd")
+
+    def profitable(n, ev, net):
+        return bool(n > 0 and ev is not None and net is not None and float(ev) > 0 and float(net) > 0)
+
+    profitable_kinds = []
+    if profitable(static_n, static_ev, static_net):
+        profitable_kinds.append(("STATIC", float(static_ev), float(static_net)))
+    if profitable(dynamic_n, dynamic_ev, dynamic_net):
+        profitable_kinds.append(("DYNAMIC", float(dynamic_ev), float(dynamic_net)))
+    if len(profitable_kinds) == 2 and profitable_kinds[0][1:] == profitable_kinds[1][1:]:
+        winner = "TIE"
+    else:
+        winner = max(profitable_kinds, key=lambda row: (row[1], row[2]))[0] if profitable_kinds else "NONE"
+
+    relative = "NONE"
+    if static_n > 0 and dynamic_n > 0 and static_ev is not None and dynamic_ev is not None:
+        if float(dynamic_ev) > float(static_ev):
+            relative = "DYNAMIC"
+        elif float(static_ev) > float(dynamic_ev):
+            relative = "STATIC"
+        else:
+            relative = "TIE"
+    return {
+        "winner_kind": winner,
+        "winner_status": "PROFITABLE_OOS_WINNER" if winner != "NONE" else "NO_PROFITABLE_OOS_WINNER",
+        "relative_leader_kind": relative,
+        "comparison_delta": {
+            "dynamic_minus_static_expectancy_usd": None if static_ev is None or dynamic_ev is None else round(float(dynamic_ev) - float(static_ev), 6),
+            "dynamic_minus_static_net_pnl_usd": None if static_net is None or dynamic_net is None else round(float(dynamic_net) - float(static_net), 4),
+            "dynamic_minus_static_completed_episodes": dynamic_n - static_n,
+        },
+    }
+
+
 def _read_events(path: Path) -> list[dict]:
     rows = []
     try:
@@ -199,22 +243,36 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
     for regime, train_rows in sorted(regime_train.items()):
         chosen = regime_map.get(regime, "CONTROL")
         oos_rows = [row for row in oos if _regime_key(row) == regime]
+        train_ready = len(train_rows) >= MIN_TRAIN_EPISODES
+        oos_ready = len(oos_rows) >= MIN_OOS_EPISODES
+        fallback = not (train_ready and oos_ready)
         dynamic_regimes.append({
             "regime": regime,
-            "selected_policy_id": chosen,
+            "selected_policy_id": chosen if not fallback else "CONTROL_OR_NO_TRADE",
+            "research_candidate_policy_id": chosen,
             "train": _evaluate(chosen, train_rows, cache),
             "oos": _evaluate(chosen, oos_rows, cache),
-            "fallback": False,
+            "fallback": fallback,
+            "fallback_reason": None if not fallback else (
+                "INSUFFICIENT_REGIME_TRAIN_EPISODES" if not train_ready
+                else "INSUFFICIENT_REGIME_OOS_EPISODES"
+            ),
+            "required_train_episodes": MIN_TRAIN_EPISODES,
+            "required_oos_episodes": MIN_OOS_EPISODES,
             "qualification": "DESCRIPTIVE_ONLY",
         })
     unknown_oos = [row for row in oos if _regime_key(row) not in regime_map]
     if unknown_oos:
         dynamic_regimes.append({
             "regime": "UNKNOWN_OR_UNSEEN",
-            "selected_policy_id": "CONTROL",
+            "selected_policy_id": "CONTROL_OR_NO_TRADE",
+            "research_candidate_policy_id": None,
             "train": None,
             "oos": _evaluate("CONTROL", unknown_oos, cache),
             "fallback": True,
+            "fallback_reason": "REGIME_UNSEEN_IN_TRAINING",
+            "required_train_episodes": MIN_TRAIN_EPISODES,
+            "required_oos_episodes": MIN_OOS_EPISODES,
             "qualification": "DESCRIPTIVE_ONLY",
         })
 
@@ -258,9 +316,9 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".") -> dict:
     candidate = None
     descriptive = None
     if static_oos:
-        use_dynamic = dynamic_oos.get("expectancy_usd") is not None and dynamic_oos["expectancy_usd"] > (static_oos.get("expectancy_usd") or -1e9)
+        comparison = _oos_policy_comparison(static_oos, dynamic_oos)
         descriptive = {
-            "winner_kind": "DYNAMIC" if use_dynamic else "STATIC",
+            **comparison,
             "static_train": static_train,
             "static_oos": static_oos,
             "dynamic_oos": dynamic_oos,

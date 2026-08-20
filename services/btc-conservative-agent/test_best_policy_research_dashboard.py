@@ -295,9 +295,21 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
         "evidence_policy_signature": EVIDENCE_SIGNATURE,
         "evidence": {"independent_episodes": 2, "training_episodes": 1, "oos_episodes": 1},
         "descriptive_challenger": {
-            "winner_kind": "STATIC",
+            "winner_kind": "NONE",
+            "winner_status": "NO_PROFITABLE_OOS_WINNER",
+            "relative_leader_kind": "DYNAMIC",
+            "comparison_delta": {
+                "dynamic_minus_static_expectancy_usd": 3.0467,
+                "dynamic_minus_static_net_pnl_usd": 45.701,
+            },
+            "static_oos": {"independent_episodes": 15, "net_pnl_usd": -56.4694, "expectancy_usd": -3.7646},
+            "dynamic_oos": {"independent_episodes": 15, "net_pnl_usd": -10.7684, "expectancy_usd": -0.7179},
             "profitable_static_policies": [{"policy_id": "policy-a"}],
-            "dynamic_regimes": [{"regime": "BULL", "selected_policy_id": "policy-a"}],
+            "dynamic_regimes": [{
+                "regime": "BULL", "selected_policy_id": "CONTROL_OR_NO_TRADE",
+                "research_candidate_policy_id": "policy-a", "fallback": True,
+                "fallback_reason": "INSUFFICIENT_REGIME_OOS_EPISODES",
+            }],
         },
         "shadow_research": {"independent_episodes": 1, "profitable_policies": []},
     }
@@ -319,6 +331,13 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     assert static["profitable_policies"][0]["policy_id"] == "policy-a"
     assert static["live_policy_change_allowed"] is False
     assert dynamic["regimes"][0]["regime"] == "BULL"
+    assert dynamic["winner_kind"] == "NONE"
+    assert dynamic["winner_status"] == "NO_PROFITABLE_OOS_WINNER"
+    assert dynamic["relative_leader_kind"] == "DYNAMIC"
+    assert dynamic["comparison_delta"]["dynamic_minus_static_expectancy_usd"] == 3.0467
+    assert "No profitable OOS winner" in dynamic["warning"]
+    assert dynamic["regimes"][0]["fallback"] is True
+    assert dynamic["regimes"][0]["selected_policy_id"] == "CONTROL_OR_NO_TRADE"
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
     assert shadow["v22_shadow"]["independent_episodes"] == 1
     assert shadow["paused_shadow"]["overall"]["closed"] == 3
@@ -335,6 +354,10 @@ def test_main_dashboard_links_to_all_policy_research_pages():
     assert 'href="/static-policies"' in source
     assert 'href="/dynamic-policies"' in source
     assert 'href="/shadow-research"' in source
+    assert "Profitable OOS winner" in source
+    assert "NONE — both candidates unprofitable" in source
+    assert "Relative leader only" in source
+    assert "Descriptive winner" not in source
 
 
 def test_analyzer_policy_reports_use_configured_data_and_report_roots():
