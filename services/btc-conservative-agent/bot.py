@@ -142,6 +142,7 @@ from collector_v22_schema import (
     COLLECTOR_VERSION as COLLECTOR_V22_VERSION,
     EVENT_INDEX_FILE as COLLECTOR_V22_EVENT_INDEX_FILE,
     RESEARCH_EVENTS_FILE as COLLECTOR_V22_RESEARCH_EVENTS_FILE,
+    build_policy_identity,
 )
 from collector_v22 import (
     build_decision_tree_v22,
@@ -7430,6 +7431,51 @@ def tile2_entry_policy_hash() -> str:
     return digest[:12]
 
 
+def invert_signal_active() -> bool:
+    """Current operator treatment for new signals; frozen default remains OFF."""
+    try:
+        with state_lock:
+            return bool(state.get("invert_signal", False))
+    except Exception:
+        return False
+
+
+def apply_invert_direction(raw_direction, invert_on=None):
+    """Return the executed side for a new signal without mutating old tickets."""
+    direction = str(raw_direction or "").upper()
+    active = invert_signal_active() if invert_on is None else bool(invert_on)
+    if active and direction == "LONG":
+        return "SHORT", True
+    if active and direction == "SHORT":
+        return "LONG", True
+    return direction, False
+
+
+def stamp_signal_policy_identity(signal: dict, *, raw_direction, executed_direction, invert_on: bool) -> dict:
+    """Freeze direction/treatment identity on a newly created signal ticket."""
+    if not isinstance(signal, dict):
+        return {}
+    control_cell = dict(CONTROL_CELL)
+    control_cell["invert_on"] = bool(invert_on)
+    identity = build_policy_identity(
+        epoch_id=_collector_v22_epoch_id(), control_cell=control_cell, invert_on=bool(invert_on),
+    )
+    signal.update({
+        "ai_direction_raw": str(raw_direction or "").upper(),
+        "raw_direction": str(raw_direction or "").upper(),
+        "final_direction": str(executed_direction or "").upper(),
+        "executed_direction": str(executed_direction or "").upper(),
+        "direction": str(executed_direction or "").upper(),
+        "invert_on": bool(invert_on),
+        "invert_signal": bool(invert_on),
+        "base_policy_id": identity["base_policy_id"],
+        "policy_signature": identity["policy_signature"],
+        "policy_epoch_id": identity["policy_epoch_id"],
+        "policy_identity": identity,
+    })
+    return identity
+
+
 def csv_research_meta(signal: dict = None) -> dict:
     """Columns written to research CSVs for analyzer version/exchange verification."""
     invert_on = False
@@ -7437,7 +7483,7 @@ def csv_research_meta(signal: dict = None) -> dict:
         invert_on = _coerce_invert_on(signal)
     else:
         try:
-            invert_on = bool(state.get("invert_signal", False))
+            invert_on = invert_signal_active()
         except Exception:
             invert_on = False
     meta = {
@@ -7459,7 +7505,7 @@ def _coerce_invert_on(*sources) -> bool:
     for src in sources:
         if not isinstance(src, dict):
             continue
-        for key in ("invert_on", "invert_signal", "inverted"):
+        for key in ("invert_on", "invert_signal"):
             if src.get(key) is not None:
                 return bool(src.get(key))
         controls = src.get("controls")
@@ -7470,7 +7516,7 @@ def _coerce_invert_on(*sources) -> bool:
             return bool(entry.get("invert_signal"))
     try:
         with state_lock:
-            return bool(state.get("invert_signal", False))
+            return invert_signal_active()
     except Exception:
         return False
 ORDER_PLACEMENT_GRACE_SEC = 30
@@ -10768,21 +10814,14 @@ def finalize_signal(signal: dict, ai: dict = None, status: str = None):
         signal["ai_decision"] = ai.get("decision")
         signal["ai_source"] = ai.get("source")
         ai_direction = ai.get("direction")
-        signal["ai_direction_raw"] = ai_direction
-        final_direction = ai_direction
-        inverted = False
-        if state.get("invert_signal", False):
-            if ai_direction == "LONG":
-                final_direction = "SHORT"
-            elif ai_direction == "SHORT":
-                final_direction = "LONG"
-            inverted = True
+        invert_on = invert_signal_active()
+        final_direction, inverted = apply_invert_direction(ai_direction, invert_on)
+        if inverted:
             logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED raw_ai={ai_direction} -> final_direction={final_direction} inverted={inverted} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-        signal["final_direction"] = final_direction
-        signal["direction"] = final_direction
+        stamp_signal_policy_identity(
+            signal, raw_direction=ai_direction, executed_direction=final_direction, invert_on=invert_on,
+        )
         signal["inverted"] = inverted
-        signal["invert_on"] = bool(state.get("invert_signal", False))
-        signal["invert_signal"] = signal["invert_on"]
     if ai and not signal.get("_ai_logged"):
         log_ai(signal, ai)
     signal["_completed"] = True
@@ -21731,21 +21770,14 @@ def process_signal(event: dict):
             signal["event"] = event_obj
             signal["signal_price"] = state.get("price")
             ai_direction_raw = ai.get("direction")
-            final_direction = ai_direction_raw
-            inverted = False
-            if state.get("invert_signal", False):
-                if ai_direction_raw == "LONG":
-                    final_direction = "SHORT"
-                elif ai_direction_raw == "SHORT":
-                    final_direction = "LONG"
-                inverted = True
+            invert_on = invert_signal_active()
+            final_direction, inverted = apply_invert_direction(ai_direction_raw, invert_on)
+            if inverted:
                 logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED immediately after AI - raw_ai={ai_direction_raw} -> final_direction={final_direction} inverted={inverted} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
-            signal["ai_direction_raw"] = ai_direction_raw
-            signal["final_direction"] = final_direction
-            signal["direction"] = final_direction
+            stamp_signal_policy_identity(
+                signal, raw_direction=ai_direction_raw, executed_direction=final_direction, invert_on=invert_on,
+            )
             signal["inverted"] = inverted
-            signal["invert_on"] = bool(state.get("invert_signal", False))
-            signal["invert_signal"] = signal["invert_on"]
             signal["ai_decision"] = ai.get("decision")
             signal["ai_win_prob"] = ai.get("win_prob")
             signal["bull_score_at_entry"] = ai.get("bull_score", 0)
@@ -28014,7 +28046,7 @@ __ADMIN_ACCESS_CONTROLS__
 <div id="dashboardToggles" style="margin:12px 0;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;">
     <strong style="color:#58a6ff;">Quick toggles</strong>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
-    <button onclick="toggleInvert()">Invert Signal: <span id="invertBtn">OFF</span></button>
+    <button id="invertToggleBtn" onclick="toggleInvert()" title="Flip LONG↔SHORT on new signals only. Existing tickets stay unchanged. Admin login required to toggle.">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
@@ -28728,9 +28760,35 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_early_fail');
       refresh();
     }
+    function applyInvertUi(d) {
+      const btn = document.getElementById('invertToggleBtn');
+      const label = document.getElementById('invertBtn');
+      const publicView = !!(d && (d.public_sanitized || d.invert_control === 'admin_login_required' || d.operator_authed === false));
+      if (publicView) {
+        if (btn) {
+          btn.disabled = true;
+          btn.title = 'Admin login required to toggle invert';
+          btn.style.backgroundColor = '#1f2937';
+        }
+        if (label) label.innerText = d && d.invert_signal ? 'ON · admin login required' : 'OFF · admin login required';
+        return;
+      }
+      const on = !!(d && d.invert_signal);
+      if (btn) {
+        btn.disabled = false;
+        btn.title = 'Flip LONG↔SHORT on new signals only. Existing tickets stay unchanged.';
+        btn.style.backgroundColor = on ? '#f97316' : '#374151';
+      }
+      if (label) label.innerText = on ? 'ON' : 'OFF';
+    }
     async function toggleInvert() {
-      await post('/api/toggle_invert_signal');
-      refresh();
+      const btn = document.getElementById('invertToggleBtn');
+      if (btn && btn.disabled) return;
+      const res = await post('/api/toggle_invert_signal');
+      if (res && res.ok) {
+        try { applyInvertUi(await res.json()); } catch (_) {}
+        await refresh();
+      }
     }
     async function toggleContinuousAi() {
       await post('/api/toggle_continuous_ai_research');
@@ -29579,8 +29637,7 @@ DASHBOARD_JS = """(function () {
         }
         const invertBtn = document.getElementById('invertBtn');
         if (invertBtn) {
-          invertBtn.innerText = `Invert Signal ${d.invert_signal ? 'ON' : 'OFF'}`;
-          invertBtn.style.backgroundColor = d.invert_signal ? '#f97316' : '#374151';
+          applyInvertUi(d);
         }
         const contAiOn = d.continuous_ai_research_enabled !== false;
         const contAiBtn = document.getElementById('continuousAiBtn');
@@ -33598,8 +33655,13 @@ def _sanitize_public_state(state: dict) -> dict:
                      "next_funding_time", "ts", "predicted_rate")
         }
 
-    # Explicit marker so observers know they're seeing the sanitized view.
+    # Truthfully expose the mode while keeping mutation admin-only.
+    invert = bool(state.get("invert_signal", False))
     out["public_sanitized"] = True
+    out["invert_signal"] = invert
+    out["invert_on"] = invert
+    out["operator_authed"] = False
+    out["invert_control"] = "admin_login_required"
     out["ai_input"] = {
         "status": "OWNER_ONLY",
         "message": (
@@ -34387,10 +34449,45 @@ def toggle_early_fail():
 
 @app.route('/api/toggle_invert_signal', methods=['POST'])
 def toggle_invert_signal():
+    """Toggle treatment for new signals only; existing tickets retain stamps."""
+    if not _admin_authed():
+        return jsonify({
+            "error": "unauthorized — admin token required",
+            "invert_control": "admin_login_required",
+        }), 401
     with state_lock:
-        state["invert_signal"] = not state.get("invert_signal", False)
+        state["invert_signal"] = not bool(state.get("invert_signal", False))
+        invert_on = bool(state["invert_signal"])
         save_persistent_config()
-    return jsonify({"invert_signal": state["invert_signal"]})
+    control_cell = dict(CONTROL_CELL)
+    control_cell["invert_on"] = invert_on
+    identity = build_policy_identity(
+        epoch_id=_collector_v22_epoch_id(), control_cell=control_cell, invert_on=invert_on,
+    )
+    _patch_api_state_cache_fields(
+        invert_signal=invert_on,
+        invert_on=invert_on,
+        operator_authed=True,
+        invert_control="operator",
+        policy_signature=identity["policy_signature"],
+        policy_epoch_id=identity["policy_epoch_id"],
+    )
+    logger.info(
+        f"[INVERT] invert_signal={invert_on} applies_to=new_signals_only "
+        f"policy_epoch={identity['policy_epoch_id']} existing_tickets_unchanged=True "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({
+        "ok": True,
+        "invert_signal": invert_on,
+        "invert_on": invert_on,
+        "invert_control": "operator",
+        "operator_authed": True,
+        "applies_to": "new_signals_only",
+        "existing_tickets_unchanged": True,
+        "policy_signature": identity["policy_signature"],
+        "policy_epoch_id": identity["policy_epoch_id"],
+    })
 
 @app.route('/api/toggle_profit_gates', methods=['POST'])
 def toggle_profit_gates():
