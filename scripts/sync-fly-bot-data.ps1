@@ -204,8 +204,12 @@ foreach ($row in $selectedFiles) {
         $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
         try {
           $encoded = [uri]::EscapeDataString($rel)
+          $expectedPhysicalSize = [int64]$(if ($null -ne $row.physical_size) { $row.physical_size } else { $row.size })
+          $expectedMtime = [int64]$row.mtime_ns
+          $expectedInode = [int64]$row.inode
           $response = $downloadClient.GetAsync(
-            "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
+            "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit" +
+            "&expected_physical_size=$expectedPhysicalSize&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode"
           ).GetAwaiter().GetResult()
           $response.EnsureSuccessStatusCode() | Out-Null
           try {

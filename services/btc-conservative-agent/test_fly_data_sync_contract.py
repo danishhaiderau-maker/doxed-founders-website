@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 from research.platform_relay_evidence import _validate_platform_relay_evidence_payload as pure_validate_relay
@@ -146,6 +147,16 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
         assert rows[0]["size"] == target.stat().st_size
 
 
+def test_data_sync_generation_fence_rejects_every_generation_change():
+    namespace = _load_bot_functions("_data_sync_generation_matches")
+    matches = namespace["_data_sync_generation_matches"]
+    original = SimpleNamespace(st_size=100, st_mtime_ns=200, st_ino=300)
+    assert matches(original, size=100, mtime_ns=200, inode=300)
+    assert not matches(original, size=101, mtime_ns=200, inode=300)
+    assert not matches(original, size=100, mtime_ns=201, inode=300)
+    assert not matches(original, size=100, mtime_ns=200, inode=301)
+
+
 def test_fly_runtime_cwd_is_volume_backed():
     assert 'RUNTIME_DIR="$DATA_DIR/runtime"' in ENTRYPOINT
     assert 'export BOT_SINGLETON_DIR="$DATA_DIR/locks"' in ENTRYPOINT
@@ -159,9 +170,15 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "@app.route('/api/data-sync/file')" in BOT
     assert "@app.route('/api/data-sync/ack', methods=['POST'])" in BOT
     assert 'response.headers["X-Chunk-Sha256"]' in BOT
+    assert '"physical_size": int(stat.st_size)' in BOT
+    assert '"file generation changed after manifest"' in BOT
+    assert '"file generation changed during download"' in BOT
     assert "/api/data-sync/manifest" not in BOT[BOT.index("_READ_ONLY_GET_PATHS"):BOT.index("def _client_ip")]
     assert '"X-Bot-Admin-Token" = $AdminToken' in SYNC_SCRIPT
     assert "Chunk checksum mismatch" in SYNC_SCRIPT
+    assert "expected_physical_size=$expectedPhysicalSize" in SYNC_SCRIPT
+    assert "expected_mtime_ns=$expectedMtime" in SYNC_SCRIPT
+    assert "expected_inode=$expectedInode" in SYNC_SCRIPT
     assert "$chunkLimit = 4MB" in SYNC_SCRIPT
     assert '$appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")' in SYNC_SCRIPT
     assert "[int64]$previous.mtime_ns -eq [int64]$row.mtime_ns" in SYNC_SCRIPT

@@ -35824,6 +35824,14 @@ def _data_sync_complete_record_size(path: Path, size: int) -> int:
     return 0
 
 
+def _data_sync_generation_matches(stat, *, size: int, mtime_ns: int, inode: int) -> bool:
+    return (
+        int(stat.st_size) == int(size)
+        and int(stat.st_mtime_ns) == int(mtime_ns)
+        and int(getattr(stat, "st_ino", 0) or 0) == int(inode)
+    )
+
+
 def _data_sync_inventory() -> list:
     runtime = _data_sync_runtime_root()
     seen = set()
@@ -35846,6 +35854,7 @@ def _data_sync_inventory() -> list:
                     rows.append({
                         "path": _data_sync_relpath(path),
                         "size": published_size,
+                        "physical_size": int(stat.st_size),
                         "mtime_ns": int(stat.st_mtime_ns),
                         "inode": int(getattr(stat, "st_ino", 0) or 0),
                     })
@@ -35974,12 +35983,29 @@ def api_data_sync_file():
             max(1, int(request.args.get("limit") or _DATA_SYNC_CHUNK_MAX)),
         )
         before = path.stat()
+        expected_size = request.args.get("expected_physical_size")
+        expected_mtime = request.args.get("expected_mtime_ns")
+        expected_inode = request.args.get("expected_inode")
+        if None not in (expected_size, expected_mtime, expected_inode) and not _data_sync_generation_matches(
+            before,
+            size=int(expected_size),
+            mtime_ns=int(expected_mtime),
+            inode=int(expected_inode),
+        ):
+            return jsonify({"error": "file generation changed after manifest"}), 409
         if offset > before.st_size:
             return jsonify({"error": "offset beyond current file size", "size": before.st_size}), 416
         with path.open("rb") as handle:
             handle.seek(offset)
             payload = handle.read(limit)
         after = path.stat()
+        if not _data_sync_generation_matches(
+            after,
+            size=int(before.st_size),
+            mtime_ns=int(before.st_mtime_ns),
+            inode=int(getattr(before, "st_ino", 0) or 0),
+        ):
+            return jsonify({"error": "file generation changed during download"}), 409
         response = make_response(payload)
         response.headers["Content-Type"] = "application/octet-stream"
         response.headers["X-Data-Path"] = _data_sync_relpath(path)
