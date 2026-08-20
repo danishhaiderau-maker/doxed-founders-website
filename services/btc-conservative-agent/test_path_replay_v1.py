@@ -204,8 +204,12 @@ class PathReplayGroupingTests(unittest.TestCase):
         self.assertFalse(report["live_recommendation"])
         self.assertTrue(report["integer_sweep_available"])
         self.assertEqual(report["live_policy_untouched"]["thesis_cut"], -12.0)
-        self.assertTrue(report["live_policy_untouched"]["hard_stop_does_not_close_paper"])
-        self.assertEqual(report["live_policy_untouched"]["ladder"][0], [4, 2])
+        self.assertTrue(report["live_policy_untouched"]["hard_stop_closes_paper"])
+        self.assertFalse(report["live_policy_untouched"]["hard_stop_does_not_close_paper"])
+        self.assertEqual(report["live_policy_untouched"]["ladder"], [
+            [8, 5], [12, 10], [19, 17], [40, 28],
+            [60, 45], [80, 60], [100, 75], [150, 120],
+        ])
 
 
 class PathReplayAltExitTests(unittest.TestCase):

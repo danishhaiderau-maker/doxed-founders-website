@@ -36,21 +36,12 @@ TRAIL_LADDER_SCENARIO_C = [
     (150, 120),
 ]
 
-# Legacy ladder retained for TYPE_B_HUNTER_V1. The constant NAME is kept for
-# backwards compatibility (referenced in combo_pathway_config.py:621+ via
-# get_lane_ladder_override) — the name is HISTORICAL; the first rung is now
-# (8, 5), changed from (10, 6) on 2026-08-06 (Danish decision).
-TRAIL_LADDER_SCENARIO_C_LEGACY_10_6 = [
-    (8, 5),       # CHANGED from (10, 6) — Danish decision 2026-08-06
-    (19, 17),
-    (40, 28),
-    (60, 45),
-    (80, 60),
-    (100, 75),
-    (150, 120),
-]
+# Compatibility aliases must not silently create a different live treatment.
+# TYPE_B uses the same operator-approved eight-rung policy unless a future
+# treatment has its own explicit signature and qualification record.
+TRAIL_LADDER_SCENARIO_C_LEGACY_10_6 = list(TRAIL_LADDER_SCENARIO_C)
 
 SCENARIO_C_PROFILE_ID = "SCENARIO_C_RUNNER_8_v8_20260820"
 SCENARIO_C_LADDER_LABEL = "8→5, 12→10, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120"
-SCENARIO_C_LEGACY_10_6_PROFILE_ID = "SCENARIO_C_RUNNER_8_v8_TYPE_B_20260820"
-SCENARIO_C_LEGACY_10_6_LADDER_LABEL = "8→5, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120 (TYPE_B_HUNTER_V1)"
+SCENARIO_C_LEGACY_10_6_PROFILE_ID = SCENARIO_C_PROFILE_ID
+SCENARIO_C_LEGACY_10_6_LADDER_LABEL = SCENARIO_C_LADDER_LABEL

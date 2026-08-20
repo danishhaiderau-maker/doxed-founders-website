@@ -83,14 +83,9 @@ COMBO_LANE_SPECS = {
         "id_prefix": "tbhv1",
         "module": "type_b_hunter_v1.py",
         "ai_cadence_offset_sec": 0,
-        # v12 (historical): TYPE_B_HUNTER_V1 used to keep a legacy 10→6 first rung
-        # because tightening the global ladder (12→10) made Type B Hunter worse
-        # (-$22.20 in the v2a backtest). As of 2026-08-06 (Danish decision) the
-        # v2a backtest is considered stale — Stage 1 strategy fixes (commit
-        # f03640dd) changed entry direction logic — and TYPE_B now uses the same
-        # (8, 5) first rung as CONTINUOUS. The constant NAME
-        # (TRAIL_LADDER_SCENARIO_C_LEGACY_10_6) is retained only for backwards
-        # compatibility; its first rung is now (8, 5). See scenario_c_config.py.
+        # Compatibility names remain, but TYPE_B uses the exact operator-approved
+        # eight-rung Scenario C policy. A distinct treatment requires its own
+        # explicit treatment signature and qualification evidence.
         "ladder": TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
         "ladder_label": SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
         "ladder_profile_id": SCENARIO_C_LEGACY_10_6_PROFILE_ID,

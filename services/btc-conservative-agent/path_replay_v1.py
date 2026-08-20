@@ -2,8 +2,9 @@
 
 What we are doing (not a live Fly knob grid):
 
-1. One live paper policy on Fly. Trades as today: thesis −12, Scenario C
-   rungs, hard-stop-does-not-close-paper. Cheetah stays paused. No RSI veto.
+1. One live paper policy on Fly. Trades as today: thesis −12 for the first
+   five minutes, Scenario C rungs, then a closing −30 hard stop. Cheetah stays
+   paused. No RSI veto.
 2. Record a dense unreal path (in-trade + 120m after exit) in margin-% at
    100x, 1s/tick. Because the path is continuous, any integer 0–100 for
    thesis, hard stop, or ladder can be replayed later.
@@ -71,24 +72,32 @@ _FIRST_EXIT_MAP = {
     "TIME_STOP": "TIME_STOP",
     "PATH_END": "PATH_END",
 }
-CONTROL_CELL = {
-    "tag": "CONTROL",
-    "LIVE_CELL": True,
-    "orig_offset_pct": 0.10,
-    "thesis_cut": -12.0,
-    "ladder": "4->2",
-    "invert_on": False,
-}
-# 1pp of margin at 100x is 0.01% of price.
-MARGIN_PP_AS_PRICE_PCT = 0.01
-# Documented live policy — replay grouping must not mutate these on Fly.
-LIVE_THESIS_CUT = -12.0
-LIVE_HARD_STOP_PCT = 30.0
-LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER = True
 try:
     from scenario_c_config import TRAIL_LADDER_SCENARIO_C as LIVE_SCENARIO_C_LADDER
 except Exception:  # pragma: no cover - keep replay importable in isolation
     LIVE_SCENARIO_C_LADDER = ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))
+# 1pp of margin at 100x is 0.01% of price.
+MARGIN_PP_AS_PRICE_PCT = 0.01
+# Documented live policy — replay grouping must not mutate these on Fly.
+LIVE_THESIS_CUT = -12.0
+LIVE_THESIS_WINDOW_SEC = 5 * 60.0
+LIVE_HARD_STOP_PCT = 30.0
+LIVE_HARD_STOP_START_SEC = LIVE_THESIS_WINDOW_SEC
+LIVE_HARD_STOP_CLOSES_PAPER = True
+# Deprecated compatibility inverse. New provenance uses the positive key.
+LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER = not LIVE_HARD_STOP_CLOSES_PAPER
+CONTROL_CELL = {
+    "tag": "CONTROL",
+    "LIVE_CELL": True,
+    "orig_offset_pct": 0.10,
+    "thesis_cut": LIVE_THESIS_CUT,
+    "thesis_window_sec": LIVE_THESIS_WINDOW_SEC,
+    "hard_stop_pct": LIVE_HARD_STOP_PCT,
+    "hard_stop_start_sec": LIVE_HARD_STOP_START_SEC,
+    "hard_stop_closes_paper": LIVE_HARD_STOP_CLOSES_PAPER,
+    "ladder": [list(rung) for rung in LIVE_SCENARIO_C_LADDER],
+    "invert_on": False,
+}
 LIVE_EARLY_LADDER_4_2 = ((4.0, 2.0),)
 ATR_K_GRID = (1.0, 1.5, 2.0, 3.0)
 CHANDELIER_K_GRID = (2.0, 3.0)
@@ -469,6 +478,78 @@ def simulate_policy_on_path(
         "MFE_time": _minutes_from_fill(t_mfe, fill_t),
         "MAE": round(mae, 4),
         "MAE_time": _minutes_from_fill(t_mae, fill_t),
+        "green": bool(pnl_usd is not None and pnl_usd > 0),
+        "control_cell": dict(CONTROL_CELL),
+    }
+
+
+def simulate_live_policy_on_path(
+    ticks: Sequence[Mapping[str, Any]],
+    *,
+    direction: str,
+    entry_price: float,
+    leverage: float = LIVE_LEVERAGE,
+    margin_usdt: float = 20.0,
+    fill_t: float = 0.0,
+) -> dict:
+    """Replay the exact live two-phase loss cap and eight-rung ladder."""
+    ordered = sorted(ticks, key=lambda tick: (float(tick.get("t") or 0), int(tick.get("seq") or 0)))
+    peak = 0.0
+    mae = 0.0
+    lock = None
+    exit_reason = "PATH_END"
+    exit_t = exit_unreal = exit_price = None
+    for tick in ordered:
+        t = float(tick.get("t") or 0)
+        if t < fill_t:
+            continue
+        mark = executable_mark(tick, direction)
+        stored = tick.get("unreal_pct")
+        unreal = float(stored) if stored is not None else (
+            unrealized_margin_pct(direction=direction, entry_price=entry_price, mark=mark, leverage=leverage)
+            if mark is not None else None
+        )
+        if unreal is None:
+            continue
+        peak = max(peak, unreal)
+        mae = min(mae, unreal)
+        for trigger, floor in LIVE_SCENARIO_C_LADDER:
+            if peak >= float(trigger):
+                lock = float(floor)
+        age = t - fill_t
+        if age < LIVE_THESIS_WINDOW_SEC and unreal <= LIVE_THESIS_CUT:
+            exit_reason = "THESIS_FAST_CUT"
+        elif age >= LIVE_HARD_STOP_START_SEC and unreal <= -LIVE_HARD_STOP_PCT:
+            exit_reason = "HARD_STOP"
+        elif lock is not None and unreal <= lock:
+            exit_reason = "PROFIT_LOCK_LADDER"
+        if exit_reason != "PATH_END":
+            exit_t, exit_unreal, exit_price = t, unreal, mark
+            break
+        exit_t, exit_unreal, exit_price = t, unreal, mark
+    pnl_usd = None if exit_unreal is None else round((float(exit_unreal) / 100.0) * float(margin_usdt), 4)
+    return {
+        "schema": "live_path_policy_sim_v1",
+        "policy_tag": PATH_REPLAY_POLICY_TAG,
+        "replay_version": REPLAY_VERSION,
+        "units": PATH_UNITS,
+        "live_recommendation": False,
+        "direction": str(direction).upper(),
+        "entry_price": entry_price,
+        "thesis_cut": LIVE_THESIS_CUT,
+        "thesis_window_sec": LIVE_THESIS_WINDOW_SEC,
+        "hard_stop": -LIVE_HARD_STOP_PCT,
+        "hard_stop_start_sec": LIVE_HARD_STOP_START_SEC,
+        "hard_stop_closes_paper": LIVE_HARD_STOP_CLOSES_PAPER,
+        "ladder": [list(rung) for rung in LIVE_SCENARIO_C_LADDER],
+        "exit_reason": exit_reason,
+        "FIRST_EXIT": first_exit_code(exit_reason),
+        "exit_t": exit_t,
+        "exit_price": exit_price,
+        "exit_unreal_pct": None if exit_unreal is None else round(float(exit_unreal), 4),
+        "net_pnl_usd": pnl_usd,
+        "mfe_pct": round(peak, 4),
+        "mae_pct": round(mae, 4),
         "green": bool(pnl_usd is not None and pnl_usd > 0),
         "control_cell": dict(CONTROL_CELL),
     }
@@ -1386,17 +1467,13 @@ def replay_group_report(
     if best is not None:
         best.pop("_pnl", None)
 
-    live = simulate_policy_on_path(
+    live = simulate_live_policy_on_path(
         ticks,
         direction=direction,
         entry_price=entry,
         leverage=leverage,
         margin_usdt=margin_usdt,
-        thesis_cut=LIVE_THESIS_CUT,
-        hard_stop=None,
-        ladder=LIVE_SCENARIO_C_LADDER,
         fill_t=fill_t,
-        mfe_protect_pct=mfe_protect_pct,
     )
     live["left_vs_mfe_pct"] = _left_on_table(live.get("mfe_pct"), live.get("exit_unreal_pct"))
     early_4_2 = simulate_policy_on_path(
@@ -1484,6 +1561,10 @@ def replay_group_report(
         "live_recommendation": False,
         "live_policy_untouched": {
             "thesis_cut": LIVE_THESIS_CUT,
+            "thesis_window_sec": LIVE_THESIS_WINDOW_SEC,
+            "hard_stop_pct": LIVE_HARD_STOP_PCT,
+            "hard_stop_start_sec": LIVE_HARD_STOP_START_SEC,
+            "hard_stop_closes_paper": LIVE_HARD_STOP_CLOSES_PAPER,
             "hard_stop_does_not_close_paper": LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER,
             "ladder": [list(rung) for rung in LIVE_SCENARIO_C_LADDER],
             "note": "4pp / 5pp numbers are analysis grouping, not a live knob grid.",
@@ -1566,7 +1647,7 @@ def path_recovery_stats(
     ever_green = t_green is not None
     hit_12 = "12" in first_hit
     return {
-        "schema": "path_recovery_v1",
+        "schema": "path_recovery_v2",
         "mfe_pct": round(peak, 4),
         "mae_pct": round(mae, 4),
         "MFE": round(peak, 4),
@@ -1578,7 +1659,9 @@ def path_recovery_stats(
         "time_to_mfe_sec": None if t_mfe is None else round(float(t_mfe) - float(fill_t), 3),
         "time_to_mae_sec": None if t_mae is None else round(float(t_mae) - float(fill_t), 3),
         "hit_thesis_12": hit_12,
-        "would_stop_13_hit": mae <= -LIVE_HARD_STOP_PCT,
+        "would_live_hard_stop_hit": mae <= -LIVE_HARD_STOP_PCT,
+        "would_stop_30_hit": mae <= -30.0,
+        "would_stop_13_hit": mae <= -13.0,
         "recovered_after_12": "12" in green_after,
         "recovered_after_13": "13" in green_after,
         "would_50_save": bool(hit_12 and mae > -50.0 and "12" in green_after),
@@ -1879,9 +1962,12 @@ def score_all_corners(
         "live_policy_untouched": {
             "orig_offset_pct": 0.10,
             "thesis_cut": LIVE_THESIS_CUT,
+            "thesis_window_sec": LIVE_THESIS_WINDOW_SEC,
             "hard_stop_pct": LIVE_HARD_STOP_PCT,
+            "hard_stop_start_sec": LIVE_HARD_STOP_START_SEC,
+            "hard_stop_closes_paper": LIVE_HARD_STOP_CLOSES_PAPER,
             "hard_stop_does_not_close_paper": LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER,
-            "ladder": "4->2 then Scenario C",
+            "ladder": [list(rung) for rung in LIVE_SCENARIO_C_LADDER],
         },
         "recovery": recovery,
         "mfe_mae_trajectory": traj,

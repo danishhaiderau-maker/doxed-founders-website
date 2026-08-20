@@ -117,7 +117,13 @@ class TapeCompletenessTests(unittest.TestCase):
         self.assertTrue(closed["LIVE_CELL"])
         self.assertAlmostEqual(closed["control_cell"]["orig_offset_pct"], 0.10)
         self.assertEqual(closed["control_cell"]["thesis_cut"], -12.0)
-        self.assertEqual(closed["control_cell"]["ladder"], "4->2")
+        self.assertEqual(closed["control_cell"]["ladder"], [
+            [8, 5], [12, 10], [19, 17], [40, 28],
+            [60, 45], [80, 60], [100, 75], [150, 120],
+        ])
+        self.assertEqual(closed["control_cell"]["thesis_window_sec"], 300.0)
+        self.assertEqual(closed["control_cell"]["hard_stop_pct"], 30.0)
+        self.assertTrue(closed["control_cell"]["hard_stop_closes_paper"])
         self.assertFalse(closed["control_cell"]["invert_on"])
         self.assertIn("MFE", closed)
         self.assertIn("MFE_time", closed)
