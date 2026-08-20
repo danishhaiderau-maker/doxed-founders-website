@@ -207,9 +207,12 @@ foreach ($row in $selectedFiles) {
           $expectedPhysicalSize = [int64]$(if ($null -ne $row.physical_size) { $row.physical_size } else { $row.size })
           $expectedMtime = [int64]$row.mtime_ns
           $expectedInode = [int64]$row.inode
+          $expectedPublishedSize = [int64]$row.size
+          $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
           $response = $downloadClient.GetAsync(
             "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit" +
-            "&expected_physical_size=$expectedPhysicalSize&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode"
+            "&expected_physical_size=$expectedPhysicalSize&expected_published_size=$expectedPublishedSize" +
+            "&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode&consistency_mode=$consistencyMode"
           ).GetAwaiter().GetResult()
           $response.EnsureSuccessStatusCode() | Out-Null
           try {

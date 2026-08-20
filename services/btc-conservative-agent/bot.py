@@ -35714,6 +35714,9 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "archive-v2",
     "object-store",
     "object_store",
+    # Original corrupt evidence is preserved with a hash/line receipt for
+    # manual review. It must not starve the active mirror sync repeatedly.
+    "corrupt_evidence_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 
@@ -35832,6 +35835,23 @@ def _data_sync_generation_matches(stat, *, size: int, mtime_ns: int, inode: int)
     )
 
 
+def _data_sync_consistency_mode(path: Path) -> str:
+    """Declare only proven append-only files eligible for fixed-prefix reads.
+
+    JSONL and CSV remain strict: several active writers patch or atomically
+    rewrite those files in place. Runtime .log files are logging-handler-owned
+    append streams; rotation changes the inode and is therefore still fenced.
+    """
+    return "append_prefix_v1" if path.suffix.lower() == ".log" else "strict_generation_v1"
+
+
+def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> bool:
+    return bool(
+        int(getattr(stat, "st_ino", 0) or 0) == int(inode)
+        and int(stat.st_size) >= int(minimum_size)
+    )
+
+
 def _data_sync_inventory() -> list:
     runtime = _data_sync_runtime_root()
     seen = set()
@@ -35857,6 +35877,7 @@ def _data_sync_inventory() -> list:
                         "physical_size": int(stat.st_size),
                         "mtime_ns": int(stat.st_mtime_ns),
                         "inode": int(getattr(stat, "st_ino", 0) or 0),
+                        "consistency_mode": _data_sync_consistency_mode(resolved),
                     })
                 except (OSError, ValueError):
                     continue
@@ -35986,11 +36007,28 @@ def api_data_sync_file():
         expected_size = request.args.get("expected_physical_size")
         expected_mtime = request.args.get("expected_mtime_ns")
         expected_inode = request.args.get("expected_inode")
-        if None not in (expected_size, expected_mtime, expected_inode) and not _data_sync_generation_matches(
-            before,
-            size=int(expected_size),
-            mtime_ns=int(expected_mtime),
-            inode=int(expected_inode),
+        expected_published_size = request.args.get("expected_published_size")
+        requested_mode = str(request.args.get("consistency_mode") or "strict_generation_v1")
+        server_mode = _data_sync_consistency_mode(path)
+        if requested_mode != server_mode:
+            return jsonify({"error": "file consistency mode mismatch"}), 409
+        append_prefix = requested_mode == "append_prefix_v1"
+        if append_prefix:
+            if None in (expected_size, expected_inode, expected_published_size):
+                return jsonify({"error": "append prefix fence is incomplete"}), 409
+            published_boundary = int(expected_published_size)
+            physical_boundary = int(expected_size)
+            if not (0 <= published_boundary <= physical_boundary):
+                return jsonify({"error": "append prefix boundary is invalid"}), 409
+            if not _data_sync_append_prefix_matches(
+                before, minimum_size=physical_boundary, inode=int(expected_inode),
+            ):
+                return jsonify({"error": "append file generation changed after manifest"}), 409
+            if offset > published_boundary:
+                return jsonify({"error": "offset beyond published prefix", "size": published_boundary}), 416
+            limit = min(limit, max(0, published_boundary - offset))
+        elif None not in (expected_size, expected_mtime, expected_inode) and not _data_sync_generation_matches(
+            before, size=int(expected_size), mtime_ns=int(expected_mtime), inode=int(expected_inode),
         ):
             return jsonify({"error": "file generation changed after manifest"}), 409
         if offset > before.st_size:
@@ -35999,10 +36037,14 @@ def api_data_sync_file():
             handle.seek(offset)
             payload = handle.read(limit)
         after = path.stat()
-        if not _data_sync_generation_matches(
-            after,
-            size=int(before.st_size),
-            mtime_ns=int(before.st_mtime_ns),
+        if append_prefix:
+            if not _data_sync_append_prefix_matches(
+                after, minimum_size=int(before.st_size),
+                inode=int(getattr(before, "st_ino", 0) or 0),
+            ):
+                return jsonify({"error": "append file generation changed during download"}), 409
+        elif not _data_sync_generation_matches(
+            after, size=int(before.st_size), mtime_ns=int(before.st_mtime_ns),
             inode=int(getattr(before, "st_ino", 0) or 0),
         ):
             return jsonify({"error": "file generation changed during download"}), 409
@@ -36014,7 +36056,9 @@ def api_data_sync_file():
         response.headers["X-Data-Mtime-Ns"] = str(after.st_mtime_ns)
         response.headers["X-Data-Inode"] = str(int(getattr(after, "st_ino", 0) or 0))
         response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
-        response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= after.st_size else "0"
+        eof_size = published_boundary if append_prefix else after.st_size
+        response.headers["X-Data-Published-Size"] = str(eof_size)
+        response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= eof_size else "0"
         return response
     except (OSError, TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
@@ -40066,23 +40110,111 @@ def rotate_log(file):
         logger.error(f"[LOG ROTATION] failed for {file}: {e} [PIPELINE ENFORCEMENT]")
 
 
+_jsonl_append_locks_guard = threading.Lock()
+_jsonl_append_locks = {}
+_jsonl_validated_targets = set()
+
+
+def _jsonl_path_lock(path: str):
+    key = os.path.abspath(path)
+    with _jsonl_append_locks_guard:
+        lock = _jsonl_append_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _jsonl_append_locks[key] = lock
+        return lock
+
+
+def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
+    """Preserve a corrupt source file and make the active target writable.
+
+    Validation runs once per process/path under the same lock as append. The
+    corrupt bytes are never deleted or rewritten; they are moved with a
+    SHA-256/line receipt into an excluded evidence quarantine.
+    """
+    key = os.path.abspath(path)
+    if key in _jsonl_validated_targets or not os.path.isfile(path):
+        _jsonl_validated_targets.add(key)
+        return True
+    bad_line = None
+    error = None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError as exc:
+                    bad_line = line_number
+                    error = f"{type(exc).__name__}: {exc.msg}"
+                    break
+    except (OSError, UnicodeError) as exc:
+        bad_line = 0
+        error = f"{type(exc).__name__}: {exc}"
+    if bad_line is None:
+        _jsonl_validated_targets.add(key)
+        return True
+
+    quarantine_root = os.path.join(
+        os.path.dirname(key), "corrupt_evidence_quarantine",
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ") + "_" + uuid.uuid4().hex[:8],
+    )
+    os.makedirs(quarantine_root, exist_ok=False)
+    target = os.path.join(quarantine_root, os.path.basename(key))
+    size_bytes = os.path.getsize(key)
+    digest = hashlib.sha256()
+    with open(key, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    os.replace(key, target)
+    receipt = {
+        "schema": "corrupt_jsonl_quarantine_v1",
+        "complete": True,
+        "quarantined_at": utc_iso(),
+        "source_name": os.path.basename(key),
+        "label": label,
+        "bad_line": bad_line,
+        "error": error,
+        "size_bytes": size_bytes,
+        "sha256": digest.hexdigest(),
+        "preserved_path": os.path.basename(target),
+    }
+    receipt_path = os.path.join(quarantine_root, "quarantine_manifest.json")
+    temp = receipt_path + ".tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, indent=2, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, receipt_path)
+    _jsonl_validated_targets.add(key)
+    logger.error(
+        f"[{label}] corrupt JSONL preserved at {quarantine_root}; bad_line={bad_line} "
+        "new active file will start [PIPELINE ENFORCEMENT]"
+    )
+    return False
+
+
 def _safe_append_jsonl(path: str, row: dict, label: str = "JSONL"):
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
     line = json.dumps(row, default=str) + "\n"
     last_err = None
-    for attempt in range(CSV_WRITE_RETRIES):
-        try:
-            rotate_log(path)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-            return True
-        except Exception as e:
-            last_err = e
-            if attempt < CSV_WRITE_RETRIES - 1 and _transient_csv_lock_error(e):
-                time.sleep(CSV_WRITE_RETRY_BASE_SEC * (attempt + 1))
-                continue
-            break
+    with _jsonl_path_lock(path):
+        for attempt in range(CSV_WRITE_RETRIES):
+            try:
+                _validate_or_quarantine_jsonl(path, label)
+                rotate_log(path)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(line)
+                    f.flush()
+                    os.fsync(f.fileno())
+                return True
+            except Exception as e:
+                last_err = e
+                if attempt < CSV_WRITE_RETRIES - 1 and _transient_csv_lock_error(e):
+                    time.sleep(CSV_WRITE_RETRY_BASE_SEC * (attempt + 1))
+                    continue
+                break
     logger.error(f"[{label}] append failed ({path}): {last_err} [PIPELINE ENFORCEMENT]")
     _csv_write_fallback(path, row, last_err)
     return False

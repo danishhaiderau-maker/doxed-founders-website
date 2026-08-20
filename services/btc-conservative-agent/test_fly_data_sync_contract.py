@@ -9,9 +9,10 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import zipfile
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from research.platform_relay_evidence import _validate_platform_relay_evidence_payload as pure_validate_relay
 
@@ -65,6 +66,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
         "_data_sync_rotation_parts",
         "_data_sync_path_allowed",
         "_data_sync_complete_record_size",
+        "_data_sync_consistency_mode",
         "_data_sync_inventory",
     }
     selected = [
@@ -96,6 +98,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
             "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({
                 "research_epoch_quarantine", "research_archive",
                 "research_session_archives", "archive-v2", "object-store", "object_store",
+                "corrupt_evidence_quarantine",
             }),
             "_data_sync_volume_root": lambda: root,
             "_data_sync_runtime_root": lambda: root,
@@ -115,6 +118,7 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
         "_data_sync_rotation_parts",
         "_data_sync_path_allowed",
         "_data_sync_complete_record_size",
+        "_data_sync_consistency_mode",
         "_data_sync_inventory",
     }
     selected = [
@@ -157,6 +161,115 @@ def test_data_sync_generation_fence_rejects_every_generation_change():
     assert not matches(original, size=100, mtime_ns=200, inode=301)
 
 
+def test_append_prefix_mode_is_narrow_and_allows_only_same_inode_growth():
+    namespace = _load_bot_functions(
+        "_data_sync_consistency_mode", "_data_sync_append_prefix_matches"
+    )
+    mode = namespace["_data_sync_consistency_mode"]
+    matches = namespace["_data_sync_append_prefix_matches"]
+    assert mode(Path("bot_runtime.log")) == "append_prefix_v1"
+    assert mode(Path("research_events_v22.jsonl")) == "strict_generation_v1"
+    assert mode(Path("trades_3factor.csv")) == "strict_generation_v1"
+    assert mode(Path("state.json")) == "strict_generation_v1"
+    grown = SimpleNamespace(st_size=130, st_mtime_ns=999, st_ino=7)
+    assert matches(grown, minimum_size=100, inode=7)
+    assert not matches(grown, minimum_size=131, inode=7)
+    assert not matches(grown, minimum_size=100, inode=8)
+
+
+def _load_jsonl_writer(tmp_path):
+    tree = ast.parse(BOT)
+    wanted = {"_jsonl_path_lock", "_validate_or_quarantine_jsonl", "_safe_append_jsonl"}
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+
+    class _Logger:
+        def __init__(self):
+            self.messages = []
+
+        def error(self, message):
+            self.messages.append(str(message))
+
+    namespace = {
+        "os": os,
+        "json": json,
+        "time": time,
+        "uuid": uuid,
+        "hashlib": hashlib,
+        "threading": threading,
+        "datetime": datetime,
+        "timezone": timezone,
+        "CSV_WRITE_RETRIES": 3,
+        "CSV_WRITE_RETRY_BASE_SEC": 0,
+        "_jsonl_append_locks_guard": threading.Lock(),
+        "_jsonl_append_locks": {},
+        "_jsonl_validated_targets": set(),
+        "rotate_log": lambda _path: None,
+        "_transient_csv_lock_error": lambda _error: False,
+        "_csv_write_fallback": lambda *_args: None,
+        "utc_iso": lambda: datetime.now(timezone.utc).isoformat(),
+        "logger": _Logger(),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace
+
+
+def test_jsonl_writer_serializes_concurrent_rows(tmp_path):
+    namespace = _load_jsonl_writer(tmp_path)
+    append = namespace["_safe_append_jsonl"]
+    target = tmp_path / "shadow_lane_outcome.jsonl"
+    threads = [
+        threading.Thread(target=append, args=(str(target), {"row": index}, "SHADOW"))
+        for index in range(32)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 32
+    assert {row["row"] for row in rows} == set(range(32))
+
+
+def test_jsonl_writer_quarantines_corrupt_bytes_with_receipt(tmp_path):
+    namespace = _load_jsonl_writer(tmp_path)
+    target = tmp_path / "shadow_lane_outcome.jsonl"
+    corrupt = b'{"row": 1}\n{"row":'
+    target.write_bytes(corrupt)
+
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 2}, "SHADOW")
+    assert [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()] == [
+        {"row": 2}
+    ]
+
+    quarantine_dirs = list((tmp_path / "corrupt_evidence_quarantine").iterdir())
+    assert len(quarantine_dirs) == 1
+    preserved = quarantine_dirs[0] / target.name
+    receipt = json.loads(
+        (quarantine_dirs[0] / "quarantine_manifest.json").read_text(encoding="utf-8")
+    )
+    assert preserved.read_bytes() == corrupt
+    assert receipt["complete"] is True
+    assert receipt["bad_line"] == 2
+    assert receipt["size_bytes"] == len(corrupt)
+    assert receipt["sha256"] == hashlib.sha256(corrupt).hexdigest()
+    assert receipt["preserved_path"] == target.name
+
+
+def test_jsonl_writer_is_serialized_and_corruption_is_preserved_not_deleted():
+    assert "with _jsonl_path_lock(path):" in BOT
+    assert "_validate_or_quarantine_jsonl(path, label)" in BOT
+    assert '"schema": "corrupt_jsonl_quarantine_v1"' in BOT
+    assert '"sha256": digest.hexdigest()' in BOT
+    assert "os.replace(key, target)" in BOT
+    assert '"corrupt_evidence_quarantine"' in BOT
+    assert "os.fsync(f.fileno())" in BOT
+
+
 def test_fly_runtime_cwd_is_volume_backed():
     assert 'RUNTIME_DIR="$DATA_DIR/runtime"' in ENTRYPOINT
     assert 'export BOT_SINGLETON_DIR="$DATA_DIR/locks"' in ENTRYPOINT
@@ -177,12 +290,17 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert '"X-Bot-Admin-Token" = $AdminToken' in SYNC_SCRIPT
     assert "Chunk checksum mismatch" in SYNC_SCRIPT
     assert "expected_physical_size=$expectedPhysicalSize" in SYNC_SCRIPT
+    assert "expected_published_size=$expectedPublishedSize" in SYNC_SCRIPT
+    assert "consistency_mode=$consistencyMode" in SYNC_SCRIPT
     assert "expected_mtime_ns=$expectedMtime" in SYNC_SCRIPT
     assert "expected_inode=$expectedInode" in SYNC_SCRIPT
     assert "$chunkLimit = 4MB" in SYNC_SCRIPT
     assert '$appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")' in SYNC_SCRIPT
     assert "[int64]$previous.mtime_ns -eq [int64]$row.mtime_ns" in SYNC_SCRIPT
     assert "def _data_sync_rotation_parts" in BOT
+    assert '"consistency_mode": _data_sync_consistency_mode(resolved)' in BOT
+    assert 'return "append_prefix_v1" if path.suffix.lower() == ".log"' in BOT
+    assert 'limit = min(limit, max(0, published_boundary - offset))' in BOT
     assert "_data_sync_rotation_parts(resolved.name) is not None" in BOT
     assert 'path.startswith("/api/data-sync/")' in BOT
     assert "and not is_authenticated_data_sync" in BOT
