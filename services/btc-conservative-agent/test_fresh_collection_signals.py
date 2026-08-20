@@ -27,6 +27,14 @@ import bot
 
 
 class FreshCollectionSignalTests(unittest.TestCase):
+    def test_fresh_reset_covers_v22_provisionals_and_post_exit_rotations(self):
+        source = Path(bot.__file__).read_text(encoding="utf-8")
+        self.assertIn("COLLECTOR_V22_RESEARCH_EVENTS_FILE", source)
+        self.assertIn("COLLECTOR_V22_EVENT_INDEX_FILE", source)
+        self.assertIn("COLLECTOR_V22_PROVISIONAL_FILE", source)
+        self.assertIn("PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE", source)
+        self.assertIn("_order_multiverse_pending_src.clear()", source)
+
     def setUp(self):
         self.original_signal = float(bot.state.get("fresh_collection_signal_ts") or 0.0)
         self.original_mode = bool(bot.state.get("fresh_collection_mode", False))

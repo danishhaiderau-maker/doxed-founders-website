@@ -138,7 +138,11 @@ from opportunity_capture_v21 import (
     build_rejected_capture,
     filter_node,
 )
-from collector_v22_schema import COLLECTOR_VERSION as COLLECTOR_V22_VERSION
+from collector_v22_schema import (
+    COLLECTOR_VERSION as COLLECTOR_V22_VERSION,
+    EVENT_INDEX_FILE as COLLECTOR_V22_EVENT_INDEX_FILE,
+    RESEARCH_EVENTS_FILE as COLLECTOR_V22_RESEARCH_EVENTS_FILE,
+)
 from collector_v22 import (
     build_decision_tree_v22,
     build_research_event,
@@ -148,6 +152,7 @@ from collector_v22 import (
 )
 from collector_storage import storage_blocks_new_events, storage_state, project_capacity
 from collector_v22_provisional import (
+    PROVISIONAL_STORE_FILE as COLLECTOR_V22_PROVISIONAL_FILE,
     load_provisional_events,
     remove_provisional_event,
     upsert_provisional_event,
@@ -25339,7 +25344,10 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
-        PATH_REPLAY_FILE,
+        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE,
+        COLLECTOR_V22_RESEARCH_EVENTS_FILE,
+        COLLECTOR_V22_EVENT_INDEX_FILE,
+        COLLECTOR_V22_PROVISIONAL_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
@@ -25385,7 +25393,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
-        PATH_REPLAY_FILE,
+        PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
@@ -25654,6 +25662,13 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             }
     with replay_lock:
         replay_buffers.clear()
+    _cycle_3m_written_buckets.clear()
+    _touch_grid_book.clear()
+    _order_multiverse_state.clear()
+    _order_multiverse_pending_src.clear()
+    _order_multiverse_path_complete.clear()
+    _order_multiverse_post_ttl_done.clear()
+    _order_multiverse_written.clear()
     with trade_lock:
         pending_orders.clear()
         expired_orders.clear()
