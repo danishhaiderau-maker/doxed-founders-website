@@ -130,11 +130,16 @@ def read_current_events(path: Path) -> dict[str, Any]:
         row for row in current
         if str(row.get("observation_status") or "").upper() in {"COMPLETE", "FUNNEL_COMPLETE"}
     ]
-    episode_ids = {
+    all_episode_ids = {
         str(row.get("event_episode_id") or row.get("envelope", {}).get("event_episode_id") or "")
         for row in current
     }
-    episode_ids.discard("")
+    all_episode_ids.discard("")
+    eligible_episode_ids = {
+        str(row.get("event_episode_id") or row.get("envelope", {}).get("event_episode_id") or "")
+        for row in completed
+    }
+    eligible_episode_ids.discard("")
     policy_epochs = {str(row.get("policy_epoch_id") or "") for row in current}
     signatures = {str(row.get("policy_signature") or "") for row in current}
     policy_epochs.discard("")
@@ -143,17 +148,38 @@ def read_current_events(path: Path) -> dict[str, Any]:
         "epoch_id": epoch,
         "current_events": len(current),
         "eligible_events": len(completed),
-        "independent_episodes": len(episode_ids),
+        "ineligible_events": len(current) - len(completed),
+        "all_independent_episodes": len(all_episode_ids),
+        "eligible_independent_episodes": len(eligible_episode_ids),
         "policy_epoch_ids": sorted(policy_epochs),
         "policy_signatures": sorted(signatures),
     }
 
 
-def report_counts(report: dict[str, Any]) -> tuple[int, int]:
+def report_count_contract(filename: str, report: dict[str, Any]) -> dict[str, int]:
+    """Return counts with the semantics declared by each report schema.
+
+    Candidate selection operates only on replay-eligible paths, so its episode
+    count is eligible-only.  Best-policy coverage deliberately includes
+    negative/ineligible paths, so its episode count covers the whole epoch.
+    Silently substituting one meaning for the other would create false health
+    or false failure and is therefore rejected.
+    """
     evidence = report.get("evidence") or {}
-    events = evidence.get("current_events", evidence.get("current_epoch_events", 0))
-    episodes = evidence.get("independent_episodes", evidence.get("independent_episode_count", 0))
-    return int(events or 0), int(episodes or 0)
+    if filename == "policy_candidate_oos_report.json":
+        return {
+            "current_events": int(evidence.get("current_events") or 0),
+            "eligible_events": int(evidence.get("eligible_events") or 0),
+            "eligible_independent_episodes": int(evidence.get("independent_episodes") or 0),
+        }
+    if filename == "best_policy_research_report.json":
+        return {
+            "current_events": int(evidence.get("current_epoch_events") or 0),
+            "eligible_events": int(evidence.get("replay_eligible_events") or 0),
+            "ineligible_events": int(evidence.get("replay_ineligible_events") or 0),
+            "all_independent_episodes": int(evidence.get("independent_episode_count") or 0),
+        }
+    raise ValueError(f"unsupported report count contract: {filename}")
 
 
 @dataclass
@@ -266,9 +292,21 @@ class Supervisor:
                 add(f"report_fresh:{filename}", False, type(exc).__name__)
 
         if event_summary and len(reports) == 2:
-            expected = (event_summary["current_events"], event_summary["independent_episodes"])
-            observed = {name: report_counts(report) for name, report in reports.items()}
-            add("report_count_parity", all(value == expected for value in observed.values()),
+            expected = {
+                "policy_candidate_oos_report.json": {
+                    "current_events": event_summary["current_events"],
+                    "eligible_events": event_summary["eligible_events"],
+                    "eligible_independent_episodes": event_summary["eligible_independent_episodes"],
+                },
+                "best_policy_research_report.json": {
+                    "current_events": event_summary["current_events"],
+                    "eligible_events": event_summary["eligible_events"],
+                    "ineligible_events": event_summary["ineligible_events"],
+                    "all_independent_episodes": event_summary["all_independent_episodes"],
+                },
+            }
+            observed = {name: report_count_contract(name, report) for name, report in reports.items()}
+            add("report_count_parity", all(observed[name] == expected[name] for name in expected),
                 {"expected": expected, "reports": observed})
             expected_epoch = event_summary["epoch_id"]
             expected_policy_epochs = event_summary["policy_epoch_ids"]

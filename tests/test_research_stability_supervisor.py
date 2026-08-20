@@ -40,14 +40,19 @@ def make_fixture(tmp_path):
     timestamp = NOW.timestamp()
     import os
     os.utime(mirror / "research_events_v22.jsonl", (timestamp, timestamp))
-    for name, key_events, key_episodes in (
-        ("policy_candidate_oos_report.json", "current_events", "independent_episodes"),
-        ("best_policy_research_report.json", "current_epoch_events", "independent_episode_count"),
+    for name, evidence in (
+        ("policy_candidate_oos_report.json", {
+            "current_events": 3, "eligible_events": 3, "independent_episodes": 2,
+        }),
+        ("best_policy_research_report.json", {
+            "current_epoch_events": 3, "replay_eligible_events": 3,
+            "replay_ineligible_events": 0, "independent_episode_count": 2,
+        }),
     ):
         write_json(reports / name, {
             "generated_at": NOW.isoformat(), "epoch_id": "epoch-new",
             "policy_epoch_id": "policy-epoch-a", "evidence_policy_signature": "policy-a",
-            "evidence": {key_events: 3, key_episodes: 2},
+            "evidence": evidence,
         })
     return repo, mirror, reports
 
@@ -78,7 +83,56 @@ def test_healthy_separate_data_and_report_directories(tmp_path):
     revision_parity = next(x for x in result["checks"] if x["name"] == "fly_sync_revision_parity")
     assert revision_parity["ok"] is True
     parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
-    assert parity["detail"]["expected"] == (3, 2)
+    assert parity["detail"]["expected"]["policy_candidate_oos_report.json"] == {
+        "current_events": 3, "eligible_events": 3, "eligible_independent_episodes": 2,
+    }
+
+
+def test_negative_evidence_uses_schema_aware_episode_denominators(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    events_path = mirror / "research_events_v22.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    # One terminalized negative-evidence path belongs to its own episode. It is
+    # part of whole-epoch coverage but cannot enter candidate replay ranking.
+    events.append({
+        "schema": "research_event_v2.2", "collector_version": "collector_v2.2",
+        "epoch_id": "epoch-new", "policy_epoch_id": "policy-epoch-a",
+        "policy_signature": "policy-a", "event_episode_id": "episode-negative",
+        "observation_status": "INSUFFICIENT_PATH", "primary_outcome": "ACCEPTED_FILLED",
+    })
+    events_path.write_text("\n".join(json.dumps(x) for x in events), encoding="utf-8")
+    import os
+    os.utime(events_path, (NOW.timestamp(), NOW.timestamp()))
+
+    candidate = json.loads((reports / "policy_candidate_oos_report.json").read_text())
+    candidate["evidence"].update(current_events=4, eligible_events=3, independent_episodes=2)
+    write_json(reports / "policy_candidate_oos_report.json", candidate)
+    best = json.loads((reports / "best_policy_research_report.json").read_text())
+    best["evidence"].update(current_epoch_events=4, replay_eligible_events=3,
+                            replay_ineligible_events=1, independent_episode_count=3)
+    write_json(reports / "best_policy_research_report.json", best)
+
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is True
+    assert result["healthy"] is True
+    assert parity["detail"]["reports"]["policy_candidate_oos_report.json"]["eligible_independent_episodes"] == 2
+    assert parity["detail"]["reports"]["best_policy_research_report.json"]["all_independent_episodes"] == 3
+
+
+def test_negative_evidence_denominator_swap_fails_closed(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    candidate = json.loads((reports / "policy_candidate_oos_report.json").read_text())
+    candidate["evidence"]["independent_episodes"] = 3
+    write_json(reports / "policy_candidate_oos_report.json", candidate)
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is False
+    assert result["healthy"] is False
 
 
 def test_count_or_signature_mismatch_fails_closed_without_restart(tmp_path):
