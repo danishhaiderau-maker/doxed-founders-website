@@ -54,7 +54,8 @@ def _load_bot_functions(*names):
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
         ),
         "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({
-            "pipeline_events_3factor.csv", "trades_3factor.csv"
+            "pipeline_events_3factor.csv", "trades_3factor.csv",
+            "research_events_v22.jsonl",
         }),
         "_RESEARCH_RAW_JSONL_NEVER_PRUNE": frozenset({"research_events_v22.jsonl"}),
         "_pure_validate_platform_relay_evidence_payload": pure_validate_relay,
@@ -170,11 +171,19 @@ def test_data_sync_generation_fence_rejects_every_generation_change():
     assert not matches(original, size=100, mtime_ns=200, inode=301)
 
 
-def test_only_declared_dynamic_csv_ledgers_use_append_prefix_mode():
+def test_only_declared_append_ledgers_use_append_prefix_mode():
     mode = _load_bot_functions("_data_sync_consistency_mode")["_data_sync_consistency_mode"]
     assert mode(Path("pipeline_events_3factor.csv")) == "append_prefix_v1"
     assert mode(Path("signal_snapshot.csv")) == "strict_generation_v1"
-    assert mode(Path("research_events_v22.jsonl")) == "strict_generation_v1"
+    assert mode(Path("research_events_v22.jsonl")) == "append_prefix_v1"
+
+
+def test_v22_prefix_growth_is_allowed_but_inode_replacement_is_fenced():
+    namespace = _load_bot_functions("_data_sync_append_prefix_matches")
+    matches = namespace["_data_sync_append_prefix_matches"]
+    current = SimpleNamespace(st_size=12_000_000, st_ino=41)
+    assert matches(current, minimum_size=10_000_000, inode=41)
+    assert not matches(current, minimum_size=10_000_000, inode=42)
 
 
 def test_serialized_jsonl_writer_targets_are_append_prefix_eligible(tmp_path):
@@ -263,7 +272,7 @@ def test_append_prefix_mode_is_narrow_and_allows_only_same_inode_growth():
     mode = namespace["_data_sync_consistency_mode"]
     matches = namespace["_data_sync_append_prefix_matches"]
     assert mode(Path("bot_runtime.log")) == "append_prefix_v1"
-    assert mode(Path("research_events_v22.jsonl")) == "strict_generation_v1"
+    assert mode(Path("research_events_v22.jsonl")) == "append_prefix_v1"
     assert mode(Path("trades_3factor.csv")) == "append_prefix_v1"
     assert mode(Path("state.json")) == "strict_generation_v1"
     grown = SimpleNamespace(st_size=130, st_mtime_ns=999, st_ino=7)

@@ -35729,6 +35729,9 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
+    # Collector v2.2 is a write-once, serialized JSONL ledger. It may grow
+    # during a large mirror download; inode replacement remains fenced.
+    "research_events_v22.jsonl",
     "decisions_3factor.csv", "trades_3factor.csv",
     "expired_orders_3factor.csv", "blocked_signals_3factor.csv",
     "ai_tranche_log.csv", "setup_log_3factor.csv", "candles_3factor.csv",
