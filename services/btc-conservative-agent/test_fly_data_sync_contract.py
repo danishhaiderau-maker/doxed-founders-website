@@ -187,6 +187,43 @@ def test_serialized_jsonl_writer_targets_are_append_prefix_eligible(tmp_path):
     ) == "strict_generation_v1"
 
 
+def test_every_static_serialized_jsonl_target_is_declared_before_first_write():
+    tree = ast.parse(BOT)
+    declared_constants = set()
+    declared_literals = set()
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or not isinstance(node.value, ast.Tuple):
+            continue
+        values = {
+            item.value for item in node.value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        }
+        if target.id == "_JSONL_SERIALIZED_APPEND_CONSTANTS":
+            declared_constants = values
+        elif target.id == "_JSONL_SERIALIZED_APPEND_LITERALS":
+            declared_literals = values
+
+    observed_constants = set()
+    observed_literals = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "_safe_append_jsonl" or not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Name) and first.id != "output_file":
+            observed_constants.add(first.id)
+        elif isinstance(first, ast.Constant) and isinstance(first.value, str):
+            observed_literals.add(first.value)
+
+    assert observed_constants <= declared_constants
+    assert observed_literals <= declared_literals
+    assert "FILL_QUALITY_FILE" in declared_constants
+
+
 def test_dynamic_csv_schema_expansion_is_an_atomic_inode_change():
     tree = ast.parse(BOT)
     selected = [

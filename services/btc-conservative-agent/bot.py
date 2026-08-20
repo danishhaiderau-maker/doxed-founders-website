@@ -40104,7 +40104,60 @@ def rotate_log(file):
 _jsonl_append_locks_guard = threading.Lock()
 _jsonl_append_locks = {}
 _jsonl_validated_targets = set()
-_jsonl_serialized_append_targets = set()
+_JSONL_SERIALIZED_APPEND_CONSTANTS = (
+    "AI_INPUT_LOG_FILE",
+    "CSV_FALLBACK_JSONL",
+    "CHASE_OFFSET_TOUCH_GRID_FILE",
+    "ORDER_MULTIVERSE_FILE",
+    "OPPORTUNITY_CAPTURE_FILE",
+    "CYCLE_3M_UNIVERSE_FILE",
+    "LANE_OPPORTUNITY_CAPTURE_FILE",
+    "AI_EDGE_DISAGREEMENT_FILE",
+    "APPROVED_BUT_REJECTED_FILE",
+    "NEAR_MISS_FILE",
+    "REVERSAL_STUDY_FILE",
+    "AI_REASON_RESEARCH_FILE",
+    "AI_CONFIDENCE_CALIBRATION_FILE",
+    "TRADE_LIFECYCLE_FILE",
+    "SOFT_REJECT_SHADOW_FILE",
+    "SHADOW_LANE_OUTCOME_FILE",
+    "EXECUTION_SETTINGS_HISTORY_FILE",
+    "DUPLICATE_INTENT_AUDIT_FILE",
+    "EDGE_CENSUS_FILE",
+    "FILL_QUALITY_FILE",
+    "SHADOW_VS_LIVE_ENTRY_FILE",
+    "SIGNAL_SNAPSHOT_FILE",
+    "GOLDEN_STACK_REJECTIONS_FILE",
+    "SHADOW_OUTCOME_FILE",
+    "PATH_REPLAY_FILE",
+    "POST_EXIT_REPLAY_FILE",
+    "TRADE_OUTCOME_FILE",
+    "SIGNAL_REPLAY_FILE",
+    "COUNTERFACTUAL_FILE",
+    "SOURCE_ORDER_MARKET_EVIDENCE_FILE",
+)
+_JSONL_SERIALIZED_APPEND_LITERALS = (
+    "shadow_runner_study.jsonl",
+    "type_b_adx_v3_shadow_decisions.jsonl",
+)
+
+
+def _declared_serialized_jsonl_targets():
+    """Return the stable startup contract for JSONL fixed-prefix downloads.
+
+    Sync consistency mode must not depend on whether a writer happened to run
+    between the manifest and file request. Every path routed through the
+    serialized writer is therefore declared before the first request.
+    """
+    values = list(_JSONL_SERIALIZED_APPEND_LITERALS)
+    for constant_name in _JSONL_SERIALIZED_APPEND_CONSTANTS:
+        value = globals().get(constant_name)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return {os.path.abspath(value) for value in values}
+
+
+_jsonl_serialized_append_targets = _declared_serialized_jsonl_targets()
 
 
 def _jsonl_path_lock(path: str):
