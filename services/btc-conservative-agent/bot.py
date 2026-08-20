@@ -33906,7 +33906,7 @@ def health():
             "alt_sl": ["atr_k_stop", "structure_stop"],
             "live_exits_unchanged": True,
             "live_thesis_cut": -12.0,
-            "hard_stop_closes_paper": False,
+            "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
             "writers_hooked": True,
         },
     })

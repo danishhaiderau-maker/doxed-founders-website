@@ -1,4 +1,5 @@
 """Exact live-policy provenance and two-phase boundary tests."""
+from pathlib import Path
 from path_replay_v1 import (
     CONTROL_CELL,
     LIVE_HARD_STOP_CLOSES_PAPER,
@@ -18,6 +19,8 @@ EXPECTED_LADDER = [
     (8, 5), (12, 10), (19, 17), (40, 28),
     (60, 45), (80, 60), (100, 75), (150, 120),
 ]
+
+BOT_SOURCE = (Path(__file__).parent / "bot.py").read_text(encoding="utf-8")
 
 
 def _sim(*points):
@@ -50,6 +53,8 @@ def test_control_provenance_is_exact_and_invert_defaults_off():
     assert LIVE_HARD_STOP_START_SEC == 300.0
     assert LIVE_HARD_STOP_CLOSES_PAPER is True
     assert LIVE_HARD_STOP_DOES_NOT_CLOSE_PAPER is False
+    assert '"hard_stop_closes_paper": False' not in BOT_SOURCE
+    assert '"hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper"))' in BOT_SOURCE
 
 
 def test_two_phase_boundaries_are_exact():
