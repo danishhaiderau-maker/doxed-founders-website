@@ -303,6 +303,11 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     }
     (tmp_path / "policy_candidate_oos_report.json").write_text(json.dumps(detail), encoding="utf-8")
     (tmp_path / "paused_shadow_research_report.json").write_text(json.dumps({"overall": {"closed": 3}}), encoding="utf-8")
+    (tmp_path / "shadow_lane_comprehensive_report.json").write_text(json.dumps({
+        "coverage": {"independent_shared_ai_episodes": 4, "deduped_lane_records": 7},
+        "cohorts": [{"research_lane": "TYPE_B_HUNTER_V1", "classification": "POLICY_ENTERED_ACCEPTED"}],
+        "safety": {"executed_pnl_merged": False},
+    }), encoding="utf-8")
     (tmp_path / "real_edge_summary.json").write_text(json.dumps({"executed_pnl_usd": -2.5}), encoding="utf-8")
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
 
@@ -317,6 +322,8 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
     assert shadow["v22_shadow"]["independent_episodes"] == 1
     assert shadow["paused_shadow"]["overall"]["closed"] == 3
+    assert shadow["comprehensive_shadow_lanes"]["coverage"]["independent_shared_ai_episodes"] == 4
+    assert shadow["comprehensive_shadow_lanes"]["safety"]["executed_pnl_merged"] is False
     assert shadow["live_policy_change_allowed"] is False
     assert client.get("/static-policies").status_code == 200
     assert client.get("/dynamic-policies").status_code == 200
@@ -336,3 +343,4 @@ def test_analyzer_policy_reports_use_configured_data_and_report_roots():
     assert 'policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."' in analyzer
     assert "data_dir=policy_data_dir" in analyzer
     assert "report_dir=policy_report_dir" in analyzer
+    assert "build_shadow_lane_comprehensive_report" in analyzer

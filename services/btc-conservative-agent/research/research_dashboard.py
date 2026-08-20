@@ -1856,6 +1856,7 @@ def api_shadow_policy_research():
     shadow = (detail.get("shadow_research") or {}) if current else {}
     paused = _read_json("paused_shadow_research_report.json")
     real_edge = _read_json("real_edge_summary.json")
+    comprehensive = _read_json("shadow_lane_comprehensive_report.json")
     return jsonify({
         "schema": "shadow_policy_dashboard_v1",
         "status": "DESCRIPTIVE_ONLY",
@@ -1863,6 +1864,7 @@ def api_shadow_policy_research():
         "epoch_id": best.get("epoch_id"),
         "current_epoch_rejected": ((best.get("evidence") or {}).get("outcome_coverage") or {}).get("REJECTED", 0),
         "v22_shadow": shadow,
+        "comprehensive_shadow_lanes": comprehensive,
         "paused_shadow": paused,
         "real_edge": real_edge,
         "warning": (
@@ -1897,11 +1899,11 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
   rows=(d.regimes||[]).map(x=>`<tr><td>${x.regime}</td><td>${x.selected_policy_id}</td><td>${(x.train||{}).independent_episodes||0}</td><td>${money((x.train||{}).net_pnl_usd)}</td><td>${(x.oos||{}).independent_episodes||0}</td><td>${money((x.oos||{}).net_pnl_usd)}</td><td>${money((x.oos||{}).expectancy_usd)}</td><td>${x.fallback?'YES':'NO'}</td><td class="bad">${x.qualification}</td></tr>`);
  } else {
-  const s=d.v22_shadow||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{};
-  cards=[['Current rejected paths',d.current_epoch_rejected||0],['Independent v2.2 shadows',s.independent_episodes||0],['Paused-shadow closed',o.closed||0],['Paused-shadow WR',pct(o.wins,o.closed)],['Paused-shadow PnL',money(o.net_pnl_usd)],['Executed PnL',money(re.executed_pnl_usd)]];
+  const s=d.v22_shadow||{}, c=d.comprehensive_shadow_lanes||{}, cov=c.coverage||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{};
+  cards=[['Current rejected paths',d.current_epoch_rejected||0],['Independent shared-AI episodes',cov.independent_shared_ai_episodes||0],['Deduped lane records',cov.deduped_lane_records||0],['Paired episodes',cov.paired_multi_lane_episodes||0],['Provisional exclusions',(c.cohorts||[]).reduce((n,x)=>n+(x.provisional_excluded||0),0)],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
   document.getElementById('head').innerHTML='<tr><th>Policy / lane</th><th>Episodes</th><th>Fills</th><th>Wins</th><th>Losses</th><th>Net PnL</th><th>EV</th><th>Status</th></tr>';
-  rows=(s.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.independent_episodes}</td><td>${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.expectancy_usd)}</td><td class="bad">${x.qualification}</td></tr>`);
-  rows=rows.concat((p.by_lane||[]).map(x=>`<tr><td>${x.lane}</td><td>${x.closed}</td><td>${x.filled}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_usd)}</td><td class="bad">PAUSED_SHADOW</td></tr>`));
+  rows=(c.cohorts||[]).map(x=>`<tr><td>${x.research_lane}<br><small>${x.classification}</small></td><td>${x.independent_shared_ai_episodes}</td><td>${x.completed_terminal_fills}/${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_per_completed_fill_usd)}</td><td class="bad">${x.qualification}; provisional excluded ${x.provisional_excluded}</td></tr>`);
+  rows=rows.concat((s.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}<br><small>REJECTED V2.2 POLICY REPLAY</small></td><td>${x.independent_episodes}</td><td>${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.expectancy_usd)}</td><td class="bad">${x.qualification}</td></tr>`));
  }
  document.getElementById('kpis').innerHTML=cards.map(x=>`<div class="kpi"><small>${x[0]}</small><div>${x[1]??'—'}</div></div>`).join('');
  document.getElementById('body').innerHTML=rows.join('')||'<tr><td colspan="10">Waiting for sufficient current-epoch evidence.</td></tr>';
