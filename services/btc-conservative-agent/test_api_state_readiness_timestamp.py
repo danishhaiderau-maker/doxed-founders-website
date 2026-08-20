@@ -62,6 +62,23 @@ class ApiStateReadinessTimestampTests(unittest.TestCase):
         ]
         self.assertTrue(any(refresh_line < line < recompute.lineno for line in fresh_clock_lines))
 
+    def test_active_dashboard_overlay_carries_live_readiness_authority(self):
+        target = self._function("_api_state_cache_refresher_loop")
+        constants = {
+            node.value
+            for node in ast.walk(target)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        }
+        self.assertTrue(
+            {
+                "system_ready",
+                "signal_generation_ready",
+                "new_entry_progress_ready",
+                "new_entry_block_reason",
+                "runtime_readiness",
+            }.issubset(constants)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
