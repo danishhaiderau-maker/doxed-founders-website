@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(sync): serialize JSONL writes and sync log prefixes
+fix(sync): exclude volatile storage telemetry
 
 ## Last Activity
 
