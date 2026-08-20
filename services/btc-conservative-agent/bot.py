@@ -4961,6 +4961,17 @@ _last_bbo_refresh_ts = 0.0
 _last_rest_entry_recovery_attempt_ts = 0.0
 _last_book_refresh_ts = 0.0
 _bbo_refresh_lock = threading.Lock()
+_bbo_refresh_claim_token = None
+_bbo_refresh_claim_started_ts = 0.0
+BBO_REFRESH_CLAIM_TTL_SEC = max(
+    5.0, float(os.getenv("BBO_REFRESH_CLAIM_TTL_SEC", "8"))
+)
+BBO_HOT_CONNECT_TIMEOUT_SEC = max(
+    0.25, float(os.getenv("BBO_HOT_CONNECT_TIMEOUT_SEC", "1.5"))
+)
+BBO_HOT_READ_TIMEOUT_SEC = max(
+    0.5, float(os.getenv("BBO_HOT_READ_TIMEOUT_SEC", "2.5"))
+)
 _book_refresh_lock = threading.Lock()
 _bitfinex_http_session = requests.Session()
 _bitfinex_http_session.headers.update({"User-Agent": "btc-research-bot/1.0"})
@@ -5087,36 +5098,113 @@ def fetch_bitfinex_last_price_rest(symbol: str = BITFINEX_WS_SYMBOL) -> float:
     return fetch_bitfinex_ticker_rest(symbol)["last"]
 
 
+def _fetch_bitfinex_ticker_rest_hot() -> dict:
+    """One bounded ticker attempt using an isolated HTTP session.
+
+    The hot readiness loop must not inherit the five-attempt retry/backoff
+    budget or share a requests.Session with unrelated REST workers.  A failed
+    attempt leaves the strict REST freshness gate closed; the next scheduled
+    attempt can recover without blocking OHLCV maintenance.
+    """
+    url = f"{BITFINEX_REST_BASE}/ticker/{BITFINEX_WS_SYMBOL}"
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": "btc-research-bot/1.0"})
+        response = session.get(
+            url,
+            timeout=(BBO_HOT_CONNECT_TIMEOUT_SEC, BBO_HOT_READ_TIMEOUT_SEC),
+        )
+        response.raise_for_status()
+        data = response.json()
+    if not isinstance(data, list) or len(data) <= 6:
+        raise ValueError(f"unexpected ticker response: {data!r}")
+    bid, ask, last = float(data[0]), float(data[2]), float(data[6])
+    if bid <= 0 or ask <= 0 or last <= 0 or ask < bid:
+        raise ValueError("invalid ticker bid/ask/last")
+    return {
+        "bid": bid,
+        "ask": ask,
+        "last": last,
+        "spread_usd": round(ask - bid, 2),
+        "spread_pct": round((ask - bid) / bid * 100.0, 5),
+    }
+
+
 def refresh_bbo_state(force: bool = False):
-    """Cache live bid/ask from Bitfinex for realistic sim fills and PnL marks."""
-    global _last_bbo_refresh_ts
+    """Bounded, coalesced BBO refresh; never hold its claim across network I/O."""
+    global _last_bbo_refresh_ts, _bbo_refresh_claim_token, _bbo_refresh_claim_started_ts
     now = time.time()
     if not force and (now - _last_bbo_refresh_ts) < BBO_REFRESH_SEC:
-        return
-    with _bbo_refresh_lock:
+        return True
+    token = uuid.uuid4().hex
+    if not _bbo_refresh_lock.acquire(blocking=False):
+        return False
+    try:
         now = time.time()
         if not force and (now - _last_bbo_refresh_ts) < BBO_REFRESH_SEC:
-            return
-        try:
-            t = fetch_bitfinex_ticker_rest()
+            return True
+        claim_age = (
+            now - float(_bbo_refresh_claim_started_ts or 0)
+            if _bbo_refresh_claim_token
+            else 0.0
+        )
+        if _bbo_refresh_claim_token and claim_age <= BBO_REFRESH_CLAIM_TTL_SEC:
+            return False
+        if _bbo_refresh_claim_token:
             with state_lock:
-                state["bid"] = t["bid"]
-                state["ask"] = t["ask"]
-                state["spread_usd"] = t["spread_usd"]
-                state["spread_pct"] = t["spread_pct"]
-                state["bbo_ts"] = now
-                state["rest_last_tick"] = now
-                state["last_trade_price"] = t["last"]
-                state["rest_price"] = t["last"]
-                state["rest_price_ts"] = now
-                ws_age = now - float(state.get("ws_last_tick") or 0)
+                state["bbo_refresh_stale_claims"] = int(
+                    state.get("bbo_refresh_stale_claims") or 0
+                ) + 1
+        _bbo_refresh_claim_token = token
+        _bbo_refresh_claim_started_ts = now
+        with state_lock:
+            state["bbo_refresh_last_attempt_ts"] = now
+            state["bbo_refresh_inflight"] = True
+            state["bbo_refresh_inflight_age_sec"] = 0.0
+    finally:
+        _bbo_refresh_lock.release()
+
+    try:
+        ticker = _fetch_bitfinex_ticker_rest_hot()
+        completed_at = time.time()
+        with _bbo_refresh_lock:
+            if _bbo_refresh_claim_token != token:
+                return False
+            with state_lock:
+                state["bid"] = ticker["bid"]
+                state["ask"] = ticker["ask"]
+                state["spread_usd"] = ticker["spread_usd"]
+                state["spread_pct"] = ticker["spread_pct"]
+                state["bbo_ts"] = completed_at
+                state["rest_last_tick"] = completed_at
+                state["last_trade_price"] = ticker["last"]
+                state["rest_price"] = ticker["last"]
+                state["rest_price_ts"] = completed_at
+                state["bbo_refresh_last_success_ts"] = completed_at
+                state["bbo_refresh_last_error"] = None
+                state["bbo_refresh_consecutive_failures"] = 0
+                ws_age = completed_at - float(state.get("ws_last_tick") or 0)
                 if ws_age > WS_ENTRY_FRESH_SEC:
                     state["ws_ready"] = False
                     state["last_ready_ts"] = 0
                     state["system_ready"] = False
-            _last_bbo_refresh_ts = now
-        except Exception as e:
-            logger.debug(f"[BBO] refresh failed: {e} [PIPELINE ENFORCEMENT]")
+            _last_bbo_refresh_ts = completed_at
+        return True
+    except Exception as exc:
+        with state_lock:
+            state["bbo_refresh_last_error"] = f"{type(exc).__name__}: {exc}"[:240]
+            state["bbo_refresh_consecutive_failures"] = int(
+                state.get("bbo_refresh_consecutive_failures") or 0
+            ) + 1
+        logger.warning(f"[BBO] bounded refresh failed: {exc} [PIPELINE ENFORCEMENT]")
+        return False
+    finally:
+        with _bbo_refresh_lock:
+            if _bbo_refresh_claim_token == token:
+                _bbo_refresh_claim_token = None
+                _bbo_refresh_claim_started_ts = 0.0
+                with state_lock:
+                    state["bbo_refresh_inflight"] = False
+                    state["bbo_refresh_inflight_age_sec"] = 0.0
 
 
 def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = "P0") -> dict:
@@ -23052,7 +23140,6 @@ def state_monitor_loop():
                     f"(watchdog reconnecting; pending orders kept) [PIPELINE ENFORCEMENT]"
                 )
                 set_execution_paused("WS_STALE")
-            fetch_ohlcv()
             update_ema()
             trend_info()
             update_support_resistance()
@@ -23253,6 +23340,18 @@ def state_monitor_loop():
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
+
+
+def ohlcv_refresh_loop():
+    """Maintain candles independently from ticker/BBO readiness work."""
+    while not shutdown_event.is_set():
+        try:
+            fetch_ohlcv()
+        except Exception as exc:
+            logger.error(
+                f"[OHLCV WORKER] refresh failed: {exc} [PIPELINE ENFORCEMENT]"
+            )
+        shutdown_event.wait(min(OHLCV_FETCH_INTERVAL, 5.0))
 
 def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     signal.update(context)
@@ -33857,6 +33956,29 @@ def _market_data_health_snapshot(now: float = None) -> dict:
     }
 
 
+def _bbo_refresh_telemetry_snapshot(now: float = None) -> dict:
+    now = float(now or time.time())
+    with _bbo_refresh_lock:
+        inflight = bool(_bbo_refresh_claim_token)
+        inflight_age = (
+            max(0.0, now - float(_bbo_refresh_claim_started_ts or 0))
+            if inflight
+            else 0.0
+        )
+    with state_lock:
+        return {
+            "inflight": inflight,
+            "inflight_age_sec": inflight_age,
+            "last_attempt_ts": state.get("bbo_refresh_last_attempt_ts"),
+            "last_success_ts": state.get("bbo_refresh_last_success_ts"),
+            "last_error": state.get("bbo_refresh_last_error"),
+            "consecutive_failures": int(
+                state.get("bbo_refresh_consecutive_failures") or 0
+            ),
+            "stale_claims": int(state.get("bbo_refresh_stale_claims") or 0),
+        }
+
+
 @app.route('/health')
 @app.route('/api/status')
 @app.route('/status')
@@ -33898,6 +34020,7 @@ def health():
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
         "runtime_readiness": runtime,
+        "bbo_refresh": _bbo_refresh_telemetry_snapshot(now),
         **market_health,
         "live_entry_armable": armable,
         "live_entry_arm_block_reason": None if armable else arm_block_reason,
@@ -40757,6 +40880,7 @@ def main():
     sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()
