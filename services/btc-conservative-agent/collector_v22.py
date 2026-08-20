@@ -75,6 +75,7 @@ from path_replay_v1 import (
 )
 from replay_eligibility import LEGACY_PREMATURE, validate_replay_eligibility
 from policy_search_manifest import compact_search_receipt
+from microstructure_tape import window_reference as microstructure_window_reference
 
 BYTES_PER_EVENT_TYPICAL = 210_000
 BYTES_PRE_SIGNAL_CONTEXT_TYPICAL = 117_000
@@ -706,6 +707,9 @@ def build_research_event(
             "ticks_1s_note": "optional bounded; replay must not require 1s",
             "coverage": coverage,
         },
+        "microstructure_window": microstructure_window_reference(
+            signal_ts, required_end_ts,
+        ),
         "entry_children": entry_children,
         "primary_outcome": primary,
         "observation_status": obs,

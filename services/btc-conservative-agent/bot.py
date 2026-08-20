@@ -109,6 +109,11 @@ from path_replay_v1 import (
     REPLAY_VERSION,
     build_path_sample,
 )
+from microstructure_tape import (
+    FILE_NAME as MICROSTRUCTURE_TAPE_FILE,
+    SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
+    build_bucket as build_microstructure_bucket,
+)
 from cycle_3m_indicators import (
     EXHAUSTION_POLICY_TAG as MTF_EXHAUSTION_LOG_V1,
     UNIVERSE_FILE as CYCLE_3M_UNIVERSE_FILE,
@@ -4801,8 +4806,11 @@ recent_trades = deque(maxlen=50)
 # Public Bitfinex executions used only to validate a paper fill.  This is a
 # bounded in-memory tape; it never blocks order placement, cancellation, or
 # the WebSocket handler with an HTTP call.
-venue_fill_trade_tape = deque(maxlen=256)
+venue_fill_trade_tape = deque(maxlen=5000)
 venue_fill_trade_tape_lock = threading.Lock()
+_microstructure_last_bucket = 0
+_microstructure_rows_written = 0
+_microstructure_write_failures = 0
 ret_1m_buffer = deque(maxlen=20)
 ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
@@ -22699,7 +22707,9 @@ def _process_ws_ticker_update(payload) -> bool:
         return False
     try:
         bid = float(payload[0] or 0)
+        bid_qty = abs(float(payload[1] or 0))
         ask = float(payload[2] or 0)
+        ask_qty = abs(float(payload[3] or 0))
         last = float(payload[6] or 0)
     except (TypeError, ValueError):
         return False
@@ -22709,6 +22719,8 @@ def _process_ws_ticker_update(payload) -> bool:
     with state_lock:
         state["bid"] = bid
         state["ask"] = ask
+        state["bid_qty"] = bid_qty
+        state["ask_qty"] = ask_qty
         state["price"] = last
         state["price_ts"] = tick_now
         state["ws_last_tick"] = tick_now
@@ -22725,6 +22737,49 @@ def _process_ws_ticker_update(payload) -> bool:
         )
     _recompute_system_readiness(tick_now)
     return True
+
+
+def microstructure_capture_loop():
+    """Persist one shared, side-aware BBO/depth/trade row per full second.
+
+    This is research evidence only. It never calls an entry/exit path and it
+    starts at the next second boundary so a process restart cannot duplicate a
+    bucket already written by the prior process.
+    """
+    global _microstructure_last_bucket, _microstructure_rows_written
+    global _microstructure_write_failures
+    next_bucket = int(time.time()) + 1
+    while not shutdown_event.is_set():
+        wait = max(0.01, next_bucket + 1.0 - time.time())
+        if shutdown_event.wait(wait):
+            break
+        bucket = next_bucket
+        next_bucket += 1
+        with state_lock:
+            bid = state.get("bid")
+            ask = state.get("ask")
+            bid_qty = state.get("bid_qty")
+            ask_qty = state.get("ask_qty")
+            last = state.get("price")
+            source_ts = state.get("ws_last_tick")
+        with venue_fill_trade_tape_lock:
+            bucket_trades = [
+                dict(row) for row in venue_fill_trade_tape
+                if bucket <= float((row or {}).get("received_ts") or 0) < bucket + 1
+            ]
+        row = build_microstructure_bucket(
+            bucket_ts=bucket, bid=bid, ask=ask, bid_qty=bid_qty,
+            ask_qty=ask_qty, last=last, source_ts=source_ts,
+            trades=bucket_trades, symbol=BITFINEX_WS_SYMBOL,
+        )
+        if _safe_append_jsonl(
+            MICROSTRUCTURE_TAPE_FILE, row,
+            label="MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
+        ):
+            _microstructure_last_bucket = bucket
+            _microstructure_rows_written += 1
+        else:
+            _microstructure_write_failures += 1
 
 
 def _tick_driven_position_exits(price: float):
@@ -25591,6 +25646,7 @@ def research_wipe_file_paths():
         ORDER_MULTIVERSE_FILE,
         OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
+        MICROSTRUCTURE_TAPE_FILE,
         "counterfactual.jsonl", APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
@@ -25637,6 +25693,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         ORDER_MULTIVERSE_FILE,
         OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
+        MICROSTRUCTURE_TAPE_FILE,
         "counterfactual.jsonl", FILL_QUALITY_FILE, "execution_funnel.jsonl",
         SHADOW_VS_LIVE_ENTRY_FILE,
         APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
@@ -34064,6 +34121,14 @@ def health():
             "path_schema_version": PATH_SCHEMA_VERSION,
             "replay_version": REPLAY_VERSION,
             "fill_model": FILL_MODEL_IDEAL_TOUCH,
+            "microstructure_tape": {
+                "schema": MICROSTRUCTURE_TAPE_SCHEMA,
+                "file": MICROSTRUCTURE_TAPE_FILE,
+                "last_bucket_ts": int(_microstructure_last_bucket or 0),
+                "rows_written_this_process": int(_microstructure_rows_written),
+                "write_failures_this_process": int(_microstructure_write_failures),
+                "qualification_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
+            },
             "control_cell": CONTROL_CELL,
             "alt_tp": ["atr_k_tp", "chandelier", "structure_tp"],
             "alt_sl": ["atr_k_stop", "structure_stop"],
@@ -40138,6 +40203,7 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "SIGNAL_REPLAY_FILE",
     "COUNTERFACTUAL_FILE",
     "SOURCE_ORDER_MARKET_EVIDENCE_FILE",
+    "MICROSTRUCTURE_TAPE_FILE",
     "TYPE_B_RESEARCH_V2_EVENT_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
@@ -41137,6 +41203,7 @@ def main():
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bbo_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()

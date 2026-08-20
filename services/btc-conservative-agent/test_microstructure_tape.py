@@ -1,4 +1,8 @@
 from microstructure_tape import build_bucket, validate_window, window_reference
+from pathlib import Path
+
+BOT = (Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8")
+COLLECTOR = (Path(__file__).resolve().parent / "collector_v22.py").read_text(encoding="utf-8")
 
 
 def test_bucket_aggregates_side_volume_and_binds_hash():
@@ -33,3 +37,20 @@ def test_window_requires_every_unique_fresh_second():
     assert validate_window(rows, ref)["eligible"] is True
     assert validate_window(rows[:-1], ref)["eligible"] is False
     assert validate_window(rows + [rows[0]], ref)["eligible"] is False
+
+
+def test_runtime_capture_is_research_only_and_started_once():
+    start = BOT.index("def microstructure_capture_loop():")
+    end = BOT.index("\ndef ", start + 5)
+    body = BOT[start:end]
+    for forbidden in ("create_order", "submit_order", "close_position", "process_pending_orders"):
+        assert forbidden not in body
+    assert BOT.count("target=safe_thread(microstructure_capture_loop)") == 1
+    assert 'state["bid_qty"] = bid_qty' in BOT
+    assert 'state["ask_qty"] = ask_qty' in BOT
+    assert "MICROSTRUCTURE_TAPE_FILE" in BOT
+
+
+def test_v22_event_references_the_shared_required_window_without_claiming_coverage():
+    assert '"microstructure_window": microstructure_window_reference(' in COLLECTOR
+    assert "signal_ts, required_end_ts" in COLLECTOR
