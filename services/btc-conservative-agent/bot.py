@@ -22976,6 +22976,10 @@ def state_monitor_loop():
             if now - last_bbo_mon_ts >= BBO_REFRESH_SEC:
                 refresh_bbo_state()
                 last_bbo_mon_ts = now
+            # The REST refresh above may overlap newer WS ticks.  Never feed
+            # its pre-request timestamp into readiness or those newer ticks
+            # acquire a negative age and reset the stability latch.
+            now = time.time()
             runtime = _recompute_system_readiness(now)
             recover_reason = ""
             should_pause_ws = False
