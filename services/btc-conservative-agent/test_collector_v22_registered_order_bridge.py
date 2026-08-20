@@ -1,4 +1,5 @@
 import ast
+import copy
 from pathlib import Path
 
 
@@ -34,6 +35,28 @@ def _load_bridge(pending, sync_calls):
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
     return namespace["_promote_collector_v22_registered_order"], namespace["logger"]
+
+
+def _load_refresh(pending, upserts):
+    tree = ast.parse(BOT_SOURCE)
+    node = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name == "_refresh_collector_v22_registered_order_evidence"
+    )
+
+    def upsert(event_id, source, *, epoch_id):
+        upserts.append((event_id, copy.deepcopy(source), epoch_id))
+
+    namespace = {
+        "copy": copy,
+        "_order_multiverse_pending_src": pending,
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "upsert_provisional_event": upsert,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
+    return namespace["_refresh_collector_v22_registered_order_evidence"]
 
 
 def test_real_registration_replaces_rejected_provisional_with_execution_evidence():
@@ -104,3 +127,57 @@ def test_lane_registration_invokes_bridge_after_schedule_initialization():
     assert "collector_bridge(" in body
     assert body.index("schedule_initializer(") < body.index("collector_bridge(")
 
+
+def test_reprice_and_terminal_close_refresh_durable_schedule_snapshot():
+    pending = {
+        "cont-3": {
+            "trade_id": "cont-3",
+            "status": "PENDING",
+            "qty": 0.03,
+            "collector_rejected": False,
+            "research_chase_schedule": {"authoritative": True, "intervals": []},
+        }
+    }
+    upserts = []
+    refresh = _load_refresh(pending, upserts)
+    schedule = {
+        "schema": "research_chase_schedule_v1",
+        "authoritative": True,
+        "intervals": [
+            {"start_ts": 1000, "end_ts": 1100, "limit_price": 50000.0},
+            {"start_ts": 1100, "end_ts": None, "limit_price": 50010.0},
+        ],
+    }
+    order = {
+        "trade_id": "cont-3",
+        "status": "PENDING",
+        "qty": 0.03,
+        "limit_price": 50010.0,
+        "limit_chase_count": 4,
+        "last_chase_ts": 1100.0,
+        "research_chase_schedule": schedule,
+        "chase_schedule_authoritative": True,
+    }
+
+    assert refresh(order) is True
+    assert len(upserts) == 1
+    _event_id, durable, epoch_id = upserts[-1]
+    assert epoch_id == "epoch-1"
+    assert durable["limit_chase_count"] == 4
+    assert len(durable["research_chase_schedule"]["intervals"]) == 2
+
+    schedule["intervals"][-1]["end_ts"] = 1200
+    order["status"] = "CANCELLED"
+    assert refresh(order) is True
+    assert upserts[-1][1]["status"] == "CANCELLED"
+    assert upserts[-1][1]["research_chase_schedule"]["intervals"][-1]["end_ts"] == 1200
+
+    # Durable rows are copies, not aliases to later runtime mutations.
+    schedule["intervals"][-1]["end_ts"] = 1300
+    assert upserts[-1][1]["research_chase_schedule"]["intervals"][-1]["end_ts"] == 1200
+
+
+def test_schedule_mutation_paths_refresh_collector_after_mutation():
+    assert BOT_SOURCE.count("_refresh_collector_v22_registered_order_evidence") >= 6
+    assert "schedule_reprice(\n                order," in BOT_SOURCE
+    assert "schedule_close(\n                    order," in BOT_SOURCE

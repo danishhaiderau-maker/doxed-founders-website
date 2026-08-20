@@ -12151,6 +12151,41 @@ def _promote_collector_v22_registered_order(order: dict, signal: dict = None):
     return result
 
 
+def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict = None):
+    """Persist the latest authoritative order schedule after every mutation."""
+    if not isinstance(order, dict):
+        return False
+    tid = str(order.get("trade_id") or "")
+    source = _order_multiverse_pending_src.get(tid)
+    if not tid or not isinstance(source, dict) or source.get("collector_rejected"):
+        return False
+    schedule = order.get("research_chase_schedule")
+    if schedule is None and isinstance(signal, dict):
+        schedule = signal.get("research_chase_schedule")
+    signal_authoritative = bool(
+        signal.get("chase_schedule_authoritative") if isinstance(signal, dict) else False
+    )
+    if not isinstance(schedule, dict) or not bool(
+        order.get("chase_schedule_authoritative") or signal_authoritative
+    ):
+        return False
+    refreshed = dict(source)
+    refreshed["qty"] = order.get("qty", refreshed.get("qty"))
+    refreshed["status"] = order.get("status", refreshed.get("status"))
+    refreshed["limit_price"] = order.get("limit_price", refreshed.get("limit_price"))
+    refreshed["limit_chase_count"] = order.get(
+        "limit_chase_count", refreshed.get("limit_chase_count")
+    )
+    refreshed["last_chase_ts"] = order.get("last_chase_ts", refreshed.get("last_chase_ts"))
+    refreshed["fill_ts"] = order.get("fill_ts", refreshed.get("fill_ts"))
+    refreshed["fill_price"] = order.get("fill_price", refreshed.get("fill_price"))
+    refreshed["research_chase_schedule"] = copy.deepcopy(schedule)
+    refreshed["chase_schedule_authoritative"] = True
+    _order_multiverse_pending_src[tid] = refreshed
+    upsert_provisional_event(tid, refreshed, epoch_id=_collector_v22_epoch_id())
+    return True
+
+
 def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "REJECTED", *, would_block_only: bool = False):
     """First-class rejected/WOULD_BLOCK candidate. Not a live veto."""
     if not isinstance(signal, dict):
@@ -20537,6 +20572,9 @@ def _commit_relay_limit_chase(
                 limit_price=new_limit,
                 reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
             )
+        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+        if callable(collector_refresh):
+            collector_refresh(order, signal if isinstance(signal, dict) else None)
         # Canonical pending-order identity: fill gate + market evidence share
         # this generation only after chase ACK mutated the live order.
         sync_pending = globals().get("_sync_canonical_source_pending_order")
@@ -20868,6 +20906,9 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
                 limit_price=new_limit,
                 reason="MARKETABLE_LIMIT_FALLBACK",
             )
+        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+        if callable(collector_refresh):
+            collector_refresh(order, signal if isinstance(signal, dict) else None)
         sync_pending = globals().get("_sync_canonical_source_pending_order")
         store = globals().get("_canonical_source_order_market_evidence")
         summary_builder = globals().get("_source_market_evidence_summary")
@@ -21243,6 +21284,9 @@ def process_pending_orders():
                     now=time.time(),
                     reason="FILLED",
                 )
+            collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+            if callable(collector_refresh):
+                collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
             order["fill_handoff_in_progress"] = True
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
@@ -21270,6 +21314,9 @@ def fill_order(order):
                 now=time.time(),
                 reason="ADMIN_MANUAL_PAUSE",
             )
+        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+        if callable(collector_refresh):
+            collector_refresh(order, paused_signal if isinstance(paused_signal, dict) else None)
         _record_expired_order(order, "ADMIN_MANUAL_PAUSE")
         expire_signal_for_order(order, "ADMIN_MANUAL_PAUSE")
         logger.warning(
@@ -24248,6 +24295,9 @@ def _cancel_pending_order_confirmed(
                 reason=reason,
             )
 
+    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+    if callable(collector_refresh):
+        collector_refresh(order, master_signal if isinstance(master_signal, dict) else None)
     result["confirmed"] = True
     result["finalized"] = True
     if record_expired:
