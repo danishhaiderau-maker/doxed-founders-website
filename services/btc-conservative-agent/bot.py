@@ -23066,16 +23066,8 @@ def state_monitor_loop():
     try:
         last_stale_time = 0
         last_rest_snapshot_ts = 0.0
-        last_bbo_mon_ts = 0.0
         while not shutdown_event.is_set():
             time.sleep(1)
-            now = time.time()
-            if now - last_bbo_mon_ts >= BBO_REFRESH_SEC:
-                refresh_bbo_state()
-                last_bbo_mon_ts = now
-            # The REST refresh above may overlap newer WS ticks.  Never feed
-            # its pre-request timestamp into readiness or those newer ticks
-            # acquire a negative age and reset the stability latch.
             now = time.time()
             runtime = _recompute_system_readiness(now)
             recover_reason = ""
@@ -23352,6 +23344,20 @@ def ohlcv_refresh_loop():
                 f"[OHLCV WORKER] refresh failed: {exc} [PIPELINE ENFORCEMENT]"
             )
         shutdown_event.wait(min(OHLCV_FETCH_INTERVAL, 5.0))
+
+
+def bbo_refresh_loop():
+    """Maintain the strict REST entry quote on an independent cadence."""
+    while not shutdown_event.is_set():
+        started = time.monotonic()
+        try:
+            refresh_bbo_state()
+        except Exception as exc:
+            logger.error(
+                f"[BBO WORKER] refresh failed: {exc} [PIPELINE ENFORCEMENT]"
+            )
+        elapsed = max(0.0, time.monotonic() - started)
+        shutdown_event.wait(max(0.05, BBO_REFRESH_SEC - elapsed))
 
 def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     signal.update(context)
@@ -40880,6 +40886,7 @@ def main():
     sync_dashboard_branding()
     threading.Thread(target=safe_thread(start_websocket), daemon=True).start()
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(bbo_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()

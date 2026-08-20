@@ -112,6 +112,44 @@ class WorkerIsolationSourceContractTest(unittest.TestCase):
             "threading.Thread(target=safe_thread(ohlcv_refresh_loop)", SOURCE
         )
 
+    def test_bbo_has_an_independent_bounded_cadence_worker(self):
+        state_monitor = ast.get_source_segment(SOURCE, FUNCTIONS["state_monitor_loop"])
+        bbo_worker = ast.get_source_segment(SOURCE, FUNCTIONS["bbo_refresh_loop"])
+        self.assertNotIn("refresh_bbo_state()", state_monitor)
+        self.assertIn("refresh_bbo_state()", bbo_worker)
+        self.assertIn("BBO_REFRESH_SEC - elapsed", bbo_worker)
+        self.assertIn(
+            "threading.Thread(target=safe_thread(bbo_refresh_loop)", SOURCE
+        )
+
+    def test_bbo_worker_repeats_without_creating_a_request_stampede(self):
+        calls = []
+
+        class BoundedShutdown:
+            def __init__(self):
+                self.waits = []
+
+            def is_set(self):
+                return len(self.waits) >= 3
+
+            def wait(self, seconds):
+                self.waits.append(seconds)
+                return self.is_set()
+
+        shutdown = BoundedShutdown()
+        namespace = {
+            "time": time,
+            "shutdown_event": shutdown,
+            "BBO_REFRESH_SEC": 3.0,
+            "refresh_bbo_state": lambda: calls.append(time.monotonic()),
+            "logger": SimpleNamespace(error=lambda *_args, **_kwargs: None),
+        }
+        compile_function("bbo_refresh_loop", namespace)
+        namespace["bbo_refresh_loop"]()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(shutdown.waits), 3)
+        self.assertTrue(all(0.05 <= delay <= 3.0 for delay in shutdown.waits))
+
     def test_entry_freshness_contract_is_not_weakened(self):
         readiness = ast.get_source_segment(
             SOURCE, FUNCTIONS["_fresh_rest_entry_quote_ready"]

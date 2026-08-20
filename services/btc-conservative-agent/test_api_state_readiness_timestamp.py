@@ -32,16 +32,15 @@ class ApiStateReadinessTimestampTests(unittest.TestCase):
         self.assertEqual(calls[0].args, [])
         self.assertEqual(calls[0].keywords, [])
 
-    def test_state_monitor_refreshes_clock_after_rest_io(self):
+    def test_state_monitor_uses_its_own_fresh_clock_without_rest_io(self):
         target = self._function("state_monitor_loop")
         statements = list(ast.walk(target))
-        refresh_line = next(
-            node.lineno
-            for node in statements
-            if isinstance(node, ast.Call)
+        self.assertFalse(any(
+            isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "refresh_bbo_state"
-        )
+            for node in statements
+        ))
         recompute = next(
             node
             for node in statements
@@ -60,7 +59,16 @@ class ApiStateReadinessTimestampTests(unittest.TestCase):
             and node.value.func.value.id == "time"
             and node.value.func.attr == "time"
         ]
-        self.assertTrue(any(refresh_line < line < recompute.lineno for line in fresh_clock_lines))
+        self.assertTrue(any(line < recompute.lineno for line in fresh_clock_lines))
+
+    def test_bbo_refresh_has_an_independent_worker(self):
+        target = self._function("bbo_refresh_loop")
+        calls = {
+            node.func.id
+            for node in ast.walk(target)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        self.assertIn("refresh_bbo_state", calls)
 
     def test_active_dashboard_overlay_carries_live_readiness_authority(self):
         target = self._function("_api_state_cache_refresher_loop")
