@@ -32,6 +32,12 @@ def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
     assert "@{$signal_ts" not in SYNC_LOOP
 
 
+def test_sync_loop_has_sha256_fallback_for_minimal_windows_hosts():
+    assert "Get-Command Get-FileHash -ErrorAction SilentlyContinue" in SYNC_LOOP
+    assert "[System.Security.Cryptography.SHA256]::Create()" in SYNC_LOOP
+    assert "[System.IO.File]::OpenRead($resolved)" in SYNC_LOOP
+
+
 def _load_bot_functions(*names):
     tree = ast.parse(BOT)
     selected = [

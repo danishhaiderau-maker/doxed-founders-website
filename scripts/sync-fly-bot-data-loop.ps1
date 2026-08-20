@@ -4,6 +4,29 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+
+# Windows PowerShell hosts launched without the Microsoft.PowerShell.Utility
+# module may not expose Get-FileHash. Keep sync receipts fail-closed while
+# providing the same SHA-256 contract via the framework implementation.
+if (-not (Get-Command Get-FileHash -ErrorAction SilentlyContinue)) {
+  function Get-FileHash {
+    param(
+      [Parameter(Mandatory = $true)][string]$LiteralPath,
+      [ValidateSet("SHA256")][string]$Algorithm = "SHA256"
+    )
+    $resolved = [System.IO.Path]::GetFullPath($LiteralPath)
+    $stream = [System.IO.File]::OpenRead($resolved)
+    try {
+      $sha = [System.Security.Cryptography.SHA256]::Create()
+      try { $hex = [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace("-", "") }
+      finally { $sha.Dispose() }
+    } finally {
+      $stream.Dispose()
+    }
+    [pscustomobject]@{ Algorithm = "SHA256"; Hash = $hex; Path = $resolved }
+  }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
