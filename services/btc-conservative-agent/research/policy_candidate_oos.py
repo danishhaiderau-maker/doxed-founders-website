@@ -12,7 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from collector_v22_schema import RESEARCH_EVENTS_FILE
+from collector_v22_schema import OBS_DATA_ERROR, OBS_INSUFFICIENT_PATH, RESEARCH_EVENTS_FILE
 from replay_eligibility import validate_replay_eligibility
 from replay_event_report import replay_event_report
 from research.best_policy_research import (
@@ -26,6 +26,74 @@ MIN_TRAIN_EPISODES = 30
 MIN_OOS_EPISODES = 20
 MIN_PROMOTION_EPISODES = 100
 MAX_DESCRIPTIVE_STATIC_ROWS = 100
+TERMINAL_NEGATIVE_OBSERVATIONS = {OBS_INSUFFICIENT_PATH, OBS_DATA_ERROR}
+
+
+def _structured_integrity_cohorts(rows: list[dict]) -> dict:
+    """Classify ranked and explicitly quarantined rows without count shortcuts."""
+    ranked = []
+    excluded = []
+    defects = []
+    exclusion_reasons = defaultdict(int)
+    for row in rows:
+        event_id = str(row.get("event_id") or "")
+        derived = validate_replay_eligibility(row)
+        ranking_flag = row.get("ranking_eligible")
+        if ranking_flag is True:
+            if derived.get("eligible") is True:
+                ranked.append(row)
+            else:
+                defects.append({
+                    "event_id": event_id,
+                    "reason": "RANKED_ROW_REPLAY_INVALID",
+                    "replay_reasons": list(derived.get("reasons") or []),
+                })
+            continue
+        if ranking_flag is not False and derived.get("eligible") is True:
+            # Legacy rows predate the stored ranking flag. Independent tape
+            # validation is authoritative for rows that are actually ranked;
+            # only exclusions require explicit quarantine metadata.
+            ranked.append(row)
+            continue
+
+        observation = str(row.get("observation_status") or "")
+        stored = row.get("replay_eligibility")
+        stored_reasons = list(stored.get("reasons") or []) if isinstance(stored, dict) else []
+        derived_reasons = list(derived.get("reasons") or [])
+        explicit_negative = bool(
+            ranking_flag is False
+            and row.get("negative_evidence") is True
+            and observation in TERMINAL_NEGATIVE_OBSERVATIONS
+            and isinstance(row.get("replay_outcomes"), list)
+            and not row.get("replay_outcomes")
+            and isinstance(stored, dict)
+            and stored.get("eligible") is False
+            and stored.get("status") == "REPLAY_INELIGIBLE"
+            and stored_reasons
+            and derived.get("eligible") is False
+            and stored_reasons == derived_reasons
+        )
+        if explicit_negative:
+            excluded.append(row)
+            for reason in stored_reasons:
+                exclusion_reasons[str(reason)] += 1
+        else:
+            defects.append({
+                "event_id": event_id,
+                "reason": "EXCLUSION_NOT_EXPLICIT_TERMINAL_NEGATIVE_EVIDENCE",
+                "observation_status": observation or None,
+                "derived_replay_reasons": derived_reasons,
+            })
+    return {
+        "passed": not defects,
+        "ranked_rows": ranked,
+        "excluded_rows": excluded,
+        "ranked_count": len(ranked),
+        "excluded_count": len(excluded),
+        "exclusion_reasons": dict(sorted(exclusion_reasons.items())),
+        "defect_count": len(defects),
+        "defects": defects,
+    }
 
 
 def _oos_policy_comparison(static_oos, dynamic_oos) -> dict:
@@ -187,7 +255,8 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
             or ""
         ) == policy_epoch
     ]
-    eligible = [row for row in current if validate_replay_eligibility(row).get("eligible")]
+    integrity = _structured_integrity_cohorts(current)
+    eligible = integrity["ranked_rows"]
     episodes = _episode_rows(eligible)
     cache = {str(row.get("event_id")): _policy_outcomes(row) for row in episodes}
     for row in episodes:
@@ -309,7 +378,7 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
         "chronological_untouched_oos": enough,
         "minimum_independent_episodes": len(episodes) >= MIN_PROMOTION_EPISODES,
         "regime_diversity": len(regime_train) >= 3,
-        "no_data_integrity_defects": len(eligible) == len(current) and bool(current),
+        "no_data_integrity_defects": bool(current) and integrity["passed"],
         "control_benchmark_comparison": bool(static_oos and static_oos.get("expectancy_usd") is not None),
     })
     blockers = [f"QUALIFICATION_GATE_FAILED:{name}" for name, passed in gates.items() if not passed]
@@ -352,6 +421,17 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
             "independent_episodes": len(episodes), "training_episodes": len(train),
             "oos_episodes": len(oos), "policies_observed": len(policies),
             "shadow_independent_episodes": len(shadow_rows),
+            "integrity_ranked_events": integrity["ranked_count"],
+            "integrity_excluded_negative_events": integrity["excluded_count"],
+            "integrity_exclusion_reasons": integrity["exclusion_reasons"],
+            "integrity_defect_count": integrity["defect_count"],
+        },
+        "data_integrity": {
+            "status": "PASS" if integrity["passed"] else "FAIL",
+            "ranked_events": integrity["ranked_count"],
+            "excluded_terminal_negative_events": integrity["excluded_count"],
+            "exclusion_reasons": integrity["exclusion_reasons"],
+            "defects": integrity["defects"],
         },
         "shadow_research": {
             "scope": "REJECTED_CURRENT_EPOCH_REPLAY",
