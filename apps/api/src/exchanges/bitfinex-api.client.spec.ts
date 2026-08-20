@@ -38,9 +38,9 @@ test('authenticated order-trade parsing preserves immutable fill identity and ex
 
 test('REST and WS nonce allocations share one strictly monotonic api-key sequence', () => {
   resetBitfinexNonceLanesForTests();
+  const floor = BigInt(Date.now()) * BITFINEX_NONCE_MS_SCALE;
   const values = Array.from({ length: 20 }, () => BigInt(allocateBitfinexAuthNonce('shared-nonce-key')));
   for (let index = 1; index < values.length; index++) assert.ok(values[index] > values[index - 1]);
-  const floor = BigInt(Date.now()) * BITFINEX_NONCE_MS_SCALE;
   assert.ok(values[0] >= floor);
 });
 
