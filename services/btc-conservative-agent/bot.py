@@ -220,27 +220,17 @@ from a160_v2_research import (
     V2_AI_INPUT_LOG_FILE,
     V2_AI_OFFSET_FROM_MAIN_SEC,
     V2_CHECKER_LOG_FILE,
-    V2_LANE,
     V2_MIN_SIGNAL_AGE_SEC,
     V2_PROMPT_ID,
     V2_RESEARCH_AI_COOLDOWN_SEC,
     V2_SHADOW_OUTCOME_FILE,
-    build_v2_prompt,
-    checked_to_v2_ai,
-    evaluate_a160_context_chase_v2_checker,
     load_v2_shadow_metrics,
-    parse_v2_structured_audit,
-    synthesize_v2_trade_planner,
-    v2_research_ai_enabled_env,
     v2_wipe_files,
 )
 from legacy_pathway_config import (
     PATHWAY_STATUS_SHADOW_COLLECTING,
-    SHADOW_COLLECTING_ID_PREFIX,
     SHADOW_COLLECTING_LANES,
     is_shadow_collecting_lane,
-    legacy_lane_matches,
-    shadow_collecting_toggle_defaults,
 )
 from scenario_c_config import (
     SCENARIO_C_LADDER_LABEL,
@@ -248,7 +238,6 @@ from scenario_c_config import (
     TRAIL_LADDER_SCENARIO_C,
 )
 from experimental_pathway_config import (
-    EXPERIMENTAL_EXECUTION_LANES,
     EXPERIMENTAL_LANE_LABELS,
     EXPERIMENTAL_LANE_SPECS,
     EXPERIMENTAL_TILE_DISPLAY_ORDER,
@@ -260,11 +249,6 @@ from experimental_pathway_config import (
     RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
     RESEARCH_LANE_RECOVERY_MONSTER_V1,
     RESEARCH_LANE_TYPE_B_PREDICTOR_V1,
-    ai_disagreement_alpha_matches,
-    ai_disagreement_replay_matches,
-    experimental_toggle_defaults,
-    is_experimental_execution_lane,
-    type_b_predictor_matches,
 )
 from pathway_lane_roster import (
     PATHWAY_SHADOW_COLLECTING_ENABLED,
@@ -16311,217 +16295,6 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             ctx, ai, edge_score, enriched, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
-    spawn_experimental_lanes_from_ai_scan(
-        ctx, ai, edge_score, enriched, source_lane, final_direction, spread,
-    )
-    spawn_shadow_collecting_lanes_from_ai_scan(
-        ctx, ai, edge_score, enriched, source_lane, final_direction, spread,
-    )
-
-
-def _spawn_experimental_lane(
-    ctx, ai, edge_score, features, target_lane: str, trigger_reason: str,
-):
-    if not is_research_data_collection():
-        return
-    if not guard_retired_lane_execution(target_lane, "spawn_experimental_lane", (ctx or {}).get("trade_id")):
-        return
-    if not is_research_lane_enabled(target_lane):
-        logger.info(f"[{target_lane}] spawn skipped - lane OFF [PIPELINE ENFORCEMENT]")
-        log_lane_opportunity_event(
-            target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
-            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
-            block_reason="LANE_TOGGLE_OFF",
-        )
-        return
-    spec = EXPERIMENTAL_LANE_SPECS.get(target_lane, {})
-    spawn_ctx = copy.deepcopy(ctx)
-    spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
-    spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
-    logger.info(
-        f"[{target_lane}] experimental spawn trade_id={spawn_ctx['trade_id']} "
-        f"reason={trigger_reason} [PIPELINE ENFORCEMENT]"
-    )
-    process_signal({
-        "event_trigger": True,
-        "research_lane": target_lane,
-        "edge_trigger_reason": trigger_reason,
-        "edge_score": round(float(edge_score), 1),
-        "price": nz(state.get("price")),
-        "timestamp": utc_iso(),
-        "features": features or {},
-        "skip_ai": True,
-        "pre_ai": copy.deepcopy(ai),
-        "pre_ctx": spawn_ctx,
-    })
-
-
-def spawn_experimental_lanes_from_ai_scan(
-    ctx, ai, edge_score, features, source_lane: str,
-    final_direction: str = None, spread: int = None,
-):
-    """APPROVE-spawn experimental lanes retired 2026-06-21 — Replay uses spawn_on REJECT."""
-    return
-
-
-def spawn_experimental_disagreement_replay(ctx, ai, edge_score, features, source_lane: str):
-    """Spawn when AI rejected but replay model approves (counterfactual execution lane)."""
-    if not is_ai_scan_lane(source_lane) or not is_research_data_collection():
-        return
-    with state_lock:
-        replay_eval = copy.deepcopy(state.get("last_replay_model_eval") or {})
-    if not ai_disagreement_replay_matches(ai, replay_eval):
-        return
-    if not is_research_lane_enabled(RESEARCH_LANE_AI_DISAGREEMENT_REPLAY):
-        return
-    spawn_ai = copy.deepcopy(ai)
-    spawn_ai["decision"] = "APPROVE"
-    spawn_ai["execution_tier"] = "APPROVE"
-    spawn_ai["approved"] = True
-    direction = spawn_ai.get("direction")
-    if str(direction or "").upper() in ("NO_TRADE", "NONE", ""):
-        direction = (spawn_ai.get("factors") or {}).get("preferred_direction")
-    if str(direction or "").upper() in ("NO_TRADE", "NONE", ""):
-        direction = "SHORT"
-    spawn_ai["direction"] = direction
-    _spawn_experimental_lane(
-        ctx, spawn_ai, edge_score, features,
-        RESEARCH_LANE_AI_DISAGREEMENT_REPLAY,
-        "AI_DISAGREE_REPLAY_APPROVE",
-    )
-
-
-def spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane: str):
-    """Shadow-only horizon study — no orders submitted."""
-    if ai.get("decision") != "APPROVE":
-        return
-    if not is_research_data_collection():
-        return
-    if not is_research_lane_enabled(RESEARCH_LANE_SHADOW_RUNNER):
-        return
-    edge = round(float(edge_score), 1)
-    if edge < 3.5:
-        return
-    direction = str(ai.get("direction") or "LONG").upper()
-    if state.get("invert_signal", False):
-        direction = "SHORT" if direction == "LONG" else "LONG" if direction == "SHORT" else direction
-    price = float(nz(state.get("price")) or 0)
-    if price <= 0:
-        return
-    study_id = f"shrun-{uuid.uuid4().hex[:12]}"
-    with state_lock:
-        edge_prev = round(float(state.get("last_edge_trigger_prev", state.get("edge_prev", 0)) or 0), 1)
-    row = {
-        "schema": "shadow_runner_v1",
-        "ts": utc_iso(),
-        "study_id": study_id,
-        "trade_id": study_id,
-        "source_lane": source_lane,
-        "research_lane": RESEARCH_LANE_SHADOW_RUNNER,
-        "direction": direction,
-        "price": price,
-        "edge_score": edge,
-        "edge_previous": edge_prev,
-        "volume_ratio": float((features or {}).get("volume_ratio") or 0),
-        "ai_win_prob": ai.get("win_prob"),
-        "horizon_secs": SHADOW_RUNNER_HORIZON_SECS,
-        "bot_version": EXECUTION_FIX_VERSION,
-    }
-    _safe_append_jsonl("shadow_runner_study.jsonl", row, label="SHADOW_RUNNER")
-    start_replay_buffer(
-        study_id,
-        price,
-        lane=RESEARCH_LANE_SHADOW_RUNNER,
-        direction=direction,
-        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
-        margin_usdt=float(FIXED_MARGIN_USDT),
-        source_trade_id=ctx.get("trade_id"),
-        edge_score=edge,
-        horizon_secs=SHADOW_RUNNER_HORIZON_SECS,
-        exit_config=get_exit_config_snapshot(RESEARCH_LANE_CONTINUOUS),
-    )
-    spawn_ai = copy.deepcopy(ai)
-    spawn_ai["trade_id"] = study_id
-    spawn_ai["research_lane"] = RESEARCH_LANE_SHADOW_RUNNER
-    spawn_ai["research_model"] = research_lane_label(RESEARCH_LANE_SHADOW_RUNNER)
-    spawn_ai["source"] = "SPAWN"
-    spawn_ai["shadow_only"] = True
-    log_ai_tranche_outcome(spawn_ai, event="AI_SPAWN")
-    _append_ai_history_row(spawn_ai)
-    logger.info(
-        f"[SHADOW_RUNNER] horizon study started study_id={study_id} edge={edge} "
-        f"horizons=+15/+30/+60/+90m [PIPELINE ENFORCEMENT]"
-    )
-
-
-def spawn_shadow_collecting_lanes_from_ai_scan(
-    ctx, ai, edge_score, features, source_lane: str, executed_direction: str, spread: int,
-):
-    """Shadow sim lanes — virtual attribution from AI scan (no live orders)."""
-    if not PATHWAY_SHADOW_COLLECTING_ENABLED:
-        return
-    for lane in SHADOW_COLLECTING_LANES:
-        if lane == RESEARCH_LANE_SHADOW_RUNNER:
-            spawn_shadow_runner_lane(ctx, ai, edge_score, features, source_lane)
-            continue
-        if not is_research_lane_enabled(lane):
-            continue
-        if not legacy_lane_matches(lane, ai, edge_score, features, executed_direction, spread):
-            continue
-        _spawn_shadow_collecting_lane(
-            ctx, ai, edge_score, features, lane, source_lane,
-            raw_direction=str(ai.get("direction") or "LONG").upper(),
-            executed_direction=str(executed_direction or ai.get("direction") or "LONG").upper(),
-        )
-
-
-def _spawn_shadow_collecting_lane(
-    ctx, ai, edge_score, features, target_lane: str, source_lane: str,
-    raw_direction: str, executed_direction: str,
-):
-    prefix = SHADOW_COLLECTING_ID_PREFIX.get(target_lane, "shcol")
-    study_id = f"{prefix}-{uuid.uuid4().hex[:12]}"
-    # The caller has already applied the ticket-time invert exactly once.
-    # Keep both sides explicit so this shadow cannot silently flip back.
-    direction = str(executed_direction or raw_direction or "LONG").upper()
-    raw_direction = str(raw_direction or direction).upper()
-    price = float(nz(state.get("price")) or 0)
-    if price <= 0:
-        return
-    exit_cfg = get_exit_config_for_lane(target_lane)
-    start_replay_buffer(
-        study_id,
-        price,
-        lane=f"shadow_collect_{target_lane}",
-        direction=direction,
-        raw_direction=raw_direction,
-        executed_direction=direction,
-        invert_on=bool(raw_direction in ("LONG", "SHORT") and direction != raw_direction),
-        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
-        margin_usdt=float(FIXED_MARGIN_USDT),
-        pullback_pct=float(state.get("pullback_threshold", 0.001)),
-        early_fail_enabled=False,
-        exit_config=exit_cfg,
-        ai_win_prob=ai.get("win_prob"),
-        edge_score=round(float(edge_score), 1),
-        research_lane=target_lane,
-        source_trade_id=(ctx or {}).get("trade_id"),
-        collection_mode=PATHWAY_STATUS_SHADOW_COLLECTING,
-    )
-    append_replay_tick(study_id, price, None)
-    log_lane_opportunity_event(
-        target_lane,
-        "SHADOW_COLLECT_SPAWN",
-        study_id,
-        direction,
-        ai.get("win_prob"),
-        edge_score,
-        block_reason="SHADOW_COLLECTING",
-    )
-    logger.info(
-        f"[{target_lane}] shadow collect study_id={study_id} source={source_lane} "
-        f"[PIPELINE ENFORCEMENT]"
-    )
 
 
 def finalize_shadow_lane_collecting(study_id: str, buf: dict):
@@ -16750,104 +16523,6 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     )
 
 
-def spawn_type_b_lane_from_shared_ai(ctx, ai, edge_score, features, source_lane: str):
-    """Evaluate Type B from the same AI_SCAN direction used by Continuous.
-
-    This performs no API call.  Type B keeps a separate feature gate, toggle,
-    pending-order/chase lifecycle, trade id, P&L ledger, and policy cohort.
-    """
-    if not is_ai_scan_lane(source_lane) or not ai:
-        return
-    direction = str(ai.get("direction") or "").upper()
-    if direction not in ("LONG", "SHORT"):
-        _stamp_shared_ai_lane_verdict(
-            _shared_ai_call_id(ai_result=ai, ctx=ctx),
-            RESEARCH_LANE_TYPE_B_HUNTER_V1,
-            False,
-            "SHARED_AI_NO_CANDIDATE_DIRECTION",
-            policy_version=_type_b_policy_version(),
-        )
-        log_lane_opportunity_event(
-            RESEARCH_LANE_TYPE_B_HUNTER_V1,
-            "SPAWN_SKIPPED",
-            (ctx or {}).get("trade_id"),
-            direction,
-            0,
-            edge_score,
-            block_reason="SHARED_AI_NO_DIRECTION",
-        )
-        return
-    shared_ai = copy.deepcopy(ai)
-    shared_ai["shared_ai_call"] = True
-    shared_ai["shared_ai_call_id"] = _shared_ai_call_id(ai_result=ai, ctx=ctx)
-    shared_ai["shared_ai_source_lane"] = source_lane
-    shared_ai["win_prob"] = 0
-    shared_ai["confidence_used_for_entry"] = False
-    _spawn_independent_v1_lane_after_ai(
-        ctx,
-        shared_ai,
-        edge_score,
-        _enrich_combo_lane_features(features, ctx),
-        RESEARCH_LANE_TYPE_B_HUNTER_V1,
-        "TYPE_B_FROM_SHARED_DIRECTION_AI",
-    )
-
-
-def _v2_benchmark_safety_ok(context: str, trade_id: str = None) -> bool:
-    """Prove V2 cannot alter CONTINUOUS decisions / shared AI cooldown / live exchange.
-
-    Returns True when safe to continue V2 path. Aborts only on invariant violations.
-    V2 IS order-capable for independent paper limits (same pattern as AI60 tile).
-    """
-
-    return False  # A160_CONTEXT_CHASE_EXIT_V2 retired 2026-07-08
-def _v2_research_collection_active() -> bool:
-    return False  # A160 retired
-def _v2_tile_orders_enabled() -> bool:
-    """Tile ON → independent paper limits on a160v2-* (Live Copy may mirror). Tile OFF → shadow sim only."""
-
-    return False  # A160 retired
-def _v2_reserve_ai_slot() -> tuple:
-    """Phase-shifted V2 AI — never touches last_ai_call_ts / CONTINUOUS cadence.
-
-    Rules (only anti-spam):
-    - ≥ V2_AI_OFFSET_FROM_MAIN_SEC (90s) after last main AI call (last_ai_call_ts)
-    - ≥ V2_RESEARCH_AI_COOLDOWN_SEC (~180s) since v2_last_ai_call_ts
-    - No hourly budget / max-calls-per-hour
-    - Never concurrent with AI_SCAN (main last_ai_call_ts is set before AI_SCAN API call)
-    """
-
-    return (None, None)  # A160 retired
-def evaluate_signal_with_v2_research_ai(raw_context, edge_score, features, source_ai=None):
-    """Independent V2 DeepSeek call — never updates CONTINUOUS / last_ai_call_ts.
-
-    Uses V2 prompt only (tmp_ai_prompt_balanced_direction_v1.md). Does not call
-    evaluate_signal_with_ai or touch AI_PROMPT_TEMPLATE / RESEARCH_AI_PROMPT_ADDENDUM.
-    Tile OFF still runs AI + checker + shadow sim; only paper limits are gated by the tile toggle.
-    """
-
-    return None  # A160 retired
-def _log_v2_ai_input(ctx, source_ai, edge_score, shadow_only: bool = False):
-    return  # A160 retired
-def _log_v2_ai_decision(ctx, v2_ai, checked, latency_ms, shadow_only: bool = False):
-    return  # A160 retired
-def _log_v2_checker(ctx, checked, shadow_only: bool = False):
-    return  # A160 retired
-def spawn_a160_v2_paper_order(ctx, checked, edge_score, features):
-    """Independent paper limits on V2 lane — same virtual-chase path as AI60_SP3.
-
-    Tile OFF → no process_signal / no a160v2-* on shared book (use start_a160_v2_shadow_replay).
-    """
-
-    return  # A160 retired
-def start_a160_v2_shadow_replay(ctx, checked, edge_score, features, *, checker_reject: bool = False):
-    """Scenario C shadow replay — tile OFF accepts, or checker rejects (counterfactual metrics).
-
-    checker_reject=True: simulate would-have-been PnL when checker fails (e.g. WIN_PROB_LT_60).
-    Never places paper limits — orders remain gated by tile ON + checker accept.
-    """
-
-    return  # A160 retired
 def finalize_a160_v2_shadow_outcome(study_id: str, buf: dict):
     """Legacy shadow-replay finalizer (pre-orders era / LAB OFF-tile). Safe no-order path."""
 
@@ -16864,291 +16539,16 @@ def _type_b_policy_version() -> str:
         return "TYPE_B_POLICY_UNAVAILABLE"
 
 
-def _run_type_b_adx_v3_shadow(ai: dict, feat: dict, edge_score: float, ctx: dict = None) -> None:
-    """Run the ADX-v3 challenger as replay-only; it can never submit an order."""
-    try:
-        from type_b_hunter_v1 import (
-            CANDIDATE_POLICY_VERSION,
-            should_enter_type_b_adx_v3_shadow,
-        )
-        direction = str((ai or {}).get("direction") or "").upper()
-        ai_prob = int(float((ai or {}).get("win_prob") or 0))
-        accepted, detail = should_enter_type_b_adx_v3_shadow(ai_prob, feat, direction)
-        source_trade_id = str((ai or {}).get("shared_ai_call_id") or (ctx or {}).get("trade_id") or "")
-        study_id = f"tbadxv3-{'accept' if accepted else 'reject'}-{uuid.uuid4().hex[:12]}"
-        row = {
-            "schema": "type_b_adx_v3_shadow_decision_v1",
-            "ts": utc_iso(),
-            "study_id": study_id,
-            "source_trade_id": source_trade_id,
-            "direction": direction,
-            "accepted": bool(accepted),
-            "block_reason": (detail or {}).get("block_reason"),
-            "score": (detail or {}).get("score"),
-            "breakdown": (detail or {}).get("breakdown") or {},
-            "policy_version": CANDIDATE_POLICY_VERSION,
-            "prompt_id": (ai or {}).get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
-            "execution_eligible": False,
-            "relay_eligible": False,
-        }
-        _safe_append_jsonl(
-            "type_b_adx_v3_shadow_decisions.jsonl", row,
-            label="TYPE_B_ADX_V3_SHADOW",
-        )
-        price = float((ctx or {}).get("price") or state.get("price") or 0)
-        if price <= 0 or direction not in ("LONG", "SHORT"):
-            return
-        paused = manual_admin_pause_active()
-        start_replay_buffer(
-            study_id,
-            price,
-            lane="shadow_collect_TYPE_B_HUNTER_ADX_V3_SHADOW",
-            direction=direction,
-            leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
-            margin_usdt=float(FIXED_MARGIN_USDT),
-            pullback_pct=float(state.get("pullback_threshold", 0.001)),
-            early_fail_enabled=bool(state.get("early_fail_enabled", True)),
-            exit_config=get_exit_config_for_lane(RESEARCH_LANE_TYPE_B_HUNTER_V1),
-            edge_score=round(float(edge_score or 0), 1),
-            research_lane="TYPE_B_HUNTER_ADX_V3_SHADOW",
-            source_trade_id=source_trade_id,
-            shared_ai_call_id=source_trade_id,
-            shared_ai_call_ts=(ai or {}).get("shared_ai_call_ts"),
-            collection_mode="ADMIN_PAUSED_SHADOW" if paused else "TYPE_B_ADX_V3_SHADOW",
-            paused_shadow=paused,
-            is_counterfactual=not bool(accepted),
-            policy_version=CANDIDATE_POLICY_VERSION,
-            prompt_id=(ai or {}).get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
-            adx_at_signal=((detail or {}).get("breakdown") or {}).get("adx"),
-            entry_features=copy.deepcopy(feat),
-            ai_snapshot=copy.deepcopy(ai or {}),
-        )
-        append_replay_tick(study_id, price, None)
-        logger.info(
-            f"[TYPE_B_ADX_V3_SHADOW] study_id={study_id} accepted={accepted} "
-            f"score={(detail or {}).get('score')} reason={(detail or {}).get('block_reason')} "
-            f"never_relay_eligible [PIPELINE ENFORCEMENT]"
-        )
-    except Exception as exc:
-        logger.error(f"[TYPE_B_ADX_V3_SHADOW] failed: {exc} [PIPELINE ENFORCEMENT]")
-
-
-def _apply_type_b_hunter_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
-    """Optional TYPE_B composite filter. Returns (ok, block_reason)."""
-    try:
-        from type_b_hunter_v1 import should_enter_type_b
-    except Exception as e:
-        logger.error(f"[TYPE_B_HUNTER_V1] policy import failed: {e} [PIPELINE ENFORCEMENT]")
-        return False, "TYPE_B_POLICY_UNAVAILABLE"
-    feat = dict(features or {})
-    direction = str((ai or {}).get("direction") or "").upper()
-    feat["direction"] = direction
-    if "edge_score" not in feat:
-        feat["edge_score"] = edge_score
-    try:
-        ai_prob = int(float((ai or {}).get("win_prob") or 0))
-    except (TypeError, ValueError):
-        ai_prob = 0
-    # Enrich spread from AI conviction when features lack it
-    if not feat.get("spread") and not feat.get("conviction_spread"):
-        try:
-            direction = str((ai or {}).get("direction") or "LONG").upper()
-            feat["spread"] = int(compute_directional_spread(direction, ai or {}))
-        except Exception:
-            pass
-    # Feature snapshot often omits adx/structure/ema — pull from AI ctx / market_context
-    ctx = ctx or {}
-    mc = ctx.get("market_context") if isinstance(ctx.get("market_context"), dict) else {}
-    ts = mc.get("trend_strength") if isinstance(mc.get("trend_strength"), dict) else {}
-    for key, src in (
-        ("adx", ctx.get("adx") or ts.get("adx")),
-        ("adx_at_entry", ctx.get("adx") or ts.get("adx")),
-        ("structure_score", ctx.get("structure_score") or ctx.get("structure")),
-        ("structure", ctx.get("structure_score") or ctx.get("structure")),
-        ("ema_slope", ctx.get("ema_slope") or ctx.get("ema_hybrid_slope")),
-        ("market_context", mc or None),
-    ):
-        if feat.get(key) is None and src is not None:
-            feat[key] = src
-    ms = mc.get("market_structure") if isinstance(mc.get("market_structure"), dict) else {}
-    if feat.get("structure_score") is None:
-        feat["structure_score"] = ms.get("structure_score")
-    if feat.get("structure") is None:
-        feat["structure"] = ms.get("structure_score")
-    if feat.get("regime") is None:
-        feat["regime"] = ctx.get("regime") or mc.get("regime") or ms.get("regime")
-    _run_type_b_adx_v3_shadow(ai, feat, edge_score, ctx)
-    try:
-        ok, detail = should_enter_type_b(ai_prob, feat, direction)
-    except Exception as e:
-        logger.error(
-            f"[TYPE_B_HUNTER_V1] entry filter crash: {e} — treating as FILTERED "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-        _stamp_type_b_verdict(ctx, ok=False, score=None, block_reason=f"TYPE_B_FILTER_CRASH ({type(e).__name__})")
-        return False, f"TYPE_B_FILTER_CRASH ({type(e).__name__})"
-    _score = (detail or {}).get("score")
-    _br = (detail or {}).get("block_reason") or ("TYPE_B_FILTER" if not ok else None)
-    _stamp_type_b_verdict(ctx, ok=ok, score=_score, block_reason=_br)
-    if ok:
-        return True, None
-    block_reason = _br or "TYPE_B_FILTER"
-    return False, f"{block_reason} [{_type_b_policy_version()}]"
-
-
-def _stamp_type_b_verdict(ctx, ok: bool, score, block_reason):
-    """Surface Type B scorer verdict on the matching AI history row (transparency).
-
-    AI history is appended in _append_ai_history_row right after DeepSeek evaluates,
-    but BEFORE the deterministic Type B scorer runs. This stamps the scorer's
-    verdict back onto the row matching the trade_id so the dashboard AI History
-    table can show WHY a signal was approved/rejected by the policy.
-    """
-    try:
-        tid = (ctx or {}).get("trade_id")
-        if not tid:
-            return
-        _stamp_shared_ai_lane_verdict(
-            tid,
-            RESEARCH_LANE_TYPE_B_HUNTER_V1,
-            bool(ok),
-            str(block_reason or "TYPE_B_POLICY_ACCEPT"),
-            score=score,
-            policy_version=_type_b_policy_version(),
-        )
-    except Exception as e:
-        logger.warning(f"[TYPE_B_HUNTER_V1] verdict stamp failed: {e}")
-
-
-def _apply_sr_micro_tile_v1_entry_filter(ai: dict, features: dict, edge_score: float, ctx: dict = None) -> tuple:
-    """Optional S/R micro entry filter. Returns (ok, block_reason)."""
-    try:
-        from sr_micro_tile_v1 import should_enter_sr
-    except Exception:
-        return True, None
-    feat = dict(features or {})
-    if "edge_score" not in feat:
-        feat["edge_score"] = edge_score
-    if "price" not in feat:
-        feat["price"] = nz(state.get("price"))
-    # Feature snapshot lacks micro S/R — pull from AI context upgrade when present
-    ctx = ctx or {}
-    for key in ("micro_support", "micro_resistance", "nearest_support_price", "nearest_resistance_price",
-                "adx", "volatility_percentile", "vol_pct", "structure_bias", "structure_bias_at_entry"):
-        if feat.get(key) is None and ctx.get(key) is not None:
-            feat[key] = ctx.get(key)
-    try:
-        ai_prob = int(float((ai or {}).get("win_prob") or 0))
-    except (TypeError, ValueError):
-        ai_prob = 0
-    side = str((ai or {}).get("direction") or "LONG").upper()
-    if side not in ("LONG", "SHORT"):
-        return False, "NO_DIRECTION"
-    ok, detail = should_enter_sr(side, feat, ai_prob)
-    if ok:
-        return True, None
-    return False, (detail or {}).get("block_reason") or "SR_MICRO_FILTER"
-
-
-def _spawn_independent_v1_lane_after_ai(ctx, ai, edge_score, features, lane: str, trigger_reason: str):
-    """Feed independent-AI V1 APPROVEs into LAB shadow (OFF) or process_signal (ON).
-
-    Mirrors V2 tick post-AI routing and combo `_spawn_combo_lane` LAB/ON split.
-    Never silently drops an executable APPROVE — every path logs SPAWN_*.
-    """
-    type_b_policy_lane = lane == RESEARCH_LANE_TYPE_B_HUNTER_V1
-    type_b_direction_ready = bool(
-        ai and not ai.get("ai_error") and str(ai.get("direction") or "").upper() in ("LONG", "SHORT")
-    )
-    if not ai or (not type_b_policy_lane and not ai_decision_should_execute(ai)) or (type_b_policy_lane and not type_b_direction_ready):
-        logger.info(
-            f"[{lane}_AI] soft-reject — not executable "
-            f"decision={((ai or {}).get('decision'))} tier={((ai or {}).get('execution_tier'))} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-        log_lane_opportunity_event(
-            lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
-            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
-            block_reason="AI_NOT_EXECUTABLE",
-        )
-        return
-    try:
-        if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
-            ok, br = _apply_type_b_hunter_v1_entry_filter(ai, features, edge_score, ctx=ctx)
-        elif lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
-            ok, br = _apply_sr_micro_tile_v1_entry_filter(ai, features, edge_score, ctx=ctx)
-        else:
-            ok, br = True, None
-    except Exception as e:
-        ok, br = False, f"ENTRY_FILTER_CRASH ({type(e).__name__})"
-        logger.error(f"[{lane}_AI] entry filter crash: {e} [PIPELINE ENFORCEMENT]")
-    if not ok:
-        log_lane_opportunity_event(
-            lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
-            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
-            block_reason=br,
-        )
-        if lane == RESEARCH_LANE_TYPE_B_HUNTER_V1:
-            # Record a paper-only control for every executable signal rejected
-            # by the Type B policy.  It is excluded from the tile ledger and
-            # cannot submit an order, but supplies the held-out negative class
-            # needed for an honest walk-forward calibration test.
-            _spawn_lab_combo_shadow(
-                ctx,
-                ai,
-                edge_score,
-                lane,
-                features,
-                collection_mode="CALIBRATION_COUNTERFACTUAL",
-                is_counterfactual=True,
-            )
-        logger.info(f"[{lane}_AI] entry filter blocked spawn reason={br} [PIPELINE ENFORCEMENT]")
-        return
-    if type_b_policy_lane:
-        ai = dict(ai or {})
-        ai["pre_policy_decision"] = ai.get("decision")
-        ai["pre_policy_execution_tier"] = ai.get("execution_tier")
-        ai["decision"] = "APPROVE"
-        ai["approved"] = True
-        ai["execution_tier"] = "TYPE_B_POLICY"
-        ai["policy_version"] = _type_b_policy_version()
-    try:
-        _spawn_combo_lane(ctx, ai, edge_score, features, lane, trigger_reason)
-    except Exception as e:
-        log_lane_opportunity_event(
-            lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
-            (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
-            block_reason=f"SPAWN_COMBO_CRASH ({type(e).__name__})",
-        )
-        logger.error(f"[{lane}_AI] spawn_combo crash after APPROVE: {e} [PIPELINE ENFORCEMENT]")
-        raise
-
-
 def maybe_tick_type_b_hunter_v1_research():
     """Compatibility no-op: Type B consumes the shared AI_SCAN result."""
     return
 
 
-def maybe_tick_sr_micro_tile_v1_research():
-    """SR_MICRO_TILE_V1 phase-shifted AI tick -- T+120s from CONTINUOUS.
-
-    Independent DeepSeek call with S/R mean-reversion prompt.
-    Tile OFF → LAB shadow (`_spawn_lab_combo_shadow`); tile ON → `process_signal`.
-    """
-
-    return  # SR_MICRO_TILE_V1 retired 2026-07-16
 _srmv2_last_tick_ts = 0.0
 _srmv2_last_pivot_sig = None
 SRMV2_TICK_INTERVAL_SEC = int(os.getenv("SRMV2_TICK_INTERVAL_SEC", "20"))
 
 
-def maybe_tick_sr_micro_tile_v2_bracket():
-    """SR_MICRO_TILE_V2 deterministic bracket tick — no AI, dual LAB shadow replay.
-
-    Throttled every ~20s (10-30s) OR on micro S/R pivot change. Phase 1: shadow only.
-    """
-
-    return  # SR_MICRO_TILE_V2 retired 2026-07-16
 _srmv2s_last_tick_ts = 0.0
 _srmv2s_last_pivot_sig = None
 SRMV2S_TICK_INTERVAL_SEC = int(os.getenv("SRMV2S_TICK_INTERVAL_SEC", os.getenv("SRMV2_TICK_INTERVAL_SEC", "20")))
@@ -17211,12 +16611,8 @@ def evaluate_signal_with_ai(
         replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
-        # Continuous and Type B intentionally share this single direction
-        # prompt. Type B's deterministic scorer remains a separate entry gate.
-        if research_lane == RESEARCH_LANE_SR_MICRO_TILE_V1:
-            prompt = SR_MICRO_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
-        else:
-            prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        # One shared direction prompt is the only runtime AI layer.
+        prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
         if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
@@ -22085,10 +21481,6 @@ def process_signal(event: dict):
                     state["debug_state"]["skip_reason"] = block_tag
                 update_debug_state_always(block_tag, {"edge": edge_score, "bull": ai.get("bull_score"), "bear": ai.get("bear_score")})
                 start_soft_reject_shadow_replay(ctx, ai, edge_score, research_lane, block_tag)
-                if is_ai_scan_lane(research_lane):
-                    spawn_experimental_disagreement_replay(
-                        ctx, ai, edge_score, features, research_lane,
-                    )
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
@@ -25372,59 +24764,6 @@ Respond ONLY with a JSON object in this format:
   "reason": "Brief one-line explanation",
   "type_b_score": 0.0-5.0,
   "type_b_factors": ["adx", "volume_ratio", "regime", ...]
-}}
-
-Direction: LONG / SHORT / NO_TRADE
-Win probability: 0-100
-Long score: 0-100
-Short score: 0-100
-Bull score: 0-10
-Bear score: 0-10
-Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT
-Reason: ...
-"""
-
-SR_MICRO_PROMPT_TEMPLATE = """
-You are a micro support/resistance mean-reversion engine for BTC perpetual trades.
-Your strategy: place LONG at micro support, SHORT at micro resistance.
-Avoid the midpoint between S & R. Suspend during trending/volatile markets.
-
-Given the following market data:
-
-{context}
-
-=== S/R MEAN-REVERSION RULES ===
-
-CRITICAL RULES:
-1. ADX > 40 = TRENDING MARKET -> REJECT (do not mean-revert against strong trends)
-2. Volatility percentile > 80 -> REJECT (suspended)
-3. Midpoint between S and R = NO ENTRY ZONE -> REJECT
-4. Must identify clear micro support AND micro resistance levels
-
-ENTRY CONDITIONS:
-- LONG: price near micro_support with ADX < 40
-- SHORT: price near micro_resistance with ADX < 40
-- Both LONG and SHORT can be placed simultaneously (symmetric mean-reversion)
-
-SCORING:
-- Distance to S/R < 10% of range: STRONG_APPROVE
-- Distance to S/R < 20%: APPROVE
-- Distance to S/R < 30%: SOFT_APPROVE
-- Distance > 30% or midpoint zone: REJECT
-
-Respond ONLY with a JSON object in this format:
-
-{{
-  "direction": "LONG / SHORT / NO_TRADE",
-  "confidence": 0-100,
-  "long_score": 0-100,
-  "short_score": 0-100,
-  "bull_score": 0-10,
-  "bear_score": 0-10,
-  "decision": "STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT",
-  "reason": "Brief one-line explanation",
-  "sr_location": "AT_SUPPORT / AT_RESISTANCE / MIDPOINT / FAR",
-  "adx_state": "TRENDING / NEUTRAL / RANGEBOUND"
 }}
 
 Direction: LONG / SHORT / NO_TRADE
