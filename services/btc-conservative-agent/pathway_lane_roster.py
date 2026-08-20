@@ -3,6 +3,7 @@ Quality pathway roster -- v15-typeb-opportunity-v2 (2026-07-26).
 
 Active paper-research stack:
   - CONTINUOUS (benchmark, T+0s AI, paper research)
+  - OFFSET_029_ATR_TP_25 (shared direction, independent paper lifecycle)
   + AI_SCAN (internal scanner, no orders)
 
 Retired 2026-08-21:
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 from combo_pathway_config import (
     COMPARISON_BENCHMARK_LANE,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
@@ -33,6 +35,7 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
 DASHBOARD_PRIMARY_LANES = (
     COMPARISON_BENCHMARK_LANE,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 )
 
 LIVE_PATHWAY_TILE_ORDER = DASHBOARD_PRIMARY_LANES
@@ -53,15 +56,17 @@ DATA_RETIRED_PATHWAY_LANES = frozenset((
 
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v15-continuous-only"
+ROSTER_PHASE = "v16-continuous-offset029-paper"
 ROSTER_NOTES = (
-    "Active research stack: CONTINUOUS only. TYPE_B_HUNTER_V1 retired 2026-08-21; "
+    "Active research stack: CONTINUOUS + OFFSET_029_ATR_TP_25, fed by one shared "
+    "AI_SCAN direction call with separate paper lifecycles. TYPE_B_HUNTER_V1 retired 2026-08-21; "
     "SR_MICRO_TILE_V2_STATIC retired 2026-07-30 for negative shadow expectancy; "
     "history/code preserved. SR_MICRO_TILE_V1 and full-chase S/R V2 are historical-only."
 )
 
 ANALYZER_COMPARE_LANES = (
     COMPARISON_BENCHMARK_LANE,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_AI_SCAN,
 )
