@@ -8,6 +8,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import threading
 from datetime import datetime, timezone
 
 from combo_pathway_config import (
@@ -51,6 +52,7 @@ LANE_MEMORY_VALIDATION_FILE = "lane_memory_validation.json"
 LANE_MEMORY_VIOLATION_FILE = "lane_memory_violation.json"
 RUNTIME_PATHWAY_INTEGRITY_FILE = "runtime_pathway_integrity.json"
 RETIRED_LANE_VIOLATIONS_FILE = "retired_lane_violations.jsonl"
+_retired_lane_violations_lock = threading.RLock()
 
 LEGACY_SPAWN_TARGET_LANES = (
     "HIGH_EDGE_RUNNER",
@@ -732,8 +734,11 @@ def log_retired_lane_violation(lane: str, context: str, trade_id: str = None) ->
         "bot_version": EXECUTION_FIX_VERSION,
     }
     try:
-        with open(RETIRED_LANE_VIOLATIONS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+        with _retired_lane_violations_lock:
+            with open(RETIRED_LANE_VIOLATIONS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
     except Exception:
         pass
     return row

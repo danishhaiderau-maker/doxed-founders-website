@@ -40138,6 +40138,8 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "TYPE_B_RESEARCH_V2_EVENT_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
+    "execution_funnel.jsonl",
+    "retired_lane_violations.jsonl",
     "shadow_runner_study.jsonl",
     "type_b_adx_v3_shadow_decisions.jsonl",
 )

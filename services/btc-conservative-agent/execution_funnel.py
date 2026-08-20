@@ -43,6 +43,8 @@ def _append_jsonl(path: str, row: dict) -> None:
     with _lock:
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, default=str) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
 
 def _distance_pct(market: float, target: float) -> float:
