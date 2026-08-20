@@ -31,6 +31,7 @@ def make_fixture(tmp_path):
     events = []
     for index in range(3):
         events.append({
+            "event_id": f"event-{index}",
             "schema": "research_event_v2.2", "collector_version": "collector_v2.2",
             "epoch_id": "epoch-new", "policy_epoch_id": "policy-epoch-a",
             "policy_signature": "policy-a", "event_episode_id": f"episode-{index // 2}",
@@ -173,6 +174,66 @@ def test_one_event_forward_lag_is_pending_not_unhealthy(tmp_path):
     assert parity["detail"]["status"] == "PENDING_NEXT_ANALYZER_CYCLE"
     assert parity["detail"]["pending"]["deltas"]["current_events"] == 1
     assert result["healthy"] is True
+
+
+def test_mid_cycle_append_uses_shared_snapshot_prefix_not_write_time(tmp_path):
+    repo, mirror, reports = make_one_event_pending(tmp_path)
+    from datetime import timedelta
+    receipt = {
+        "schema": "policy_cycle_snapshot_v1",
+        "snapshot_id": "policy-snapshot-fixture",
+        "captured_at": (NOW - timedelta(minutes=6)).isoformat(),
+        "source_file": "research_events_v22.jsonl",
+        "row_count": 3,
+        "last_event_id": "event-2",
+        "epoch_id": "epoch-new",
+        "policy_epoch_id": "policy-epoch-a",
+        "policy_signature": "policy-a",
+    }
+    for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
+        report = json.loads((reports / filename).read_text())
+        report["cycle_snapshot"] = receipt
+        write_json(reports / filename, report)
+    # The append happened during the analyzer cycle, before its final report
+    # write. Timestamp ordering alone therefore cannot identify the pinned
+    # boundary, but the shared prefix receipt can.
+    import os
+    events_path = mirror / "research_events_v22.jsonl"
+    old = (NOW - timedelta(minutes=10)).timestamp()
+    os.utime(events_path, (old, old))
+
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is True
+    assert parity["detail"]["status"] == "PENDING_NEXT_ANALYZER_CYCLE"
+    assert parity["detail"]["pending"]["mirror_after_reports"] is False
+    assert parity["detail"]["pending"]["snapshot_prefix_ok"] is True
+    assert parity["detail"]["cycle_snapshot_prefix"]["prefix_terminal_event_id"] == "event-2"
+
+
+def test_mid_cycle_append_with_false_snapshot_terminal_fails_closed(tmp_path):
+    repo, mirror, reports = make_one_event_pending(tmp_path)
+    receipt = {
+        "schema": "policy_cycle_snapshot_v1", "snapshot_id": "bad-snapshot",
+        "row_count": 3, "last_event_id": "not-event-2", "epoch_id": "epoch-new",
+        "policy_epoch_id": "policy-epoch-a", "policy_signature": "policy-a",
+    }
+    for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
+        report = json.loads((reports / filename).read_text())
+        report["cycle_snapshot"] = receipt
+        write_json(reports / filename, report)
+    from datetime import timedelta
+    import os
+    old = (NOW - timedelta(minutes=10)).timestamp()
+    os.utime(mirror / "research_events_v22.jsonl", (old, old))
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+                                fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
+    assert parity["ok"] is False
+    assert parity["detail"]["pending"]["snapshot_prefix_ok"] is False
 
 
 def test_pending_lag_fails_when_reports_are_stale(tmp_path):

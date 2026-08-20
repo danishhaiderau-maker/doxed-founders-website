@@ -400,6 +400,20 @@ def test_csv_fallback_uses_non_recursive_serialized_jsonl_writer():
     assert "_jsonl_serialized_append_targets.add(os.path.abspath(path))" in BOT
 
 
+def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
+    assert "$generationRefreshCount = 0" in SYNC_SCRIPT
+    assert "$generationRefreshCount -lt 3" in SYNC_SCRIPT
+    assert "-match 'generation changed'" in SYNC_SCRIPT
+    assert 'Invoke-RestMethod -Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
+    assert 'Where-Object { [string]$_.path -eq $rel }' in SYNC_SCRIPT
+    assert "$sameGeneration = $false" in SYNC_SCRIPT
+    assert "$fullReplaceRetry = $true" in SYNC_SCRIPT
+    assert "restarting the candidate from byte zero" in SYNC_SCRIPT
+    # Other 409s (mode mismatch, unsafe path, malformed request) must continue
+    # to fail closed rather than being hidden by a broad retry.
+    assert "-match '^Fly sync HTTP 409 '" in SYNC_SCRIPT
+
+
 def test_shadow_jsonl_is_validated_before_startup_collection_and_sync():
     assert "def _validate_research_ledgers_on_startup():" in BOT
     assert '(SHADOW_LANE_OUTCOME_FILE, "SHADOW_LANE_STARTUP")' in BOT

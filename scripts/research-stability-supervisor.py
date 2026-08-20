@@ -155,6 +155,39 @@ def read_current_events(path: Path) -> dict[str, Any]:
         "eligible_independent_episodes": len(eligible_episode_ids),
         "policy_epoch_ids": sorted(policy_epochs),
         "policy_signatures": sorted(signatures),
+        "_all_event_ids": [str(row.get("event_id") or "") for row in events],
+    }
+
+
+def shared_cycle_snapshot_prefix_ok(
+    reports: dict[str, dict[str, Any]], event_summary: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    """Prove that both reports used one immutable prefix of the live mirror."""
+    snapshots = [report.get("cycle_snapshot") or {} for report in reports.values()]
+    shared = bool(snapshots) and all(snapshot == snapshots[0] for snapshot in snapshots[1:])
+    receipt = snapshots[0] if snapshots else {}
+    row_count = int(receipt.get("row_count") or 0)
+    event_ids = event_summary.get("_all_event_ids") or []
+    prefix_terminal = event_ids[row_count - 1] if 0 < row_count <= len(event_ids) else None
+    identity_ok = bool(
+        receipt.get("schema") == "policy_cycle_snapshot_v1"
+        and receipt.get("snapshot_id")
+        and receipt.get("epoch_id") == event_summary.get("epoch_id")
+        and receipt.get("policy_epoch_id") in event_summary.get("policy_epoch_ids", [])
+        and receipt.get("policy_signature") in event_summary.get("policy_signatures", [])
+    )
+    ok = bool(
+        shared and identity_ok and row_count > 0
+        and receipt.get("last_event_id") == prefix_terminal
+    )
+    return ok, {
+        "shared": shared,
+        "identity_ok": identity_ok,
+        "snapshot_id": receipt.get("snapshot_id"),
+        "row_count": row_count,
+        "mirror_row_count": len(event_ids),
+        "last_event_id": receipt.get("last_event_id"),
+        "prefix_terminal_event_id": prefix_terminal,
     }
 
 
@@ -190,6 +223,7 @@ def bounded_pending_parity(
     *,
     reports_fresh: bool,
     mirror_after_reports: bool,
+    snapshot_prefix_ok: bool,
     identity_ok: bool,
 ) -> tuple[bool, dict[str, Any]]:
     """Accept only append-only growth awaiting the next fresh analyzer cycle."""
@@ -228,7 +262,7 @@ def bounded_pending_parity(
         and deltas["eligible_independent_episodes"] <= deltas["eligible_events"]
     )
     pending = (
-        reports_fresh and mirror_after_reports and identity_ok
+        reports_fresh and (mirror_after_reports or snapshot_prefix_ok) and identity_ok
         and baseline_consistent and nonnegative and bounded
         and deltas["current_events"] > 0
     )
@@ -237,6 +271,7 @@ def bounded_pending_parity(
         "deltas": deltas,
         "reports_fresh": reports_fresh,
         "mirror_after_reports": mirror_after_reports,
+        "snapshot_prefix_ok": snapshot_prefix_ok,
         "identity_ok": identity_ok,
         "baseline_consistent": baseline_consistent,
         "nonnegative": nonnegative,
@@ -464,8 +499,12 @@ class Supervisor:
             # A finalized append-only event file legitimately remains unchanged
             # when no lifecycle matures. Transport freshness is independently
             # enforced by the atomic sync heartbeat above.
+            public_summary = {
+                key: value for key, value in event_summary.items()
+                if not key.startswith("_")
+            }
             add("mirror_schema_and_freshness", True,
-                {**event_summary, "age_seconds": round(mirror_age, 1)})
+                {**public_summary, "age_seconds": round(mirror_age, 1)})
         except Exception as exc:
             add("mirror_schema_and_freshness", False, f"{type(exc).__name__}: {exc}")
 
@@ -517,10 +556,14 @@ class Supervisor:
                 len(report_times) == 2
                 and all(mirror_time > generated for generated in report_times.values())
             )
+            snapshot_prefix_ok, snapshot_prefix_detail = shared_cycle_snapshot_prefix_ok(
+                reports, event_summary,
+            )
             pending, pending_detail = bounded_pending_parity(
                 expected, observed,
                 reports_fresh=len(report_freshness) == 2 and all(report_freshness.values()),
                 mirror_after_reports=mirror_after_reports,
+                snapshot_prefix_ok=snapshot_prefix_ok,
                 identity_ok=identity_ok,
             )
             add("report_count_parity", exact or pending, {
@@ -528,6 +571,7 @@ class Supervisor:
                 "expected": expected,
                 "reports": observed,
                 "pending": pending_detail,
+                "cycle_snapshot_prefix": snapshot_prefix_detail,
             })
             add("report_epoch_policy_signature_parity", identity_ok, {
                 "expected_epoch": expected_epoch, "expected_policy_epochs": expected_policy_epochs,

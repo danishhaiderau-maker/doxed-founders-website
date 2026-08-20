@@ -189,7 +189,9 @@ foreach ($row in $selectedFiles) {
   $candidateBackup = "$candidate.replace-backup"
   try {
     $fullReplaceRetry = $false
+    $generationRefreshCount = 0
     while ($true) {
+      $refreshGeneration = $false
       if ($sameGeneration -and -not $fullReplaceRetry -and (Test-Path -LiteralPath $local)) {
         [System.IO.File]::Copy($local, $candidate, $true)
         $offset = $localSize
@@ -216,7 +218,9 @@ foreach ($row in $selectedFiles) {
           ).GetAwaiter().GetResult()
           if (-not $response.IsSuccessStatusCode) {
             $errorBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-            throw "Fly sync HTTP $([int]$response.StatusCode) for $rel at offset ${offset}: $errorBody"
+            $statusCode = [int]$response.StatusCode
+            $response.Dispose()
+            throw "Fly sync HTTP $statusCode for $rel at offset ${offset}: $errorBody"
           }
           try {
             $payload = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
@@ -244,6 +248,14 @@ foreach ($row in $selectedFiles) {
           $offset = [int64](Get-Item -LiteralPath $candidate).Length
           $chunkComplete = $true
         } catch {
+          if (
+            $_.Exception.Message -match '^Fly sync HTTP 409 ' -and
+            $_.Exception.Message -match 'generation changed' -and
+            $generationRefreshCount -lt 3
+          ) {
+            $refreshGeneration = $true
+            break
+          }
           if ($attempt -ge 3) { throw }
           Start-Sleep -Seconds (2 * $attempt)
         } finally {
@@ -252,6 +264,31 @@ foreach ($row in $selectedFiles) {
           }
         }
       }
+      if ($refreshGeneration) { break }
+      }
+      if ($refreshGeneration) {
+        $generationRefreshCount += 1
+        $freshManifest = Invoke-RestMethod -Uri "$base/api/data-sync/manifest" -Headers $headers -TimeoutSec 30
+        if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
+          throw "Unexpected Fly sync manifest schema during generation refresh."
+        }
+        $freshRows = @($freshManifest.files | Where-Object { [string]$_.path -eq $rel })
+        if ($freshRows.Count -ne 1) {
+          throw "Fly manifest generation refresh did not return exactly one row for $rel."
+        }
+        $row = $freshRows[0]
+        $remoteSize = [int64]$row.size
+        $remoteInode = [int64]$row.inode
+        if (($currentMirrorBytes + $remoteSize) -gt $capBytes) {
+          throw "Refreshed Fly generation would exceed the local mirror hard cap for $rel."
+        }
+        $sameGeneration = $false
+        $fullReplaceRetry = $true
+        Write-Host (
+          "Fly generation changed while downloading $rel; refreshed authenticated manifest " +
+          "and restarting the candidate from byte zero ($generationRefreshCount/3)."
+        )
+        continue
       }
       if ([int64](Get-Item -LiteralPath $candidate).Length -ne $remoteSize) {
         throw "Incomplete Fly mirror candidate for $rel."
