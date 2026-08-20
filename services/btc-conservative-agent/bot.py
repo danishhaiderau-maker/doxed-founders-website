@@ -35806,6 +35806,24 @@ def _data_sync_resolve_relpath(raw_rel: str) -> Path:
     return candidate.resolve()
 
 
+def _data_sync_complete_record_size(path: Path, size: int) -> int:
+    """Return the last complete-record boundary for JSONL/CSV evidence."""
+    if size <= 0 or path.suffix.lower() not in {".jsonl", ".csv"}:
+        return max(0, int(size))
+    cursor = int(size)
+    block_size = 64 * 1024
+    with path.open("rb") as handle:
+        while cursor > 0:
+            start = max(0, cursor - block_size)
+            handle.seek(start)
+            block = handle.read(cursor - start)
+            newline = block.rfind(b"\n")
+            if newline >= 0:
+                return start + newline + 1
+            cursor = start
+    return 0
+
+
 def _data_sync_inventory() -> list:
     runtime = _data_sync_runtime_root()
     seen = set()
@@ -35824,9 +35842,10 @@ def _data_sync_inventory() -> list:
                         continue
                     seen.add(resolved)
                     stat = resolved.stat()
+                    published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
                     rows.append({
                         "path": _data_sync_relpath(path),
-                        "size": int(stat.st_size),
+                        "size": published_size,
                         "mtime_ns": int(stat.st_mtime_ns),
                         "inode": int(getattr(stat, "st_ino", 0) or 0),
                     })

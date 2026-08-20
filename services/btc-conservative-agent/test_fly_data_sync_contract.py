@@ -60,7 +60,12 @@ def _load_bot_functions(*names):
 
 def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
     tree = ast.parse(BOT)
-    wanted = {"_data_sync_rotation_parts", "_data_sync_path_allowed", "_data_sync_inventory"}
+    wanted = {
+        "_data_sync_rotation_parts",
+        "_data_sync_path_allowed",
+        "_data_sync_complete_record_size",
+        "_data_sync_inventory",
+    }
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -101,6 +106,44 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
         assert [row["path"] for row in rows] == ["signal_snapshot.jsonl"]
         for path in excluded:
             assert namespace["_data_sync_path_allowed"](path) is False
+
+
+def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_rotation_parts",
+        "_data_sync_path_allowed",
+        "_data_sync_complete_record_size",
+        "_data_sync_inventory",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        complete = b'{"event":1}\n'
+        target = root / "shadow_lane_outcome.jsonl"
+        target.write_bytes(complete + b'{"event":2')
+        namespace = {
+            "Path": Path,
+            "os": os,
+            "_DATA_SYNC_EXTENSIONS": frozenset({".jsonl"}),
+            "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
+            "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+            "_data_sync_volume_root": lambda: root,
+            "_data_sync_runtime_root": lambda: root,
+            "_data_sync_allowed_roots": lambda: [root],
+            "_data_sync_relpath": lambda path: path.resolve().relative_to(root).as_posix(),
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+        rows = namespace["_data_sync_inventory"]()
+        assert rows[0]["size"] == len(complete)
+
+        with target.open("ab") as handle:
+            handle.write(b'}\n')
+        rows = namespace["_data_sync_inventory"]()
+        assert rows[0]["size"] == target.stat().st_size
 
 
 def test_fly_runtime_cwd_is_volume_backed():
