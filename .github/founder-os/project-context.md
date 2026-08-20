@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-test(bitfinex): make nonce floor deterministic
+test(fly): align warehouse ownership contract
 
 ## Last Activity
 
