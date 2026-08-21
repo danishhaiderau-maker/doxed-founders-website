@@ -11971,12 +11971,13 @@ def _maybe_complete_pending_order_multiverse():
     # append and V3 dual-write must not leave an eternal provisional V3 row.
     # Reconcile once per changed V2 generation; failures retry next poll.
     try:
-        v22_path = os.path.join(DATA_DIR, "research_events_v22.jsonl")
+        v3_data_dir = os.getcwd()
+        v22_path = os.path.join(v3_data_dir, "research_events_v22.jsonl")
         v22_size = os.path.getsize(v22_path) if os.path.exists(v22_path) else 0
         if v22_size != _v3_terminal_reconcile_last_v22_size:
             from research_v3_bridge import reconcile_terminal_v22_into_v3
             receipt = reconcile_terminal_v22_into_v3(
-                data_dir=DATA_DIR,
+                data_dir=v3_data_dir,
                 epoch_id=_collector_v22_epoch_id(),
             )
             if receipt.get("passed"):

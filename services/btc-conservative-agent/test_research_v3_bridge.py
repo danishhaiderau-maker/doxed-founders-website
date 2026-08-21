@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from pathlib import Path
 
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
@@ -31,6 +32,13 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_bot_wires_terminal_reconciliation_to_canonical_runtime_root(self):
+        source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+        self.assertIn("v3_data_dir = os.getcwd()", source)
+        self.assertIn("reconcile_terminal_v22_into_v3(", source)
+        self.assertIn("data_dir=v3_data_dir", source)
+        self.assertNotIn('os.path.join(DATA_DIR, "research_events_v22.jsonl")', source)
+
     def test_paper_submit_and_fill_are_visible_before_terminal_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             signal = {
