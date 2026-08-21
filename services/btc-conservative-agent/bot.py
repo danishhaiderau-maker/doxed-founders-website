@@ -41,6 +41,12 @@ from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
 from bounded_evidence_worker import BoundedEvidenceWorker
+from position_registry import (
+    PositionCloseClaimScope,
+    finalize_position_close,
+    promote_pending_to_open,
+    release_position_close_claim,
+)
 import numpy as np
 import pytz
 
@@ -21235,28 +21241,32 @@ def fill_order(order):
         funnel_on_fill(order, tick)
     except Exception:
         pass
-    with trade_lock:
-        if order in pending_orders:
-            lane_unregister_pending_order(order)
     meta = trades_map.get(order["trade_id"], {})
     signal = meta.get("signal_ref", {})
     ai = meta.get("ai", {}) or signal.get("ai", {})
     if direction not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
-    with trade_lock:
-        # C4 guard: never open a second position for the same trade_id. A race or double
-        # touch could otherwise append 2x exposure for one signal; /api/state dedupes in
-        # the response but the relay may already have copied both.
-        _ftid = order.get("trade_id")
-        if _ftid and any(p.get("trade_id") == _ftid and p.get("status") != "CLOSED" for p in open_positions):
-            logger.warning(f"[FILL GUARD] Duplicate fill suppressed for trade_id={_ftid} — position already open")
-            clear_fill_handoff()
-            return
-        pos = _build_open_position(order, signal, ai)
-        lane_register_open_position(pos)
-        # Bind relay chronology to the actual position registration, not to
-        # the end of slower persistence/analytics work below.
-        position_opened_relay_ts = utc_iso()
+    candidate_pos = _build_open_position(order, signal, ai)
+    pos, registered = promote_pending_to_open(
+        order,
+        candidate_pos,
+        trade_lock=trade_lock,
+        pending_orders=pending_orders,
+        lane_pending_orders=lane_pending_orders,
+        open_positions=open_positions,
+        lane_open_positions=lane_open_positions,
+        lane=_normalize_lane_key(order),
+    )
+    if not registered:
+        logger.warning(
+            f"[FILL GUARD] Duplicate fill suppressed for trade_id={order.get('trade_id')} "
+            "— position already open"
+        )
+        clear_fill_handoff()
+        return
+    # Bind relay chronology to the atomic position registration, before any
+    # slower persistence/analytics callback below.
+    position_opened_relay_ts = utc_iso()
     try:
         dual_write_paper_fill(
             order,
@@ -24593,15 +24603,18 @@ def close_position(pos: dict, exit_reason: str):
     # Closing performs persistence, research logging, relay publication and
     # optional exchange work. Serialize close claims on a dedicated lock rather
     # than holding state_lock/trade_lock across that slow work.
-    with position_close_lock:
-        if pos not in open_positions:
+    with PositionCloseClaimScope(
+        pos,
+        position_close_lock=position_close_lock,
+        open_positions=open_positions,
+    ) as close_claimed:
+        if not close_claimed:
             return
-        if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
-            return
-        pos["_close_in_progress"] = True
         trade_id = pos.get("trade_id")
         if not trade_id:
-            pos["_close_in_progress"] = False
+            release_position_close_claim(
+                pos, position_close_lock=position_close_lock,
+            )
             return
         _emit_genome_execution_event("EXIT_TRIGGERED", {
             "trade_id": trade_id,
@@ -24637,7 +24650,9 @@ def close_position(pos: dict, exit_reason: str):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
             # CRITICAL: clear the in-progress flag so this position is not frozen
             # OPEN forever (stop-loss/ladder exits must still be able to run on it).
-            pos["_close_in_progress"] = False
+            release_position_close_claim(
+                pos, position_close_lock=position_close_lock,
+            )
             return
         requires_private_close = bool(
             pos.get("bitfinex_position_id")
@@ -24645,7 +24660,9 @@ def close_position(pos: dict, exit_reason: str):
             or pos.get("bitfinex_live_entry")
         )
         if requires_private_close and not _maybe_bitfinex_close(pos, exit_reason):
-            pos["_close_in_progress"] = False
+            release_position_close_claim(
+                pos, position_close_lock=position_close_lock,
+            )
             _record_bitfinex_close_failure(trade_id, exit_reason)
             set_execution_paused("BITFINEX_CLOSE_FAILED")
             _disarm_live_control("BITFINEX_CLOSE_FAILED")
@@ -24851,8 +24868,18 @@ def close_position(pos: dict, exit_reason: str):
                 f"[COLLECTOR_V3] paper close write failed "
                 f"trade_id={trade_id} error={exc} [PIPELINE ENFORCEMENT]"
             )
-    pos["status"] = "CLOSED"
-    lane_unregister_open_position(pos)
+    if not finalize_position_close(
+        pos,
+        position_close_lock=position_close_lock,
+        trade_lock=trade_lock,
+        open_positions=open_positions,
+        lane_open_positions=lane_open_positions,
+        lane=_normalize_lane_key(pos),
+    ):
+        logger.warning(
+            f"[CLOSE GUARD] terminal close commit already completed trade_id={trade_id}"
+        )
+        return
     begin_post_exit_replay(trade_id, pos, price)
     log_trade_outcome_jsonl(trade_row, pos)
     update_lane_pnl_ledger(
