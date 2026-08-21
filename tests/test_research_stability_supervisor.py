@@ -174,6 +174,35 @@ def test_clean_v3_only_epoch_satisfies_mirror_schema_check(tmp_path):
     assert schema["detail"]["epoch_ids"] == ["epoch-v3-fresh"]
 
 
+def test_v3_identity_alias_fails_integrity_and_is_not_counted_twice(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    common = {
+        "schema": "research_evidence_v3", "ledger": "opportunity",
+        "epoch_id": "epoch-v3", "signal_ts": 1000.0,
+        "symbol": "BTCUSD", "raw_direction": "LONG",
+    }
+    rows = [
+        {**common, "record_id": "o-fallback", "episode_id": "episode-fallback", "grouping_basis": "TIME_DIRECTION_SYMBOL_FALLBACK"},
+        {**common, "record_id": "o-shared", "episode_id": "episode-shared", "grouping_basis": "SHARED_AI_CALL", "shared_ai_call_id": "scan-1"},
+    ]
+    (ledgers / "opportunity.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_EPOCH_CONTAMINATION_BLOCKED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 0, "terminal_lifecycles": 0, "provisional_lifecycles": 0, "market_segments": 0},
+    })
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW, fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    integrity = next(item for item in result["checks"] if item["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    assert integrity["detail"]["raw_opportunity_rows"] == 2
+    assert integrity["detail"]["independent_opportunities"] == 1
+    assert integrity["detail"]["identity_alias_episode_ids"] == ["episode-fallback"]
+
+
 def test_missing_v2_and_v3_evidence_fails_mirror_schema_check(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     (mirror / "research_events_v22.jsonl").unlink()

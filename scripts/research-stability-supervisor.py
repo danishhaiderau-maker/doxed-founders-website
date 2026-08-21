@@ -224,6 +224,7 @@ def read_v3_evidence(mirror: Path) -> dict[str, Any]:
     episodes: set[str] = set()
     epochs: set[str] = set()
     terminal = provisional = 0
+    opportunity_rows: list[dict[str, Any]] = []
     for name in ("opportunity", "decision", "order_intent", "execution", "market_segment", "lifecycle"):
         path = ledger_dir / f"{name}.jsonl"
         rows = []
@@ -236,6 +237,8 @@ def read_v3_evidence(mirror: Path) -> dict[str, Any]:
                 if row.get("schema") != "research_evidence_v3" or row.get("ledger") != name:
                     raise ValueError(f"V3_SCHEMA_OR_LEDGER_MISMATCH:{name}:{line_number}")
                 rows.append(row)
+                if name == "opportunity":
+                    opportunity_rows.append(row)
                 if row.get("episode_id"):
                     episodes.add(str(row["episode_id"]))
                 if row.get("epoch_id"):
@@ -246,11 +249,35 @@ def read_v3_evidence(mirror: Path) -> dict[str, Any]:
                     else:
                         provisional += 1
         counts[name] = len(rows)
+    causal_groups: dict[tuple[float, str, str], list[dict[str, Any]]] = {}
+    for row in opportunity_rows:
+        try:
+            signal_ts = float(row.get("signal_ts"))
+        except (TypeError, ValueError):
+            signal_ts = -1.0
+        key = (
+            signal_ts,
+            str(row.get("symbol") or "").upper(),
+            str(row.get("raw_direction") or "").upper(),
+        )
+        causal_groups.setdefault(key, []).append(row)
+    identity_aliases = []
+    for rows in causal_groups.values():
+        if len(rows) <= 1:
+            continue
+        ordered = sorted(rows, key=lambda row: (
+            0 if str(row.get("grouping_basis") or "") == "SHARED_AI_CALL" else 1,
+            str(row.get("episode_id") or ""),
+        ))
+        identity_aliases.extend(ordered[1:])
     segment_root = mirror / "v3" / "market_segments"
     segment_files = list(segment_root.glob("*/*.json")) if segment_root.is_dir() else []
     return {
         "ledger_counts": counts,
-        "independent_opportunities": counts["opportunity"],
+        "independent_opportunities": counts["opportunity"] - len(identity_aliases),
+        "raw_opportunity_rows": counts["opportunity"],
+        "identity_alias_count": len(identity_aliases),
+        "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
         "decision_branches": counts["decision"],
         "terminal_lifecycles": terminal,
         "provisional_lifecycles": provisional,
@@ -705,7 +732,7 @@ class Supervisor:
         if v3_report_path.is_file() or manifest_has_v3:
             try:
                 v3 = read_v3_evidence(self.mirror)
-                add("v3_normalized_evidence_integrity", True, v3)
+                add("v3_normalized_evidence_integrity", v3.get("identity_alias_count", 0) == 0, v3)
                 report = read_json(v3_report_path)
                 generated = parse_time(report.get("generated_at"))
                 age = (self.now() - generated).total_seconds() if generated else float("inf")
