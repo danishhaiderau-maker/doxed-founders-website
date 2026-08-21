@@ -3203,6 +3203,18 @@ def _load_shadow_lane_outcome_df(session: dict = None):
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
+    if "research_lane" in df.columns:
+        # OFFSET_029 is paper-only. Historical rows in this shadow file were
+        # emitted by an invalid generic Scenario-C replay route and are kept on
+        # disk as immutable evidence, but can never qualify for policy ranking.
+        mismatch = (
+            df["research_lane"].fillna("").astype(str).str.upper()
+            == "OFFSET_029_ATR_TP_25"
+        )
+        mismatch_count = int(mismatch.sum())
+        df = df[~mismatch].copy()
+        df.attrs["policy_mismatch_rows_excluded"] = mismatch_count
+        df.attrs["policy_mismatch_reason"] = "OFFSET029_PAPER_ONLY_FORBIDS_SHADOW_OUTCOME"
     if session and _session_start_ts(session) is not None:
         df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
     return df
@@ -16869,13 +16881,26 @@ def type_b_research_v2_report():
     event_path = TYPE_B_RESEARCH_V2_EVENT_FILE
     report_path = analyzer_report_path(TYPE_B_RESEARCH_V2_REPORT_FILE)
     try:
-        events = load_type_b_research_v2_events(event_path)
+        events_all = load_type_b_research_v2_events(event_path)
+        invalid_ids = {
+            str(event.get("opportunity_id") or "")
+            for event in events_all
+            if event.get("opportunity_id")
+            and str(event.get("lane") or "").upper() == "OFFSET_029_ATR_TP_25"
+        }
+        events = [
+            event for event in events_all
+            if str(event.get("opportunity_id") or "") not in invalid_ids
+        ]
         opportunities = materialize_type_b_research_v2(events)
         payload = summarize_type_b_research_v2(opportunities)
         payload.update({
             "analyzer_sync_id": ANALYZER_SYNC_ID,
             "expected_bot_version": EXPECTED_BOT_VERSION,
             "events_total": len(events),
+            "policy_mismatch_events_excluded": len(events_all) - len(events),
+            "policy_mismatch_opportunities_excluded": len(invalid_ids),
+            "policy_mismatch_reason": "OFFSET029_PAPER_ONLY_FORBIDS_TYPE_B_SHADOW_EVENTS",
             "quality_gate": {
                 "minimum_independent_opportunities": TYPE_B_GATE_MIN_TRADES,
                 "minimum_feature_coverage_pct": 90,

@@ -1191,7 +1191,12 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
             or (ai or {}).get("shared_ai_call_id")
             or signal.get("source_trade_id")
         ),
-        "research_collection_mode": _type_b_research_v2_mode(),
+        "research_collection_mode": (
+            "PAPER"
+            if str(signal.get("research_lane") or order.get("research_lane") or "").upper()
+            == RESEARCH_LANE_OFFSET_029_ATR_TP_25
+            else _type_b_research_v2_mode()
+        ),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
         "book_slippage_usd": round(float((order.get("fill_sim") or {}).get("slippage_usd") or order.get("book_slippage_usd") or 0), 4),
         "entry_levels_consumed": int((order.get("fill_sim") or {}).get("levels_consumed") or 0),
@@ -14294,6 +14299,11 @@ def _record_type_b_research_v2_child(
     mode: str = None,
     payload: dict = None,
 ) -> None:
+    # The offset/ATR candidate is a genuine paper-order lane, not a Type-B or
+    # shadow-replay cohort.  Keeping this fence at the writer prevents any
+    # future caller from contaminating the legacy Type-B event stream.
+    if str(lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return
     if not opportunity_id:
         return
     try:
@@ -15288,6 +15298,13 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         return
     enriched = _enrich_combo_lane_features(features, ctx)
     if not is_research_lane_enabled(target_lane):
+        if str(target_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+            log_lane_opportunity_event(
+                target_lane, "SPAWN_CANCELLED", (ctx or {}).get("trade_id"),
+                (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+                block_reason="PAPER_LANE_TOGGLE_OFF_NO_SHADOW",
+            )
+            return
         logger.info(f"[{target_lane}] spawn LAB mode - lane OFF [PIPELINE ENFORCEMENT]")
         log_lane_opportunity_event(
             target_lane, "SPAWN_LAB", (ctx or {}).get("trade_id"),
@@ -15339,6 +15356,12 @@ def _spawn_lab_combo_shadow(
     order-submission site.
     """
     if not is_research_data_collection():
+        return
+    if str(target_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        logger.error(
+            "[OFFSET029_CONTRACT] refused forbidden LAB/shadow replay "
+            f"lane={target_lane} [PIPELINE ENFORCEMENT]"
+        )
         return
     if not (
         is_combo_execution_lane(target_lane)
@@ -16134,6 +16157,13 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
 
 def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     """Simulate virtual fill + Scenario C exit for off-dashboard shadow lanes."""
+    lane = str(buf.get("research_lane") or "").upper()
+    if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        logger.error(
+            "[OFFSET029_CONTRACT] discarded forbidden shadow finalization "
+            f"study_id={study_id}; genuine paper lifecycle only [PIPELINE ENFORCEMENT]"
+        )
+        return
     # Honour explicit cancel before simulate (CANCELLED > TTL).
     explicit = str(buf.get("exit_outcome") or buf.get("block_reason") or "").upper()
     outcome = simulate_replay_outcome(buf)
@@ -16147,7 +16177,6 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     ):
         outcome["exit_reason"] = "TTL_EXPIRED"
         outcome["entry_outcome"] = "TTL_EXPIRED"
-    lane = str(buf.get("research_lane") or "").upper()
     # Section 8: stable outcome schema for the Tile 2 frozen policy cohort.
     # When this row belongs to SR_MICRO_TILE_V2_STATIC, stamp the full
     # required field set so the fresh holdout cohort can never be silently
@@ -20837,9 +20866,14 @@ def process_signal(event: dict):
     global last_signal_create_ts, last_ai_call_ts, last_signal_key, last_ai_signal_key, last_processed_candle_ts, last_ai_call_ts, last_price_for_debounce, last_signal_process_ts, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_pipeline_run, last_edge_compute
     event = copy.deepcopy(event or {})
     manual_pause = manual_admin_pause_active()
+    event_lane = str(event.get("research_lane") or RESEARCH_LANE_AI_SCAN).upper()
     paused_shadow_mode = bool(event.get("paused_shadow_mode")) or (
         manual_pause and is_research_data_collection()
     )
+    # This lane has no paused-shadow mode. A pause must cancel/refuse paper
+    # exposure and leave cancellation evidence, never synthesize an outcome.
+    if event_lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        paused_shadow_mode = False
     if manual_pause and not paused_shadow_mode:
         # A manual stop may collect isolated counterfactual outcomes only in
         # the paper/research configuration.  If a future live-armed runtime is
@@ -36988,6 +37022,10 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""
     if ai.get("decision") != "APPROVE":
         return
+    if str(signal.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        # Offset outcomes are sourced exclusively from its genuine paper order
+        # and position lifecycle. Generic replay uses Scenario C and is invalid.
+        return
     trade_id = signal.get("trade_id")
     price = float(signal.get("signal_price") or state.get("price") or 0)
     if not trade_id or price <= 0:
@@ -37353,6 +37391,12 @@ def log_shadow_outcome_jsonl(
     signal: dict = None, ai: dict = None, post_block_research: dict = None,
 ):
     try:
+        if str(buf.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+            logger.error(
+                "[OFFSET029_CONTRACT] refused forbidden shadow outcome write "
+                f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
+            )
+            return
         row = {
             "schema": "shadow_outcome_v2",
             "ts": utc_iso(),
