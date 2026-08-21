@@ -211,15 +211,14 @@ if (Test-PortOpen $AnalyzerPort) {
     Write-Host "Port $AnalyzerPort has a stale dashboard listener - clearing and starting the analyzer..." -ForegroundColor Yellow
   }
   if (-not ($dashboardHealthy -and $listenerPids.Count -eq 1)) {
-    $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
-    if (Test-Path -LiteralPath $analyzerPidFile) {
-      try {
-        $staleAnalyzerPid = [int](Get-Content -LiteralPath $analyzerPidFile -Raw)
-        if ($staleAnalyzerPid -gt 0) {
-          Stop-Process -Id $staleAnalyzerPid -Force -ErrorAction SilentlyContinue
-        }
-      } catch { }
-      Remove-Item -LiteralPath $analyzerPidFile -Force -ErrorAction SilentlyContinue
+    # The engine and dashboard have separate owners. A stale HTTP listener must
+    # never terminate the healthy analyzer engine recorded in
+    # .home-analyzer.pid; doing so leaves reports permanently stale until a
+    # later supervisor pass. The bounded listener cleanup below owns the actual
+    # process stop, so this block only clears the dashboard's stale PID receipt.
+    $dashboardPidFile = Join-Path $repoRoot ".home-analyzer-dashboard.pid"
+    if (Test-Path -LiteralPath $dashboardPidFile) {
+      Remove-Item -LiteralPath $dashboardPidFile -Force -ErrorAction SilentlyContinue
     }
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 2

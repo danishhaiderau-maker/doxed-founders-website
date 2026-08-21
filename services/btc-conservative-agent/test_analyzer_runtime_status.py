@@ -89,6 +89,16 @@ checks = {
         and "Get-CimInstance" not in start_bot
         and "Get-CimInstance" not in start_analyzer
     ),
+    "stale dashboard recovery never terminates the analyzer engine owner": (
+        '".home-analyzer-dashboard.pid"' in start_analyzer[
+            start_analyzer.index("Port $AnalyzerPort has a stale dashboard listener") :
+            start_analyzer.index("# Publish the read-only dashboard")
+        ]
+        and '".home-analyzer.pid"' not in start_analyzer[
+            start_analyzer.index("Port $AnalyzerPort has a stale dashboard listener") :
+            start_analyzer.index("# Publish the read-only dashboard")
+        ]
+    ),
     "all launchers use the canonical tested analyzer": (
         '@("analyzer_research_engine_v62.py")' in start_analyzer
         and '@("analyzer_research_engine_v62.py")' in local_analyzer
