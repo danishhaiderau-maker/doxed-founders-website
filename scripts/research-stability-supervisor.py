@@ -114,16 +114,19 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
 
 def read_current_events(path: Path) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8-sig") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            value = json.loads(line)
-            if not isinstance(value, dict):
-                raise ValueError(f"event line {line_number} is not an object")
-            if value.get("schema") != REQUIRED_SCHEMA or value.get("collector_version") != REQUIRED_COLLECTOR:
-                raise ValueError(f"event line {line_number} is not qualified v2.2")
-            events.append(value)
+    # Release the Windows mirror handle before schema validation/counting. A
+    # supervisor pass must never block publication of the next generation.
+    payload = path.read_bytes()
+    for line_number, raw_line in enumerate(payload.splitlines(), 1):
+        line = raw_line.decode("utf-8-sig", errors="strict")
+        if not line.strip():
+            continue
+        value = json.loads(line)
+        if not isinstance(value, dict):
+            raise ValueError(f"event line {line_number} is not an object")
+        if value.get("schema") != REQUIRED_SCHEMA or value.get("collector_version") != REQUIRED_COLLECTOR:
+            raise ValueError(f"event line {line_number} is not qualified v2.2")
+        events.append(value)
     if not events:
         raise ValueError("no v2.2 events")
     epoch = str(events[-1].get("epoch_id") or "")

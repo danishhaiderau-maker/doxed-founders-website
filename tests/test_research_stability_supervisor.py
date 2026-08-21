@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -457,3 +459,39 @@ def test_dead_runtime_fails_immediately_without_remote_repair(tmp_path):
     assert ok is False
     assert detail["state"] == "PROCESS_NOT_ALIVE"
     assert persisted["first_starved_at"] is None
+
+
+def test_supervisor_releases_live_mirror_before_schema_counting(tmp_path, monkeypatch):
+    path = tmp_path / "research_events_v22.jsonl"
+    row = {
+        "event_id": "event-1", "schema": "research_event_v2.2",
+        "collector_version": "collector_v2.2", "epoch_id": "epoch-a",
+        "policy_epoch_id": "policy-epoch-a", "policy_signature": "policy-a",
+        "event_episode_id": "episode-a", "observation_status": "COMPLETE",
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    parsing_started = threading.Event()
+    allow_parsing = threading.Event()
+    real_loads = json.loads
+
+    def slow_loads(*args, **kwargs):
+        parsing_started.set()
+        assert allow_parsing.wait(5)
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(module.json, "loads", slow_loads)
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.setdefault("summary", module.read_current_events(path))
+    )
+    worker.start()
+    assert parsing_started.wait(5)
+    replacement = tmp_path / "supervisor-replacement.download"
+    replacement.write_text(json.dumps({**row, "event_id": "event-2"}) + "\n", encoding="utf-8")
+    try:
+        os.replace(replacement, path)
+    finally:
+        allow_parsing.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert result["summary"]["current_events"] == 1
