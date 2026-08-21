@@ -148,6 +148,45 @@ def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
     }
 
 
+def test_clean_v3_only_epoch_satisfies_mirror_schema_check(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    (mirror / "research_events_v22.jsonl").unlink()
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    for ledger in ("opportunity", "lifecycle"):
+        row = {
+            "schema": "research_evidence_v3", "ledger": ledger,
+            "epoch_id": "epoch-v3-fresh", "record_id": f"{ledger}-1",
+            "episode_id": "episode-1", "terminal": ledger == "lifecycle",
+        }
+        path = ledgers / f"{ledger}.jsonl"
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        os.utime(path, (NOW.timestamp(), NOW.timestamp()))
+
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    )
+    result = checker.check()
+    schema = next(x for x in result["checks"] if x["name"] == "mirror_schema_and_freshness")
+    assert schema["ok"] is True
+    assert schema["detail"]["schema_source"] == "research_evidence_v3"
+    assert schema["detail"]["epoch_ids"] == ["epoch-v3-fresh"]
+
+
+def test_missing_v2_and_v3_evidence_fails_mirror_schema_check(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    (mirror / "research_events_v22.jsonl").unlink()
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    )
+    result = checker.check()
+    schema = next(x for x in result["checks"] if x["name"] == "mirror_schema_and_freshness")
+    assert schema["ok"] is False
+    assert "neither research_events_v22.jsonl nor V3 normalized ledgers exist" in schema["detail"]
+
+
 def test_negative_evidence_uses_schema_aware_episode_denominators(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     events_path = mirror / "research_events_v22.jsonl"

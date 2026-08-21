@@ -595,18 +595,37 @@ class Supervisor:
 
         events_path = self.mirror / "research_events_v22.jsonl"
         event_summary: dict[str, Any] | None = None
+        v3_ledger_dir = self.mirror / "v3" / "ledgers"
+        v3_ledger_paths = list(v3_ledger_dir.glob("*.jsonl")) if v3_ledger_dir.is_dir() else []
         try:
-            event_summary = read_current_events(events_path)
-            mirror_age = (self.now().timestamp() - events_path.stat().st_mtime)
+            if events_path.is_file():
+                event_summary = read_current_events(events_path)
+                mirror_age = self.now().timestamp() - events_path.stat().st_mtime
+                public_summary = {
+                    key: value for key, value in event_summary.items()
+                    if not key.startswith("_")
+                }
+                schema_source = "research_event_v2.2"
+            elif v3_ledger_paths:
+                v3_summary = read_v3_evidence(self.mirror)
+                row_count = sum(v3_summary["ledger_counts"].values())
+                if row_count <= 0 or not v3_summary["epoch_ids"]:
+                    raise ValueError("V3_EVIDENCE_EMPTY_OR_MISSING_EPOCH")
+                mirror_age = self.now().timestamp() - max(
+                    path.stat().st_mtime for path in v3_ledger_paths
+                )
+                public_summary = v3_summary
+                schema_source = "research_evidence_v3"
+            else:
+                raise FileNotFoundError(
+                    "neither research_events_v22.jsonl nor V3 normalized ledgers exist"
+                )
             # A finalized append-only event file legitimately remains unchanged
             # when no lifecycle matures. Transport freshness is independently
             # enforced by the atomic sync heartbeat above.
-            public_summary = {
-                key: value for key, value in event_summary.items()
-                if not key.startswith("_")
-            }
             add("mirror_schema_and_freshness", True,
-                {**public_summary, "age_seconds": round(mirror_age, 1)})
+                {**public_summary, "schema_source": schema_source,
+                 "age_seconds": round(mirror_age, 1)})
         except Exception as exc:
             add("mirror_schema_and_freshness", False, f"{type(exc).__name__}: {exc}")
 
