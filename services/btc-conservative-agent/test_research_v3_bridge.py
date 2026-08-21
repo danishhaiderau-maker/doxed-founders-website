@@ -176,6 +176,41 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(decision["policy_epoch_id"], intent["policy_epoch_id"])
             self.assertEqual(decision["episode_id"], intent["episode_id"])
 
+    def test_continuous_relay_capability_default_keeps_decision_and_order_identity_equal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-continuous", "shared_ai_call_id": "scan-continuous",
+                "created_ts_ts": 1000, "raw_direction": "LONG", "final_direction": "LONG",
+                "research_lane": "CONTINUOUS", "policy_id": "CONTINUOUS",
+                "entry_limit_policy": "deterministic_0.1pct_offset_v1",
+                "deterministic_entry_offset_pct": 0.001,
+                "exit_config": {"policy": "SCENARIO_C"}, "paper_only": True,
+            }
+            dual_write_lane_decision(
+                source, lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={**source, "relay_eligible": True},
+            )
+            dual_write_paper_order_intent(
+                {"trade_id": "cont-child", "created_ts": 1001, "signal_dir": "LONG",
+                 "limit_price": 99.9, "qty": 0.1, "research_lane": "CONTINUOUS"},
+                {**source, "trade_id": "cont-child"},
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            decision = json.loads(store.ledger_path("decision").read_text().strip())
+            intent = json.loads(store.ledger_path("order_intent").read_text().strip())
+            self.assertEqual(decision["policy_signature"], intent["policy_signature"])
+            self.assertEqual(decision["policy_epoch_id"], intent["policy_epoch_id"])
+            self.assertEqual(intent["shared_ai_call_id"], "scan-continuous")
+            self.assertTrue(decision["paper_policy_spec"]["relay_eligible"])
+            self.assertTrue(intent["paper_policy_spec"]["relay_eligible"])
+            self.assertTrue(intent["relay_eligible"])
+            self.assertEqual(
+                decision["paper_policy_spec"], intent["paper_policy_spec"],
+            )
+
     def test_terminal_record_uses_same_shared_call_episode_as_provisional_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = _event("scan-child", "legacy-stable-episode")

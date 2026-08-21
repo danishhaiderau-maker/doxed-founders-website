@@ -56,7 +56,7 @@ def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, An
             "grouping_basis": grouping_basis}
 
 
-def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, str | None]:
+def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
     """Derive a lane-scoped identity instead of reusing the live CONTROL tag."""
     research_lane = str(_first(*(source.get("research_lane") for source in sources)) or "").strip()
     policy_id = str(_first(
@@ -66,6 +66,7 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
     ))
     base_signature = str(_first(*(source.get("policy_signature") for source in sources)) or "").strip()
     base_epoch = str(_first(*(source.get("policy_epoch_id") for source in sources)) or "").strip()
+    relay_default = research_lane.upper() == "CONTINUOUS"
     spec = {
         "schema": "paper_policy_identity_spec_v3",
         "policy_id": policy_id,
@@ -79,7 +80,7 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         )),
         "exit_config": _first(*(source.get("exit_config") for source in sources)),
         "paper_only": bool(_first(*(source.get("paper_only") for source in sources), True)),
-        "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), False)),
+        "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), relay_default)),
         "base_policy_signature": base_signature or None,
     }
     signature = "paper-policy-" + hashlib.sha256(canonical_json(spec).encode("utf-8")).hexdigest()[:20]
@@ -93,6 +94,10 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         "policy_epoch_id": policy_epoch_id,
         "base_policy_signature": base_signature or None,
         "base_policy_epoch_id": base_epoch or None,
+        # Persist the exact material that produced the signature.  Downstream
+        # rows must not re-interpret sparse order dictionaries differently
+        # from the original lane decision.
+        "paper_policy_spec": spec,
     }
 
 
@@ -162,8 +167,8 @@ def dual_write_lane_decision(
         "long_score": source.get("long_score"),
         "short_score": source.get("short_score"),
         "score_gap": source.get("score_gap"),
-        "paper_only": bool(material.get("paper_only", True)),
-        "relay_eligible": bool(material.get("relay_eligible", False)),
+        "paper_only": bool(policy["paper_policy_spec"]["paper_only"]),
+        "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "order_intent_expected": execution_disposition == "ORDER_ELIGIBLE",
         **policy,
     })
@@ -192,18 +197,20 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     })
     intent = store.append("order_intent", {
         "record_id": f"order-intent:{event_id}:paper-submit", "episode_id": identity["episode_id"], "event_id": event_id,
+        "shared_ai_call_id": identity["shared_ai_call_id"],
         "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
         "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
         "limit_price": _first(order.get("limit_price"), order.get("price")), "requested_qty": order.get("qty"),
         "executed_direction": identity["executed_direction"], "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
-        "paper_only": bool(order.get("paper_only") or signal.get("paper_only")),
-        "relay_eligible": bool(order.get("relay_eligible", signal.get("relay_eligible", False))),
+        "paper_only": bool(policy["paper_policy_spec"]["paper_only"]),
+        "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "chase_schedule": order.get("research_chase_schedule") or signal.get("research_chase_schedule") or {},
         "chase_schedule_authoritative": bool(order.get("chase_schedule_authoritative") or signal.get("chase_schedule_authoritative")),
         **policy,
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-order-submitted", "episode_id": identity["episode_id"], "event_id": event_id,
+        "shared_ai_call_id": identity["shared_ai_call_id"],
         "observation_status": "PAPER_ORDER_SUBMITTED", "outcome_state": "PENDING_FILL", "terminal": False,
         "ranking_eligible": False, "ranking_blocker": "PATH_NOT_MATURED",
     })
