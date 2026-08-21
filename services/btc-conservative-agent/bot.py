@@ -40,6 +40,7 @@ import hmac
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
+from bounded_evidence_worker import BoundedEvidenceWorker
 import numpy as np
 import pytz
 
@@ -3255,6 +3256,56 @@ def reconcile_lane_position_registry():
                     lane_open_positions[ln].append(p)
 
 
+_pending_order_evidence_worker = None
+_pending_order_evidence_worker_lock = threading.Lock()
+
+
+def _write_pending_order_evidence(job: dict) -> None:
+    payload = job.get("payload") or {}
+    order = payload.get("order") or {}
+    master_signal = payload.get("signal") or {}
+    collector_bridge = globals().get("_promote_collector_v22_registered_order")
+    if callable(collector_bridge):
+        collector_bridge(order, master_signal)
+    if payload.get("is_paper_entry"):
+        dual_write_paper_order_intent(
+            order, master_signal,
+            epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+        )
+    _emit_genome_execution_event("LIMIT_CREATED", {
+        "trade_id": order.get("trade_id"),
+        "limit_price": order.get("limit_price") or order.get("price"),
+        "direction": order.get("dir") or order.get("direction"),
+        "research_lane": order.get("research_lane"),
+        "evidence_source_ts": job.get("source_ts"),
+        "evidence_enqueued_ts": job.get("enqueued_ts"),
+    })
+
+
+def _get_pending_order_evidence_worker():
+    global _pending_order_evidence_worker
+    with _pending_order_evidence_worker_lock:
+        if _pending_order_evidence_worker is None:
+            _pending_order_evidence_worker = BoundedEvidenceWorker(
+                _write_pending_order_evidence,
+                max_queue=256,
+                max_retries=2,
+                name="pending-order-evidence",
+                on_dead_letter=lambda row: logger.error(
+                    f"[ORDER EVIDENCE] dead-letter key={row.get('key')} "
+                    f"reason={row.get('reason')} attempt={row.get('attempt')} "
+                    f"source_ts={row.get('source_ts')} error={row.get('error')} "
+                    "[PIPELINE ENFORCEMENT]"
+                ),
+            )
+        return _pending_order_evidence_worker
+
+
+def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
+    worker = _pending_order_evidence_worker
+    return True if worker is None else worker.shutdown(drain_timeout=timeout)
+
+
 def lane_register_pending_order(order: dict):
     """Dual-write once: global pending_orders + lane-owned bucket.
 
@@ -3326,30 +3377,23 @@ def lane_register_pending_order(order: dict):
             chase_acked=False,
             observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
         )
-    collector_bridge = globals().get("_promote_collector_v22_registered_order")
-    if callable(collector_bridge):
-        collector_bridge(
-            order,
-            master_signal if isinstance(master_signal, dict) else None,
-        )
     is_paper_entry = not bool(order.get("bitfinex_order_id") or order.get("bitfinex_live_entry")) and str(order.get("entry_type") or "").upper() not in {"POSTONLY_TP", "REDUCE_ONLY", "EXIT"}
-    if is_paper_entry:
-        try:
-            dual_write_paper_order_intent(
-                order, master_signal if isinstance(master_signal, dict) else {},
-                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
-            )
-        except Exception as exc:
-            logger.error(
-                f"[COLLECTOR_V3] paper order intent write failed "
-                f"trade_id={order.get('trade_id')} error={exc} [PIPELINE ENFORCEMENT]"
-            )
-    _emit_genome_execution_event("LIMIT_CREATED", {
-        "trade_id": order.get("trade_id"),
-        "limit_price": order.get("limit_price") or order.get("price"),
-        "direction": order.get("dir") or order.get("direction"),
-        "research_lane": order.get("research_lane"),
-    })
+    source_ts = float(order.get("created_ts") or time.time())
+    evidence_key = f"pending-order:{tid}"
+    queued = _get_pending_order_evidence_worker().submit(
+        evidence_key,
+        {
+            "order": order,
+            "signal": master_signal if isinstance(master_signal, dict) else {},
+            "is_paper_entry": is_paper_entry,
+        },
+        source_ts=source_ts,
+    )
+    if not queued:
+        logger.warning(
+            f"[ORDER EVIDENCE] duplicate/full/stopped enqueue trade_id={tid} "
+            f"source_ts={source_ts} [PIPELINE ENFORCEMENT]"
+        )
     return True
 
 
@@ -37145,6 +37189,8 @@ def shutdown_handler(signum, frame):
         return
     logger.warning(f"[SHUTDOWN] Signal received: {signum}")
     shutdown_event.set()
+    drained = _shutdown_pending_order_evidence_worker(timeout=5.0)
+    logger.warning(f"[SHUTDOWN] Pending-order evidence drained={drained}")
     logger.warning("[SHUTDOWN] Controlled shutdown initiated")
 
 signal.signal(signal.SIGINT, shutdown_handler)
