@@ -102,12 +102,46 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(intent["intent_kind"], "ACTUAL_PAPER_LIMIT_SUBMIT")
             self.assertEqual(intent["requested_qty"], 0.2)
             self.assertTrue(intent["chase_schedule_authoritative"])
-            self.assertEqual(intent["policy_signature"], "policy-paper")
-            self.assertEqual(intent["policy_epoch_id"], "policy-epoch-paper")
+            self.assertTrue(intent["policy_signature"].startswith("paper-policy-"))
+            self.assertTrue(intent["policy_epoch_id"].startswith("paper-policy-epoch-"))
+            self.assertEqual(intent["base_policy_signature"], "policy-paper")
+            self.assertEqual(intent["base_policy_epoch_id"], "policy-epoch-paper")
             self.assertEqual(execution["execution_world"], "SHOWCASE_PAPER_OBSERVED")
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertEqual(execution["filled_qty"], 0.2)
             self.assertEqual(intent["episode_id"], execution["episode_id"])
+
+    def test_different_paper_lanes_never_share_inherited_control_signature(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = {
+                "created_ts_ts": 1000, "raw_direction": "LONG",
+                "final_direction": "LONG", "policy_signature": "policy-control",
+                "policy_epoch_id": "policy-epoch-control",
+            }
+            continuous = {**base, "trade_id": "cont-1", "shared_ai_call_id": "scan-1",
+                          "research_lane": "CONTINUOUS"}
+            patient = {**base, "trade_id": "patient-1", "shared_ai_call_id": "scan-2",
+                       "research_lane": "OFFSET_029_ATR_TP_25",
+                       "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+                       "paper_only": True, "relay_eligible": False}
+            dual_write_paper_order_intent(
+                {"trade_id": "cont-1", "created_ts": 1001, "signal_dir": "LONG",
+                 "limit_price": 99.9, "qty": 0.1, "research_lane": "CONTINUOUS"},
+                continuous, epoch_id="epoch-v3-test", data_dir=tmp)
+            dual_write_paper_order_intent(
+                {"trade_id": "patient-1", "created_ts": 1001, "signal_dir": "LONG",
+                 "limit_price": 99.71, "qty": 0.1,
+                 "research_lane": "OFFSET_029_ATR_TP_25", "paper_only": True,
+                 "relay_eligible": False},
+                patient, epoch_id="epoch-v3-test", data_dir=tmp)
+            rows = [json.loads(line) for line in
+                    V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("order_intent").read_text().splitlines()]
+            self.assertEqual({row["base_policy_signature"] for row in rows}, {"policy-control"})
+            self.assertEqual(len({row["policy_signature"] for row in rows}), 2)
+            self.assertEqual(len({row["policy_epoch_id"] for row in rows}), 2)
+            self.assertEqual({row["policy_id"] for row in rows}, {
+                "CONTINUOUS", "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+            })
 
     def test_paper_lifecycle_retry_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:

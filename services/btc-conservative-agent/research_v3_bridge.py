@@ -52,25 +52,39 @@ def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, An
             "grouping_basis": grouping_basis}
 
 
-def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, str]:
-    policy_id = str(_first(*(source.get("policy_id") or source.get("raw_policy_id") for source in sources)) or "UNSPECIFIED_PAPER_POLICY")
-    signature = str(_first(*(source.get("policy_signature") for source in sources)) or "")
-    if not signature:
-        spec = {
-            "policy_id": policy_id,
-            "research_lane": _first(*(source.get("research_lane") for source in sources)),
-            "entry_limit_policy": _first(*(source.get("entry_limit_policy") for source in sources)),
-            "entry_offset_pct": _first(*(source.get("entry_offset_pct") for source in sources)),
-            "exit_config": _first(*(source.get("exit_config") for source in sources)),
-            "paper_only": True,
-        }
-        signature = "paper-policy-" + hashlib.sha256(canonical_json(spec).encode("utf-8")).hexdigest()[:20]
-    policy_epoch_id = str(_first(*(source.get("policy_epoch_id") for source in sources)) or "")
-    if not policy_epoch_id:
-        policy_epoch_id = "paper-policy-epoch-" + hashlib.sha256(
-            f"{epoch_id}|{signature}".encode("utf-8")
-        ).hexdigest()[:20]
-    return {"policy_id": policy_id, "policy_signature": signature, "policy_epoch_id": policy_epoch_id}
+def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, str | None]:
+    """Derive a lane-scoped identity instead of reusing the live CONTROL tag."""
+    research_lane = str(_first(*(source.get("research_lane") for source in sources)) or "").strip()
+    policy_id = str(_first(
+        *(source.get("policy_id") or source.get("raw_policy_id") for source in sources),
+        research_lane,
+        "UNSPECIFIED_PAPER_POLICY",
+    ))
+    base_signature = str(_first(*(source.get("policy_signature") for source in sources)) or "").strip()
+    base_epoch = str(_first(*(source.get("policy_epoch_id") for source in sources)) or "").strip()
+    spec = {
+        "schema": "paper_policy_identity_spec_v2",
+        "policy_id": policy_id,
+        "research_lane": research_lane or None,
+        "entry_limit_policy": _first(*(source.get("entry_limit_policy") for source in sources)),
+        "entry_offset_pct": _first(*(source.get("entry_offset_pct") for source in sources)),
+        "exit_config": _first(*(source.get("exit_config") for source in sources)),
+        "paper_only": bool(_first(*(source.get("paper_only") for source in sources), True)),
+        "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), False)),
+        "base_policy_signature": base_signature or None,
+    }
+    signature = "paper-policy-" + hashlib.sha256(canonical_json(spec).encode("utf-8")).hexdigest()[:20]
+    policy_epoch_id = "paper-policy-epoch-" + hashlib.sha256(
+        f"{epoch_id}|{signature}".encode("utf-8")
+    ).hexdigest()[:20]
+    return {
+        "policy_identity_schema": "paper_policy_identity_v2",
+        "policy_id": policy_id,
+        "policy_signature": signature,
+        "policy_epoch_id": policy_epoch_id,
+        "base_policy_signature": base_signature or None,
+        "base_policy_epoch_id": base_epoch or None,
+    }
 
 
 def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:

@@ -81,6 +81,26 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["status"], "V3_EPOCH_CONTAMINATION_BLOCKED")
             self.assertIn("CAUSAL_IDENTITY_ALIAS_EXCLUDED", report["blockers"])
 
+    def test_report_blocks_two_policy_ids_sharing_one_signature(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            for index, policy_id in enumerate(("CONTINUOUS", "PATIENT_CHASE"), 1):
+                store.append("order_intent", {
+                    "record_id": f"i-{index}", "episode_id": "episode-1",
+                    "event_id": f"event-{index}", "policy_id": policy_id,
+                    "policy_signature": "shared-wrong-signature",
+                    "policy_epoch_id": "shared-wrong-epoch",
+                })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["status"], "V3_EPOCH_CONTAMINATION_BLOCKED")
+            self.assertEqual(report["epoch_scope"]["policy_signature_collisions"], {
+                "shared-wrong-signature": ["CONTINUOUS", "PATIENT_CHASE"],
+            })
+            self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -109,12 +109,32 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     opportunities, identity_aliases = _exclude_identity_aliases(opportunities)
     allowed_episodes = {str(row.get("episode_id") or "") for row in opportunities}
     decisions = [row for row in scoped(_read_ledger(store.ledger_path("decision"))) if str(row.get("episode_id") or "") in allowed_episodes]
+    order_intents = [row for row in scoped(_read_ledger(store.ledger_path("order_intent"))) if str(row.get("episode_id") or "") in allowed_episodes]
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
     terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
     executions = [row for row in scoped(_read_ledger(store.ledger_path("execution"))) if str(row.get("episode_id") or "") in allowed_episodes]
     observed_epochs = sorted({str(row.get("epoch_id")) for row in all_opportunities if row.get("epoch_id")})
     excluded_opportunities = len(all_opportunities) - len(opportunities)
-    contamination = bool(excluded_opportunities or identity_aliases or len(observed_epochs) > 1)
+    policy_ids_by_signature: dict[str, set[str]] = {}
+    missing_policy_identity_rows = 0
+    for row in order_intents:
+        signature = str(row.get("policy_signature") or "").strip()
+        policy_id = str(row.get("policy_id") or "").strip()
+        policy_epoch_id = str(row.get("policy_epoch_id") or "").strip()
+        if not signature or not policy_id or not policy_epoch_id:
+            missing_policy_identity_rows += 1
+            continue
+        policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
+    policy_signature_collisions = {
+        signature: sorted(policy_ids)
+        for signature, policy_ids in policy_ids_by_signature.items()
+        if len(policy_ids) > 1
+    }
+    policy_identity_contamination = bool(policy_signature_collisions or missing_policy_identity_rows)
+    contamination = bool(
+        excluded_opportunities or identity_aliases or len(observed_epochs) > 1
+        or policy_identity_contamination
+    )
     outcome_counts = Counter(str(row.get("outcome_state") or "UNKNOWN") for row in terminal_lifecycles)
     decision_outcomes = Counter(str(row.get("primary_outcome") or "UNKNOWN") for row in decisions)
     search = build_search_plan({
@@ -155,6 +175,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "excluded_stale_or_foreign_rows": excluded_opportunities,
             "excluded_identity_alias_rows": len(identity_aliases),
             "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
+            "missing_policy_identity_rows": missing_policy_identity_rows,
+            "policy_signature_collisions": policy_signature_collisions,
             "contamination_detected": contamination,
         },
         "collection": {
@@ -178,7 +200,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "safe_policy_ranking": ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],
-        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
+        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
