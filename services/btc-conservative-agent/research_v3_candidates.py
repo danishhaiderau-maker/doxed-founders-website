@@ -86,15 +86,42 @@ def _load_segment(root: Path, ref: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in (envelope.get("rows") or []) if isinstance(row, dict)]
 
 
-def load_candidate_inputs(data_dir: str | Path) -> list[dict[str, Any]]:
+def load_candidate_inputs(
+    data_dir: str | Path,
+    *,
+    epoch_id: str | None = None,
+    minimum_signal_ts: float | None = None,
+) -> list[dict[str, Any]]:
     """Return one normalized event input per event, never per duplicate row."""
     root = Path(data_dir)
     ledgers = root / "v3" / "ledgers"
-    opportunities = {str(row.get("episode_id")): row for row in _read_jsonl(ledgers / "opportunity.jsonl")}
-    intents = {str(row.get("event_id")): row for row in _read_jsonl(ledgers / "order_intent.jsonl")}
+    def in_scope(row: Mapping[str, Any]) -> bool:
+        if epoch_id is not None and str(row.get("epoch_id") or "") != str(epoch_id):
+            return False
+        return True
+
+    opportunities = {}
+    for row in _read_jsonl(ledgers / "opportunity.jsonl"):
+        if not in_scope(row):
+            continue
+        try:
+            signal_ts = float(row.get("signal_ts"))
+        except (TypeError, ValueError):
+            signal_ts = None
+        if minimum_signal_ts is not None and (signal_ts is None or signal_ts < minimum_signal_ts):
+            continue
+        opportunities[str(row.get("episode_id"))] = row
+    allowed_episodes = set(opportunities)
+    intents = {
+        str(row.get("event_id")): row
+        for row in _read_jsonl(ledgers / "order_intent.jsonl")
+        if in_scope(row) and str(row.get("episode_id") or "") in allowed_episodes
+    }
     terminal = {
         str(row.get("event_id")): row for row in _read_jsonl(ledgers / "lifecycle.jsonl")
         if row.get("terminal") is True
+        and in_scope(row)
+        and str(row.get("episode_id") or "") in allowed_episodes
     }
     result = []
     for event_id in sorted(set(intents) & set(terminal)):

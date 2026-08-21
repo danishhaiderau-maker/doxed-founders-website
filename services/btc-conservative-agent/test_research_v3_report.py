@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import json
+from pathlib import Path
 
 from research.research_v3_report import build_safe_policy_genome_v3_report
 from research import research_dashboard as dashboard
@@ -38,6 +40,24 @@ class V3ReportTests(unittest.TestCase):
             self.assertIn(b"Safe Policy Genome", page.data)
         finally:
             dashboard._read_json = original
+
+    def test_report_excludes_foreign_epoch_and_pre_reset_rows(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            Path(data, "research_session.json").write_text(json.dumps({"fresh_collection_start_time": 1000}), encoding="utf-8")
+            old = V3EvidenceStore(data, epoch_id="epoch-old")
+            old.append("opportunity", {"record_id": "o-old", "episode_id": "episode-old", "signal_ts": 900})
+            current = V3EvidenceStore(data, epoch_id="epoch-current")
+            current.append("opportunity", {"record_id": "o-rebuilt", "episode_id": "episode-rebuilt", "signal_ts": 950})
+            current.append("opportunity", {"record_id": "o-fresh", "episode_id": "episode-fresh", "signal_ts": 1100})
+            current.append("decision", {"record_id": "d-rebuilt", "episode_id": "episode-rebuilt", "primary_outcome": "REJECTED"})
+            current.append("decision", {"record_id": "d-fresh", "episode_id": "episode-fresh", "primary_outcome": "REJECTED"})
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["epoch_id"], "epoch-current")
+            self.assertEqual(report["collection"]["independent_opportunities"], 1)
+            self.assertEqual(report["collection"]["decision_branches"], 1)
+            self.assertEqual(report["status"], "V3_EPOCH_CONTAMINATION_BLOCKED")
+            self.assertEqual(report["epoch_scope"]["excluded_stale_or_foreign_rows"], 2)
+            self.assertIn("MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED", report["blockers"])
 
 
 if __name__ == "__main__":
