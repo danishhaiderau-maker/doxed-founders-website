@@ -58,16 +58,48 @@ function Test-MirrorCandidate {
 function Publish-MirrorCandidate {
   param(
     [Parameter(Mandatory = $true)][string]$Candidate,
-    [Parameter(Mandatory = $true)][string]$Destination
+    [Parameter(Mandatory = $true)][string]$Destination,
+    [int]$ReplaceAttempts = 12
   )
   $backup = "$Candidate.replace-backup"
   try {
     if (Test-Path -LiteralPath $Destination) {
-      [System.IO.File]::Replace($Candidate, $Destination, $backup, $true)
+      Invoke-MirrorAtomicReplace `
+        -Candidate $Candidate `
+        -Destination $Destination `
+        -Backup $backup `
+        -Attempts $ReplaceAttempts
     } else {
       [System.IO.File]::Move($Candidate, $Destination)
     }
   } finally {
     Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Invoke-MirrorAtomicReplace {
+  param(
+    [Parameter(Mandatory = $true)][string]$Candidate,
+    [Parameter(Mandatory = $true)][string]$Destination,
+    [Parameter(Mandatory = $true)][string]$Backup,
+    [int]$Attempts = 12
+  )
+  $boundedAttempts = [Math]::Max(1, [Math]::Min(20, $Attempts))
+  for ($attempt = 1; $attempt -le $boundedAttempts; $attempt++) {
+    try {
+      [System.IO.File]::Replace($Candidate, $Destination, $Backup, $true)
+      return
+    } catch [System.IO.IOException] {
+      if ($attempt -ge $boundedAttempts) {
+        throw [System.IO.IOException]::new(
+          "Atomic mirror publish failed after $attempt attempt(s): destination=$Destination candidate=$Candidate error=$($_.Exception.Message)",
+          $_.Exception
+        )
+      }
+      # Readers of a large immutable snapshot can briefly hold a Windows file
+      # handle without FILE_SHARE_DELETE. Keep the validated candidate and the
+      # prior mirror intact, then retry only the atomic publish operation.
+      Start-Sleep -Milliseconds ([Math]::Min(2000, 100 * [Math]::Pow(2, $attempt - 1)))
+    }
   }
 }

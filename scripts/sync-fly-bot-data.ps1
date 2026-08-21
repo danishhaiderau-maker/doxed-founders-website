@@ -59,7 +59,11 @@ function Save-SyncState {
       # with "Cannot create a file when that file already exists". Replace the
       # complete temporary file in one filesystem operation so the analyzer can
       # never observe a partially-written JSON state document.
-      [System.IO.File]::Replace($stateTmp, $statePath, $stateBackup, $true)
+      Invoke-MirrorAtomicReplace `
+        -Candidate $stateTmp `
+        -Destination $statePath `
+        -Backup $stateBackup `
+        -Attempts 12
     } else {
       [System.IO.File]::Move($stateTmp, $statePath)
     }

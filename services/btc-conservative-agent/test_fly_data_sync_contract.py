@@ -595,6 +595,41 @@ def test_invalid_jsonl_candidate_preserves_previous_mirror_and_valid_candidate_r
     }
 
 
+def test_atomic_publish_retries_a_transient_windows_reader_lock_without_losing_either_file():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        destination = root / "locked.jsonl"
+        candidate = root / "candidate.download"
+        marker = root / "locked.marker"
+        destination.write_text('{"version":"old"}\n', encoding="utf-8")
+        candidate.write_text('{"version":"new"}\n', encoding="utf-8")
+        command = (
+            f". '{ATOMIC_HELPER}'; $dest='{destination}'; $candidate='{candidate}'; $marker='{marker}'; "
+            "$job=Start-Job -ScriptBlock { param($p,$m) "
+            "$s=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); "
+            "[IO.File]::WriteAllText($m,'locked'); Start-Sleep -Milliseconds 550; $s.Dispose() "
+            "} -ArgumentList $dest,$marker; "
+            "$until=(Get-Date).AddSeconds(5); while (!(Test-Path -LiteralPath $marker) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 20 }; "
+            "Publish-MirrorCandidate -Candidate $candidate -Destination $dest -ReplaceAttempts 8; "
+            "$job|Wait-Job|Remove-Job; [IO.File]::ReadAllText($dest)"
+        )
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    assert completed.stdout.replace("\r\n", "\n").strip() == '{"version":"new"}'
+
+
+def test_atomic_publish_lock_failure_names_the_destination_and_preserves_candidate():
+    helper = ATOMIC_HELPER.read_text(encoding="utf-8")
+    assert "Atomic mirror publish failed after $attempt attempt(s): destination=$Destination" in helper
+    assert "retry only the atomic publish operation" in helper
+    assert "-Attempts 12" in SYNC_SCRIPT
+
+
 def test_platform_relay_evidence_validation_rejects_wrong_scope_and_duplicate_events():
     validate = _load_bot_functions("_validate_platform_relay_evidence_payload")[
         "_validate_platform_relay_evidence_payload"
