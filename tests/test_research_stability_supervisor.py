@@ -232,6 +232,49 @@ def test_v3_supervisor_accepts_awaiting_order_within_declared_deadline(tmp_path)
     assert integrity["detail"]["entry_resolution_integrity"]["awaiting_within_deadline"] == 1
 
 
+def test_v3_supervisor_fails_execution_and_paper_lifecycle_without_policy_provenance(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def write_ledger(name, rows):
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps({"schema": "research_evidence_v3", "ledger": name,
+                                "epoch_id": "epoch-v3", **row}) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+    write_ledger("opportunity", [{"record_id": "o-1", "episode_id": "e-1"}])
+    incomplete = {
+        "episode_id": "e-1", "event_id": "event-1",
+        "policy_id": "PATIENT", "policy_signature": "sig-p",
+        "policy_epoch_id": "pe-p",
+    }
+    write_ledger("execution", [{"record_id": "e-1", **incomplete}])
+    write_ledger("lifecycle", [{
+        "record_id": "l-1", **incomplete,
+        "observation_status": "PAPER_POSITION_CLOSED", "terminal": True,
+    }])
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_EPOCH_CONTAMINATION_BLOCKED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 0,
+                       "terminal_lifecycles": 1, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+    integrity = next(x for x in result["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    provenance = integrity["detail"]["policy_provenance_integrity"]
+    assert provenance["checked_rows"] == 2
+    assert provenance["defect_count"] == 2
+    assert {tuple(row["missing_fields"]) for row in provenance["defects"]} == {
+        ("research_lane", "shared_ai_call_id"),
+    }
+
+
 def test_clean_v3_only_epoch_satisfies_mirror_schema_check(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     (mirror / "research_events_v22.jsonl").unlink()
