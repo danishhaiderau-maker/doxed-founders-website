@@ -172,7 +172,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
 from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -24456,6 +24456,17 @@ def close_position(pos: dict, exit_reason: str):
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
             "exit_config_json": json.dumps(get_exit_config_snapshot(pos.get("research_lane"))),
         }
+    if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
+        try:
+            dual_write_paper_close(
+                pos, master if isinstance(master, dict) else {}, trade_row,
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            )
+        except Exception as exc:
+            logger.error(
+                f"[COLLECTOR_V3] paper close write failed "
+                f"trade_id={trade_id} error={exc} [PIPELINE ENFORCEMENT]"
+            )
     pos["status"] = "CLOSED"
     lane_unregister_open_position(pos)
     begin_post_exit_replay(trade_id, pos, price)

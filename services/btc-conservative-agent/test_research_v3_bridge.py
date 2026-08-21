@@ -4,7 +4,7 @@ import unittest
 
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
-from research_v3_bridge import dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
 from research_v3_store import V3EvidenceStore
 
 
@@ -94,6 +94,22 @@ class V3BridgeTests(unittest.TestCase):
             self.assertTrue(intent["policy_epoch_id"].startswith("paper-policy-epoch-"))
             self.assertEqual(intent["policy_signature"], execution["policy_signature"])
             self.assertEqual(intent["policy_epoch_id"], execution["policy_epoch_id"])
+
+    def test_paper_close_records_realized_result_without_claiming_exchange_actual(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {"trade_id": "p-3", "created_ts_ts": 1000, "raw_direction": "LONG", "shared_ai_call_id": "scan-3", "policy_id": "PATIENT"}
+            position = {"trade_id": "p-3", "entry_ts": 1010, "entry": 99, "qty": 0.1, "dir": "LONG"}
+            outcome = {"trade_id": "p-3", "close_ts": "1970-01-01T00:17:00Z", "exit": 100, "net_pnl_usd": 1.0, "gross_pnl_usd": 1.0, "trading_fees_usd": 0.0, "funding_fees_usd": 0.0, "exit_reason": "ATR_TP_2_5"}
+            receipt = dual_write_paper_close(position, signal, outcome, epoch_id="epoch-v3-test", data_dir=tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            execution = json.loads(store.ledger_path("execution").read_text().strip())
+            lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
+            self.assertTrue(receipt["store_verification"]["passed"])
+            self.assertEqual(execution["net_pnl_usd"], 1.0)
+            self.assertEqual(execution["trading_fees_usd"], 0.0)
+            self.assertFalse(execution["authenticated_exchange_actual"])
+            self.assertTrue(lifecycle["terminal"])
+            self.assertFalse(lifecycle["ranking_eligible"])
 
     def test_provisional_without_stable_identity_is_deferred_without_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

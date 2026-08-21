@@ -115,6 +115,31 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
             "writes": [execution, lifecycle], "store_verification": store.verify()}
 
 
+def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any], outcome: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
+    """Write the observed terminal paper result while replay paths continue."""
+    event_id = str(_first(position.get("trade_id"), signal.get("trade_id"), outcome.get("trade_id")) or "")
+    identity = _causal_identity(event_id, signal, position, outcome)
+    policy = _paper_policy_identity(str(epoch_id), signal, position, outcome)
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    execution = store.append("execution", {
+        "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
+        "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
+        "entry_price": _first(outcome.get("entry"), position.get("entry")), "exit_price": outcome.get("exit"),
+        "filled_qty": _first(outcome.get("execution_qty"), position.get("qty")), "net_pnl_usd": outcome.get("net_pnl_usd"),
+        "gross_pnl_usd": outcome.get("gross_pnl_usd"), "trading_fees_usd": outcome.get("trading_fees_usd"),
+        "funding_fees_usd": outcome.get("funding_fees_usd"), "exit_reason": outcome.get("exit_reason"),
+        "authenticated_exchange_actual": False, "paper_observation": True, **policy,
+    })
+    lifecycle = store.append("lifecycle", {
+        "record_id": f"lifecycle:{event_id}:paper-closed", "episode_id": identity["episode_id"], "event_id": event_id,
+        "observation_status": "PAPER_POSITION_CLOSED", "outcome_state": "PAPER_REALIZED",
+        "terminal": True, "ranking_eligible": False, "ranking_blocker": "REPLAY_PATH_NOT_MATURED",
+        "net_pnl_usd": outcome.get("net_pnl_usd"), "exit_reason": outcome.get("exit_reason"),
+    })
+    return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            "writes": [execution, lifecycle], "store_verification": store.verify()}
+
+
 def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Record the causal opportunity immediately, before its long path matures."""
     signal_ts = float(_first(source.get("created_ts_ts"), source.get("signal_ts"), 0) or 0)
