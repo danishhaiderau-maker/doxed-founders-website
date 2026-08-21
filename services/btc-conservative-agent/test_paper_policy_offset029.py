@@ -5,6 +5,7 @@ from combo_pathway_config import (
     COMBO_EXECUTION_LANES,
     COMBO_LANE_SPECS,
     COMBO_TILE_DISPLAY_ORDER,
+    RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
 )
@@ -52,6 +53,7 @@ def test_atr_target_and_path_end_are_exact():
 def test_active_roster_contains_only_new_candidate_and_not_retired_type_b():
     assert COMBO_EXECUTION_LANES == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,)
     assert COMBO_TILE_DISPLAY_ORDER == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,)
+    assert RESEARCH_CANDIDATE_LANE == RESEARCH_LANE_OFFSET_029_ATR_TP_25
     spec = COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25]
     assert spec["raw_policy_id"] == policy.POLICY_ID
     assert spec["paper_only"] is True

@@ -459,7 +459,6 @@ _lane_locks = {
 PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES
 LEGACY_PATHWAY_LANES = (
     RESEARCH_LANE_CONTINUOUS,
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_HIGH_EDGE_RUNNER,
     RESEARCH_LANE_EXTREME_EDGE,
     RESEARCH_LANE_EDGE_PLUS_STACK,
@@ -25607,7 +25606,7 @@ _cached_pathway_lane_specs = {}
 PATHWAY_LANE_SPECS_FILE = "pathway_lane_specs.json"
 PATHWAY_LANE_ORDER = (
     RESEARCH_LANE_CONTINUOUS,
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
@@ -26394,7 +26393,7 @@ def build_static_pathway_lane_specs() -> dict:
         "entry_limit_policy": DETERMINISTIC_ENTRY_POLICY_VERSION,
         "shared_call_consumers": [
             RESEARCH_LANE_CONTINUOUS,
-            RESEARCH_LANE_TYPE_B_HUNTER_V1,
+            RESEARCH_LANE_OFFSET_029_ATR_TP_25,
         ],
     }
     lanes.append({
@@ -26431,10 +26430,10 @@ def build_static_pathway_lane_specs() -> dict:
             "trigger": "Higher LONG/SHORT score + raw score gap >=5",
             "entry_path": "LOCAL_SR_DIRECT",
             "fill_path": "AI_DIRECT_CHASE",
-            "ai_path": "One shared direction-only AI call; no separate Continuous or Type B call",
+            "ai_path": "One shared direction-only AI call; no separate Continuous or Patient Chase call",
             "ai_cadence": ai_cadence,
             "chase_detail": chase_detail,
-            "post_ai_gates": "Continuous raw-score-gap tier only; Type B applies a separate fixed policy",
+            "post_ai_gates": "Continuous raw-score-gap tier only; Patient Chase follows its registered 0.29% paper policy",
             "margin_usd": shared["margin_usd"],
             "execution": "Immediate AI-direct limit + 25% chase + Scenario C (toggle ON)",
             "orders": "Toggle ON → limit orders; OFF → shadow/data only (no limits)",
@@ -26450,7 +26449,7 @@ def build_static_pathway_lane_specs() -> dict:
         "diff_vs_benchmark": [],
         "strategy_detail": _strategy_detail_lines(
             {
-                "spawn": "Evaluate every shared direction call; Continuous and Type B record separate verdicts",
+                "spawn": "Evaluate every shared direction call; Continuous records its evaluation and Patient Chase records its lifecycle",
                 "execution": "Immediate AI-direct limit + 25% chase + Scenario C when toggle ON",
                 "ai_path": "One shared direction-only call; higher score supplies the candidate side",
                 "ai_cadence": ai_cadence,
@@ -28118,7 +28117,7 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>AI History (Session)</h2>
 <p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. REJECT / ACCEPT is in the lane verdict and Reason columns — these rows are not pending orders. Executable orders are only in Pending Orders. After a restart, Reason still shows APPROVE/REJECT plus the block comment.</p>
 <table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous research verdict</th><th>Type B research verdict</th><th>Reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous evaluation</th><th>Patient Chase route / outcome</th><th>Reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -28636,6 +28635,7 @@ DASHBOARD_JS = """(function () {
           const entry = spec.entry || {};
           const exit = spec.exit || {};
           const stats = spec.session_stats || {};
+          const laneNow = (d.lane_position_counts || {})[spec.lane] || {};
           const pausedAll = d.paused_shadow_stats || {};
           const sourcePaused = d.manual_admin_pause === true
             || (d.execution_paused === true && d.execution_reason === 'ADMIN_MANUAL')
@@ -28682,14 +28682,16 @@ DASHBOARD_JS = """(function () {
             + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
             + '<thead><tr style="color:#8b949e;background:#101820;">'
             + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Chase</th>'
-            + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Executed</th>'
+            + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Closed</th>'
             + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th>'
             + '</tr></thead><tbody>'
             + (settingsRows || '<tr><td colspan="7" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
             + '</tbody></table></div>';
-          const statsGrid = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
+          const statsGrid = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
-            + statRow('Executed', stats.real_fills != null ? stats.real_fills : 0)
+            + statRow('Pending', laneNow.pending || 0)
+            + statRow('Open', laneNow.open || 0)
+            + statRow('Closed', stats.real_fills != null ? stats.real_fills : 0)
             + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
             + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
             + '</div>'
@@ -29761,7 +29763,8 @@ DASHBOARD_JS = """(function () {
             ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls. ')
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
-            + 'Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above. '
+            + 'Continuous ACCEPT is an evaluation, not proof of an order. Patient Chase shows the matched paper lifecycle. '
+            + `Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. `
             + 'Older CSV-only calls show lane metadata unavailable only when no matching journal verdict exists.';
         }
         const formatLaneVerdict = (v, row) => {
@@ -29780,6 +29783,21 @@ DASHBOARD_JS = """(function () {
           const title = String(v.policy_version || v.reason || '').replace(/"/g, '&quot;');
           return `<span style="color:${accepted ? '#3fb950' : '#f85149'}" title="${title}">${label}${score}</span>`;
         };
+        const formatPatientRoute = (route) => {
+          if (!route || route.status === 'NOT_SELECTED') {
+            return '<span style="color:#8b949e">not selected</span>';
+          }
+          const status = route.status || 'UNKNOWN';
+          const detail = route.lifecycle_status && route.lifecycle_status !== status
+            ? ` · ${route.lifecycle_status}` : '';
+          const price = route.limit_price != null ? ` · limit ${Number(route.limit_price).toFixed(2)}`
+            : (route.entry_price != null ? ` · entry ${Number(route.entry_price).toFixed(2)}` : '');
+          const reason = route.exit_reason ? ` · ${route.exit_reason}` : '';
+          const colour = status === 'OPEN' || status === 'PENDING' ? '#3fb950'
+            : status === 'CLOSED' ? '#58a6ff'
+            : status === 'APPROVED_NO_ORDER' ? '#d29922' : '#8b949e';
+          return `<span style="color:${colour}" title="${route.trade_id || ''}">${status}${detail}${price}${reason}</span>`;
+        };
         safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
           const c = [a.decision, a.reason, a.comment].filter(function (part, idx, arr) {
             const text = String(part || '').trim();
@@ -29789,7 +29807,7 @@ DASHBOARD_JS = """(function () {
           const cShort = c.length > 100 ? c.substring(0, 100) + '...' : (c || '-');
           const verdicts = a.lane_verdicts || {};
           const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
-          const typeBVerdict = a.type_b_verdict || verdicts.TYPE_B_HUNTER_V1;
+          const patientRoute = a.patient_chase_route;
           const rawGap = a.score_gap != null
             ? Number(a.score_gap)
             : (a.long_score != null && a.short_score != null
@@ -29809,7 +29827,7 @@ DASHBOARD_JS = """(function () {
             <td>${rawGap != null && !Number.isNaN(rawGap) ? rawGap : '-'}</td>
             <td>${gapBucket}</td>
             <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict, a)}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(typeBVerdict, a)}</td>
+            <td style="font-size:0.85em">${formatPatientRoute(patientRoute)}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
         }).join('') : '<tr><td colspan="11" style="color:#8b949e">No AI calls yet this session</td></tr>');
@@ -32685,6 +32703,78 @@ def _snapshot_trades_for_api(session_start: float):
     return rows
 
 
+def _attach_patient_chase_routes(
+    ai_history: list,
+    *,
+    signals=(),
+    pending=(),
+    positions=(),
+    closed=(),
+    expired=(),
+) -> tuple[list, dict]:
+    """Attach genuine Patient Chase lifecycle state to each shared AI call."""
+    lane = RESEARCH_LANE_OFFSET_029_ATR_TP_25
+    priority = {"APPROVED_NO_ORDER": 0, "EXPIRED": 1, "CLOSED": 2, "PENDING": 3, "OPEN": 4}
+    by_call = {}
+    counts = {"pending": 0, "open": 0, "closed": 0, "expired": 0}
+
+    def add(items, status, *, nested_signal=False):
+        for raw in items or ():
+            row = (raw or {}).get("signal_ref") if nested_signal else raw
+            if not isinstance(row, dict) or _normalize_lane_key(row) != lane:
+                continue
+            call_id = str(row.get("shared_ai_call_id") or row.get("source_trade_id") or "")
+            if not call_id:
+                continue
+            actual = str(row.get("status") or status).upper()
+            route_status = status
+            if status == "APPROVED_NO_ORDER" and actual in VIRTUAL_CHASE_AWAITING_STATUSES:
+                route_status = "APPROVED_NO_ORDER"
+            detail = {
+                "status": route_status,
+                "lifecycle_status": actual,
+                "trade_id": row.get("trade_id"),
+                "limit_price": row.get("limit_price") or row.get("planned_limit_price"),
+                "entry_price": row.get("entry") or row.get("fill_price"),
+                "exit_reason": row.get("exit_reason") or row.get("outcome"),
+            }
+            current = by_call.get(call_id)
+            if current is None or priority[route_status] >= priority[current["status"]]:
+                by_call[call_id] = detail
+
+    add(signals, "APPROVED_NO_ORDER", nested_signal=True)
+    add(expired, "EXPIRED")
+    add(closed, "CLOSED")
+    add(pending, "PENDING")
+    add(positions, "OPEN")
+    for route in by_call.values():
+        key = route["status"].lower()
+        if key in counts:
+            counts[key] += 1
+    enriched = []
+    for original in ai_history or ():
+        row = dict(original)
+        row.pop("type_b_verdict", None)
+        verdicts = dict(row.get("lane_verdicts") or {})
+        verdicts.pop(RESEARCH_LANE_TYPE_B_HUNTER_V1, None)
+        row["lane_verdicts"] = verdicts
+        call_id = str(row.get("shared_ai_call_id") or row.get("trade_id") or "")
+        route = by_call.get(call_id)
+        if route is None:
+            route = {
+                "status": "NOT_SELECTED",
+                "lifecycle_status": None,
+                "trade_id": None,
+                "limit_price": None,
+                "entry_price": None,
+                "exit_reason": None,
+            }
+        row["patient_chase_route"] = route
+        enriched.append(row)
+    counts["selected_calls"] = len(by_call)
+    return enriched, counts
+
+
 def _build_api_state_snapshot():
     """Build the full /api/state payload dict.
 
@@ -32808,8 +32898,17 @@ def _build_api_state_snapshot():
             _DASHBOARD_HISTORY_MAX,
         )
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
+        ai_history_copy, patient_chase_counts = _attach_patient_chase_routes(
+            ai_history_copy,
+            signals=list(bounded_trades_map.values()),
+            pending=pending_orders_copy,
+            positions=positions_copy,
+            closed=trades_copy,
+            expired=expired_orders_copy,
+        )
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
+        snapshot["patient_chase_counts"] = patient_chase_counts
         snapshot["expired_orders_total"] = expired_orders_total
         snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
@@ -33237,6 +33336,19 @@ def _api_state_cache_refresher_loop():
                     snap["shared_ai_lane_counters"] = copy.deepcopy(
                         state.get("shared_ai_lane_counters") or {}
                     )
+                overlay_signals = snap.get("trades_map") or {}
+                snap["ai_history"], snap["patient_chase_counts"] = _attach_patient_chase_routes(
+                    snap.get("ai_history") or [],
+                    signals=(
+                        list(overlay_signals.values())
+                        if isinstance(overlay_signals, dict)
+                        else overlay_signals
+                    ),
+                    pending=snap.get("orders") or [],
+                    positions=snap.get("positions") or [],
+                    closed=snap.get("trades") or [],
+                    expired=snap.get("expired_orders") or [],
+                )
                 snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
                     for_api=True
                 )

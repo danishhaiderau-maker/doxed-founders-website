@@ -176,3 +176,82 @@ def test_offset_post_approve_path_bypasses_legacy_strategy_gates():
         assert "registered_offset_policy" in preceding, legacy_gate
     assert "if not registered_offset_policy:\n                log_golden_stack_rejection" in process
     assert "if is_combo_execution_lane(research_lane) and not registered_offset_policy" in process
+
+
+def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{
+        "shared_ai_call_id": "scan-1",
+        "type_b_verdict": {"accepted": True},
+        "lane_verdicts": {"TYPE_B_HUNTER_V1": {"accepted": True}},
+    }]
+    pending = [{
+        "shared_ai_call_id": "scan-1",
+        "trade_id": "o29atr-1",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+        "limit_price": 69_797.0,
+    }]
+    enriched, counts = fn(history, pending=pending)
+    assert enriched[0]["patient_chase_route"] == {
+        "status": "PENDING",
+        "lifecycle_status": "PENDING",
+        "trade_id": "o29atr-1",
+        "limit_price": 69_797.0,
+        "entry_price": None,
+        "exit_reason": None,
+    }
+    assert counts == {"pending": 1, "open": 0, "closed": 0, "expired": 0, "selected_calls": 1}
+    assert "type_b_verdict" not in enriched[0]
+    assert "TYPE_B_HUNTER_V1" not in enriched[0]["lane_verdicts"]
+
+
+def test_api_distinguishes_legacy_approved_no_order_from_pending():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-old"}]
+    signals = [{"signal_ref": {
+        "shared_ai_call_id": "scan-old",
+        "trade_id": "o29atr-old",
+        "research_lane": offset_policy.LANE,
+        "status": "AWAITING_DASHBOARD_CHASE",
+    }}]
+    enriched, counts = fn(history, signals=signals)
+    route = enriched[0]["patient_chase_route"]
+    assert route["status"] == "APPROVED_NO_ORDER"
+    assert route["lifecycle_status"] == "AWAITING_DASHBOARD_CHASE"
+    assert counts["pending"] == 0
+
+
+def test_dashboard_replaces_retired_type_b_column_with_patient_route():
+    source = BOT.read_text(encoding="utf-8")
+    assert "<th>Type B research verdict</th>" not in source
+    assert "<th>Patient Chase route / outcome</th>" in source
+    assert "formatPatientRoute(patientRoute)" in source
+    assert "Continuous ACCEPT is an evaluation, not proof of an order" in source
+    assert "statRow('Pending', laneNow.pending || 0)" in source
+    assert "statRow('Open', laneNow.open || 0)" in source
+    assert "statRow('Closed', stats.real_fills" in source
+    assert "statRow('Executed'" not in source
+    legacy_block = source.split("LEGACY_PATHWAY_LANES = (", 1)[1].split(")", 1)[0]
+    order_block = source.split("PATHWAY_LANE_ORDER = (", 1)[1].split(")", 1)[0]
+    assert LANE not in legacy_block
+    assert LANE in order_block
+    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in order_block
