@@ -608,6 +608,11 @@ PATHWAY_LANE_STATUS = {
     "CHASE_3PLUS_ALPHA": "SHADOW_COLLECTING",
     "AI_SCAN": "ACTIVE",
 }
+# The roster is the current execution authority. Historical comparison lanes
+# remain in analyzer reports so immutable evidence can still be decoded, but a
+# retired lane must never inherit the status helper's ACTIVE default.
+for _retired_lane in RETIRED_PATHWAY_LANES:
+    PATHWAY_LANE_STATUS[str(_retired_lane).upper()] = "RETIRED"
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
 LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "PROFIT_GATES", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
@@ -15011,8 +15016,6 @@ def _lane_entry_conditions(spec: dict) -> list:
 
 
 def _lane_depends_on_edge(lane_key: str, spec: dict) -> bool:
-    if lane_key in RETIRED_PATHWAY_LANES:
-        return True
     if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
         return False
     text = " ".join(_lane_entry_conditions(spec)).lower()
