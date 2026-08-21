@@ -14470,14 +14470,20 @@ def _write_v3_shared_lane_decision(
             if spec.get("entry_offset_pct") is not None
             else None
         )
+    relay_eligible = bool(
+        spec.get("platform_relay_eligible", lane == RESEARCH_LANE_CONTINUOUS)
+    )
     lane_policy = {
         "policy_id": spec.get("raw_policy_id") or lane,
         "raw_policy_id": spec.get("raw_policy_id") or lane,
         "deterministic_entry_offset_pct": entry_offset_fraction,
         "entry_limit_policy": entry_limit_policy,
         "exit_config": get_exit_config_for_lane(lane),
-        "paper_only": True,
-        "relay_eligible": bool(spec.get("platform_relay_eligible", lane == RESEARCH_LANE_CONTINUOUS)),
+        # Continuous is a local Showcase paper lifecycle that may be copied by
+        # the separately armed relay, so it is not a paper-only policy.
+        # Patient Chase has relay eligibility disabled and remains paper-only.
+        "paper_only": not relay_eligible,
+        "relay_eligible": relay_eligible,
     }
     base_control = dict(CONTROL_CELL)
     base_control["invert_on"] = bool(invert_signal_active())
