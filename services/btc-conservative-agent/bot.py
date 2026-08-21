@@ -9069,6 +9069,14 @@ def _apply_smart_submit_limit(
 
 def _resolve_submit_limit_price(signal: dict) -> tuple:
     """Refresh market, resolve entry limit, apply smart-submit re-anchor when needed."""
+    if str(signal.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        planned, entry_mode = resolve_entry_limit_price(signal)
+        return planned, entry_mode, {
+            "reanchored": False,
+            "immediate_chase": False,
+            "original_planned": planned,
+            "policy_id": offset029_policy.POLICY_ID,
+        }, planned
     if smart_submit_enabled():
         _refresh_signal_price_for_submit(signal)
     planned, entry_mode = resolve_entry_limit_price(signal)
@@ -11721,6 +11729,11 @@ def _ensure_collector_v22_epoch() -> str:
 def _arm_chase_offset_touch_grid(signal: dict):
     """Paper path-touch grid at 0.01–0.30%. Does not change live 0.1% orig."""
     if not isinstance(signal, dict):
+        return
+    if str(signal.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        # This generic 0.01–0.30% research grid labels one 0.10% anchor as the
+        # live/original order. OFFSET_029 has its own exact 0.29% paper anchor
+        # and lifecycle, so mixing the schemas would falsify its evidence.
         return
     try:
         price = float(
@@ -17400,6 +17413,16 @@ def evaluate_dashboard_execution_gate(
     ):
         return False, str(signal.get("entry_reason") or "STRUCTURAL_LIMIT_UNAVAILABLE"), False
 
+    if str(lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        # Registered paper policy: shared AI APPROVE places its exact 0.29%
+        # resting limit immediately. Global spread/AI-band/chase-bucket gates
+        # belong to Continuous experiments and must not rewrite this cohort.
+        if not ensure_signal_capacity():
+            return False, "MAX_ACTIVE_SIGNALS", False
+        if lev < 1 or lev > MAX_RESEARCH_LEVERAGE:
+            return False, "LEVERAGE_OUT_OF_RANGE", False
+        return True, "OK_OFFSET029_REGISTERED_POLICY", False
+
     # V2 entry gate: age ≥180s before limit submit (chase 3–5 via virtual chase).
     # Does not affect CONTINUOUS or AI60_SP3.
     if str(lane or "").upper() == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2:
@@ -18880,7 +18903,10 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
             f"[PIPELINE ENFORCEMENT]"
         )
         return False
-    _spread_blocked, _spread_bucket = _spread_gate_blocks_signal(signal)
+    registered_offset_policy = str(lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25
+    _spread_blocked, _spread_bucket = (
+        (False, None) if registered_offset_policy else _spread_gate_blocks_signal(signal)
+    )
     if _spread_blocked:
         logger.info(
             f"[SPREAD GATE] bucket={_spread_bucket} disabled -> skipping limit order "
@@ -18897,7 +18923,8 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return False
     direction = signal.get("final_direction") or _signal_direction(signal)
-    limit_price = _apply_lane_limit_offset(limit_price, lane, direction)
+    if not registered_offset_policy:
+        limit_price = _apply_lane_limit_offset(limit_price, lane, direction)
     original_limit_price = limit_price
     if smart_meta.get("preserve_original_limit"):
         try:
@@ -18927,7 +18954,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     # chase selector. The selected activation bucket must rest for a complete
     # chase interval before it is allowed to advance; otherwise a chase-3
     # activation can silently become chase 4 during the same function call.
-    dashboard_exact_chase_managed = True
+    dashboard_exact_chase_managed = not registered_offset_policy
     order = {
         "trade_id": signal["trade_id"],
         "research_lane": lane,
@@ -19031,27 +19058,29 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         f"activation_chase={order.get('limit_chase_count')} "
         f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
     )
-    _relay_mirror(
-        "ORDER_PLACED",
-        {
-            "trade_id": signal.get("trade_id"),
-            "direction": signal.get("final_direction"),
-            "signal_dir": signal.get("final_direction"),
-            "side": order.get("side"),
-            "qty": order.get("qty"),
-            "limit_price": limit_price,
-            "signal_price": signal_price,
-            "entry_mode": entry_mode,
-            "entry_reason": signal.get("entry_reason"),
-            "entry_limit_policy": signal.get("entry_limit_policy"),
-            "dashboard_chase_activation_count": order.get("limit_chase_count"),
-            "research_lane": signal.get("research_lane"),
-            "conf": signal.get("ai_win_prob"),
-            "ai_win_prob": signal.get("ai_win_prob"),
-        },
-        source_ts=float(signal.get("order_created_ts") or time.time()),
-    )
-    _maybe_bitfinex_limit_entry(order, signal)
+    if not registered_offset_policy:
+        _relay_mirror(
+            "ORDER_PLACED",
+            {
+                "trade_id": signal.get("trade_id"),
+                "direction": signal.get("final_direction"),
+                "signal_dir": signal.get("final_direction"),
+                "side": order.get("side"),
+                "qty": order.get("qty"),
+                "limit_price": limit_price,
+                "signal_price": signal_price,
+                "entry_mode": entry_mode,
+                "entry_reason": signal.get("entry_reason"),
+                "entry_limit_policy": signal.get("entry_limit_policy"),
+                "dashboard_chase_activation_count": order.get("limit_chase_count"),
+                "research_lane": signal.get("research_lane"),
+                "conf": signal.get("ai_win_prob"),
+                "ai_win_prob": signal.get("ai_win_prob"),
+            },
+            source_ts=float(signal.get("order_created_ts") or time.time()),
+        )
+    if not registered_offset_policy:
+        _maybe_bitfinex_limit_entry(order, signal)
     defer_instant_fill = False
     research_instant = is_research_data_collection() and RESEARCH_INSTANT_FILL
     features = signal.get("features") or state.get("feature_snapshot") or {}
@@ -19100,13 +19129,16 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         logger.debug(f"[FUNNEL] order log failed: {_fe}")
     if order.get("status") == "PENDING" and order.get("entry_type") == "SIM_LIMIT":
         _try_immediate_first_chase(order, signal)
-    _log_shadow_vs_live_entry(signal, limit_price, entry_mode)
+    if not registered_offset_policy:
+        _log_shadow_vs_live_entry(signal, limit_price, entry_mode)
     pipeline_state_sync()
     return True
 
 
 def _try_immediate_first_chase(order: dict, signal: dict) -> bool:
     """Research chase #0 — re-anchor limit once at order creation before 60s cycle."""
+    if str(order.get("research_lane") or (signal or {}).get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return False
     if order.get("dashboard_exact_chase_managed") or (signal or {}).get("dashboard_exact_chase_managed"):
         return False
     if is_virtual_chase_entry_lane(order.get("research_lane") or (signal or {}).get("research_lane")):
@@ -20895,6 +20927,9 @@ def process_signal(event: dict):
             )
             return
     research_lane = event.get("research_lane", RESEARCH_LANE_AI_SCAN)
+    registered_offset_policy = (
+        str(research_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25
+    )
     skip_ai = bool(event.get("skip_ai"))
     pre_ai = event.get("pre_ai")
     pre_ctx = event.get("pre_ctx")
@@ -21015,7 +21050,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            if not sole:
+            if not sole and not registered_offset_policy:
                 current_bucket = int(time.time() / 5)
                 signal_key = f"{round(state.get('price',0),2)}_{round(edge_score,1)}_{current_bucket}"
                 if signal_key == state.get("last_signal_key"):
@@ -21414,10 +21449,13 @@ def process_signal(event: dict):
                 f"micro={signal.get('micro_structure_confirmed')} pivots={signal.get('pivot_count')} "
                 f"[PIPELINE ENFORCEMENT]"
             )
-            signal["golden_stack_eval"] = capture_golden_stack_eval(
-                signal, ai, edge_score, signal.get("features")
+            signal["golden_stack_eval"] = (
+                {"eligible": True, "reason": "NOT_APPLICABLE_REGISTERED_OFFSET_POLICY"}
+                if registered_offset_policy
+                else capture_golden_stack_eval(signal, ai, edge_score, signal.get("features"))
             )
-            log_golden_stack_rejection(signal, ai, signal["golden_stack_eval"], edge_score)
+            if not registered_offset_policy:
+                log_golden_stack_rejection(signal, ai, signal["golden_stack_eval"], edge_score)
             with state_lock:
                 state["golden_stack_last_eval"] = copy.deepcopy(signal["golden_stack_eval"])
                 signal["replay_model_eval"] = copy.deepcopy(state.get("last_replay_model_eval"))
@@ -21445,7 +21483,11 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
             capture_near_miss_on_approve(signal, ai, edge_score, signal.get("context", {}) or ctx)
-            pg_blocked, pg_reason = evaluate_profitability_entry_gates(signal, ai, edge_score, research_lane)
+            pg_blocked, pg_reason = (
+                (False, None)
+                if registered_offset_policy
+                else evaluate_profitability_entry_gates(signal, ai, edge_score, research_lane)
+            )
             if pg_reason and not pg_blocked:
                 _research_log_would_block(signal, ai, pg_reason, edge_score)
             if pg_blocked:
@@ -21458,13 +21500,17 @@ def process_signal(event: dict):
                     )
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     return
-            gs_blocked, gs_reason = evaluate_golden_stack_filter(
-                final_direction,
-                signal.get("context", {}) or ctx,
-                ai,
-                signal.get("features"),
-                edge_score,
-                signal,
+            gs_blocked, gs_reason = (
+                (False, None)
+                if registered_offset_policy
+                else evaluate_golden_stack_filter(
+                    final_direction,
+                    signal.get("context", {}) or ctx,
+                    ai,
+                    signal.get("features"),
+                    edge_score,
+                    signal,
+                )
             )
             if gs_blocked:
                 with state_lock:
@@ -21476,7 +21522,11 @@ def process_signal(event: dict):
 
             sr_state = signal.get("context", {}).get("sr_state") or state.get("support_resistance", {}).get("sr_state", "UNKNOWN")
             mc = signal.get("context", {}).get("market_context") or state.get("market_context", {})
-            sr_blocked, sr_block_reason = evaluate_sr_direction_filter(final_direction, sr_state, mc, ai)
+            sr_blocked, sr_block_reason = (
+                (False, None)
+                if registered_offset_policy
+                else evaluate_sr_direction_filter(final_direction, sr_state, mc, ai)
+            )
             if sr_blocked:
                 if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, sr_block_reason, edge_score)
@@ -21494,8 +21544,12 @@ def process_signal(event: dict):
             elif sr_block_reason and str(sr_block_reason).startswith("SR_SOFT_ALLOW"):
                 logger.info(f"[SR SOFT] Allowed {final_direction} at {sr_state}: {sr_block_reason} trade_id={trade_id} [PIPELINE ENFORCEMENT]")
 
-            loc_blocked, loc_reason = evaluate_entry_location_filter(
-                final_direction, signal.get("context", {}) or ctx, ai
+            loc_blocked, loc_reason = (
+                (False, None)
+                if registered_offset_policy
+                else evaluate_entry_location_filter(
+                    final_direction, signal.get("context", {}) or ctx, ai
+                )
             )
             if loc_blocked:
                 if not _post_ai_gate_blocks(sole, research_lane):
@@ -21512,8 +21566,12 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-            qual_blocked, qual_reason = evaluate_entry_quality_filter(
-                final_direction, signal.get("context", {}) or ctx, ai, signal.get("features")
+            qual_blocked, qual_reason = (
+                (False, None)
+                if registered_offset_policy
+                else evaluate_entry_quality_filter(
+                    final_direction, signal.get("context", {}) or ctx, ai, signal.get("features")
+                )
             )
             if qual_blocked:
                 if not _post_ai_gate_blocks(sole, research_lane):
@@ -21530,12 +21588,16 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-            ev_blocked, ev_reason = evaluate_evidence_entry_filter(
-                final_direction,
-                signal.get("context", {}) or ctx,
-                ai,
-                signal.get("features"),
-                edge_score,
+            ev_blocked, ev_reason = (
+                (False, None)
+                if registered_offset_policy
+                else evaluate_evidence_entry_filter(
+                    final_direction,
+                    signal.get("context", {}) or ctx,
+                    ai,
+                    signal.get("features"),
+                    edge_score,
+                )
             )
             if ev_blocked:
                 if not _post_ai_gate_blocks(sole, research_lane):
@@ -21590,7 +21652,7 @@ def process_signal(event: dict):
 
             direction = final_direction
             price = state.get("price")
-            if not sole:
+            if not sole and not registered_offset_policy:
                 signal_key = f"{direction}_{round(price, 1)}" if price else "UNKNOWN"
                 if signal_key == state.get("last_signal_key"):
                     logger.info("[DUPLICATE] Signal blocked by key match [PIPELINE ENFORCEMENT]")
@@ -21605,8 +21667,12 @@ def process_signal(event: dict):
                     return
                 state["last_signal_key"] = signal_key
 
-            margin_usdt, margin_reason = resolve_entry_margin_usdt(
-                final_direction, ai, signal.get("context", {}) or ctx
+            margin_usdt, margin_reason = (
+                (FIXED_MARGIN_USDT, None)
+                if registered_offset_policy
+                else resolve_entry_margin_usdt(
+                    final_direction, ai, signal.get("context", {}) or ctx
+                )
             )
             if margin_reason:
                 margin_log_only = (
@@ -21636,7 +21702,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
             # Per-lane session sizing (SIZED_CONTINUOUS_V1) — applied after flat/risk margin.
-            if is_combo_execution_lane(research_lane):
+            if is_combo_execution_lane(research_lane) and not registered_offset_policy:
                 sized_feats = _enrich_combo_lane_features(
                     signal.get("features") or features,
                     signal.get("context", {}) or ctx,
@@ -21658,7 +21724,7 @@ def process_signal(event: dict):
             signal["conviction_spread"] = spread
             signal["spread_penalty_mult"] = spread_penalty_margin_mult(spread)
             health = signal.get("trend_health_at_entry") or compute_trend_health(final_direction)
-            if final_direction == "LONG" and health.get("trend_state") == "BULL_WEAKENING":
+            if not registered_offset_policy and final_direction == "LONG" and health.get("trend_state") == "BULL_WEAKENING":
                 if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
                 else:
@@ -21670,7 +21736,7 @@ def process_signal(event: dict):
                     update_debug_state_always("TREND_WEAKENING", {"edge": edge_score, "health": health})
                     state["last_pipeline_stage"] = "IDLE"
                     return
-            if final_direction == "SHORT" and health.get("trend_state") == "BEAR_WEAKENING":
+            if not registered_offset_policy and final_direction == "SHORT" and health.get("trend_state") == "BEAR_WEAKENING":
                 if not _post_ai_gate_blocks(sole, research_lane):
                     _research_log_would_block(signal, ai, "TREND_WEAKENING", edge_score)
                 else:
@@ -21699,7 +21765,7 @@ def process_signal(event: dict):
                 f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
             )
 
-            if dashboard_ai_band_blocks(ai.get("win_prob", 0)):
+            if not registered_offset_policy and dashboard_ai_band_blocks(ai.get("win_prob", 0)):
                 exit_pipeline(signal, ai, "BELOW_THRESHOLD")
                 with state_lock:
                     state["debug_state"]["last_block_reason"] = "BELOW_THRESHOLD"
@@ -21709,7 +21775,7 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
-            if is_clustered_entry(final_direction, price, research_lane):
+            if not registered_offset_policy and is_clustered_entry(final_direction, price, research_lane):
                 if not _post_ai_gate_blocks(sole, research_lane) or _research_execute_log_only(research_lane):
                     _research_log_would_block(signal, ai, "CLUSTER_ENTRY", edge_score)
                 else:

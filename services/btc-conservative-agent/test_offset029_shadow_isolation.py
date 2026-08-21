@@ -1,7 +1,9 @@
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 
 import pandas as pd
+import paper_policy_offset029 as offset_policy
 
 
 ROOT = Path(__file__).parent
@@ -98,3 +100,79 @@ def test_shadow_loader_behavior_keeps_evidence_but_excludes_offset_from_ranking(
     assert ranked["research_lane"].tolist() == ["CONTINUOUS"]
     assert ranked.attrs["policy_mismatch_rows_excluded"] == 1
     assert rows[0]["net_pnl_usd"] == 99.0  # immutable source evidence untouched
+
+
+def test_offset_dashboard_gate_places_now_despite_global_chase_and_spread_filters():
+    fn = _load_function(
+        BOT,
+        "evaluate_dashboard_execution_gate",
+        {
+            "state_lock": nullcontext(),
+            "state": {"ai_enabled": True, "leverage": 100},
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "MAX_RESEARCH_LEVERAGE": 100,
+            "lane_orders_allowed": lambda _lane: True,
+            "ensure_signal_capacity": lambda: True,
+            # These global experiment gates must not be consulted for Offset.
+            "_signal_spread_gate_blocked": lambda *_args: (_ for _ in ()).throw(AssertionError("spread gate leaked")),
+            "dashboard_ai_band_blocks": lambda *_args: (_ for _ in ()).throw(AssertionError("AI band leaked")),
+            "get_chase_execution_buckets": lambda: {},
+        },
+    )
+    allowed, reason, defer = fn(
+        {"research_lane": offset_policy.LANE, "structural_entry_valid": True},
+        {"decision": "APPROVE"},
+        stage="promote",
+    )
+    assert (allowed, reason, defer) == (True, "OK_OFFSET029_REGISTERED_POLICY", False)
+
+
+def test_offset_resolver_preserves_exact_anchor_without_smart_reanchor():
+    fn = _load_function(
+        BOT,
+        "_resolve_submit_limit_price",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "offset029_policy": offset_policy,
+            "resolve_entry_limit_price": lambda signal: (signal["planned_limit_price"], "AI_DIRECT"),
+            "smart_submit_enabled": lambda: (_ for _ in ()).throw(AssertionError("smart submit leaked")),
+        },
+    )
+    signal = offset_policy.entry_fields("LONG", 70_000)
+    signal["research_lane"] = offset_policy.LANE
+    planned, mode, meta, raw = fn(signal)
+    assert planned == raw == 69_797.0
+    assert mode == "AI_DIRECT"
+    assert meta["reanchored"] is False
+    assert meta["policy_id"] == offset_policy.POLICY_ID
+
+
+def test_offset_order_path_disables_generic_chase_and_relay_side_effects():
+    place = _function_source(BOT, "_place_simulated_limit_order")
+    touch_grid = _function_source(BOT, "_arm_chase_offset_touch_grid")
+    assert "dashboard_exact_chase_managed = not registered_offset_policy" in place
+    assert "if not registered_offset_policy:\n        _relay_mirror" in place
+    assert "if not registered_offset_policy:\n        _maybe_bitfinex_limit_entry" in place
+    assert "if not registered_offset_policy:\n        _log_shadow_vs_live_entry" in place
+    assert "funnel_on_order(signal, order)" in place
+    assert "lane_register_pending_order(order)" in place
+    assert LANE in touch_grid and touch_grid.index("return") < touch_grid.index("arm_touch_grid_rows")
+
+
+def test_offset_post_approve_path_bypasses_legacy_strategy_gates():
+    process = _function_source(BOT, "process_signal")
+    assert "registered_offset_policy" in process
+    for legacy_gate in (
+        "evaluate_profitability_entry_gates",
+        "evaluate_golden_stack_filter",
+        "evaluate_sr_direction_filter",
+        "evaluate_entry_location_filter",
+        "evaluate_entry_quality_filter",
+        "evaluate_evidence_entry_filter",
+        "resolve_entry_margin_usdt",
+    ):
+        call = process.index(legacy_gate)
+        preceding = process[max(0, call - 180):call]
+        assert "registered_offset_policy" in preceding, legacy_gate
+    assert "if not registered_offset_policy:\n                log_golden_stack_rejection" in process
+    assert "if is_combo_execution_lane(research_lane) and not registered_offset_policy" in process
