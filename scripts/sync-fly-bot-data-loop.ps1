@@ -31,6 +31,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 . (Join-Path $scriptDir "fly-data-paths.ps1")
+. (Join-Path $scriptDir "fly-mirror-quarantine.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
@@ -291,23 +292,16 @@ try {
         Add-Content -LiteralPath $logFile -Value (
           "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tlocal mirror quarantine signalled ($currentSignal > $lastSeenSignal)"
         )
-        if (Test-Path -LiteralPath $mirrorDir) {
-          $cutoff = (Get-Date).ToUniversalTime().ToString('o')
-          $epochName = 'epoch_' + (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffffffZ')
-          $quarantineDir = Join-Path (Split-Path -Parent $mirrorDir) ('fly-data-quarantine\' + $epochName)
-          New-Item -ItemType Directory -Path $quarantineDir -Force | Out-Null
-          $preserved = @()
-          foreach ($file in @(Get-ChildItem -LiteralPath $mirrorDir -File -Force -ErrorAction Stop)) {
-            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            $target = Join-Path $quarantineDir $file.Name
-            Move-Item -LiteralPath $file.FullName -Destination $target -ErrorAction Stop
-            $preserved += [ordered]@{ path = $file.Name; size_bytes = $file.Length; sha256 = $hash }
-          }
-          [ordered]@{ schema = 'fly_mirror_epoch_quarantine_v1'; complete = $true;
-            cutoff_utc = $cutoff; fresh_collection_signal_ts = $currentSignal;
-            file_count = $preserved.Count; files = $preserved } |
-            ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $quarantineDir 'quarantine_manifest.json') -Encoding UTF8
-        }
+        $quarantineResult = Invoke-FlyMirrorEpochQuarantine `
+          -MirrorPath $mirrorDir `
+          -QuarantineRoot (Join-Path (Split-Path -Parent $mirrorDir) 'fly-data-quarantine') `
+          -FreshCollectionSignalTs $currentSignal
+        Add-Content -LiteralPath $logFile -Value (
+          "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tquarantine complete files=$($quarantineResult.FileCount) path=$($quarantineResult.Destination)"
+        )
+        # A signal is acknowledged only after recursive preservation, hash
+        # verification and active-mirror emptying all succeed. Any lock or
+        # verification failure leaves this receipt untouched and blocks sync.
         @{ signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
           ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8
         $lastSyncedTotalBytes = 0
