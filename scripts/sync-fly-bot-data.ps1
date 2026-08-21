@@ -349,7 +349,10 @@ $ack = Invoke-RestMethod `
   -Body $ackBody `
   -TimeoutSec 30
 
+$analyzerPublished = $false
+$analyzerPublishErrorCode = $null
 if ($PublishAnalyzerReport) {
+  try {
   $reportPath = [System.IO.Path]::GetFullPath($PublishAnalyzerReport)
   if (-not (Test-Path -LiteralPath $reportPath)) {
     throw "Analyzer report does not exist: $reportPath"
@@ -547,6 +550,7 @@ if ($PublishAnalyzerReport) {
           $form
         ).GetAwaiter().GetResult()
         $publishResponse.EnsureSuccessStatusCode() | Out-Null
+        $analyzerPublished = $true
       } finally {
         $stream.Dispose()
         $form.Dispose()
@@ -558,6 +562,13 @@ if ($PublishAnalyzerReport) {
     Remove-Item -LiteralPath $bundlePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $snapshotRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
+  } catch {
+    # Analyzer publication is a derived, optional mirror operation. A rejected
+    # bundle must preserve the last validated hosted report without changing
+    # the success of the canonical Fly evidence download and ACK above.
+    $analyzerPublishErrorCode = "ANALYZER_PUBLICATION_FAILED"
+    Write-Warning "Optional analyzer publication failed; canonical evidence sync remains valid."
+  }
 }
 
 [pscustomobject]@{
@@ -568,5 +579,6 @@ if ($PublishAnalyzerReport) {
   SourceRevision = $manifest.source_git_rev
   AckAccepted = $ack.accepted
   PrunedRotations = @($ack.removed_acknowledged_rotations).Count
-  AnalyzerPublished = [bool]$PublishAnalyzerReport
+  AnalyzerPublished = [bool]$analyzerPublished
+  AnalyzerPublishErrorCode = $analyzerPublishErrorCode
 }

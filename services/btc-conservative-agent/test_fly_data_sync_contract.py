@@ -1165,6 +1165,20 @@ def test_v3_normalized_ledgers_use_prefix_sync_but_segments_are_strict():
     assert mode(Path("v3/market_segments/ab/abcdef.json")) == "strict_generation_v1"
 
 
+def test_optional_analyzer_publication_failure_does_not_invalidate_canonical_sync():
+    sync = (ROOT.parent.parent / "scripts" / "sync-fly-bot-data.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "$analyzerPublished = $false" in sync
+    assert '$analyzerPublishErrorCode = "ANALYZER_PUBLICATION_FAILED"' in sync
+    assert "canonical evidence sync remains valid" in sync
+    assert "AnalyzerPublished = [bool]$analyzerPublished" in sync
+    assert "AnalyzerPublished = [bool]$PublishAnalyzerReport" not in sync
+    ack_pos = sync.index('$ack = Invoke-RestMethod')
+    publication_try_pos = sync.index("if ($PublishAnalyzerReport)")
+    assert ack_pos < publication_try_pos
+
+
 if __name__ == "__main__":
     test_fly_runtime_cwd_is_volume_backed()
     test_incremental_sync_is_authenticated_and_chunk_verified()
