@@ -15,6 +15,7 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["status"], "V3_READY_FOR_FRESH_EPOCH")
             self.assertIsNone(report["number_one_strategy"])
             self.assertFalse(report["real_bitfinex_trading_allowed"])
+            self.assertEqual(report["data_scope"], "SESSION")
 
     def test_report_counts_independent_episodes_not_decision_branches(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
@@ -26,6 +27,7 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["collection"]["independent_opportunities"], 1)
             self.assertEqual(report["collection"]["decision_branches"], 2)
             self.assertEqual(report["status"], "V3_COLLECTING")
+            self.assertEqual(report["data_scope"], "FRESH-COLLECTION")
 
     def test_report_blocks_overdue_lane_order_orphan_and_accepts_resolutions(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:

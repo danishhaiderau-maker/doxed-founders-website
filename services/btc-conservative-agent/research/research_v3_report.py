@@ -286,6 +286,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     report = {
         "schema": "safe_policy_genome_v3_1_report_v1",
         "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
+        "data_scope": "FRESH-COLLECTION" if selected_epoch is not None else "SESSION",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "status": "V3_INTEGRITY_FAILED" if not verification["passed"] else "V3_ORDER_RESOLUTION_INTEGRITY_FAILED" if not entry_resolution_integrity["passed"] else "V3_EPOCH_CONTAMINATION_BLOCKED" if contamination else "V3_COLLECTING" if opportunities else "V3_READY_FOR_FRESH_EPOCH",
         "live_policy_change_allowed": False,
