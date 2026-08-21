@@ -29511,7 +29511,6 @@ DASHBOARD_JS = """(function () {
         renderChaseAnalyticsPanel(d.chase_analytics || {});
         renderSpreadAnalyticsPanel(d.spread_analytics || {});
         if (d.edge_range_preset) {
-          syncEdgeRangePreset(d.edge_range_preset);
         }
         if (d.edge_threshold != null && d.edge_threshold !== '') {
           syncEdgeThresholdSelect(d.edge_threshold);
