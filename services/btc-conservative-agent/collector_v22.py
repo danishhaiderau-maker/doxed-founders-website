@@ -926,7 +926,16 @@ def write_research_event_once(
         }
         index["events_file_size"] = os.path.getsize(events_path)
         _save_event_index(index_path, index)
-        return True, "written"
+        # V3 dual-write is deliberately downstream of the durable v2 append.
+        # V2 remains the recovery source during migration; V3 failures are
+        # surfaced in a receipt without corrupting or duplicating the source.
+        try:
+            from research_v3_bridge import dual_write_v22_record
+            v3_receipt = dual_write_v22_record(record, data_dir=root)
+            v3_reason = "v3-written" if v3_receipt.get("store_verification", {}).get("passed") else "v3-integrity-failed"
+        except Exception as exc:
+            v3_reason = f"v3-failed:{type(exc).__name__}:{exc}"
+        return True, f"written;{v3_reason}"
 
 
 def terminal_observation(status: str) -> bool:
