@@ -10,6 +10,8 @@ def test_dashboard_refresh_has_no_retired_edge_formatter_reference() -> None:
     source = BOT_PATH.read_text(encoding="utf-8")
     assert "normalizeEdgeOptionValue" not in source
     assert "syncEdgeRangePreset" not in source
+    assert "syncEdgeThresholdSelect" not in source
+    assert "syncEdgeThresholdMaxSelect" not in source
     assert "safeText('edgeThresholdDisplay', 'analytics only')" in source
 
 

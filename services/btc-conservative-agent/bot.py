@@ -29513,10 +29513,8 @@ DASHBOARD_JS = """(function () {
         if (d.edge_range_preset) {
         }
         if (d.edge_threshold != null && d.edge_threshold !== '') {
-          syncEdgeThresholdSelect(d.edge_threshold);
         }
         if (d.edge_threshold_max !== undefined) {
-          syncEdgeThresholdMaxSelect(d.edge_threshold_max);
         }
         const capWarn = document.getElementById('capacityWarningBanner');
         if (capWarn) {
