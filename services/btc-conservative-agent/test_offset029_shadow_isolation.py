@@ -297,6 +297,44 @@ def test_api_distinguishes_legacy_approved_no_order_from_pending():
     assert counts["pending"] == 0
 
 
+def test_sanitized_overlay_preserves_verified_patient_route():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "copy": __import__("copy"),
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{
+        "shared_ai_call_id": "scan-cdd7a7c3fb01",
+        "patient_chase_route": {
+            "status": "OPEN",
+            "lifecycle_status": "OPEN",
+            "trade_id": "o29atr-deef524bb3a1",
+            "limit_price": 78170.65,
+            "entry_price": 78170.65,
+            "exit_reason": None,
+        },
+    }]
+    # Public relay position has lane/trade identity but deliberately omits the
+    # private shared_ai_call_id.  A second enrichment pass must not downgrade it.
+    sanitized_positions = [{
+        "trade_id": "o29atr-deef524bb3a1",
+        "research_lane": offset_policy.LANE,
+        "status": "OPEN",
+        "entry": 78170.65,
+    }]
+    enriched, counts = fn(history, positions=sanitized_positions)
+    assert enriched[0]["patient_chase_route"]["status"] == "OPEN"
+    assert enriched[0]["patient_chase_route"]["trade_id"] == "o29atr-deef524bb3a1"
+    assert counts["open"] == 1
+    assert counts["selected_calls"] == 1
+
+
 def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     source = BOT.read_text(encoding="utf-8")
     assert "<th>Type B research verdict</th>" not in source

@@ -32880,6 +32880,20 @@ def _attach_patient_chase_routes(
     by_call = {}
     counts = {"pending": 0, "open": 0, "closed": 0, "expired": 0}
 
+    # The lightweight relay overlay intentionally receives sanitized orders and
+    # positions without private causal identity fields.  It runs after the full
+    # state snapshot has already joined those rows.  Seed that verified result
+    # so the overlay cannot downgrade OPEN/PENDING to NOT_SELECTED merely
+    # because its reduced payload cannot repeat the join.
+    for existing in ai_history or ():
+        if not isinstance(existing, dict):
+            continue
+        call_id = str(existing.get("shared_ai_call_id") or existing.get("trade_id") or "")
+        route = existing.get("patient_chase_route")
+        status = str((route or {}).get("status") or "").upper()
+        if call_id and isinstance(route, dict) and status in priority:
+            by_call[call_id] = copy.deepcopy(route)
+
     def canonical_call_id(row):
         """Read current identity and recover pre-fix children from their AI snapshot."""
         direct = str(row.get("shared_ai_call_id") or row.get("source_trade_id") or "")
