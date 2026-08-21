@@ -11697,6 +11697,7 @@ _touch_grid_book = {}
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
+_v3_terminal_reconcile_last_v22_size = -1
 _order_multiverse_path_complete = {}
 _order_multiverse_post_ttl_done = {}
 _order_multiverse_written = set()
@@ -11939,7 +11940,7 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
 
 
 def _maybe_complete_pending_order_multiverse():
-    global _order_multiverse_last_poll
+    global _order_multiverse_last_poll, _v3_terminal_reconcile_last_v22_size
     now = time.time()
     if now - _order_multiverse_last_poll < 60.0:
         return
@@ -11965,6 +11966,36 @@ def _maybe_complete_pending_order_multiverse():
         _sync_order_multiverse(
             src,
             path_complete=bool(post_ttl_done or closed or src.get("path_complete")),
+        )
+    # V2 is the durable migration source.  A rollout or crash between the V2
+    # append and V3 dual-write must not leave an eternal provisional V3 row.
+    # Reconcile once per changed V2 generation; failures retry next poll.
+    try:
+        v22_path = os.path.join(DATA_DIR, "research_events_v22.jsonl")
+        v22_size = os.path.getsize(v22_path) if os.path.exists(v22_path) else 0
+        if v22_size != _v3_terminal_reconcile_last_v22_size:
+            from research_v3_bridge import reconcile_terminal_v22_into_v3
+            receipt = reconcile_terminal_v22_into_v3(
+                data_dir=DATA_DIR,
+                epoch_id=_collector_v22_epoch_id(),
+            )
+            if receipt.get("passed"):
+                _v3_terminal_reconcile_last_v22_size = v22_size
+                if receipt.get("backfilled"):
+                    logger.warning(
+                        "[COLLECTOR_V3] reconciled terminal V2 rows "
+                        f"backfilled={receipt.get('backfilled')} "
+                        f"already_present={receipt.get('already_present')}"
+                    )
+            else:
+                logger.error(
+                    "[COLLECTOR_V3] terminal reconciliation failed "
+                    f"errors={receipt.get('errors')} [PIPELINE ENFORCEMENT]"
+                )
+    except Exception as exc:
+        logger.error(
+            f"[COLLECTOR_V3] terminal reconciliation error: {exc} "
+            "[PIPELINE ENFORCEMENT]"
         )
 
 

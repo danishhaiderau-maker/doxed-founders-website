@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 import hashlib
+import json
+from pathlib import Path
 
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
@@ -314,4 +316,87 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "episode_id": episode_id,
         "writes": writes,
         "store_verification": store.verify(),
+    }
+
+
+def reconcile_terminal_v22_into_v3(
+    *,
+    data_dir: str,
+    epoch_id: str,
+    events_file: str = "research_events_v22.jsonl",
+) -> dict[str, Any]:
+    """Backfill terminal V2 rows missed during a V3 bridge rollout or crash.
+
+    The durable V2 ledger remains authoritative during migration.  V3 writes
+    are idempotent by record_id, and only exact-current-epoch terminal rows are
+    eligible for repair.  Corrupt/truncated source or V3 ledgers fail closed.
+    """
+    root = Path(data_dir)
+    source = root / events_file
+    store = V3EvidenceStore(root, epoch_id=str(epoch_id))
+    lifecycle_path = store.ledger_path("lifecycle")
+    durable_lifecycle_ids = V3EvidenceStore._load_ids(lifecycle_path)
+    terminal_statuses = {"COMPLETE", "FUNNEL_COMPLETE", "DATA_ERROR", "INSUFFICIENT_PATH"}
+    scanned = current_epoch_terminal = backfilled = already_present = foreign_epoch = 0
+    errors: list[dict[str, Any]] = []
+    if not source.exists():
+        return {
+            "schema": "v3_terminal_reconciliation_v1",
+            "epoch_id": str(epoch_id),
+            "source": events_file,
+            "scanned": 0,
+            "current_epoch_terminal": 0,
+            "backfilled": 0,
+            "already_present": 0,
+            "foreign_epoch": 0,
+            "errors": [],
+            "passed": True,
+            "store_verification": store.verify(),
+        }
+    with source.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, 1):
+            if not line.endswith("\n"):
+                raise ValueError(f"TRUNCATED_V22_JSONL_LINE:{line_no}")
+            scanned += 1
+            record = json.loads(line)
+            envelope = record.get("envelope") if isinstance(record.get("envelope"), Mapping) else {}
+            row_epoch = str(_first(record.get("epoch_id"), envelope.get("epoch_id")) or "")
+            if row_epoch != str(epoch_id):
+                foreign_epoch += 1
+                continue
+            status = str(record.get("observation_status") or "")
+            if status not in terminal_statuses:
+                continue
+            current_epoch_terminal += 1
+            event_id = str(_first(record.get("event_id"), record.get("trade_id")) or "")
+            terminal_id = f"lifecycle:{event_id}:terminal"
+            if not event_id:
+                errors.append({"line": line_no, "reason": "MISSING_EVENT_ID"})
+                continue
+            if terminal_id in durable_lifecycle_ids:
+                already_present += 1
+                continue
+            try:
+                receipt = dual_write_v22_record(record, data_dir=str(root))
+                verification = receipt.get("store_verification") or {}
+                if not verification.get("passed"):
+                    errors.append({"line": line_no, "event_id": event_id, "reason": "V3_STORE_VERIFICATION_FAILED"})
+                    continue
+                durable_lifecycle_ids.add(terminal_id)
+                backfilled += 1
+            except Exception as exc:
+                errors.append({"line": line_no, "event_id": event_id, "reason": f"{type(exc).__name__}:{exc}"})
+    verification = store.verify()
+    return {
+        "schema": "v3_terminal_reconciliation_v1",
+        "epoch_id": str(epoch_id),
+        "source": events_file,
+        "scanned": scanned,
+        "current_epoch_terminal": current_epoch_terminal,
+        "backfilled": backfilled,
+        "already_present": already_present,
+        "foreign_epoch": foreign_epoch,
+        "errors": errors,
+        "passed": not errors and bool(verification.get("passed")),
+        "store_verification": verification,
     }

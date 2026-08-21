@@ -5,6 +5,7 @@ import unittest
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_store import V3EvidenceStore
 
 
@@ -180,6 +181,37 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(intent["atr14_pct"], 0.42)
             self.assertEqual(intent["signal_price"], 100.0)
             self.assertEqual(intent["executed_direction"], "LONG")
+
+    def test_terminal_reconciliation_backfills_only_current_epoch_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = _event("scan-current", "episode-current")
+            foreign = {**_event("scan-foreign", "episode-foreign"), "epoch_id": "epoch-old"}
+            foreign["envelope"] = {**foreign["envelope"], "epoch_id": "epoch-old"}
+            source = V3EvidenceStore(tmp, epoch_id="epoch-v3-test").root / "research_events_v22.jsonl"
+            source.write_text(
+                "\n".join(json.dumps(row, separators=(",", ":")) for row in (current, foreign)) + "\n",
+                encoding="utf-8",
+            )
+            dual_write_provisional_source("scan-current", {
+                "created_ts_ts": 1000,
+                "raw_direction": "LONG",
+                "symbol": "tBTCF0:USTF0",
+                "shared_ai_call_id": "scan-1",
+                "observation_status": "WAITING_ENTRY_WINDOW",
+            }, epoch_id="epoch-v3-test", data_dir=tmp)
+
+            first = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test")
+            second = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test")
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            lifecycle = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
+
+            self.assertTrue(first["passed"])
+            self.assertEqual(first["backfilled"], 1)
+            self.assertEqual(first["foreign_epoch"], 1)
+            self.assertEqual(second["backfilled"], 0)
+            self.assertEqual(second["already_present"], 1)
+            self.assertEqual(sum(row["record_id"] == "lifecycle:scan-current:terminal" for row in lifecycle), 1)
+            self.assertFalse(any(row.get("event_id") == "scan-foreign" for row in lifecycle))
 
 
 if __name__ == "__main__":
