@@ -6,6 +6,7 @@ from pathlib import Path
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
 from research_v3_bridge import dual_write_lane_decision
+from research_v3_bridge import dual_write_lane_entry_resolution
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
 from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_store import V3EvidenceStore
@@ -33,6 +34,40 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_lane_entry_receipts_are_append_only_and_no_order_has_no_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-resolution", "shared_ai_call_id": "scan-resolution",
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "research_lane": "CONTINUOUS", "entry_ttl_sec": 600,
+            }
+            receipt = dual_write_lane_decision(
+                source, lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
+            )
+            self.assertEqual(len(receipt["writes"]), 3)
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().splitlines()]
+            self.assertEqual(rows[0]["entry_resolution"], "AWAITING")
+            self.assertEqual(rows[0]["resolution_deadline_ts"], 1780)
+
+            dual_write_lane_entry_resolution(
+                source, lane="CONTINUOUS", entry_resolution="NO_ORDER",
+                exact_reason="MAX_ACTIVE_SIGNALS", epoch_id="epoch-v3-test",
+                data_dir=tmp, lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
+                observed_ts=1001,
+            )
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().splitlines()]
+            terminal = next(row for row in rows if row["entry_resolution"] == "NO_ORDER")
+            self.assertTrue(terminal["terminal"])
+            self.assertEqual(terminal["outcome_state"], "NO_TRADE")
+            self.assertFalse(any(key in terminal for key in ("pnl", "pnl_usd", "net_usd")))
+
     def test_shared_call_episode_is_stable_across_symbol_enrichment(self):
         with tempfile.TemporaryDirectory() as tmp:
             decision = dual_write_lane_decision(
@@ -175,6 +210,13 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(decision["policy_signature"], intent["policy_signature"])
             self.assertEqual(decision["policy_epoch_id"], intent["policy_epoch_id"])
             self.assertEqual(decision["episode_id"], intent["episode_id"])
+            lifecycle = [
+                json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()
+            ]
+            submitted = next(row for row in lifecycle if row.get("entry_resolution") == "ORDER_SUBMITTED")
+            self.assertTrue(submitted["entry_resolution_terminal"])
+            self.assertFalse(submitted["terminal"])
+            self.assertEqual(submitted["policy_signature"], decision["policy_signature"])
 
     def test_continuous_relay_capability_default_keeps_decision_and_order_identity_equal(self):
         with tempfile.TemporaryDirectory() as tmp:

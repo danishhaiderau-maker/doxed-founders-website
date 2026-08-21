@@ -192,6 +192,52 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         lane = str(row.get("research_lane") or "UNKNOWN")
         outcome = str(row.get("outcome_state") or row.get("policy_decision") or "UNKNOWN")
         lane_decision_outcomes.setdefault(lane, Counter())[outcome] += 1
+    now_ts = datetime.now(timezone.utc).timestamp()
+    def resolution_key(row):
+        return (
+            str(row.get("episode_id") or ""),
+            str(row.get("policy_signature") or ""),
+            str(row.get("research_lane") or "").upper(),
+        )
+    expected_order_decisions = [
+        row for row in immediate_lane_decisions if row.get("order_intent_expected") is True
+    ]
+    intent_keys = {resolution_key(row) for row in order_intents}
+    entry_resolutions: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in lifecycles:
+        if row.get("resolution_scope") == "LANE_ENTRY":
+            entry_resolutions.setdefault(resolution_key(row), []).append(row)
+    entry_resolution_counts = Counter()
+    orphan_expected_orders = []
+    for decision in expected_order_decisions:
+        key = resolution_key(decision)
+        rows = entry_resolutions.get(key, [])
+        states = {str(row.get("entry_resolution") or "") for row in rows}
+        if key in intent_keys or "ORDER_SUBMITTED" in states:
+            entry_resolution_counts["submitted"] += 1
+        elif "NO_ORDER" in states:
+            entry_resolution_counts["terminal_no_order"] += 1
+        else:
+            deadline = float(decision.get("resolution_deadline_ts") or 0)
+            awaiting_deadlines = [float(row.get("resolution_deadline_ts") or 0) for row in rows if row.get("entry_resolution") == "AWAITING"]
+            deadline = max([deadline, *awaiting_deadlines])
+            if deadline > now_ts:
+                entry_resolution_counts["awaiting_within_deadline"] += 1
+            else:
+                entry_resolution_counts["overdue_orphan"] += 1
+                orphan_expected_orders.append({
+                    "episode_id": key[0], "policy_signature": key[1],
+                    "research_lane": key[2], "resolution_deadline_ts": deadline or None,
+                })
+    entry_resolution_integrity = {
+        "expected": len(expected_order_decisions),
+        "submitted": entry_resolution_counts["submitted"],
+        "terminal_no_order": entry_resolution_counts["terminal_no_order"],
+        "awaiting_within_deadline": entry_resolution_counts["awaiting_within_deadline"],
+        "overdue_orphan": entry_resolution_counts["overdue_orphan"],
+        "orphan_expected_orders": orphan_expected_orders,
+        "passed": entry_resolution_counts["overdue_orphan"] == 0,
+    }
     search = build_search_plan({
         "entry_offset_pct": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_offset_pct") or []),
         "entry_ttl_min": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_ttl_min") or []),
@@ -206,6 +252,12 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         ))
         candidates = candidate_screen["candidates"]
     ranking = rank_safe_policies(candidates or [])
+    if not entry_resolution_integrity["passed"]:
+        # Preserve descriptive rows, but never surface a qualified winner from
+        # a cohort whose expected entry outcomes are still missing.
+        ranking = dict(ranking)
+        ranking["number_one"] = None
+        ranking["qualification"] = "BLOCKED_ORDER_RESOLUTION_INTEGRITY"
     progress_receipts = []
     if candidate_screen is not None:
         progress_receipts.append({
@@ -215,7 +267,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     report = {
         "schema": "safe_policy_genome_v3_report_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "status": "V3_INTEGRITY_FAILED" if not verification["passed"] else "V3_EPOCH_CONTAMINATION_BLOCKED" if contamination else "V3_COLLECTING" if opportunities else "V3_READY_FOR_FRESH_EPOCH",
+        "status": "V3_INTEGRITY_FAILED" if not verification["passed"] else "V3_ORDER_RESOLUTION_INTEGRITY_FAILED" if not entry_resolution_integrity["passed"] else "V3_EPOCH_CONTAMINATION_BLOCKED" if contamination else "V3_COLLECTING" if opportunities else "V3_READY_FOR_FRESH_EPOCH",
         "live_policy_change_allowed": False,
         "real_bitfinex_trading_allowed": False,
         "epoch_id": epoch_id,
@@ -250,6 +302,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "outcome_states": dict(sorted(outcome_counts.items())),
             "ledger_counts": verification["ledger_counts"],
             "market_segments": verification["market_segment_count"],
+            "entry_resolution_integrity": entry_resolution_integrity,
         },
         "search": search,
         "search_progress": search_progress(search, progress_receipts),
@@ -261,7 +314,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "safe_policy_ranking": ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],
-        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
+        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
     _atomic_json(Path(report_dir) / REPORT_FILE, report)

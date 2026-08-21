@@ -148,6 +148,90 @@ def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
     }
 
 
+def test_v3_supervisor_fails_overdue_expected_order_and_accepts_terminal_no_order(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def row(ledger, record_id, **extra):
+        return {"schema": "research_evidence_v3", "ledger": ledger,
+                "epoch_id": "epoch-v3", "record_id": record_id, **extra}
+    (ledgers / "opportunity.jsonl").write_text(json.dumps(row(
+        "opportunity", "o-1", episode_id="e-1",
+    )) + "\n", encoding="utf-8")
+    (ledgers / "decision.jsonl").write_text(json.dumps(row(
+        "decision", "d-1", episode_id="e-1", decision_stage="LANE_POLICY_VERDICT",
+        research_lane="CONTINUOUS", policy_signature="sig-c",
+        order_intent_expected=True, resolution_deadline_ts=NOW.timestamp() - 1,
+    )) + "\n", encoding="utf-8")
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_ORDER_RESOLUTION_INTEGRITY_FAILED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 1,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token",
+                                now=lambda: NOW, fetcher=fetcher, process_reader=processes)
+    first = checker.check()
+    integrity = next(x for x in first["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    assert integrity["detail"]["entry_resolution_integrity"]["overdue_orphan"] == 1
+
+    (ledgers / "lifecycle.jsonl").write_text(json.dumps(row(
+        "lifecycle", "l-1", episode_id="e-1", research_lane="CONTINUOUS",
+        policy_signature="sig-c", resolution_scope="LANE_ENTRY",
+        entry_resolution="NO_ORDER", entry_resolution_terminal=True,
+        terminal=True, outcome_state="NO_TRADE",
+    )) + "\n", encoding="utf-8")
+    report = json.loads((reports / "safe_policy_genome_v3_report.json").read_text())
+    report["collection"].update(terminal_lifecycles=1)
+    write_json(reports / "safe_policy_genome_v3_report.json", report)
+    second = checker.check()
+    integrity = next(x for x in second["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is True
+    assert integrity["detail"]["entry_resolution_integrity"]["terminal_no_order"] == 1
+
+
+def test_v3_supervisor_accepts_awaiting_order_within_declared_deadline(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def write_ledger(name, rows):
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps({"schema": "research_evidence_v3", "ledger": name,
+                                "epoch_id": "epoch-v3", **row}) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+    write_ledger("opportunity", [{"record_id": "o-1", "episode_id": "e-1"}])
+    write_ledger("decision", [{
+        "record_id": "d-1", "episode_id": "e-1", "decision_stage": "LANE_POLICY_VERDICT",
+        "research_lane": "CONTINUOUS", "policy_signature": "sig-c",
+        "order_intent_expected": True, "resolution_deadline_ts": NOW.timestamp() + 60,
+    }])
+    write_ledger("lifecycle", [{
+        "record_id": "l-await", "episode_id": "e-1", "research_lane": "CONTINUOUS",
+        "policy_signature": "sig-c", "resolution_scope": "LANE_ENTRY",
+        "entry_resolution": "AWAITING", "resolution_deadline_ts": NOW.timestamp() + 60,
+        "entry_resolution_terminal": False, "terminal": False,
+    }])
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_COLLECTING",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 1,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 1,
+                       "market_segments": 0},
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+    integrity = next(x for x in result["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is True
+    assert integrity["detail"]["entry_resolution_integrity"]["awaiting_within_deadline"] == 1
+
+
 def test_clean_v3_only_epoch_satisfies_mirror_schema_check(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     (mirror / "research_events_v22.jsonl").unlink()

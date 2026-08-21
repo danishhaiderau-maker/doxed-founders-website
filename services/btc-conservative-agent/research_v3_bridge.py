@@ -5,6 +5,7 @@ from typing import Any, Mapping
 import hashlib
 import json
 from pathlib import Path
+import time
 
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
@@ -12,6 +13,8 @@ from research_v3_contract import canonical_json
 
 
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
+DEFAULT_DECLARED_ENTRY_TTL_SEC = 30 * 60
+ENTRY_RECONCILIATION_ALLOWANCE_SEC = 3 * 60
 
 
 def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str, Any]]:
@@ -67,6 +70,12 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
     base_signature = str(_first(*(source.get("policy_signature") for source in sources)) or "").strip()
     base_epoch = str(_first(*(source.get("policy_epoch_id") for source in sources)) or "").strip()
     relay_default = research_lane.upper() == "CONTINUOUS"
+    chase_schedule = _first(*(source.get("research_chase_schedule") for source in sources)) or {}
+    declared_entry_ttl_sec = _first(*(
+        source.get("entry_ttl_sec") or source.get("signal_ttl_sec")
+        for source in sources
+    ), chase_schedule.get("entry_ttl_sec"), chase_schedule.get("ttl_sec"),
+        DEFAULT_DECLARED_ENTRY_TTL_SEC)
     spec = {
         "schema": "paper_policy_identity_spec_v3",
         "policy_id": policy_id,
@@ -78,6 +87,8 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
             else source.get("deterministic_entry_offset_pct")
             for source in sources
         )),
+        "declared_entry_ttl_sec": float(declared_entry_ttl_sec),
+        "entry_reconciliation_allowance_sec": ENTRY_RECONCILIATION_ALLOWANCE_SEC,
         "exit_config": _first(*(source.get("exit_config") for source in sources)),
         "paper_only": bool(_first(*(source.get("paper_only") for source in sources), True)),
         "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), relay_default)),
@@ -98,6 +109,72 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         # rows must not re-interpret sparse order dictionaries differently
         # from the original lane decision.
         "paper_policy_spec": spec,
+    }
+
+
+def dual_write_lane_entry_resolution(
+    source: Mapping[str, Any],
+    *,
+    lane: str,
+    entry_resolution: str,
+    exact_reason: str,
+    epoch_id: str,
+    data_dir: str,
+    lane_policy: Mapping[str, Any] | None = None,
+    observed_ts: float | None = None,
+) -> dict[str, Any]:
+    """Append one lane-scoped entry resolution without rewriting its verdict."""
+    resolution = str(entry_resolution or "").strip().upper()
+    if resolution not in {"AWAITING", "ORDER_SUBMITTED", "NO_ORDER"}:
+        raise ValueError(f"V3_UNKNOWN_LANE_ENTRY_RESOLUTION:{resolution}")
+    lane_name = str(lane or "").strip().upper()
+    call_id = str(_first(source.get("shared_ai_call_id"), source.get("trade_id")) or "").strip()
+    if not lane_name or not call_id:
+        raise ValueError("V3_LANE_ENTRY_RESOLUTION_IDENTITY_INCOMPLETE")
+    material = dict(source)
+    material.update(dict(lane_policy or {}))
+    material["research_lane"] = lane_name
+    identity = _causal_identity(f"lane-entry:{lane_name}:{call_id}", material)
+    policy = _paper_policy_identity(str(epoch_id), material)
+    now_ts = float(observed_ts if observed_ts is not None else time.time())
+    signal_ts = float(_first(
+        source.get("signal_ts"), source.get("shared_ai_call_ts_epoch"),
+        source.get("created_ts_ts"), now_ts,
+    ))
+    policy_spec = policy["paper_policy_spec"]
+    deadline_ts = signal_ts + float(policy_spec["declared_entry_ttl_sec"]) + float(
+        policy_spec["entry_reconciliation_allowance_sec"]
+    )
+    suffix = {
+        "AWAITING": "awaiting", "ORDER_SUBMITTED": "submitted", "NO_ORDER": "no-order",
+    }[resolution]
+    terminal_no_order = resolution == "NO_ORDER"
+    row = {
+        "record_id": (
+            f"lifecycle:{identity['episode_id']}:{policy['policy_signature']}:"
+            f"{lane_name}:lane-entry:{suffix}"
+        ),
+        "episode_id": identity["episode_id"],
+        "event_id": identity["event_id"],
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "research_lane": lane_name,
+        "resolution_scope": "LANE_ENTRY",
+        "entry_resolution": resolution,
+        "entry_resolution_terminal": resolution in {"ORDER_SUBMITTED", "NO_ORDER"},
+        "exact_reason": str(exact_reason or "UNSPECIFIED"),
+        "observed_ts": now_ts,
+        "resolution_deadline_ts": deadline_ts,
+        "observation_status": resolution,
+        "outcome_state": "NO_TRADE" if terminal_no_order else "CENSORED",
+        "terminal": terminal_no_order,
+        "ranking_eligible": False,
+        "ranking_blocker": "NO_ORDER" if terminal_no_order else "PATH_NOT_MATURED",
+        **policy,
+    }
+    write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("lifecycle", row)
+    return {
+        "schema": "v3_lane_entry_resolution_receipt_v1", "epoch_id": str(epoch_id),
+        **identity, "entry_resolution": resolution, "write": write,
     }
 
 
@@ -170,13 +247,22 @@ def dual_write_lane_decision(
         "paper_only": bool(policy["paper_policy_spec"]["paper_only"]),
         "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "order_intent_expected": execution_disposition == "ORDER_ELIGIBLE",
+        "decision_ts": signal_ts,
+        "resolution_deadline_ts": signal_ts + float(policy["paper_policy_spec"]["declared_entry_ttl_sec"]) + float(policy["paper_policy_spec"]["entry_reconciliation_allowance_sec"]),
         **policy,
     })
+    resolution = dual_write_lane_entry_resolution(
+        material, lane=lane_name,
+        entry_resolution="AWAITING" if execution_disposition == "ORDER_ELIGIBLE" else "NO_ORDER",
+        exact_reason="ORDER_ELIGIBLE_AWAITING_EXECUTION" if execution_disposition == "ORDER_ELIGIBLE" else exact_reason,
+        epoch_id=str(epoch_id), data_dir=data_dir, lane_policy=lane_policy,
+        observed_ts=signal_ts,
+    )
     return {
         "schema": "v3_lane_decision_receipt_v1",
         "epoch_id": str(epoch_id),
         **identity,
-        "writes": [opportunity, decision],
+        "writes": [opportunity, decision, resolution["write"]],
         "store_verification": store.verify(),
     }
 
@@ -213,9 +299,24 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "observation_status": "PAPER_ORDER_SUBMITTED", "outcome_state": "PENDING_FILL", "terminal": False,
         "ranking_eligible": False, "ranking_blocker": "PATH_NOT_MATURED",
+        "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
+        **policy,
     })
+    resolution = None
+    resolution_lane = str(_first(order.get("research_lane"), signal.get("research_lane")) or "")
+    if resolution_lane:
+        resolution = dual_write_lane_entry_resolution(
+            {**dict(signal), **dict(order), "shared_ai_call_id": identity["shared_ai_call_id"]},
+            lane=resolution_lane, entry_resolution="ORDER_SUBMITTED",
+            exact_reason="ACTUAL_PAPER_LIMIT_SUBMITTED",
+            epoch_id=str(epoch_id), data_dir=data_dir,
+            observed_ts=float(_first(order.get("created_ts"), time.time())),
+        )
+    writes = [opportunity, intent, lifecycle]
+    if resolution is not None:
+        writes.append(resolution["write"])
     return {"schema": "v3_paper_order_intent_receipt_v1", "epoch_id": str(epoch_id), **identity,
-            "writes": [opportunity, intent, lifecycle], "store_verification": store.verify()}
+            "writes": writes, "store_verification": store.verify()}
 
 
 def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], position: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:

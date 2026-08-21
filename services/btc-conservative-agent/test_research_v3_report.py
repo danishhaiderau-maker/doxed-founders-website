@@ -27,6 +27,41 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["collection"]["decision_branches"], 2)
             self.assertEqual(report["status"], "V3_COLLECTING")
 
+    def test_report_blocks_overdue_lane_order_orphan_and_accepts_resolutions(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {"record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1})
+            for lane, signature in (("CONTINUOUS", "sig-c"), ("PATIENT", "sig-p")):
+                store.append("decision", {
+                    "record_id": f"d-{lane}", "episode_id": "episode-1",
+                    "decision_stage": "LANE_POLICY_VERDICT", "research_lane": lane,
+                    "policy_id": lane, "policy_signature": signature, "policy_epoch_id": "pe-1",
+                    "order_intent_expected": True, "resolution_deadline_ts": 2,
+                })
+            first = build_safe_policy_genome_v3_report(data, reports)
+            integrity = first["collection"]["entry_resolution_integrity"]
+            self.assertEqual(integrity["overdue_orphan"], 2)
+            self.assertIn("ORPHAN_EXPECTED_ORDER", first["blockers"])
+            self.assertIsNone(first["number_one_strategy"])
+            self.assertEqual(first["qualification"], "BLOCKED_ORDER_RESOLUTION_INTEGRITY")
+
+            store.append("order_intent", {
+                "record_id": "i-c", "episode_id": "episode-1", "research_lane": "CONTINUOUS",
+                "policy_id": "CONTINUOUS", "policy_signature": "sig-c", "policy_epoch_id": "pe-1",
+            })
+            store.append("lifecycle", {
+                "record_id": "l-p-no-order", "episode_id": "episode-1", "research_lane": "PATIENT",
+                "policy_id": "PATIENT", "policy_signature": "sig-p", "policy_epoch_id": "pe-1",
+                "resolution_scope": "LANE_ENTRY", "entry_resolution": "NO_ORDER",
+                "entry_resolution_terminal": True, "terminal": True, "outcome_state": "NO_TRADE",
+            })
+            second = build_safe_policy_genome_v3_report(data, reports)
+            integrity = second["collection"]["entry_resolution_integrity"]
+            self.assertEqual(integrity["submitted"], 1)
+            self.assertEqual(integrity["terminal_no_order"], 1)
+            self.assertEqual(integrity["overdue_orphan"], 0)
+            self.assertNotIn("ORPHAN_EXPECTED_ORDER", second["blockers"])
+
     def test_report_exposes_rejected_and_disabled_lane_decisions_separately(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             store = V3EvidenceStore(data, epoch_id="epoch-v3")
