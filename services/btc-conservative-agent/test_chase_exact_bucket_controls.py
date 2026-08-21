@@ -230,6 +230,62 @@ def test_venue_fill_gate_refuses_old_generation_and_keeps_unknown_on_stale_book(
     assert matched_ev["limit_generation"] == 1
 
 
+def test_venue_fill_gate_accepts_fresh_crossed_bbo_and_full_visible_depth_without_print():
+    namespace = {
+        "_normalize_order_side_to_dir": lambda value: (
+            "LONG" if str(value or "").upper() in {"BUY", "LONG"} else
+            "SHORT" if str(value or "").upper() in {"SELL", "SHORT"} else ""
+        ),
+        "VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC": 2.0,
+        "VENUE_EXECUTABLE_TRADE_WINDOW_SEC": 3.0,
+        "_canonical_source_order_market_evidence": {},
+    }
+    gate = _compile_function("_venue_executable_showcase_fill", namespace)
+    executable, evidence = gate(
+        {"trade_id": "offset-crossed", "side": "buy", "limit_price": 74414.57, "qty": 0.0268},
+        bid=74390.0,
+        ask=74407.0,
+        venue_snapshot={
+            "book_ts": 10.0,
+            "order_book": {"asks": [[74407.0, 1, 0.779405]]},
+        },
+        recent_market_trades=[],
+        now=10.2,
+    )
+    assert executable is True
+    assert evidence["policy"] == "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V2"
+    assert evidence["reason"] == "EXECUTABLE"
+    assert evidence["visible_executable_qty"] == 0.779405
+    assert evidence["recent_executable_trade_qty"] == 0.0
+    assert evidence["recent_execution_corroborated"] is False
+
+
+def test_venue_fill_gate_keeps_thin_crossed_depth_unfilled():
+    namespace = {
+        "_normalize_order_side_to_dir": lambda value: (
+            "LONG" if str(value or "").upper() in {"BUY", "LONG"} else
+            "SHORT" if str(value or "").upper() in {"SELL", "SHORT"} else ""
+        ),
+        "VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC": 2.0,
+        "VENUE_EXECUTABLE_TRADE_WINDOW_SEC": 3.0,
+        "_canonical_source_order_market_evidence": {},
+    }
+    gate = _compile_function("_venue_executable_showcase_fill", namespace)
+    executable, evidence = gate(
+        {"trade_id": "offset-thin", "side": "buy", "limit_price": 74414.57, "qty": 0.0268},
+        bid=74390.0,
+        ask=74407.0,
+        venue_snapshot={
+            "book_ts": 10.0,
+            "order_book": {"asks": [[74407.0, 1, 0.005]]},
+        },
+        recent_market_trades=[],
+        now=10.2,
+    )
+    assert executable is False
+    assert evidence["reason"] == "INSUFFICIENT_EXECUTABLE_DEPTH"
+
+
 def test_virtual_promotion_claim_is_atomic_generation_bound_and_single_owner():
     signal = {
         "trade_id": "cont-promotion-race",

@@ -19602,9 +19602,12 @@ def _venue_executable_showcase_fill(
 
     The gate is intentionally read-only and cache-only.  It validates a source
     fill *after* an order is already resting, so it adds no network round trip
-    to placement, repricing, or cancellation.  It is conservative: public
-    depth and prints cannot prove private queue priority, but both must support
-    the full requested quantity at the hard limit before the Showcase fills.
+    to placement, repricing, or cancellation.  A fresh opposite quote at or
+    through the resting limit plus contemporaneous visible depth is executable
+    evidence.  Public prints are retained as corroboration, but are not a
+    second mandatory condition: requiring a later aggressor print after the
+    ask/bid has already crossed can falsely leave a marketable paper order
+    unfilled.
     """
     direction = _normalize_order_side_to_dir(
         order.get("signal_dir") or order.get("dir") or order.get("side")
@@ -19626,7 +19629,7 @@ def _venue_executable_showcase_fill(
         if canon_gen != live_generation:
             book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
             return False, {
-                "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
+                "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V2",
                 "checked_at_ts": round(float(now), 3),
                 "limit_price": round(limit, 2),
                 "limit_generation": canon_gen,
@@ -19645,7 +19648,7 @@ def _venue_executable_showcase_fill(
                 pass
     book_ts = float((venue_snapshot or {}).get("book_ts") or 0)
     evidence = {
-        "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V1",
+        "policy": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V2",
         "checked_at_ts": round(float(now), 3),
         "limit_price": round(limit, 2),
         "limit_generation": live_generation,
@@ -19695,9 +19698,7 @@ def _venue_executable_showcase_fill(
         if str(trade.get("S") or "") == expected_aggressor and at_limit:
             printed_qty += trade_qty
     evidence["recent_executable_trade_qty"] = round(printed_qty, 8)
-    if printed_qty + 1e-12 < qty:
-        evidence["reason"] = "INSUFFICIENT_RECENT_EXECUTION"
-        return False, evidence
+    evidence["recent_execution_corroborated"] = printed_qty + 1e-12 >= qty
     evidence["reason"] = "EXECUTABLE"
     return True, evidence
 
