@@ -172,6 +172,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
+from research_v3_bridge import dual_write_paper_fill, dual_write_paper_order_intent
 from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -3331,6 +3332,18 @@ def lane_register_pending_order(order: dict):
             order,
             master_signal if isinstance(master_signal, dict) else None,
         )
+    is_paper_entry = not bool(order.get("bitfinex_order_id") or order.get("bitfinex_live_entry")) and str(order.get("entry_type") or "").upper() not in {"POSTONLY_TP", "REDUCE_ONLY", "EXIT"}
+    if is_paper_entry:
+        try:
+            dual_write_paper_order_intent(
+                order, master_signal if isinstance(master_signal, dict) else {},
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            )
+        except Exception as exc:
+            logger.error(
+                f"[COLLECTOR_V3] paper order intent write failed "
+                f"trade_id={order.get('trade_id')} error={exc} [PIPELINE ENFORCEMENT]"
+            )
     _emit_genome_execution_event("LIMIT_CREATED", {
         "trade_id": order.get("trade_id"),
         "limit_price": order.get("limit_price") or order.get("price"),
@@ -20862,6 +20875,19 @@ def fill_order(order):
         # Bind relay chronology to the actual position registration, not to
         # the end of slower persistence/analytics work below.
         position_opened_relay_ts = utc_iso()
+    try:
+        dual_write_paper_fill(
+            order,
+            signal if isinstance(signal, dict) else {},
+            pos,
+            epoch_id=_collector_v22_epoch_id(),
+            data_dir=os.getcwd(),
+        )
+    except Exception as exc:
+        logger.error(
+            f"[COLLECTOR_V3] paper fill write failed "
+            f"trade_id={order.get('trade_id')} error={exc} [PIPELINE ENFORCEMENT]"
+        )
     fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
     if fill_lane:
         log_lane_opportunity_event(
