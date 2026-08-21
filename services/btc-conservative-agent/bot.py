@@ -792,6 +792,19 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         "cwd": os.getcwd(),
         "launcher": "15minu_bot.py",
     }
+    # A normal process restart must keep the collector identity bound by the
+    # last explicit Fresh Collection reset.  Rebuilding research_session.json
+    # without these fields caused V2/V3 to silently mint an epoch-v22-* alias
+    # while the dashboard continued to advertise the official epoch-* id.
+    # Only a new, explicitly confirmed reset is allowed to replace them.
+    if fcm and not fresh_collection_reset:
+        for key in (
+            "collector_v22_epoch_ts",
+            "collector_v22_epoch_id",
+            "collector_version",
+        ):
+            if prev.get(key) not in (None, ""):
+                payload[key] = prev.get(key)
     if fresh_collection_reset and fresh_start is not None:
         cutoff = _utc_isoformat_ns(float(fresh_start))
         material = f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{cutoff}"

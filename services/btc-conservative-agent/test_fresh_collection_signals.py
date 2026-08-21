@@ -28,6 +28,37 @@ import bot
 
 
 class FreshCollectionSignalTests(unittest.TestCase):
+    def test_normal_restart_preserves_official_collector_epoch_binding(self):
+        old_cwd = os.getcwd()
+        original_mode = bool(bot.state.get("fresh_collection_mode", False))
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+                os.chdir(root)
+                with bot.state_lock:
+                    bot.state["fresh_collection_mode"] = True
+
+                reset_anchor = 200.0
+                bot._write_research_session(reset_anchor, fresh_collection_reset=True)
+                official_epoch, cutoff, _kind = bot._fresh_epoch_identity_from_session()
+                self.assertEqual(bot._collector_v22_epoch_id(), official_epoch)
+
+                # This is the startup path after a deployment/restart.  It may
+                # refresh bot_start_time, but it must not mint a second epoch.
+                bot._write_research_session(300.0, fresh_collection_reset=False)
+                session = bot._load_research_session_meta()
+                self.assertEqual(session.get("collector_v22_epoch_id"), official_epoch)
+                self.assertEqual(session.get("collector_v22_epoch_ts"), reset_anchor)
+                self.assertEqual(bot._collector_v22_epoch_id(), official_epoch)
+                self.assertEqual(
+                    bot._fresh_epoch_identity_from_session(),
+                    (official_epoch, cutoff, "SHOWCASE_FRESH_COLLECTION"),
+                )
+                os.chdir(old_cwd)
+        finally:
+            os.chdir(old_cwd)
+            with bot.state_lock:
+                bot.state["fresh_collection_mode"] = original_mode
+
     def test_fresh_reset_covers_v22_provisionals_and_post_exit_rotations(self):
         source = Path(bot.__file__).read_text(encoding="utf-8")
         self.assertIn("COLLECTOR_V22_RESEARCH_EVENTS_FILE", source)
