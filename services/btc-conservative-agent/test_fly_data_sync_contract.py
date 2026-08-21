@@ -26,6 +26,9 @@ SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
 SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(
     encoding="utf-8"
 )
+RELAY_SYNC = (ROOT.parents[1] / "scripts" / "sync-platform-relay-evidence.ps1").read_text(
+    encoding="utf-8"
+)
 ATOMIC_HELPER = ROOT.parents[1] / "scripts" / "fly-mirror-atomic.ps1"
 
 
@@ -39,6 +42,13 @@ def test_analyzer_manifest_timestamp_is_canonicalized_before_publication():
     assert "$analyzerGeneratedAtValue.AddMinutes(30)" in SYNC_SCRIPT
     assert "$artifactModifiedAt -gt $analyzerCommittedAtValue.AddMinutes(1)" in SYNC_SCRIPT
     assert "$artifactModifiedAt -gt $analyzerGeneratedAtValue.AddMinutes(5)" not in SYNC_SCRIPT
+
+
+def test_relay_evidence_timestamp_survives_powershell_json_date_conversion():
+    assert "[DateTimeOffset]::TryParse([string]$payload.generatedAt" not in RELAY_SYNC
+    assert "$generatedAtRaw = $payload.generatedAt" in RELAY_SYNC
+    assert "$generatedAtRaw -is [DateTime]" in RELAY_SYNC
+    assert "[Globalization.CultureInfo]::InvariantCulture" in RELAY_SYNC
 
 
 def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
