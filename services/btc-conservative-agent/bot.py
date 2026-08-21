@@ -179,7 +179,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
 from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -21247,6 +21247,17 @@ def fill_order(order):
     if direction not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
     candidate_pos = _build_open_position(order, signal, ai)
+    frozen_paper_identity = paper_policy_identity_for_sources(
+        _collector_v22_epoch_id(),
+        signal if isinstance(signal, dict) else {},
+        order,
+        candidate_pos,
+    )
+    candidate_pos.update(copy.deepcopy(frozen_paper_identity))
+    candidate_pos["research_lane"] = (
+        frozen_paper_identity["paper_policy_spec"].get("research_lane")
+        or candidate_pos.get("research_lane")
+    )
     pos, registered = promote_pending_to_open(
         order,
         candidate_pos,

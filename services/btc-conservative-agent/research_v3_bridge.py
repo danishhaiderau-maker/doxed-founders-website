@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -61,6 +62,24 @@ def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, An
 
 def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
     """Derive a lane-scoped identity instead of reusing the live CONTROL tag."""
+    for source in sources:
+        frozen_spec = source.get("paper_policy_spec")
+        if (
+            source.get("policy_identity_schema") == "paper_policy_identity_v3"
+            and isinstance(frozen_spec, Mapping)
+            and source.get("policy_id")
+            and source.get("policy_signature")
+            and source.get("policy_epoch_id")
+        ):
+            return {
+                "policy_identity_schema": "paper_policy_identity_v3",
+                "policy_id": str(source["policy_id"]),
+                "policy_signature": str(source["policy_signature"]),
+                "policy_epoch_id": str(source["policy_epoch_id"]),
+                "base_policy_signature": source.get("base_policy_signature"),
+                "base_policy_epoch_id": source.get("base_policy_epoch_id"),
+                "paper_policy_spec": copy.deepcopy(dict(frozen_spec)),
+            }
     research_lane = str(_first(*(source.get("research_lane") for source in sources)) or "").strip()
     policy_id = str(_first(
         *(source.get("policy_id") or source.get("raw_policy_id") for source in sources),
@@ -110,6 +129,13 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         # from the original lane decision.
         "paper_policy_spec": spec,
     }
+
+
+def paper_policy_identity_for_sources(
+    epoch_id: str, *sources: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Freeze the exact paper identity once for later fill/close attribution."""
+    return copy.deepcopy(_paper_policy_identity(str(epoch_id), *sources))
 
 
 def dual_write_lane_entry_resolution(

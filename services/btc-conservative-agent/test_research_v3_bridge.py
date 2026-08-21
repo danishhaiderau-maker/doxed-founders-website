@@ -7,7 +7,7 @@ from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
 from research_v3_bridge import dual_write_lane_decision
 from research_v3_bridge import dual_write_lane_entry_resolution
-from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
 from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_store import V3EvidenceStore
 
@@ -423,6 +423,52 @@ class V3BridgeTests(unittest.TestCase):
                 self.assertEqual(row["shared_ai_call_id"], "scan-3")
                 self.assertEqual(row["policy_id"], "PATIENT")
                 self.assertTrue(row["policy_signature"].startswith("paper-policy-"))
+
+    def test_close_reuses_frozen_submit_identity_instead_of_recomputing_sparse_position(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "cont-1", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "shared_ai_call_id": "scan-frozen",
+                "research_lane": "CONTINUOUS", "policy_id": "CONTINUOUS",
+                "policy_signature": "base-control", "policy_epoch_id": "base-epoch",
+                "entry_limit_policy": "deterministic_0.1pct_offset_v1",
+                "entry_offset_fraction": 0.001,
+            }
+            order = {
+                "trade_id": "cont-1", "created_ts": 1001,
+                "signal_dir": "LONG", "limit_price": 99.9, "qty": 0.1,
+                "research_lane": "CONTINUOUS",
+            }
+            submit = dual_write_paper_order_intent(
+                order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            frozen = paper_policy_identity_for_sources("epoch-v3-test", signal, order)
+            position = {
+                "trade_id": "cont-1", "entry_ts": 1010, "entry": 99.9,
+                "qty": 0.1, "dir": "LONG", "research_lane": "CONTINUOUS",
+                "shared_ai_call_id": "scan-frozen", **frozen,
+            }
+            dual_write_paper_fill(
+                order, signal, position, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            dual_write_paper_close(
+                position,
+                {"trade_id": "cont-1", "shared_ai_call_id": "scan-frozen"},
+                {"trade_id": "cont-1", "close_ts": 1020, "exit": 100.1,
+                 "net_pnl_usd": 0.2, "exit_reason": "TEST"},
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            intent = json.loads(store.ledger_path("order_intent").read_text().splitlines()[0])
+            execution_rows = [json.loads(line) for line in store.ledger_path("execution").read_text().splitlines()]
+            lifecycle_rows = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
+            attributable = execution_rows + [
+                row for row in lifecycle_rows
+                if row.get("observation_status") in {"PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED"}
+            ]
+            self.assertEqual(frozen["policy_signature"], intent["policy_signature"])
+            self.assertEqual({row["policy_signature"] for row in attributable}, {intent["policy_signature"]})
+            self.assertEqual({row["policy_epoch_id"] for row in attributable}, {intent["policy_epoch_id"]})
 
     def test_provisional_without_stable_identity_is_deferred_without_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
