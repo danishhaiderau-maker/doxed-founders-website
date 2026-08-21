@@ -1190,6 +1190,11 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
             or (ai or {}).get("shared_ai_call_id")
             or signal.get("source_trade_id")
         ),
+        "shared_ai_call_ts": (
+            order.get("shared_ai_call_ts")
+            or signal.get("shared_ai_call_ts")
+            or (ai or {}).get("shared_ai_call_ts")
+        ),
         "research_collection_mode": (
             "PAPER"
             if str(signal.get("research_lane") or order.get("research_lane") or "").upper()
@@ -15327,9 +15332,19 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         )
         _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane, enriched)
         return
+    # The child gets its own trade id, but retains the canonical parent scan.
+    # Thread it through both inputs because process_signal can normalize them
+    # independently before creating the signal and order records.
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
+    call_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
     spawn_ctx = copy.deepcopy(ctx)
     spawn_ctx["trade_id"] = allocate_lane_trade_id(target_lane)
+    spawn_ctx["shared_ai_call_id"] = call_id
+    spawn_ctx["shared_ai_call_ts"] = call_ts
     spawn_ctx["exit_config"] = get_exit_config_for_lane(target_lane)
+    spawn_ai = copy.deepcopy(ai)
+    spawn_ai["shared_ai_call_id"] = call_id
+    spawn_ai["shared_ai_call_ts"] = call_ts
     logger.info(
         f"[{target_lane}] combo spawn trade_id={spawn_ctx['trade_id']} reason={trigger_reason} "
         f"[PIPELINE ENFORCEMENT]"
@@ -15343,7 +15358,7 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         "timestamp": utc_iso(),
         "features": enriched,
         "skip_ai": True,
-        "pre_ai": copy.deepcopy(ai),
+        "pre_ai": spawn_ai,
         "pre_ctx": spawn_ctx,
     })
 
@@ -23449,6 +23464,7 @@ def _record_expired_order(source: dict, reason: str):
             or source.get("source_trade_id")
             or master.get("source_trade_id")
         ),
+        "shared_ai_call_ts": source.get("shared_ai_call_ts") or master.get("shared_ai_call_ts"),
         "source_order_market_evidence": copy.deepcopy(
             source.get("source_order_market_evidence")
             or master.get("source_order_market_evidence")
@@ -24084,6 +24100,14 @@ def close_position(pos: dict, exit_reason: str):
             "ts_melbourne": close_mel,
             "close_ts_melbourne": close_mel,
             "trade_id": trade_id,
+            "research_lane": pos.get("research_lane") or master.get("research_lane"),
+            "shared_ai_call_id": (
+                master.get("shared_ai_call_id")
+                or pos.get("shared_ai_call_id")
+                or master.get("source_trade_id")
+                or pos.get("source_trade_id")
+            ),
+            "shared_ai_call_ts": master.get("shared_ai_call_ts") or pos.get("shared_ai_call_ts"),
             "dir": pos.get("dir"),
             "entry": entry,
             "exit": price,
@@ -32718,12 +32742,45 @@ def _attach_patient_chase_routes(
     by_call = {}
     counts = {"pending": 0, "open": 0, "closed": 0, "expired": 0}
 
+    def canonical_call_id(row):
+        """Read current identity and recover pre-fix children from their AI snapshot."""
+        direct = str(row.get("shared_ai_call_id") or row.get("source_trade_id") or "")
+        if direct:
+            return direct
+        for key in ("ai_output", "ai_result", "ai"):
+            nested = row.get(key)
+            if not isinstance(nested, dict):
+                continue
+            nested_id = str(nested.get("shared_ai_call_id") or "")
+            if nested_id:
+                return nested_id
+            scan_id = str(nested.get("trade_id") or "")
+            if scan_id.startswith("scan-"):
+                return scan_id
+        return ""
+
+    # Index identities from signals first so pre-fix pending/open/terminal rows
+    # with the same Patient child id become visible after this repair.
+    trade_to_call = {}
+    for items, nested_signal in (
+        (signals, True), (pending, False), (positions, False),
+        (closed, False), (expired, False),
+    ):
+        for raw in items or ():
+            row = (raw or {}).get("signal_ref") if nested_signal else raw
+            if not isinstance(row, dict) or _normalize_lane_key(row) != lane:
+                continue
+            call_id = canonical_call_id(row)
+            trade_id = str(row.get("trade_id") or "")
+            if call_id and trade_id:
+                trade_to_call[trade_id] = call_id
+
     def add(items, status, *, nested_signal=False):
         for raw in items or ():
             row = (raw or {}).get("signal_ref") if nested_signal else raw
             if not isinstance(row, dict) or _normalize_lane_key(row) != lane:
                 continue
-            call_id = str(row.get("shared_ai_call_id") or row.get("source_trade_id") or "")
+            call_id = canonical_call_id(row) or trade_to_call.get(str(row.get("trade_id") or ""), "")
             if not call_id:
                 continue
             actual = str(row.get("status") or status).upper()

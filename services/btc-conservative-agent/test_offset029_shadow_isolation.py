@@ -215,6 +215,54 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
     assert "TYPE_B_HUNTER_V1" not in enriched[0]["lane_verdicts"]
 
 
+def test_api_recovers_live_patient_child_identity_from_signal_snapshot():
+    """A pre-fix child order still matches its canonical parent scan after deploy."""
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-196e02c33ddb"}]
+    signals = [{"signal_ref": {
+        "trade_id": "o29atr-a01440a5125e",
+        "research_lane": offset_policy.LANE,
+        "status": "ORDERED",
+        "ai_output": {"trade_id": "scan-196e02c33ddb"},
+    }}]
+    pending = [{
+        "trade_id": "o29atr-a01440a5125e",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+        "limit_price": 62_817.0,
+    }]
+    enriched, counts = fn(history, signals=signals, pending=pending)
+    assert enriched[0]["patient_chase_route"]["status"] == "PENDING"
+    assert enriched[0]["patient_chase_route"]["trade_id"] == "o29atr-a01440a5125e"
+    assert counts["pending"] == 1
+    assert counts["selected_calls"] == 1
+
+
+def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
+    spawn = _function_source(BOT, "_spawn_combo_lane")
+    assert "call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)" in spawn
+    assert 'spawn_ctx["shared_ai_call_id"] = call_id' in spawn
+    assert 'spawn_ai["shared_ai_call_id"] = call_id' in spawn
+    assert '"pre_ai": spawn_ai' in spawn
+
+    position = _function_source(BOT, "_build_open_position")
+    expired = _function_source(BOT, "_record_expired_order")
+    close = _function_source(BOT, "close_position")
+    assert '"shared_ai_call_ts": (' in position
+    assert '"shared_ai_call_ts": source.get("shared_ai_call_ts")' in expired
+    assert '"research_lane": pos.get("research_lane") or master.get("research_lane")' in close
+    assert 'master.get("shared_ai_call_id")' in close
+
+
 def test_api_distinguishes_legacy_approved_no_order_from_pending():
     fn = _load_function(
         BOT,
