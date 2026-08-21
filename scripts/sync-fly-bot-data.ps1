@@ -387,6 +387,17 @@ if ($PublishAnalyzerReport) {
   $analyzerGeneratedAt = $analyzerGeneratedAtValue.ToUniversalTime().ToString(
     "o", [Globalization.CultureInfo]::InvariantCulture
   )
+  # generated_at identifies the beginning of the analyzer cycle; the manifest
+  # is its commit marker and may legitimately be written several minutes later
+  # after the policy grid and dashboard are rendered. Bound that duration and
+  # use the commit marker—not an arbitrary five-minute wall—as the upper file
+  # fence.
+  $reportManifestItem = Get-Item -LiteralPath $reportManifestPath
+  $analyzerCommittedAtValue = [DateTimeOffset]$reportManifestItem.LastWriteTimeUtc
+  if ($analyzerCommittedAtValue -lt $analyzerGeneratedAtValue.AddMinutes(-1) -or
+      $analyzerCommittedAtValue -gt $analyzerGeneratedAtValue.AddMinutes(30)) {
+    throw "Analyzer manifest commit time is outside the bounded run window."
+  }
   $analyzerRunId = [string]$reportManifest.analyzer_sync_id
   $analyzerRevision = [string]$reportManifest.analysis_provenance.generation_revision
   $cohortSchema = [string]$reportManifest.analysis_provenance.cohort_schema
@@ -458,8 +469,9 @@ if ($PublishAnalyzerReport) {
       Copy-Item -LiteralPath $source -Destination $destination
       $item = Get-Item -LiteralPath $destination
       $artifactModifiedAt = [DateTimeOffset]$item.LastWriteTimeUtc
-      if ($artifactModifiedAt -lt $analyzerGeneratedAtValue.AddMinutes(-15) -or $artifactModifiedAt -gt $analyzerGeneratedAtValue.AddMinutes(5)) {
-        throw "Analyzer artifact is outside the current run window: $relative ($artifactModifiedAt vs $analyzerGeneratedAtValue)"
+      if ($artifactModifiedAt -lt $analyzerGeneratedAtValue.AddMinutes(-15) -or
+          $artifactModifiedAt -gt $analyzerCommittedAtValue.AddMinutes(1)) {
+        throw "Analyzer artifact is outside the committed run window: $relative"
       }
       if ($relative.StartsWith("reports/")) {
         $reportName = [System.IO.Path]::GetFileName($relative)

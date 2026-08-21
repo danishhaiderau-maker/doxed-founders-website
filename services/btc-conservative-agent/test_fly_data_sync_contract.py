@@ -35,6 +35,10 @@ def test_analyzer_manifest_timestamp_is_canonicalized_before_publication():
     assert "$analyzerGeneratedAtRaw -is [DateTime]" in SYNC_SCRIPT
     assert "$analyzerGeneratedAtValue.ToUniversalTime().ToString(" in SYNC_SCRIPT
     assert "[Globalization.CultureInfo]::InvariantCulture" in SYNC_SCRIPT
+    assert "$analyzerCommittedAtValue = [DateTimeOffset]$reportManifestItem.LastWriteTimeUtc" in SYNC_SCRIPT
+    assert "$analyzerGeneratedAtValue.AddMinutes(30)" in SYNC_SCRIPT
+    assert "$artifactModifiedAt -gt $analyzerCommittedAtValue.AddMinutes(1)" in SYNC_SCRIPT
+    assert "$artifactModifiedAt -gt $analyzerGeneratedAtValue.AddMinutes(5)" not in SYNC_SCRIPT
 
 
 def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
@@ -741,7 +745,7 @@ def test_remote_analyzer_mirror_is_read_only_and_admin_gated():
     assert '"report_manifest.json"' in SYNC_SCRIPT
     assert "$reportManifest.text_artifacts" in SYNC_SCRIPT
     assert "Required analyzer artifact is missing" in SYNC_SCRIPT
-    assert "outside the current run window" in SYNC_SCRIPT
+    assert "outside the committed run window" in SYNC_SCRIPT
     assert "metadata does not match the snapshotted file" in SYNC_SCRIPT
     assert "analysis_provenance.cohort_schema" in SYNC_SCRIPT
     assert 'schema = "analyzer_mirror_bundle_v2"' in SYNC_SCRIPT
