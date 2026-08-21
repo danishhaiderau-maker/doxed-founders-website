@@ -203,6 +203,45 @@ class V3ReportTests(unittest.TestCase):
             })
             self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
 
+    def test_report_blocks_execution_and_paper_lifecycle_without_lane_provenance(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            incomplete = {
+                "episode_id": "episode-1", "event_id": "event-1",
+                "policy_id": "PATIENT", "policy_signature": "sig-patient",
+                "policy_epoch_id": "pe-patient",
+            }
+            store.append("execution", {"record_id": "e-1", **incomplete})
+            store.append("lifecycle", {
+                "record_id": "l-1", **incomplete,
+                "observation_status": "PAPER_POSITION_CLOSED", "terminal": True,
+            })
+            blocked = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(blocked["epoch_scope"]["missing_policy_identity_rows"], 2)
+            self.assertIn("POLICY_IDENTITY_CONTAMINATION", blocked["blockers"])
+            self.assertIsNone(blocked["number_one_strategy"])
+
+            complete = {
+                **incomplete, "research_lane": "PATIENT",
+                "shared_ai_call_id": "scan-1",
+            }
+            with tempfile.TemporaryDirectory() as clean_data, tempfile.TemporaryDirectory() as clean_reports:
+                clean = V3EvidenceStore(clean_data, epoch_id="epoch-v3")
+                clean.append("opportunity", {
+                    "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+                })
+                clean.append("execution", {"record_id": "e-1", **complete})
+                clean.append("lifecycle", {
+                    "record_id": "l-1", **complete,
+                    "observation_status": "PAPER_POSITION_CLOSED", "terminal": True,
+                })
+                accepted = build_safe_policy_genome_v3_report(clean_data, clean_reports)
+                self.assertEqual(accepted["epoch_scope"]["missing_policy_identity_rows"], 0)
+                self.assertNotIn("POLICY_IDENTITY_CONTAMINATION", accepted["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()
