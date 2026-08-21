@@ -20,6 +20,21 @@ def test_exact_anchor_and_chase_windows():
     assert not policy.chase_due(created_ts=0, last_chase_ts=1_439, now=1_500)
 
 
+def test_chase_uses_side_correct_bbo_not_last_trade_touch():
+    assert not policy.marketable_quote_at_limit(
+        direction="LONG", limit_price=99.0, bid=98.5, ask=100.0
+    )
+    assert policy.marketable_quote_at_limit(
+        direction="LONG", limit_price=99.0, bid=98.5, ask=99.0
+    )
+    assert not policy.marketable_quote_at_limit(
+        direction="SHORT", limit_price=101.0, bid=100.0, ask=101.5
+    )
+    assert policy.marketable_quote_at_limit(
+        direction="SHORT", limit_price=101.0, bid=101.0, ask=101.5
+    )
+
+
 def test_atr_target_and_path_end_are_exact():
     assert policy.atr_target(100, "LONG", atr_abs=2) == 105
     assert policy.atr_target(100, "SHORT", atr_abs=2) == 95
@@ -54,6 +69,12 @@ def test_bot_adapter_is_paper_only_and_never_relay_allowlisted():
     assert "if lane in PAPER_ONLY_RESEARCH_LANES:\n        return EXEC_MODE_PAPER" in source
     assert "return _apply_offset_029_atr_exit(pos, price, now)" in source
     assert "and lane != RESEARCH_LANE_OFFSET_029_ATR_TP_25" in source
+    chase_adapter = source[
+        source.index("def _apply_offset_029_policy_chase(") :
+        source.index("def microstructure_capture_loop(")
+    ]
+    assert "offset029_policy.marketable_quote_at_limit(" in chase_adapter
+    assert "_pending_limit_touched(" not in chase_adapter
 
 
 def test_dashboard_copy_is_truthful_and_complete():

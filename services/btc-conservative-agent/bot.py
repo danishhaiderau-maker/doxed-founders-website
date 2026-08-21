@@ -22188,7 +22188,20 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
     if direction not in ("LONG", "SHORT") or old_limit <= 0:
         return False
-    if _pending_limit_touched(order, price):
+    # A last-price/extrema touch is not executable fill evidence under the V2
+    # paper gate. Stopping here on that weaker observation stranded Offset
+    # orders after one reprice. Pause only when the contemporaneous opposite
+    # BBO is actually at/through the limit; fill processing immediately after
+    # this chase then validates visible depth.
+    with state_lock:
+        chase_bid = float(state.get("bid") or 0)
+        chase_ask = float(state.get("ask") or 0)
+    if offset029_policy.marketable_quote_at_limit(
+        direction=direction,
+        limit_price=old_limit,
+        bid=chase_bid,
+        ask=chase_ask,
+    ):
         return False
     new_limit, reason = _compute_limit_chase_target(
         direction, old_limit, float(price), original,
@@ -29991,7 +30004,6 @@ DASHBOARD_JS = """(function () {
     window.toggleResearchLane = toggleResearchLane;
     window.downloadDebug = downloadDebug;
     window.updateThreshold = updateThreshold;
-    window.updateEdge = updateEdge;
     window.updateAiBands = updateAiBands;
     window.updateChaseBuckets = updateChaseBuckets;
     window.updateSpreadGate = updateSpreadGate;

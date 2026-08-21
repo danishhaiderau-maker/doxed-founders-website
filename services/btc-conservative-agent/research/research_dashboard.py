@@ -202,7 +202,7 @@ REPORT_NAV_GROUPS = (
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("chase-delay", "Delay", "chase_delay_report.json"),
         ("chase-iso", "Isolation", "lane_chase_isolation_report.json"),
-        ("combos", "Policy Grid & Legacy", "top_combinations_report.json"),
+        ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
         ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
@@ -1155,7 +1155,7 @@ def _decode_counterfactual_policy_id(policy_id: str) -> dict:
     return decoded
 
 
-def _current_policy_grid_rows(limit: int = 50) -> dict:
+def _current_policy_grid_rows(limit: int = 100) -> dict:
     """Expose pinned current-epoch OOS leaders separately from legacy trade combos."""
     best = _best_policy_research_payload()
     detail = _read_json("policy_candidate_oos_report.json")
@@ -1197,6 +1197,9 @@ def _current_policy_grid_rows(limit: int = 50) -> dict:
         "policy_signature": detail.get("evidence_policy_signature") if current else None,
         "cycle_snapshot": detail.get("cycle_snapshot") if current else None,
         "evidence": evidence if current else {},
+        "search_counts": ((best.get("research_design") or {}).get("counts") or {}),
+        "rows_available": len(challenger.get("profitable_static_policies") or []),
+        "rows_limit": max(1, int(limit)),
         "blockers": best.get("blockers") or [],
         "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
         "warning": (
@@ -1216,8 +1219,8 @@ def _combos_payload():
         "min_trades": rep.get("min_trades_per_combo"),
         "dimensions": rep.get("dimensions") or [],
         "filter_note": rep.get("filter_note") or "Known ADX × score gap × entry × lane cohorts only (no UNKNOWN/TYPE_B/OTHER)",
-        "top": top[:50],
-        "policy_grid": _current_policy_grid_rows(limit=50),
+        "top": top[:100],
+        "policy_grid": _current_policy_grid_rows(limit=100),
     }
 
 
@@ -3358,8 +3361,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table id="chase-iso-table"><thead><tr><th>Metric</th><th id="chase-iso-direct-h">Direct</th><th id="chase-iso-chase-h">Chase 3+</th></tr></thead><tbody id="chase-iso-body"></tbody></table>
   </section>
   <section id="sec-combos">
-    <h2>Top Combinations</h2>
-    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid — pinned chronological OOS results. Descriptive only until every qualification gate passes.</p>
+    <h2>Top 100 Policy Combinations</h2>
+    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid — up to 100 training-ranked policies with pinned chronological OOS results. Descriptive only until every qualification gate passes.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
     <table><thead><tr><th>#</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
@@ -3918,10 +3921,14 @@ async function loadCombos() {
   }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
   const pg = d.policy_grid || {};
   const pe = pg.evidence || {};
+  const searchCounts = pg.search_counts || {};
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
     ['Policies shown', (pg.rows||[]).length],
+    ['Profitable policies available', pg.rows_available ?? 0],
+    ['Entry policies searched', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString()],
+    ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString()],
     ['Independent episodes', pe.independent_episodes ?? 0],
     ['Train / OOS', `${pe.training_episodes ?? 0} / ${pe.oos_episodes ?? 0}`],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],

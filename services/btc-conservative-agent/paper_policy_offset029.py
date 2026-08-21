@@ -60,6 +60,27 @@ def chase_due(*, created_ts: float, last_chase_ts: float, now: float) -> bool:
     )
 
 
+def marketable_quote_at_limit(*, direction: str, limit_price: float,
+                              bid: float, ask: float) -> bool:
+    """Return whether the current opposite BBO is at/through the paper limit.
+
+    A last-trade or candle touch is deliberately insufficient. The V2 paper
+    fill gate can reject that weaker observation when the opposite quote/depth
+    was not executable, and the declared minute chase must then keep running.
+    """
+    direction = str(direction or "").upper()
+    limit_price = float(limit_price or 0)
+    bid = float(bid or 0)
+    ask = float(ask or 0)
+    if limit_price <= 0:
+        return False
+    if direction == "LONG":
+        return ask > 0 and ask <= limit_price
+    if direction == "SHORT":
+        return bid > 0 and bid >= limit_price
+    return False
+
+
 def atr_target(entry: float, direction: str, atr_abs: float = 0.0, atr_pct: float = 0.0) -> float | None:
     entry = float(entry or 0)
     atr_abs = float(atr_abs or 0)
