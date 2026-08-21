@@ -35,6 +35,9 @@ COPY . /app
 # Fail the image build if the whitelist-style .dockerignore drops a module that
 # bot.py or the canonical analyzer imports at runtime.
 RUN python -c "import research.analysis_eligibility, research.platform_relay_evidence, research.source_market_evidence, research.immutable_archive, research.counterfactual_normalization, research.epoch_quarantine"
+# V3 dual-write is on the Fly bot's critical evidence path. Fail the image
+# build if the whitelist omits any collector dependency.
+RUN python -c "import collector_v22, collector_v22_provisional, research_v3_contract, research_v3_store, research_v3_bridge"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
