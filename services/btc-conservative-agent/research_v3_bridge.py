@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Mapping
+import hashlib
 
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
@@ -9,6 +10,52 @@ from research_v3_store import V3EvidenceStore
 
 def _first(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
+
+
+def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
+    """Record the causal opportunity immediately, before its long path matures."""
+    signal_ts = float(_first(source.get("created_ts_ts"), source.get("signal_ts"), 0) or 0)
+    direction = str(_first(source.get("raw_direction"), source.get("final_direction"), "UNKNOWN")).upper()
+    symbol = str(_first(source.get("symbol"), source.get("pair"), "BTCUSD")).upper()
+    shared = str(source.get("shared_ai_call_id") or "").strip()
+    if shared:
+        causal_key = f"shared:{symbol}:{direction}:{shared}"
+        grouping_basis = "SHARED_AI_CALL"
+    else:
+        window = int(signal_ts // 300) * 300
+        causal_key = f"fallback:{symbol}:{direction}:{window}"
+        grouping_basis = "TIME_DIRECTION_SYMBOL_FALLBACK"
+    episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    opportunity = store.append("opportunity", {
+        "record_id": f"opportunity:{episode_id}",
+        "episode_id": episode_id,
+        "shared_ai_call_id": shared or None,
+        "signal_ts": signal_ts,
+        "symbol": symbol,
+        "raw_direction": direction,
+        "feature_snapshot_at_signal": source.get("research_feature_snapshot") or {},
+        "first_observed_as_provisional": True,
+        "grouping_basis": grouping_basis,
+        "collector_version": COLLECTOR_VERSION,
+    })
+    lifecycle = store.append("lifecycle", {
+        "record_id": f"lifecycle:{event_id}:opened",
+        "episode_id": episode_id,
+        "event_id": str(event_id),
+        "observation_status": str(source.get("observation_status") or "PENDING"),
+        "outcome_state": "CENSORED",
+        "terminal": False,
+        "ranking_eligible": False,
+        "ranking_blocker": "PATH_NOT_MATURED",
+    })
+    return {
+        "schema": "v3_provisional_dual_write_receipt_v1",
+        "event_id": str(event_id),
+        "episode_id": episode_id,
+        "writes": [opportunity, lifecycle],
+        "store_verification": store.verify(),
+    }
 
 
 def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[str, Any]:
@@ -98,6 +145,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "episode_id": episode_id,
         "event_id": event_id,
         "observation_status": record.get("observation_status"),
+        "terminal": True,
         "outcome_state": (
             "DATA_ERROR" if record.get("observation_status") == "DATA_ERROR"
             else "CENSORED" if record.get("negative_evidence") is True
@@ -118,4 +166,3 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "writes": writes,
         "store_verification": store.verify(),
     }
-

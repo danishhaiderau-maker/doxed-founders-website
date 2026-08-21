@@ -53,8 +53,9 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     opportunities = _read_ledger(store.ledger_path("opportunity"))
     decisions = _read_ledger(store.ledger_path("decision"))
     lifecycles = _read_ledger(store.ledger_path("lifecycle"))
+    terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
     executions = _read_ledger(store.ledger_path("execution"))
-    outcome_counts = Counter(str(row.get("outcome_state") or "UNKNOWN") for row in lifecycles)
+    outcome_counts = Counter(str(row.get("outcome_state") or "UNKNOWN") for row in terminal_lifecycles)
     decision_outcomes = Counter(str(row.get("primary_outcome") or "UNKNOWN") for row in decisions)
     search = build_search_plan({
         "entry_offset_pct": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_offset_pct") or []),
@@ -75,7 +76,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "independent_opportunities": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
             "decision_branches": len(decisions),
             "execution_rows": len(executions),
-            "terminal_lifecycles": len(lifecycles),
+            "terminal_lifecycles": len(terminal_lifecycles),
+            "provisional_lifecycles": len(lifecycles) - len(terminal_lifecycles),
             "decision_outcomes": dict(sorted(decision_outcomes.items())),
             "outcome_states": dict(sorted(outcome_counts.items())),
             "ledger_counts": verification["ledger_counts"],
@@ -91,4 +93,3 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     }
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
     return report
-

@@ -55,7 +55,7 @@ def _atomic_write_unlocked(path: Path, payload: Mapping[str, Any]) -> None:
         os.close(dir_fd)
 
 
-def upsert_provisional_event(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: Optional[str] = None) -> None:
+def upsert_provisional_event(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: Optional[str] = None) -> Optional[dict]:
     """Durably insert/replace the recovery source for one provisional event."""
     key, epoch = str(event_id or "").strip(), str(epoch_id or "").strip()
     if not key or not epoch:
@@ -65,6 +65,19 @@ def upsert_provisional_event(event_id: str, source: Mapping[str, Any], *, epoch_
         store = _read_unlocked(path)
         store["events"][key] = {"event_id": key, "epoch_id": epoch, "source": dict(source)}
         _atomic_write_unlocked(path, store)
+    try:
+        from research_v3_bridge import dual_write_provisional_source
+        return dual_write_provisional_source(key, source, epoch_id=epoch, data_dir=str(path.parent))
+    except Exception as exc:
+        # The v2 provisional journal remains the recovery authority during the
+        # migration.  A V3 dual-write error is returned to callers/supervision
+        # rather than destroying the durable source or inventing completion.
+        return {
+            "schema": "v3_provisional_dual_write_receipt_v1",
+            "event_id": key,
+            "written": False,
+            "error": f"{type(exc).__name__}:{exc}",
+        }
 
 
 def remove_provisional_event(event_id: str, *, data_dir: Optional[str] = None) -> bool:

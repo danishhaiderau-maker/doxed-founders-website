@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from research_v3_bridge import dual_write_v22_record
+from research_v3_bridge import dual_write_provisional_source
 from research_v3_store import V3EvidenceStore
 
 
@@ -28,6 +29,23 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_provisional_opportunity_is_available_before_terminal_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = dual_write_provisional_source("cont-early", {
+                "created_ts_ts": 1000,
+                "final_direction": "LONG",
+                "symbol": "tBTCF0:USTF0",
+                "shared_ai_call_id": "scan-early",
+                "observation_status": "WAITING_120M",
+            }, epoch_id="epoch-v3-test", data_dir=tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertTrue(receipt["store_verification"]["passed"])
+            opportunity = json.loads(store.ledger_path("opportunity").read_text().strip())
+            lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
+            self.assertTrue(opportunity["first_observed_as_provisional"])
+            self.assertFalse(lifecycle["terminal"])
+            self.assertEqual(lifecycle["ranking_blocker"], "PATH_NOT_MATURED")
+
     def test_one_episode_many_branches_has_one_opportunity(self):
         with tempfile.TemporaryDirectory() as tmp:
             a = dual_write_v22_record(_event("cont-1"), data_dir=tmp)
