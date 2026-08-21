@@ -324,6 +324,11 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
     event_id = str(_first(position.get("trade_id"), order.get("trade_id"), signal.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, order, position)
     policy = _paper_policy_identity(str(epoch_id), signal, order, position)
+    lifecycle_identity = {
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        **policy,
+    }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:primary-fill", "episode_id": identity["episode_id"], "event_id": event_id,
@@ -333,12 +338,13 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         "fill_model": _first(position.get("fill_model"), order.get("fill_model")),
         "authenticated_exchange_actual": False, "paper_observation": True,
         "source_market_evidence_required_for_conservative_claim": True,
-        **policy,
+        **lifecycle_identity,
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-filled", "episode_id": identity["episode_id"], "event_id": event_id,
         "observation_status": "PAPER_POSITION_OPEN", "outcome_state": "PARTIAL_FILL" if order.get("partial_fill") else "FULL_FILL",
         "terminal": False, "ranking_eligible": False, "ranking_blocker": "EXIT_PATH_NOT_MATURED",
+        **lifecycle_identity,
     })
     return {"schema": "v3_paper_fill_receipt_v1", "epoch_id": str(epoch_id), **identity,
             "writes": [execution, lifecycle], "store_verification": store.verify()}
@@ -349,6 +355,11 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     event_id = str(_first(position.get("trade_id"), signal.get("trade_id"), outcome.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, position, outcome)
     policy = _paper_policy_identity(str(epoch_id), signal, position, outcome)
+    lifecycle_identity = {
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        **policy,
+    }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
@@ -357,13 +368,14 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         "filled_qty": _first(outcome.get("execution_qty"), position.get("qty")), "net_pnl_usd": outcome.get("net_pnl_usd"),
         "gross_pnl_usd": outcome.get("gross_pnl_usd"), "trading_fees_usd": outcome.get("trading_fees_usd"),
         "funding_fees_usd": outcome.get("funding_fees_usd"), "exit_reason": outcome.get("exit_reason"),
-        "authenticated_exchange_actual": False, "paper_observation": True, **policy,
+        "authenticated_exchange_actual": False, "paper_observation": True, **lifecycle_identity,
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-closed", "episode_id": identity["episode_id"], "event_id": event_id,
         "observation_status": "PAPER_POSITION_CLOSED", "outcome_state": "PAPER_REALIZED",
         "terminal": True, "ranking_eligible": False, "ranking_blocker": "REPLAY_PATH_NOT_MATURED",
         "net_pnl_usd": outcome.get("net_pnl_usd"), "exit_reason": outcome.get("exit_reason"),
+        **lifecycle_identity,
     })
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
             "writes": [execution, lifecycle], "store_verification": store.verify()}

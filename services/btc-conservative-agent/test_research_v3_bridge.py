@@ -333,6 +333,14 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertEqual(execution["filled_qty"], 0.2)
             self.assertEqual(intent["episode_id"], execution["episode_id"])
+            lifecycle_rows = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
+            fill_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_POSITION_OPEN")
+            for row in (execution, fill_lifecycle):
+                self.assertEqual(row["research_lane"], "OFFSET_029_ATR_TP_25")
+                self.assertEqual(row["shared_ai_call_id"], "scan-paper-1")
+                self.assertEqual(row["policy_id"], intent["policy_id"])
+                self.assertEqual(row["policy_signature"], intent["policy_signature"])
+                self.assertEqual(row["policy_epoch_id"], intent["policy_epoch_id"])
 
     def test_different_paper_lanes_never_share_inherited_control_signature(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -397,8 +405,8 @@ class V3BridgeTests(unittest.TestCase):
 
     def test_paper_close_records_realized_result_without_claiming_exchange_actual(self):
         with tempfile.TemporaryDirectory() as tmp:
-            signal = {"trade_id": "p-3", "created_ts_ts": 1000, "raw_direction": "LONG", "shared_ai_call_id": "scan-3", "policy_id": "PATIENT"}
-            position = {"trade_id": "p-3", "entry_ts": 1010, "entry": 99, "qty": 0.1, "dir": "LONG"}
+            signal = {"trade_id": "p-3", "created_ts_ts": 1000, "raw_direction": "LONG", "shared_ai_call_id": "scan-3", "policy_id": "PATIENT", "research_lane": "PATIENT"}
+            position = {"trade_id": "p-3", "entry_ts": 1010, "entry": 99, "qty": 0.1, "dir": "LONG", "research_lane": "PATIENT"}
             outcome = {"trade_id": "p-3", "close_ts": "1970-01-01T00:17:00Z", "exit": 100, "net_pnl_usd": 1.0, "gross_pnl_usd": 1.0, "trading_fees_usd": 0.0, "funding_fees_usd": 0.0, "exit_reason": "ATR_TP_2_5"}
             receipt = dual_write_paper_close(position, signal, outcome, epoch_id="epoch-v3-test", data_dir=tmp)
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
@@ -410,6 +418,11 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertTrue(lifecycle["terminal"])
             self.assertFalse(lifecycle["ranking_eligible"])
+            for row in (execution, lifecycle):
+                self.assertEqual(row["research_lane"], "PATIENT")
+                self.assertEqual(row["shared_ai_call_id"], "scan-3")
+                self.assertEqual(row["policy_id"], "PATIENT")
+                self.assertTrue(row["policy_signature"].startswith("paper-policy-"))
 
     def test_provisional_without_stable_identity_is_deferred_without_rows(self):
         with tempfile.TemporaryDirectory() as tmp:

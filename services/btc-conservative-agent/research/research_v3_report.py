@@ -148,11 +148,30 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         row for row in decisions
         if str(row.get("decision_stage") or "") == "LANE_POLICY_VERDICT"
     ]
+    policy_attributable_lifecycles = [
+        row for row in lifecycles
+        if str(row.get("observation_status") or "") in {
+            "PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED",
+        }
+    ]
     for row in [*order_intents, *immediate_lane_decisions]:
         signature = str(row.get("policy_signature") or "").strip()
         policy_id = str(row.get("policy_id") or "").strip()
         policy_epoch_id = str(row.get("policy_epoch_id") or "").strip()
         if not signature or not policy_id or not policy_epoch_id:
+            missing_policy_identity_rows += 1
+            continue
+        policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
+        signatures_by_episode_policy.setdefault(
+            (str(row.get("episode_id") or ""), policy_id), set()
+        ).add(signature)
+    for row in [*executions, *policy_attributable_lifecycles]:
+        signature = str(row.get("policy_signature") or "").strip()
+        policy_id = str(row.get("policy_id") or "").strip()
+        policy_epoch_id = str(row.get("policy_epoch_id") or "").strip()
+        research_lane = str(row.get("research_lane") or "").strip()
+        shared_ai_call_id = str(row.get("shared_ai_call_id") or "").strip()
+        if not all((signature, policy_id, policy_epoch_id, research_lane, shared_ai_call_id)):
             missing_policy_identity_rows += 1
             continue
         policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
