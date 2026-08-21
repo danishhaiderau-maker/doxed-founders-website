@@ -117,7 +117,11 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     excluded_opportunities = len(all_opportunities) - len(opportunities)
     policy_ids_by_signature: dict[str, set[str]] = {}
     missing_policy_identity_rows = 0
-    for row in order_intents:
+    immediate_lane_decisions = [
+        row for row in decisions
+        if str(row.get("decision_stage") or "") == "LANE_POLICY_VERDICT"
+    ]
+    for row in [*order_intents, *immediate_lane_decisions]:
         signature = str(row.get("policy_signature") or "").strip()
         policy_id = str(row.get("policy_id") or "").strip()
         policy_epoch_id = str(row.get("policy_epoch_id") or "").strip()
@@ -136,7 +140,20 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         or policy_identity_contamination
     )
     outcome_counts = Counter(str(row.get("outcome_state") or "UNKNOWN") for row in terminal_lifecycles)
-    decision_outcomes = Counter(str(row.get("primary_outcome") or "UNKNOWN") for row in decisions)
+    decision_outcomes = Counter(str(
+        row.get("primary_outcome")
+        or row.get("outcome_state")
+        or row.get("policy_decision")
+        or "UNKNOWN"
+    ) for row in decisions)
+    decision_dispositions = Counter(str(
+        row.get("execution_disposition") or "LEGACY_TERMINAL_DECISION"
+    ) for row in decisions)
+    lane_decision_outcomes: dict[str, Counter] = {}
+    for row in immediate_lane_decisions:
+        lane = str(row.get("research_lane") or "UNKNOWN")
+        outcome = str(row.get("outcome_state") or row.get("policy_decision") or "UNKNOWN")
+        lane_decision_outcomes.setdefault(lane, Counter())[outcome] += 1
     search = build_search_plan({
         "entry_offset_pct": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_offset_pct") or []),
         "entry_ttl_min": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_ttl_min") or []),
@@ -186,6 +203,11 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "terminal_lifecycles": len(terminal_lifecycles),
             "provisional_lifecycles": len(lifecycles) - len(terminal_lifecycles),
             "decision_outcomes": dict(sorted(decision_outcomes.items())),
+            "decision_dispositions": dict(sorted(decision_dispositions.items())),
+            "lane_decision_outcomes": {
+                lane: dict(sorted(counts.items()))
+                for lane, counts in sorted(lane_decision_outcomes.items())
+            },
             "outcome_states": dict(sorted(outcome_counts.items())),
             "ledger_counts": verification["ledger_counts"],
             "market_segments": verification["market_segment_count"],

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
+from research_v3_bridge import dual_write_lane_decision
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
 from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_store import V3EvidenceStore
@@ -32,6 +33,118 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_shared_call_records_independent_lane_decisions_without_duplicate_opportunity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-lanes-1", "shared_ai_call_id": "scan-lanes-1",
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "executed_direction": "LONG", "long_score": 62, "short_score": 38,
+                "score_gap": 24, "feature_snapshot_at_signal": {"adx": 31},
+            }
+            continuous = dual_write_lane_decision(
+                source, lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="SCORE_TIER_APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+            )
+            patient = dual_write_lane_decision(
+                source, lane="OFFSET_029_ATR_TP_25", policy_decision="REJECT",
+                execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="AI_REJECT",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={
+                    "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+                    "entry_offset_pct": 0.29, "paper_only": True,
+                },
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            decisions = [json.loads(line) for line in store.ledger_path("decision").read_text().splitlines()]
+            self.assertEqual(continuous["episode_id"], patient["episode_id"])
+            self.assertEqual(store.verify()["ledger_counts"]["opportunity"], 1)
+            self.assertEqual(len(decisions), 2)
+            self.assertEqual({row["research_lane"] for row in decisions}, {
+                "CONTINUOUS", "OFFSET_029_ATR_TP_25",
+            })
+            self.assertEqual(len({row["policy_signature"] for row in decisions}), 2)
+            patient_row = next(row for row in decisions if row["research_lane"] == "OFFSET_029_ATR_TP_25")
+            self.assertEqual(patient_row["outcome_state"], "REJECTED")
+            self.assertFalse(patient_row["order_intent_expected"])
+            self.assertEqual(store.verify()["ledger_counts"]["order_intent"], 0)
+
+    def test_accepted_but_disabled_lane_is_no_trade_not_zero_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = dual_write_lane_decision(
+                {
+                    "trade_id": "scan-disabled", "shared_ai_call_id": "scan-disabled",
+                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "SHORT",
+                    "executed_direction": "SHORT", "raw_ai_decision": "APPROVE",
+                },
+                lane="OFFSET_029_ATR_TP_25", policy_decision="ACCEPT",
+                execution_disposition="LANE_DISABLED_NO_ORDER",
+                exact_reason="PAPER_LANE_TOGGLE_OFF_NO_SHADOW",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "PATIENT", "paper_only": True},
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            row = json.loads(store.ledger_path("decision").read_text().strip())
+            self.assertTrue(receipt["store_verification"]["passed"])
+            self.assertEqual(row["policy_decision"], "ACCEPT")
+            self.assertEqual(row["execution_disposition"], "LANE_DISABLED_NO_ORDER")
+            self.assertEqual(row["outcome_state"], "NO_TRADE")
+            self.assertNotEqual(row["outcome_state"], "REALIZED_ZERO_PNL")
+
+    def test_lane_decision_retry_is_write_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = {
+                "source": {
+                    "trade_id": "scan-retry", "shared_ai_call_id": "scan-retry",
+                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                },
+                "lane": "CONTINUOUS", "policy_decision": "REJECT",
+                "execution_disposition": "POLICY_REJECTED_NO_ORDER",
+                "exact_reason": "REJECT", "epoch_id": "epoch-v3-test", "data_dir": tmp,
+                "lane_policy": {"policy_id": "CONTINUOUS"},
+            }
+            dual_write_lane_decision(**args)
+            retry = dual_write_lane_decision(**args)
+            self.assertTrue(all(write["duplicate"] for write in retry["writes"]))
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertEqual(store.verify()["ledger_counts"]["decision"], 1)
+
+    def test_lane_decision_and_later_order_share_exact_policy_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "patient-child", "shared_ai_call_id": "scan-policy-match",
+                "created_ts_ts": 1000, "raw_direction": "LONG", "final_direction": "LONG",
+                "research_lane": "OFFSET_029_ATR_TP_25",
+                "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+                "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+                "entry_limit_policy": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+                "deterministic_entry_offset_pct": 0.0029,
+                "exit_config": {"policy": "ATR_TP_2.5"},
+                "paper_only": True, "relay_eligible": False,
+            }
+            dual_write_lane_decision(
+                {**signal, "trade_id": "scan-policy-match"},
+                lane="OFFSET_029_ATR_TP_25", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp, lane_policy=signal,
+            )
+            dual_write_paper_order_intent(
+                {
+                    "trade_id": "patient-child", "created_ts": 1001,
+                    "signal_dir": "LONG", "limit_price": 99.71, "qty": 0.1,
+                    "research_lane": "OFFSET_029_ATR_TP_25", "paper_only": True,
+                    "relay_eligible": False,
+                },
+                signal, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            decision = json.loads(store.ledger_path("decision").read_text().strip())
+            intent = json.loads(store.ledger_path("order_intent").read_text().strip())
+            self.assertEqual(decision["policy_signature"], intent["policy_signature"])
+            self.assertEqual(decision["policy_epoch_id"], intent["policy_epoch_id"])
+            self.assertEqual(decision["episode_id"], intent["episode_id"])
+
     def test_terminal_record_uses_same_shared_call_episode_as_provisional_source(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = _event("scan-child", "legacy-stable-episode")

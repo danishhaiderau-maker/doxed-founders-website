@@ -335,6 +335,22 @@ def test_ai_scan_fans_out_patient_before_slow_continuous_processing():
     assert "fanout_ctx" not in process
 
 
+def test_every_shared_call_writes_patient_and_continuous_v3_lane_verdicts():
+    patient = _function_source(BOT, "spawn_combo_lanes_from_ai_scan")
+    continuous = _function_source(BOT, "spawn_continuous_lane_from_ai_scan")
+    bridge = _function_source(BOT, "_write_v3_shared_lane_decision")
+    assert "dual_write_lane_decision(" in bridge
+    assert "if not ai_accepted:\n            continue" in patient
+    write_at = patient.index("_write_v3_shared_lane_decision(")
+    reject_continue_at = patient.index("if not ai_accepted:\n            continue", write_at)
+    assert write_at < reject_continue_at
+    assert "LANE_DISABLED_NO_ORDER" in patient
+    assert "AI_REJECTED_NO_ORDER" in patient
+    assert "LANE_DISABLED_DATA_ONLY" in continuous
+    assert "POLICY_REJECTED_NO_ORDER" in continuous
+    assert "_write_v3_shared_lane_decision(" in continuous
+
+
 def test_api_distinguishes_legacy_approved_no_order_from_pending():
     fn = _load_function(
         BOT,

@@ -27,6 +27,41 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["collection"]["decision_branches"], 2)
             self.assertEqual(report["status"], "V3_COLLECTING")
 
+    def test_report_exposes_rejected_and_disabled_lane_decisions_separately(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            common = {
+                "episode_id": "episode-1", "decision_stage": "LANE_POLICY_VERDICT",
+                "policy_epoch_id": "pe-1",
+            }
+            store.append("decision", {
+                **common, "record_id": "d-cont", "research_lane": "CONTINUOUS",
+                "policy_id": "CONTINUOUS", "policy_signature": "sig-cont",
+                "policy_decision": "ACCEPT", "outcome_state": "CENSORED",
+                "execution_disposition": "ORDER_ELIGIBLE",
+            })
+            store.append("decision", {
+                **common, "record_id": "d-patient", "research_lane": "OFFSET_029_ATR_TP_25",
+                "policy_id": "PATIENT", "policy_signature": "sig-patient",
+                "policy_decision": "ACCEPT", "outcome_state": "NO_TRADE",
+                "execution_disposition": "LANE_DISABLED_NO_ORDER",
+            })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["collection"]["decision_outcomes"], {
+                "CENSORED": 1, "NO_TRADE": 1,
+            })
+            self.assertEqual(report["collection"]["decision_dispositions"], {
+                "LANE_DISABLED_NO_ORDER": 1, "ORDER_ELIGIBLE": 1,
+            })
+            self.assertEqual(report["collection"]["lane_decision_outcomes"], {
+                "CONTINUOUS": {"CENSORED": 1},
+                "OFFSET_029_ATR_TP_25": {"NO_TRADE": 1},
+            })
+            self.assertFalse(report["epoch_scope"]["contamination_detected"])
+
     def test_dashboard_api_and_page_are_fail_closed(self):
         original = dashboard._read_json
         try:

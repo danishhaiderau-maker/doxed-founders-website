@@ -63,11 +63,16 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
     base_signature = str(_first(*(source.get("policy_signature") for source in sources)) or "").strip()
     base_epoch = str(_first(*(source.get("policy_epoch_id") for source in sources)) or "").strip()
     spec = {
-        "schema": "paper_policy_identity_spec_v2",
+        "schema": "paper_policy_identity_spec_v3",
         "policy_id": policy_id,
         "research_lane": research_lane or None,
         "entry_limit_policy": _first(*(source.get("entry_limit_policy") for source in sources)),
-        "entry_offset_pct": _first(*(source.get("entry_offset_pct") for source in sources)),
+        "entry_offset_fraction": _first(*(
+            source.get("entry_offset_fraction")
+            if source.get("entry_offset_fraction") is not None
+            else source.get("deterministic_entry_offset_pct")
+            for source in sources
+        )),
         "exit_config": _first(*(source.get("exit_config") for source in sources)),
         "paper_only": bool(_first(*(source.get("paper_only") for source in sources), True)),
         "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), False)),
@@ -78,12 +83,92 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         f"{epoch_id}|{signature}".encode("utf-8")
     ).hexdigest()[:20]
     return {
-        "policy_identity_schema": "paper_policy_identity_v2",
+        "policy_identity_schema": "paper_policy_identity_v3",
         "policy_id": policy_id,
         "policy_signature": signature,
         "policy_epoch_id": policy_epoch_id,
         "base_policy_signature": base_signature or None,
         "base_policy_epoch_id": base_epoch or None,
+    }
+
+
+def dual_write_lane_decision(
+    source: Mapping[str, Any],
+    *,
+    lane: str,
+    policy_decision: str,
+    execution_disposition: str,
+    exact_reason: str,
+    epoch_id: str,
+    data_dir: str,
+    lane_policy: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist one immediate, causal per-lane verdict for every shared call.
+
+    A decision is evidence even when it correctly creates no order.  Keeping
+    this separate from ``order_intent`` prevents REJECT/disabled/filter paths
+    from disappearing or being misrepresented as zero-PnL trades.
+    """
+    lane_name = str(lane or "").strip().upper()
+    call_id = str(_first(source.get("shared_ai_call_id"), source.get("trade_id")) or "").strip()
+    if not lane_name or not call_id:
+        raise ValueError("V3_LANE_DECISION_IDENTITY_INCOMPLETE")
+    material = dict(source)
+    material.update(dict(lane_policy or {}))
+    material["research_lane"] = lane_name
+    event_id = f"lane-decision:{lane_name}:{call_id}"
+    identity = _causal_identity(event_id, material)
+    policy = _paper_policy_identity(str(epoch_id), material)
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    signal_ts = float(_first(
+        source.get("signal_ts"), source.get("shared_ai_call_ts_epoch"),
+        source.get("created_ts_ts"), 0,
+    ) or 0)
+    policy_decision = str(policy_decision or "UNKNOWN").strip().upper()
+    execution_disposition = str(execution_disposition or "UNKNOWN").strip().upper()
+    outcome_state = (
+        "REJECTED" if policy_decision in {"REJECT", "ERROR"}
+        else "NO_TRADE" if execution_disposition != "ORDER_ELIGIBLE"
+        else "CENSORED"
+    )
+    opportunity = store.append("opportunity", {
+        "record_id": f"opportunity:{identity['episode_id']}",
+        "episode_id": identity["episode_id"],
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "signal_ts": signal_ts,
+        "symbol": identity["symbol"],
+        "raw_direction": identity["raw_direction"],
+        "feature_snapshot_at_signal": source.get("feature_snapshot_at_signal") or {},
+        "grouping_basis": identity["grouping_basis"],
+        "collector_version": COLLECTOR_VERSION,
+    })
+    decision = store.append("decision", {
+        "record_id": f"decision:{identity['episode_id']}:{policy['policy_signature']}:LANE_POLICY_VERDICT",
+        "episode_id": identity["episode_id"],
+        "event_id": event_id,
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "decision_stage": "LANE_POLICY_VERDICT",
+        "research_lane": lane_name,
+        "policy_decision": policy_decision,
+        "execution_disposition": execution_disposition,
+        "outcome_state": outcome_state,
+        "exact_reason": str(exact_reason or "UNSPECIFIED"),
+        "executed_direction": identity["executed_direction"],
+        "raw_ai_decision": source.get("raw_ai_decision"),
+        "long_score": source.get("long_score"),
+        "short_score": source.get("short_score"),
+        "score_gap": source.get("score_gap"),
+        "paper_only": bool(material.get("paper_only", True)),
+        "relay_eligible": bool(material.get("relay_eligible", False)),
+        "order_intent_expected": execution_disposition == "ORDER_ELIGIBLE",
+        **policy,
+    })
+    return {
+        "schema": "v3_lane_decision_receipt_v1",
+        "epoch_id": str(epoch_id),
+        **identity,
+        "writes": [opportunity, decision],
+        "store_verification": store.verify(),
     }
 
 

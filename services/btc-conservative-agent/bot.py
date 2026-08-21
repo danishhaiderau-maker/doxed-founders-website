@@ -172,7 +172,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import dual_write_lane_decision, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
 from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -14335,6 +14335,98 @@ def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
     )
 
 
+def _write_v3_shared_lane_decision(
+    lane: str,
+    ai: dict,
+    ctx: dict,
+    features: dict,
+    *,
+    policy_decision: str,
+    execution_disposition: str,
+    exact_reason: str,
+) -> None:
+    """Write the lane verdict even when it correctly creates no order."""
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
+    if not call_id:
+        logger.error(
+            f"[COLLECTOR_V3] lane decision missing shared identity lane={lane} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return
+    call_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
+    try:
+        signal_ts = datetime.fromisoformat(str(call_ts).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        signal_ts = float((ctx or {}).get("created_ts_ts") or time.time())
+    raw_direction = str(
+        (ai or {}).get("raw_direction")
+        or (ai or {}).get("candidate_direction")
+        or (ai or {}).get("direction")
+        or "UNKNOWN"
+    ).upper()
+    executed_direction = raw_direction
+    if invert_signal_active():
+        if raw_direction == "LONG":
+            executed_direction = "SHORT"
+        elif raw_direction == "SHORT":
+            executed_direction = "LONG"
+    spec = dict(COMBO_LANE_SPECS.get(lane) or {})
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        entry_limit_policy = DETERMINISTIC_ENTRY_POLICY_VERSION
+        entry_offset_fraction = DETERMINISTIC_ENTRY_OFFSET_PCT
+    else:
+        entry_limit_policy = spec.get("combo_key")
+        entry_offset_fraction = (
+            float(spec.get("entry_offset_pct")) / 100.0
+            if spec.get("entry_offset_pct") is not None
+            else None
+        )
+    lane_policy = {
+        "policy_id": spec.get("raw_policy_id") or lane,
+        "raw_policy_id": spec.get("raw_policy_id") or lane,
+        "deterministic_entry_offset_pct": entry_offset_fraction,
+        "entry_limit_policy": entry_limit_policy,
+        "exit_config": get_exit_config_for_lane(lane),
+        "paper_only": True,
+        "relay_eligible": False,
+    }
+    factors = (ai or {}).get("factors") or {}
+    long_score = (ai or {}).get("long_score", factors.get("long_score"))
+    short_score = (ai or {}).get("short_score", factors.get("short_score"))
+    try:
+        score_gap = abs(int(long_score or 0) - int(short_score or 0))
+    except (TypeError, ValueError):
+        score_gap = None
+    try:
+        dual_write_lane_decision(
+            {
+                "trade_id": call_id,
+                "shared_ai_call_id": call_id,
+                "shared_ai_call_ts_epoch": signal_ts,
+                "symbol": (ctx or {}).get("symbol") or (ctx or {}).get("pair") or SYMBOL,
+                "raw_direction": raw_direction,
+                "executed_direction": executed_direction,
+                "raw_ai_decision": (ai or {}).get("raw_decision") or (ai or {}).get("decision"),
+                "long_score": long_score,
+                "short_score": short_score,
+                "score_gap": score_gap,
+                "feature_snapshot_at_signal": copy.deepcopy(features or {}),
+            },
+            lane=lane,
+            policy_decision=policy_decision,
+            execution_disposition=execution_disposition,
+            exact_reason=exact_reason,
+            epoch_id=_collector_v22_epoch_id(),
+            data_dir=os.getcwd(),
+            lane_policy=lane_policy,
+        )
+    except Exception as exc:
+        logger.error(
+            f"[COLLECTOR_V3] lane decision write failed lane={lane} call_id={call_id} "
+            f"error={exc} [PIPELINE ENFORCEMENT]"
+        )
+
+
 def _type_b_research_v2_mode() -> str:
     if manual_admin_pause_active():
         return "PAUSED_SHADOW"
@@ -16339,7 +16431,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
     lanes are excluded. Shared Type B is routed explicitly from the same completed
     AI result so it keeps a separate policy and order book without a duplicate call.
     """
-    if not is_ai_scan_lane(source_lane) or ai.get("decision") != "APPROVE":
+    if not is_ai_scan_lane(source_lane) or not ai:
         return
     if not is_research_data_collection():
         return
@@ -16367,6 +16459,29 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         detail = combo_lane_match_detail(
             lane, ai, final_direction, spread, features=enriched,
         )
+        ai_accepted = str(ai.get("decision") or "").upper() == "APPROVE"
+        lane_enabled = is_research_lane_enabled(lane)
+        policy_accepted = ai_accepted and bool(detail.get("passes"))
+        if not ai_accepted:
+            disposition = "AI_REJECTED_NO_ORDER"
+            decision_reason = f"AI_{str(ai.get('decision') or 'REJECT').upper()}"
+        elif not detail.get("passes"):
+            disposition = "POLICY_FILTERED_NO_ORDER"
+            decision_reason = detail.get("block_reason") or "COMBO_FILTER"
+        elif not lane_enabled:
+            disposition = "LANE_DISABLED_NO_ORDER"
+            decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
+        else:
+            disposition = "ORDER_ELIGIBLE"
+            decision_reason = "SHARED_AI_APPROVE_AND_POLICY_PASS"
+        _write_v3_shared_lane_decision(
+            lane, ai, ctx, enriched,
+            policy_decision="ACCEPT" if policy_accepted else "REJECT",
+            execution_disposition=disposition,
+            exact_reason=decision_reason,
+        )
+        if not ai_accepted:
+            continue
         if not detail.get("passes"):
             br = detail.get("block_reason") or "COMBO_FILTER"
             log_lane_opportunity_event(
@@ -16601,6 +16716,24 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         continuous_reason,
         score=abs(long_score - short_score),
         policy_version="continuous_shared_direction_gap_v1",
+    )
+    if continuous_accept and orders_on:
+        v3_disposition = "ORDER_ELIGIBLE"
+        v3_reason = continuous_reason
+    elif continuous_accept:
+        v3_disposition = "LANE_DISABLED_DATA_ONLY"
+        v3_reason = "CONTINUOUS_TOGGLE_OFF_DATA_ONLY"
+    else:
+        v3_disposition = "POLICY_REJECTED_NO_ORDER"
+        v3_reason = continuous_reason
+    _write_v3_shared_lane_decision(
+        RESEARCH_LANE_CONTINUOUS,
+        continuous_ai,
+        spawn_ctx,
+        features or {},
+        policy_decision="ACCEPT" if continuous_accept else "REJECT",
+        execution_disposition=v3_disposition,
+        exact_reason=v3_reason,
     )
     if r2_floor_blocked:
         return
