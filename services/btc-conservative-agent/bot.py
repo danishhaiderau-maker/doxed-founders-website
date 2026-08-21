@@ -7667,6 +7667,45 @@ def stamp_signal_policy_identity(signal: dict, *, raw_direction, executed_direct
     return identity
 
 
+def _shadow_policy_identity(*, research_lane, policy_version, exit_config, invert_on: bool) -> dict:
+    """Freeze the exact lane policy that generated a shadow observation."""
+    control_cell = dict(CONTROL_CELL)
+    control_cell["invert_on"] = bool(invert_on)
+    base = build_policy_identity(
+        epoch_id=_collector_v22_epoch_id(),
+        control_cell=control_cell,
+        invert_on=bool(invert_on),
+    )
+    lane = str(research_lane or "UNKNOWN").upper()
+    version = str(
+        policy_version
+        or ("continuous_shared_direction_gap_v1" if lane == RESEARCH_LANE_CONTINUOUS else "UNVERSIONED")
+    )
+    policy_spec = {
+        "schema": "shadow_policy_spec_v1",
+        "research_lane": lane,
+        "policy_version": version,
+        "invert_on": bool(invert_on),
+        "control_policy_signature": base["policy_signature"],
+        "exit_config": copy.deepcopy(exit_config),
+    }
+    material = json.dumps(policy_spec, sort_keys=True, separators=(",", ":"), default=str)
+    signature = "shadow-policy-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+    epoch_id = str(base["collection_epoch_id"])
+    policy_epoch_id = "shadow-policy-epoch-" + hashlib.sha256(
+        f"{epoch_id}|{signature}".encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "schema": "shadow_policy_identity_v1",
+        "collection_epoch_id": epoch_id,
+        "base_policy_id": base["base_policy_id"],
+        "control_policy_signature": base["policy_signature"],
+        "policy_signature": signature,
+        "policy_epoch_id": policy_epoch_id,
+        "policy_spec": policy_spec,
+    }
+
+
 def csv_research_meta(signal: dict = None) -> dict:
     """Columns written to research CSVs for analyzer version/exchange verification."""
     invert_on = False
@@ -15507,8 +15546,9 @@ def _spawn_lab_combo_shadow(
         return
     study_id = f"lab-{str(target_lane).lower()}-{uuid.uuid4().hex[:12]}"
     ai_dir = str((ai or {}).get("direction") or "LONG").upper()
+    invert_on = invert_signal_active()
     direction = ai_dir
-    if state.get("invert_signal", False):
+    if invert_on:
         if direction == "LONG":
             direction = "SHORT"
         elif direction == "SHORT":
@@ -15565,8 +15605,11 @@ def _spawn_lab_combo_shadow(
         policy_version=(
             _type_b_policy_version()
             if str(target_lane).upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
+            else "continuous_shared_direction_gap_v1"
+            if str(target_lane).upper() == RESEARCH_LANE_CONTINUOUS
             else None
         ),
+        invert_on=invert_on,
         size_mult=size_mult,
         session_bucket=enriched.get("session_bucket"),
         prompt_id=(ai or {}).get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
@@ -16340,6 +16383,13 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "is_counterfactual": bool(buf.get("is_counterfactual")),
         "policy_entered": not bool(buf.get("is_counterfactual")),
         "policy_version": buf.get("policy_version"),
+        "collection_epoch_id": buf.get("collection_epoch_id"),
+        "epoch_id": buf.get("collection_epoch_id"),
+        "base_policy_id": buf.get("base_policy_id"),
+        "control_policy_signature": buf.get("control_policy_signature"),
+        "policy_signature": buf.get("policy_signature"),
+        "policy_epoch_id": buf.get("policy_epoch_id"),
+        "policy_identity": copy.deepcopy(buf.get("policy_identity") or {}),
         "executed": False,
         "direction": buf.get("direction"),
         "exit_config": buf.get("exit_config"),
@@ -38010,6 +38060,17 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
         protective_exit="REDUCE_ONLY_STOP",
     )
     fill_stamps = _fill_replay_3m_stamps(None, meta.get("entry_features") or meta)
+    policy_version = meta.get("policy_version")
+    invert_on = bool(meta.get("invert_on", False))
+    policy_identity = meta.get("policy_identity")
+    if not isinstance(policy_identity, dict) and str(meta.get("lane") or "").startswith("shadow_collect_"):
+        policy_identity = _shadow_policy_identity(
+            research_lane=meta.get("research_lane"),
+            policy_version=policy_version,
+            exit_config=meta.get("exit_config"),
+            invert_on=invert_on,
+        )
+    policy_identity = copy.deepcopy(policy_identity or {})
     with replay_lock:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
             return
@@ -38039,7 +38100,13 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "shared_ai_call_ts": meta.get("shared_ai_call_ts"),
             "collection_mode": meta.get("collection_mode"),
             "is_counterfactual": bool(meta.get("is_counterfactual")),
-            "policy_version": meta.get("policy_version"),
+            "policy_version": policy_version,
+            "collection_epoch_id": policy_identity.get("collection_epoch_id"),
+            "base_policy_id": policy_identity.get("base_policy_id"),
+            "control_policy_signature": policy_identity.get("control_policy_signature"),
+            "policy_signature": policy_identity.get("policy_signature"),
+            "policy_epoch_id": policy_identity.get("policy_epoch_id"),
+            "policy_identity": policy_identity,
             "fee_model": fee_model,
             "execution_profile": execution_profile,
             "size_mult": meta.get("size_mult"),
