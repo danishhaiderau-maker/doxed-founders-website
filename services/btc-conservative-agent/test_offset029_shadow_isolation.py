@@ -29,6 +29,37 @@ def _load_function(path: Path, name: str, env: dict):
     return env[name]
 
 
+def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
+    protection_view = _load_function(
+        BOT,
+        "_position_protection_view",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
+            "_buf_float": lambda value, default=0.0: float(value or default),
+        },
+    )
+
+    patient = protection_view({
+        "research_lane": "OFFSET_029_ATR_TP_25",
+        "sl": 77_936.13,
+    })
+    assert patient == {
+        "sl": None,
+        "sl_enforced": False,
+        "stop_policy": "NONE_TP_ONLY_RESEARCH",
+    }
+
+    continuous = protection_view({"research_lane": "CONTINUOUS", "sl": 77_936.13})
+    assert continuous["sl"] == 77_936.13
+    assert continuous["sl_enforced"] is True
+    assert continuous["stop_policy"] == "PHASE_STOP_POLICY"
+
+    paper_book = _function_source(BOT, "build_paper_order_book")
+    relay_view = _function_source(BOT, "_relay_position_row_lite")
+    assert paper_book.count("_position_protection_view(") >= 2
+    assert "_position_protection_view(row)" in relay_view
+
+
 def test_paused_offset_is_cancelled_not_shadow_replayed():
     process = _function_source(BOT, "process_signal")
     spawn = _function_source(BOT, "_spawn_combo_lane")

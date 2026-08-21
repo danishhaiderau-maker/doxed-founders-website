@@ -31932,6 +31932,26 @@ def _last_fill_ts() -> float:
         return 0.0
 
 
+def _position_protection_view(row: dict) -> dict:
+    """Expose the protection that the selected exit branch actually enforces."""
+    row = row if isinstance(row, dict) else {}
+    lane = str(row.get("research_lane") or "").upper()
+    if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        # Patient Chase is deliberately a TP-only paper experiment. Its
+        # internal SL-shaped reference exists only for generic persistence and
+        # close validation; the Patient exit branch never consults it.
+        return {
+            "sl": None,
+            "sl_enforced": False,
+            "stop_policy": "NONE_TP_ONLY_RESEARCH",
+        }
+    return {
+        "sl": row.get("sl"),
+        "sl_enforced": bool(_buf_float(row.get("sl"), 0.0) > 0),
+        "stop_policy": "PHASE_STOP_POLICY",
+    }
+
+
 def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
     """Per-leg paper order book — the accounting ledger that Bitfinex live cannot
     give us once it merges multiple small orders into one netted position.
@@ -31955,6 +31975,7 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
     for p in open_copy:
         if not isinstance(p, dict):
             continue
+        protection_view = _position_protection_view(p)
         entry = float(p.get("entry") or 0)
         qty = float(p.get("qty") or 0)
         lev = int(p.get("leverage") or _state_leverage())
@@ -31974,7 +31995,9 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
             "qty": qty,
             "entry_price": entry,
             "current_price": mark,
-            "sl": p.get("sl"),
+            "sl": protection_view["sl"],
+            "sl_enforced": protection_view["sl_enforced"],
+            "stop_policy": protection_view["stop_policy"],
             "tp": p.get("tp"),
             "leverage": lev,
             "entry_ts": p.get("entry_ts"),
@@ -31991,6 +32014,7 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
     for o in pending_copy:
         if not isinstance(o, dict):
             continue
+        protection_view = _position_protection_view(o)
         legs.append({
             "leg_id": o.get("trade_id"),
             "trade_id": o.get("trade_id"),
@@ -31999,7 +32023,9 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
             "qty": float(o.get("qty") or 0),
             "entry_price": None,
             "current_price": price,
-            "sl": o.get("sl"),
+            "sl": protection_view["sl"],
+            "sl_enforced": protection_view["sl_enforced"],
+            "stop_policy": protection_view["stop_policy"],
             "tp": o.get("tp"),
             "leverage": int(o.get("leverage") or _state_leverage()),
             "entry_ts": None,
@@ -32238,6 +32264,7 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
     """Open position truth required by flatness, mirror, and exit checks."""
     if not isinstance(row, dict):
         return {}
+    protection_view = _position_protection_view(row)
     out = {
         "trade_id": row.get("trade_id"),
         "status": row.get("status"),
@@ -32245,7 +32272,9 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "side": row.get("side") or row.get("dir"),
         "entry": row.get("entry"),
         "qty": row.get("qty"),
-        "sl": row.get("sl"),
+        "sl": protection_view["sl"],
+        "sl_enforced": protection_view["sl_enforced"],
+        "stop_policy": protection_view["stop_policy"],
         "tp": row.get("tp"),
         "leverage": row.get("leverage"),
         "funding_fees": row.get("funding_fees"),
