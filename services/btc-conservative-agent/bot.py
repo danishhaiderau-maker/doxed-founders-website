@@ -14477,8 +14477,17 @@ def _write_v3_shared_lane_decision(
         "entry_limit_policy": entry_limit_policy,
         "exit_config": get_exit_config_for_lane(lane),
         "paper_only": True,
-        "relay_eligible": False,
+        "relay_eligible": bool(spec.get("platform_relay_eligible", lane == RESEARCH_LANE_CONTINUOUS)),
     }
+    base_control = dict(CONTROL_CELL)
+    base_control["invert_on"] = bool(invert_signal_active())
+    base_identity = build_policy_identity(
+        epoch_id=_collector_v22_epoch_id(),
+        control_cell=base_control,
+        invert_on=bool(base_control["invert_on"]),
+    )
+    lane_policy["policy_signature"] = base_identity["policy_signature"]
+    lane_policy["policy_epoch_id"] = base_identity["policy_epoch_id"]
     factors = (ai or {}).get("factors") or {}
     long_score = (ai or {}).get("long_score", factors.get("long_score"))
     short_score = (ai or {}).get("short_score", factors.get("short_score"))

@@ -116,6 +116,38 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["status"], "V3_EPOCH_CONTAMINATION_BLOCKED")
             self.assertIn("CAUSAL_IDENTITY_ALIAS_EXCLUDED", report["blockers"])
 
+    def test_report_blocks_shared_call_split_by_symbol_alias(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            for suffix, symbol in (("venue", "TBTCF0:USTF0"), ("generic", "BTCUSD")):
+                store.append("opportunity", {
+                    "record_id": f"o-{suffix}", "episode_id": f"episode-{suffix}",
+                    "signal_ts": 1000.0, "symbol": symbol, "raw_direction": "LONG",
+                    "grouping_basis": "SHARED_AI_CALL", "shared_ai_call_id": "scan-same",
+                })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["collection"]["independent_opportunities"], 1)
+            self.assertEqual(report["epoch_scope"]["excluded_identity_alias_rows"], 1)
+            self.assertIn("CAUSAL_IDENTITY_ALIAS_EXCLUDED", report["blockers"])
+
+    def test_report_blocks_same_episode_policy_with_two_signatures(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            store.append("decision", {
+                "record_id": "d-1", "episode_id": "episode-1", "decision_stage": "LANE_POLICY_VERDICT",
+                "policy_id": "PATIENT", "policy_signature": "sig-decision", "policy_epoch_id": "pe-1",
+            })
+            store.append("order_intent", {
+                "record_id": "i-1", "episode_id": "episode-1", "event_id": "event-1",
+                "policy_id": "PATIENT", "policy_signature": "sig-order", "policy_epoch_id": "pe-2",
+            })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertTrue(report["epoch_scope"]["policy_signature_divergence"])
+            self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+
     def test_report_blocks_two_policy_ids_sharing_one_signature(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             store = V3EvidenceStore(data, epoch_id="epoch-v3")

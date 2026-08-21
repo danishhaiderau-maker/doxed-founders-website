@@ -66,18 +66,44 @@ def _select_current_epoch(opportunities: list[dict[str, Any]], cutoff: float | N
 
 def _exclude_identity_aliases(opportunities: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Prefer the causal shared-ID row when an enrichment retry minted a fallback alias."""
-    grouped: dict[tuple[float, str, str], list[dict[str, Any]]] = {}
-    for row in opportunities:
+    parents = list(range(len(opportunities)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left, right = find(left), find(right)
+        if left != right:
+            parents[right] = left
+
+    first_by_shared: dict[str, int] = {}
+    first_by_fingerprint: dict[tuple[float, str, str], int] = {}
+    for index, row in enumerate(opportunities):
+        shared = str(row.get("shared_ai_call_id") or "").strip()
+        if shared:
+            if shared in first_by_shared:
+                union(index, first_by_shared[shared])
+            else:
+                first_by_shared[shared] = index
         try:
             signal_ts = float(row.get("signal_ts"))
         except (TypeError, ValueError):
             signal_ts = -1.0
-        key = (
+        fingerprint = (
             signal_ts,
             str(row.get("symbol") or "").upper(),
             str(row.get("raw_direction") or "").upper(),
         )
-        grouped.setdefault(key, []).append(row)
+        if fingerprint in first_by_fingerprint:
+            union(index, first_by_fingerprint[fingerprint])
+        else:
+            first_by_fingerprint[fingerprint] = index
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for index, row in enumerate(opportunities):
+        grouped.setdefault(find(index), []).append(row)
     kept, excluded = [], []
     for rows in grouped.values():
         rows = sorted(
@@ -116,6 +142,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     observed_epochs = sorted({str(row.get("epoch_id")) for row in all_opportunities if row.get("epoch_id")})
     excluded_opportunities = len(all_opportunities) - len(opportunities)
     policy_ids_by_signature: dict[str, set[str]] = {}
+    signatures_by_episode_policy: dict[tuple[str, str], set[str]] = {}
     missing_policy_identity_rows = 0
     immediate_lane_decisions = [
         row for row in decisions
@@ -129,12 +156,23 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             missing_policy_identity_rows += 1
             continue
         policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
+        signatures_by_episode_policy.setdefault(
+            (str(row.get("episode_id") or ""), policy_id), set()
+        ).add(signature)
     policy_signature_collisions = {
         signature: sorted(policy_ids)
         for signature, policy_ids in policy_ids_by_signature.items()
         if len(policy_ids) > 1
     }
-    policy_identity_contamination = bool(policy_signature_collisions or missing_policy_identity_rows)
+    policy_signature_divergence = {
+        f"{episode_id}:{policy_id}": sorted(signatures)
+        for (episode_id, policy_id), signatures in signatures_by_episode_policy.items()
+        if len(signatures) > 1
+    }
+    policy_identity_contamination = bool(
+        policy_signature_collisions or policy_signature_divergence
+        or missing_policy_identity_rows
+    )
     contamination = bool(
         excluded_opportunities or identity_aliases or len(observed_epochs) > 1
         or policy_identity_contamination
@@ -194,6 +232,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
             "missing_policy_identity_rows": missing_policy_identity_rows,
             "policy_signature_collisions": policy_signature_collisions,
+            "policy_signature_divergence": policy_signature_divergence,
             "contamination_detected": contamination,
         },
         "collection": {

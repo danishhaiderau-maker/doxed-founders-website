@@ -33,6 +33,37 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_shared_call_episode_is_stable_across_symbol_enrichment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = dual_write_lane_decision(
+                {
+                    "trade_id": "scan-symbol-alias", "shared_ai_call_id": "scan-symbol-alias",
+                    "shared_ai_call_ts_epoch": 1000, "symbol": "tBTCF0:USTF0",
+                    "raw_direction": "LONG", "executed_direction": "LONG",
+                },
+                lane="OFFSET_029_ATR_TP_25", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "PATIENT", "paper_only": True},
+            )
+            submit = dual_write_paper_order_intent(
+                {
+                    "trade_id": "patient-child", "created_ts": 1001,
+                    "signal_dir": "LONG", "limit_price": 99.71, "qty": 0.1,
+                    "research_lane": "OFFSET_029_ATR_TP_25", "paper_only": True,
+                },
+                {
+                    "trade_id": "patient-child", "shared_ai_call_id": "scan-symbol-alias",
+                    "created_ts_ts": 1000, "symbol": "BTCUSD", "raw_direction": "LONG",
+                    "research_lane": "OFFSET_029_ATR_TP_25", "policy_id": "PATIENT",
+                    "paper_only": True,
+                },
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            self.assertEqual(decision["episode_id"], submit["episode_id"])
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertEqual(store.verify()["ledger_counts"]["opportunity"], 1)
+
     def test_shared_call_records_independent_lane_decisions_without_duplicate_opportunity(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = {

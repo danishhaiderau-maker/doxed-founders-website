@@ -40,7 +40,11 @@ def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, An
     executed_direction = str(_first(*(source.get("executed_direction") or source.get("final_direction") or source.get("signal_dir") or source.get("dir") for source in sources)) or "UNKNOWN").upper()
     raw_direction = raw_direction or executed_direction
     if shared:
-        causal_key = f"shared:{symbol}:{raw_direction}:{shared}"
+        # A shared AI call is the causal unit.  Symbol spellings may be
+        # enriched later (for example BTCUSD -> tBTCF0:USTF0), and direction
+        # treatments may differ by lane.  Neither is allowed to mint a second
+        # episode for the same call.
+        causal_key = f"shared:{shared}"
         episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
         grouping_basis = "SHARED_AI_CALL"
     else:
@@ -277,7 +281,7 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
             "writes": [],
         }
     if shared:
-        causal_key = f"shared:{symbol}:{direction}:{shared}"
+        causal_key = f"shared:{shared}"
         grouping_basis = "SHARED_AI_CALL"
         episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
     else:
@@ -331,7 +335,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     identity_symbol = str(_first(record.get("symbol"), record.get("pair"), envelope.get("symbol"), "BTCUSD")).upper()
     identity_direction = str(_first(envelope.get("raw_direction"), record.get("raw_direction"), record.get("direction"), "UNKNOWN")).upper()
     if shared_ai_call_id:
-        causal_key = f"shared:{identity_symbol}:{identity_direction}:{shared_ai_call_id}"
+        causal_key = f"shared:{shared_ai_call_id}"
         episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
     else:
         episode_id = stable_episode_id

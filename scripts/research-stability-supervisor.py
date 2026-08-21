@@ -249,18 +249,41 @@ def read_v3_evidence(mirror: Path) -> dict[str, Any]:
                     else:
                         provisional += 1
         counts[name] = len(rows)
-    causal_groups: dict[tuple[float, str, str], list[dict[str, Any]]] = {}
-    for row in opportunity_rows:
+    parents = list(range(len(opportunity_rows)))
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+    def union(left: int, right: int) -> None:
+        left, right = find(left), find(right)
+        if left != right:
+            parents[right] = left
+    first_by_shared: dict[str, int] = {}
+    first_by_fingerprint: dict[tuple[float, str, str], int] = {}
+    for index, row in enumerate(opportunity_rows):
+        shared = str(row.get("shared_ai_call_id") or "").strip()
+        if shared:
+            if shared in first_by_shared:
+                union(index, first_by_shared[shared])
+            else:
+                first_by_shared[shared] = index
         try:
             signal_ts = float(row.get("signal_ts"))
         except (TypeError, ValueError):
             signal_ts = -1.0
-        key = (
+        fingerprint = (
             signal_ts,
             str(row.get("symbol") or "").upper(),
             str(row.get("raw_direction") or "").upper(),
         )
-        causal_groups.setdefault(key, []).append(row)
+        if fingerprint in first_by_fingerprint:
+            union(index, first_by_fingerprint[fingerprint])
+        else:
+            first_by_fingerprint[fingerprint] = index
+    causal_groups: dict[int, list[dict[str, Any]]] = {}
+    for index, row in enumerate(opportunity_rows):
+        causal_groups.setdefault(find(index), []).append(row)
     identity_aliases = []
     for rows in causal_groups.values():
         if len(rows) <= 1:
