@@ -359,34 +359,32 @@ if ($PublishAnalyzerReport) {
   if (-not (Test-Path -LiteralPath $reportManifestPath)) {
     throw "Analyzer report manifest does not exist: $reportManifestPath"
   }
-  $reportManifest = Get-Content -LiteralPath $reportManifestPath -Raw | ConvertFrom-Json
+  $reportManifestRaw = Get-Content -LiteralPath $reportManifestPath -Raw
+  $reportManifest = $reportManifestRaw | ConvertFrom-Json
   if ([string]$reportManifest.schema -ne "report_manifest_v1") {
     throw "Unsupported analyzer report manifest schema: $($reportManifest.schema)"
   }
   # PowerShell 7 converts ISO JSON timestamps to System.DateTime. Casting that
-  # value to string uses the desktop locale (for example 08/21/2026), which a
-  # different culture may reject even though the source timestamp was valid.
-  # Preserve the instant first, then emit one invariant round-trip value.
-  $analyzerGeneratedAtRaw = $reportManifest.generated_at
-  $analyzerGeneratedAtValue = [DateTimeOffset]::MinValue
-  if ($analyzerGeneratedAtRaw -is [DateTimeOffset]) {
-    $analyzerGeneratedAtValue = [DateTimeOffset]$analyzerGeneratedAtRaw
-  } elseif ($analyzerGeneratedAtRaw -is [DateTime]) {
-    $analyzerGeneratedAtValue = [DateTimeOffset]([DateTime]$analyzerGeneratedAtRaw)
-  } else {
-    $analyzerGeneratedAtText = [string]$analyzerGeneratedAtRaw
-    if (-not [DateTimeOffset]::TryParse(
-      $analyzerGeneratedAtText,
-      [Globalization.CultureInfo]::InvariantCulture,
-      [Globalization.DateTimeStyles]::RoundtripKind,
-      [ref]$analyzerGeneratedAtValue
-    )) {
-      throw "Analyzer report manifest generated_at is invalid: $analyzerGeneratedAtText"
-    }
-  }
-  $analyzerGeneratedAt = $analyzerGeneratedAtValue.ToUniversalTime().ToString(
-    "o", [Globalization.CultureInfo]::InvariantCulture
+  # value to string uses the desktop locale and also loses the exact JSON
+  # spelling that the Fly bundle validator binds to the source manifest. Read
+  # the first (top-level) unescaped ISO value from the original bytes instead.
+  $generatedAtMatch = [regex]::Match(
+    $reportManifestRaw,
+    '"generated_at"\s*:\s*"(?<value>[^"\\]+)"'
   )
+  if (-not $generatedAtMatch.Success) {
+    throw "Analyzer report manifest generated_at is missing or escaped."
+  }
+  $analyzerGeneratedAt = $generatedAtMatch.Groups['value'].Value
+  $analyzerGeneratedAtValue = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse(
+    $analyzerGeneratedAt,
+    [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::RoundtripKind,
+    [ref]$analyzerGeneratedAtValue
+  )) {
+    throw "Analyzer report manifest generated_at is invalid."
+  }
   # generated_at identifies the beginning of the analyzer cycle; the manifest
   # is its commit marker and may legitimately be written several minutes later
   # after the policy grid and dashboard are rendered. Bound that duration and

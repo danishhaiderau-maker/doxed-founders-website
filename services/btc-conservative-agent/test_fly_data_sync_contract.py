@@ -34,9 +34,10 @@ ATOMIC_HELPER = ROOT.parents[1] / "scripts" / "fly-mirror-atomic.ps1"
 
 def test_analyzer_manifest_timestamp_is_canonicalized_before_publication():
     assert "$analyzerGeneratedAt = [string]$reportManifest.generated_at" not in SYNC_SCRIPT
-    assert "$analyzerGeneratedAtRaw = $reportManifest.generated_at" in SYNC_SCRIPT
-    assert "$analyzerGeneratedAtRaw -is [DateTime]" in SYNC_SCRIPT
-    assert "$analyzerGeneratedAtValue.ToUniversalTime().ToString(" in SYNC_SCRIPT
+    assert "$reportManifestRaw = Get-Content -LiteralPath $reportManifestPath -Raw" in SYNC_SCRIPT
+    assert "$generatedAtMatch = [regex]::Match(" in SYNC_SCRIPT
+    assert "$analyzerGeneratedAt = $generatedAtMatch.Groups['value'].Value" in SYNC_SCRIPT
+    assert "[DateTimeOffset]::TryParse(" in SYNC_SCRIPT
     assert "[Globalization.CultureInfo]::InvariantCulture" in SYNC_SCRIPT
     assert "$analyzerCommittedAtValue = [DateTimeOffset]$reportManifestItem.LastWriteTimeUtc" in SYNC_SCRIPT
     assert "$analyzerGeneratedAtValue.AddMinutes(30)" in SYNC_SCRIPT
