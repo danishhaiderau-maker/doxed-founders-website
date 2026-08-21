@@ -49,6 +49,7 @@ def _load_bot_functions(*names):
     ]
     namespace = {
         "Path": Path,
+        "os": os,
         "time": time,
         "_DATA_SYNC_EXTENSIONS": frozenset(
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
@@ -194,6 +195,79 @@ def test_serialized_jsonl_writer_targets_are_append_prefix_eligible(tmp_path):
     assert namespace["_data_sync_consistency_mode"](
         tmp_path / "unregistered.jsonl"
     ) == "strict_generation_v1"
+
+
+def test_signal_snapshot_rewrite_stays_strict_even_when_append_registered(tmp_path):
+    namespace = _load_bot_functions("_data_sync_consistency_mode")
+    target = (tmp_path / "signal_snapshot.jsonl").resolve()
+    namespace["SIGNAL_SNAPSHOT_FILE"] = str(target)
+    namespace["_jsonl_serialized_append_targets"] = {str(target)}
+    assert namespace["_data_sync_consistency_mode"](target) == "strict_generation_v1"
+
+
+def test_signal_snapshot_patch_and_append_share_the_canonical_path_lock():
+    patch_body = BOT[
+        BOT.index("def patch_signal_snapshot_outcome("):
+        BOT.index("def log_signal_snapshot(")
+    ]
+    assert "with _jsonl_path_lock(SIGNAL_SNAPSHOT_FILE), signal_snapshot_lock:" in patch_body
+
+
+def test_signal_snapshot_concurrent_append_survives_outcome_patch(tmp_path):
+    tree = ast.parse(BOT)
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "patch_signal_snapshot_outcome"
+    )
+    target = tmp_path / "signal_snapshot.jsonl"
+    target.write_text('{"trade_id":"first","executed":false}\n', encoding="utf-8")
+    path_lock = threading.RLock()
+    replacement_started = threading.Event()
+
+    def atomic_replace(path, write_fn, _file_lock, _label):
+        temp = str(path) + ".test.tmp"
+        with open(temp, "w", encoding="utf-8") as handle:
+            write_fn(handle)
+        replacement_started.set()
+        time.sleep(0.05)
+        os.replace(temp, path)
+        return True
+
+    namespace = {
+        "os": os,
+        "json": json,
+        "time": time,
+        "SIGNAL_SNAPSHOT_FILE": str(target),
+        "signal_snapshot_lock": threading.RLock(),
+        "_jsonl_path_lock": lambda _path: path_lock,
+        "_atomic_file_replace": atomic_replace,
+        "logger": SimpleNamespace(error=lambda *_args: None, warning=lambda *_args: None),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    patch_thread = threading.Thread(
+        target=namespace["patch_signal_snapshot_outcome"],
+        args=("first",),
+        kwargs={"executed": True},
+    )
+
+    def append_second():
+        assert replacement_started.wait(1)
+        with path_lock, target.open("a", encoding="utf-8") as handle:
+            handle.write('{"trade_id":"second","executed":false}\n')
+
+    append_thread = threading.Thread(target=append_second)
+    patch_thread.start()
+    append_thread.start()
+    patch_thread.join(2)
+    append_thread.join(2)
+    assert not patch_thread.is_alive()
+    assert not append_thread.is_alive()
+    rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        {"trade_id": "first", "executed": True, "outcome": rows[0]["outcome"]},
+        {"trade_id": "second", "executed": False},
+    ]
 
 
 def test_every_static_serialized_jsonl_target_is_declared_before_first_write():

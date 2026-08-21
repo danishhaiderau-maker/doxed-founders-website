@@ -35226,10 +35226,19 @@ def _data_sync_consistency_mode(path: Path) -> str:
     rewrite those files in place. Runtime .log files are logging-handler-owned
     append streams; rotation changes the inode and is therefore still fenced.
     """
-    append_prefix = (
+    # Some ledgers use the serialized append helper for new rows but are also
+    # atomically rewritten when an outcome is patched.  They are not true
+    # append-only generations and must retain the full inode/mtime/size fence.
+    rewrite_targets = {
+        os.path.abspath(value)
+        for value in (globals().get("SIGNAL_SNAPSHOT_FILE"),)
+        if isinstance(value, str) and value
+    }
+    resolved = str(path.resolve())
+    append_prefix = resolved not in rewrite_targets and (
         path.suffix.lower() == ".log"
         or path.name in _DATA_SYNC_APPEND_PREFIX_NAMES
-        or str(path.resolve()) in globals().get("_jsonl_serialized_append_targets", set())
+        or resolved in globals().get("_jsonl_serialized_append_targets", set())
     )
     return "append_prefix_v1" if append_prefix else "strict_generation_v1"
 
@@ -36675,7 +36684,8 @@ def patch_signal_snapshot_outcome(
     if not trade_id or not os.path.exists(SIGNAL_SNAPSHOT_FILE):
         return
     try:
-        with signal_snapshot_lock:
+        # Serialize the entire read/modify/replace cycle with new-row appends.
+        with _jsonl_path_lock(SIGNAL_SNAPSHOT_FILE), signal_snapshot_lock:
             lines = []
             updated = False
             with open(SIGNAL_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
@@ -36838,7 +36848,9 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
                 "volume_ratio": feat.get("volume_ratio"),
                 "imbalance": feat.get("imbalance"),
             }
-        with signal_snapshot_lock:
+        # New snapshot rows and outcome patches share one path lock.  Without
+        # it, an append could race the read/replace cycle and be silently lost.
+        with _jsonl_path_lock(SIGNAL_SNAPSHOT_FILE), signal_snapshot_lock:
             _safe_append_jsonl(SIGNAL_SNAPSHOT_FILE, snapshot, label="SIGNAL_SNAPSHOT")
         logger.info(f"[SIGNAL_SNAPSHOT] trade_id={trade_id} dir={snapshot['direction']} price={fmt(price)} [PIPELINE ENFORCEMENT]")
     except Exception as e:
