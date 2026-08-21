@@ -32,6 +32,20 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_production_compact_ohlcv_rows_are_normalized_without_losing_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event("cont-compact")
+            event["canonical_tape"]["path_1m"] = [
+                [1787298900000.0, 76447.0, 76555.0, 76433.0, 76527.0, 0.46732612]
+            ]
+            receipt = dual_write_v22_record(event, data_dir=tmp)
+            self.assertTrue(receipt["store_verification"]["passed"])
+            files = list((Path(tmp) / "v3" / "market_segments").rglob("*.json"))
+            self.assertEqual(len(files), 1)
+            row = json.loads(files[0].read_text(encoding="utf-8"))["rows"][0]
+            self.assertEqual(row, {"t": 1787298900000.0, "o": 76447.0, "h": 76555.0,
+                                   "l": 76433.0, "c": 76527.0, "v": 0.46732612})
+
     def test_bot_wires_terminal_reconciliation_to_canonical_runtime_root(self):
         source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
         self.assertIn("v3_data_dir = os.getcwd()", source)

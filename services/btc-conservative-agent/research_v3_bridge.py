@@ -11,6 +11,22 @@ from research_v3_store import V3EvidenceStore
 from research_v3_contract import canonical_json
 
 
+_OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
+
+
+def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str, Any]]:
+    """Give compact production tape rows explicit, hash-stable field names."""
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if isinstance(row, Mapping):
+            normalized.append(dict(row))
+        elif timeframe == "1m" and isinstance(row, (list, tuple)) and len(row) >= 6:
+            normalized.append(dict(zip(_OHLCV_FIELDS, row[:6])))
+        else:
+            raise ValueError(f"UNSUPPORTED_CANONICAL_{timeframe.upper()}_ROW:{index}")
+    return normalized
+
+
 def _first(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
 
@@ -216,6 +232,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     symbol = str(_first((record.get("feature_snapshot_at_signal") or {}).get("symbol"), "BTCUSD"))
     segment_refs = []
     if path_1m:
+        path_1m = _normalize_market_rows(path_1m, timeframe="1m")
         segment_refs.append(store.put_market_segment(
             source="CANONICAL_1M", symbol=symbol, timeframe="1m",
             start_ts=float(_first(tape.get("canonical_tape_start"), signal_ts) or signal_ts),
@@ -223,6 +240,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             rows=path_1m,
         ))
     if ticks_1s:
+        ticks_1s = _normalize_market_rows(ticks_1s, timeframe="1s")
         times = [float(_first(row.get("t"), row.get("ts"), 0) or 0) for row in ticks_1s]
         segment_refs.append(store.put_market_segment(
             source="CANONICAL_1S", symbol=symbol, timeframe="1s",
