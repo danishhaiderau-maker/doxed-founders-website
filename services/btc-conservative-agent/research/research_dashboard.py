@@ -154,6 +154,7 @@ PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
+SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
@@ -1920,6 +1921,32 @@ def api_best_policy_research():
     return jsonify(_best_policy_research_payload())
 
 
+@app.route("/api/safe-policy-genome-v3")
+def api_safe_policy_genome_v3():
+    payload = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
+    if not payload:
+        payload = {
+            "schema": "safe_policy_genome_v3_report_v1",
+            "status": "V3_REPORT_NOT_GENERATED",
+            "qualification": "NO_SAFE_QUALIFIED_POLICY",
+            "number_one_strategy": None,
+            "live_policy_change_allowed": False,
+            "real_bitfinex_trading_allowed": False,
+            "collection": {},
+            "blockers": ["V3_REPORT_NOT_GENERATED"],
+        }
+    return jsonify(payload)
+
+
+@app.route("/safe-policy-genome-v3")
+def safe_policy_genome_v3_page():
+    return render_template_string("""
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Safe Policy Genome V3</title>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{max-width:1500px;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre{white-space:pre-wrap}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3 — Safe Policy Genome</h1><div id="banner" class="banner bad">Loading signed V3 report…</div><div id="grid" class="grid"></div><div class="card"><h2>Number one safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
+<script>fetch('/api/safe-policy-genome-v3').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Policies evaluated',s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search},null,2);});</script></body></html>
+""")
+
+
 @app.route("/api/conservative-fill-research")
 def api_conservative_fill_research():
     """Read-only descriptive receipts; never a policy qualification endpoint."""
@@ -3277,7 +3304,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="cohort-note"></p>
     <h2>Best Policy Research</h2>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
-    <p class="note"><a href="/static-policies">Static profitable-policy research</a> · <a href="/dynamic-policies">Dynamic market-regime research</a> · <a href="/shadow-research">Shadow and rejected-opportunity research</a></p>
+    <p class="note"><a href="/safe-policy-genome-v3">Safe Policy Genome V3</a> · <a href="/static-policies">Static profitable-policy research</a> · <a href="/dynamic-policies">Dynamic market-regime research</a> · <a href="/shadow-research">Shadow and rejected-opportunity research</a></p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>

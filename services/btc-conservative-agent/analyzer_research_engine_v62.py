@@ -109,6 +109,7 @@ RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
+SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -679,11 +680,13 @@ ANALYZER_JSON_REPORT_FILES = (
     SHOWCASE_LOSING_CLUSTER_REPORT_FILE,
     RESEARCH_HORIZON_MATURITY_REPORT_FILE,
     BEST_POLICY_RESEARCH_REPORT_FILE,
+    SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
+    ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
@@ -18884,6 +18887,7 @@ def write_report_manifest(payload=None):
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
         from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
+        from research.research_v3_report import build_safe_policy_genome_v3_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
@@ -18892,6 +18896,10 @@ def write_report_manifest(payload=None):
             report_dir=policy_report_dir,
         )
         build_shadow_lane_comprehensive_report(
+            data_dir=policy_data_dir,
+            report_dir=policy_report_dir,
+        )
+        build_safe_policy_genome_v3_report(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
         )
