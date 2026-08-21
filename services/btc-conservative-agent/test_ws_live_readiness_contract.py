@@ -19,6 +19,8 @@ from unittest import mock
 BOT_PATH = Path(__file__).with_name("bot.py")
 SOURCE = BOT_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(BOT_PATH))
+POSITION_REGISTRY_PATH = Path(__file__).with_name("position_registry.py")
+POSITION_REGISTRY_SOURCE = POSITION_REGISTRY_PATH.read_text(encoding="utf-8")
 FUNCTIONS = {
     node.name: node
     for node in TREE.body
@@ -1045,7 +1047,11 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         )
         self.assertLess(
             close.index("_maybe_bitfinex_close"),
-            close.index('pos["status"] = "CLOSED"'),
+            close.index("finalize_position_close"),
+        )
+        self.assertIn(
+            'position["status"] = "CLOSED"',
+            POSITION_REGISTRY_SOURCE,
         )
         self.assertIn('_disarm_live_control("BITFINEX_CLOSE_FAILED")', close)
         priorities = SOURCE[
