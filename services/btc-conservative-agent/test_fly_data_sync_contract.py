@@ -1155,6 +1155,16 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
         assert status.json["legacy_data_preserved"] is True
 
 
+def test_v3_normalized_ledgers_use_prefix_sync_but_segments_are_strict():
+    namespace = _load_bot_functions("_data_sync_consistency_mode")
+    namespace["_jsonl_serialized_append_targets"] = set()
+    namespace["SIGNAL_SNAPSHOT_FILE"] = "signal_snapshot.jsonl"
+    mode = namespace["_data_sync_consistency_mode"]
+    assert mode(Path("v3/ledgers/opportunity.jsonl")) == "append_prefix_v1"
+    assert mode(Path("v3/ledgers/lifecycle.jsonl")) == "append_prefix_v1"
+    assert mode(Path("v3/market_segments/ab/abcdef.json")) == "strict_generation_v1"
+
+
 if __name__ == "__main__":
     test_fly_runtime_cwd_is_volume_backed()
     test_incremental_sync_is_authenticated_and_chunk_verified()

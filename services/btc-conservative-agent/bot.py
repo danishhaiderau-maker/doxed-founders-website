@@ -25230,6 +25230,12 @@ def research_wipe_file_paths():
     ]
     paths.extend(v2_wipe_files())
     paths.extend(glob.glob(os.path.join("research", "genome", "*.jsonl")))
+    # V3 belongs to the active research epoch. The reset path first seals the
+    # archive and signals the desktop mirror to quarantine the old generation;
+    # only then may these normalized ledgers/segments be removed on Fly.
+    v3_root = Path("v3")
+    if v3_root.is_dir():
+        paths.extend(str(path) for path in v3_root.rglob("*") if path.is_file())
     return paths
 
 
@@ -35507,10 +35513,17 @@ def _data_sync_consistency_mode(path: Path) -> str:
         if isinstance(value, str) and value
     }
     resolved = str(path.resolve())
+    parts_lower = tuple(part.lower() for part in path.resolve().parts)
+    v3_append_only_ledger = (
+        len(parts_lower) >= 3
+        and parts_lower[-3:-1] == ("v3", "ledgers")
+        and path.suffix.lower() == ".jsonl"
+    )
     append_prefix = resolved not in rewrite_targets and (
         path.suffix.lower() == ".log"
         or path.name in _DATA_SYNC_APPEND_PREFIX_NAMES
         or resolved in globals().get("_jsonl_serialized_append_targets", set())
+        or v3_append_only_ledger
     )
     return "append_prefix_v1" if append_prefix else "strict_generation_v1"
 
