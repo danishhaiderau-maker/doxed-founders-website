@@ -58,6 +58,15 @@ def test_marketable_bbo_with_visible_depth_fills_without_aggressor_print():
     assert got["matching_aggressor_qty"] == 0
 
 
+def test_high_precision_requested_qty_is_not_rounded_into_dust_partial():
+    qty = 0.027490275315107282
+    rows = [row(100), row(101), row(102, ask=100, ask_qty=1)]
+    got = evaluate(rows, direction="LONG", requested_qty=qty, chase_schedule=schedule(end=103))
+    assert got["outcome"] == "FILL"
+    assert got["filled_qty"] == qty
+    assert got["remaining_qty"] == 0
+
+
 def test_thin_visible_depth_with_matching_aggressor_is_explicit_partial():
     rows = [row(100), row(101), row(102, ask=100, ask_qty=.25, sell_qty=.25, sell_vwap=100)]
     got = evaluate(rows, direction="LONG", requested_qty=1, chase_schedule=schedule(end=103))

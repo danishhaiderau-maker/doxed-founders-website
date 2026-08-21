@@ -549,6 +549,7 @@ def build_research_event(
     evaluation_ts: Optional[float] = None,
     requested_qty: Optional[float] = None,
     research_notional_usd: Optional[float] = STANDARD_RESEARCH_NOTIONAL_USD,
+    market_microstructure_symbol: Optional[str] = None,
     chase_schedule: Optional[Sequence[Mapping[str, Any]]] = None,
     chase_schedule_authoritative: bool = False,
 ) -> dict:
@@ -686,6 +687,10 @@ def build_research_event(
         "source_ticket_qty": exact_requested_qty,
         "standardized_notional_usd": standardized_notional if exact_requested_qty is None else None,
         "signal_price": float(signal_price),
+        "market_microstructure_symbol": (
+            str(market_microstructure_symbol).strip()
+            if market_microstructure_symbol else None
+        ),
         "exchange_qty_claim": exchange_qty_claim,
         "note": (
             "Exact source ticket quantity" if exchange_qty_claim else

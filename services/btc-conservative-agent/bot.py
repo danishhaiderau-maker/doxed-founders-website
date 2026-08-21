@@ -11957,6 +11957,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             feature_snapshot=feature_snapshot,
             evaluation_ts=time.time(),
             requested_qty=source.get("qty"),
+            market_microstructure_symbol=BITFINEX_WS_SYMBOL,
             chase_schedule=source.get("research_chase_schedule") or source.get("chase_schedule"),
             chase_schedule_authoritative=bool(source.get("chase_schedule_authoritative")),
         )
@@ -12157,6 +12158,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             feature_snapshot=feature_snapshot,
             evaluation_ts=time.time(),
             requested_qty=signal.get("qty"),
+            market_microstructure_symbol=BITFINEX_WS_SYMBOL,
             chase_schedule=signal.get("research_chase_schedule") or signal.get("chase_schedule"),
             chase_schedule_authoritative=bool(signal.get("chase_schedule_authoritative")),
         )

@@ -274,9 +274,14 @@ def evaluate_limit_fill(
     receipt["diagnostics"] = {**counters, "evidence_bucket_count": len(by_ts), "schedule_bucket_count": len(expected_ts)}
     if best_partial is not None:
         interval = best_partial["interval"]
-        filled = round(float(best_partial["filled"]), 12)
+        filled_raw = float(best_partial["filled"])
+        is_full = filled_raw >= qty
+        # Preserve exact requested quantity for a full fill. Rounding first can
+        # turn an exact min(qty, visible) result into a fictitious dust partial
+        # when requested_qty has more than twelve decimal places.
+        filled = qty if is_full else round(filled_raw, 12)
         receipt.update({
-            "outcome": "FILL" if filled >= qty else "PARTIAL_FILL",
+            "outcome": "FILL" if is_full else "PARTIAL_FILL",
             "supported": True,
             "filled_qty": filled,
             "remaining_qty": round(max(0.0, qty - filled), 12),
@@ -290,7 +295,7 @@ def evaluate_limit_fill(
             "matching_aggressor_qty": best_partial["aggressor"],
             "aggressor_corroborated": bool(best_partial["aggressor"] > 0),
             "fill_price": interval["limit_price"],
-            "negative_reasons": [] if filled >= qty else ["PARTIAL_ONLY_INSUFFICIENT_PROVABLE_QTY"],
+            "negative_reasons": [] if is_full else ["PARTIAL_ONLY_INSUFFICIENT_PROVABLE_QTY"],
         })
         return receipt
 
