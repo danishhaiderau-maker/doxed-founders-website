@@ -1738,23 +1738,26 @@ def api_status():
 
 
 def _read_research_events_v22() -> list[dict]:
-    """Read the freshest local mirror. A malformed line is never evidence."""
+    """Read the freshest mirror without locking it during JSON parsing."""
     candidates = [path for path in _data_file_candidates(RESEARCH_EVENTS_FILE) if path.is_file()]
     if not candidates:
         return []
     path = max(candidates, key=lambda item: item.stat().st_mtime)
     rows = []
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
+        # Close the Windows source handle before parsing a large ledger. The
+        # dashboard may receive overlapping refresh requests; retaining the
+        # handle during JSON decoding can otherwise starve atomic mirror sync.
+        payload = path.read_bytes()
     except OSError:
         return []
+    for raw_line in payload.splitlines():
+        try:
+            row = json.loads(raw_line.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
     return rows
 
 

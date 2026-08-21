@@ -118,3 +118,34 @@ def test_policy_snapshot_releases_live_mirror_before_expensive_json_parsing(tmp_
     assert not worker.is_alive()
     assert result["snapshot"]["receipt"]["source_read_mode"] == "BYTES_THEN_PARSE_V1"
     assert result["snapshot"]["receipt"]["row_count"] == 1
+
+
+def test_dashboard_releases_live_mirror_before_expensive_json_parsing(tmp_path, monkeypatch):
+    event_path = tmp_path / RESEARCH_EVENTS_FILE
+    _append(event_path, _event(1))
+    parsing_started = threading.Event()
+    allow_parsing = threading.Event()
+    real_loads = json.loads
+
+    def slow_loads(*args, **kwargs):
+        parsing_started.set()
+        assert allow_parsing.wait(5)
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [event_path])
+    monkeypatch.setattr(dashboard.json, "loads", slow_loads)
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.setdefault("events", dashboard._read_research_events_v22())
+    )
+    worker.start()
+    assert parsing_started.wait(5)
+    replacement = tmp_path / "dashboard-replacement.download"
+    replacement.write_text(json.dumps(_event(2)) + "\n", encoding="utf-8")
+    try:
+        os.replace(replacement, event_path)
+    finally:
+        allow_parsing.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert [row["event_id"] for row in result["events"]] == ["event-1"]
