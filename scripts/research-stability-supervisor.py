@@ -339,6 +339,25 @@ def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, 
                     "episode_id": key[0], "policy_signature": key[1],
                     "research_lane": key[2], "resolution_deadline_ts": deadline or None,
                 })
+    policy_provenance_defects = []
+    attributable_rows = [
+        *(('execution', row) for row in rows_by_ledger["execution"]),
+        *(("lifecycle", row) for row in rows_by_ledger["lifecycle"]
+          if str(row.get("observation_status") or "") in {
+              "PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED",
+          }),
+    ]
+    for ledger, row in attributable_rows:
+        missing = [field for field in (
+            "policy_id", "policy_signature", "policy_epoch_id",
+            "research_lane", "shared_ai_call_id",
+        ) if not str(row.get(field) or "").strip()]
+        if missing:
+            policy_provenance_defects.append({
+                "ledger": ledger,
+                "record_id": str(row.get("record_id") or ""),
+                "missing_fields": missing,
+            })
     return {
         "ledger_counts": counts,
         "independent_opportunities": counts["opportunity"] - len(identity_aliases),
@@ -355,6 +374,12 @@ def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, 
             "expected": len(expected), **resolution_counts,
             "orphan_expected_orders": orphan_expected_orders,
             "passed": resolution_counts["overdue_orphan"] == 0,
+        },
+        "policy_provenance_integrity": {
+            "checked_rows": len(attributable_rows),
+            "defect_count": len(policy_provenance_defects),
+            "defects": policy_provenance_defects,
+            "passed": not policy_provenance_defects,
         },
     }
 
@@ -805,9 +830,11 @@ class Supervisor:
             try:
                 v3 = read_v3_evidence(self.mirror, now_ts=self.now().timestamp())
                 entry_integrity = v3.get("entry_resolution_integrity") or {}
+                provenance_integrity = v3.get("policy_provenance_integrity") or {}
                 add("v3_normalized_evidence_integrity", (
                     v3.get("identity_alias_count", 0) == 0
                     and entry_integrity.get("passed") is True
+                    and provenance_integrity.get("passed") is True
                 ), v3)
                 report = read_json(v3_report_path)
                 generated = parse_time(report.get("generated_at"))
