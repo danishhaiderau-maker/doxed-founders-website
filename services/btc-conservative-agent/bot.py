@@ -2574,6 +2574,11 @@ def continuous_ai_research_enabled() -> bool:
     with state_lock:
         return bool(state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED))
 
+
+def shared_research_ai_observation_enabled() -> bool:
+    """Research observation cadence is independent of paper-order toggles."""
+    return bool(_sole_ai_research_mode() and AI_RESEARCH_MODE_ENABLED)
+
 def research_lane_enabled_map() -> dict:
     with state_lock:
         stored = state.get("research_lane_enabled") or {}
@@ -2590,7 +2595,7 @@ def is_research_lane_enabled(lane: str) -> bool:
     if lane == RESEARCH_LANE_CONTINUOUS:
         return continuous_ai_research_enabled()
     if is_ai_scan_lane(lane):
-        return any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
+        return shared_research_ai_observation_enabled()
     if is_combo_execution_lane(lane):
         return bool(research_lane_enabled_map().get(lane, False))
     # Unknown and historical lane names fail closed.  This prevents old persisted
@@ -3000,7 +3005,7 @@ def is_data_retired_lane(lane: str) -> bool:
 def lane_pipeline_allowed(lane: str = None) -> bool:
     lane = str(lane or RESEARCH_LANE_AI_SCAN).upper()
     if is_ai_scan_lane(lane):
-        return any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
+        return shared_research_ai_observation_enabled()
     if lane_blocks_live_orders(lane):
         return False
     if is_research_lane_retired(lane):
@@ -9879,8 +9884,8 @@ def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple
     if state.get("force_ai_every_signal"):
         return True, "FORCE_AI"
     if _sole_ai_research_mode():
-        if not any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled()):
-            return False, "ALL_COMBO_OFF"
+        if not shared_research_ai_observation_enabled():
+            return False, "RESEARCH_OBSERVATION_DISABLED"
         if ai_cooldown_remaining_sec() > 0:
             return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN)}s"
         rq = compute_research_quality_score(ctx)
@@ -18495,10 +18500,8 @@ def detect_event_light():
         if now - last_event_trigger < 0.5:
             return {"event_trigger": False, "edge_score": edge_score, "price": price, "timestamp": utc_iso(), "features": features}
 
-        if not any_combo_execution_enabled(
-            research_lane_enabled_map(), continuous_ai_research_enabled()
-        ):
-            event_trigger, trigger_reason = False, "ALL_COMBO_OFF"
+        if not shared_research_ai_observation_enabled():
+            event_trigger, trigger_reason = False, "RESEARCH_OBSERVATION_DISABLED"
         else:
             cd_rem = ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN)
             if cd_rem == 0:
@@ -23138,7 +23141,7 @@ def state_monitor_loop():
                         _lane_last_ts['CONTINUOUS'] = time.time()
                     elif (
                         _sole_ai_research_mode()
-                        and any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())
+                        and shared_research_ai_observation_enabled()
                         and ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN) == 0
                     ):
                         features = build_full_feature_snapshot()
@@ -25825,7 +25828,7 @@ PATHWAY_LANE_ORDER = (
 
 def _pathway_lanes_live() -> dict:
     enabled = research_lane_enabled_map()
-    live = {RESEARCH_LANE_AI_SCAN: any_combo_execution_enabled(enabled, continuous_ai_research_enabled())}
+    live = {RESEARCH_LANE_AI_SCAN: shared_research_ai_observation_enabled()}
     for lane in COMBO_EXECUTION_LANES:
         live[lane] = bool(enabled.get(lane, False))
     live[RESEARCH_LANE_CONTINUOUS] = continuous_ai_research_enabled()
@@ -26610,7 +26613,7 @@ def build_static_pathway_lane_specs() -> dict:
     }
     lanes.append({
         "lane": RESEARCH_LANE_CONTINUOUS,
-        "label": RESEARCH_LANE_LABELS.get(RESEARCH_LANE_CONTINUOUS, "Continuous AI Research"),
+        "label": "Continuous Benchmark — Paper Orders",
         "subtitle": "BENCHMARK · one shared direction call · independent Continuous verdict and orders",
         "role": "continuous_direct_benchmark",
         "status": "BENCHMARK",
@@ -28100,7 +28103,7 @@ __ADMIN_ACCESS_CONTROLS__
     <strong style="color:#58a6ff;">Quick toggles</strong>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button id="invertToggleBtn" onclick="toggleInvert()" title="Flip LONG↔SHORT on new signals only. Existing tickets stay unchanged. Admin login required to toggle.">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark tile — ON places limits, OFF records shadow data only">Continuous AI Research: <span id="continuousAiBtn">OFF</span></button>
+    <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark paper orders — OFF still runs the shared three-minute AI observation and records shadow outcomes">Continuous Paper Orders: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
@@ -29389,7 +29392,7 @@ DASHBOARD_JS = """(function () {
           if (d.fee_profile) syncTxt += ' | fees=' + d.fee_profile;
           if (d.bot_version) syncTxt += ' | ' + d.bot_version;
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
-          if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous AI OFF';
+          if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous paper orders OFF · shadow observation ON';
           else syncTxt += ' | Continuous AI ON';
           inst.innerText = syncTxt;
         }
@@ -29480,7 +29483,7 @@ DASHBOARD_JS = """(function () {
         safeText('aiDecision', aiStatusTxt);
         safeText('aiStatusNote', dai.note || '');
         const laneLabels = (d.research_config && d.research_config.lane_labels) || {
-          'CONTINUOUS': 'Continuous AI Research',
+          'CONTINUOUS': 'Continuous Benchmark — Paper Orders',
           'HIGH_EDGE_RUNNER': 'High Edge Runner',
           'EXTREME_EDGE': 'Extreme Edge',
           'EDGE_ACCELERATION': 'Edge Acceleration',
@@ -32424,6 +32427,10 @@ def _build_relay_execution_state_snapshot() -> dict:
             "continuous_ai_research_enabled": bool(
                 state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
             ),
+            "continuous_paper_orders_enabled": bool(
+                state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
+            ),
+            "shared_research_ai_observation_enabled": shared_research_ai_observation_enabled(),
             "research_lane_enabled": copy.deepcopy(state.get("research_lane_enabled") or {}),
             "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
             "strategy_mode": state.get("strategy_mode"),
@@ -34734,17 +34741,21 @@ def toggle_continuous_ai_research():
             )
         save_persistent_config()
         logger.info(
-            f"[CONTINUOUS_AI] set {'ON' if state['continuous_ai_research_enabled'] else 'OFF'} "
+            f"[CONTINUOUS_PAPER_ORDERS] set {'ON' if state['continuous_ai_research_enabled'] else 'OFF'} "
+            f"shared_research_observation={'ON' if shared_research_ai_observation_enabled() else 'OFF'} "
             f"[PIPELINE ENFORCEMENT]"
         )
     suspend_result = None
     if not state["continuous_ai_research_enabled"]:
         suspend_result = suspend_lane_trading(RESEARCH_LANE_CONTINUOUS, reason="CONTINUOUS_AI_OFF")
     _patch_api_state_cache_fields(
-        continuous_ai_research_enabled=state["continuous_ai_research_enabled"]
+        continuous_ai_research_enabled=state["continuous_ai_research_enabled"],
+        shared_research_ai_observation_enabled=shared_research_ai_observation_enabled(),
     )
     return jsonify({
         "continuous_ai_research_enabled": state["continuous_ai_research_enabled"],
+        "continuous_paper_orders_enabled": state["continuous_ai_research_enabled"],
+        "shared_research_ai_observation_enabled": shared_research_ai_observation_enabled(),
         "suspend": suspend_result,
     })
 
@@ -40958,11 +40969,12 @@ def main():
     if RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection():
         logger.warning(
             f"[{COMBO_BENCHMARK_ROLE}] {BENCHMARK_PROFILE_ID} — {COMBO_BENCHMARK_LANE} | "
-            f"~{get_research_ai_cooldown_sec()}s shared direction AI | separate Continuous/Type B policies | Scenario C exits "
+            f"~{get_research_ai_cooldown_sec()}s shared direction AI | separate Continuous/Patient Chase policies "
             f"[PIPELINE ENFORCEMENT]"
         )
     logger.warning(
-        f"[V109 RESEARCH-LANES] continuous_ai={'ON' if continuous_ai_research_enabled() else 'OFF'} "
+        f"[V109 RESEARCH-LANES] continuous_paper_orders={'ON' if continuous_ai_research_enabled() else 'OFF'} "
+        f"| shared_ai_observation={'ON' if shared_research_ai_observation_enabled() else 'OFF'} "
         f"| runner_exit={RUNNER_EXIT_PROFILE_ID} | research_temp={RESEARCH_AI_TEMPERATURE} "
         f"[PIPELINE ENFORCEMENT]"
     )
