@@ -1951,6 +1951,32 @@ def safe_policy_genome_v3_page():
 def api_conservative_fill_research():
     """Read-only descriptive receipts; never a policy qualification endpoint."""
     payload = _read_json(CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, {}) or {}
+    v3 = _current_v3_report()
+    if v3 and payload.get("epoch_id") != v3.get("epoch_id"):
+        collection = v3.get("collection") or {}
+        return jsonify({
+            "schema": "conservative_fill_descriptive_cohort_v1",
+            "status": "WAITING_FOR_V3_MARKET_SEGMENTS",
+            "epoch_id": v3.get("epoch_id"),
+            "qualification": "DESCRIPTIVE_ONLY",
+            "qualification_effect": "NONE",
+            "qualification_promotion_allowed": False,
+            "live_policy_change_allowed": False,
+            "counts": {
+                "events": int(collection.get("independent_opportunities") or 0),
+                "market_segments": int(collection.get("market_segments") or 0),
+                "fill": 0,
+                "partial_fill": 0,
+                "no_fill": 0,
+                "unsupported": 0,
+            },
+            "receipts": [],
+            "blockers": ["V3_CONSERVATIVE_MARKET_SEGMENTS_NOT_MATURED"],
+            "warning": (
+                "The active V3 epoch has no matured conservative BBO/depth path receipts yet. "
+                "Legacy-epoch conservative results are intentionally hidden."
+            ),
+        })
     if not payload:
         payload = {
             "schema": "conservative_fill_descriptive_cohort_v1",
@@ -1961,6 +1987,56 @@ def api_conservative_fill_research():
             "receipts": [],
         }
     return jsonify(payload)
+
+
+def _current_v3_report() -> dict:
+    """Return only an integrity-valid active V3 report.
+
+    The dedicated research pages must never fall back to a retired V2 epoch
+    merely because its report files still exist on disk after a fresh reset.
+    """
+    payload = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
+    if (
+        payload.get("schema") == "safe_policy_genome_v3_report_v1"
+        and payload.get("epoch_id")
+        and not ((payload.get("epoch_scope") or {}).get("contamination_detected"))
+        and bool((payload.get("integrity") or {}).get("passed"))
+    ):
+        return payload
+    return {}
+
+
+def _v3_static_rows(v3: dict) -> list[dict]:
+    rows = ((v3.get("candidate_screen") or {}).get("descriptive_top_100") or [])
+    mapped = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        total = int(row.get("episodes_total") or 0)
+        oos_n = int(row.get("oos_episodes") or 0)
+        oos_net = row.get("sealed_oos_net_usd")
+        # "Profitable" on this page means positive descriptive sealed-OOS net;
+        # it is still never qualified without the V3 safety gates.
+        if oos_net is None or float(oos_net) <= 0:
+            continue
+        mapped.append({
+            "policy_id": row.get("policy_id"),
+            "train": {
+                "independent_episodes": max(0, total - oos_n),
+                "wins": row.get("train_wins"),
+                "net_pnl_usd": row.get("train_net_usd"),
+            },
+            "oos": {
+                "independent_episodes": oos_n,
+                "wins": row.get("oos_wins"),
+                "net_pnl_usd": oos_net,
+                "expectancy_usd": row.get("sealed_oos_expectancy_usd"),
+                "max_drawdown_usd": row.get("max_drawdown_usd"),
+            },
+            "qualification": "DESCRIPTIVE_ONLY",
+            "v3_gates": row.get("gates") or {},
+        })
+    return mapped
 
 
 def _policy_detail_is_current(detail: dict, best: dict) -> bool:
@@ -1975,6 +2051,34 @@ def _policy_detail_is_current(detail: dict, best: dict) -> bool:
 
 @app.route("/api/static-policy-research")
 def api_static_policy_research():
+    v3 = _current_v3_report()
+    if v3:
+        collection = v3.get("collection") or {}
+        progress = v3.get("search_progress") or {}
+        rows = _v3_static_rows(v3)
+        return jsonify({
+            "schema": "static_policy_dashboard_v1",
+            "source_generation": "V3_SAFE_POLICY_GENOME",
+            "status": "DESCRIPTIVE" if rows else "WAITING_FOR_MATURED_V3_PATHS",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "live_policy_change_allowed": False,
+            "epoch_id": v3.get("epoch_id"),
+            "policy_epoch_id": None,
+            "independent_episodes": int(collection.get("independent_opportunities") or 0),
+            "training_episodes": 0,
+            "oos_episodes": 0,
+            "profitable_policies": rows,
+            "policy_search_statistics": {
+                "unique_policies_evaluated": int(progress.get("unique_policies_evaluated") or 0),
+                "nominal_full_cartesian": int(progress.get("nominal_full_cartesian") or 0),
+                "exhaustive_materialization": False,
+            },
+            "warning": (
+                "Current V3 evidence only. No static policy is promoted until paths mature and "
+                "all conservative execution, drawdown, CVaR, OOS and stability gates pass."
+            ),
+            "blockers": v3.get("blockers") or ["NO_SAFE_QUALIFIED_POLICY"],
+        })
     best = _best_policy_research_payload()
     detail = _read_json("policy_candidate_oos_report.json")
     current = _policy_detail_is_current(detail, best)
@@ -2001,6 +2105,33 @@ def api_static_policy_research():
 
 @app.route("/api/dynamic-policy-research")
 def api_dynamic_policy_research():
+    v3 = _current_v3_report()
+    if v3:
+        return jsonify({
+            "schema": "dynamic_policy_dashboard_v1",
+            "source_generation": "V3_SAFE_POLICY_GENOME",
+            "status": "WAITING_FOR_V3_REGIME_COVERAGE",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "live_policy_change_allowed": False,
+            "epoch_id": v3.get("epoch_id"),
+            "policy_epoch_id": None,
+            "winner_kind": "NONE",
+            "winner_status": "NO_SAFE_QUALIFIED_DYNAMIC_POLICY",
+            "relative_leader_kind": "NONE",
+            "comparison_delta": {},
+            "static_oos": None,
+            "dynamic_oos": None,
+            "regimes": [],
+            "required_market_families": ["BULL", "BEAR", "SIDEWAYS"],
+            "fallback": "CONTROL_OR_NO_TRADE",
+            "warning": (
+                "Current V3 evidence only. Dynamic regime selection remains unavailable until "
+                "causal regime paths mature with later chronological OOS evidence."
+            ),
+            "blockers": list(dict.fromkeys(
+                (v3.get("blockers") or []) + ["V3_REGIME_OOS_COVERAGE_MISSING"]
+            )),
+        })
     best = _best_policy_research_payload()
     detail = _read_json("policy_candidate_oos_report.json")
     current = _policy_detail_is_current(detail, best)
@@ -2036,6 +2167,42 @@ def api_dynamic_policy_research():
 
 @app.route("/api/shadow-policy-research")
 def api_shadow_policy_research():
+    v3 = _current_v3_report()
+    if v3:
+        collection = v3.get("collection") or {}
+        dispositions = collection.get("decision_dispositions") or {}
+        rejected = sum(
+            int(value or 0) for key, value in dispositions.items()
+            if str(key).upper() not in {"ORDER_ELIGIBLE", "ORDER_SUBMITTED"}
+        )
+        return jsonify({
+            "schema": "shadow_policy_dashboard_v1",
+            "source_generation": "V3_SAFE_POLICY_GENOME",
+            "status": "V3_DESCRIPTIVE_ONLY",
+            "live_policy_change_allowed": False,
+            "epoch_id": v3.get("epoch_id"),
+            "current_epoch_rejected": rejected,
+            "v22_shadow": {},
+            "comprehensive_shadow_lanes": {
+                "status": "WAITING_FOR_MATURED_V3_SHADOW_PATHS",
+                "coverage": {
+                    "independent_shared_ai_episodes": int(
+                        collection.get("independent_opportunities") or 0
+                    ),
+                    "deduped_lane_records": int(collection.get("decision_branches") or 0),
+                    "paired_multi_lane_episodes": 0,
+                },
+                "cohorts": [],
+                "epoch_scope": {"epoch_id": v3.get("epoch_id"), "legacy_unscoped_rows": 0},
+            },
+            "paused_shadow": {},
+            "real_edge": {},
+            "warning": (
+                "Current V3 epoch only. Shadow/rejected paths remain descriptive and are not "
+                "assigned PnL until their required paths mature. Legacy shadow ledgers are hidden."
+            ),
+            "blockers": ["V3_SHADOW_PATHS_NOT_MATURED"],
+        })
     best = _best_policy_research_payload()
     detail = _read_json("policy_candidate_oos_report.json")
     current = _policy_detail_is_current(detail, best)
