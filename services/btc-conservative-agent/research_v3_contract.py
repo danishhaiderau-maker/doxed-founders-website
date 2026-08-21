@@ -12,9 +12,9 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-COLLECTOR_VERSION = "collector_v3.0"
-CONTRACT_SCHEMA = "safe_policy_genome_contract_v1"
-POLICY_DSL_SCHEMA = "safe_policy_dsl_v1"
+COLLECTOR_VERSION = "collector_v3.1"
+CONTRACT_SCHEMA = "safe_policy_genome_contract_v1_1"
+POLICY_DSL_SCHEMA = "safe_policy_dsl_v1_1"
 EVIDENCE_SCHEMA = "research_evidence_v3"
 EPISODE_SCHEMA = "causal_episode_v3"
 
@@ -56,6 +56,14 @@ BREAK_EVEN_FLOOR_PCT = (0, 0.5, 1, 2)
 MFE_GIVEBACK_ABS_PCT = (1, 2, 3, 4, 5, 8, 10)
 MFE_GIVEBACK_FRACTION = (0.2, 0.3, 0.4, 0.5, 0.6)
 CHANDELIER_ATR_MULTIPLIERS = (1.0, 1.5, 2.0, 2.5, 3.0)
+ATR_TRAIL_MULTIPLIERS = (0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+TRAIL_ACTIVATION_ATR_MULTIPLIERS = (0.5, 0.75, 1.0, 1.25, 1.5)
+PARTIAL_TAKE_PROFIT_PLANS = {
+    "none": (),
+    "secure_25_25_runner": ((1.0, 0.25), (1.5, 0.25)),
+    "secure_33_runner": ((1.0, 0.33),),
+    "late_25_25_runner": ((1.5, 0.25), (2.0, 0.25)),
+}
 CONCURRENCY_CAPS = (1, 2, 3, 5)
 SIZE_SCALES = (0.25, 0.5, 0.75, 1.0)
 DAILY_LOSS_KILL_PCT = (2, 3, 5, 8)
@@ -148,6 +156,25 @@ def validate_policy_spec(spec: Mapping[str, Any]) -> list[str]:
         if trigger <= prior_trigger or floor < prior_floor or floor >= trigger:
             errors.append("NON_MONOTONIC_OR_INVALID_LADDER")
         prior_trigger, prior_floor = trigger, floor
+    profit = spec.get("profit_protection") or {}
+    mode = str(profit.get("mode") or "ATR_TARGET")
+    if mode not in {"ATR_TARGET", "ATR_TRAIL", "CHANDELIER", "MFE_GIVEBACK", "HYBRID_RUNNER"}:
+        errors.append("INVALID_PROFIT_PROTECTION_MODE")
+    partials = profit.get("partial_take_profits") or []
+    prior_trigger = 0.0
+    total_fraction = 0.0
+    for rung in partials:
+        try:
+            trigger, fraction = map(float, rung)
+        except (TypeError, ValueError):
+            errors.append("INVALID_PARTIAL_TAKE_PROFIT")
+            continue
+        if trigger <= prior_trigger or fraction <= 0 or fraction >= 1:
+            errors.append("INVALID_PARTIAL_TAKE_PROFIT")
+        total_fraction += fraction
+        prior_trigger = trigger
+    if total_fraction >= 1:
+        errors.append("PARTIAL_TAKE_PROFITS_LEAVE_NO_RUNNER")
     return sorted(set(errors))
 
 
@@ -176,6 +203,10 @@ def build_contract() -> dict[str, Any]:
             "mfe_giveback_abs_pct": list(MFE_GIVEBACK_ABS_PCT),
             "mfe_giveback_fraction": list(MFE_GIVEBACK_FRACTION),
             "chandelier_atr_k": list(CHANDELIER_ATR_MULTIPLIERS),
+            "atr_trail_k": list(ATR_TRAIL_MULTIPLIERS),
+            "trail_activation_atr_k": list(TRAIL_ACTIVATION_ATR_MULTIPLIERS),
+            "partial_take_profit_plan": list(PARTIAL_TAKE_PROFIT_PLANS),
+            "profit_protection_mode": ["ATR_TARGET", "ATR_TRAIL", "CHANDELIER", "MFE_GIVEBACK", "HYBRID_RUNNER"],
             "ladder_id": list(LADDERS),
         },
         "portfolio_axes": {
@@ -190,7 +221,7 @@ def build_contract() -> dict[str, Any]:
                 "DRAWDOWN_BUDGET_EXCEEDED", "CVAR_BUDGET_EXCEEDED", "LIQUIDATION_BUFFER_BREACH",
                 "OOS_LCB_NOT_POSITIVE", "UNSTABLE_PARAMETER_NEIGHBORHOOD",
             ],
-            "pareto_objectives": ["MAX_CONSERVATIVE_OOS_NET", "MAX_EXPECTANCY_LCB", "MIN_MAX_DRAWDOWN", "MIN_CVAR95"],
+            "pareto_objectives": ["MAX_CONSERVATIVE_OOS_NET", "MAX_EXPECTANCY_LCB", "MAX_PROFIT_RETENTION", "MIN_MAX_DRAWDOWN", "MIN_CVAR95", "MIN_TIME_UNDERWATER"],
             "number_one": "Among policies passing every hard gate, choose the Pareto survivor with highest conservative sealed-OOS net profit, then lowest max drawdown and CVaR95.",
         },
         "activation": "PAPER_AND_SHADOW_ONLY_UNTIL_EXPLICIT_USER_AUTHORIZATION",

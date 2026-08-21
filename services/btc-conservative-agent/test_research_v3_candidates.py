@@ -1,6 +1,6 @@
 import unittest
 
-from research_v3_candidates import evaluate_protection_screen, protection_screen
+from research_v3_candidates import _conservative_ohlc_prices, evaluate_protection_screen, protection_screen
 from research_v3_ranking import rank_safe_policies
 
 
@@ -30,6 +30,10 @@ def source(event_id="event-1", episode_id="episode-1"):
 
 
 class V3CandidateTests(unittest.TestCase):
+    def test_one_minute_fallback_is_adverse_first(self):
+        candle = [{"t": 60, "o": 100, "h": 102, "l": 98, "c": 101}]
+        self.assertEqual([row["price"] for row in _conservative_ohlc_prices(candle, direction="LONG")], [100, 98, 102, 101])
+        self.assertEqual([row["price"] for row in _conservative_ohlc_prices(candle, direction="SHORT")], [100, 102, 98, 101])
     def test_screen_contains_requested_loss_and_profit_protection_families(self):
         names = {row["protection_id"] for row in protection_screen()}
         self.assertIn("ATR_TP_2.5_ATR_SL_1", names)

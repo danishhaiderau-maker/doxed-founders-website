@@ -12,7 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from research_v3_contract import LADDERS, canonical_hash
+from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
 from research_v3_policy_replay import replay_protected_policy
 from research_v3_validation import validate_policy
 
@@ -21,11 +21,14 @@ def protection_screen() -> list[dict[str, Any]]:
     """Small, auditable Stage-1 safety screen requested by the user."""
     rows: list[dict[str, Any]] = []
 
-    def add(name: str, *, atr_sl=None, thesis=None, thesis_sec=0, hard=30,
+    def add(name: str, *, family="FIXED_TARGET", mode="ATR_TARGET", atr_tp=2.5,
+            atr_sl=None, thesis=None, thesis_sec=0, hard=30,
             time_stop=None, ladder="none", be_arm=None, be_floor=0,
-            giveback_abs=None, giveback_fraction=None) -> None:
+            giveback_abs=None, giveback_fraction=None, atr_trail=None,
+            chandelier=None, trail_activation=0, partial_plan="none") -> None:
         rows.append({
             "protection_id": name,
+            "policy_family": family,
             "loss_protection": {
                 "atr_stop_k": atr_sl,
                 "thesis_cut_margin_pct": thesis,
@@ -34,12 +37,17 @@ def protection_screen() -> list[dict[str, Any]]:
                 "time_stop_min": time_stop,
             },
             "profit_protection": {
-                "atr_tp_k": 2.5,
+                "mode": mode,
+                "atr_tp_k": atr_tp,
                 "ladder": [list(rung) for rung in LADDERS[ladder]],
                 "break_even_arm_mfe_pct": be_arm,
                 "break_even_floor_pct": be_floor,
                 "mfe_giveback_abs_pct": giveback_abs,
                 "mfe_giveback_fraction": giveback_fraction,
+                "atr_trail_k": atr_trail,
+                "chandelier_atr_k": chandelier,
+                "trail_activation_atr_k": trail_activation,
+                "partial_take_profits": [list(rung) for rung in PARTIAL_TAKE_PROFIT_PLANS[partial_plan]],
             },
         })
 
@@ -55,7 +63,16 @@ def protection_screen() -> list[dict[str, Any]]:
     for giveback in (2, 4, 8):
         add(f"ATR_TP_2.5_GIVEBACK_{giveback}", giveback_abs=giveback)
     for fraction in (0.2, 0.4, 0.6):
-        add(f"ATR_TP_2.5_GIVEBACK_{int(fraction * 100)}PCT", giveback_fraction=fraction)
+        add(f"ATR_TP_2.5_GIVEBACK_{int(fraction * 100)}PCT", family="MFE_GIVEBACK", mode="MFE_GIVEBACK", atr_tp=None, giveback_fraction=fraction)
+    for stop in (1.0, 1.5, 2.0):
+        for activation in (0.75, 1.0, 1.25):
+            for trail in (0.75, 1.0, 1.5):
+                add(f"ATR_TRAIL_SL_{stop:g}_ARM_{activation:g}_TRAIL_{trail:g}", family="ATR_TRAIL", mode="ATR_TRAIL", atr_tp=None, atr_sl=stop, atr_trail=trail, trail_activation=activation)
+    for chandelier in (1.5, 2.0, 2.5, 3.0):
+        add(f"CHANDELIER_{chandelier:g}", family="CHANDELIER", mode="CHANDELIER", atr_tp=None, atr_sl=2.0, chandelier=chandelier, trail_activation=1.0)
+    for plan in ("secure_25_25_runner", "secure_33_runner", "late_25_25_runner"):
+        for trail in (0.75, 1.0, 1.5):
+            add(f"HYBRID_{plan}_TRAIL_{trail:g}", family="HYBRID_RUNNER", mode="HYBRID_RUNNER", atr_tp=None, atr_sl=1.5, atr_trail=trail, trail_activation=1.0, partial_plan=plan)
     return rows
 
 
@@ -128,9 +145,12 @@ def load_candidate_inputs(
         intent, lifecycle = intents[event_id], terminal[event_id]
         episode_id = str(lifecycle.get("episode_id") or intent.get("episode_id") or "")
         one_second_rows = []
+        one_minute_rows = []
         for ref in lifecycle.get("market_segment_refs") or []:
             if str(ref.get("timeframe")) == "1s":
                 one_second_rows.extend(_load_segment(root, ref))
+            elif str(ref.get("timeframe")) == "1m":
+                one_minute_rows.extend(_load_segment(root, ref))
         feature = (opportunities.get(episode_id) or {}).get("feature_snapshot_at_signal") or {}
         result.append({
             "event_id": event_id,
@@ -143,6 +163,7 @@ def load_candidate_inputs(
             "margin_usd": intent.get("margin_usd") or 20.0,
             "entry_children": intent.get("entry_children") or [],
             "ordered_1s_prices": one_second_rows,
+            "canonical_1m_ohlc": one_minute_rows,
             "terminal_outcome_state": lifecycle.get("outcome_state"),
         })
     return result
@@ -160,6 +181,29 @@ def _ordered_prices(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, float]]
     return sorted(result, key=lambda row: row["ts"])
 
 
+def _conservative_ohlc_prices(rows: Iterable[Mapping[str, Any]], *, direction: str) -> list[dict[str, float]]:
+    """Expand candles adverse-first when intrabar ordering is unknowable.
+
+    This is deliberately pessimistic: if a stop and profit exit are both
+    touched in one candle, the stop-side extreme appears first. The generated
+    path is descriptive and never upgrades execution evidence to depth/tick.
+    """
+    result: list[dict[str, float]] = []
+    for row in rows:
+        try:
+            ts = float(row.get("t", row.get("ts")))
+            open_price = float(row.get("o", row.get("open")))
+            high = float(row.get("h", row.get("high")))
+            low = float(row.get("l", row.get("low")))
+            close = float(row.get("c", row.get("close")))
+        except (TypeError, ValueError):
+            continue
+        sequence = (open_price, low, high, close) if direction == "LONG" else (open_price, high, low, close)
+        for offset, price in enumerate(sequence):
+            result.append({"ts": ts + offset * 0.001, "price": price})
+    return sorted(result, key=lambda row: row["ts"])
+
+
 def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: bool = False) -> dict[str, Any]:
     """Evaluate exact policies; return descriptive rows and gated candidates."""
     episodes_by_policy: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
@@ -170,6 +214,13 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
         if not episode_id:
             continue
         prices = _ordered_prices(source.get("ordered_1s_prices") or [])
+        replay_path_basis = "CANONICAL_1S_ORDERED"
+        if not prices:
+            prices = _conservative_ohlc_prices(
+                source.get("canonical_1m_ohlc") or [],
+                direction=str(source.get("direction") or "UNKNOWN"),
+            )
+            replay_path_basis = "CANONICAL_1M_ADVERSE_FIRST_OHLC"
         for child in source.get("entry_children") or []:
             entry_id = str(child.get("entry_policy_id") or "")
             if not entry_id:
@@ -204,6 +255,10 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
                         "outcome_state": "FULL_FILL" if replay.get("status") == "COMPLETE" else str(replay.get("status") or "UNSUPPORTED"),
                         "net_pnl_usd": replay.get("net_pnl_usd"),
                         "exit_reason": replay.get("exit_reason"),
+                        "profit_retention_ratio": replay.get("profit_retention_ratio"),
+                        "profit_giveback_pct": replay.get("profit_giveback_pct"),
+                        "underwater_observation_ratio": replay.get("underwater_observation_ratio"),
+                        "replay_path_basis": replay_path_basis,
                     }
                 # Multiple lane events from one AI call are correlated. A
                 # deterministic event-id tie-break keeps one sample per episode.
@@ -215,6 +270,7 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
                         "signal_ts": source.get("signal_ts"),
                         "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
                         "regime": source.get("regime"),
+                        "replay_path_basis": replay_path_basis,
                         "policy_outcomes": {policy_id: outcome},
                     }
 
@@ -238,16 +294,44 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
             liquidation_buffer_verified=False,
         )
         risk = validation["risk"]
+        replay_outcomes = [
+            (row.get("policy_outcomes") or {}).get(policy_id) or {}
+            for row in oos
+        ]
+        retentions = [float(row["profit_retention_ratio"]) for row in replay_outcomes if row.get("profit_retention_ratio") is not None]
+        givebacks = [float(row["profit_giveback_pct"]) for row in replay_outcomes if row.get("profit_giveback_pct") is not None]
+        underwater = [float(row["underwater_observation_ratio"]) for row in replay_outcomes if row.get("underwater_observation_ratio") is not None]
+        regime_breakdown = {}
+        for regime in sorted({str(row.get("regime") or "UNKNOWN") for row in oos}):
+            regime_rows = [row for row in oos if str(row.get("regime") or "UNKNOWN") == regime]
+            regime_pnls = [
+                float(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd"))
+                for row in regime_rows
+                if ((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd") is not None
+            ]
+            regime_breakdown[regime] = {
+                "independent_episodes": len(regime_rows),
+                "scored_episodes": len(regime_pnls),
+                "net_pnl_usd": round(sum(regime_pnls), 8),
+                "expectancy_usd": round(sum(regime_pnls) / len(regime_pnls), 8) if regime_pnls else None,
+            }
         assessed.append({
             "policy_id": policy_id,
             "policy_signature": canonical_hash("v3-policy", policy_specs[policy_id]),
             "policy_spec": policy_specs[policy_id],
+            "policy_family": next((p["policy_family"] for p in protections if policy_id.endswith("|" + p["protection_id"])), "UNKNOWN"),
             "episodes_total": len(rows),
             "oos_episodes": len(oos),
             "sealed_oos_net_usd": risk.get("net_pnl_usd"),
             "max_drawdown_usd": risk.get("max_drawdown_usd"),
             "cvar95_usd": risk.get("cvar95_usd"),
             "expectancy_lcb_usd": validation["bootstrap"].get("mean_lcb95"),
+            "mean_profit_retention_ratio": round(sum(retentions) / len(retentions), 8) if retentions else None,
+            "mean_profit_giveback_pct": round(sum(givebacks) / len(givebacks), 8) if givebacks else None,
+            "mean_underwater_observation_ratio": round(sum(underwater) / len(underwater), 8) if underwater else None,
+            "max_underwater_episodes": risk.get("max_underwater_episodes"),
+            "regime_breakdown": regime_breakdown,
+            "replay_path_bases": sorted({str(row.get("replay_path_basis") or "UNKNOWN") for row in rows}),
             "gates": validation["gates"],
             "validation": validation,
         })
@@ -256,6 +340,18 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
         abs(float(row.get("max_drawdown_usd") or 0)),
         str(row["policy_id"]),
     ))[:100]
+    family_leaders = {}
+    for family in sorted({row["policy_family"] for row in assessed}):
+        family_rows = [row for row in assessed if row["policy_family"] == family]
+        family_leaders[family] = sorted(family_rows, key=lambda row: (-float(row.get("sealed_oos_net_usd") or 0), abs(float(row.get("max_drawdown_usd") or 0)), str(row["policy_id"])))[:10]
+    dynamic_regime_leaders = {}
+    regimes = sorted({regime for row in assessed for regime in row.get("regime_breakdown", {})})
+    for regime in regimes:
+        eligible = [row for row in assessed if (row.get("regime_breakdown") or {}).get(regime, {}).get("scored_episodes", 0) > 0]
+        dynamic_regime_leaders[regime] = sorted(
+            eligible,
+            key=lambda row: (-float(row["regime_breakdown"][regime].get("net_pnl_usd") or 0), abs(float(row.get("max_drawdown_usd") or 0)), str(row["policy_id"])),
+        )[:10]
     return {
         "schema": "safe_policy_candidate_screen_v3",
         "stage": "STAGE_1_PROTECTION_SCREEN",
@@ -264,5 +360,8 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
         "protection_variants": len(protections),
         "candidates": assessed,
         "descriptive_top_100": descriptive,
+        "profit_capture_leaders": family_leaders,
+        "drawdown_control_leaders": sorted(assessed, key=lambda row: (abs(float(row.get("max_drawdown_usd") or 0)), -float(row.get("sealed_oos_net_usd") or 0)))[:25],
+        "dynamic_regime_leaders": dynamic_regime_leaders,
         "warning": "Descriptive rows use ideal-touch entry receipts and cannot qualify conservative execution or authorize live trading.",
     }
