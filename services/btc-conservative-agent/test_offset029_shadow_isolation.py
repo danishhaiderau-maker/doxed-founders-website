@@ -36,6 +36,7 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
             "_buf_float": lambda value, default=0.0: float(value or default),
+            "offset029_policy": offset_policy,
         },
     )
 
@@ -47,12 +48,25 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
         "sl": None,
         "sl_enforced": False,
         "stop_policy": "NONE_TP_ONLY_RESEARCH",
+        "tp": None,
+        "tp_policy": "FROZEN_3M_ATR_TP_2_5X",
     }
+
+    patient_with_atr = protection_view({
+        "research_lane": "OFFSET_029_ATR_TP_25",
+        "dir": "LONG",
+        "entry": 78_170.65,
+        "atr14_3m": 399.12654179,
+        "tp": 79_343.21,
+    })
+    assert patient_with_atr["tp"] == 79_168.47
+    assert patient_with_atr["tp_policy"] == "FROZEN_3M_ATR_TP_2_5X"
 
     continuous = protection_view({"research_lane": "CONTINUOUS", "sl": 77_936.13})
     assert continuous["sl"] == 77_936.13
     assert continuous["sl_enforced"] is True
     assert continuous["stop_policy"] == "PHASE_STOP_POLICY"
+    assert continuous["tp_policy"] == "CONFIGURED_EXIT_POLICY"
 
     paper_book = _function_source(BOT, "build_paper_order_book")
     relay_view = _function_source(BOT, "_relay_position_row_lite")

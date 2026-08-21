@@ -31940,15 +31940,27 @@ def _position_protection_view(row: dict) -> dict:
         # Patient Chase is deliberately a TP-only paper experiment. Its
         # internal SL-shaped reference exists only for generic persistence and
         # close validation; the Patient exit branch never consults it.
+        target = _buf_float(row.get("atr_tp_price"), 0.0)
+        if target <= 0:
+            target = offset029_policy.atr_target(
+                _buf_float(row.get("entry"), 0.0),
+                row.get("dir") or row.get("side"),
+                _buf_float(row.get("atr14_3m"), 0.0),
+                _buf_float(row.get("atr14_pct_3m"), 0.0),
+            )
         return {
             "sl": None,
             "sl_enforced": False,
             "stop_policy": "NONE_TP_ONLY_RESEARCH",
+            "tp": round(float(target), 2) if target else None,
+            "tp_policy": "FROZEN_3M_ATR_TP_2_5X",
         }
     return {
         "sl": row.get("sl"),
         "sl_enforced": bool(_buf_float(row.get("sl"), 0.0) > 0),
         "stop_policy": "PHASE_STOP_POLICY",
+        "tp": row.get("tp"),
+        "tp_policy": "CONFIGURED_EXIT_POLICY",
     }
 
 
@@ -31998,7 +32010,8 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
             "sl": protection_view["sl"],
             "sl_enforced": protection_view["sl_enforced"],
             "stop_policy": protection_view["stop_policy"],
-            "tp": p.get("tp"),
+            "tp": protection_view["tp"],
+            "tp_policy": protection_view["tp_policy"],
             "leverage": lev,
             "entry_ts": p.get("entry_ts"),
             "entry_age_sec": round(now - float(p.get("entry_ts") or 0), 1) if p.get("entry_ts") else None,
@@ -32026,7 +32039,8 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
             "sl": protection_view["sl"],
             "sl_enforced": protection_view["sl_enforced"],
             "stop_policy": protection_view["stop_policy"],
-            "tp": o.get("tp"),
+            "tp": protection_view["tp"],
+            "tp_policy": protection_view["tp_policy"],
             "leverage": int(o.get("leverage") or _state_leverage()),
             "entry_ts": None,
             "entry_age_sec": None,
@@ -32275,7 +32289,8 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "sl": protection_view["sl"],
         "sl_enforced": protection_view["sl_enforced"],
         "stop_policy": protection_view["stop_policy"],
-        "tp": row.get("tp"),
+        "tp": protection_view["tp"],
+        "tp_policy": protection_view["tp_policy"],
         "leverage": row.get("leverage"),
         "funding_fees": row.get("funding_fees"),
         "created_ts": row.get("created_ts") or row.get("signal_created_ts"),
