@@ -36105,6 +36105,18 @@ def api_data_sync_manifest():
     ack = _read_data_sync_ack()
     with state_lock:
         fresh_collection_signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
+    if fresh_collection_signal_ts <= 0:
+        # The in-memory notification is lost on a normal machine restart, but
+        # research_session.json is the durable epoch authority. Re-publish the
+        # same cutoff (the sync client compares monotonically) so manifests do
+        # not falsely claim that no Fresh Collection has ever run.
+        session = _load_research_session_meta() or {}
+        try:
+            fresh_collection_signal_ts = float(
+                session.get("fresh_collection_start_time") or 0.0
+            )
+        except (TypeError, ValueError):
+            fresh_collection_signal_ts = 0.0
     return jsonify({
         "schema": "fly_runtime_incremental_sync_v1",
         "generated_at": utc_iso(),

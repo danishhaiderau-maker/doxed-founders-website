@@ -255,6 +255,23 @@ class FreshCollectionSignalTests(unittest.TestCase):
                 body["fresh_collection_signal_ts"], (int, float)
             )
 
+    def test_manifest_restores_signal_from_durable_session_after_restart(self):
+        """A restart must not make the current fresh epoch look uninitialized."""
+        with bot.state_lock:
+            bot.state["fresh_collection_signal_ts"] = 0.0
+        with mock.patch.object(
+            bot,
+            "_load_research_session_meta",
+            return_value={"fresh_collection_start_time": 12345.25},
+        ):
+            with bot.app.test_client() as client:
+                response = client.get("/api/data-sync/manifest")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["fresh_collection_signal_ts"],
+            12345.25,
+        )
+
     @staticmethod
     def _strict_flat_proof():
         return {
