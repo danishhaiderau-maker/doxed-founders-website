@@ -173,7 +173,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent
 from opportunity_capture_v22 import analyze_v22_events
 from research_opportunity_v2 import (
     COLLECTION_ID as TYPE_B_RESEARCH_V2_COLLECTION_ID,
@@ -14471,6 +14471,86 @@ def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
     )
 
 
+def _v3_lane_policy_material(lane: str) -> dict:
+    """Build the one policy material used by verdict and later resolution rows."""
+    spec = dict(COMBO_LANE_SPECS.get(lane) or {})
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        entry_limit_policy = DETERMINISTIC_ENTRY_POLICY_VERSION
+        entry_offset_fraction = DETERMINISTIC_ENTRY_OFFSET_PCT
+    else:
+        entry_limit_policy = spec.get("combo_key")
+        entry_offset_fraction = (
+            float(spec.get("entry_offset_pct")) / 100.0
+            if spec.get("entry_offset_pct") is not None else None
+        )
+    relay_eligible = bool(
+        spec.get("platform_relay_eligible", lane == RESEARCH_LANE_CONTINUOUS)
+    )
+    material = {
+        "policy_id": spec.get("raw_policy_id") or lane,
+        "raw_policy_id": spec.get("raw_policy_id") or lane,
+        "deterministic_entry_offset_pct": entry_offset_fraction,
+        "entry_limit_policy": entry_limit_policy,
+        "entry_ttl_sec": float(SIGNAL_TTL_SEC),
+        "exit_config": get_exit_config_for_lane(lane),
+        "paper_only": not relay_eligible,
+        "relay_eligible": relay_eligible,
+    }
+    base_control = dict(CONTROL_CELL)
+    base_control["invert_on"] = bool(invert_signal_active())
+    base_identity = build_policy_identity(
+        epoch_id=_collector_v22_epoch_id(), control_cell=base_control,
+        invert_on=bool(base_control["invert_on"]),
+    )
+    material["policy_signature"] = base_identity["policy_signature"]
+    material["policy_epoch_id"] = base_identity["policy_epoch_id"]
+    return material
+
+
+def _append_v3_lane_entry_resolution(
+    source: dict, lane: str, resolution: str, reason: str,
+) -> None:
+    """Best-effort append; never changes execution and never fabricates PnL."""
+    if not source or not _shared_ai_call_id(ctx=source):
+        return
+    try:
+        dual_write_lane_entry_resolution(
+            source, lane=lane, entry_resolution=resolution, exact_reason=reason,
+            epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            lane_policy=_v3_lane_policy_material(lane),
+        )
+    except Exception as exc:
+        logger.error(
+            f"[COLLECTOR_V3] lane entry resolution write failed lane={lane} "
+            f"resolution={resolution} reason={reason} error={exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+
+
+def _v3_record_preorder_terminal_if_needed(
+    source: dict, master: dict, row: dict, reason: str,
+) -> bool:
+    """Close only a pre-order expectation; an expired submitted order is not NO_ORDER."""
+    reason_upper = str(reason or "").upper()
+    had_submitted_order = bool(
+        source.get("order_placed") is True
+        or source.get("submitted_order_trade_id")
+        or master.get("order_placed") is True
+        or master.get("submitted_order_trade_id")
+    )
+    lane = str(row.get("research_lane") or "")
+    if (
+        reason_upper not in {"SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "DUPLICATE_LIMIT_PRICE"}
+        or had_submitted_order or not lane
+    ):
+        return False
+    _append_v3_lane_entry_resolution(
+        {**(master or {}), **(source or {}), **(row or {})},
+        lane, "NO_ORDER", reason_upper,
+    )
+    return True
+
+
 def _write_v3_shared_lane_decision(
     lane: str,
     ai: dict,
@@ -14506,41 +14586,7 @@ def _write_v3_shared_lane_decision(
             executed_direction = "SHORT"
         elif raw_direction == "SHORT":
             executed_direction = "LONG"
-    spec = dict(COMBO_LANE_SPECS.get(lane) or {})
-    if lane == RESEARCH_LANE_CONTINUOUS:
-        entry_limit_policy = DETERMINISTIC_ENTRY_POLICY_VERSION
-        entry_offset_fraction = DETERMINISTIC_ENTRY_OFFSET_PCT
-    else:
-        entry_limit_policy = spec.get("combo_key")
-        entry_offset_fraction = (
-            float(spec.get("entry_offset_pct")) / 100.0
-            if spec.get("entry_offset_pct") is not None
-            else None
-        )
-    relay_eligible = bool(
-        spec.get("platform_relay_eligible", lane == RESEARCH_LANE_CONTINUOUS)
-    )
-    lane_policy = {
-        "policy_id": spec.get("raw_policy_id") or lane,
-        "raw_policy_id": spec.get("raw_policy_id") or lane,
-        "deterministic_entry_offset_pct": entry_offset_fraction,
-        "entry_limit_policy": entry_limit_policy,
-        "exit_config": get_exit_config_for_lane(lane),
-        # Continuous is a local Showcase paper lifecycle that may be copied by
-        # the separately armed relay, so it is not a paper-only policy.
-        # Patient Chase has relay eligibility disabled and remains paper-only.
-        "paper_only": not relay_eligible,
-        "relay_eligible": relay_eligible,
-    }
-    base_control = dict(CONTROL_CELL)
-    base_control["invert_on"] = bool(invert_signal_active())
-    base_identity = build_policy_identity(
-        epoch_id=_collector_v22_epoch_id(),
-        control_cell=base_control,
-        invert_on=bool(base_control["invert_on"]),
-    )
-    lane_policy["policy_signature"] = base_identity["policy_signature"]
-    lane_policy["policy_epoch_id"] = base_identity["policy_epoch_id"]
+    lane_policy = _v3_lane_policy_material(lane)
     factors = (ai or {}).get("factors") or {}
     long_score = (ai or {}).get("long_score", factors.get("long_score"))
     short_score = (ai or {}).get("short_score", factors.get("short_score"))
@@ -15789,7 +15835,7 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         f"[{target_lane}] combo spawn trade_id={spawn_ctx['trade_id']} reason={trigger_reason} "
         f"[PIPELINE ENFORCEMENT]"
     )
-    process_signal({
+    result = process_signal({
         "event_trigger": True,
         "research_lane": target_lane,
         "edge_trigger_reason": trigger_reason,
@@ -15801,6 +15847,20 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         "pre_ai": spawn_ai,
         "pre_ctx": spawn_ctx,
     })
+    if isinstance(result, dict):
+        resolution = str(result.get("entry_resolution") or "").upper()
+        if resolution in {"AWAITING", "NO_ORDER"}:
+            resolution_source = {
+                **spawn_ctx,
+                "shared_ai_call_id": call_id,
+                "raw_direction": spawn_ai.get("raw_direction") or spawn_ai.get("direction"),
+                "executed_direction": spawn_ai.get("direction"),
+                "research_lane": target_lane,
+            }
+            _append_v3_lane_entry_resolution(
+                resolution_source, target_lane, resolution,
+                str(result.get("exact_reason") or "UNSPECIFIED"),
+            )
 
 
 def _spawn_lab_combo_shadow(
@@ -19380,7 +19440,10 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     """Create a pending limit order after micro structure is confirmed."""
     if _manual_pause_block_entry(signal, "SIM_LIMIT_CREATE"):
         return False
-    if not can_progress_new_entry()[0]:
+    entry_ok, entry_reason, _runtime = can_progress_new_entry()
+    if not entry_ok:
+        signal["block_reason"] = entry_reason
+        signal["exit_reason"] = entry_reason
         logger.warning(
             f"[WS ENTRY FREEZE] refusing new simulated limit trade_id={signal.get('trade_id')} "
             f"until a genuine WS tick is fresh [PIPELINE ENFORCEMENT]"
@@ -21448,7 +21511,7 @@ def process_signal(event: dict):
                 f"[PIPELINE] blocked before AI/new entry reason={entry_reason} "
                 f"[PIPELINE ENFORCEMENT]"
             )
-            return
+            return {"entry_resolution": "NO_ORDER", "exact_reason": entry_reason}
     research_lane = event.get("research_lane", RESEARCH_LANE_AI_SCAN)
     registered_offset_policy = (
         str(research_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25
@@ -21554,7 +21617,7 @@ def process_signal(event: dict):
                     update_debug_state_always("MAX_ACTIVE_SIGNALS", {"edge": edge_score, "lane": research_lane})
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     state["last_pipeline_stage"] = "IDLE"
-                    return
+                    return {"entry_resolution": "NO_ORDER", "exact_reason": "MAX_ACTIVE_SIGNALS"}
             elif not sole and not ensure_signal_capacity():
                 active = get_active_signal_count()
                 logger.info(f"[MAX ACTIVE SIGNALS] Hard block at entry - {active}/{max_active} [PIPELINE ENFORCEMENT]")
@@ -21563,7 +21626,7 @@ def process_signal(event: dict):
                 update_debug_state_always("MAX_ACTIVE_SIGNALS", {"edge": edge_score})
                 _set_lane_pipeline_stage(research_lane, "IDLE")
                 state["last_pipeline_stage"] = "IDLE"
-                return
+                return {"entry_resolution": "NO_ORDER", "exact_reason": "MAX_ACTIVE_SIGNALS"}
 
             if not sole and time.time() - state.get("last_signal_create_ts", 0) < GLOBAL_SIGNAL_COOLDOWN:
                 logger.info("[GLOBAL COOLDOWN] 5min block active after any prior signal attempt [PIPELINE ENFORCEMENT]")
@@ -21643,7 +21706,7 @@ def process_signal(event: dict):
                     update_debug_state_always("AI_COOLDOWN_ACTIVE", {"edge": edge_score})
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     state["last_pipeline_stage"] = "IDLE"
-                    return
+                    return {"entry_resolution": "NO_ORDER", "exact_reason": "CONTINUOUS_TOGGLE_OFF"}
 
                 buffers = {
                     "ret_1m": ret_1m_buffer,
@@ -22336,7 +22399,7 @@ def process_signal(event: dict):
                     update_debug_state_always("MAX_ACTIVE_SIGNALS", {"edge": edge_score, "lane": research_lane})
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     state["last_pipeline_stage"] = "IDLE"
-                    return
+                    return {"entry_resolution": "NO_ORDER", "exact_reason": "MAX_ACTIVE_SIGNALS"}
             elif not sole and not ensure_signal_capacity():
                 logger.warning("[MAX ACTIVE SIGNALS] Hard block before finalize [PIPELINE ENFORCEMENT]")
                 exit_pipeline(signal, ai, "MAX_ACTIVE_SIGNALS")
@@ -22347,7 +22410,7 @@ def process_signal(event: dict):
                 update_debug_state_always("MAX_ACTIVE_SIGNALS", {"edge": edge_score})
                 _set_lane_pipeline_stage(research_lane, "IDLE")
                 state["last_pipeline_stage"] = "IDLE"
-                return
+                return {"entry_resolution": "NO_ORDER", "exact_reason": "MAX_ACTIVE_SIGNALS"}
 
             price = ctx.get("price")
             if price is None or price <= 0:
@@ -22416,7 +22479,7 @@ def process_signal(event: dict):
                 finalize_signal(signal, ai, "EXPIRED")
                 _set_lane_pipeline_stage(research_lane, "IDLE")
                 state["last_pipeline_stage"] = "IDLE"
-                return
+                return {"entry_resolution": "NO_ORDER", "exact_reason": "DUPLICATE_LIMIT_PRICE"}
             if not success:
                 if (
                     research_lane == RESEARCH_LANE_CONTINUOUS
@@ -22442,7 +22505,7 @@ def process_signal(event: dict):
                 )
                 exit_pipeline(signal, ai, failure_reason)
                 state["last_pipeline_stage"] = "IDLE"
-                return
+                return {"entry_resolution": "NO_ORDER", "exact_reason": failure_reason}
             if (
                 relay_publishes_approve_outcome(research_lane)
                 and signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES
@@ -22477,7 +22540,15 @@ def process_signal(event: dict):
             )
             _set_lane_pipeline_stage(research_lane, "IDLE")
             state["last_pipeline_stage"] = "IDLE"
-            return
+            if signal.get("status") in (
+                SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MICRO,
+                SIGNAL_STATUS_AWAITING_MIN_AGE,
+            ) or signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES:
+                return {
+                    "entry_resolution": "AWAITING",
+                    "exact_reason": str(signal.get("status") or "AWAITING_ENTRY"),
+                }
+            return {"entry_resolution": "ORDER_SUBMITTED", "exact_reason": "ORDER_SUBMITTED"}
 
         except Exception as e:
             logger.error(f"[PIPELINE FATAL] lane={research_lane} {e} [PIPELINE ENFORCEMENT]")
@@ -22490,6 +22561,7 @@ def process_signal(event: dict):
                 logger.error("[PIPELINE] No signal object for crash recovery [PIPELINE ENFORCEMENT]")
             update_debug_state_always("PIPELINE_ERROR", {"error": str(e)})
             state["last_pipeline_stage"] = "IDLE"
+            return {"entry_resolution": "NO_ORDER", "exact_reason": f"PIPELINE_ERROR:{e}"}
         finally:
             if lane_started:
                 _set_lane_pipeline_stage(research_lane, "IDLE")
@@ -24103,6 +24175,7 @@ def _record_expired_order(source: dict, reason: str):
         },
         path_complete=True,
     )
+    _v3_record_preorder_terminal_if_needed(source, master, row, reason)
     return row
 
 
