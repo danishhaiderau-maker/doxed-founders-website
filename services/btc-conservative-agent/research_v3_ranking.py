@@ -15,6 +15,8 @@ REQUIRED_GATES = (
     "neighborhood_stability_pass",
     "multiple_testing_pass",
     "regime_coverage_pass",
+    "minimum_episode_pass",
+    "sealed_holdout_pass",
 )
 
 
@@ -54,4 +56,3 @@ def rank_safe_policies(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "ranked": survivors,
         "blocked": [row for row in assessed if not row["ranking_eligible"]],
     }
-

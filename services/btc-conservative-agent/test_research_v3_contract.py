@@ -55,6 +55,16 @@ class ResearchV3ContractTests(unittest.TestCase):
         self.assertEqual(report["policies_qualified"], 2)
         self.assertIn("drawdown_budget_pass", report["blocked"][0]["ranking_blockers"])
 
+    def test_ranking_requires_minimum_sample_and_sealed_holdout(self):
+        passes = {gate: True for gate in REQUIRED_GATES}
+        too_small = {"policy_id": "TOO_SMALL", "sealed_oos_net_usd": 99, "gates": {**passes, "minimum_episode_pass": False}}
+        inspected_holdout = {"policy_id": "INSPECTED", "sealed_oos_net_usd": 99, "gates": {**passes, "sealed_holdout_pass": False}}
+        report = rank_safe_policies([too_small, inspected_holdout])
+        self.assertIsNone(report["number_one"])
+        blockers = {row["policy_id"]: row["ranking_blockers"] for row in report["blocked"]}
+        self.assertIn("minimum_episode_pass", blockers["TOO_SMALL"])
+        self.assertIn("sealed_holdout_pass", blockers["INSPECTED"])
+
 
 if __name__ == "__main__":
     unittest.main()

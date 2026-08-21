@@ -48,6 +48,13 @@ class V3ValidationTests(unittest.TestCase):
         self.assertEqual(report["outcome_states"]["NO_FILL"], 100)
         self.assertFalse(report["gates"]["oos_lcb_positive_pass"])
 
+    def test_liquidation_buffer_is_never_inferred_from_price_path(self):
+        rows = [episode(i, 2) for i in range(100)]
+        unverified = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True)
+        verified = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True, liquidation_buffer_verified=True)
+        self.assertFalse(unverified["gates"]["liquidation_buffer_pass"])
+        self.assertTrue(verified["gates"]["liquidation_buffer_pass"])
+
 
 if __name__ == "__main__":
     unittest.main()

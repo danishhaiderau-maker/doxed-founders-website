@@ -102,6 +102,7 @@ def validate_policy(
     conservative_execution: bool,
     neighborhood_stable: bool,
     sealed_holdout: bool,
+    liquidation_buffer_verified: bool = False,
     minimum_episodes: int = 100,
     minimum_regimes: int = 3,
 ) -> dict[str, Any]:
@@ -125,7 +126,9 @@ def validate_policy(
         "conservative_execution_pass": bool(conservative_execution),
         "drawdown_budget_pass": bool(budget["passed"]),
         "cvar_budget_pass": "CVAR95_BUDGET_FAILED" not in budget["reasons"],
-        "liquidation_buffer_pass": True,
+        # A complete market path does not prove liquidation safety. Require an
+        # explicit leverage/margin/liquidation-distance receipt.
+        "liquidation_buffer_pass": bool(liquidation_buffer_verified),
         "oos_lcb_positive_pass": bool(bootstrap.get("mean_lcb95") is not None and bootstrap["mean_lcb95"] > 0),
         "neighborhood_stability_pass": bool(neighborhood_stable),
         "multiple_testing_pass": probability >= adjusted_required_probability,
