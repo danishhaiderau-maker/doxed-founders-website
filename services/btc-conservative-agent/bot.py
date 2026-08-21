@@ -3717,7 +3717,10 @@ def log_ai_input_full(
             "trade_id": ctx.get("trade_id") or ai_result.get("trade_id"),
             "research_lane": research_lane,
             "shadow_only": shadow_only,
-            "candle_bucket": _edge_candle_bucket(),
+            # This is a descriptive time bucket for offline grouping only.
+            # Edge execution was retired, so AI-input persistence must not
+            # depend on the removed Edge trigger helper.
+            "candle_bucket": int(time.time() // (15 * 60)),
             "candle_15m_elapsed_pct": _candle_15m_elapsed_pct(),
             "continuous_ai_enabled": continuous_ai_research_enabled(),
             "temperature": temperature,
