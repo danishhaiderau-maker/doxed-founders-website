@@ -10,6 +10,7 @@ policy.  Every observation is written atomically for the dashboard/operator.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import subprocess
@@ -78,6 +79,60 @@ def fetch_json(url: str, token: str, timeout: int = 20) -> dict[str, Any]:
     return value
 
 
+@contextmanager
+def open_replace_safe(path: Path):
+    """Open evidence for reading without blocking an atomic mirror replace.
+
+    Python's normal Windows file open does not grant FILE_SHARE_DELETE.  A
+    supervisor scan of a large JSONL could therefore make the sync publisher's
+    File.Replace fail even though the supervisor is read-only.  The explicit
+    Windows handle keeps read/write/delete sharing enabled; other platforms use
+    the ordinary context-managed reader.
+    """
+    if os.name != "nt":
+        with path.open("rb") as handle:
+            yield handle
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    raw_handle = create_file(
+        str(path),
+        0x80000000,              # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # READ | WRITE | DELETE sharing
+        None,
+        3,                       # OPEN_EXISTING
+        0x00000080,              # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    invalid_handle = wintypes.HANDLE(-1).value
+    if raw_handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(int(raw_handle), os.O_RDONLY | os.O_BINARY)
+    except Exception:
+        close_handle(raw_handle)
+        raise
+    with os.fdopen(fd, "rb", closefd=True) as handle:
+        yield handle
+
+
+def read_replace_safe_bytes(path: Path) -> bytes:
+    with open_replace_safe(path) as handle:
+        return handle.read()
+
+
 def process_inventory() -> list[dict[str, Any]]:
     command = (
         "Get-CimInstance Win32_Process | "
@@ -116,7 +171,7 @@ def read_current_events(path: Path) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     # Release the Windows mirror handle before schema validation/counting. A
     # supervisor pass must never block publication of the next generation.
-    payload = path.read_bytes()
+    payload = read_replace_safe_bytes(path)
     for line_number, raw_line in enumerate(payload.splitlines(), 1):
         line = raw_line.decode("utf-8-sig", errors="strict")
         if not line.strip():

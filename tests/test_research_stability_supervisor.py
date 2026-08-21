@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,33 @@ NOW = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_supervisor_reader_does_not_block_atomic_mirror_replace(tmp_path):
+    destination = tmp_path / "research_events_v22.jsonl"
+    candidate = tmp_path / "candidate.jsonl"
+    backup = tmp_path / "backup.jsonl"
+    destination.write_bytes(b"old\n")
+    candidate.write_bytes(b"new\n")
+
+    with module.open_replace_safe(destination) as held_reader:
+        if os.name == "nt":
+            command = (
+                f'[System.IO.File]::Replace("{candidate}", '
+                f'"{destination}", "{backup}")'
+            )
+            replaced = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", command],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert replaced.returncode == 0, replaced.stderr
+        else:
+            os.replace(candidate, destination)
+        assert held_reader.read() == b"old\n"
+
+    assert destination.read_bytes() == b"new\n"
 
 
 def make_fixture(tmp_path):
