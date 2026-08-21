@@ -29298,19 +29298,10 @@ DASHBOARD_JS = """(function () {
         safeText('aiThresholdDisplay', enabledBands.length
           ? enabledBands.join(', ')
           : (d.ai_threshold != null ? d.ai_threshold + '% min' : 'WAITING'));
-        const edgeBase = d.edge_threshold != null ? normalizeEdgeOptionValue(d.edge_threshold) : '2.0';
-        const edgeMax = d.edge_threshold_max;
-        const edgeEff = d.debug_state?.edge_components?.effective_threshold;
-        const flatFloor = d.debug_state?.edge_components?.flat_momentum_floor;
-        let edgeDisp = edgeMax != null && edgeMax !== ''
-          ? edgeBase + ' – ' + normalizeEdgeOptionValue(edgeMax)
-          : edgeBase + '+';
-        if (d.edge_range_preset) edgeDisp += ' (' + d.edge_range_preset + ')';
-        if (edgeEff != null) {
-          edgeDisp += ' | eff min ' + normalizeEdgeOptionValue(edgeEff);
-          if (flatFloor != null && flatFloor > parseFloat(edgeBase)) edgeDisp += ', flat floor ' + normalizeEdgeOptionValue(flatFloor);
-        }
-        safeText('edgeThresholdDisplay', edgeDisp);
+        // Edge is retained only as historical research telemetry.  Do not let
+        // removed Edge controls or formatters participate in live refresh:
+        // one stale UI reference must never abort every dashboard tile/table.
+        safeText('edgeThresholdDisplay', 'analytics only');
         const lao = d.last_approve_outcome || {};
         const approveEl = document.getElementById('approveOutcome');
         if (approveEl) {
