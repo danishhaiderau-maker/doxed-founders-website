@@ -217,6 +217,49 @@ def read_current_events(path: Path) -> dict[str, Any]:
     }
 
 
+def read_v3_evidence(mirror: Path) -> dict[str, Any]:
+    """Read normalized V3 ledgers without holding mirror-replace handles."""
+    ledger_dir = mirror / "v3" / "ledgers"
+    counts: dict[str, int] = {}
+    episodes: set[str] = set()
+    epochs: set[str] = set()
+    terminal = provisional = 0
+    for name in ("opportunity", "decision", "order_intent", "execution", "market_segment", "lifecycle"):
+        path = ledger_dir / f"{name}.jsonl"
+        rows = []
+        if path.is_file():
+            payload = read_replace_safe_bytes(path)
+            if payload and not payload.endswith(b"\n"):
+                raise ValueError(f"V3_TRUNCATED_LEDGER:{name}")
+            for line_number, raw in enumerate(payload.splitlines(), 1):
+                row = json.loads(raw.decode("utf-8-sig", errors="strict"))
+                if row.get("schema") != "research_evidence_v3" or row.get("ledger") != name:
+                    raise ValueError(f"V3_SCHEMA_OR_LEDGER_MISMATCH:{name}:{line_number}")
+                rows.append(row)
+                if row.get("episode_id"):
+                    episodes.add(str(row["episode_id"]))
+                if row.get("epoch_id"):
+                    epochs.add(str(row["epoch_id"]))
+                if name == "lifecycle":
+                    if row.get("terminal") is True:
+                        terminal += 1
+                    else:
+                        provisional += 1
+        counts[name] = len(rows)
+    segment_root = mirror / "v3" / "market_segments"
+    segment_files = list(segment_root.glob("*/*.json")) if segment_root.is_dir() else []
+    return {
+        "ledger_counts": counts,
+        "independent_opportunities": counts["opportunity"],
+        "decision_branches": counts["decision"],
+        "terminal_lifecycles": terminal,
+        "provisional_lifecycles": provisional,
+        "market_segments": len(segment_files),
+        "episode_ids_seen_across_ledgers": len(episodes),
+        "epoch_ids": sorted(epochs),
+    }
+
+
 def shared_cycle_snapshot_prefix_ok(
     reports: dict[str, dict[str, Any]], event_summary: dict[str, Any],
 ) -> tuple[bool, dict[str, Any]]:
@@ -476,6 +519,7 @@ class Supervisor:
             checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
         source_revision = None
+        manifest: dict[str, Any] = {}
         try:
             manifest = self.fetcher(self.fly_url.rstrip("/") + "/api/data-sync/manifest", self.token, 20)
             source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
@@ -636,6 +680,44 @@ class Supervisor:
                 "expected_policy_signatures": expected_signatures,
                 "reports": {name: {key: report.get(key) for key in ("epoch_id", "policy_epoch_id", "evidence_policy_signature")}
                             for name, report in reports.items()}})
+
+        v3_report_path = self.report_dir / "safe_policy_genome_v3_report.json"
+        manifest_has_v3 = any(str(row.get("path") or "").replace("\\", "/").startswith("v3/") for row in (manifest.get("files") or []))
+        if v3_report_path.is_file() or manifest_has_v3:
+            try:
+                v3 = read_v3_evidence(self.mirror)
+                add("v3_normalized_evidence_integrity", True, v3)
+                report = read_json(v3_report_path)
+                generated = parse_time(report.get("generated_at"))
+                age = (self.now() - generated).total_seconds() if generated else float("inf")
+                collection = report.get("collection") or {}
+                expected = {
+                    "independent_opportunities": v3["independent_opportunities"],
+                    "decision_branches": v3["decision_branches"],
+                    "terminal_lifecycles": v3["terminal_lifecycles"],
+                    "provisional_lifecycles": v3["provisional_lifecycles"],
+                    "market_segments": v3["market_segments"],
+                }
+                observed = {key: int(collection.get(key) or 0) for key in expected}
+                deltas = {key: expected[key] - observed[key] for key in expected}
+                exact = expected == observed
+                pending = (
+                    age <= REPORT_MAX_AGE_SECONDS
+                    and all(delta >= 0 for delta in deltas.values())
+                    and sum(deltas.values()) <= MAX_PENDING_EVENT_DELTA
+                )
+                add("v3_report_fresh_and_count_parity", age <= REPORT_MAX_AGE_SECONDS and (exact or pending), {
+                    "status": "EXACT" if exact else "PENDING_NEXT_ANALYZER_CYCLE" if pending else "MISMATCH",
+                    "age_seconds": round(age, 1), "expected": expected, "observed": observed, "deltas": deltas,
+                    "report_status": report.get("status"), "qualification": report.get("qualification"),
+                    "real_bitfinex_trading_allowed": report.get("real_bitfinex_trading_allowed"),
+                })
+                add("v3_real_money_fail_closed", report.get("real_bitfinex_trading_allowed") is False, {
+                    "real_bitfinex_trading_allowed": report.get("real_bitfinex_trading_allowed"),
+                    "number_one_strategy": report.get("number_one_strategy"),
+                })
+            except Exception as exc:
+                add("v3_normalized_evidence_integrity", False, f"{type(exc).__name__}: {exc}")
 
         return {
             "schema": "research_stability_supervisor_v1",
