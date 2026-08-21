@@ -19400,8 +19400,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     signal.pop("awaiting_micro_since", None)
     signal.pop("awaiting_5m_since", None)
     signal.pop("awaiting_min_age_since", None)
-    with trade_lock:
-        registered = lane_register_pending_order(order)
+    # lane_register_pending_order owns the narrow list-mutation lock itself and
+    # intentionally performs schedule/evidence hydration after releasing it.
+    # An outer RLock here silently kept trade_lock held across that slow work,
+    # starving relay snapshots and eventually the WebSocket ping/pong loop.
+    registered = lane_register_pending_order(order)
     if not registered:
         pipeline_state_sync()
         return True
