@@ -555,10 +555,15 @@ def build_research_event(
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
+    raw_direction = (
+        "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
+    ) if invert_on else direction_u
     event_id = make_event_id(trade_id, signal_ts)
     episode = make_event_episode(
         signal_ts=signal_ts,
-        direction=direction_u,
+        # Episode identity belongs to the causal signal. Inversion is a policy
+        # treatment and must not split the same opportunity into a new sample.
+        direction=raw_direction,
         symbol=symbol,
         shared_ai_call_id=shared_ai_call_id,
     )
@@ -651,9 +656,6 @@ def build_research_event(
     policy_identity = build_policy_identity(
         epoch_id=str(epoch_id), control_cell=control_cell, invert_on=bool(invert_on),
     )
-    raw_direction = (
-        "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
-    ) if invert_on else direction_u
     exact_requested_qty = None
     try:
         exact_requested_qty = float(requested_qty) if requested_qty is not None else None

@@ -11974,6 +11974,11 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "created_ts_ts": ts,
             "expires_ts": ts + ttl_sec,
             "final_direction": direction,
+            "raw_direction": source.get("raw_direction") or (
+                "SHORT" if invert_on and direction == "LONG"
+                else "LONG" if invert_on and direction == "SHORT"
+                else direction
+            ),
             "invert_on": invert_on,
             "live_fill_ts": live_fill_ts,
             "live_fill_price": live_fill_price,
@@ -12184,6 +12189,11 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 "created_ts_ts": ts,
                 "expires_ts": ts + 1800.0,
                 "final_direction": direction,
+                "raw_direction": signal.get("raw_direction") or (
+                    "SHORT" if _coerce_invert_on(signal) and direction == "LONG"
+                    else "LONG" if _coerce_invert_on(signal) and direction == "SHORT"
+                    else direction
+                ),
                 "invert_on": _coerce_invert_on(signal),
                 "edge_score_at_entry": signal.get("edge_score_at_entry"),
                 "status": "REJECTED",
