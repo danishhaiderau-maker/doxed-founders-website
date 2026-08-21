@@ -1,0 +1,53 @@
+import unittest
+
+from research_v3_validation import chronological_folds, validate_policy
+
+
+def episode(index, pnl, *, state="FULL_FILL", regime=None):
+    return {
+        "episode_id": f"e-{index}",
+        "signal_ts": index * 10_000,
+        "required_end_ts": index * 10_000 + 7200,
+        "regime": regime or ("BULL" if index % 3 == 0 else "BEAR" if index % 3 == 1 else "SIDEWAYS"),
+        "policy_outcomes": {"p": {"outcome_state": state, "net_pnl_usd": pnl}},
+    }
+
+
+class V3ValidationTests(unittest.TestCase):
+    def test_purge_removes_training_paths_overlapping_validation(self):
+        rows = [episode(i, 1) for i in range(30)]
+        folds = chronological_folds(rows, outer_folds=5, purge_sec=7200, embargo_sec=300)
+        self.assertEqual(len(folds), 5)
+        for fold in folds:
+            boundary = fold["validation_start_ts"]
+            self.assertTrue(all(row["required_end_ts"] < boundary - 7500 for row in fold["train"]))
+
+    def test_unsupported_is_not_silently_zero_pnl(self):
+        rows = [episode(i, 2) for i in range(100)]
+        rows[5] = episode(5, None, state="UNSUPPORTED")
+        report = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=10, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True)
+        self.assertFalse(report["gates"]["integrity_pass"])
+        self.assertEqual(report["episodes_scored"], 99)
+        self.assertIn("e-5", report["missing_or_unsupported_episode_ids"])
+
+    def test_positive_pnl_still_fails_unsafe_drawdown_or_unsealed_holdout(self):
+        rows = [episode(i, 5) for i in range(100)]
+        rows[80] = episode(80, -100)
+        report = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=25, max_drawdown_pct=5, min_cvar95_usd=-30, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=False)
+        self.assertGreater(report["risk"]["net_pnl_usd"], 0)
+        self.assertFalse(report["gates"]["drawdown_budget_pass"])
+        self.assertFalse(report["gates"]["sealed_holdout_pass"])
+        self.assertFalse(report["qualified"])
+
+    def test_no_fill_is_explicit_valid_opportunity_not_execution(self):
+        rows = [episode(i, None, state="NO_FILL") for i in range(100)]
+        report = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=25, max_drawdown_pct=5, min_cvar95_usd=-1, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True)
+        self.assertEqual(report["episodes_scored"], 100)
+        self.assertEqual(report["risk"]["realized_zero_executions"], 0)
+        self.assertEqual(report["risk"]["non_execution_zero_contributions"], 100)
+        self.assertEqual(report["outcome_states"]["NO_FILL"], 100)
+        self.assertFalse(report["gates"]["oos_lcb_positive_pass"])
+
+
+if __name__ == "__main__":
+    unittest.main()
