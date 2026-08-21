@@ -308,13 +308,15 @@ def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
     assert 'master.get("shared_ai_call_id")' in close
 
 
-def test_ai_scan_fanout_stamps_persisted_parent_identity_before_child_spawn():
+def test_ai_scan_fans_out_patient_before_slow_continuous_processing():
     process = _function_source(BOT, "process_signal")
-    assert 'canonical_call_id = str(' in process
-    assert 'or signal.get("trade_id")' in process
-    assert 'fanout_ctx["shared_ai_call_id"] = canonical_call_id' in process
-    assert 'fanout_ai["shared_ai_call_id"] = canonical_call_id' in process
-    assert "spawn_combo_lanes_from_ai_scan(\n                    fanout_ctx,\n                    fanout_ai," in process
+    patient_call = "spawn_combo_lanes_from_ai_scan(\n                        ctx, ai, edge_score, features, research_lane,"
+    continuous_call = "spawn_continuous_lane_from_ai_scan(\n                        ctx, ai, edge_score, features, research_lane,"
+    assert process.count("spawn_combo_lanes_from_ai_scan(") == 1
+    assert patient_call in process
+    assert continuous_call in process
+    assert process.index(patient_call) < process.index(continuous_call)
+    assert "fanout_ctx" not in process
 
 
 def test_api_distinguishes_legacy_approved_no_order_from_pending():
