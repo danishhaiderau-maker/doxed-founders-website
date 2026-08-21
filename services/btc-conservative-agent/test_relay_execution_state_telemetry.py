@@ -31,6 +31,16 @@ def _function(name: str) -> ast.FunctionDef:
     )
 
 
+def test_active_dashboard_overlay_refreshes_nested_manual_pause_label() -> None:
+    """A paused-built presentation cache must not claim pause after resume."""
+    func = _function("_api_state_cache_refresher_loop")
+    body_src = ast.get_source_segment(BOT_SOURCE, func)
+    assert body_src is not None
+    assert 'paused_shadow_stats["manual_pause_active"] = bool(' in body_src
+    assert 'relay.get("manual_admin_pause")' in body_src
+    assert 'relay.get("execution_reason") == "ADMIN_MANUAL"' in body_src
+
+
 def test_relay_execution_state_snapshot_surfaces_relay_push_summary() -> None:
     """state_integrity in the slim snapshot must include a relay_push block.
 

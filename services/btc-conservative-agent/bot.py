@@ -33590,6 +33590,21 @@ def _api_state_cache_refresher_loop():
                 snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
                     for_api=True
                 )
+                paused_shadow_stats = snap.get("paused_shadow_stats")
+                if isinstance(paused_shadow_stats, dict):
+                    # The expensive presentation payload may have been built
+                    # while the operator was paused. Keep its historical
+                    # aggregates, but never let that cached build freeze the
+                    # *current* control-state label after execution resumes.
+                    paused_shadow_stats = copy.deepcopy(paused_shadow_stats)
+                    paused_shadow_stats["manual_pause_active"] = bool(
+                        relay.get("manual_admin_pause")
+                        or (
+                            relay.get("execution_paused")
+                            and relay.get("execution_reason") == "ADMIN_MANUAL"
+                        )
+                    )
+                    snap["paused_shadow_stats"] = paused_shadow_stats
                 snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
                 snap["api_state_overlay_build_ms"] = relay.get("build_ms")
             with _api_state_cache_lock:
