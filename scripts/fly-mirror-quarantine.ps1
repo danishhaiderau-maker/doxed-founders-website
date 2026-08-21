@@ -87,6 +87,12 @@ function Invoke-FlyMirrorEpochQuarantine {
       sha256 = (Get-FlyMirrorSha256 -LiteralPath $file.FullName)
     }
   }
+  $preservedTotalBytes = [int64]0
+  foreach ($row in $preserved) {
+    # Ordered dictionaries do not expose size_bytes as a PowerShell object
+    # property to Measure-Object on every Windows PowerShell host.
+    $preservedTotalBytes += [int64]$row['size_bytes']
+  }
 
   $manifest = [ordered]@{
     schema = 'fly_mirror_epoch_quarantine_v2'
@@ -95,7 +101,7 @@ function Invoke-FlyMirrorEpochQuarantine {
     fresh_collection_signal_ts = $FreshCollectionSignalTs
     source_mirror = $mirror
     file_count = $preserved.Count
-    total_bytes = [int64](($preserved | Measure-Object -Property size_bytes -Sum).Sum)
+    total_bytes = $preservedTotalBytes
     files = $preserved
   }
   $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporaryManifest -Encoding UTF8

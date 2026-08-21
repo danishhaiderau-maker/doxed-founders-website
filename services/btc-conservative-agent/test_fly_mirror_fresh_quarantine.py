@@ -38,6 +38,8 @@ def test_recursive_quarantine_preserves_paths_bytes_and_hashes(tmp_path):
     assert {row["path"] for row in manifest["files"]} == {
         "root.jsonl", "research/genome/opportunity.jsonl"
     }
+    assert manifest["total_bytes"] == len(b"root-old\n") + len(b"nested-old\n")
+    assert manifest["total_bytes"] == sum(row["size_bytes"] for row in manifest["files"])
     assert not any(path.is_file() for path in mirror.rglob("*"))
     destination = manifest_path.parent
     assert (destination / "root.jsonl").read_bytes() == b"root-old\n"
