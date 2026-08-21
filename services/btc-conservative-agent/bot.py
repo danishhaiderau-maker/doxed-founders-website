@@ -21,6 +21,7 @@ import glob
 import itertools
 import re
 import copy
+import functools
 import shutil
 import sys
 import subprocess
@@ -168,6 +169,7 @@ from collector_v22_provisional import (
     PROVISIONAL_STORE_FILE as COLLECTOR_V22_PROVISIONAL_FILE,
     load_provisional_events,
     remove_provisional_event,
+    reset_provisional_events,
     upsert_provisional_event,
 )
 from opportunity_capture_v22 import analyze_v22_events
@@ -790,6 +792,13 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         "cwd": os.getcwd(),
         "launcher": "15minu_bot.py",
     }
+    if fresh_collection_reset and fresh_start is not None:
+        cutoff = _utc_isoformat_ns(float(fresh_start))
+        material = f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{cutoff}"
+        fresh_epoch_id = "epoch-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+        payload["collector_v22_epoch_ts"] = float(fresh_start)
+        payload["collector_v22_epoch_id"] = fresh_epoch_id
+        payload["collector_version"] = COLLECTOR_V22_VERSION
     with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -11621,6 +11630,16 @@ _order_multiverse_last_poll = 0.0
 _order_multiverse_path_complete = {}
 _order_multiverse_post_ttl_done = {}
 _order_multiverse_written = set()
+_collector_epoch_lock = threading.RLock()
+
+
+def _collector_epoch_serialized(fn):
+    """Serialize collector writes with the official fresh-epoch boundary."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _collector_epoch_lock:
+            return fn(*args, **kwargs)
+    return wrapped
 # v2.2: dense 1s path_replay off Fly volume by default (~309 KB/filled event saved).
 COLLECTOR_V22_PATH_REPLAY_1S = os.getenv("COLLECTOR_V22_PATH_REPLAY_1S", "").strip().lower() in ("1", "true", "yes")
 _RESEARCH_RAW_JSONL_NEVER_PRUNE = frozenset({
@@ -11666,6 +11685,7 @@ def _collector_feature_snapshot(source, *, signal_ts):
     }
 
 
+@_collector_epoch_serialized
 def _merge_collector_v22_provisionals(*, reason: str) -> int:
     """Self-heal missing same-epoch maturation sources from durable journal."""
     epoch_id = _collector_v22_epoch_id()
@@ -11710,6 +11730,51 @@ def _collector_v22_epoch_id() -> str:
         anchor = float(bot_start_time or time.time())
     material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
     return "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def _collector_source_in_current_epoch(source: dict) -> bool:
+    """Reject an old causal source that races a completed fresh reset."""
+    if not isinstance(source, dict):
+        return False
+    cutoff = (_load_research_session_meta() or {}).get("fresh_collection_start_time")
+    if cutoff in (None, "", 0, 0.0):
+        return True
+    raw = (
+        source.get("created_ts_ts")
+        or source.get("created_ts")
+        or source.get("signal_ts")
+        or source.get("snapshot_ts")
+    )
+    try:
+        return float(raw) >= float(cutoff)
+    except (TypeError, ValueError):
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return parsed.timestamp() >= float(cutoff)
+        except (TypeError, ValueError):
+            return False
+
+
+def _reset_collector_epoch_state(reset_anchor: float) -> str:
+    """Bind and atomically clear V2/V3 recovery state for a fresh epoch."""
+    global _order_multiverse_last_poll
+    with state_lock:
+        state["fresh_collection_mode"] = True
+    _write_research_session(float(reset_anchor), fresh_collection_reset=True)
+    fresh_epoch_id = _collector_v22_epoch_id()
+    with _collector_epoch_lock:
+        reset_provisional_events(epoch_id=fresh_epoch_id)
+        with replay_lock:
+            replay_buffers.clear()
+        _cycle_3m_written_buckets.clear()
+        _touch_grid_book.clear()
+        _order_multiverse_state.clear()
+        _order_multiverse_pending_src.clear()
+        _order_multiverse_path_complete.clear()
+        _order_multiverse_post_ttl_done.clear()
+        _order_multiverse_written.clear()
+        _order_multiverse_last_poll = 0.0
+    return fresh_epoch_id
 
 
 def _ensure_collector_v22_epoch() -> str:
@@ -11833,9 +11898,17 @@ def _maybe_complete_pending_order_multiverse():
         )
 
 
+@_collector_epoch_serialized
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     """v2.2: write-once immutable research event per event_id (~210 KB)."""
     if not isinstance(source, dict):
+        return None
+    if not _collector_source_in_current_epoch(source):
+        logger.warning(
+            "[COLLECTOR_V22] stale pre-reset source refused during maturation "
+            f"trade_id={source.get('trade_id')} epoch_id={_collector_v22_epoch_id()} "
+            "[PIPELINE ENFORCEMENT]"
+        )
         return None
     if storage_blocks_new_events() and not event_already_written(
         str(source.get("trade_id") or source.get("canonical_trade_id") or "")
@@ -12062,6 +12135,7 @@ def _promote_collector_v22_registered_order(order: dict, signal: dict = None):
     return result
 
 
+@_collector_epoch_serialized
 def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict = None):
     """Persist the latest authoritative order schedule after every mutation."""
     if not isinstance(order, dict):
@@ -12097,9 +12171,16 @@ def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict =
     return True
 
 
+@_collector_epoch_serialized
 def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "REJECTED", *, would_block_only: bool = False):
     """First-class rejected/WOULD_BLOCK candidate. Not a live veto."""
     if not isinstance(signal, dict):
+        return None
+    if not _collector_source_in_current_epoch(signal):
+        logger.warning(
+            "[COLLECTOR_V22] stale pre-reset rejected source refused "
+            f"trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]"
+        )
         return None
     try:
         tid = str(signal.get("trade_id") or "")
@@ -14295,6 +14376,8 @@ def _type_b_research_v2_entry_features(ai_result: dict, call_ts: str) -> tuple[d
 
 
 def _record_type_b_research_v2_opportunity(ai_result: dict, call_ts: str) -> None:
+    # Retired evidence is archive-only. V3 owns active causal opportunities.
+    return
     opportunity_id = _shared_ai_call_id(ai_result=ai_result)
     if not opportunity_id:
         logger.warning("[TYPE_B_RESEARCH_V2] missing shared opportunity id; event rejected")
@@ -14328,6 +14411,8 @@ def _record_type_b_research_v2_child(
     mode: str = None,
     payload: dict = None,
 ) -> None:
+    # Retired evidence is archive-only. V3 owns active causal lifecycles.
+    return
     # The offset/ATR candidate is a genuine paper-order lane, not a Type-B or
     # shadow-replay cohort.  Keeping this fence at the writer prevents any
     # future caller from contaminating the legacy Type-B event stream.
@@ -25211,6 +25296,7 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        "type_b_adx_v3_shadow_decisions.jsonl", TYPE_B_RESEARCH_V2_EVENT_FILE,
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE,
         COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         COLLECTOR_V22_EVENT_INDEX_FILE,
@@ -25267,6 +25353,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        "type_b_adx_v3_shadow_decisions.jsonl", TYPE_B_RESEARCH_V2_EVENT_FILE,
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
@@ -25535,15 +25622,11 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
                 "archive_path": archive_path,
                 "past_analysis_id": past_analysis_id,
             }
-    with replay_lock:
-        replay_buffers.clear()
-    _cycle_3m_written_buckets.clear()
-    _touch_grid_book.clear()
-    _order_multiverse_state.clear()
-    _order_multiverse_pending_src.clear()
-    _order_multiverse_path_complete.clear()
-    _order_multiverse_post_ttl_done.clear()
-    _order_multiverse_written.clear()
+    # Bind the new causal generation before clearing recovery state. A racing
+    # maturation poll then either finishes wholly before this boundary or is
+    # refused by the new cutoff; it cannot recreate old V3 ledgers afterward.
+    reset_anchor = time.time()
+    _reset_collector_epoch_state(reset_anchor)
     with trade_lock:
         pending_orders.clear()
         expired_orders.clear()
@@ -25564,10 +25647,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     _reset_runtime_log_handlers()
     reset_runtime_state()
     reset_session_risk_state()
-    bot_start_time = time.time()
+    bot_start_time = reset_anchor
     _last_fresh_maintain_ts = time.time()
-    with state_lock:
-        state["fresh_collection_mode"] = True
     _write_research_session(bot_start_time, fresh_collection_reset=True)
     _record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)
     load_session_trades_from_csv()

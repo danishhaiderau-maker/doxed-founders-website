@@ -104,3 +104,15 @@ def load_provisional_events(*, epoch_id: Optional[str] = None, data_dir: Optiona
             continue
         result[str(event_id)] = dict(row["source"])
     return result
+
+
+def reset_provisional_events(*, epoch_id: str, data_dir: Optional[str] = None) -> None:
+    """Atomically replace every pre-bound recovery source at an epoch boundary."""
+    epoch = str(epoch_id or "").strip()
+    if not epoch:
+        raise ValueError("epoch_id is required")
+    path = _path(data_dir)
+    with _LOCK:
+        payload = _empty()
+        payload["bound_epoch_id"] = epoch
+        _atomic_write_unlocked(path, payload)

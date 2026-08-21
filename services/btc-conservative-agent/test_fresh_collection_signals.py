@@ -13,6 +13,7 @@ endpoint.
 
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,81 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertIn("COLLECTOR_V22_PROVISIONAL_FILE", source)
         self.assertIn("PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE", source)
         self.assertIn("_order_multiverse_pending_src.clear()", source)
+
+    def test_reset_then_maturation_cannot_resurrect_old_epoch(self):
+        old_source = {
+            "trade_id": "pre-reset-provisional",
+            "created_ts_ts": 100.0,
+            "signal_price_at_approve": 70000.0,
+            "final_direction": "LONG",
+            "expires_ts": 101.0,
+            "collector_rejected": True,
+            "collector_reject_reason": "TEST",
+        }
+        old_cwd = os.getcwd()
+        original_start = bot.bot_start_time
+        original_last_poll = bot._order_multiverse_last_poll
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+                os.chdir(root)
+                bot._order_multiverse_pending_src[old_source["trade_id"]] = dict(old_source)
+                bot._order_multiverse_state[old_source["trade_id"]] = "PENDING"
+                bot.upsert_provisional_event(
+                    old_source["trade_id"], old_source,
+                    epoch_id="epoch-old", data_dir=root,
+                )
+
+                epoch_id = bot._reset_collector_epoch_state(200.0)
+                bot._delete_paths(bot.research_wipe_file_paths())
+                official_epoch, cutoff, _kind = bot._fresh_epoch_identity_from_session()
+                self.assertEqual(epoch_id, official_epoch)
+                self.assertEqual(bot._collector_v22_epoch_id(), official_epoch)
+                self.assertEqual(bot.load_provisional_events(data_dir=root), {})
+                self.assertEqual(bot._order_multiverse_pending_src, {})
+                self.assertTrue(bot._collector_source_in_current_epoch({
+                    "created_ts_ts": 201.0,
+                }))
+
+                # Simulate a maturation worker that retained a reference before
+                # reset. The cutoff fence must reject it before any V2/V3 write.
+                self.assertIsNone(bot._sync_order_multiverse(old_source, path_complete=True))
+                bot._order_multiverse_last_poll = 0.0
+                bot._maybe_complete_pending_order_multiverse()
+                self.assertFalse(Path("research_events_v22.jsonl").exists())
+                self.assertFalse(any(Path("v3").rglob("*.jsonl")))
+                self.assertTrue(cutoff)
+                os.chdir(old_cwd)
+        finally:
+            os.chdir(old_cwd)
+            bot.bot_start_time = original_start
+            bot._order_multiverse_last_poll = original_last_poll
+
+    def test_retired_type_b_active_files_are_wiped_and_not_recreated(self):
+        old_cwd = os.getcwd()
+        try:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as root:
+                os.chdir(root)
+                retired = (
+                    Path("type_b_adx_v3_shadow_decisions.jsonl"),
+                    Path(bot.TYPE_B_RESEARCH_V2_EVENT_FILE),
+                )
+                archive = Path("research_archive/session_001/archive_meta.json")
+                archive.parent.mkdir(parents=True)
+                archive.write_text('{"sealed":true}\n', encoding="utf-8")
+                for path in retired:
+                    path.write_text('{"legacy":true}\n', encoding="utf-8")
+                    self.assertIn(str(path), bot.research_wipe_file_paths())
+                deleted, errors = bot._delete_paths(bot.research_wipe_file_paths())
+                self.assertFalse(errors)
+                self.assertTrue(all(str(path) in deleted for path in retired))
+                self.assertTrue(archive.exists())
+
+                bot._record_type_b_research_v2_opportunity({}, "2026-01-01T00:00:00Z")
+                bot._record_type_b_research_v2_child("OUTCOME", "legacy")
+                self.assertTrue(all(not path.exists() for path in retired))
+                os.chdir(old_cwd)
+        finally:
+            os.chdir(old_cwd)
 
     def setUp(self):
         self.original_signal = float(bot.state.get("fresh_collection_signal_ts") or 0.0)
