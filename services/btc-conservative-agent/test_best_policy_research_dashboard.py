@@ -140,6 +140,7 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "Top 100 Policy Combos" in html
     assert "Entry policies searched" in html
     assert "Hierarchical search space" in html
+    assert "pg.policy_rows || pg.rows || []" in html
 
 
 def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):

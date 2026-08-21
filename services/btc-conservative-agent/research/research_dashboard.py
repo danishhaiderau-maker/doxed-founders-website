@@ -3922,10 +3922,11 @@ async function loadCombos() {
   const pg = d.policy_grid || {};
   const pe = pg.evidence || {};
   const searchCounts = pg.search_counts || {};
+  const policyRows = pg.policy_rows || pg.rows || [];
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
-    ['Policies shown', (pg.rows||[]).length],
+    ['Policies shown', policyRows.length],
     ['Profitable policies available', pg.rows_available ?? 0],
     ['Entry policies searched', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString()],
     ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString()],
@@ -3933,7 +3934,7 @@ async function loadCombos() {
     ['Train / OOS', `${pe.training_episodes ?? 0} / ${pe.oos_episodes ?? 0}`],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('policy-grid-body').innerHTML = (pg.rows||[]).map(p => {
+  document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {
     const ci = p.oos_win_probability_ci95_low_pct == null ? 'n/a' :
       `${p.oos_win_probability_pct}% (${p.oos_win_probability_ci95_low_pct}–${p.oos_win_probability_ci95_high_pct}%)`;
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
