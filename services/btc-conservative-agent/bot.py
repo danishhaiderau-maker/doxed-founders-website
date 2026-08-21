@@ -315,6 +315,13 @@ WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "
 # normal heartbeat jitter never trips a self-inflicted reconnect. Only the
 # watchdog uses this — entry authorization uses WS_ENTRY_FRESH_SEC below.
 WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "30"))
+WATCHDOG_TRADE_LOCK_TIMEOUT_SEC = float(
+    os.getenv("WATCHDOG_TRADE_LOCK_TIMEOUT_SEC", "2")
+)
+WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY = max(
+    3,
+    int(os.getenv("WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY", "6")),
+)
 # A genuine trade-channel tick remains mandatory for new strategy work. The
 # 60s window tolerates the quiet Bitfinex derivative tape, but entry also
 # requires a separately fresh REST bid/ask snapshot (see
@@ -28413,7 +28420,63 @@ def dump_system_state():
     except Exception as e:
         logger.error(f"[CRASH DUMP FAILED] {e}")
 
+def _strategy_progress_health_snapshot(now: float = None) -> dict:
+    """Prove the strategy loop can progress; a heartbeat thread is insufficient."""
+    now = float(now or time.time())
+    with state_lock:
+        ws_ts = float(state.get("ws_last_tick") or 0)
+        ws_hb_ts = float(state.get("ws_last_hb_ts") or 0)
+        ws_connected = bool(state.get("ws_transport_connected", False))
+        ai_ts = float(state.get("last_ai_call_ts") or 0)
+        paused = bool(state.get("execution_paused", False))
+        manual = bool(state.get("manual_admin_pause", False))
+        live_armed = bool(state.get("live_armed", False))
+    ws_age = max(0.0, now - ws_ts) if ws_ts else None
+    ws_hb_age = max(0.0, now - ws_hb_ts) if ws_hb_ts else None
+    ai_age = max(0.0, now - ai_ts) if ai_ts else None
+    startup_age = max(0.0, now - float(bot_start_time or now))
+    ai_stale_sec = max(300.0, float(get_effective_ai_cooldown_sec()) + 120.0)
+    ai_expected = bool(
+        not paused
+        and not manual
+        and (os.getenv("DEEPSEEK_API_KEY") or "").strip()
+        and startup_age >= ai_stale_sec
+    )
+
+    lock_available = trade_lock.acquire(timeout=WATCHDOG_TRADE_LOCK_TIMEOUT_SEC)
+    if lock_available:
+        trade_lock.release()
+
+    transport_progressing = bool(
+        ws_connected
+        and (
+            (ws_ts and ws_age <= WATCHDOG_WS_STALE_SEC)
+            or (ws_hb_ts and ws_hb_age <= WATCHDOG_WS_STALE_SEC)
+        )
+    )
+    trade_stream_progressing = bool(
+        ws_ts and ws_age <= WATCHDOG_WS_TRADE_STALE_SEC
+    )
+    ws_progressing = bool(transport_progressing and trade_stream_progressing)
+    ai_progressing = bool(not ai_expected or (ai_ts and ai_age <= ai_stale_sec))
+    return {
+        "ok": bool(lock_available and ws_progressing and ai_progressing),
+        "trade_lock_available": bool(lock_available),
+        "ws_progressing": ws_progressing,
+        "ws_age_sec": ws_age,
+        "ws_heartbeat_age_sec": ws_hb_age,
+        "ai_expected": ai_expected,
+        "ai_progressing": ai_progressing,
+        "ai_age_sec": ai_age,
+        "ai_stale_after_sec": ai_stale_sec,
+        "open_positions": len(open_positions),
+        "pending_orders": len(pending_orders),
+        "live_armed": live_armed,
+    }
+
+
 def watchdog_loop():
+    consecutive_progress_failures = 0
     while not shutdown_event.is_set():
         with state_lock:
             hb_ts = state.get("last_heartbeat") or last_heartbeat
@@ -28426,6 +28489,40 @@ def watchdog_loop():
             )
             dump_system_state()
             dump_threads()
+        progress = _strategy_progress_health_snapshot()
+        if progress["ok"]:
+            consecutive_progress_failures = 0
+        else:
+            consecutive_progress_failures += 1
+            logger.error(
+                "[WATCHDOG] strategy progress failed %s/%s lock=%s ws_age=%s "
+                "ai_age=%s ai_expected=%s positions=%s pending=%s",
+                consecutive_progress_failures,
+                WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY,
+                progress["trade_lock_available"],
+                progress["ws_age_sec"],
+                progress["ai_age_sec"],
+                progress["ai_expected"],
+                progress["open_positions"],
+                progress["pending_orders"],
+            )
+            if consecutive_progress_failures >= WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY:
+                dump_system_state()
+                dump_threads()
+                # A paper-only, disarmed, position-flat process may be restarted
+                # by Fly to clear a wedged lock. Never self-restart a live or
+                # position-bearing risk manager.
+                if (
+                    _force_paper_mode_active()
+                    and not progress["live_armed"]
+                    and progress["open_positions"] == 0
+                ):
+                    logger.critical(
+                        "[WATCHDOG] paper strategy stalled while flat; exiting 75 "
+                        "for supervisor recovery"
+                    )
+                    os._exit(75)
+                consecutive_progress_failures = 0
         time.sleep(5)
 
 def dump_threads():
@@ -34446,13 +34543,17 @@ def health():
     force_paper_mode = _force_paper_mode_active()
     relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
     process_alive = heartbeat_age <= 15.0
-    status = "paused" if paused else ("alive" if process_alive else "degraded")
+    strategy_progress = _strategy_progress_health_snapshot(now)
+    status = "paused" if paused else (
+        "alive" if process_alive and strategy_progress["ok"] else "degraded"
+    )
     return jsonify({
         "status": status,
         **_dashboard_owner_metadata(),
         "last_heartbeat": hb,
         "time_since_heartbeat": heartbeat_age,
         "process_alive": process_alive,
+        "strategy_progress": strategy_progress,
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
@@ -34527,11 +34628,13 @@ def ready():
         now=now,
     )
     dashboard_owner = is_active_dashboard_owner()
+    strategy_progress = _strategy_progress_health_snapshot(now)
     process_ready = bool(
         dashboard_owner
         and heartbeat_age <= 15.0
         and ohlcv_ready
         and market_health["market_data_ready"]
+        and strategy_progress["ok"]
     )
     # A deliberate operator pause must not make Fly mark the process unhealthy
     # or remove the sole risk manager from service. Readiness proves that the
@@ -34547,6 +34650,7 @@ def ready():
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
         "heartbeat_age": heartbeat_age,
+        "strategy_progress": strategy_progress,
         **market_health,
         "ohlcv_ready": ohlcv_ready,
         "system_ready": runtime["system_ready"],
