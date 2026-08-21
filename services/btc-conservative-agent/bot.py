@@ -5078,6 +5078,17 @@ BBO_HOT_READ_TIMEOUT_SEC = max(
     0.5, float(os.getenv("BBO_HOT_READ_TIMEOUT_SEC", "2.5"))
 )
 _book_refresh_lock = threading.Lock()
+_book_refresh_claim_token = None
+_book_refresh_claim_started_ts = 0.0
+BOOK_REFRESH_CLAIM_TTL_SEC = max(
+    5.0, float(os.getenv("BOOK_REFRESH_CLAIM_TTL_SEC", "8"))
+)
+BOOK_HOT_CONNECT_TIMEOUT_SEC = max(
+    0.25, float(os.getenv("BOOK_HOT_CONNECT_TIMEOUT_SEC", "1.5"))
+)
+BOOK_HOT_READ_TIMEOUT_SEC = max(
+    0.5, float(os.getenv("BOOK_HOT_READ_TIMEOUT_SEC", "2.5"))
+)
 _bitfinex_http_session = requests.Session()
 _bitfinex_http_session.headers.update({"User-Agent": "btc-research-bot/1.0"})
 bitfinex_public = None
@@ -5340,6 +5351,40 @@ def fetch_bitfinex_book_rest(symbol: str = BITFINEX_WS_SYMBOL, precision: str = 
     return {"bids": bids, "asks": asks, "level_count": len(bids) + len(asks)}
 
 
+def _fetch_bitfinex_book_rest_hot() -> dict:
+    """One bounded depth attempt isolated from unrelated REST sessions."""
+    url = f"{BITFINEX_REST_BASE}/book/{BITFINEX_WS_SYMBOL}/P0"
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": "btc-research-bot/1.0"})
+        response = session.get(
+            url,
+            timeout=(BOOK_HOT_CONNECT_TIMEOUT_SEC, BOOK_HOT_READ_TIMEOUT_SEC),
+        )
+        response.raise_for_status()
+        rows = response.json()
+    if not isinstance(rows, list):
+        raise ValueError(f"unexpected book response: {rows!r}")
+    bids, asks = [], []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        price = float(row[0])
+        count = int(row[1])
+        amount = float(row[2])
+        if amount > 0:
+            bids.append([price, count, amount])
+        elif amount < 0:
+            asks.append([price, count, abs(amount)])
+    bids.sort(key=lambda level: -level[0])
+    asks.sort(key=lambda level: level[0])
+    if MAX_BOOK_LEVELS > 0:
+        bids = bids[:MAX_BOOK_LEVELS]
+        asks = asks[:MAX_BOOK_LEVELS]
+    if not bids or not asks:
+        raise ValueError("order book missing bid or ask depth")
+    return {"bids": bids, "asks": asks, "level_count": len(bids) + len(asks)}
+
+
 def refresh_order_book_state(force: bool = False):
     """Cache Bitfinex order book for depth-aware sim fills (refreshed with BBO cadence).
 
@@ -5348,28 +5393,72 @@ def refresh_order_book_state(force: bool = False):
     at the same time only trigger ONE REST fetch, not one per caller. That
     coalescing is what keeps the Flask HTTP thread from being CPU-starved.
     """
-    global _last_book_refresh_ts
+    global _last_book_refresh_ts, _book_refresh_claim_token, _book_refresh_claim_started_ts
     now = time.time()
     min_interval = BOOK_FORCE_MIN_SEC if force else BOOK_REFRESH_SEC
     if (now - _last_book_refresh_ts) < min_interval:
-        return
-    with _book_refresh_lock:
+        return True
+    token = uuid.uuid4().hex
+    if not _book_refresh_lock.acquire(blocking=False):
+        return False
+    try:
         now = time.time()
         min_interval = BOOK_FORCE_MIN_SEC if force else BOOK_REFRESH_SEC
         if (now - _last_book_refresh_ts) < min_interval:
-            return
-        try:
-            book = fetch_bitfinex_book_rest()
+            return True
+        claim_age = (
+            now - float(_book_refresh_claim_started_ts or 0)
+            if _book_refresh_claim_token
+            else 0.0
+        )
+        if _book_refresh_claim_token and claim_age <= BOOK_REFRESH_CLAIM_TTL_SEC:
+            return False
+        if _book_refresh_claim_token:
+            with state_lock:
+                state["book_refresh_stale_claims"] = int(
+                    state.get("book_refresh_stale_claims") or 0
+                ) + 1
+        _book_refresh_claim_token = token
+        _book_refresh_claim_started_ts = now
+        with state_lock:
+            state["book_refresh_last_attempt_ts"] = now
+            state["book_refresh_inflight"] = True
+    finally:
+        _book_refresh_lock.release()
+
+    try:
+        book = _fetch_bitfinex_book_rest_hot()
+        completed_at = time.time()
+        with _book_refresh_lock:
+            if _book_refresh_claim_token != token:
+                return False
             with state_lock:
                 state["order_book"] = book
-                state["book_ts"] = now
+                state["book_ts"] = completed_at
                 bids = book.get("bids") or []
                 asks = book.get("asks") or []
                 state["bid_size_btc"] = round(float(bids[0][2]), 6) if bids else None
                 state["ask_size_btc"] = round(float(asks[0][2]), 6) if asks else None
-            _last_book_refresh_ts = now
-        except Exception as e:
-            logger.debug(f"[BOOK] refresh failed: {e} [PIPELINE ENFORCEMENT]")
+                state["book_refresh_last_success_ts"] = completed_at
+                state["book_refresh_last_error"] = None
+                state["book_refresh_consecutive_failures"] = 0
+            _last_book_refresh_ts = completed_at
+        return True
+    except Exception as exc:
+        with state_lock:
+            state["book_refresh_last_error"] = f"{type(exc).__name__}: {exc}"[:240]
+            state["book_refresh_consecutive_failures"] = int(
+                state.get("book_refresh_consecutive_failures") or 0
+            ) + 1
+        logger.warning(f"[BOOK] bounded refresh failed: {exc} [PIPELINE ENFORCEMENT]")
+        return False
+    finally:
+        with _book_refresh_lock:
+            if _book_refresh_claim_token == token:
+                _book_refresh_claim_token = None
+                _book_refresh_claim_started_ts = 0.0
+                with state_lock:
+                    state["book_refresh_inflight"] = False
 
 
 def simulate_market_fill(side: str, qty_btc: float) -> dict:
@@ -23363,6 +23452,20 @@ def bbo_refresh_loop():
         elapsed = max(0.0, time.monotonic() - started)
         shutdown_event.wait(max(0.05, BBO_REFRESH_SEC - elapsed))
 
+
+def order_book_refresh_loop():
+    """Maintain executable depth independently of order and HTTP workers."""
+    while not shutdown_event.is_set():
+        started = time.monotonic()
+        try:
+            refresh_order_book_state()
+        except Exception as exc:
+            logger.error(
+                f"[BOOK WORKER] refresh failed: {exc} [PIPELINE ENFORCEMENT]"
+            )
+        elapsed = max(0.0, time.monotonic() - started)
+        shutdown_event.wait(max(0.05, BOOK_REFRESH_SEC - elapsed))
+
 def build_signal(signal: dict, context: dict, ai: dict) -> dict:
     signal.update(context)
     signal["final_direction"] = ai.get("direction")
@@ -34117,6 +34220,31 @@ def _bbo_refresh_telemetry_snapshot(now: float = None) -> dict:
         }
 
 
+def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
+    now = float(now or time.time())
+    with _book_refresh_lock:
+        inflight = bool(_book_refresh_claim_token)
+        inflight_age = (
+            max(0.0, now - float(_book_refresh_claim_started_ts or 0))
+            if inflight
+            else 0.0
+        )
+    with state_lock:
+        book_ts = float(state.get("book_ts") or 0)
+        return {
+            "inflight": inflight,
+            "inflight_age_sec": inflight_age,
+            "book_age_sec": max(0.0, now - book_ts) if book_ts else None,
+            "last_attempt_ts": state.get("book_refresh_last_attempt_ts"),
+            "last_success_ts": state.get("book_refresh_last_success_ts"),
+            "last_error": state.get("book_refresh_last_error"),
+            "consecutive_failures": int(
+                state.get("book_refresh_consecutive_failures") or 0
+            ),
+            "stale_claims": int(state.get("book_refresh_stale_claims") or 0),
+        }
+
+
 @app.route('/health')
 @app.route('/api/status')
 @app.route('/status')
@@ -34159,6 +34287,7 @@ def health():
         "signal_generation_ready": runtime["signal_generation_ready"],
         "runtime_readiness": runtime,
         "bbo_refresh": _bbo_refresh_telemetry_snapshot(now),
+        "book_refresh": _book_refresh_telemetry_snapshot(now),
         **market_health,
         "live_entry_armable": armable,
         "live_entry_arm_block_reason": None if armable else arm_block_reason,
@@ -41290,6 +41419,7 @@ def main():
     threading.Thread(target=safe_thread(ws_tick_lifecycle_worker), daemon=True).start()
     threading.Thread(target=safe_thread(state_monitor_loop), daemon=True).start()
     threading.Thread(target=safe_thread(bbo_refresh_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
