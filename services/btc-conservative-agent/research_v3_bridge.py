@@ -119,6 +119,15 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "execution_basis": record.get("research_execution_basis") or envelope.get("research_execution_basis") or {},
         "chase_schedule": record.get("research_chase_schedule") or envelope.get("research_chase_schedule") or {},
         "entry_children_count": len(record.get("entry_children") or []),
+        # These are immutable policy-intent results, not duplicated market
+        # paths. Keeping the exact fill/chase receipts lets the V3 analyzer
+        # evaluate protection variants without rereading mutable v2 rows.
+        "entry_children": record.get("entry_children") or [],
+        "signal_price": _first(envelope.get("signal_price"), record.get("signal_price")),
+        "executed_direction": _first(envelope.get("executed_direction"), record.get("direction")),
+        "atr14_pct": _first(record.get("atr14_pct"), envelope.get("atr14_pct")),
+        "leverage": _first((record.get("research_execution_basis") or {}).get("leverage"), (envelope.get("control_cell") or {}).get("leverage"), 100.0),
+        "margin_usd": _first((record.get("research_execution_basis") or {}).get("margin_usd"), (envelope.get("control_cell") or {}).get("margin_usd"), 20.0),
         "search_receipt": envelope.get("policy_search") or {},
     }))
     if record.get("live_fill_ts") is not None or record.get("live_fill_price") is not None:

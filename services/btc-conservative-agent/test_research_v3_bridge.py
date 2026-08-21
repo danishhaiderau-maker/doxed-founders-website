@@ -74,6 +74,20 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(lifecycle["outcome_state"], "NO_FILL")
             self.assertNotEqual(lifecycle["outcome_state"], "REALIZED_ZERO_PNL")
 
+    def test_order_intent_preserves_exact_entry_children_for_v3_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event()
+            event["atr14_pct"] = 0.42
+            event["envelope"]["signal_price"] = 100.0
+            dual_write_v22_record(event, data_dir=tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            intent = json.loads(store.ledger_path("order_intent").read_text().strip())
+            self.assertEqual(intent["entry_children"], event["entry_children"])
+            self.assertEqual(intent["entry_children_count"], 2)
+            self.assertEqual(intent["atr14_pct"], 0.42)
+            self.assertEqual(intent["signal_price"], 100.0)
+            self.assertEqual(intent["executed_direction"], "LONG")
+
 
 if __name__ == "__main__":
     unittest.main()

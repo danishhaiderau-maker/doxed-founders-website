@@ -10,6 +10,7 @@ from typing import Any
 
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT
+from research_v3_candidates import evaluate_protection_screen, load_candidate_inputs
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
@@ -62,7 +63,17 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "entry_ttl_min": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_ttl_min") or []),
         "chase_policy_id": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("chase_policy_id") or []),
     })
+    candidate_screen = None
+    if candidates is None:
+        candidate_screen = evaluate_protection_screen(load_candidate_inputs(data_dir))
+        candidates = candidate_screen["candidates"]
     ranking = rank_safe_policies(candidates or [])
+    progress_receipts = []
+    if candidate_screen is not None:
+        progress_receipts.append({
+            "unique_policies_evaluated": candidate_screen.get("unique_policies_evaluated", 0),
+            "independent_episodes": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
+        })
     report = {
         "schema": "safe_policy_genome_v3_report_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -84,7 +95,12 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "market_segments": verification["market_segment_count"],
         },
         "search": search,
-        "search_progress": search_progress(search, []),
+        "search_progress": search_progress(search, progress_receipts),
+        "candidate_screen": candidate_screen or {
+            "schema": "externally_supplied_safe_policy_candidates_v3",
+            "unique_policies_evaluated": len(candidates or []),
+            "descriptive_top_100": [],
+        },
         "safe_policy_ranking": ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],
