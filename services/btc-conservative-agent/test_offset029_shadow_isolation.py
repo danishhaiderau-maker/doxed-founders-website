@@ -308,6 +308,22 @@ def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
     assert 'master.get("shared_ai_call_id")' in close
 
 
+def test_lightweight_dashboard_signal_keeps_patient_join_identity():
+    tree = ast.parse(BOT.read_text(encoding="utf-8"))
+    assignment = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_DASHBOARD_ACTIVE_SIGNAL_KEYS"
+                for target in node.targets)
+    )
+    values = {
+        item.value
+        for item in assignment.value.args[0].elts
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    }
+    assert {"shared_ai_call_id", "shared_ai_call_ts", "source_trade_id"} <= values
+
+
 def test_ai_scan_fans_out_patient_before_slow_continuous_processing():
     process = _function_source(BOT, "process_signal")
     patient_call = "spawn_combo_lanes_from_ai_scan(\n                        ctx, ai, edge_score, features, research_lane,"

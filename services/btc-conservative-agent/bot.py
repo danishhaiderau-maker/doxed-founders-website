@@ -31635,6 +31635,7 @@ def _relay_signal_ref_lite(sig: dict) -> dict:
 
 _DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
     "trade_id", "research_lane", "research_model", "final_direction", "dir",
+    "shared_ai_call_id", "shared_ai_call_ts", "source_trade_id",
     "ai_win_prob", "regime", "strategy", "strategy_birth", "created_ts",
     "created_ts_ts", "closed_ts", "closed_ts_ts", "timing", "expires_ts",
     "status", "outcome", "fill_price", "fill_ts", "exit_price",
