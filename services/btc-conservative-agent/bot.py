@@ -21590,8 +21590,36 @@ def process_signal(event: dict):
                 ai.get("win_prob"), edge_score,
             )
             if is_ai_scan_lane(research_lane) and ai.get("decision") == "APPROVE":
+                # The shared AI result is created before the AI_SCAN signal record,
+                # so it may not yet carry its canonical scan ID.  Fan-out children
+                # must inherit the persisted parent signal identity, not fall back
+                # to their newly allocated lane trade ID.  Otherwise the order is
+                # real but the dashboard/V3 provenance cannot join it to the paid
+                # shared call (observed as Patient Chase NOT_SELECTED + PENDING).
+                fanout_ctx = copy.deepcopy(ctx)
+                fanout_ai = copy.deepcopy(ai)
+                canonical_call_id = str(
+                    signal.get("shared_ai_call_id")
+                    or signal.get("trade_id")
+                    or trade_id
+                    or ""
+                )
+                canonical_call_ts = (
+                    signal.get("shared_ai_call_ts")
+                    or signal.get("approve_ts")
+                    or signal.get("created_ts")
+                    or time.time()
+                )
+                fanout_ctx["shared_ai_call_id"] = canonical_call_id
+                fanout_ctx["shared_ai_call_ts"] = canonical_call_ts
+                fanout_ai["shared_ai_call_id"] = canonical_call_id
+                fanout_ai["shared_ai_call_ts"] = canonical_call_ts
                 spawn_combo_lanes_from_ai_scan(
-                    ctx, ai, edge_score, signal.get("features") or features, research_lane,
+                    fanout_ctx,
+                    fanout_ai,
+                    edge_score,
+                    signal.get("features") or features,
+                    research_lane,
                 )
             if paused_shadow_mode:
                 log_lane_opportunity_event(

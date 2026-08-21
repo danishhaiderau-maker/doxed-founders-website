@@ -263,6 +263,15 @@ def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
     assert 'master.get("shared_ai_call_id")' in close
 
 
+def test_ai_scan_fanout_stamps_persisted_parent_identity_before_child_spawn():
+    process = _function_source(BOT, "process_signal")
+    assert 'canonical_call_id = str(' in process
+    assert 'or signal.get("trade_id")' in process
+    assert 'fanout_ctx["shared_ai_call_id"] = canonical_call_id' in process
+    assert 'fanout_ai["shared_ai_call_id"] = canonical_call_id' in process
+    assert "spawn_combo_lanes_from_ai_scan(\n                    fanout_ctx,\n                    fanout_ai," in process
+
+
 def test_api_distinguishes_legacy_approved_no_order_from_pending():
     fn = _load_function(
         BOT,
