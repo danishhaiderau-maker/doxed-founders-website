@@ -260,7 +260,12 @@ foreach ($row in $selectedFiles) {
             $refreshGeneration = $true
             break
           }
-          if ($attempt -ge 3) { throw }
+          if ($attempt -ge 3) {
+            throw (
+              "Fly sync chunk failed for $rel at offset $offset limit $limit " +
+              "after $attempt/3 attempt(s): $($_.Exception.Message)"
+            )
+          }
           Start-Sleep -Seconds (2 * $attempt)
         } finally {
           if (Test-Path -LiteralPath $tmp) {

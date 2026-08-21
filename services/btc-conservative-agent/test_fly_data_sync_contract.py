@@ -527,6 +527,8 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "/api/data-sync/manifest" not in BOT[BOT.index("_READ_ONLY_GET_PATHS"):BOT.index("def _client_ip")]
     assert '"X-Bot-Admin-Token" = $AdminToken' in SYNC_SCRIPT
     assert "Chunk checksum mismatch" in SYNC_SCRIPT
+    assert "Fly sync chunk failed for $rel at offset $offset limit $limit" in SYNC_SCRIPT
+    assert "after $attempt/3 attempt(s): $($_.Exception.Message)" in SYNC_SCRIPT
     assert "expected_physical_size=$expectedPhysicalSize" in SYNC_SCRIPT
     assert "expected_published_size=$expectedPublishedSize" in SYNC_SCRIPT
     assert "consistency_mode=$consistencyMode" in SYNC_SCRIPT
