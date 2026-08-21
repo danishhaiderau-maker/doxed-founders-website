@@ -59,6 +59,28 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["epoch_scope"]["excluded_stale_or_foreign_rows"], 2)
             self.assertIn("MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED", report["blockers"])
 
+    def test_report_dedupes_fallback_alias_of_same_causal_signal(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            common = {"signal_ts": 1000.0, "symbol": "BTCUSD", "raw_direction": "LONG"}
+            store.append("opportunity", {
+                "record_id": "o-fallback", "episode_id": "episode-fallback",
+                "grouping_basis": "TIME_DIRECTION_SYMBOL_FALLBACK", **common,
+            })
+            store.append("opportunity", {
+                "record_id": "o-shared", "episode_id": "episode-shared",
+                "grouping_basis": "SHARED_AI_CALL", "shared_ai_call_id": "scan-1", **common,
+            })
+            store.append("lifecycle", {
+                "record_id": "l-shared", "episode_id": "episode-shared", "terminal": False,
+            })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["collection"]["independent_opportunities"], 1)
+            self.assertEqual(report["epoch_scope"]["excluded_identity_alias_rows"], 1)
+            self.assertEqual(report["epoch_scope"]["identity_alias_episode_ids"], ["episode-fallback"])
+            self.assertEqual(report["status"], "V3_EPOCH_CONTAMINATION_BLOCKED")
+            self.assertIn("CAUSAL_IDENTITY_ALIAS_EXCLUDED", report["blockers"])
+
 
 if __name__ == "__main__":
     unittest.main()

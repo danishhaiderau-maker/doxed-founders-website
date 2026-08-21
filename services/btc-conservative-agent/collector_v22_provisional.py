@@ -11,6 +11,21 @@ PROVISIONAL_STORE_FILE = "research_events_v22.provisional.json"
 PROVISIONAL_STORE_SCHEMA = "research_event_provisional_store_v1"
 _LOCK = threading.RLock()
 
+# These fields define causal identity or point-in-time evidence.  A later
+# maturation rebuild may add lifecycle state, but it must never erase an
+# identity/snapshot already captured by the original signal.
+_PRESERVE_NONEMPTY_SOURCE_FIELDS = (
+    "shared_ai_call_id",
+    "event_episode_id",
+    "raw_direction",
+    "final_direction",
+    "symbol",
+    "pair",
+    "created_ts_ts",
+    "signal_ts",
+    "research_feature_snapshot",
+)
+
 
 def _path(data_dir: Optional[str] = None) -> Path:
     return Path(data_dir or os.getcwd()) / PROVISIONAL_STORE_FILE
@@ -63,11 +78,22 @@ def upsert_provisional_event(event_id: str, source: Mapping[str, Any], *, epoch_
     path = _path(data_dir)
     with _LOCK:
         store = _read_unlocked(path)
-        store["events"][key] = {"event_id": key, "epoch_id": epoch, "source": dict(source)}
+        incoming = dict(source)
+        previous = store["events"].get(key)
+        if isinstance(previous, dict) and str(previous.get("epoch_id") or "") == epoch:
+            prior_source = previous.get("source") if isinstance(previous.get("source"), dict) else {}
+            merged = dict(prior_source)
+            merged.update(incoming)
+            for field in _PRESERVE_NONEMPTY_SOURCE_FIELDS:
+                prior_value = prior_source.get(field)
+                if prior_value not in (None, "", {}, []):
+                    merged[field] = prior_value
+            incoming = merged
+        store["events"][key] = {"event_id": key, "epoch_id": epoch, "source": incoming}
         _atomic_write_unlocked(path, store)
     try:
         from research_v3_bridge import dual_write_provisional_source
-        return dual_write_provisional_source(key, source, epoch_id=epoch, data_dir=str(path.parent))
+        return dual_write_provisional_source(key, incoming, epoch_id=epoch, data_dir=str(path.parent))
     except Exception as exc:
         # The v2 provisional journal remains the recovery authority during the
         # migration.  A V3 dual-write error is returned to callers/supervision

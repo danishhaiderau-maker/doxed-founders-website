@@ -64,6 +64,34 @@ def _select_current_epoch(opportunities: list[dict[str, Any]], cutoff: float | N
     return max(eligible)[1] if eligible else None
 
 
+def _exclude_identity_aliases(opportunities: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Prefer the causal shared-ID row when an enrichment retry minted a fallback alias."""
+    grouped: dict[tuple[float, str, str], list[dict[str, Any]]] = {}
+    for row in opportunities:
+        try:
+            signal_ts = float(row.get("signal_ts"))
+        except (TypeError, ValueError):
+            signal_ts = -1.0
+        key = (
+            signal_ts,
+            str(row.get("symbol") or "").upper(),
+            str(row.get("raw_direction") or "").upper(),
+        )
+        grouped.setdefault(key, []).append(row)
+    kept, excluded = [], []
+    for rows in grouped.values():
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                0 if str(row.get("grouping_basis") or "") == "SHARED_AI_CALL" else 1,
+                str(row.get("episode_id") or ""),
+            ),
+        )
+        kept.append(rows[0])
+        excluded.extend(rows[1:])
+    return kept, excluded
+
+
 def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidates=None) -> dict[str, Any]:
     v3_root = Path(data_dir) / "v3"
     all_opportunities = _read_ledger(v3_root / "ledgers" / "opportunity.jsonl")
@@ -78,6 +106,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     opportunities = scoped(all_opportunities)
     if cutoff is not None:
         opportunities = [row for row in opportunities if float(row.get("signal_ts") or 0) >= cutoff]
+    opportunities, identity_aliases = _exclude_identity_aliases(opportunities)
     allowed_episodes = {str(row.get("episode_id") or "") for row in opportunities}
     decisions = [row for row in scoped(_read_ledger(store.ledger_path("decision"))) if str(row.get("episode_id") or "") in allowed_episodes]
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
@@ -85,7 +114,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     executions = [row for row in scoped(_read_ledger(store.ledger_path("execution"))) if str(row.get("episode_id") or "") in allowed_episodes]
     observed_epochs = sorted({str(row.get("epoch_id")) for row in all_opportunities if row.get("epoch_id")})
     excluded_opportunities = len(all_opportunities) - len(opportunities)
-    contamination = bool(excluded_opportunities or len(observed_epochs) > 1)
+    contamination = bool(excluded_opportunities or identity_aliases or len(observed_epochs) > 1)
     outcome_counts = Counter(str(row.get("outcome_state") or "UNKNOWN") for row in terminal_lifecycles)
     decision_outcomes = Counter(str(row.get("primary_outcome") or "UNKNOWN") for row in decisions)
     search = build_search_plan({
@@ -124,6 +153,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "active_opportunity_rows": len(all_opportunities),
             "included_fresh_rows": len(opportunities),
             "excluded_stale_or_foreign_rows": excluded_opportunities,
+            "excluded_identity_alias_rows": len(identity_aliases),
+            "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
             "contamination_detected": contamination,
         },
         "collection": {
@@ -147,7 +178,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "safe_policy_ranking": ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],
-        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
+        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
     _atomic_json(Path(report_dir) / REPORT_FILE, report)

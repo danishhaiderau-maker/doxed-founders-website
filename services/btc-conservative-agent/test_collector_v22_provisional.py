@@ -23,6 +23,25 @@ class ProvisionalStoreTests(unittest.TestCase):
             self.assertEqual(list(loaded), ["evt-1"])
             self.assertEqual(loaded["evt-1"]["status"], "FILLED")
 
+    def test_maturation_rebuild_cannot_erase_causal_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            upsert_provisional_event("cont-1", {
+                "trade_id": "cont-1", "shared_ai_call_id": "scan-1",
+                "created_ts_ts": 1000.0, "research_feature_snapshot": {"rsi": 42},
+                "status": "PENDING",
+            }, epoch_id="epoch-a", data_dir=root)
+            receipt = upsert_provisional_event("cont-1", {
+                "trade_id": "cont-1", "shared_ai_call_id": None,
+                "created_ts_ts": None, "research_feature_snapshot": {},
+                "status": "FILLED",
+            }, epoch_id="epoch-a", data_dir=root)
+            loaded = load_provisional_events(epoch_id="epoch-a", data_dir=root)["cont-1"]
+            self.assertEqual(loaded["shared_ai_call_id"], "scan-1")
+            self.assertEqual(loaded["created_ts_ts"], 1000.0)
+            self.assertEqual(loaded["research_feature_snapshot"], {"rsi": 42})
+            self.assertEqual(loaded["status"], "FILLED")
+            self.assertEqual(receipt["episode_id"], "episode-" + __import__("hashlib").sha256(b"shared:BTCUSD:UNKNOWN:scan-1").hexdigest()[:20])
+
     def test_remove_is_explicit_and_idempotent(self):
         with tempfile.TemporaryDirectory() as root:
             upsert_provisional_event("evt-1", {"trade_id": "evt-1"}, epoch_id="epoch-a", data_dir=root)

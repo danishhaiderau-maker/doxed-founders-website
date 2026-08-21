@@ -29,6 +29,17 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_provisional_without_stable_identity_is_deferred_without_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = dual_write_provisional_source("cont-pending", {
+                "created_ts_ts": 1000, "final_direction": "LONG", "symbol": "BTCUSD",
+            }, epoch_id="epoch-v3-test", data_dir=tmp)
+            self.assertTrue(receipt["deferred"])
+            self.assertEqual(receipt["reason"], "CAUSAL_IDENTITY_PENDING")
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertEqual(store.verify()["ledger_counts"]["opportunity"], 0)
+            self.assertEqual(store.verify()["ledger_counts"]["lifecycle"], 0)
+
     def test_provisional_opportunity_is_available_before_terminal_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             receipt = dual_write_provisional_source("cont-early", {

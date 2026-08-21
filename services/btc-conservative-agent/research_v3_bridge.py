@@ -18,14 +18,26 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
     direction = str(_first(source.get("raw_direction"), source.get("final_direction"), "UNKNOWN")).upper()
     symbol = str(_first(source.get("symbol"), source.get("pair"), "BTCUSD")).upper()
     shared = str(source.get("shared_ai_call_id") or "").strip()
+    stable_episode_id = str(source.get("event_episode_id") or "").strip()
+    if not shared and not stable_episode_id:
+        # Do not mint a fallback episode while the signal is still being
+        # enriched.  A later upsert commonly supplies the shared AI identity;
+        # writing now would leave an immutable orphan and inflate N.
+        return {
+            "schema": "v3_provisional_dual_write_receipt_v1",
+            "event_id": str(event_id),
+            "written": False,
+            "deferred": True,
+            "reason": "CAUSAL_IDENTITY_PENDING",
+            "writes": [],
+        }
     if shared:
         causal_key = f"shared:{symbol}:{direction}:{shared}"
         grouping_basis = "SHARED_AI_CALL"
+        episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
     else:
-        window = int(signal_ts // 300) * 300
-        causal_key = f"fallback:{symbol}:{direction}:{window}"
-        grouping_basis = "TIME_DIRECTION_SYMBOL_FALLBACK"
-    episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
+        episode_id = stable_episode_id
+        grouping_basis = "STABLE_EVENT_EPISODE"
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{episode_id}",
