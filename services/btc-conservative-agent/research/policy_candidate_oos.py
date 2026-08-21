@@ -272,20 +272,35 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
     # Filtering or sorting directly on OOS would turn the dashboard into a
     # multiple-testing winner picker and make attractive noise look causal.
     profitable_static = []
+    train_profitable_count = 0
+    oos_profitable_count = 0
+    train_and_oos_profitable_count = 0
     for train_result in train_rank:
-        if (train_result.get("expectancy_usd") or 0) <= 0:
-            continue
         oos_result = _evaluate(train_result["policy_id"], oos, cache)
-        if (oos_result.get("expectancy_usd") or 0) <= 0:
+        train_profitable = (train_result.get("expectancy_usd") or 0) > 0
+        oos_profitable = (oos_result.get("expectancy_usd") or 0) > 0
+        train_profitable_count += int(train_profitable)
+        oos_profitable_count += int(oos_profitable)
+        if not (train_profitable and oos_profitable):
             continue
-        profitable_static.append({
-            "policy_id": train_result["policy_id"],
-            "train": train_result,
-            "oos": oos_result,
-            "qualification": "DESCRIPTIVE_ONLY",
-        })
-        if len(profitable_static) >= MAX_DESCRIPTIVE_STATIC_ROWS:
-            break
+        train_and_oos_profitable_count += 1
+        if len(profitable_static) < MAX_DESCRIPTIVE_STATIC_ROWS:
+            profitable_static.append({
+                "policy_id": train_result["policy_id"],
+                "train": train_result,
+                "oos": oos_result,
+                "qualification": "DESCRIPTIVE_ONLY",
+            })
+    policy_search_statistics = {
+        "distinct_policies_tested": len(policies),
+        "train_profitable_policies": train_profitable_count,
+        "oos_profitable_policies": oos_profitable_count,
+        "train_and_oos_profitable_policies": train_and_oos_profitable_count,
+        "profitable_policies_displayed": len(profitable_static),
+        "display_limit": MAX_DESCRIPTIVE_STATIC_ROWS,
+        "ranking_basis": "TRAIN_EXPECTANCY_DESC_THEN_TRAIN_NET_PNL_DESC",
+        "oos_selection_use": "VALIDATION_ONLY_NOT_RANKING",
+    }
 
     regime_train = defaultdict(list)
     for row in train:
@@ -393,6 +408,7 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
             "dynamic_oos": dynamic_oos,
             "regime_policy_map": regime_map,
             "profitable_static_policies": profitable_static,
+            "policy_search_statistics": policy_search_statistics,
             "dynamic_regimes": dynamic_regimes,
             "multiple_testing_warning": (
                 "Policies are ranked on training only and shown with later OOS. "

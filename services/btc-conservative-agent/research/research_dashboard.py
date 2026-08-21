@@ -1161,6 +1161,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     detail = _read_json("policy_candidate_oos_report.json")
     current = _policy_detail_is_current(detail, best)
     challenger = (detail.get("descriptive_challenger") or {}) if current else {}
+    statistics = challenger.get("policy_search_statistics") or {}
     rows = []
     for rank, item in enumerate(challenger.get("profitable_static_policies") or [], start=1):
         train = item.get("train") or {}
@@ -1198,7 +1199,8 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "cycle_snapshot": detail.get("cycle_snapshot") if current else None,
         "evidence": evidence if current else {},
         "search_counts": ((best.get("research_design") or {}).get("counts") or {}),
-        "rows_available": len(challenger.get("profitable_static_policies") or []),
+        "rows_available": int(statistics.get("train_and_oos_profitable_policies") or len(challenger.get("profitable_static_policies") or [])),
+        "policy_search_statistics": statistics,
         "rows_limit": max(1, int(limit)),
         "blockers": best.get("blockers") or [],
         "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
@@ -1962,6 +1964,7 @@ def api_static_policy_research():
         "training_episodes": (detail.get("evidence") or {}).get("training_episodes", 0) if current else 0,
         "oos_episodes": (detail.get("evidence") or {}).get("oos_episodes", 0) if current else 0,
         "profitable_policies": rows,
+        "policy_search_statistics": challenger.get("policy_search_statistics") or {},
         "warning": challenger.get("multiple_testing_warning") or (
             "No current static policy report is available yet."
         ),
@@ -3922,14 +3925,16 @@ async function loadCombos() {
   const pg = d.policy_grid || {};
   const pe = pg.evidence || {};
   const searchCounts = pg.search_counts || {};
+  const policyStats = pg.policy_search_statistics || {};
   const policyRows = pg.policy_rows || pg.rows || [];
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
-    ['Policies shown', policyRows.length],
-    ['Profitable policies available', pg.rows_available ?? 0],
-    ['Entry policies searched', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString()],
-    ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString()],
+    ['Profitable policies shown', policyRows.length],
+    ['Profitable in train + OOS', Number(policyStats.train_and_oos_profitable_policies ?? pg.rows_available ?? 0).toLocaleString()],
+    ['Distinct policies tested', Number(policyStats.distinct_policies_tested || 0).toLocaleString()],
+    ['Entry configurations', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString()],
+    ['Theoretical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString()],
     ['Independent episodes', pe.independent_episodes ?? 0],
     ['Train / OOS', `${pe.training_episodes ?? 0} / ${pe.oos_episodes ?? 0}`],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],

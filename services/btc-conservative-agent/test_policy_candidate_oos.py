@@ -95,6 +95,16 @@ def test_descriptive_pages_use_train_rank_and_include_rejected_shadow(tmp_path, 
 
     challenger = report["descriptive_challenger"]
     assert [row["policy_id"] for row in challenger["profitable_static_policies"]] == ["POLICY_GOOD"]
+    assert challenger["policy_search_statistics"] == {
+        "distinct_policies_tested": 3,
+        "train_profitable_policies": 2,
+        "oos_profitable_policies": 1,
+        "train_and_oos_profitable_policies": 1,
+        "profitable_policies_displayed": 1,
+        "display_limit": 100,
+        "ranking_basis": "TRAIN_EXPECTANCY_DESC_THEN_TRAIN_NET_PNL_DESC",
+        "oos_selection_use": "VALIDATION_ONLY_NOT_RANKING",
+    }
     assert challenger["dynamic_regimes"]
     assert all(row["fallback"] is True for row in challenger["dynamic_regimes"])
     assert all(row["selected_policy_id"] == "CONTROL_OR_NO_TRADE" for row in challenger["dynamic_regimes"])

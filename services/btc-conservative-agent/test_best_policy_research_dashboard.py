@@ -138,7 +138,10 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "SOURCE UNAVAILABLE" in html
     assert "Top 100 Policy Combinations" in html
     assert "Top 100 Policy Combos" in html
-    assert "Entry policies searched" in html
+    assert "Entry configurations" in html
+    assert "Distinct policies tested" in html
+    assert "Profitable in train + OOS" in html
+    assert "Theoretical search space" in html
     assert "Hierarchical search space" in html
     assert "pg.policy_rows || pg.rows || []" in html
 
@@ -170,13 +173,20 @@ def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):
         "epoch_id": "epoch-clean",
         "policy_epoch_id": POLICY_EPOCH,
         "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "descriptive_challenger": {"profitable_static_policies": policies},
+        "descriptive_challenger": {
+            "profitable_static_policies": policies,
+            "policy_search_statistics": {
+                "distinct_policies_tested": 12601,
+                "train_and_oos_profitable_policies": 1449,
+            },
+        },
     })
 
     grid = dashboard._current_policy_grid_rows()
 
     assert len(grid["rows"]) == 100
-    assert grid["rows_available"] == 120
+    assert grid["rows_available"] == 1449
+    assert grid["policy_search_statistics"]["distinct_policies_tested"] == 12601
     assert grid["rows_limit"] == 100
 
 
