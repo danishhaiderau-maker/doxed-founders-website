@@ -363,7 +363,30 @@ if ($PublishAnalyzerReport) {
   if ([string]$reportManifest.schema -ne "report_manifest_v1") {
     throw "Unsupported analyzer report manifest schema: $($reportManifest.schema)"
   }
-  $analyzerGeneratedAt = [string]$reportManifest.generated_at
+  # PowerShell 7 converts ISO JSON timestamps to System.DateTime. Casting that
+  # value to string uses the desktop locale (for example 08/21/2026), which a
+  # different culture may reject even though the source timestamp was valid.
+  # Preserve the instant first, then emit one invariant round-trip value.
+  $analyzerGeneratedAtRaw = $reportManifest.generated_at
+  $analyzerGeneratedAtValue = [DateTimeOffset]::MinValue
+  if ($analyzerGeneratedAtRaw -is [DateTimeOffset]) {
+    $analyzerGeneratedAtValue = [DateTimeOffset]$analyzerGeneratedAtRaw
+  } elseif ($analyzerGeneratedAtRaw -is [DateTime]) {
+    $analyzerGeneratedAtValue = [DateTimeOffset]([DateTime]$analyzerGeneratedAtRaw)
+  } else {
+    $analyzerGeneratedAtText = [string]$analyzerGeneratedAtRaw
+    if (-not [DateTimeOffset]::TryParse(
+      $analyzerGeneratedAtText,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::RoundtripKind,
+      [ref]$analyzerGeneratedAtValue
+    )) {
+      throw "Analyzer report manifest generated_at is invalid: $analyzerGeneratedAtText"
+    }
+  }
+  $analyzerGeneratedAt = $analyzerGeneratedAtValue.ToUniversalTime().ToString(
+    "o", [Globalization.CultureInfo]::InvariantCulture
+  )
   $analyzerRunId = [string]$reportManifest.analyzer_sync_id
   $analyzerRevision = [string]$reportManifest.analysis_provenance.generation_revision
   $cohortSchema = [string]$reportManifest.analysis_provenance.cohort_schema
@@ -375,9 +398,6 @@ if ($PublishAnalyzerReport) {
   }
   if ($cohortSchema -ne "analysis_cohorts_v1") {
     throw "Unsupported analyzer cohort schema: $cohortSchema"
-  }
-  try { $analyzerGeneratedAtValue = [DateTimeOffset]::Parse($analyzerGeneratedAt) } catch {
-    throw "Analyzer report manifest generated_at is invalid: $analyzerGeneratedAt"
   }
   if (-not [string]$manifest.source_git_rev) {
     throw "Fly source-data manifest does not identify source_git_rev."

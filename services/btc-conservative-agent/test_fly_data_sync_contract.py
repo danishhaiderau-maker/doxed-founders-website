@@ -29,6 +29,14 @@ SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_te
 ATOMIC_HELPER = ROOT.parents[1] / "scripts" / "fly-mirror-atomic.ps1"
 
 
+def test_analyzer_manifest_timestamp_is_canonicalized_before_publication():
+    assert "$analyzerGeneratedAt = [string]$reportManifest.generated_at" not in SYNC_SCRIPT
+    assert "$analyzerGeneratedAtRaw = $reportManifest.generated_at" in SYNC_SCRIPT
+    assert "$analyzerGeneratedAtRaw -is [DateTime]" in SYNC_SCRIPT
+    assert "$analyzerGeneratedAtValue.ToUniversalTime().ToString(" in SYNC_SCRIPT
+    assert "[Globalization.CultureInfo]::InvariantCulture" in SYNC_SCRIPT
+
+
 def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
     assert "@{ signal_ts = $currentSignal" in SYNC_LOOP
     assert "@{$signal_ts" not in SYNC_LOOP
