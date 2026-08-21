@@ -1,9 +1,12 @@
 import json
+import os
+import threading
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
 from research import research_dashboard as dashboard
 from research.policy_cycle_snapshot import build_policy_cycle_reports
+from research import policy_cycle_snapshot
 
 
 SIGNAL_TS = 1_800_000_000.0
@@ -79,3 +82,39 @@ def test_analyzer_uses_single_policy_cycle_orchestrator():
     assert "build_policy_cycle_reports" in manifest_body
     assert "build_policy_candidate_oos_report(" not in manifest_body
     assert "build_best_policy_research_report(" not in manifest_body
+
+
+def test_policy_snapshot_releases_live_mirror_before_expensive_json_parsing(tmp_path, monkeypatch):
+    event_path = tmp_path / RESEARCH_EVENTS_FILE
+    _append(event_path, _event(1))
+    parsing_started = threading.Event()
+    allow_parsing = threading.Event()
+    real_loads = json.loads
+
+    def slow_loads(*args, **kwargs):
+        parsing_started.set()
+        assert allow_parsing.wait(5)
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(policy_cycle_snapshot.json, "loads", slow_loads)
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "snapshot", policy_cycle_snapshot.load_policy_cycle_snapshot(tmp_path)
+        )
+    )
+    worker.start()
+    assert parsing_started.wait(5)
+    replacement = tmp_path / "replacement.download"
+    replacement.write_text(json.dumps(_event(2)) + "\n", encoding="utf-8")
+    try:
+        # This fails on Windows when the reader retains a non-delete-sharing
+        # handle during JSON parsing. The bytes-then-parse boundary must allow
+        # the synchronizer's atomic destination replacement here.
+        os.replace(replacement, event_path)
+    finally:
+        allow_parsing.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert result["snapshot"]["receipt"]["source_read_mode"] == "BYTES_THEN_PARSE_V1"
+    assert result["snapshot"]["receipt"]["row_count"] == 1

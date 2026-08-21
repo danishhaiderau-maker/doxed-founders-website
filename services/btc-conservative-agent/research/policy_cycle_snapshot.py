@@ -13,25 +13,36 @@ from microstructure_tape import FILE_NAME as MICROSTRUCTURE_FILE, validate_windo
 CONSERVATIVE_FILL_REPORT_FILE = "conservative_fill_descriptive_report.json"
 
 
+def _read_snapshot_lines(path: Path):
+    """Release the live mirror handle before parsing expensive JSON rows.
+
+    On Windows, parsing a large JSONL stream while the source handle remains
+    open prevents the synchronizer from atomically replacing that mirror file.
+    Reading the immutable byte generation first keeps one exact-cycle boundary
+    while reducing the source lock to the bounded filesystem read itself.
+    """
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return ()
+    return tuple(line.decode("utf-8", errors="replace") for line in payload.splitlines())
+
+
 def _load_microstructure_snapshot(data_dir=".") -> dict:
     path = Path(data_dir) / MICROSTRUCTURE_FILE
     rows = []
     digest = hashlib.sha256()
-    try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(row, dict):
-                    continue
-                frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
-                rows.append(frozen)
-                digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode())
-                digest.update(b"\n")
-    except OSError:
-        pass
+    for line in _read_snapshot_lines(path):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
+        rows.append(frozen)
+        digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode())
+        digest.update(b"\n")
     bounds = [int(row["bucket_ts"]) for row in rows if isinstance(row.get("bucket_ts"), (int, float))]
     receipt = {
         "schema": "market_microstructure_snapshot_v1",
@@ -91,23 +102,19 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
     path = Path(data_dir) / RESEARCH_EVENTS_FILE
     events = []
     digest = hashlib.sha256()
-    try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    # A concurrent append may expose an incomplete final line.
-                    # It belongs to the next cycle, never this snapshot.
-                    continue
-                if not isinstance(row, dict):
-                    continue
-                frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
-                events.append(frozen)
-                digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-                digest.update(b"\n")
-    except OSError:
-        pass
+    for line in _read_snapshot_lines(path):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # A concurrent append may expose an incomplete final line. It
+            # belongs to the next cycle, never this snapshot.
+            continue
+        if not isinstance(row, dict):
+            continue
+        frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
+        events.append(frozen)
+        digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        digest.update(b"\n")
     last = events[-1] if events else {}
     envelope = last.get("envelope") or {}
     receipt = {
@@ -115,6 +122,7 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
         "snapshot_id": "policy-snapshot-" + digest.hexdigest()[:24],
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source_file": RESEARCH_EVENTS_FILE,
+        "source_read_mode": "BYTES_THEN_PARSE_V1",
         "row_count": len(events),
         "last_event_id": last.get("event_id"),
         "last_signal_ts": envelope.get("signal_ts") or last.get("signal_ts"),
