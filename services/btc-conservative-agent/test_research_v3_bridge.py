@@ -32,6 +32,26 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_terminal_record_uses_same_shared_call_episode_as_provisional_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event("scan-child", "legacy-stable-episode")
+            event["event_episode"] = {}
+            event["feature_snapshot_at_signal"]["source_features"] = {
+                "shared_ai_call_id": "scan-parent", "raw_direction": "LONG"
+            }
+            provisional = dual_write_provisional_source("scan-child", {
+                "created_ts_ts": 1000, "raw_direction": "LONG",
+                "shared_ai_call_id": "scan-parent",
+            }, epoch_id="epoch-v3-test", data_dir=tmp)
+
+            terminal = dual_write_v22_record(event, data_dir=tmp)
+
+            self.assertEqual(terminal["episode_id"], provisional["episode_id"])
+            rows = [json.loads(line) for line in
+                    (Path(tmp) / "v3" / "ledgers" / "opportunity.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["shared_ai_call_id"], "scan-parent")
+
     def test_production_compact_ohlcv_rows_are_normalized_without_losing_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = _event("cont-compact")

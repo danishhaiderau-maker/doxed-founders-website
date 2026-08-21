@@ -221,7 +221,21 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     envelope = record.get("envelope") if isinstance(record.get("envelope"), Mapping) else {}
     epoch_id = str(_first(record.get("epoch_id"), envelope.get("epoch_id")) or "")
     event_id = str(_first(record.get("event_id"), record.get("trade_id")) or "")
-    episode_id = str(_first(record.get("event_episode_id"), envelope.get("event_episode_id")) or "")
+    event_episode = record.get("event_episode") if isinstance(record.get("event_episode"), Mapping) else {}
+    feature_snapshot = record.get("feature_snapshot_at_signal") if isinstance(record.get("feature_snapshot_at_signal"), Mapping) else {}
+    source_features = feature_snapshot.get("source_features") if isinstance(feature_snapshot.get("source_features"), Mapping) else {}
+    shared_ai_call_id = str(_first(
+        event_episode.get("shared_ai_call_id"), record.get("shared_ai_call_id"),
+        source_features.get("shared_ai_call_id"), envelope.get("shared_ai_call_id"),
+    ) or "").strip()
+    stable_episode_id = str(_first(record.get("event_episode_id"), envelope.get("event_episode_id")) or "")
+    identity_symbol = str(_first(record.get("symbol"), record.get("pair"), envelope.get("symbol"), "BTCUSD")).upper()
+    identity_direction = str(_first(envelope.get("raw_direction"), record.get("raw_direction"), record.get("direction"), "UNKNOWN")).upper()
+    if shared_ai_call_id:
+        causal_key = f"shared:{identity_symbol}:{identity_direction}:{shared_ai_call_id}"
+        episode_id = "episode-" + hashlib.sha256(causal_key.encode("utf-8")).hexdigest()[:20]
+    else:
+        episode_id = stable_episode_id
     if not epoch_id or not event_id or not episode_id:
         raise ValueError("V3_IDENTITY_INCOMPLETE")
     store = V3EvidenceStore(data_dir, epoch_id=epoch_id)
@@ -251,7 +265,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     writes.append(store.append("opportunity", {
         "record_id": f"opportunity:{episode_id}",
         "episode_id": episode_id,
-        "shared_ai_call_id": _first((record.get("event_episode") or {}).get("shared_ai_call_id"), record.get("shared_ai_call_id")),
+        "shared_ai_call_id": shared_ai_call_id or None,
         "signal_ts": signal_ts,
         "symbol": symbol,
         "raw_direction": _first(envelope.get("raw_direction"), record.get("raw_direction")),
