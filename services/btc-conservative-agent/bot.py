@@ -3420,6 +3420,9 @@ def lane_register_pending_order(order: dict):
             f"[ORDER EVIDENCE] duplicate/full/stopped enqueue trade_id={tid} "
             f"source_ts={source_ts} [PIPELINE ENFORCEMENT]"
         )
+    persist = globals().get("save_paper_lifecycle")
+    if callable(persist):
+        persist(reason="pending_registered")
     return True
 
 
@@ -3433,6 +3436,9 @@ def lane_unregister_pending_order(order: dict):
         lst = lane_pending_orders.get(ln, [])
         if order in lst:
             lst.remove(order)
+    persist = globals().get("save_paper_lifecycle")
+    if callable(persist):
+        persist(reason="pending_unregistered")
 
 
 def lane_register_open_position(pos: dict):
@@ -3445,6 +3451,9 @@ def lane_register_open_position(pos: dict):
         lst = lane_open_positions[ln]
         if pos not in lst:
             lst.append(pos)
+    persist = globals().get("save_paper_lifecycle")
+    if callable(persist):
+        persist(reason="position_registered")
 
 
 def lane_unregister_open_position(pos: dict):
@@ -3457,6 +3466,9 @@ def lane_unregister_open_position(pos: dict):
         lst = lane_open_positions.get(ln, [])
         if pos in lst:
             lst.remove(pos)
+    persist = globals().get("save_paper_lifecycle")
+    if callable(persist):
+        persist(reason="position_unregistered")
 
 
 def get_lane_open_positions(lane: str) -> List[Dict]:
@@ -24585,6 +24597,7 @@ def position_manager():
                 refresh_bbo_state()
                 cleanup_expired_orders()
                 process_positions()
+                save_paper_lifecycle(reason="position_manager_halted_tick")
                 time.sleep(5)
                 continue
             price = _observable_exit_price()
@@ -24596,6 +24609,9 @@ def position_manager():
             cleanup_expired_orders()
             process_pending_orders()
             process_positions()
+            # Captures in-place chase/TTL/MFE/exit-config mutations as well as
+            # registrations, so restart resumes the exact lifecycle stage.
+            save_paper_lifecycle(reason="position_manager_tick")
             tick_all_replay_buffers(price)
 
             pipeline_state_sync()
@@ -25723,6 +25739,8 @@ last_logged_candle_ts = 0
 rest_failure_count = 0
 MAX_REST_FAILURES = 5
 POSITIONS_FILE = "open_positions.json"
+PAPER_LIFECYCLE_FILE = "paper_lifecycle_v1.json"
+paper_lifecycle_file_lock = threading.RLock()
 api_key = os.getenv("BITFINEX_API_KEY", "").strip()
 api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
 bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
@@ -37827,6 +37845,92 @@ def load_positions():
             f"mode={state.get('strategy_mode')} [PIPELINE ENFORCEMENT]"
         )
 
+
+def _paper_lifecycle_row_valid(row: dict, kind: str) -> bool:
+    if not isinstance(row, dict) or not row.get("trade_id"):
+        return False
+    status = str(row.get("status") or "").upper()
+    if kind == "position":
+        return status == "OPEN" and float(row.get("entry") or 0) > 0
+    return status == "PENDING" and float(row.get("limit_price") or 0) > 0
+
+
+def save_paper_lifecycle(reason: str = "mutation") -> bool:
+    """Atomically persist every paper lane's executable lifecycle."""
+    with trade_lock:
+        positions = [copy.deepcopy(row) for row in open_positions
+                     if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
+        orders = [copy.deepcopy(row) for row in pending_orders
+                  if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
+    payload = {
+        "schema": "paper_lifecycle_v1", "saved_at": utc_iso(), "git_rev": _runtime_git_rev(),
+        "reason": reason, "paper_only": bool(_force_paper_mode_active()),
+        "live_armed": bool(state.get("live_armed")), "positions": positions,
+        "pending_orders": orders,
+    }
+    return _atomic_file_replace(PAPER_LIFECYCLE_FILE,
+        lambda f: json.dump(payload, f, default=str, sort_keys=True),
+        paper_lifecycle_file_lock, "PAPER_LIFECYCLE")
+
+
+def load_paper_lifecycle() -> dict:
+    """Idempotently restore all paper positions and pending limits by trade ID."""
+    result = {"positions": 0, "pending_orders": 0, "duplicates": 0, "invalid": 0}
+    if not os.path.exists(PAPER_LIFECYCLE_FILE):
+        return result
+    with paper_lifecycle_file_lock:
+        with open(PAPER_LIFECYCLE_FILE, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    if (not isinstance(payload, dict) or payload.get("schema") != "paper_lifecycle_v1"
+            or not payload.get("paper_only") or payload.get("live_armed")):
+        logger.error("[PAPER_LIFECYCLE] refused invalid, non-paper, or armed restart snapshot")
+        result["invalid"] += 1
+        return result
+    with trade_lock:
+        known_positions = {str(x.get("trade_id")) for x in open_positions if isinstance(x, dict)}
+        known_orders = {str(x.get("trade_id")) for x in pending_orders if isinstance(x, dict)}
+        for row in payload.get("positions") or []:
+            if not _paper_lifecycle_row_valid(row, "position"):
+                result["invalid"] += 1; continue
+            tid = str(row["trade_id"])
+            if tid in known_positions or tid in known_orders:
+                result["duplicates"] += 1; continue
+            lane_register_open_position(row)
+            known_positions.add(tid); result["positions"] += 1
+        now = time.time()
+        for row in payload.get("pending_orders") or []:
+            if not _paper_lifecycle_row_valid(row, "order"):
+                result["invalid"] += 1; continue
+            tid = str(row["trade_id"])
+            if tid in known_orders or tid in known_positions:
+                result["duplicates"] += 1; continue
+            expires = float(row.get("entry_expires_ts") or 0)
+            if expires and expires <= now:
+                continue
+            row["paper_only"] = True; row["exchange_submission_blocked"] = True
+            lane_register_pending_order(row)
+            known_orders.add(tid); result["pending_orders"] += 1
+    logger.warning(f"[PAPER_LIFECYCLE] restart restored positions={result['positions']} "
+                   f"pending={result['pending_orders']} duplicates={result['duplicates']} "
+                   f"invalid={result['invalid']} [PIPELINE ENFORCEMENT]")
+    return result
+
+
+def capture_emergency_paper_lifecycle_snapshot() -> dict:
+    """Create a hash-addressed operator snapshot only while paper-only/disarmed."""
+    if not _force_paper_mode_active() or state.get("live_armed"):
+        raise PermissionError("emergency lifecycle snapshot requires paper-only and disarmed runtime")
+    if not save_paper_lifecycle(reason="emergency_snapshot"):
+        raise OSError("paper lifecycle persistence failed")
+    with paper_lifecycle_file_lock:
+        with open(PAPER_LIFECYCLE_FILE, "rb") as handle:
+            raw = handle.read()
+    digest = hashlib.sha256(raw).hexdigest()
+    target = f"paper_lifecycle_emergency_{digest[:16]}.json"
+    _atomic_file_replace(target, lambda f: f.write(raw.decode("utf-8")),
+                         paper_lifecycle_file_lock, "PAPER_LIFECYCLE_EMERGENCY")
+    return {"path": target, "sha256": digest, "bytes": len(raw)}
+
 def save_positions():
     with state_lock:
         snapshot = copy.deepcopy(open_positions)
@@ -37836,6 +37940,7 @@ def save_positions():
         positions_file_lock,
         "POSITIONS",
     )
+    save_paper_lifecycle(reason="positions_saved")
 
 def validate_state():
     # prune_signals takes trade_lock — never call it under state_lock (deadlocks with
@@ -41588,6 +41693,7 @@ def main():
     if str(os.environ.get("EXECUTION_PAUSED", "")).strip().lower() == "true":
         set_execution_paused("SIMULATION_ONLY")
     load_positions()
+    load_paper_lifecycle()
     rebuild_state_from_snapshots()
     reconcile_stale_signals()
     boot_exposure = get_active_signal_count()
