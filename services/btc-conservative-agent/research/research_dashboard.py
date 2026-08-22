@@ -1018,6 +1018,16 @@ def _filter_chase_attributions(rows, lane: str):
     return out
 
 
+def _nonqualifying_scope(scope: str, warning: str) -> dict:
+    """Attach machine-readable provenance to historical analyzer surfaces."""
+    return {
+        "evidence_scope": scope,
+        "qualified_v3_1": False,
+        "ranking_eligible": False,
+        "warning": warning,
+    }
+
+
 def _chase_payload(lane: str = ""):
     integrity = _integrity_payload()
     attr = _read_report("chase_attribution_report.json")
@@ -1042,6 +1052,10 @@ def _chase_payload(lane: str = ""):
         if int((b or {}).get("trades") or 0):
             threshold_rows.append({"threshold": key, **(b or {})})
     return {
+        **_nonqualifying_scope(
+            "LEGACY_EXECUTED",
+            "Historical executed-lane chase evidence; excluded from active V3.1 rankings.",
+        ),
         "totals": totals,
         "buckets": bucket_rows,
         "thresholds": threshold_rows,
@@ -1380,6 +1394,10 @@ def _chase_threshold_payload(lane: str = ""):
             if int((block or {}).get("trades") or 0):
                 rows.append({"threshold": key, **(block or {})})
     return {
+        **_nonqualifying_scope(
+            "LEGACY_EXECUTED",
+            "Historical executed-lane chase thresholds; excluded from active V3.1 rankings.",
+        ),
         "generated_at": rep.get("generated_at"),
         "question": rep.get("question") or "Per exact limit_chase_count bucket (0, 1, 2, 3, 4, 5+)",
         "thresholds": rows,
@@ -1403,6 +1421,10 @@ def _chase_delay_payload():
         or {}
     )
     return {
+        **_nonqualifying_scope(
+            "LEGACY_EXECUTED",
+            "Historical pathway-lab chase delay evidence; excluded from active V3.1 rankings.",
+        ),
         "generated_at": rep.get("generated_at"),
         "question": rep.get("question"),
         "verdict": rep.get("verdict"),
@@ -1426,6 +1448,10 @@ def _chase_iso_payload():
         )
     )
     return {
+        **_nonqualifying_scope(
+            "LEGACY_EXECUTED",
+            "Historical pathway-lab chase isolation evidence; excluded from active V3.1 rankings.",
+        ),
         "generated_at": rep.get("generated_at"),
         "verdict": rep.get("verdict") if has_evidence else "COLLECTING",
         "notes": rep.get("isolation_notes") or [],
@@ -1462,6 +1488,10 @@ def _exit_combos_payload():
     top = [r for r in (rep.get("top") or []) if _ok(r)]
     worst = [r for r in (rep.get("worst_leakage") or []) if _ok(r)]
     return {
+        **_nonqualifying_scope(
+            "LEGACY_EXECUTED",
+            "Historical executed-lane exit combinations; excluded from active V3.1 rankings.",
+        ),
         "generated_at": rep.get("generated_at"),
         "benchmark_lane": rep.get("benchmark_lane"),
         "overall_left_on_table_usd": rep.get("overall_left_on_table_usd"),
@@ -1475,6 +1505,10 @@ def _exit_combos_payload():
 def _exit_reason_leak_payload():
     rep = _read_report("exit_leakage_by_reason_report.json")
     return {
+        **_nonqualifying_scope(
+            "LEGACY_HINDSIGHT",
+            "Historical peak-to-close hindsight only; not directly capturable profit or a V3.1 policy.",
+        ),
         "generated_at": rep.get("generated_at"),
         "overall_left_usd": rep.get("overall_left_usd"),
         "overall_booked_usd": rep.get("overall_booked_usd"),
@@ -1489,6 +1523,10 @@ def _exit_reason_leak_payload():
 def _ladder_sim_payload():
     rep = _read_report("exit_ladder_simulator_report.json")
     return {
+        **_nonqualifying_scope(
+            "LEGACY_COUNTERFACTUAL",
+            "Historical matched-trade ladder replay; excluded from active V3.1 rankings.",
+        ),
         "generated_at": rep.get("generated_at"),
         "actual_realized_usd": rep.get("actual_realized_usd"),
         "actual_trades": rep.get("actual_trades"),
@@ -4000,7 +4038,7 @@ async function loadChaseThreshold() {
   const r = await fetch('/api/chase-threshold' + chaseLaneQuery());
   const d = await r.json();
   const note = document.getElementById('chase-threshold-note');
-  if (note) note.textContent = d.question || 'Cumulative limit_chase_count thresholds.';
+  if (note) note.textContent = [d.warning, d.question].filter(Boolean).join(' · ') || 'Cumulative limit_chase_count thresholds.';
   document.getElementById('chase-threshold-body').innerHTML = (d.thresholds||[]).map(t => {
     const wr = t.wr_pct ?? t.wr ?? 'n/a';
     const ev = t.ev_usd ?? t.ev ?? 'n/a';

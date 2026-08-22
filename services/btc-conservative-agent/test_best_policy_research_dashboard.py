@@ -66,6 +66,32 @@ def _write_fixture(tmp_path: Path, events, report):
     )
 
 
+def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monkeypatch):
+    reports = {
+        "chase_threshold_report.json": {
+            "generated_at": "2026-08-20T00:00:00+00:00",
+            "thresholds": {"4": {"trades": 17, "ev_usd": 1.12}},
+        },
+        "chase_attribution_report.json": {"trades": []},
+        "exit_combinations_report.json": {"top": [{"type": "CONTINUOUS"}]},
+        "exit_leakage_by_reason_report.json": {"reasons": []},
+        "exit_ladder_simulator_report.json": {"profiles": []},
+    }
+    monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
+
+    payloads = [
+        dashboard._chase_threshold_payload(),
+        dashboard._exit_combos_payload(),
+        dashboard._exit_reason_leak_payload(),
+        dashboard._ladder_sim_payload(),
+    ]
+    for payload in payloads:
+        assert payload["qualified_v3_1"] is False
+        assert payload["ranking_eligible"] is False
+        assert payload["evidence_scope"].startswith("LEGACY")
+        assert payload["warning"]
+
+
 def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
     monkeypatch.setattr(dashboard, "_read_report", lambda name: {
         "top": [{

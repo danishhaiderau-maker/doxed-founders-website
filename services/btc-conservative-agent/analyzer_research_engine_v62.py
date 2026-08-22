@@ -13088,6 +13088,13 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
             )
     payload = {
         "schema": "chase_threshold_v2",
+        "evidence_scope": "LEGACY_EXECUTED",
+        "qualified_v3_1": False,
+        "ranking_eligible": False,
+        "warning": (
+            "Historical executed-lane cohort only; excluded from the active "
+            "V3.1 safe-policy rankings."
+        ),
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
