@@ -24,6 +24,41 @@ def write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    quarantine = tmp_path / "fly-data-quarantine" / "epoch-old"
+    mirror.mkdir()
+    quarantine.mkdir(parents=True)
+    (mirror / "active.jsonl").write_bytes(b"active")
+    (quarantine / "old.jsonl").write_bytes(b"quarantine")
+
+    ok, detail = module.local_storage_snapshot(
+        mirror,
+        disk_usage=lambda _path: (1000, 700, 300),
+    )
+
+    assert ok is True
+    assert detail["mirror_files"] == 1
+    assert detail["mirror_bytes"] == 6
+    assert detail["quarantine_files"] == 1
+    assert detail["quarantine_bytes"] == 10
+    assert detail["disk_free_percent"] == 30.0
+    assert detail["automatic_delete"] is False
+
+
+def test_local_storage_snapshot_fails_before_disk_pressure(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    mirror.mkdir()
+
+    ok, detail = module.local_storage_snapshot(
+        mirror,
+        disk_usage=lambda _path: (1000, 900, 100),
+    )
+
+    assert ok is False
+    assert detail["disk_free_percent"] == 10.0
+
+
 def test_supervisor_reader_does_not_block_atomic_mirror_replace(tmp_path):
     destination = tmp_path / "research_events_v22.jsonl"
     candidate = tmp_path / "candidate.jsonl"

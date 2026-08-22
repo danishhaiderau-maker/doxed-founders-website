@@ -13,6 +13,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,8 @@ REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
+LOCAL_MIN_FREE_PERCENT = 15.0
+LOCAL_QUARANTINE_MAX_PERCENT = 10.0
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
 
@@ -51,6 +54,52 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} is not a JSON object")
     return value
+
+
+def directory_size(path: Path) -> tuple[int, int]:
+    """Return best-effort file count and bytes without following directory links."""
+    files = 0
+    total = 0
+    if not path.is_dir():
+        return files, total
+    for candidate in path.rglob("*"):
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                files += 1
+                total += candidate.stat().st_size
+        except OSError:
+            # Atomic mirror replacement can remove a file between enumeration
+            # and stat. The next five-minute check will observe its replacement.
+            continue
+    return files, total
+
+
+def local_storage_snapshot(
+    mirror: Path,
+    *,
+    disk_usage: Callable[[str | os.PathLike[str]], Any] = shutil.disk_usage,
+) -> tuple[bool, dict[str, Any]]:
+    """Measure active/quarantined evidence and fail before the workstation fills."""
+    quarantine = mirror.parent / "fly-data-quarantine"
+    mirror_files, mirror_bytes = directory_size(mirror)
+    quarantine_files, quarantine_bytes = directory_size(quarantine)
+    total, _used, free = disk_usage(mirror.parent)
+    free_pct = (float(free) / float(total) * 100.0) if total else 0.0
+    quarantine_pct = (float(quarantine_bytes) / float(total) * 100.0) if total else 100.0
+    ok = free_pct >= LOCAL_MIN_FREE_PERCENT and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
+    return ok, {
+        "mirror_files": mirror_files,
+        "mirror_bytes": mirror_bytes,
+        "quarantine_files": quarantine_files,
+        "quarantine_bytes": quarantine_bytes,
+        "disk_total_bytes": int(total),
+        "disk_free_bytes": int(free),
+        "disk_free_percent": round(free_pct, 2),
+        "quarantine_disk_percent": round(quarantine_pct, 3),
+        "minimum_free_percent": LOCAL_MIN_FREE_PERCENT,
+        "maximum_quarantine_percent": LOCAL_QUARANTINE_MAX_PERCENT,
+        "automatic_delete": False,
+    }
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -658,6 +707,11 @@ class Supervisor:
             add("fly_storage", pct < 85.0, {"volume_pct": pct, "cleanup_status": size.get("cleanup_status")})
         except Exception as exc:
             add("fly_storage", False, type(exc).__name__)
+        try:
+            local_ok, local_detail = local_storage_snapshot(self.mirror)
+            add("local_storage", local_ok, local_detail)
+        except Exception as exc:
+            add("local_storage", False, f"{type(exc).__name__}: {exc}")
 
         readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
         try:
