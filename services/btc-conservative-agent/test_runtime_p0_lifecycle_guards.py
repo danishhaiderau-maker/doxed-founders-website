@@ -28,6 +28,24 @@ def test_pending_fill_slow_evidence_is_outside_trade_lock():
         assert "close_research_order_schedule" not in locked
 
 
+def test_chase_research_persistence_is_outside_trade_lock():
+    for name in ("_commit_relay_limit_chase", "_apply_urgent_marketable_chase"):
+        node = _function(name)
+        for child in ast.walk(node):
+            if not isinstance(child, (ast.With, ast.AsyncWith)):
+                continue
+            if not any("trade_lock" in ast.unparse(item.context_expr) for item in child.items):
+                continue
+            locked = ast.unparse(child)
+            assert "append_research_reprice_interval" not in locked
+            assert "_refresh_collector_v22_registered_order_evidence" not in locked
+
+
+def test_watchdog_never_self_restarts_with_pending_orders():
+    body = ast.unparse(_function("watchdog_loop"))
+    assert "progress['pending_orders'] == 0" in body
+
+
 def test_terminal_execution_guards_both_collector_paths():
     sync = ast.unparse(_function("_sync_order_multiverse"))
     rejected = ast.unparse(_function("persist_rejected_opportunity"))

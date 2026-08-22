@@ -20566,20 +20566,6 @@ def _commit_relay_limit_chase(
             if tier:
                 signal["urgent_chase_tier"] = tier
             signal["fill_model"] = order["fill_model"]
-        schedule_reprice = globals().get("append_research_reprice_interval")
-        if callable(schedule_reprice):
-            schedule_reprice(
-                order,
-                signal if isinstance(signal, dict) else None,
-                now=now,
-                chase_step_index=chase_count,
-                reference_price=reference_price or old_limit,
-                limit_price=new_limit,
-                reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
-            )
-        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-        if callable(collector_refresh):
-            collector_refresh(order, signal if isinstance(signal, dict) else None)
         # Canonical pending-order identity: fill gate + market evidence share
         # this generation only after chase ACK mutated the live order.
         sync_pending = globals().get("_sync_canonical_source_pending_order")
@@ -20597,7 +20583,7 @@ def _commit_relay_limit_chase(
                     master["source_order_market_evidence"] = copy.deepcopy(summary)
                     master["limit_price"] = new_limit
                     master["limit_chase_count"] = chase_count
-        return {
+        result = {
             "ts": utc_iso(),
             "limit_price": new_limit,
             "qty": float(order.get("qty") or 0),
@@ -20608,6 +20594,24 @@ def _commit_relay_limit_chase(
             "event_seq": chase_count,
             "executable": True,
         }
+    # Research persistence may write several JSONL/provisional files. It must
+    # never run while trade_lock is held: a slow volume write previously
+    # starved relay snapshots, cancellation, and the strategy watchdog.
+    schedule_reprice = globals().get("append_research_reprice_interval")
+    if callable(schedule_reprice):
+        schedule_reprice(
+            order,
+            signal if isinstance(signal, dict) else None,
+            now=now,
+            chase_step_index=chase_count,
+            reference_price=reference_price or old_limit,
+            limit_price=new_limit,
+            reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
+        )
+    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+    if callable(collector_refresh):
+        collector_refresh(order, signal if isinstance(signal, dict) else None)
+    return result
 
 
 def _apply_urgent_marketable_chase(order: dict, signal: dict, price: float, now: float, tier: str = "extreme") -> bool:
@@ -20900,20 +20904,6 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
             signal["relay_event_ack_at_ts"] = order["relay_event_ack_at_ts"]
             signal["marketable_fallback_depth_qty"] = available_qty
             signal["fill_model"] = order["fill_model"]
-        schedule_reprice = globals().get("append_research_reprice_interval")
-        if callable(schedule_reprice):
-            schedule_reprice(
-                order,
-                signal if isinstance(signal, dict) else None,
-                now=now,
-                chase_step_index=chase_count,
-                reference_price=price,
-                limit_price=new_limit,
-                reason="MARKETABLE_LIMIT_FALLBACK",
-            )
-        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-        if callable(collector_refresh):
-            collector_refresh(order, signal if isinstance(signal, dict) else None)
         sync_pending = globals().get("_sync_canonical_source_pending_order")
         store = globals().get("_canonical_source_order_market_evidence")
         summary_builder = globals().get("_source_market_evidence_summary")
@@ -20927,6 +20917,21 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
                 master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
                 if isinstance(master, dict):
                     master["source_order_market_evidence"] = copy.deepcopy(summary)
+    # Durable research persistence is intentionally outside trade_lock.
+    schedule_reprice = globals().get("append_research_reprice_interval")
+    if callable(schedule_reprice):
+        schedule_reprice(
+            order,
+            signal if isinstance(signal, dict) else None,
+            now=now,
+            chase_step_index=chase_count,
+            reference_price=price,
+            limit_price=new_limit,
+            reason="MARKETABLE_LIMIT_FALLBACK",
+        )
+    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+    if callable(collector_refresh):
+        collector_refresh(order, signal if isinstance(signal, dict) else None)
     logger.info(
         f"[SIM] MARKETABLE_LIMIT trade_id={order.get('trade_id')} dir={direction} "
         f"old_limit={fmt(old_limit)} new_limit={fmt(new_limit)} age_min={age_min} "
@@ -28715,6 +28720,7 @@ def watchdog_loop():
                     _force_paper_mode_active()
                     and not progress["live_armed"]
                     and progress["open_positions"] == 0
+                    and progress["pending_orders"] == 0
                 ):
                     logger.critical(
                         "[WATCHDOG] paper strategy stalled while flat; exiting 75 "
