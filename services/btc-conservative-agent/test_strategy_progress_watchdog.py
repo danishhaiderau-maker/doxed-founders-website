@@ -12,6 +12,11 @@ from types import SimpleNamespace
 BOT_PATH = Path(__file__).with_name("bot.py")
 SOURCE = BOT_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(SOURCE, filename=str(BOT_PATH))
+TRACKED_LOCK_CLASS = next(
+    node
+    for node in TREE.body
+    if isinstance(node, ast.ClassDef) and node.name == "_TrackedRLock"
+)
 FUNCTION = next(
     node
     for node in TREE.body
@@ -39,6 +44,32 @@ def compile_snapshot(namespace):
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
     return namespace["_strategy_progress_health_snapshot"]
+
+
+def compile_tracked_lock():
+    namespace = {
+        "threading": threading,
+        "time": __import__("time"),
+        "sys": __import__("sys"),
+        "traceback": __import__("traceback"),
+        "Path": Path,
+    }
+    module = ast.Module(body=[TRACKED_LOCK_CLASS], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(BOT_PATH), "exec"), namespace)
+    return namespace["_TrackedRLock"]
+
+
+def test_tracked_rlock_reports_and_clears_owner_diagnostics():
+    lock = compile_tracked_lock()("test-lock")
+    with lock:
+        detail = lock.diagnostics()
+        assert detail["owner_thread"] == threading.current_thread().name
+        assert detail["depth"] == 1
+        assert detail["stack_tail"]
+    detail = lock.diagnostics()
+    assert detail["owner_thread"] is None
+    assert detail["depth"] == 0
 
 
 class StrategyProgressHealthTest(unittest.TestCase):
@@ -80,6 +111,33 @@ class StrategyProgressHealthTest(unittest.TestCase):
             self.lock.release()
         self.assertFalse(result["ok"])
         self.assertFalse(result["trade_lock_available"])
+        self.assertEqual(result["trade_lock_diagnostics"], {})
+
+    def test_tracked_lock_reports_owner_and_stack_without_releasing_it(self):
+        class DiagnosticLock:
+            def acquire(self, **_kwargs):
+                return False
+
+            def diagnostics(self, now=None):
+                return {"owner_thread": "paper-engine", "held_seconds": 42.0}
+
+        snapshot = compile_snapshot({
+            "time": SimpleNamespace(time=lambda: self.now),
+            "os": os,
+            "state": self.state,
+            "state_lock": threading.RLock(),
+            "trade_lock": DiagnosticLock(),
+            "WATCHDOG_TRADE_LOCK_TIMEOUT_SEC": 0.01,
+            "WATCHDOG_WS_STALE_SEC": 30.0,
+            "WATCHDOG_WS_TRADE_STALE_SEC": 90.0,
+            "get_effective_ai_cooldown_sec": lambda: 180,
+            "bot_start_time": self.now - 1_000,
+            "open_positions": [],
+            "pending_orders": [],
+        })
+        result = snapshot(self.now)
+        self.assertEqual(result["trade_lock_diagnostics"]["owner_thread"], "paper-engine")
+        self.assertEqual(result["trade_lock_diagnostics"]["held_seconds"], 42.0)
 
     def test_server_heartbeat_cannot_hide_stale_trade_stream(self):
         self.state["ws_last_tick"] = self.now - 91

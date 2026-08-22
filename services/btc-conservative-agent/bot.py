@@ -25752,8 +25752,81 @@ def _emergency_api_guard():
 
     return None
 
+class _TrackedRLock:
+    """RLock with bounded owner diagnostics for production stall evidence."""
+
+    def __init__(self, name: str):
+        self._lock = threading.RLock()
+        self._name = name
+        self._meta_lock = threading.Lock()
+        self._owner_ident = None
+        self._owner_name = None
+        self._acquired_at = 0.0
+        self._depth = 0
+
+    def acquire(self, blocking=True, timeout=-1):
+        acquired = self._lock.acquire(blocking, timeout)
+        if acquired:
+            ident = threading.get_ident()
+            with self._meta_lock:
+                if self._owner_ident == ident:
+                    self._depth += 1
+                else:
+                    self._owner_ident = ident
+                    self._owner_name = threading.current_thread().name
+                    self._acquired_at = time.time()
+                    self._depth = 1
+        return acquired
+
+    def release(self):
+        ident = threading.get_ident()
+        with self._meta_lock:
+            if self._owner_ident == ident and self._depth > 0:
+                self._depth -= 1
+                if self._depth == 0:
+                    self._owner_ident = None
+                    self._owner_name = None
+                    self._acquired_at = 0.0
+        self._lock.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, tb):
+        self.release()
+        return False
+
+    def _is_owned(self):
+        return self._lock._is_owned()
+
+    def diagnostics(self, now=None):
+        with self._meta_lock:
+            owner_ident = self._owner_ident
+            owner_name = self._owner_name
+            acquired_at = self._acquired_at
+            depth = self._depth
+        held_sec = max(0.0, float(now or time.time()) - acquired_at) if acquired_at else 0.0
+        stack_tail = []
+        if owner_ident is not None:
+            frame = sys._current_frames().get(owner_ident)
+            if frame is not None:
+                stack_tail = [
+                    f"{Path(item.filename).name}:{item.lineno}:{item.name}"
+                    for item in traceback.extract_stack(frame)[-8:]
+                ]
+        return {
+            "name": self._name,
+            "owner_thread": owner_name,
+            "owner_ident": owner_ident,
+            "held_seconds": round(held_sec, 3),
+            "depth": depth,
+            "stack_tail": stack_tail,
+        }
+
+
 state_lock = threading.RLock()
-trade_lock = threading.RLock()
+trade_lock = _TrackedRLock("trade_lock")
 position_close_lock = threading.RLock()
 position_evaluation_lock = threading.Lock()
 _live_control_lock = threading.RLock()
@@ -28586,6 +28659,11 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     lock_available = trade_lock.acquire(timeout=WATCHDOG_TRADE_LOCK_TIMEOUT_SEC)
     if lock_available:
         trade_lock.release()
+    lock_diagnostics = (
+        {}
+        if lock_available
+        else getattr(trade_lock, "diagnostics", lambda _now=None: {})(now)
+    )
 
     transport_progressing = bool(
         ws_connected
@@ -28612,6 +28690,7 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         "ok": bool(lock_available and ws_progressing and ai_progressing),
         "reasons": reasons,
         "trade_lock_available": bool(lock_available),
+        "trade_lock_diagnostics": lock_diagnostics,
         "ws_progressing": ws_progressing,
         "ws_age_sec": ws_age,
         "ws_heartbeat_age_sec": ws_hb_age,
