@@ -524,6 +524,7 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
 
 def test_main_dashboard_links_to_all_policy_research_pages():
     source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert 'href="/safe-policy-genome-v3.1"' in source
     assert 'href="/static-policies"' in source
     assert 'href="/dynamic-policies"' in source
     assert 'href="/shadow-research"' in source
@@ -531,6 +532,22 @@ def test_main_dashboard_links_to_all_policy_research_pages():
     assert "NONE — both candidates unprofitable" in source
     assert "Relative leader only" in source
     assert "Descriptive winner" not in source
+
+
+def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
+    payload = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "status": "V3_COLLECTING",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "collection": {"independent_opportunities": 12},
+    }
+    monkeypatch.setattr(dashboard, "_read_json", lambda *_args, **_kwargs: payload)
+    client = dashboard.app.test_client()
+
+    assert client.get("/safe-policy-genome-v3.1").status_code == 200
+    assert client.get("/api/safe-policy-genome-v3.1").get_json() == payload
+    assert client.get("/safe-policy-genome-v3").status_code == 200
+    assert client.get("/api/safe-policy-genome-v3").get_json() == payload
 
 
 def test_analyzer_policy_reports_use_configured_data_and_report_roots():
