@@ -31,6 +31,8 @@ MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
 LOCAL_MIN_FREE_PERCENT = 15.0
 LOCAL_QUARANTINE_MAX_PERCENT = 10.0
+LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
+LOCAL_QUARANTINE_MAX_BYTES = 25 * 1024**3
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
 
@@ -86,7 +88,12 @@ def local_storage_snapshot(
     total, _used, free = disk_usage(mirror.parent)
     free_pct = (float(free) / float(total) * 100.0) if total else 0.0
     quarantine_pct = (float(quarantine_bytes) / float(total) * 100.0) if total else 100.0
-    ok = free_pct >= LOCAL_MIN_FREE_PERCENT and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
+    ok = (
+        free_pct >= LOCAL_MIN_FREE_PERCENT
+        and mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
+        and quarantine_bytes <= LOCAL_QUARANTINE_MAX_BYTES
+        and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
+    )
     return ok, {
         "mirror_files": mirror_files,
         "mirror_bytes": mirror_bytes,
@@ -97,7 +104,10 @@ def local_storage_snapshot(
         "disk_free_percent": round(free_pct, 2),
         "quarantine_disk_percent": round(quarantine_pct, 3),
         "minimum_free_percent": LOCAL_MIN_FREE_PERCENT,
+        "maximum_mirror_bytes": LOCAL_MIRROR_MAX_BYTES,
+        "maximum_quarantine_bytes": LOCAL_QUARANTINE_MAX_BYTES,
         "maximum_quarantine_percent": LOCAL_QUARANTINE_MAX_PERCENT,
+        "retention_action": "QUARANTINE_AND_REVIEW; NEVER_SILENTLY_DELETE",
         "automatic_delete": False,
     }
 

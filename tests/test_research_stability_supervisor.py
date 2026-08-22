@@ -43,6 +43,9 @@ def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
     assert detail["quarantine_files"] == 1
     assert detail["quarantine_bytes"] == 10
     assert detail["disk_free_percent"] == 30.0
+    assert detail["maximum_mirror_bytes"] == 25 * 1024**3
+    assert detail["maximum_quarantine_bytes"] == 25 * 1024**3
+    assert detail["retention_action"] == "QUARANTINE_AND_REVIEW; NEVER_SILENTLY_DELETE"
     assert detail["automatic_delete"] is False
 
 
@@ -57,6 +60,30 @@ def test_local_storage_snapshot_fails_before_disk_pressure(tmp_path):
 
     assert ok is False
     assert detail["disk_free_percent"] == 10.0
+
+
+def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    quarantine = tmp_path / "fly-data-quarantine"
+    mirror.mkdir()
+    quarantine.mkdir()
+
+    original = module.directory_size
+    module.directory_size = lambda path: (
+        (1, module.LOCAL_QUARANTINE_MAX_BYTES + 1)
+        if path == quarantine
+        else (1, 1024)
+    )
+    try:
+        ok, detail = module.local_storage_snapshot(
+            mirror,
+            disk_usage=lambda _path: (1024**4, 700 * 1024**3, 324 * 1024**3),
+        )
+    finally:
+        module.directory_size = original
+
+    assert ok is False
+    assert detail["quarantine_bytes"] > detail["maximum_quarantine_bytes"]
 
 
 def test_supervisor_reader_does_not_block_atomic_mirror_replace(tmp_path):
