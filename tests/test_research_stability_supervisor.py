@@ -138,11 +138,28 @@ def fetcher(url, token, timeout):
 
 def processes():
     return [
-        {"ProcessId": 1, "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
-        {"ProcessId": 2, "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},
-        {"ProcessId": 3, "CommandLine": "python research_dashboard.py --standalone"},
-        {"ProcessId": 4, "CommandLine": "python research-stability-supervisor.py --loop"},
+        {"ProcessId": 1, "Name": "powershell.exe", "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
+        {"ProcessId": 2, "Name": "python.exe", "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},
+        {"ProcessId": 3, "Name": "python.exe", "CommandLine": "python research_dashboard.py --standalone"},
+        {"ProcessId": 4, "Name": "python.exe", "CommandLine": "python research-stability-supervisor.py --loop"},
     ]
+
+
+def test_process_classification_ignores_shell_commands_that_only_mention_worker_names():
+    rows = processes() + [
+        {
+            "ProcessId": 5,
+            "Name": "pwsh.exe",
+            "CommandLine": "pwsh -Command rg research-stability-supervisor.py analyzer_research_engine_v62.py",
+        }
+    ]
+
+    assert module.classify_processes(rows) == {
+        "sync": [1],
+        "analyzer": [2],
+        "dashboard": [3],
+        "supervisor": [4],
+    }
 
 
 def test_healthy_separate_data_and_report_directories(tmp_path):

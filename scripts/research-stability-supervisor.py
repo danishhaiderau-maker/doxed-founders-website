@@ -202,16 +202,19 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
     groups = {"sync": [], "analyzer": [], "dashboard": [], "supervisor": []}
     for row in rows:
         cmd = str(row.get("CommandLine") or "").lower()
+        name = str(row.get("Name") or "").lower()
         pid = int(row.get("ProcessId") or 0)
         if pid <= 0:
             continue
-        if "sync-fly-bot-data-loop.ps1" in cmd:
+        is_python = not name or "python" in name
+        is_powershell = not name or "powershell" in name or name.startswith("pwsh")
+        if is_powershell and "sync-fly-bot-data-loop.ps1" in cmd:
             groups["sync"].append(pid)
-        if "analyzer_research_engine_v62.py" in cmd:
+        if is_python and "analyzer_research_engine_v62.py" in cmd:
             groups["analyzer"].append(pid)
-        if "research_dashboard.py" in cmd and "--standalone" in cmd:
+        if is_python and "research_dashboard.py" in cmd and "--standalone" in cmd:
             groups["dashboard"].append(pid)
-        if "research-stability-supervisor.py" in cmd:
+        if is_python and "research-stability-supervisor.py" in cmd:
             groups["supervisor"].append(pid)
     return {key: sorted(set(value)) for key, value in groups.items()}
 
@@ -765,7 +768,7 @@ class Supervisor:
             add("process_inventory", False, type(exc).__name__)
         else:
             add("process_inventory", True, inventory)
-        for kind in ("sync", "analyzer", "dashboard"):
+        for kind in ("sync", "analyzer", "dashboard", "supervisor"):
             count = len(inventory[kind])
             add(f"unique_{kind}_process", count == 1, {"count": count, "pids": inventory[kind]})
             if count == 0 and kind in {"sync", "analyzer"} and self.launch_missing(kind):
