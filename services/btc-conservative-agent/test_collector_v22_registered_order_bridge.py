@@ -182,4 +182,4 @@ def test_reprice_and_terminal_close_refresh_durable_schedule_snapshot():
 def test_schedule_mutation_paths_refresh_collector_after_mutation():
     assert BOT_SOURCE.count("_refresh_collector_v22_registered_order_evidence") >= 6
     assert "schedule_reprice(\n                order," in BOT_SOURCE
-    assert "schedule_close(\n                    order," in BOT_SOURCE
+    assert "schedule_close(\n                order," in BOT_SOURCE

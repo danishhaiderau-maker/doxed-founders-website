@@ -335,6 +335,12 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(intent["episode_id"], execution["episode_id"])
             lifecycle_rows = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
             fill_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_POSITION_OPEN")
+            submit_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_ORDER_SUBMITTED")
+            self.assertEqual(submit_lifecycle["outcome_state"], "CENSORED")
+            self.assertEqual(submit_lifecycle["effective_execution_mode"], "PAPER_OBSERVED")
+            self.assertEqual(intent["effective_execution_mode"], "PAPER_OBSERVED")
+            self.assertEqual(intent["policy_execution_scope"], "PAPER_RESEARCH_ONLY")
+            self.assertEqual(intent["relay_capability"], "NOT_RELAY_ELIGIBLE")
             for row in (execution, fill_lifecycle):
                 self.assertEqual(row["research_lane"], "OFFSET_029_ATR_TP_25")
                 self.assertEqual(row["shared_ai_call_id"], "scan-paper-1")
@@ -418,6 +424,9 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertTrue(lifecycle["terminal"])
             self.assertFalse(lifecycle["ranking_eligible"])
+            self.assertEqual(lifecycle["outcome_state"], "REALIZED_PROFIT")
+            self.assertEqual(lifecycle["observation_status"], "PAPER_POSITION_CLOSED")
+            self.assertEqual(lifecycle["effective_execution_mode"], "PAPER_OBSERVED")
             for row in (execution, lifecycle):
                 self.assertEqual(row["research_lane"], "PATIENT")
                 self.assertEqual(row["shared_ai_call_id"], "scan-3")

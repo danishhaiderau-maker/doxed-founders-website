@@ -171,6 +171,7 @@ from collector_v22 import (
     terminal_observation,
     write_research_event_once,
 )
+from research_v3_contract import COLLECTOR_VERSION as COLLECTOR_V31_VERSION
 from collector_storage import storage_blocks_new_events, storage_state, project_capacity
 from collector_v22_provisional import (
     PROVISIONAL_STORE_FILE as COLLECTOR_V22_PROVISIONAL_FILE,
@@ -819,6 +820,11 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         "fresh_collection_start_iso_utc": fresh_iso_utc,
         "cwd": os.getcwd(),
         "launcher": "15minu_bot.py",
+        # V3.1 is the canonical research contract.  Keep the V2.2 writer
+        # identity separately because it remains the compatibility/migration
+        # source for the dual-write bridge.
+        "collector_version": COLLECTOR_V31_VERSION,
+        "legacy_collector_version": COLLECTOR_V22_VERSION,
     }
     # A normal process restart must keep the collector identity bound by the
     # last explicit Fresh Collection reset.  Rebuilding research_session.json
@@ -829,7 +835,7 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         for key in (
             "collector_v22_epoch_ts",
             "collector_v22_epoch_id",
-            "collector_version",
+            "legacy_collector_version",
         ):
             if prev.get(key) not in (None, ""):
                 payload[key] = prev.get(key)
@@ -839,7 +845,8 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         fresh_epoch_id = "epoch-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
         payload["collector_v22_epoch_ts"] = float(fresh_start)
         payload["collector_v22_epoch_id"] = fresh_epoch_id
-        payload["collector_version"] = COLLECTOR_V22_VERSION
+        payload["collector_version"] = COLLECTOR_V31_VERSION
+        payload["legacy_collector_version"] = COLLECTOR_V22_VERSION
     with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -3359,6 +3366,35 @@ def lane_register_pending_order(order: dict):
         return False
     tid = str(order.get("trade_id") or "")
     with trade_lock:
+        # The canonical trade ID is a once-only lifecycle identity.  A delayed
+        # promotion thread must not recreate an order after cleanup expired it,
+        # after fill handoff began, or after it became an open/closed trade.
+        handoff_ids = globals().get("fill_handoff_trade_ids") or set()
+        position_rows = globals().get("open_positions") or []
+        trade_rows = globals().get("trades") or []
+        expired_rows = globals().get("expired_orders") or []
+        retired = bool(tid) and (
+            tid in handoff_ids
+            or any(
+                isinstance(row, dict) and str(row.get("trade_id") or "") == tid
+                for row in position_rows
+            )
+            or any(
+                isinstance(row, dict) and str(row.get("trade_id") or "") == tid
+                for row in trade_rows
+            )
+            or any(
+                isinstance(row, dict) and str(row.get("trade_id") or "") == tid
+                for row in expired_rows
+            )
+        )
+        if retired:
+            order["registration_suppressed_reason"] = "RETIRED_LIFECYCLE"
+            logger.warning(
+                f"[ORDER IDEMPOTENCY] retired lifecycle registration suppressed "
+                f"trade_id={tid} lane={ln} [PIPELINE ENFORCEMENT]"
+            )
+            return False
         existing = next(
             (
                 row
@@ -3366,7 +3402,7 @@ def lane_register_pending_order(order: dict):
                 if isinstance(row, dict)
                 and tid
                 and str(row.get("trade_id") or "") == tid
-                and str(row.get("status") or "").upper() == "PENDING"
+                and str(row.get("status") or "").upper() in ("PENDING", "FILLED")
             ),
             None,
         )
@@ -11875,6 +11911,7 @@ _v3_terminal_reconcile_last_v22_size = -1
 _order_multiverse_path_complete = {}
 _order_multiverse_post_ttl_done = {}
 _order_multiverse_written = set()
+_execution_terminal_trade_ids = set()
 _collector_epoch_lock = threading.RLock()
 
 
@@ -11885,6 +11922,33 @@ def _collector_epoch_serialized(fn):
         with _collector_epoch_lock:
             return fn(*args, **kwargs)
     return wrapped
+
+
+def _execution_trade_is_terminal(trade_id: str) -> bool:
+    """Return execution truth without consulting provisional collector state.
+
+    Collector maturation can race a paper close.  Once execution has recorded
+    a terminal trade, an older rejection/provisional reference must never
+    downgrade it back to WAITING_ENTRY_WINDOW.
+    """
+    tid = str(trade_id or "")
+    if not tid:
+        return False
+    if tid in _execution_terminal_trade_ids:
+        return True
+    # Do not acquire trade_lock from the collector serialization lock: close
+    # commits can take the inverse path.  CPython list/dict reference snapshots
+    # are sufficient here because this is a monotonic terminal predicate.
+    master = (trades_map.get(tid) or {}).get("signal_ref") or {}
+    terminal = bool(isinstance(master, dict) and is_terminal_signal(master))
+    if not terminal:
+        terminal = any(
+            isinstance(row, dict) and str(row.get("trade_id") or "") == tid
+            for row in list(trades)
+        )
+    if terminal:
+        _execution_terminal_trade_ids.add(tid)
+    return terminal
 # v2.2: dense 1s path_replay off Fly volume by default (~309 KB/filled event saved).
 COLLECTOR_V22_PATH_REPLAY_1S = os.getenv("COLLECTOR_V22_PATH_REPLAY_1S", "").strip().lower() in ("1", "true", "yes")
 _RESEARCH_RAW_JSONL_NEVER_PRUNE = frozenset({
@@ -12031,7 +12095,8 @@ def _ensure_collector_v22_epoch() -> str:
     meta["collector_v22_epoch_ts"] = anchor
     material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
     meta["collector_v22_epoch_id"] = "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
-    meta["collector_version"] = COLLECTOR_V22_VERSION
+    meta["collector_version"] = COLLECTOR_V31_VERSION
+    meta["legacy_collector_version"] = COLLECTOR_V22_VERSION
     try:
         with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, indent=2)
@@ -12202,6 +12267,14 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             return None
         if tid in _order_multiverse_written:
             return None
+        if _execution_trade_is_terminal(tid):
+            # Execution truth wins over a stale rejected/provisional object.
+            # Force this pass to mature the existing evidence as terminal;
+            # never publish another WAITING_ENTRY_WINDOW for a closed ID.
+            source = dict(source)
+            source["status"] = "CLOSED"
+            source["ticket_closed"] = True
+            path_complete = True
         prev = _order_multiverse_state.get(tid)
         if prev in TERMINAL_LIFECYCLES and tid in _order_multiverse_written:
             return None
@@ -12461,6 +12534,12 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
     try:
         tid = str(signal.get("trade_id") or "")
         if not tid:
+            return None
+        if _execution_trade_is_terminal(tid):
+            logger.info(
+                f"[COLLECTOR_V22] terminal execution suppresses stale rejected provisional "
+                f"trade_id={tid} [PIPELINE ENFORCEMENT]"
+            )
             return None
         price = float(
             signal.get("signal_price_at_approve")
@@ -19666,6 +19745,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     # starving relay snapshots and eventually the WebSocket ping/pong loop.
     registered = lane_register_pending_order(order)
     if not registered:
+        if order.get("registration_suppressed_reason") == "RETIRED_LIFECYCLE":
+            signal["status"] = "EXPIRED"
+            signal["outcome"] = "LATE_PROMOTION_SUPPRESSED"
+            signal["exit_reason"] = "LATE_PROMOTION_SUPPRESSED"
+            signal["order_placed"] = False
         pipeline_state_sync()
         return True
     _account_registered_order_submission(signal, ai)
@@ -21161,27 +21245,38 @@ def process_pending_orders():
         }
     with venue_fill_trade_tape_lock:
         recent_market_trades = list(venue_fill_trade_tape)
+    # Copy references under the coordination lock, then perform venue-depth
+    # evaluation and evidence persistence outside it.  Those operations can
+    # include JSONL I/O and previously held trade_lock long enough to starve
+    # relay snapshots and the strategy watchdog.  A second short critical
+    # section below revalidates identity/status before committing FILLED.
     with trade_lock:
-        for order in list(pending_orders):
-            if order.get("status") != "PENDING":
+        pending_snapshot = list(pending_orders)
+    ready_orders = []
+    for order in pending_snapshot:
+        if order.get("status") != "PENDING":
+            continue
+        if not lane_orders_allowed(order.get("research_lane")):
+            continue
+        if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
+            continue
+        if _pending_limit_ready_for_fill(
+            order,
+            price,
+            bid=fill_bid,
+            ask=fill_ask,
+            venue_snapshot=venue_snapshot,
+            recent_market_trades=recent_market_trades,
+        ):
+            ready_orders.append(order)
+    for order in ready_orders:
+        with trade_lock:
+            if order not in pending_orders or order.get("status") != "PENDING":
                 continue
-            if not lane_orders_allowed(order.get("research_lane")):
-                continue
-            if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
-                # A direct-live limit may look touched on the public feed while
-                # the private exchange order is still resting, partially
-                # filled, rejected, or already cancelled. Never fabricate a
-                # local fill from public ticks. The strict private reconcile
-                # payload is the only authority that can convert it to an
-                # EXIT_ONLY managed position.
-                continue
-            if not _pending_limit_ready_for_fill(
-                order,
-                price,
-                bid=fill_bid,
-                ask=fill_ask,
-                venue_snapshot=venue_snapshot,
-                recent_market_trades=recent_market_trades,
+            tid = str(order.get("trade_id") or "")
+            if not tid or any(
+                isinstance(pos, dict) and str(pos.get("trade_id") or "") == tid
+                for pos in open_positions
             ):
                 continue
             fill_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref") or {}
@@ -21201,22 +21296,22 @@ def process_pending_orders():
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
-            schedule_close = globals().get("close_research_order_schedule")
-            if callable(schedule_close):
-                schedule_close(
-                    order,
-                    fill_signal if isinstance(fill_signal, dict) else None,
-                    now=time.time(),
-                    reason="FILLED",
-                )
-            collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-            if callable(collector_refresh):
-                collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
             order["fill_handoff_in_progress"] = True
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
-            fills.append(order)
-    for order in fills:
+            fills.append((order, fill_signal))
+    for order, fill_signal in fills:
+        schedule_close = globals().get("close_research_order_schedule")
+        if callable(schedule_close):
+            schedule_close(
+                order,
+                fill_signal if isinstance(fill_signal, dict) else None,
+                now=time.time(),
+                reason="FILLED",
+            )
+        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+        if callable(collector_refresh):
+            collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
         fill_order(order)
 
 def fill_order(order):
@@ -25030,6 +25125,7 @@ def close_position(pos: dict, exit_reason: str):
         master["expires_ts"] = time.time() - 1
 
     persist_signal_close(trade_id, "CLOSED")
+    _execution_terminal_trade_ids.add(str(trade_id))
     _sync_order_multiverse(
         {
             **(master or {}),
@@ -34679,6 +34775,8 @@ def health():
         # The running bot must not lie about which commit produced it.
         "bot_version": bot_version,
         "analyzer_sync_id": analyzer_sync_id,
+        "collector_version": COLLECTOR_V31_VERSION,
+        "legacy_collector_version": COLLECTOR_V22_VERSION,
         "git_rev": _runtime_git_rev(),
         "tile2_policy": tile2_policy_descriptor(),
         "collection": {
@@ -34688,7 +34786,8 @@ def health():
             "cycle_universe_file": CYCLE_3M_UNIVERSE_FILE,
             "post_exit_file": POST_EXIT_REPLAY_FILE,
             "order_multiverse_file": ORDER_MULTIVERSE_FILE,
-            "collector_version": COLLECTOR_VERSION,
+            "collector_version": COLLECTOR_V31_VERSION,
+            "legacy_collector_version": COLLECTOR_V22_VERSION,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "path_schema_version": PATH_SCHEMA_VERSION,
             "replay_version": REPLAY_VERSION,
@@ -35557,6 +35656,11 @@ def toggle_fresh_collection():
         state["fresh_collection_mode"] = False
         save_persistent_config()
     _write_research_session(bot_start_time)
+    logger.info(
+        f"[COLLECTOR] canonical={COLLECTOR_V31_VERSION} "
+        f"legacy_writer={COLLECTOR_V22_VERSION} analyzer_sync_id={ANALYZER_SYNC_ID} "
+        "[PIPELINE ENFORCEMENT]"
+    )
     logger.info("[FRESH COLLECTION] Mode turned OFF - no file wipe [PIPELINE ENFORCEMENT]")
     return jsonify({"fresh_collection_mode": False})
 
@@ -36000,7 +36104,8 @@ def api_data_size():
         "line_counts": line_counts,
         "key_files": key_files,
         "computed_at": int(time.time()),
-        "collector_version": COLLECTOR_V22_VERSION,
+        "collector_version": COLLECTOR_V31_VERSION,
+        "legacy_collector_version": COLLECTOR_V22_VERSION,
         "storage_state": storage_payload,
         "capacity_projection": capacity_payload,
     })
@@ -41619,6 +41724,11 @@ def main():
     last_heartbeat = time.time()
     last_edge_compute = 0.0
     _write_research_session(bot_start_time)
+    logger.info(
+        f"[COLLECTOR] canonical={COLLECTOR_V31_VERSION} "
+        f"legacy_writer={COLLECTOR_V22_VERSION} analyzer_sync_id={ANALYZER_SYNC_ID} "
+        "[PIPELINE ENFORCEMENT]"
+    )
     _record_execution_settings_epoch("TRACKING_STARTED")
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()

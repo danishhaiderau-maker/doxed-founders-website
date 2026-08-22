@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 import json
 from pathlib import Path
@@ -23,11 +24,17 @@ class V3ReportTests(unittest.TestCase):
             store.append("opportunity", {"record_id": "o-1", "episode_id": "episode-1"})
             store.append("decision", {"record_id": "d-1", "episode_id": "episode-1", "primary_outcome": "REJECTED"})
             store.append("decision", {"record_id": "d-2", "episode_id": "episode-1", "primary_outcome": "ACCEPTED_UNFILLED"})
+            store.append("lifecycle", {
+                "record_id": "l-1", "episode_id": "episode-1", "terminal": True,
+                "observation_status": "LEGACY_PAPER_CLOSE",
+                "outcome_state": "PAPER_REALIZED", "net_pnl_usd": 2.0,
+            })
             report = build_safe_policy_genome_v3_report(data, reports)
             self.assertEqual(report["collection"]["independent_opportunities"], 1)
             self.assertEqual(report["collection"]["decision_branches"], 2)
             self.assertEqual(report["status"], "V3_COLLECTING")
             self.assertEqual(report["data_scope"], "FRESH-COLLECTION")
+            self.assertEqual(report["collection"]["outcome_states"], {"REALIZED_PROFIT": 1})
 
     def test_report_blocks_overdue_lane_order_orphan_and_accepts_resolutions(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
@@ -98,6 +105,26 @@ class V3ReportTests(unittest.TestCase):
                 "OFFSET_029_ATR_TP_25": {"NO_TRADE": 1},
             })
             self.assertFalse(report["epoch_scope"]["contamination_detected"])
+
+    def test_report_separates_paper_observation_from_relay_capability(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            store.append("order_intent", {
+                "record_id": "i-1", "episode_id": "episode-1", "event_id": "event-1",
+                "research_lane": "CONTINUOUS", "policy_id": "CONTINUOUS",
+                "policy_signature": "sig-cont", "policy_epoch_id": "pe-cont",
+                "paper_policy_spec": {"relay_eligible": True},
+            })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            identities = report["collection"]["effective_paper_execution_identities"]
+            self.assertEqual(len(identities), 1)
+            self.assertEqual(identities[0]["effective_execution_mode"], "PAPER_OBSERVED")
+            self.assertTrue(identities[0]["live_relay_capable"])
+            self.assertIn("does not authorize live relay", identities[0]["relay_capability_note"])
+            self.assertFalse(report["real_bitfinex_trading_allowed"])
 
     def test_dashboard_api_and_page_are_fail_closed(self):
         original = dashboard._read_json
@@ -243,6 +270,30 @@ class V3ReportTests(unittest.TestCase):
                 accepted = build_safe_policy_genome_v3_report(clean_data, clean_reports)
                 self.assertEqual(accepted["epoch_scope"]["missing_policy_identity_rows"], 0)
                 self.assertNotIn("POLICY_IDENTITY_CONTAMINATION", accepted["blockers"])
+
+    def test_report_treats_within_deadline_identity_join_as_pending(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            now = time.time()
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": now,
+            })
+            store.append("decision", {
+                "record_id": "d-1", "episode_id": "episode-1",
+                "decision_stage": "LANE_POLICY_VERDICT", "policy_id": "PATIENT",
+                "policy_signature": "sig-patient", "policy_epoch_id": "pe-patient",
+                "order_intent_expected": True, "resolution_deadline_ts": now + 300,
+            })
+            store.append("execution", {
+                "record_id": "e-1", "episode_id": "episode-1", "event_id": "event-1",
+                "policy_id": "PATIENT", "policy_signature": "sig-patient",
+                "policy_epoch_id": "pe-patient",
+            })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["epoch_scope"]["missing_policy_identity_rows"], 0)
+            self.assertEqual(report["epoch_scope"]["pending_policy_identity_rows"], 1)
+            self.assertNotIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+            self.assertIsNone(report["number_one_strategy"])
 
 
 if __name__ == "__main__":

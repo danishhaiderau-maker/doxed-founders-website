@@ -5,6 +5,7 @@ from research_v3_contract import (
     OUTCOME_STATES,
     SAFE_POLICY_GENOME_CONTRACT,
     build_policy_identity,
+    normalize_lifecycle_outcome,
     validate_policy_spec,
 )
 from research_v3_ranking import REQUIRED_GATES, rank_safe_policies
@@ -26,6 +27,13 @@ class ResearchV3ContractTests(unittest.TestCase):
         self.assertIn("UNSUPPORTED", OUTCOME_STATES)
         self.assertEqual(SAFE_POLICY_GENOME_CONTRACT["fees"]["bitfinex_trading_fee_rate"], 0.0)
         self.assertIn("funding", SAFE_POLICY_GENOME_CONTRACT["fees"]["separate_non_fee_costs"])
+
+    def test_lifecycle_workflow_labels_map_to_analytical_outcomes(self):
+        self.assertEqual(normalize_lifecycle_outcome("PENDING_FILL"), "CENSORED")
+        self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED", net_pnl_usd=2), "REALIZED_PROFIT")
+        self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED", net_pnl_usd=-2), "REALIZED_LOSS")
+        self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED", net_pnl_usd=0), "REALIZED_ZERO_PNL")
+        self.assertEqual(normalize_lifecycle_outcome("PAPER_REALIZED"), "CENSORED")
 
     def test_identity_changes_for_cost_or_data_snapshot(self):
         spec = _protected_spec()

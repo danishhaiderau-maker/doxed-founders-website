@@ -2,6 +2,7 @@ import ast
 import copy
 import sys
 import threading
+import time
 import types
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,7 +89,15 @@ def test_pending_order_registration_is_trade_id_idempotent():
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
+        "time": time,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
+        "time": time,
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
         "logger": QuietLogger(),
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<lane-register-test>", "exec"), namespace)
@@ -171,6 +180,10 @@ def test_registration_releases_trade_lock_before_slow_schedule_hydration():
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
+        "time": time,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
     }
@@ -217,6 +230,10 @@ def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelle
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
+        "time": time,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
         "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",

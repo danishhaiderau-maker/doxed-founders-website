@@ -27,8 +27,28 @@ OUTCOME_STATES = (
     "CENSORED",
     "UNSUPPORTED",
     "DATA_ERROR",
+    "REALIZED_PROFIT",
+    "REALIZED_LOSS",
     "REALIZED_ZERO_PNL",
 )
+
+
+def normalize_lifecycle_outcome(outcome_state: Any, *, net_pnl_usd: Any = None) -> str:
+    """Separate workflow status labels from contract analytical outcomes."""
+    state = str(outcome_state or "CENSORED").strip().upper()
+    if state == "PENDING_FILL":
+        return "CENSORED"
+    if state == "PAPER_REALIZED":
+        try:
+            pnl = float(net_pnl_usd)
+        except (TypeError, ValueError):
+            return "CENSORED"
+        if pnl > 0:
+            return "REALIZED_PROFIT"
+        if pnl < 0:
+            return "REALIZED_LOSS"
+        return "REALIZED_ZERO_PNL"
+    return state if state in OUTCOME_STATES else "DATA_ERROR"
 
 EXECUTION_WORLDS = (
     "IDEAL_TOUCH_DIAGNOSTIC",

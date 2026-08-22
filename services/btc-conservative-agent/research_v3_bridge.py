@@ -10,7 +10,7 @@ import time
 
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
-from research_v3_contract import canonical_json
+from research_v3_contract import canonical_json, normalize_lifecycle_outcome
 
 
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
@@ -128,6 +128,10 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         # rows must not re-interpret sparse order dictionaries differently
         # from the original lane decision.
         "paper_policy_spec": spec,
+        "policy_execution_scope": "PAPER_RESEARCH_ONLY",
+        "relay_capability": (
+            "RELAY_ELIGIBLE" if spec["relay_eligible"] else "NOT_RELAY_ELIGIBLE"
+        ),
     }
 
 
@@ -319,11 +323,15 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "chase_schedule": order.get("research_chase_schedule") or signal.get("research_chase_schedule") or {},
         "chase_schedule_authoritative": bool(order.get("chase_schedule_authoritative") or signal.get("chase_schedule_authoritative")),
         **policy,
+        "effective_execution_mode": "PAPER_OBSERVED",
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-order-submitted", "episode_id": identity["episode_id"], "event_id": event_id,
         "shared_ai_call_id": identity["shared_ai_call_id"],
-        "observation_status": "PAPER_ORDER_SUBMITTED", "outcome_state": "PENDING_FILL", "terminal": False,
+        "observation_status": "PAPER_ORDER_SUBMITTED",
+        "outcome_state": normalize_lifecycle_outcome("PENDING_FILL"),
+        "effective_execution_mode": "PAPER_OBSERVED",
+        "terminal": False,
         "ranking_eligible": False, "ranking_blocker": "PATH_NOT_MATURED",
         "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
         **policy,
@@ -369,6 +377,7 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-filled", "episode_id": identity["episode_id"], "event_id": event_id,
         "observation_status": "PAPER_POSITION_OPEN", "outcome_state": "PARTIAL_FILL" if order.get("partial_fill") else "FULL_FILL",
+        "effective_execution_mode": "PAPER_OBSERVED",
         "terminal": False, "ranking_eligible": False, "ranking_blocker": "EXIT_PATH_NOT_MATURED",
         **lifecycle_identity,
     })
@@ -398,7 +407,11 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:paper-closed", "episode_id": identity["episode_id"], "event_id": event_id,
-        "observation_status": "PAPER_POSITION_CLOSED", "outcome_state": "PAPER_REALIZED",
+        "observation_status": "PAPER_POSITION_CLOSED",
+        "outcome_state": normalize_lifecycle_outcome(
+            "PAPER_REALIZED", net_pnl_usd=outcome.get("net_pnl_usd")
+        ),
+        "effective_execution_mode": "PAPER_OBSERVED",
         "terminal": True, "ranking_eligible": False, "ranking_blocker": "REPLAY_PATH_NOT_MATURED",
         "net_pnl_usd": outcome.get("net_pnl_usd"), "exit_reason": outcome.get("exit_reason"),
         **lifecycle_identity,

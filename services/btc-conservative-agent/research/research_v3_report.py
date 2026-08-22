@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
-from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT
+from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
 from research_v3_candidates import evaluate_protection_screen, load_candidate_inputs
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
@@ -144,22 +144,50 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     policy_ids_by_signature: dict[str, set[str]] = {}
     signatures_by_episode_policy: dict[tuple[str, str], set[str]] = {}
     missing_policy_identity_rows = 0
+    pending_policy_identity_rows = 0
     immediate_lane_decisions = [
         row for row in decisions
         if str(row.get("decision_stage") or "") == "LANE_POLICY_VERDICT"
     ]
+    now_ts = datetime.now(timezone.utc).timestamp()
+    reconciliation_deadlines_by_episode: dict[str, list[float]] = {}
+    for decision in immediate_lane_decisions:
+        if decision.get("order_intent_expected") is True:
+            reconciliation_deadlines_by_episode.setdefault(
+                str(decision.get("episode_id") or ""), []
+            ).append(float(decision.get("resolution_deadline_ts") or 0))
+
+    def identity_is_still_reconciling(row: dict[str, Any]) -> bool:
+        deadlines = reconciliation_deadlines_by_episode.get(
+            str(row.get("episode_id") or ""), []
+        )
+        return bool(deadlines and max(deadlines) > now_ts)
     policy_attributable_lifecycles = [
         row for row in lifecycles
         if str(row.get("observation_status") or "") in {
             "PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED",
         }
     ]
-    for row in [*order_intents, *immediate_lane_decisions]:
+    for row in immediate_lane_decisions:
         signature = str(row.get("policy_signature") or "").strip()
         policy_id = str(row.get("policy_id") or "").strip()
         policy_epoch_id = str(row.get("policy_epoch_id") or "").strip()
         if not signature or not policy_id or not policy_epoch_id:
             missing_policy_identity_rows += 1
+            continue
+        policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
+        signatures_by_episode_policy.setdefault(
+            (str(row.get("episode_id") or ""), policy_id), set()
+        ).add(signature)
+    for row in order_intents:
+        signature = str(row.get("policy_signature") or "").strip()
+        policy_id = str(row.get("policy_id") or "").strip()
+        policy_epoch_id = str(row.get("policy_epoch_id") or "").strip()
+        if not signature or not policy_id or not policy_epoch_id:
+            if identity_is_still_reconciling(row):
+                pending_policy_identity_rows += 1
+            else:
+                missing_policy_identity_rows += 1
             continue
         policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
         signatures_by_episode_policy.setdefault(
@@ -172,7 +200,10 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         research_lane = str(row.get("research_lane") or "").strip()
         shared_ai_call_id = str(row.get("shared_ai_call_id") or "").strip()
         if not all((signature, policy_id, policy_epoch_id, research_lane, shared_ai_call_id)):
-            missing_policy_identity_rows += 1
+            if identity_is_still_reconciling(row):
+                pending_policy_identity_rows += 1
+            else:
+                missing_policy_identity_rows += 1
             continue
         policy_ids_by_signature.setdefault(signature, set()).add(policy_id)
         signatures_by_episode_policy.setdefault(
@@ -196,7 +227,9 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         excluded_opportunities or identity_aliases or len(observed_epochs) > 1
         or policy_identity_contamination
     )
-    outcome_counts = Counter(str(row.get("outcome_state") or "UNKNOWN") for row in terminal_lifecycles)
+    outcome_counts = Counter(normalize_lifecycle_outcome(
+        row.get("outcome_state"), net_pnl_usd=row.get("net_pnl_usd")
+    ) for row in terminal_lifecycles)
     decision_outcomes = Counter(str(
         row.get("primary_outcome")
         or row.get("outcome_state")
@@ -211,7 +244,6 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         lane = str(row.get("research_lane") or "UNKNOWN")
         outcome = str(row.get("outcome_state") or row.get("policy_decision") or "UNKNOWN")
         lane_decision_outcomes.setdefault(lane, Counter())[outcome] += 1
-    now_ts = datetime.now(timezone.utc).timestamp()
     def resolution_key(row):
         return (
             str(row.get("episode_id") or ""),
@@ -257,6 +289,26 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "orphan_expected_orders": orphan_expected_orders,
         "passed": entry_resolution_counts["overdue_orphan"] == 0,
     }
+    effective_paper_execution_identities = []
+    seen_effective_identities = set()
+    for row in [*order_intents, *executions, *policy_attributable_lifecycles]:
+        signature = str(row.get("policy_signature") or "").strip()
+        if not signature or signature in seen_effective_identities:
+            continue
+        seen_effective_identities.add(signature)
+        spec = row.get("paper_policy_spec") or {}
+        relay_capable = bool(spec.get("relay_eligible", row.get("relay_eligible", False)))
+        effective_paper_execution_identities.append({
+            "policy_signature": signature,
+            "policy_epoch_id": row.get("policy_epoch_id"),
+            "policy_id": row.get("policy_id"),
+            "research_lane": row.get("research_lane"),
+            "effective_execution_mode": "PAPER_OBSERVED",
+            "live_relay_capable": relay_capable,
+            "relay_capability_note": (
+                "Capability metadata only; paper evidence does not authorize live relay."
+            ),
+        })
     search = build_search_plan({
         "entry_offset_pct": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_offset_pct") or []),
         "entry_ttl_min": list((POLICY_SEARCH_MANIFEST.get("dimensions") or {}).get("entry_ttl_min") or []),
@@ -304,6 +356,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "excluded_identity_alias_rows": len(identity_aliases),
             "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
             "missing_policy_identity_rows": missing_policy_identity_rows,
+            "pending_policy_identity_rows": pending_policy_identity_rows,
             "policy_signature_collisions": policy_signature_collisions,
             "policy_signature_divergence": policy_signature_divergence,
             "contamination_detected": contamination,
@@ -324,6 +377,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "ledger_counts": verification["ledger_counts"],
             "market_segments": verification["market_segment_count"],
             "entry_resolution_integrity": entry_resolution_integrity,
+            "effective_paper_execution_identities": effective_paper_execution_identities,
         },
         "search": search,
         "search_progress": search_progress(search, progress_receipts),
