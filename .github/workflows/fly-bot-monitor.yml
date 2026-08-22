@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 jobs:
-  readiness:
+  revision-drift:
     runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
@@ -111,4 +111,43 @@ jobs:
               if exc.code != 503:
                   raise
               print(f"Strict readiness unavailable (non-liveness): {body}")
+          PY
+  strategy-progress:
+    runs-on: ubuntu-slim
+    timeout-minutes: 3
+    steps:
+      - name: Verify strategy progress independently of process liveness
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          with urllib.request.urlopen(
+              "https://doxed-btc-bot.fly.dev/health", timeout=12
+          ) as response:
+              health = json.load(response)
+          progress = health.get("strategy_progress") or {}
+          incident = health.get("strategy_progress_incident") or {}
+          diagnostics = {
+              "process_alive": health.get("process_alive"),
+              "revision": health.get("source_git_rev") or health.get("git_rev"),
+              "strategy_progress": progress,
+              "strategy_progress_incident": incident,
+              "market_data_mode": health.get("market_data_mode"),
+              "paper_only": health.get("force_paper_mode"),
+              "live_armed": health.get("live_armed"),
+          }
+          print(json.dumps(diagnostics, indent=2, sort_keys=True))
+          if response.status != 200 or health.get("process_alive") is not True:
+              raise SystemExit("Fly process liveness failed")
+          if progress.get("ok") is not True:
+              reasons = progress.get("reasons") or ["UNKNOWN_PROGRESS_FAILURE"]
+              raise SystemExit(
+                  "Fly strategy progress stalled: "
+                  f"reasons={reasons} ws_age={progress.get('ws_age_sec')} "
+                  f"ai_age={progress.get('ai_age_sec')} "
+                  f"trade_lock_available={progress.get('trade_lock_available')} "
+                  f"positions={progress.get('open_positions')} "
+                  f"pending={progress.get('pending_orders')}"
+              )
           PY

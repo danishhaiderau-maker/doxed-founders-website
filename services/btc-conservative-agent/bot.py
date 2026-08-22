@@ -322,6 +322,19 @@ WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY = max(
     3,
     int(os.getenv("WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY", "6")),
 )
+WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR = max(
+    2,
+    int(os.getenv("WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR", "3")),
+)
+_strategy_progress_incident_lock = threading.Lock()
+_strategy_progress_incident = {
+    "active": False,
+    "started_ts": 0.0,
+    "last_failure_ts": 0.0,
+    "reasons": [],
+    "consecutive_failures": 0,
+    "consecutive_successes": 0,
+}
 # A genuine trade-channel tick remains mandatory for new strategy work. The
 # 60s window tolerates the quiet Bitfinex derivative tape, but entry also
 # requires a separately fresh REST bid/ask snapshot (see
@@ -18773,6 +18786,14 @@ def _recompute_system_readiness(now: float = None) -> dict:
 def can_progress_new_entry(now: float = None) -> tuple:
     """Central gate for signal generation and every local entry transition."""
     runtime = _recompute_system_readiness(now)
+    with _strategy_progress_incident_lock:
+        progress_stalled = bool(_strategy_progress_incident["active"])
+        progress_reasons = list(_strategy_progress_incident["reasons"])
+    if progress_stalled:
+        runtime["strategy_progress_incident"] = _strategy_progress_incident_snapshot(now)
+        return False, (
+            progress_reasons[0] if progress_reasons else "STRATEGY_PROGRESS_STALLED"
+        ), runtime
     if not runtime["signal_generation_ready"]:
         reason = (
             runtime["readiness_reasons"][0]
@@ -28459,8 +28480,18 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     )
     ws_progressing = bool(transport_progressing and trade_stream_progressing)
     ai_progressing = bool(not ai_expected or (ai_ts and ai_age <= ai_stale_sec))
+    reasons = []
+    if not lock_available:
+        reasons.append("TRADE_LOCK_UNAVAILABLE")
+    if not transport_progressing:
+        reasons.append("WS_TRANSPORT_STALLED")
+    elif not trade_stream_progressing:
+        reasons.append("WS_TRADE_STREAM_STALLED")
+    if not ai_progressing:
+        reasons.append("AI_CADENCE_STALLED")
     return {
         "ok": bool(lock_available and ws_progressing and ai_progressing),
+        "reasons": reasons,
         "trade_lock_available": bool(lock_available),
         "ws_progressing": ws_progressing,
         "ws_age_sec": ws_age,
@@ -28475,8 +28506,59 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     }
 
 
+def _strategy_progress_incident_snapshot(now: float = None) -> dict:
+    now = float(now or time.time())
+    with _strategy_progress_incident_lock:
+        snapshot = dict(_strategy_progress_incident)
+        snapshot["reasons"] = list(_strategy_progress_incident["reasons"])
+    started = float(snapshot.get("started_ts") or 0)
+    snapshot["age_sec"] = max(0.0, now - started) if started else 0.0
+    snapshot["new_entries_suppressed"] = bool(snapshot["active"])
+    return snapshot
+
+
+def _update_strategy_progress_incident(progress: dict, now: float = None) -> dict:
+    """Latch a stall; clear only after consecutive, independently healthy probes."""
+    now = float(now or time.time())
+    with _strategy_progress_incident_lock:
+        incident = _strategy_progress_incident
+        if progress.get("ok"):
+            incident["consecutive_failures"] = 0
+            incident["consecutive_successes"] += 1
+            if (
+                incident["active"]
+                and incident["consecutive_successes"]
+                >= WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR
+            ):
+                incident.update({
+                    "active": False,
+                    "started_ts": 0.0,
+                    "last_failure_ts": 0.0,
+                    "reasons": [],
+                    "consecutive_successes": 0,
+                })
+        else:
+            incident["consecutive_successes"] = 0
+            incident["consecutive_failures"] += 1
+            incident["last_failure_ts"] = now
+            incident["reasons"] = list(progress.get("reasons") or ["STRATEGY_PROGRESS_STALLED"])
+            if (
+                not incident["active"]
+                and incident["consecutive_failures"]
+                >= WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY
+            ):
+                incident["active"] = True
+                incident["started_ts"] = now
+        snapshot = dict(incident)
+        snapshot["reasons"] = list(incident["reasons"])
+    started = float(snapshot.get("started_ts") or 0)
+    snapshot["age_sec"] = max(0.0, now - started) if started else 0.0
+    snapshot["new_entries_suppressed"] = bool(snapshot["active"])
+    return snapshot
+
+
 def watchdog_loop():
-    consecutive_progress_failures = 0
+    last_progress_dump_ts = 0.0
     while not shutdown_event.is_set():
         with state_lock:
             hb_ts = state.get("last_heartbeat") or last_heartbeat
@@ -28490,14 +28572,12 @@ def watchdog_loop():
             dump_system_state()
             dump_threads()
         progress = _strategy_progress_health_snapshot()
-        if progress["ok"]:
-            consecutive_progress_failures = 0
-        else:
-            consecutive_progress_failures += 1
+        incident = _update_strategy_progress_incident(progress)
+        if not progress["ok"]:
             logger.error(
                 "[WATCHDOG] strategy progress failed %s/%s lock=%s ws_age=%s "
                 "ai_age=%s ai_expected=%s positions=%s pending=%s",
-                consecutive_progress_failures,
+                incident["consecutive_failures"],
                 WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY,
                 progress["trade_lock_available"],
                 progress["ws_age_sec"],
@@ -28506,9 +28586,14 @@ def watchdog_loop():
                 progress["open_positions"],
                 progress["pending_orders"],
             )
-            if consecutive_progress_failures >= WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY:
-                dump_system_state()
-                dump_threads()
+            if incident["active"]:
+                # Keep the incident latched without producing a multi-GB dump
+                # storm while a position-bearing paper process awaits repair.
+                now = time.time()
+                if now - last_progress_dump_ts >= 300.0:
+                    dump_system_state()
+                    dump_threads()
+                    last_progress_dump_ts = now
                 # A paper-only, disarmed, position-flat process may be restarted
                 # by Fly to clear a wedged lock. Never self-restart a live or
                 # position-bearing risk manager.
@@ -28522,7 +28607,6 @@ def watchdog_loop():
                         "for supervisor recovery"
                     )
                     os._exit(75)
-                consecutive_progress_failures = 0
         time.sleep(5)
 
 def dump_threads():
@@ -34544,6 +34628,7 @@ def health():
     relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
     process_alive = heartbeat_age <= 15.0
     strategy_progress = _strategy_progress_health_snapshot(now)
+    strategy_progress_incident = _strategy_progress_incident_snapshot(now)
     status = "paused" if paused else (
         "alive" if process_alive and strategy_progress["ok"] else "degraded"
     )
@@ -34554,6 +34639,7 @@ def health():
         "time_since_heartbeat": heartbeat_age,
         "process_alive": process_alive,
         "strategy_progress": strategy_progress,
+        "strategy_progress_incident": strategy_progress_incident,
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
@@ -34629,6 +34715,7 @@ def ready():
     )
     dashboard_owner = is_active_dashboard_owner()
     strategy_progress = _strategy_progress_health_snapshot(now)
+    strategy_progress_incident = _strategy_progress_incident_snapshot(now)
     process_ready = bool(
         dashboard_owner
         and heartbeat_age <= 15.0
@@ -34651,6 +34738,7 @@ def ready():
         "bot_version": EXECUTION_FIX_VERSION,
         "heartbeat_age": heartbeat_age,
         "strategy_progress": strategy_progress,
+        "strategy_progress_incident": strategy_progress_incident,
         **market_health,
         "ohlcv_ready": ohlcv_ready,
         "system_ready": runtime["system_ready"],
