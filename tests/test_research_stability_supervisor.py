@@ -86,6 +86,64 @@ def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap
     assert detail["quarantine_bytes"] > detail["maximum_quarantine_bytes"]
 
 
+def test_opportunity_progress_establishes_baseline_then_advances():
+    ok, detail, baseline = module.evaluate_opportunity_progress(
+        count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior={}, now=NOW, progress_expected=True,
+    )
+    assert ok is True
+    assert detail["state"] == "BASELINE_ESTABLISHED"
+
+    from datetime import timedelta
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=5, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior=baseline, now=NOW + timedelta(minutes=5), progress_expected=True,
+    )
+    assert ok is True
+    assert detail["state"] == "ADVANCING"
+    assert detail["advanced"] is True
+
+
+def test_opportunity_progress_fails_after_cadence_and_sync_grace():
+    from datetime import timedelta
+    prior = {
+        "epoch_key": "epoch-a", "source_revision": "a" * 40,
+        "independent_opportunities": 4,
+        "observed_at": (NOW - timedelta(minutes=13)).isoformat(),
+        "first_stalled_at": (NOW - timedelta(minutes=13)).isoformat(),
+    }
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior=prior, now=NOW, progress_expected=True,
+    )
+    assert ok is False
+    assert detail["state"] == "OPPORTUNITY_PROGRESS_STALLED"
+    assert detail["stalled_duration_seconds"] == 13 * 60
+
+
+def test_opportunity_progress_does_not_fail_while_paused_and_resets_on_new_epoch():
+    from datetime import timedelta
+    prior = {
+        "epoch_key": "epoch-a", "source_revision": "a" * 40,
+        "independent_opportunities": 4,
+        "observed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "first_stalled_at": (NOW - timedelta(hours=1)).isoformat(),
+    }
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior=prior, now=NOW, progress_expected=False,
+    )
+    assert ok is True
+    assert detail["state"] == "PROGRESS_NOT_EXPECTED"
+
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=0, epoch_ids=["epoch-b"], source_revision="b" * 40,
+        prior=prior, now=NOW, progress_expected=True,
+    )
+    assert ok is True
+    assert detail["state"] == "BASELINE_ESTABLISHED"
+
+
 def test_supervisor_reader_does_not_block_atomic_mirror_replace(tmp_path):
     destination = tmp_path / "research_events_v22.jsonl"
     candidate = tmp_path / "candidate.jsonl"

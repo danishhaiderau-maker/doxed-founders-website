@@ -29,6 +29,7 @@ REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
+OPPORTUNITY_STALL_THRESHOLD_SECONDS = 12 * 60
 LOCAL_MIN_FREE_PERCENT = 15.0
 LOCAL_QUARANTINE_MAX_PERCENT = 10.0
 LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
@@ -127,6 +128,77 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
             os.unlink(temp_name)
         except FileNotFoundError:
             pass
+
+
+def evaluate_opportunity_progress(
+    *,
+    count: int,
+    epoch_ids: list[str],
+    source_revision: str | None,
+    prior: dict[str, Any],
+    now: datetime,
+    progress_expected: bool,
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Persistently prove that independent research opportunities advance.
+
+    Mirror freshness alone is insufficient: unrelated files can keep syncing
+    while the three-minute AI/opportunity pipeline is stalled.  A new epoch or
+    deployed revision establishes a new baseline.  Paused or otherwise
+    non-expected collection is reported explicitly and never accumulates a
+    false stall duration.
+    """
+    epoch_key = ",".join(sorted(str(value) for value in epoch_ids if value))
+    revision = str(source_revision or "")
+    prior_count = prior.get("independent_opportunities")
+    same_identity = (
+        prior.get("epoch_key") == epoch_key
+        and prior.get("source_revision") == revision
+    )
+    previous_observed = parse_time(prior.get("observed_at"))
+    advanced = bool(
+        same_identity
+        and isinstance(prior_count, int)
+        and count > prior_count
+    )
+
+    if not progress_expected:
+        first_stalled = None
+        state = "PROGRESS_NOT_EXPECTED"
+    elif not same_identity or not isinstance(prior_count, int):
+        first_stalled = None
+        state = "BASELINE_ESTABLISHED"
+    elif advanced:
+        first_stalled = None
+        state = "ADVANCING"
+    else:
+        first_stalled = parse_time(prior.get("first_stalled_at"))
+        if first_stalled is None:
+            first_stalled = previous_observed or now
+        state = "STALLED"
+
+    stalled_for = max(0.0, (now - first_stalled).total_seconds()) if first_stalled else 0.0
+    failed = bool(progress_expected and state == "STALLED" and stalled_for >= OPPORTUNITY_STALL_THRESHOLD_SECONDS)
+    if failed:
+        state = "OPPORTUNITY_PROGRESS_STALLED"
+
+    next_state = {
+        "schema": "research_opportunity_progress_state_v1",
+        "observed_at": now.isoformat(),
+        "epoch_key": epoch_key,
+        "source_revision": revision,
+        "independent_opportunities": int(count),
+        "first_stalled_at": first_stalled.isoformat() if first_stalled else None,
+        "stalled_duration_seconds": round(stalled_for, 1),
+        "state": state,
+        "progress_expected": bool(progress_expected),
+    }
+    detail = {
+        **next_state,
+        "previous_independent_opportunities": prior_count if same_identity else None,
+        "advanced": advanced,
+        "threshold_seconds": OPPORTUNITY_STALL_THRESHOLD_SECONDS,
+    }
+    return not failed, detail, next_state
 
 
 def fetch_json(url: str, token: str, timeout: int = 20) -> dict[str, Any]:
@@ -683,6 +755,7 @@ class Supervisor:
     launcher: Callable[..., subprocess.Popen[Any]] = subprocess.Popen
     runtime_repo: Path | None = None
     readiness_state_file: Path | None = None
+    progress_state_file: Path | None = None
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -727,6 +800,7 @@ class Supervisor:
             add("local_storage", False, f"{type(exc).__name__}: {exc}")
 
         readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
+        status: dict[str, Any] = {}
         try:
             status = self.fetcher(self.fly_url.rstrip("/") + "/api/status", self.token, 20)
             count_payload = status
@@ -786,6 +860,7 @@ class Supervisor:
 
         events_path = self.mirror / "research_events_v22.jsonl"
         event_summary: dict[str, Any] | None = None
+        current_evidence_summary: dict[str, Any] | None = None
         v3_ledger_dir = self.mirror / "v3" / "ledgers"
         v3_ledger_paths = list(v3_ledger_dir.glob("*.jsonl")) if v3_ledger_dir.is_dir() else []
         try:
@@ -817,8 +892,40 @@ class Supervisor:
             add("mirror_schema_and_freshness", True,
                 {**public_summary, "schema_source": schema_source,
                  "age_seconds": round(mirror_age, 1)})
+            current_evidence_summary = public_summary
         except Exception as exc:
             add("mirror_schema_and_freshness", False, f"{type(exc).__name__}: {exc}")
+
+        progress_path = self.progress_state_file or self.repo / ".research-opportunity-progress-state.json"
+        if current_evidence_summary is not None:
+            try:
+                prior_progress = read_json(progress_path)
+            except (FileNotFoundError, ValueError, json.JSONDecodeError):
+                prior_progress = {}
+            if schema_source == "research_evidence_v3":
+                opportunity_count = int(current_evidence_summary.get("independent_opportunities") or 0)
+                epoch_ids = list(current_evidence_summary.get("epoch_ids") or [])
+            else:
+                opportunity_count = int(current_evidence_summary.get("all_independent_episodes") or 0)
+                epoch_ids = [str(current_evidence_summary.get("epoch_id") or "")]
+            strategy_progress = status.get("strategy_progress") if isinstance(status.get("strategy_progress"), dict) else {}
+            ai_expected = strategy_progress.get("ai_expected")
+            if not isinstance(ai_expected, bool):
+                ai_expected = bool(
+                    status.get("signal_generation_ready")
+                    or (status.get("runtime_readiness") or {}).get("signal_generation_ready")
+                )
+            progress_expected = bool(ai_expected and not status.get("execution_paused", False))
+            progress_ok, progress_detail, next_progress = evaluate_opportunity_progress(
+                count=opportunity_count,
+                epoch_ids=epoch_ids,
+                source_revision=source_revision,
+                prior=prior_progress,
+                now=self.now(),
+                progress_expected=progress_expected,
+            )
+            atomic_json(progress_path, next_progress)
+            add("independent_opportunity_progress", progress_ok, progress_detail)
 
         reports: dict[str, dict[str, Any]] = {}
         report_times: dict[str, datetime] = {}
