@@ -18895,6 +18895,37 @@ def can_progress_new_entry(now: float = None) -> tuple:
     return True, "READY", runtime
 
 
+def can_run_ai_recovery_observation(now: float = None) -> tuple:
+    """Allow one data-only AI observation to break an AI-only watchdog latch.
+
+    This never authorizes an entry transition.  It is intentionally limited to
+    the paper-only, live-disarmed research runtime when every readiness
+    prerequisite other than the stale AI timestamp is healthy.
+    """
+    runtime = _recompute_system_readiness(now)
+    with _strategy_progress_incident_lock:
+        active = bool(_strategy_progress_incident["active"])
+        reasons = set(_strategy_progress_incident["reasons"])
+    with state_lock:
+        paused = bool(state.get("execution_paused", False))
+        manual_pause = bool(state.get("manual_admin_pause", False))
+        live_armed = bool(state.get("live_armed", False))
+    allowed = bool(
+        active
+        and reasons == {"AI_CADENCE_STALLED"}
+        and runtime.get("system_ready")
+        and not paused
+        and not manual_pause
+        and _force_paper_mode_active()
+        and not live_armed
+        and _sole_ai_research_mode()
+    )
+    reason = "AI_RECOVERY_OBSERVATION_ONLY" if allowed else (
+        next(iter(sorted(reasons)), "AI_RECOVERY_NOT_ALLOWED")
+    )
+    return allowed, reason, runtime
+
+
 def is_system_ready():
     return bool(_recompute_system_readiness()["system_ready"])
 
@@ -21646,6 +21677,9 @@ def process_signal(event: dict):
     event = copy.deepcopy(event or {})
     manual_pause = manual_admin_pause_active()
     event_lane = str(event.get("research_lane") or RESEARCH_LANE_AI_SCAN).upper()
+    recovery_observation_only = bool(
+        event.get("strategy_recovery_observation_only")
+    )
     paused_shadow_mode = bool(event.get("paused_shadow_mode")) or (
         manual_pause and is_research_data_collection()
     )
@@ -21665,6 +21699,19 @@ def process_signal(event: dict):
         # records never enter the global signal/order/position books and never
         # publish relay webhooks.
         event["paused_shadow_mode"] = True
+    elif recovery_observation_only:
+        recovery_ok, recovery_reason, _runtime = can_run_ai_recovery_observation()
+        if not recovery_ok or not is_ai_scan_lane(event_lane):
+            logger.warning(
+                f"[PIPELINE] refused AI recovery observation reason={recovery_reason} "
+                f"lane={event_lane} [PIPELINE ENFORCEMENT]"
+            )
+            return {"entry_resolution": "NO_ORDER", "exact_reason": recovery_reason}
+        event["strategy_recovery_observation_only"] = True
+        logger.warning(
+            "[PIPELINE] AI cadence recovery observation enabled; all lane/order "
+            "fanout remains suppressed [PIPELINE ENFORCEMENT]"
+        )
     else:
         entry_ok, entry_reason, _runtime = can_progress_new_entry()
         if not entry_ok:
@@ -21951,6 +21998,15 @@ def process_signal(event: dict):
                     trigger_reason=trigger_reason,
                     research_entry_features=copy.deepcopy(features),
                 )
+                if recovery_observation_only:
+                    logger.warning(
+                        "[PIPELINE] AI recovery observation completed; no child lane, "
+                        "paper order, or live order was created [PIPELINE ENFORCEMENT]"
+                    )
+                    return {
+                        "entry_resolution": "NO_ORDER",
+                        "exact_reason": "AI_RECOVERY_OBSERVATION_ONLY",
+                    }
                 if is_ai_scan_lane(research_lane) and ai:
                     # Fan out the independent Patient Chase paper order directly
                     # from the completed shared-AI result.  Continuous processing
@@ -41598,8 +41654,12 @@ def periodic_pipeline_loop():
         if shutdown_event.wait(HEARTBEAT_INTERVAL):
             break
         now = time.time()
-        if not can_progress_new_entry(now)[0]:
-            continue
+        entry_ok, entry_reason, _runtime = can_progress_new_entry(now)
+        recovery_observation_only = False
+        if not entry_ok:
+            recovery_observation_only = can_run_ai_recovery_observation(now)[0]
+            if not recovery_observation_only:
+                continue
         ai_cd = get_effective_ai_cooldown_sec()
         if now - state.get("last_ai_call_ts", 0) < ai_cd:
             logger.debug(
@@ -41611,6 +41671,8 @@ def periodic_pipeline_loop():
             logger.info("[HEARTBEAT] v83 periodic AI check [PIPELINE ENFORCEMENT]")
             event = detect_event_light()
             if event and event.get("event_trigger"):
+                if recovery_observation_only:
+                    event["strategy_recovery_observation_only"] = True
                 process_signal(event)
             continue
         logger.info("[HEARTBEAT] Periodic pipeline check (no direct AI call) [PIPELINE ENFORCEMENT]")

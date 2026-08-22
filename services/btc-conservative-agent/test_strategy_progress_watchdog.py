@@ -37,6 +37,12 @@ ENTRY_GATE_FUNCTION = next(
     for node in TREE.body
     if isinstance(node, ast.FunctionDef) and node.name == "can_progress_new_entry"
 )
+RECOVERY_GATE_FUNCTION = next(
+    node
+    for node in TREE.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "can_run_ai_recovery_observation"
+)
 
 
 def compile_snapshot(namespace):
@@ -231,6 +237,70 @@ class StrategyProgressIncidentTest(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertEqual("TRADE_LOCK_UNAVAILABLE", reason)
         self.assertTrue(runtime["strategy_progress_incident"]["active"])
+
+    def _compile_recovery_gate(self, reasons, **state_overrides):
+        state = {
+            "execution_paused": False,
+            "manual_admin_pause": False,
+            "live_armed": False,
+            **state_overrides,
+        }
+        incident = {"active": True, "reasons": list(reasons)}
+        namespace = {
+            "_recompute_system_readiness": lambda _now=None: {
+                "system_ready": True,
+            },
+            "_strategy_progress_incident_lock": threading.Lock(),
+            "_strategy_progress_incident": incident,
+            "state_lock": threading.RLock(),
+            "state": state,
+            "_force_paper_mode_active": lambda: True,
+            "_sole_ai_research_mode": lambda: True,
+        }
+        module = ast.Module(body=[RECOVERY_GATE_FUNCTION], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, str(BOT_PATH), "exec"), namespace)
+        return namespace["can_run_ai_recovery_observation"]
+
+    def test_ai_only_incident_allows_data_only_recovery_observation(self):
+        gate = self._compile_recovery_gate(["AI_CADENCE_STALLED"])
+        allowed, reason, _ = gate(self.now)
+        self.assertTrue(allowed)
+        self.assertEqual("AI_RECOVERY_OBSERVATION_ONLY", reason)
+
+    def test_mixed_or_transport_incident_cannot_bypass_entry_latch(self):
+        for reasons in (
+            ["WS_TRADE_STREAM_STALLED"],
+            ["AI_CADENCE_STALLED", "TRADE_LOCK_UNAVAILABLE"],
+        ):
+            gate = self._compile_recovery_gate(reasons)
+            self.assertFalse(gate(self.now)[0], reasons)
+
+    def test_recovery_observation_is_refused_when_live_armed(self):
+        gate = self._compile_recovery_gate(
+            ["AI_CADENCE_STALLED"], live_armed=True,
+        )
+        self.assertFalse(gate(self.now)[0])
+
+    def test_recovery_path_returns_before_any_child_lane_fanout(self):
+        process_source = ast.get_source_segment(
+            SOURCE,
+            next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef) and node.name == "process_signal"
+            ),
+        )
+        recovery_return = process_source.index(
+            '"exact_reason": "AI_RECOVERY_OBSERVATION_ONLY"'
+        )
+        self.assertLess(
+            recovery_return,
+            process_source.index("spawn_combo_lanes_from_ai_scan("),
+        )
+        self.assertLess(
+            recovery_return,
+            process_source.index("spawn_continuous_lane_from_ai_scan("),
+        )
 
 
 if __name__ == "__main__":
