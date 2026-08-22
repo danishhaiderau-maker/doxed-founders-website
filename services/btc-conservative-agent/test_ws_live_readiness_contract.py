@@ -426,6 +426,12 @@ class ExchangeAuditBehaviorTest(unittest.TestCase):
             "time": time,
             "state": state,
             "state_lock": threading.RLock(),
+            "_strategy_progress_incident_lock": threading.Lock(),
+            "_strategy_progress_incident": {"active": False, "reasons": []},
+            "_strategy_progress_incident_snapshot": lambda now=None: {
+                "active": False,
+                "reasons": [],
+            },
             "trade_lock": threading.RLock(),
             "pending_orders": pending,
             "open_positions": positions,
@@ -555,6 +561,12 @@ class LateFillAdoptionBehaviorTest(unittest.TestCase):
             "time": time,
             "state": state,
             "state_lock": threading.RLock(),
+            "_strategy_progress_incident_lock": threading.Lock(),
+            "_strategy_progress_incident": {"active": False, "reasons": []},
+            "_strategy_progress_incident_snapshot": lambda now=None: {
+                "active": False,
+                "reasons": [],
+            },
             "trade_lock": threading.RLock(),
             "pending_orders": pending,
             "open_positions": positions,
@@ -993,7 +1005,7 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
     def test_direct_live_limits_never_simulate_fill_or_local_only_chase(self):
         pending = function_source("process_pending_orders")
         live_check = pending.index('order.get("bitfinex_order_id")')
-        touch = pending.index("if not _pending_limit_ready_for_fill")
+        touch = pending.index("_pending_limit_ready_for_fill(")
         self.assertLess(live_check, touch)
         chase = function_source("_apply_limit_chase")
         self.assertIn('order.get("bitfinex_order_id")', chase)
@@ -1045,7 +1057,7 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         )
         self.assertLess(
             close.index("_maybe_bitfinex_close"),
-            close.index('pos["status"] = "CLOSED"'),
+            close.index("finalize_position_close("),
         )
         self.assertIn('_disarm_live_control("BITFINEX_CLOSE_FAILED")', close)
         priorities = SOURCE[
