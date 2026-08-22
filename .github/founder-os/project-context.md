@@ -12,7 +12,7 @@ Product & platform (15 recent commits)
 
 ## Last Commit
 
-fix(sync): exclude volatile storage telemetry
+Merge pull request #98 from danishhaiderau-maker/codex/v31-live-readiness
 
 ## Last Activity
 
