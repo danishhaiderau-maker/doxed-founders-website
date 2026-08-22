@@ -24,7 +24,7 @@ STATUS_FILE = "research_retention_status.json"
 MARKER_FILE = ".research_retention_last_run.json"
 DAILY_DIR = Path("research_retention") / "daily"
 RETENTION_SCHEMA = "analyzer_retention_v3"
-DEFAULT_RAW_MIRROR_CAP_GIB = 30
+DEFAULT_RAW_MIRROR_CAP_GIB = 25
 
 COMPACT_EVIDENCE_FILES = (
     "analysis_summary.md",

@@ -2209,10 +2209,10 @@ def api_summary():
             "report_path": str(ROOT),
             "local_size_mb": mirror_size.get("local_size_mb"),
             "local_file_count": mirror_size.get("local_file_count"),
-            "local_limit_mb": int(retention.get("raw_mirror_cap_gib") or 30) * 1024,
+            "local_limit_mb": int(retention.get("raw_mirror_cap_gib") or 25) * 1024,
             "local_limit_pct": round(
                 100.0 * float(mirror_size.get("local_size_mb") or 0)
-                / (int(retention.get("raw_mirror_cap_gib") or 30) * 1024), 2
+                / (int(retention.get("raw_mirror_cap_gib") or 25) * 1024), 2
             ),
             "fly_size_mb": mirror_size.get("fly_size_mb"),
             "fly_volume_total_mb": mirror_size.get("fly_volume_total_mb"),
@@ -3771,7 +3771,7 @@ async function loadSummary() {
       : 'Pending first run'],
     ['Raw mirror cap', retention.raw_mirror_cap_status
       ? ((Number(retention.raw_mirror_bytes || 0) / 1073741824).toFixed(2) + ' / '
-        + Number(retention.raw_mirror_cap_gib || 30).toFixed(0) + ' GiB · '
+        + Number(retention.raw_mirror_cap_gib || 25).toFixed(0) + ' GiB · '
         + Number(retention.raw_mirror_usage_pct || 0).toFixed(1) + '% · '
         + retention.raw_mirror_cap_status)
       : 'Pending first retention measurement'],
