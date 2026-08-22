@@ -12,10 +12,11 @@ def _render_chunk() -> str:
     return SOURCE[start:end]
 
 
-def test_tile_headlines_use_one_identical_four_metric_contract():
+def test_tile_headlines_use_one_identical_six_metric_contract():
     chunk = _render_chunk()
-    for label in ("Status", "Executed", "PnL", "EV/appr"):
+    for label in ("Status", "Pending", "Open", "Closed", "PnL", "EV/appr"):
         assert f"statRow('{label}'" in chunk
+    assert "statRow('Executed'" not in chunk
     assert "statRow('Win%'" not in chunk
     assert "Counterfactual closes" not in chunk
     assert "activeGrid" not in chunk
@@ -99,7 +100,7 @@ def test_settings_period_approvals_reconcile_to_analyzer_headline():
 
 
 if __name__ == "__main__":
-    test_tile_headlines_use_one_identical_four_metric_contract()
+    test_tile_headlines_use_one_identical_six_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
     test_settings_periods_are_durable_and_attached_to_both_payload_paths()
     test_server_is_authoritative_for_execution_gate_controls()
