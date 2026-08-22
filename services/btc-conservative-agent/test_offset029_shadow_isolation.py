@@ -255,7 +255,14 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
         "entry_price": None,
         "exit_reason": None,
     }
-    assert counts == {"pending": 1, "open": 0, "closed": 0, "expired": 0, "selected_calls": 1}
+    assert counts == {
+        "pending": 1,
+        "open": 0,
+        "closed": 0,
+        "expired": 0,
+        "unlinked_lifecycle_rows": 0,
+        "selected_calls": 1,
+    }
     assert "type_b_verdict" not in enriched[0]
     assert "TYPE_B_HUNTER_V1" not in enriched[0]["lane_verdicts"]
 
@@ -290,6 +297,66 @@ def test_api_recovers_live_patient_child_identity_from_signal_snapshot():
     assert enriched[0]["patient_chase_route"]["trade_id"] == "o29atr-a01440a5125e"
     assert counts["pending"] == 1
     assert counts["selected_calls"] == 1
+
+
+def test_api_counts_patient_order_even_when_parent_ai_identity_is_missing():
+    """A visible paper order must never be hidden from the lifecycle totals."""
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-newer-visible-call"}]
+    pending = [{
+        "trade_id": "o29atr-legacy-child",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+        "limit_price": 77_460.99,
+    }]
+
+    enriched, counts = fn(history, pending=pending)
+
+    assert enriched[0]["patient_chase_route"]["status"] == "NOT_SELECTED"
+    assert counts["pending"] == 1
+    assert counts["selected_calls"] == 0
+    assert counts["unlinked_lifecycle_rows"] == 1
+
+
+def test_api_lifecycle_totals_do_not_double_count_same_trade_across_sources():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-duplicate"}]
+    signals = [{"signal_ref": {
+        "shared_ai_call_id": "scan-duplicate",
+        "trade_id": "o29atr-same",
+        "research_lane": offset_policy.LANE,
+        "status": "ORDERED",
+    }}]
+    pending = [{
+        "shared_ai_call_id": "scan-duplicate",
+        "trade_id": "o29atr-same",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+    }]
+
+    _enriched, counts = fn(history, signals=signals, pending=pending)
+
+    assert counts["pending"] == 1
+    assert counts["selected_calls"] == 1
+    assert counts["unlinked_lifecycle_rows"] == 0
 
 
 def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
@@ -426,6 +493,7 @@ def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     assert "<th>Patient Chase route / outcome</th>" in source
     assert "formatPatientRoute(patientRoute)" in source
     assert "Continuous ACCEPT is an evaluation, not proof of an order" in source
+    assert "lifecycle row(s) are missing parent AI identity" in source
     assert "statRow('Pending', laneNow.pending || 0)" in source
     assert "statRow('Open', laneNow.open || 0)" in source
     assert "statRow('Closed', stats.real_fills" in source

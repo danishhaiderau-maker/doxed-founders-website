@@ -30819,6 +30819,9 @@ DASHBOARD_JS = """(function () {
           aiHint.innerText = historyCount
             + 'Continuous ACCEPT is an evaluation, not proof of an order. Patient Chase shows the matched paper lifecycle. '
             + `Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. `
+            + ((d.patient_chase_counts?.unlinked_lifecycle_rows || 0) > 0
+              ? `${d.patient_chase_counts.unlinked_lifecycle_rows} lifecycle row(s) are missing parent AI identity; totals include them but per-call routing is incomplete. `
+              : '')
             + 'Older CSV-only calls show lane metadata unavailable only when no matching journal verdict exists.';
         }
         const formatLaneVerdict = (v, row) => {
@@ -33819,7 +33822,15 @@ def _attach_patient_chase_routes(
     lane = RESEARCH_LANE_OFFSET_029_ATR_TP_25
     priority = {"APPROVED_NO_ORDER": 0, "EXPIRED": 1, "CLOSED": 2, "PENDING": 3, "OPEN": 4}
     by_call = {}
-    counts = {"pending": 0, "open": 0, "closed": 0, "expired": 0}
+    counts = {
+        "pending": 0,
+        "open": 0,
+        "closed": 0,
+        "expired": 0,
+        "unlinked_lifecycle_rows": 0,
+    }
+    lifecycle_by_trade = {}
+    unlinked_lifecycle_trade_ids = set()
 
     # The lightweight relay overlay intentionally receives sanitized orders and
     # positions without private causal identity fields.  It runs after the full
@@ -33873,8 +33884,19 @@ def _attach_patient_chase_routes(
             row = (raw or {}).get("signal_ref") if nested_signal else raw
             if not isinstance(row, dict) or _normalize_lane_key(row) != lane:
                 continue
+            trade_id = str(row.get("trade_id") or "")
+            # Dashboard lifecycle totals describe actual orders/positions and
+            # terminal rows.  They must not disappear merely because an older
+            # child row is missing its parent shared-AI identity.  Keep the
+            # AI-history join separate and surface any identity gap explicitly.
+            if status != "APPROVED_NO_ORDER" and trade_id:
+                previous = lifecycle_by_trade.get(trade_id)
+                if previous is None or priority[status] >= priority[previous]:
+                    lifecycle_by_trade[trade_id] = status
             call_id = canonical_call_id(row) or trade_to_call.get(str(row.get("trade_id") or ""), "")
             if not call_id:
+                if status != "APPROVED_NO_ORDER" and trade_id:
+                    unlinked_lifecycle_trade_ids.add(trade_id)
                 continue
             actual = str(row.get("status") or status).upper()
             route_status = status
@@ -33897,10 +33919,11 @@ def _attach_patient_chase_routes(
     add(closed, "CLOSED")
     add(pending, "PENDING")
     add(positions, "OPEN")
-    for route in by_call.values():
-        key = route["status"].lower()
+    for lifecycle_status in lifecycle_by_trade.values():
+        key = lifecycle_status.lower()
         if key in counts:
             counts[key] += 1
+    counts["unlinked_lifecycle_rows"] = len(unlinked_lifecycle_trade_ids)
     enriched = []
     for original in ai_history or ():
         row = dict(original)
