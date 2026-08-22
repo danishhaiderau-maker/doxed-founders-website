@@ -878,6 +878,39 @@ def test_dead_runtime_fails_immediately_without_remote_repair(tmp_path):
     assert persisted["first_starved_at"] is None
 
 
+def test_strategy_progress_failure_is_immediately_unhealthy_even_if_ready():
+    status = {
+        "process_alive": True,
+        "system_ready": True,
+        "signal_generation_ready": True,
+        "git_rev": "a" * 40,
+        "runtime_readiness": {
+            "prerequisites_ready": True,
+            "signal_generation_ready": True,
+            "readiness_reasons": [],
+        },
+        "strategy_progress": {
+            "ok": False,
+            "reasons": ["TRADE_LOCK_UNAVAILABLE", "AI_CADENCE_STALLED"],
+            "trade_lock_available": False,
+            "ws_age_sec": 2.0,
+            "ai_age_sec": 420.0,
+        },
+    }
+    ok, detail, _ = module.evaluate_runtime_readiness(
+        status,
+        {},
+        now=NOW,
+        counts={"virtual_count": 0, "pending_count": 2, "position_count": 2},
+    )
+    assert ok is False
+    assert detail["state"] == "STRATEGY_PROGRESS_FAILED"
+    assert detail["trade_lock_available"] is False
+    assert detail["strategy_progress_reasons"] == [
+        "TRADE_LOCK_UNAVAILABLE", "AI_CADENCE_STALLED",
+    ]
+
+
 def test_supervisor_releases_live_mirror_before_schema_counting(tmp_path, monkeypatch):
     path = tmp_path / "research_events_v22.jsonl"
     row = {

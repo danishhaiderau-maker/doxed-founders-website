@@ -674,6 +674,15 @@ def evaluate_runtime_readiness(
     counts: dict[str, int | None],
 ) -> tuple[bool, dict[str, Any], dict[str, Any]]:
     runtime = status.get("runtime_readiness") or {}
+    strategy_progress = (
+        status.get("strategy_progress")
+        if isinstance(status.get("strategy_progress"), dict)
+        else {}
+    )
+    strategy_progress_failed = strategy_progress.get("ok") is False
+    strategy_progress_reasons = [
+        str(value) for value in (strategy_progress.get("reasons") or [])
+    ]
     reasons = [str(value) for value in (runtime.get("readiness_reasons") or [])]
     signal_ready = bool(status.get("signal_generation_ready", runtime.get("signal_generation_ready")))
     process_alive = bool(status.get("process_alive"))
@@ -703,6 +712,8 @@ def evaluate_runtime_readiness(
     persistent = bool(first and duration >= READINESS_STARVATION_THRESHOLD_SECONDS)
     if not process_alive:
         state = "PROCESS_NOT_ALIVE"
+    elif strategy_progress_failed:
+        state = "STRATEGY_PROGRESS_FAILED"
     elif signal_ready:
         state = "READY"
     elif stabilizing:
@@ -736,9 +747,14 @@ def evaluate_runtime_readiness(
         "ohlcv_ready": status.get("ohlcv_ready", runtime.get("ohlcv_ready")),
         "ohlcv_age_sec": runtime.get("ohlcv_age_sec"),
         "readiness_reasons": reasons,
+        "strategy_progress_ok": strategy_progress.get("ok"),
+        "strategy_progress_reasons": strategy_progress_reasons,
+        "trade_lock_available": strategy_progress.get("trade_lock_available"),
+        "ws_age_sec": strategy_progress.get("ws_age_sec"),
+        "ai_age_sec": strategy_progress.get("ai_age_sec"),
         **counts,
     }
-    return process_alive and not persistent, detail, next_state
+    return process_alive and not persistent and not strategy_progress_failed, detail, next_state
 
 
 @dataclass
