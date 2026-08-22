@@ -52,8 +52,18 @@ if ([string]$payload.agentSlug -cne [string]$agentSlug -or
     [string]$payload.userId -cne [string]$userId) {
   Stop-RelayEvidenceSync 'SCOPE_MISMATCH'
 }
+$generatedAtRaw = $payload.generatedAt
 $generatedAt = [DateTimeOffset]::MinValue
-if (-not [DateTimeOffset]::TryParse([string]$payload.generatedAt, [ref]$generatedAt)) {
+if ($generatedAtRaw -is [DateTimeOffset]) {
+  $generatedAt = [DateTimeOffset]$generatedAtRaw
+} elseif ($generatedAtRaw -is [DateTime]) {
+  $generatedAt = [DateTimeOffset]([DateTime]$generatedAtRaw)
+} elseif (-not [DateTimeOffset]::TryParse(
+  [string]$generatedAtRaw,
+  [Globalization.CultureInfo]::InvariantCulture,
+  [Globalization.DateTimeStyles]::RoundtripKind,
+  [ref]$generatedAt
+)) {
   Stop-RelayEvidenceSync 'GENERATED_AT_INVALID'
 }
 $now = [DateTimeOffset]::UtcNow

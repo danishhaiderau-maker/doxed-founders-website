@@ -56,6 +56,7 @@ def test_edge_controls_and_mutation_routes_are_removed() -> None:
         'id="edgeThresholdMax"',
         "updateEdgeRangePreset(",
         "updateEdgeRangeCustom(",
+        "window.updateEdge = updateEdge",
     ):
         assert token not in source
 

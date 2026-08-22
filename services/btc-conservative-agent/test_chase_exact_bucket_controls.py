@@ -2,6 +2,7 @@ import ast
 import copy
 import sys
 import threading
+import time
 import types
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,6 +87,17 @@ def test_pending_order_registration_is_trade_id_idempotent():
         "trade_lock": threading.RLock(),
         "_ensure_lane_bucket": lambda order: order.get("research_lane") or "CONTINUOUS",
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
+        "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
+        "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
+        "time": time,
+        "os": types.SimpleNamespace(getcwd=lambda: "."),
+        "time": time,
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
         "logger": QuietLogger(),
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<lane-register-test>", "exec"), namespace)
@@ -103,6 +115,97 @@ def test_pending_order_registration_is_trade_id_idempotent():
     assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
+def test_order_placement_does_not_hold_trade_lock_across_registration_hydration():
+    """Slow collector/schedule hydration must not starve WS/API snapshots."""
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_place_simulated_limit_order"
+    )
+    parents = {}
+    for node in ast.walk(fn):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    call = next(
+        node
+        for node in ast.walk(fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "lane_register_pending_order"
+    )
+    current = call
+    while current is not fn:
+        current = parents[current]
+        if isinstance(current, ast.With):
+            assert not any(
+                isinstance(item.context_expr, ast.Name)
+                and item.context_expr.id == "trade_lock"
+                for item in current.items
+            )
+
+
+def test_registration_releases_trade_lock_before_slow_schedule_hydration():
+    tree = ast.parse(BOT_SOURCE)
+    fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "lane_register_pending_order"
+    )
+
+    entered_hydration = threading.Event()
+    release_hydration = threading.Event()
+
+    def slow_schedule(*_args, **_kwargs):
+        entered_hydration.set()
+        assert release_hydration.wait(2.0)
+
+    class QuietLogger:
+        def warning(self, *_args, **_kwargs):
+            pass
+
+        def error(self, *_args, **_kwargs):
+            pass
+
+    lock = threading.RLock()
+    namespace = {
+        "pending_orders": [],
+        "lane_pending_orders": {"CONTINUOUS": []},
+        "trade_lock": lock,
+        "trades_map": {},
+        "_ensure_lane_bucket": lambda order: order.get("research_lane") or "CONTINUOUS",
+        "initialize_research_order_schedule": slow_schedule,
+        "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
+        "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
+        "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
+        "time": time,
+        "os": types.SimpleNamespace(getcwd=lambda: "."),
+        "logger": QuietLogger(),
+    }
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), "<lane-lock-scope>", "exec"), namespace)
+    order = {
+        "trade_id": "cont-slow-hydration",
+        "status": "PENDING",
+        "research_lane": "CONTINUOUS",
+        "created_ts": 1.0,
+        # Avoid unrelated V3 paper persistence in this isolated lock test.
+        "bitfinex_order_id": "test-only-nonpaper",
+    }
+    worker = threading.Thread(target=namespace["lane_register_pending_order"], args=(order,))
+    worker.start()
+    assert entered_hydration.wait(1.0)
+    assert lock.acquire(timeout=0.2), "slow hydration still owns trade_lock"
+    lock.release()
+    release_hydration.set()
+    worker.join(2.0)
+    assert not worker.is_alive()
+
+
 def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelled_shadow():
     tree = ast.parse(BOT_SOURCE)
     fn = next(
@@ -116,12 +219,22 @@ def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelle
         def warning(self, *_args, **_kwargs):
             pass
 
+        def error(self, *_args, **_kwargs):
+            pass
+
     namespace = {
         "pending_orders": [],
         "lane_pending_orders": {"CONTINUOUS": []},
         "trade_lock": threading.RLock(),
         "_ensure_lane_bucket": lambda order: order.get("research_lane") or "CONTINUOUS",
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
+        "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
+        "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
+            submit=lambda *_args, **_kwargs: True
+        ),
+        "time": time,
+        "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
         "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
         "executable_live_copy_entries_blocked": lambda: (

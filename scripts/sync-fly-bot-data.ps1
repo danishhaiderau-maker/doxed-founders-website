@@ -260,7 +260,12 @@ foreach ($row in $selectedFiles) {
             $refreshGeneration = $true
             break
           }
-          if ($attempt -ge 3) { throw }
+          if ($attempt -ge 3) {
+            throw (
+              "Fly sync chunk failed for $rel at offset $offset limit $limit " +
+              "after $attempt/3 attempt(s): $($_.Exception.Message)"
+            )
+          }
           Start-Sleep -Seconds (2 * $attempt)
         } finally {
           if (Test-Path -LiteralPath $tmp) {
@@ -344,7 +349,10 @@ $ack = Invoke-RestMethod `
   -Body $ackBody `
   -TimeoutSec 30
 
+$analyzerPublished = $false
+$analyzerPublishErrorCode = $null
 if ($PublishAnalyzerReport) {
+  try {
   $reportPath = [System.IO.Path]::GetFullPath($PublishAnalyzerReport)
   if (-not (Test-Path -LiteralPath $reportPath)) {
     throw "Analyzer report does not exist: $reportPath"
@@ -354,11 +362,43 @@ if ($PublishAnalyzerReport) {
   if (-not (Test-Path -LiteralPath $reportManifestPath)) {
     throw "Analyzer report manifest does not exist: $reportManifestPath"
   }
-  $reportManifest = Get-Content -LiteralPath $reportManifestPath -Raw | ConvertFrom-Json
+  $reportManifestRaw = Get-Content -LiteralPath $reportManifestPath -Raw
+  $reportManifest = $reportManifestRaw | ConvertFrom-Json
   if ([string]$reportManifest.schema -ne "report_manifest_v1") {
     throw "Unsupported analyzer report manifest schema: $($reportManifest.schema)"
   }
-  $analyzerGeneratedAt = [string]$reportManifest.generated_at
+  # PowerShell 7 converts ISO JSON timestamps to System.DateTime. Casting that
+  # value to string uses the desktop locale and also loses the exact JSON
+  # spelling that the Fly bundle validator binds to the source manifest. Read
+  # the first (top-level) unescaped ISO value from the original bytes instead.
+  $generatedAtMatch = [regex]::Match(
+    $reportManifestRaw,
+    '"generated_at"\s*:\s*"(?<value>[^"\\]+)"'
+  )
+  if (-not $generatedAtMatch.Success) {
+    throw "Analyzer report manifest generated_at is missing or escaped."
+  }
+  $analyzerGeneratedAt = $generatedAtMatch.Groups['value'].Value
+  $analyzerGeneratedAtValue = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse(
+    $analyzerGeneratedAt,
+    [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::RoundtripKind,
+    [ref]$analyzerGeneratedAtValue
+  )) {
+    throw "Analyzer report manifest generated_at is invalid."
+  }
+  # generated_at identifies the beginning of the analyzer cycle; the manifest
+  # is its commit marker and may legitimately be written several minutes later
+  # after the policy grid and dashboard are rendered. Bound that duration and
+  # use the commit marker—not an arbitrary five-minute wall—as the upper file
+  # fence.
+  $reportManifestItem = Get-Item -LiteralPath $reportManifestPath
+  $analyzerCommittedAtValue = [DateTimeOffset]$reportManifestItem.LastWriteTimeUtc
+  if ($analyzerCommittedAtValue -lt $analyzerGeneratedAtValue.AddMinutes(-1) -or
+      $analyzerCommittedAtValue -gt $analyzerGeneratedAtValue.AddMinutes(30)) {
+    throw "Analyzer manifest commit time is outside the bounded run window."
+  }
   $analyzerRunId = [string]$reportManifest.analyzer_sync_id
   $analyzerRevision = [string]$reportManifest.analysis_provenance.generation_revision
   $cohortSchema = [string]$reportManifest.analysis_provenance.cohort_schema
@@ -370,9 +410,6 @@ if ($PublishAnalyzerReport) {
   }
   if ($cohortSchema -ne "analysis_cohorts_v1") {
     throw "Unsupported analyzer cohort schema: $cohortSchema"
-  }
-  try { $analyzerGeneratedAtValue = [DateTimeOffset]::Parse($analyzerGeneratedAt) } catch {
-    throw "Analyzer report manifest generated_at is invalid: $analyzerGeneratedAt"
   }
   if (-not [string]$manifest.source_git_rev) {
     throw "Fly source-data manifest does not identify source_git_rev."
@@ -433,8 +470,9 @@ if ($PublishAnalyzerReport) {
       Copy-Item -LiteralPath $source -Destination $destination
       $item = Get-Item -LiteralPath $destination
       $artifactModifiedAt = [DateTimeOffset]$item.LastWriteTimeUtc
-      if ($artifactModifiedAt -lt $analyzerGeneratedAtValue.AddMinutes(-15) -or $artifactModifiedAt -gt $analyzerGeneratedAtValue.AddMinutes(5)) {
-        throw "Analyzer artifact is outside the current run window: $relative ($artifactModifiedAt vs $analyzerGeneratedAtValue)"
+      if ($artifactModifiedAt -lt $analyzerGeneratedAtValue.AddMinutes(-15) -or
+          $artifactModifiedAt -gt $analyzerCommittedAtValue.AddMinutes(1)) {
+        throw "Analyzer artifact is outside the committed run window: $relative"
       }
       if ($relative.StartsWith("reports/")) {
         $reportName = [System.IO.Path]::GetFileName($relative)
@@ -512,6 +550,7 @@ if ($PublishAnalyzerReport) {
           $form
         ).GetAwaiter().GetResult()
         $publishResponse.EnsureSuccessStatusCode() | Out-Null
+        $analyzerPublished = $true
       } finally {
         $stream.Dispose()
         $form.Dispose()
@@ -523,6 +562,13 @@ if ($PublishAnalyzerReport) {
     Remove-Item -LiteralPath $bundlePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $snapshotRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
+  } catch {
+    # Analyzer publication is a derived, optional mirror operation. A rejected
+    # bundle must preserve the last validated hosted report without changing
+    # the success of the canonical Fly evidence download and ACK above.
+    $analyzerPublishErrorCode = "ANALYZER_PUBLICATION_FAILED"
+    Write-Warning "Optional analyzer publication failed; canonical evidence sync remains valid."
+  }
 }
 
 [pscustomobject]@{
@@ -533,5 +579,6 @@ if ($PublishAnalyzerReport) {
   SourceRevision = $manifest.source_git_rev
   AckAccepted = $ack.accepted
   PrunedRotations = @($ack.removed_acknowledged_rotations).Count
-  AnalyzerPublished = [bool]$PublishAnalyzerReport
+  AnalyzerPublished = [bool]$analyzerPublished
+  AnalyzerPublishErrorCode = $analyzerPublishErrorCode
 }

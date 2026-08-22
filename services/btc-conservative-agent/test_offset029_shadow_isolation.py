@@ -29,6 +29,51 @@ def _load_function(path: Path, name: str, env: dict):
     return env[name]
 
 
+def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
+    protection_view = _load_function(
+        BOT,
+        "_position_protection_view",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
+            "_buf_float": lambda value, default=0.0: float(value or default),
+            "offset029_policy": offset_policy,
+        },
+    )
+
+    patient = protection_view({
+        "research_lane": "OFFSET_029_ATR_TP_25",
+        "sl": 77_936.13,
+    })
+    assert patient == {
+        "sl": None,
+        "sl_enforced": False,
+        "stop_policy": "NONE_TP_ONLY_RESEARCH",
+        "tp": None,
+        "tp_policy": "FROZEN_3M_ATR_TP_2_5X",
+    }
+
+    patient_with_atr = protection_view({
+        "research_lane": "OFFSET_029_ATR_TP_25",
+        "dir": "LONG",
+        "entry": 78_170.65,
+        "atr14_3m": 399.12654179,
+        "tp": 79_343.21,
+    })
+    assert patient_with_atr["tp"] == 79_168.47
+    assert patient_with_atr["tp_policy"] == "FROZEN_3M_ATR_TP_2_5X"
+
+    continuous = protection_view({"research_lane": "CONTINUOUS", "sl": 77_936.13})
+    assert continuous["sl"] == 77_936.13
+    assert continuous["sl_enforced"] is True
+    assert continuous["stop_policy"] == "PHASE_STOP_POLICY"
+    assert continuous["tp_policy"] == "CONFIGURED_EXIT_POLICY"
+
+    paper_book = _function_source(BOT, "build_paper_order_book")
+    relay_view = _function_source(BOT, "_relay_position_row_lite")
+    assert paper_book.count("_position_protection_view(") >= 2
+    assert "_position_protection_view(row)" in relay_view
+
+
 def test_paused_offset_is_cancelled_not_shadow_replayed():
     process = _function_source(BOT, "process_signal")
     spawn = _function_source(BOT, "_spawn_combo_lane")
@@ -176,3 +221,285 @@ def test_offset_post_approve_path_bypasses_legacy_strategy_gates():
         assert "registered_offset_policy" in preceding, legacy_gate
     assert "if not registered_offset_policy:\n                log_golden_stack_rejection" in process
     assert "if is_combo_execution_lane(research_lane) and not registered_offset_policy" in process
+
+
+def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{
+        "shared_ai_call_id": "scan-1",
+        "type_b_verdict": {"accepted": True},
+        "lane_verdicts": {"TYPE_B_HUNTER_V1": {"accepted": True}},
+    }]
+    pending = [{
+        "shared_ai_call_id": "scan-1",
+        "trade_id": "o29atr-1",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+        "limit_price": 69_797.0,
+    }]
+    enriched, counts = fn(history, pending=pending)
+    assert enriched[0]["patient_chase_route"] == {
+        "status": "PENDING",
+        "lifecycle_status": "PENDING",
+        "trade_id": "o29atr-1",
+        "limit_price": 69_797.0,
+        "entry_price": None,
+        "exit_reason": None,
+    }
+    assert counts == {
+        "pending": 1,
+        "open": 0,
+        "closed": 0,
+        "expired": 0,
+        "unlinked_lifecycle_rows": 0,
+        "selected_calls": 1,
+    }
+    assert "type_b_verdict" not in enriched[0]
+    assert "TYPE_B_HUNTER_V1" not in enriched[0]["lane_verdicts"]
+
+
+def test_api_recovers_live_patient_child_identity_from_signal_snapshot():
+    """A pre-fix child order still matches its canonical parent scan after deploy."""
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-196e02c33ddb"}]
+    signals = [{"signal_ref": {
+        "trade_id": "o29atr-a01440a5125e",
+        "research_lane": offset_policy.LANE,
+        "status": "ORDERED",
+        "ai_output": {"trade_id": "scan-196e02c33ddb"},
+    }}]
+    pending = [{
+        "trade_id": "o29atr-a01440a5125e",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+        "limit_price": 62_817.0,
+    }]
+    enriched, counts = fn(history, signals=signals, pending=pending)
+    assert enriched[0]["patient_chase_route"]["status"] == "PENDING"
+    assert enriched[0]["patient_chase_route"]["trade_id"] == "o29atr-a01440a5125e"
+    assert counts["pending"] == 1
+    assert counts["selected_calls"] == 1
+
+
+def test_api_counts_patient_order_even_when_parent_ai_identity_is_missing():
+    """A visible paper order must never be hidden from the lifecycle totals."""
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-newer-visible-call"}]
+    pending = [{
+        "trade_id": "o29atr-legacy-child",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+        "limit_price": 77_460.99,
+    }]
+
+    enriched, counts = fn(history, pending=pending)
+
+    assert enriched[0]["patient_chase_route"]["status"] == "NOT_SELECTED"
+    assert counts["pending"] == 1
+    assert counts["selected_calls"] == 0
+    assert counts["unlinked_lifecycle_rows"] == 1
+
+
+def test_api_lifecycle_totals_do_not_double_count_same_trade_across_sources():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-duplicate"}]
+    signals = [{"signal_ref": {
+        "shared_ai_call_id": "scan-duplicate",
+        "trade_id": "o29atr-same",
+        "research_lane": offset_policy.LANE,
+        "status": "ORDERED",
+    }}]
+    pending = [{
+        "shared_ai_call_id": "scan-duplicate",
+        "trade_id": "o29atr-same",
+        "research_lane": offset_policy.LANE,
+        "status": "PENDING",
+    }]
+
+    _enriched, counts = fn(history, signals=signals, pending=pending)
+
+    assert counts["pending"] == 1
+    assert counts["selected_calls"] == 1
+    assert counts["unlinked_lifecycle_rows"] == 0
+
+
+def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
+    spawn = _function_source(BOT, "_spawn_combo_lane")
+    assert "call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)" in spawn
+    assert 'spawn_ctx["shared_ai_call_id"] = call_id' in spawn
+    assert 'spawn_ai["shared_ai_call_id"] = call_id' in spawn
+    assert '"pre_ai": spawn_ai' in spawn
+
+    position = _function_source(BOT, "_build_open_position")
+    expired = _function_source(BOT, "_record_expired_order")
+    close = _function_source(BOT, "close_position")
+    assert '"shared_ai_call_ts": (' in position
+    assert '"shared_ai_call_ts": source.get("shared_ai_call_ts")' in expired
+    assert '"research_lane": pos.get("research_lane") or master.get("research_lane")' in close
+    assert 'master.get("shared_ai_call_id")' in close
+
+
+def test_lightweight_dashboard_signal_keeps_patient_join_identity():
+    tree = ast.parse(BOT.read_text(encoding="utf-8"))
+    assignment = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_DASHBOARD_ACTIVE_SIGNAL_KEYS"
+                for target in node.targets)
+    )
+    values = {
+        item.value
+        for item in assignment.value.args[0].elts
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    }
+    assert {"shared_ai_call_id", "shared_ai_call_ts", "source_trade_id"} <= values
+
+
+def test_ai_scan_fans_out_patient_before_slow_continuous_processing():
+    process = _function_source(BOT, "process_signal")
+    patient_call = "spawn_combo_lanes_from_ai_scan(\n                        ctx, ai, edge_score, features, research_lane,"
+    continuous_call = "spawn_continuous_lane_from_ai_scan(\n                        ctx, ai, edge_score, features, research_lane,"
+    assert process.count("spawn_combo_lanes_from_ai_scan(") == 1
+    assert patient_call in process
+    assert continuous_call in process
+    assert process.index(patient_call) < process.index(continuous_call)
+    assert "fanout_ctx" not in process
+
+
+def test_every_shared_call_writes_patient_and_continuous_v3_lane_verdicts():
+    patient = _function_source(BOT, "spawn_combo_lanes_from_ai_scan")
+    continuous = _function_source(BOT, "spawn_continuous_lane_from_ai_scan")
+    bridge = _function_source(BOT, "_write_v3_shared_lane_decision")
+    assert "dual_write_lane_decision(" in bridge
+    assert "if not ai_accepted:\n            continue" in patient
+    write_at = patient.index("_write_v3_shared_lane_decision(")
+    reject_continue_at = patient.index("if not ai_accepted:\n            continue", write_at)
+    assert write_at < reject_continue_at
+    assert "LANE_DISABLED_NO_ORDER" in patient
+    assert "AI_REJECTED_NO_ORDER" in patient
+    assert "LANE_DISABLED_DATA_ONLY" in continuous
+    assert "POLICY_REJECTED_NO_ORDER" in continuous
+    assert "_write_v3_shared_lane_decision(" in continuous
+
+
+def test_v3_lane_identity_distinguishes_relay_capable_continuous_from_paper_only_patient():
+    bridge = _function_source(BOT, "_write_v3_shared_lane_decision")
+    assert '"paper_only": not relay_eligible' in bridge
+    assert 'lane == RESEARCH_LANE_CONTINUOUS' in bridge
+
+
+def test_api_distinguishes_legacy_approved_no_order_from_pending():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{"shared_ai_call_id": "scan-old"}]
+    signals = [{"signal_ref": {
+        "shared_ai_call_id": "scan-old",
+        "trade_id": "o29atr-old",
+        "research_lane": offset_policy.LANE,
+        "status": "AWAITING_DASHBOARD_CHASE",
+    }}]
+    enriched, counts = fn(history, signals=signals)
+    route = enriched[0]["patient_chase_route"]
+    assert route["status"] == "APPROVED_NO_ORDER"
+    assert route["lifecycle_status"] == "AWAITING_DASHBOARD_CHASE"
+    assert counts["pending"] == 0
+
+
+def test_sanitized_overlay_preserves_verified_patient_route():
+    fn = _load_function(
+        BOT,
+        "_attach_patient_chase_routes",
+        {
+            "copy": __import__("copy"),
+            "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
+        },
+    )
+    history = [{
+        "shared_ai_call_id": "scan-cdd7a7c3fb01",
+        "patient_chase_route": {
+            "status": "OPEN",
+            "lifecycle_status": "OPEN",
+            "trade_id": "o29atr-deef524bb3a1",
+            "limit_price": 78170.65,
+            "entry_price": 78170.65,
+            "exit_reason": None,
+        },
+    }]
+    # Public relay position has lane/trade identity but deliberately omits the
+    # private shared_ai_call_id.  A second enrichment pass must not downgrade it.
+    sanitized_positions = [{
+        "trade_id": "o29atr-deef524bb3a1",
+        "research_lane": offset_policy.LANE,
+        "status": "OPEN",
+        "entry": 78170.65,
+    }]
+    enriched, counts = fn(history, positions=sanitized_positions)
+    assert enriched[0]["patient_chase_route"]["status"] == "OPEN"
+    assert enriched[0]["patient_chase_route"]["trade_id"] == "o29atr-deef524bb3a1"
+    assert counts["open"] == 1
+    assert counts["selected_calls"] == 1
+
+
+def test_dashboard_replaces_retired_type_b_column_with_patient_route():
+    source = BOT.read_text(encoding="utf-8")
+    assert "<th>Type B research verdict</th>" not in source
+    assert "<th>Patient Chase route / outcome</th>" in source
+    assert "formatPatientRoute(patientRoute)" in source
+    assert "Continuous ACCEPT is an evaluation, not proof of an order" in source
+    assert "lifecycle row(s) are missing parent AI identity" in source
+    assert "statRow('Pending', laneNow.pending || 0)" in source
+    assert "statRow('Open', laneNow.open || 0)" in source
+    assert "statRow('Closed', stats.real_fills" in source
+    assert "statRow('Executed'" not in source
+    legacy_block = source.split("LEGACY_PATHWAY_LANES = (", 1)[1].split(")", 1)[0]
+    order_block = source.split("PATHWAY_LANE_ORDER = (", 1)[1].split(")", 1)[0]
+    assert LANE not in legacy_block
+    assert LANE in order_block
+    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in order_block

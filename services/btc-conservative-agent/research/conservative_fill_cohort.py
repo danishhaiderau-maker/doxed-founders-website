@@ -12,6 +12,12 @@ from microstructure_tape import validate_window
 
 
 COHORT_SCHEMA = "conservative_fill_descriptive_cohort_v1"
+_TAPE_SYMBOL_ALIASES = {
+    "BTCUSD": "tBTCF0:USTF0",
+    "BTC/USD": "tBTCF0:USTF0",
+    "BTC/USDT:USDT": "tBTCF0:USTF0",
+    "TBTCF0:USTF0": "tBTCF0:USTF0",
+}
 
 
 def _unsupported(event: Mapping[str, Any], reason: str) -> dict[str, Any]:
@@ -28,6 +34,22 @@ def _unsupported(event: Mapping[str, Any], reason: str) -> dict[str, Any]:
         "qualification": "DESCRIPTIVE_ONLY",
         "qualification_effect": "NONE",
     }
+
+
+def _market_microstructure_symbol(event: Mapping[str, Any]) -> str | None:
+    basis = event.get("research_execution_basis") or {}
+    exact = str(basis.get("market_microstructure_symbol") or "").strip()
+    if exact:
+        return exact
+    strategy_symbol = str(
+        event.get("symbol")
+        or (event.get("event_episode") or {}).get("symbol")
+        or (event.get("envelope") or {}).get("symbol")
+        or ""
+    ).strip()
+    if not strategy_symbol:
+        return None
+    return _TAPE_SYMBOL_ALIASES.get(strategy_symbol.upper(), strategy_symbol)
 
 
 def build_conservative_fill_cohort(
@@ -61,17 +83,18 @@ def build_conservative_fill_cohort(
         except (KeyError, TypeError, ValueError):
             receipts.append(_unsupported(event, "AUTHORITATIVE_CHASE_SCHEDULE_INVALID"))
             continue
-        completeness = validate_window(tape, schedule_window)
-        if completeness.get("eligible") is not True:
-            receipts.append(_unsupported(event, "MICROSTRUCTURE_WINDOW_INCOMPLETE"))
+        tape_symbol = _market_microstructure_symbol(event)
+        if not tape_symbol:
+            receipts.append(_unsupported(event, "MARKET_MICROSTRUCTURE_SYMBOL_MISSING"))
             continue
+        completeness = validate_window(tape, schedule_window)
         receipt = evaluate_limit_fill(
             tape,
             direction=event.get("executed_direction") or event.get("direction") or (event.get("envelope") or {}).get("executed_direction"),
             requested_qty=qty,
             chase_schedule=intervals,
             aggressor_window_sec=aggressor_window_sec,
-            symbol=event.get("symbol") or (event.get("event_episode") or {}).get("symbol"),
+            symbol=tape_symbol,
         )
         receipt["event_id"] = event.get("event_id")
         receipt["requested_qty_provenance"] = basis.get("requested_qty_provenance")
@@ -79,6 +102,16 @@ def build_conservative_fill_cohort(
         receipt["qualification"] = "DESCRIPTIVE_ONLY"
         receipt["qualification_effect"] = "NONE"
         receipt["microstructure_completeness"] = completeness
+        receipt["market_microstructure_symbol"] = tape_symbol
+        if completeness.get("eligible") is not True:
+            if receipt.get("supported") is True and receipt.get("outcome") in {"FILL", "PARTIAL_FILL"}:
+                receipt["fill_time_semantics"] = "LATEST_PROVEN_TRIGGER_BUCKET_NOT_EARLIEST_FILL"
+                receipt["window_integrity_scope"] = "TRIGGER_PROOF_ONLY"
+            else:
+                receipt["negative_reasons"] = list(dict.fromkeys([
+                    "MICROSTRUCTURE_WINDOW_INCOMPLETE",
+                    *(receipt.get("negative_reasons") or []),
+                ]))
         receipts.append(receipt)
     return {
         "schema": COHORT_SCHEMA,

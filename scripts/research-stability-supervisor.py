@@ -10,8 +10,10 @@ policy.  Every observation is written atomically for the dashboard/operator.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,11 @@ REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
+OPPORTUNITY_STALL_THRESHOLD_SECONDS = 12 * 60
+LOCAL_MIN_FREE_PERCENT = 15.0
+LOCAL_QUARANTINE_MAX_PERCENT = 10.0
+LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
+LOCAL_QUARANTINE_MAX_BYTES = 25 * 1024**3
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
 
@@ -52,6 +59,60 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def directory_size(path: Path) -> tuple[int, int]:
+    """Return best-effort file count and bytes without following directory links."""
+    files = 0
+    total = 0
+    if not path.is_dir():
+        return files, total
+    for candidate in path.rglob("*"):
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                files += 1
+                total += candidate.stat().st_size
+        except OSError:
+            # Atomic mirror replacement can remove a file between enumeration
+            # and stat. The next five-minute check will observe its replacement.
+            continue
+    return files, total
+
+
+def local_storage_snapshot(
+    mirror: Path,
+    *,
+    disk_usage: Callable[[str | os.PathLike[str]], Any] = shutil.disk_usage,
+) -> tuple[bool, dict[str, Any]]:
+    """Measure active/quarantined evidence and fail before the workstation fills."""
+    quarantine = mirror.parent / "fly-data-quarantine"
+    mirror_files, mirror_bytes = directory_size(mirror)
+    quarantine_files, quarantine_bytes = directory_size(quarantine)
+    total, _used, free = disk_usage(mirror.parent)
+    free_pct = (float(free) / float(total) * 100.0) if total else 0.0
+    quarantine_pct = (float(quarantine_bytes) / float(total) * 100.0) if total else 100.0
+    ok = (
+        free_pct >= LOCAL_MIN_FREE_PERCENT
+        and mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
+        and quarantine_bytes <= LOCAL_QUARANTINE_MAX_BYTES
+        and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
+    )
+    return ok, {
+        "mirror_files": mirror_files,
+        "mirror_bytes": mirror_bytes,
+        "quarantine_files": quarantine_files,
+        "quarantine_bytes": quarantine_bytes,
+        "disk_total_bytes": int(total),
+        "disk_free_bytes": int(free),
+        "disk_free_percent": round(free_pct, 2),
+        "quarantine_disk_percent": round(quarantine_pct, 3),
+        "minimum_free_percent": LOCAL_MIN_FREE_PERCENT,
+        "maximum_mirror_bytes": LOCAL_MIRROR_MAX_BYTES,
+        "maximum_quarantine_bytes": LOCAL_QUARANTINE_MAX_BYTES,
+        "maximum_quarantine_percent": LOCAL_QUARANTINE_MAX_PERCENT,
+        "retention_action": "QUARANTINE_AND_REVIEW; NEVER_SILENTLY_DELETE",
+        "automatic_delete": False,
+    }
+
+
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -69,6 +130,77 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
+def evaluate_opportunity_progress(
+    *,
+    count: int,
+    epoch_ids: list[str],
+    source_revision: str | None,
+    prior: dict[str, Any],
+    now: datetime,
+    progress_expected: bool,
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Persistently prove that independent research opportunities advance.
+
+    Mirror freshness alone is insufficient: unrelated files can keep syncing
+    while the three-minute AI/opportunity pipeline is stalled.  A new epoch or
+    deployed revision establishes a new baseline.  Paused or otherwise
+    non-expected collection is reported explicitly and never accumulates a
+    false stall duration.
+    """
+    epoch_key = ",".join(sorted(str(value) for value in epoch_ids if value))
+    revision = str(source_revision or "")
+    prior_count = prior.get("independent_opportunities")
+    same_identity = (
+        prior.get("epoch_key") == epoch_key
+        and prior.get("source_revision") == revision
+    )
+    previous_observed = parse_time(prior.get("observed_at"))
+    advanced = bool(
+        same_identity
+        and isinstance(prior_count, int)
+        and count > prior_count
+    )
+
+    if not progress_expected:
+        first_stalled = None
+        state = "PROGRESS_NOT_EXPECTED"
+    elif not same_identity or not isinstance(prior_count, int):
+        first_stalled = None
+        state = "BASELINE_ESTABLISHED"
+    elif advanced:
+        first_stalled = None
+        state = "ADVANCING"
+    else:
+        first_stalled = parse_time(prior.get("first_stalled_at"))
+        if first_stalled is None:
+            first_stalled = previous_observed or now
+        state = "STALLED"
+
+    stalled_for = max(0.0, (now - first_stalled).total_seconds()) if first_stalled else 0.0
+    failed = bool(progress_expected and state == "STALLED" and stalled_for >= OPPORTUNITY_STALL_THRESHOLD_SECONDS)
+    if failed:
+        state = "OPPORTUNITY_PROGRESS_STALLED"
+
+    next_state = {
+        "schema": "research_opportunity_progress_state_v1",
+        "observed_at": now.isoformat(),
+        "epoch_key": epoch_key,
+        "source_revision": revision,
+        "independent_opportunities": int(count),
+        "first_stalled_at": first_stalled.isoformat() if first_stalled else None,
+        "stalled_duration_seconds": round(stalled_for, 1),
+        "state": state,
+        "progress_expected": bool(progress_expected),
+    }
+    detail = {
+        **next_state,
+        "previous_independent_opportunities": prior_count if same_identity else None,
+        "advanced": advanced,
+        "threshold_seconds": OPPORTUNITY_STALL_THRESHOLD_SECONDS,
+    }
+    return not failed, detail, next_state
+
+
 def fetch_json(url: str, token: str, timeout: int = 20) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"X-Bot-Admin-Token": token})
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -76,6 +208,60 @@ def fetch_json(url: str, token: str, timeout: int = 20) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("remote response is not a JSON object")
     return value
+
+
+@contextmanager
+def open_replace_safe(path: Path):
+    """Open evidence for reading without blocking an atomic mirror replace.
+
+    Python's normal Windows file open does not grant FILE_SHARE_DELETE.  A
+    supervisor scan of a large JSONL could therefore make the sync publisher's
+    File.Replace fail even though the supervisor is read-only.  The explicit
+    Windows handle keeps read/write/delete sharing enabled; other platforms use
+    the ordinary context-managed reader.
+    """
+    if os.name != "nt":
+        with path.open("rb") as handle:
+            yield handle
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    raw_handle = create_file(
+        str(path),
+        0x80000000,              # GENERIC_READ
+        0x00000001 | 0x00000002 | 0x00000004,  # READ | WRITE | DELETE sharing
+        None,
+        3,                       # OPEN_EXISTING
+        0x00000080,              # FILE_ATTRIBUTE_NORMAL
+        None,
+    )
+    invalid_handle = wintypes.HANDLE(-1).value
+    if raw_handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(int(raw_handle), os.O_RDONLY | os.O_BINARY)
+    except Exception:
+        close_handle(raw_handle)
+        raise
+    with os.fdopen(fd, "rb", closefd=True) as handle:
+        yield handle
+
+
+def read_replace_safe_bytes(path: Path) -> bytes:
+    with open_replace_safe(path) as handle:
+        return handle.read()
 
 
 def process_inventory() -> list[dict[str, Any]]:
@@ -98,16 +284,19 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
     groups = {"sync": [], "analyzer": [], "dashboard": [], "supervisor": []}
     for row in rows:
         cmd = str(row.get("CommandLine") or "").lower()
+        name = str(row.get("Name") or "").lower()
         pid = int(row.get("ProcessId") or 0)
         if pid <= 0:
             continue
-        if "sync-fly-bot-data-loop.ps1" in cmd:
+        is_python = not name or "python" in name
+        is_powershell = not name or "powershell" in name or name.startswith("pwsh")
+        if is_powershell and "sync-fly-bot-data-loop.ps1" in cmd:
             groups["sync"].append(pid)
-        if "analyzer_research_engine_v62.py" in cmd:
+        if is_python and "analyzer_research_engine_v62.py" in cmd:
             groups["analyzer"].append(pid)
-        if "research_dashboard.py" in cmd and "--standalone" in cmd:
+        if is_python and "research_dashboard.py" in cmd and "--standalone" in cmd:
             groups["dashboard"].append(pid)
-        if "research-stability-supervisor.py" in cmd:
+        if is_python and "research-stability-supervisor.py" in cmd:
             groups["supervisor"].append(pid)
     return {key: sorted(set(value)) for key, value in groups.items()}
 
@@ -116,7 +305,7 @@ def read_current_events(path: Path) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     # Release the Windows mirror handle before schema validation/counting. A
     # supervisor pass must never block publication of the next generation.
-    payload = path.read_bytes()
+    payload = read_replace_safe_bytes(path)
     for line_number, raw_line in enumerate(payload.splitlines(), 1):
         line = raw_line.decode("utf-8-sig", errors="strict")
         if not line.strip():
@@ -159,6 +348,173 @@ def read_current_events(path: Path) -> dict[str, Any]:
         "policy_epoch_ids": sorted(policy_epochs),
         "policy_signatures": sorted(signatures),
         "_all_event_ids": [str(row.get("event_id") or "") for row in events],
+    }
+
+
+def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, Any]:
+    """Read normalized V3 ledgers without holding mirror-replace handles."""
+    ledger_dir = mirror / "v3" / "ledgers"
+    counts: dict[str, int] = {}
+    episodes: set[str] = set()
+    epochs: set[str] = set()
+    terminal = provisional = 0
+    opportunity_rows: list[dict[str, Any]] = []
+    rows_by_ledger: dict[str, list[dict[str, Any]]] = {}
+    for name in ("opportunity", "decision", "order_intent", "execution", "market_segment", "lifecycle"):
+        path = ledger_dir / f"{name}.jsonl"
+        rows = []
+        if path.is_file():
+            payload = read_replace_safe_bytes(path)
+            if payload and not payload.endswith(b"\n"):
+                raise ValueError(f"V3_TRUNCATED_LEDGER:{name}")
+            for line_number, raw in enumerate(payload.splitlines(), 1):
+                row = json.loads(raw.decode("utf-8-sig", errors="strict"))
+                if row.get("schema") != "research_evidence_v3" or row.get("ledger") != name:
+                    raise ValueError(f"V3_SCHEMA_OR_LEDGER_MISMATCH:{name}:{line_number}")
+                rows.append(row)
+                if name == "opportunity":
+                    opportunity_rows.append(row)
+                if row.get("episode_id"):
+                    episodes.add(str(row["episode_id"]))
+                if row.get("epoch_id"):
+                    epochs.add(str(row["epoch_id"]))
+                if name == "lifecycle":
+                    if row.get("terminal") is True:
+                        terminal += 1
+                    else:
+                        provisional += 1
+        counts[name] = len(rows)
+        rows_by_ledger[name] = rows
+    parents = list(range(len(opportunity_rows)))
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+    def union(left: int, right: int) -> None:
+        left, right = find(left), find(right)
+        if left != right:
+            parents[right] = left
+    first_by_shared: dict[str, int] = {}
+    first_by_fingerprint: dict[tuple[float, str, str], int] = {}
+    for index, row in enumerate(opportunity_rows):
+        shared = str(row.get("shared_ai_call_id") or "").strip()
+        if shared:
+            if shared in first_by_shared:
+                union(index, first_by_shared[shared])
+            else:
+                first_by_shared[shared] = index
+        try:
+            signal_ts = float(row.get("signal_ts"))
+        except (TypeError, ValueError):
+            signal_ts = -1.0
+        fingerprint = (
+            signal_ts,
+            str(row.get("symbol") or "").upper(),
+            str(row.get("raw_direction") or "").upper(),
+        )
+        if fingerprint in first_by_fingerprint:
+            union(index, first_by_fingerprint[fingerprint])
+        else:
+            first_by_fingerprint[fingerprint] = index
+    causal_groups: dict[int, list[dict[str, Any]]] = {}
+    for index, row in enumerate(opportunity_rows):
+        causal_groups.setdefault(find(index), []).append(row)
+    identity_aliases = []
+    for rows in causal_groups.values():
+        if len(rows) <= 1:
+            continue
+        ordered = sorted(rows, key=lambda row: (
+            0 if str(row.get("grouping_basis") or "") == "SHARED_AI_CALL" else 1,
+            str(row.get("episode_id") or ""),
+        ))
+        identity_aliases.extend(ordered[1:])
+    segment_root = mirror / "v3" / "market_segments"
+    segment_files = list(segment_root.glob("*/*.json")) if segment_root.is_dir() else []
+    def resolution_key(row: dict[str, Any]) -> tuple[str, str, str]:
+        return (
+            str(row.get("episode_id") or ""),
+            str(row.get("policy_signature") or ""),
+            str(row.get("research_lane") or "").upper(),
+        )
+    expected = [
+        row for row in rows_by_ledger["decision"]
+        if row.get("decision_stage") == "LANE_POLICY_VERDICT"
+        and row.get("order_intent_expected") is True
+    ]
+    intent_keys = {resolution_key(row) for row in rows_by_ledger["order_intent"]}
+    resolution_rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in rows_by_ledger["lifecycle"]:
+        if row.get("resolution_scope") == "LANE_ENTRY":
+            resolution_rows.setdefault(resolution_key(row), []).append(row)
+    resolution_counts = {"submitted": 0, "terminal_no_order": 0,
+                         "awaiting_within_deadline": 0, "overdue_orphan": 0}
+    orphan_expected_orders = []
+    observed_now = float(now_ts if now_ts is not None else time.time())
+    for decision in expected:
+        key = resolution_key(decision)
+        rows = resolution_rows.get(key, [])
+        states = {str(row.get("entry_resolution") or "") for row in rows}
+        if key in intent_keys or "ORDER_SUBMITTED" in states:
+            resolution_counts["submitted"] += 1
+        elif "NO_ORDER" in states:
+            resolution_counts["terminal_no_order"] += 1
+        else:
+            deadlines = [float(decision.get("resolution_deadline_ts") or 0)] + [
+                float(row.get("resolution_deadline_ts") or 0)
+                for row in rows if row.get("entry_resolution") == "AWAITING"
+            ]
+            deadline = max(deadlines)
+            if deadline > observed_now:
+                resolution_counts["awaiting_within_deadline"] += 1
+            else:
+                resolution_counts["overdue_orphan"] += 1
+                orphan_expected_orders.append({
+                    "episode_id": key[0], "policy_signature": key[1],
+                    "research_lane": key[2], "resolution_deadline_ts": deadline or None,
+                })
+    policy_provenance_defects = []
+    attributable_rows = [
+        *(('execution', row) for row in rows_by_ledger["execution"]),
+        *(("lifecycle", row) for row in rows_by_ledger["lifecycle"]
+          if str(row.get("observation_status") or "") in {
+              "PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED",
+          }),
+    ]
+    for ledger, row in attributable_rows:
+        missing = [field for field in (
+            "policy_id", "policy_signature", "policy_epoch_id",
+            "research_lane", "shared_ai_call_id",
+        ) if not str(row.get(field) or "").strip()]
+        if missing:
+            policy_provenance_defects.append({
+                "ledger": ledger,
+                "record_id": str(row.get("record_id") or ""),
+                "missing_fields": missing,
+            })
+    return {
+        "ledger_counts": counts,
+        "independent_opportunities": counts["opportunity"] - len(identity_aliases),
+        "raw_opportunity_rows": counts["opportunity"],
+        "identity_alias_count": len(identity_aliases),
+        "identity_alias_episode_ids": sorted(str(row.get("episode_id") or "") for row in identity_aliases),
+        "decision_branches": counts["decision"],
+        "terminal_lifecycles": terminal,
+        "provisional_lifecycles": provisional,
+        "market_segments": len(segment_files),
+        "episode_ids_seen_across_ledgers": len(episodes),
+        "epoch_ids": sorted(epochs),
+        "entry_resolution_integrity": {
+            "expected": len(expected), **resolution_counts,
+            "orphan_expected_orders": orphan_expected_orders,
+            "passed": resolution_counts["overdue_orphan"] == 0,
+        },
+        "policy_provenance_integrity": {
+            "checked_rows": len(attributable_rows),
+            "defect_count": len(policy_provenance_defects),
+            "defects": policy_provenance_defects,
+            "passed": not policy_provenance_defects,
+        },
     }
 
 
@@ -318,6 +674,15 @@ def evaluate_runtime_readiness(
     counts: dict[str, int | None],
 ) -> tuple[bool, dict[str, Any], dict[str, Any]]:
     runtime = status.get("runtime_readiness") or {}
+    strategy_progress = (
+        status.get("strategy_progress")
+        if isinstance(status.get("strategy_progress"), dict)
+        else {}
+    )
+    strategy_progress_failed = strategy_progress.get("ok") is False
+    strategy_progress_reasons = [
+        str(value) for value in (strategy_progress.get("reasons") or [])
+    ]
     reasons = [str(value) for value in (runtime.get("readiness_reasons") or [])]
     signal_ready = bool(status.get("signal_generation_ready", runtime.get("signal_generation_ready")))
     process_alive = bool(status.get("process_alive"))
@@ -347,6 +712,8 @@ def evaluate_runtime_readiness(
     persistent = bool(first and duration >= READINESS_STARVATION_THRESHOLD_SECONDS)
     if not process_alive:
         state = "PROCESS_NOT_ALIVE"
+    elif strategy_progress_failed:
+        state = "STRATEGY_PROGRESS_FAILED"
     elif signal_ready:
         state = "READY"
     elif stabilizing:
@@ -380,9 +747,14 @@ def evaluate_runtime_readiness(
         "ohlcv_ready": status.get("ohlcv_ready", runtime.get("ohlcv_ready")),
         "ohlcv_age_sec": runtime.get("ohlcv_age_sec"),
         "readiness_reasons": reasons,
+        "strategy_progress_ok": strategy_progress.get("ok"),
+        "strategy_progress_reasons": strategy_progress_reasons,
+        "trade_lock_available": strategy_progress.get("trade_lock_available"),
+        "ws_age_sec": strategy_progress.get("ws_age_sec"),
+        "ai_age_sec": strategy_progress.get("ai_age_sec"),
         **counts,
     }
-    return process_alive and not persistent, detail, next_state
+    return process_alive and not persistent and not strategy_progress_failed, detail, next_state
 
 
 @dataclass
@@ -399,6 +771,7 @@ class Supervisor:
     launcher: Callable[..., subprocess.Popen[Any]] = subprocess.Popen
     runtime_repo: Path | None = None
     readiness_state_file: Path | None = None
+    progress_state_file: Path | None = None
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -421,6 +794,7 @@ class Supervisor:
             checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
         source_revision = None
+        manifest: dict[str, Any] = {}
         try:
             manifest = self.fetcher(self.fly_url.rstrip("/") + "/api/data-sync/manifest", self.token, 20)
             source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
@@ -435,8 +809,14 @@ class Supervisor:
             add("fly_storage", pct < 85.0, {"volume_pct": pct, "cleanup_status": size.get("cleanup_status")})
         except Exception as exc:
             add("fly_storage", False, type(exc).__name__)
+        try:
+            local_ok, local_detail = local_storage_snapshot(self.mirror)
+            add("local_storage", local_ok, local_detail)
+        except Exception as exc:
+            add("local_storage", False, f"{type(exc).__name__}: {exc}")
 
         readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
+        status: dict[str, Any] = {}
         try:
             status = self.fetcher(self.fly_url.rstrip("/") + "/api/status", self.token, 20)
             count_payload = status
@@ -488,7 +868,7 @@ class Supervisor:
             add("process_inventory", False, type(exc).__name__)
         else:
             add("process_inventory", True, inventory)
-        for kind in ("sync", "analyzer", "dashboard"):
+        for kind in ("sync", "analyzer", "dashboard", "supervisor"):
             count = len(inventory[kind])
             add(f"unique_{kind}_process", count == 1, {"count": count, "pids": inventory[kind]})
             if count == 0 and kind in {"sync", "analyzer"} and self.launch_missing(kind):
@@ -496,20 +876,72 @@ class Supervisor:
 
         events_path = self.mirror / "research_events_v22.jsonl"
         event_summary: dict[str, Any] | None = None
+        current_evidence_summary: dict[str, Any] | None = None
+        v3_ledger_dir = self.mirror / "v3" / "ledgers"
+        v3_ledger_paths = list(v3_ledger_dir.glob("*.jsonl")) if v3_ledger_dir.is_dir() else []
         try:
-            event_summary = read_current_events(events_path)
-            mirror_age = (self.now().timestamp() - events_path.stat().st_mtime)
+            if events_path.is_file():
+                event_summary = read_current_events(events_path)
+                mirror_age = self.now().timestamp() - events_path.stat().st_mtime
+                public_summary = {
+                    key: value for key, value in event_summary.items()
+                    if not key.startswith("_")
+                }
+                schema_source = "research_event_v2.2"
+            elif v3_ledger_paths:
+                v3_summary = read_v3_evidence(self.mirror)
+                row_count = sum(v3_summary["ledger_counts"].values())
+                if row_count <= 0 or not v3_summary["epoch_ids"]:
+                    raise ValueError("V3_EVIDENCE_EMPTY_OR_MISSING_EPOCH")
+                mirror_age = self.now().timestamp() - max(
+                    path.stat().st_mtime for path in v3_ledger_paths
+                )
+                public_summary = v3_summary
+                schema_source = "research_evidence_v3"
+            else:
+                raise FileNotFoundError(
+                    "neither research_events_v22.jsonl nor V3 normalized ledgers exist"
+                )
             # A finalized append-only event file legitimately remains unchanged
             # when no lifecycle matures. Transport freshness is independently
             # enforced by the atomic sync heartbeat above.
-            public_summary = {
-                key: value for key, value in event_summary.items()
-                if not key.startswith("_")
-            }
             add("mirror_schema_and_freshness", True,
-                {**public_summary, "age_seconds": round(mirror_age, 1)})
+                {**public_summary, "schema_source": schema_source,
+                 "age_seconds": round(mirror_age, 1)})
+            current_evidence_summary = public_summary
         except Exception as exc:
             add("mirror_schema_and_freshness", False, f"{type(exc).__name__}: {exc}")
+
+        progress_path = self.progress_state_file or self.repo / ".research-opportunity-progress-state.json"
+        if current_evidence_summary is not None:
+            try:
+                prior_progress = read_json(progress_path)
+            except (FileNotFoundError, ValueError, json.JSONDecodeError):
+                prior_progress = {}
+            if schema_source == "research_evidence_v3":
+                opportunity_count = int(current_evidence_summary.get("independent_opportunities") or 0)
+                epoch_ids = list(current_evidence_summary.get("epoch_ids") or [])
+            else:
+                opportunity_count = int(current_evidence_summary.get("all_independent_episodes") or 0)
+                epoch_ids = [str(current_evidence_summary.get("epoch_id") or "")]
+            strategy_progress = status.get("strategy_progress") if isinstance(status.get("strategy_progress"), dict) else {}
+            ai_expected = strategy_progress.get("ai_expected")
+            if not isinstance(ai_expected, bool):
+                ai_expected = bool(
+                    status.get("signal_generation_ready")
+                    or (status.get("runtime_readiness") or {}).get("signal_generation_ready")
+                )
+            progress_expected = bool(ai_expected and not status.get("execution_paused", False))
+            progress_ok, progress_detail, next_progress = evaluate_opportunity_progress(
+                count=opportunity_count,
+                epoch_ids=epoch_ids,
+                source_revision=source_revision,
+                prior=prior_progress,
+                now=self.now(),
+                progress_expected=progress_expected,
+            )
+            atomic_json(progress_path, next_progress)
+            add("independent_opportunity_progress", progress_ok, progress_detail)
 
         reports: dict[str, dict[str, Any]] = {}
         report_times: dict[str, datetime] = {}
@@ -581,6 +1013,50 @@ class Supervisor:
                 "expected_policy_signatures": expected_signatures,
                 "reports": {name: {key: report.get(key) for key in ("epoch_id", "policy_epoch_id", "evidence_policy_signature")}
                             for name, report in reports.items()}})
+
+        v3_report_path = self.report_dir / "safe_policy_genome_v3_report.json"
+        manifest_has_v3 = any(str(row.get("path") or "").replace("\\", "/").startswith("v3/") for row in (manifest.get("files") or []))
+        if v3_report_path.is_file() or manifest_has_v3:
+            try:
+                v3 = read_v3_evidence(self.mirror, now_ts=self.now().timestamp())
+                entry_integrity = v3.get("entry_resolution_integrity") or {}
+                provenance_integrity = v3.get("policy_provenance_integrity") or {}
+                add("v3_normalized_evidence_integrity", (
+                    v3.get("identity_alias_count", 0) == 0
+                    and entry_integrity.get("passed") is True
+                    and provenance_integrity.get("passed") is True
+                ), v3)
+                report = read_json(v3_report_path)
+                generated = parse_time(report.get("generated_at"))
+                age = (self.now() - generated).total_seconds() if generated else float("inf")
+                collection = report.get("collection") or {}
+                expected = {
+                    "independent_opportunities": v3["independent_opportunities"],
+                    "decision_branches": v3["decision_branches"],
+                    "terminal_lifecycles": v3["terminal_lifecycles"],
+                    "provisional_lifecycles": v3["provisional_lifecycles"],
+                    "market_segments": v3["market_segments"],
+                }
+                observed = {key: int(collection.get(key) or 0) for key in expected}
+                deltas = {key: expected[key] - observed[key] for key in expected}
+                exact = expected == observed
+                pending = (
+                    age <= REPORT_MAX_AGE_SECONDS
+                    and all(delta >= 0 for delta in deltas.values())
+                    and sum(deltas.values()) <= MAX_PENDING_EVENT_DELTA
+                )
+                add("v3_report_fresh_and_count_parity", age <= REPORT_MAX_AGE_SECONDS and (exact or pending), {
+                    "status": "EXACT" if exact else "PENDING_NEXT_ANALYZER_CYCLE" if pending else "MISMATCH",
+                    "age_seconds": round(age, 1), "expected": expected, "observed": observed, "deltas": deltas,
+                    "report_status": report.get("status"), "qualification": report.get("qualification"),
+                    "real_bitfinex_trading_allowed": report.get("real_bitfinex_trading_allowed"),
+                })
+                add("v3_real_money_fail_closed", report.get("real_bitfinex_trading_allowed") is False, {
+                    "real_bitfinex_trading_allowed": report.get("real_bitfinex_trading_allowed"),
+                    "number_one_strategy": report.get("number_one_strategy"),
+                })
+            except Exception as exc:
+                add("v3_normalized_evidence_integrity", False, f"{type(exc).__name__}: {exc}")
 
         return {
             "schema": "research_stability_supervisor_v1",

@@ -109,6 +109,7 @@ RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
+SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -608,6 +609,11 @@ PATHWAY_LANE_STATUS = {
     "CHASE_3PLUS_ALPHA": "SHADOW_COLLECTING",
     "AI_SCAN": "ACTIVE",
 }
+# The roster is the current execution authority. Historical comparison lanes
+# remain in analyzer reports so immutable evidence can still be decoded, but a
+# retired lane must never inherit the status helper's ACTIVE default.
+for _retired_lane in RETIRED_PATHWAY_LANES:
+    PATHWAY_LANE_STATUS[str(_retired_lane).upper()] = "RETIRED"
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
 LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "PROFIT_GATES", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
@@ -674,11 +680,13 @@ ANALYZER_JSON_REPORT_FILES = (
     SHOWCASE_LOSING_CLUSTER_REPORT_FILE,
     RESEARCH_HORIZON_MATURITY_REPORT_FILE,
     BEST_POLICY_RESEARCH_REPORT_FILE,
+    SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
+    ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
@@ -13080,6 +13088,13 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
             )
     payload = {
         "schema": "chase_threshold_v2",
+        "evidence_scope": "LEGACY_EXECUTED",
+        "qualified_v3_1": False,
+        "ranking_eligible": False,
+        "warning": (
+            "Historical executed-lane cohort only; excluded from the active "
+            "V3.1 safe-policy rankings."
+        ),
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -15011,8 +15026,6 @@ def _lane_entry_conditions(spec: dict) -> list:
 
 
 def _lane_depends_on_edge(lane_key: str, spec: dict) -> bool:
-    if lane_key in RETIRED_PATHWAY_LANES:
-        return True
     if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
         return False
     text = " ".join(_lane_entry_conditions(spec)).lower()
@@ -17227,7 +17240,7 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
 
 def _adx_bucket_val(v) -> str:
     try:
-        from research_trade_accumulator import _adx_bucket as _ab
+        from research.research_trade_accumulator import _adx_bucket as _ab
         return _ab(v)
     except ImportError:
         pass
@@ -17245,7 +17258,7 @@ def _adx_bucket_val(v) -> str:
 def _trades_for_regime_analysis(trades=None, session=None):
     """Prefer fresh accumulator DB (v9.83+ epoch) over session CSV slice."""
     try:
-        from research_trade_accumulator import load_accumulated_trades_df
+        from research.research_trade_accumulator import load_accumulated_trades_df
 
         acc = load_accumulated_trades_df()
         if acc is not None and not acc.empty:
@@ -17257,7 +17270,7 @@ def _trades_for_regime_analysis(trades=None, session=None):
 
 def _regime_tags_from_row(row) -> dict:
     try:
-        from research_trade_accumulator import compute_regime_tags
+        from research.research_trade_accumulator import compute_regime_tags
 
         if hasattr(row, "to_dict"):
             row = row.to_dict()
@@ -18096,7 +18109,12 @@ def pre_test_analytics_reports(
         run_ai_scan_independence_self_test(retired_status=dict(PATHWAY_LANE_STATUS))
         run_ai_scan_role_validation()
         verify_repo_version_sync()
-        trade_n = len(trades.drop_duplicates(subset=["trade_id"])) if trades is not None and not trades.empty and "trade_id" in trades.columns else len(trades or [])
+        if trades is None or trades.empty:
+            trade_n = 0
+        elif "trade_id" in trades.columns:
+            trade_n = len(trades.drop_duplicates(subset=["trade_id"]))
+        else:
+            trade_n = len(trades)
         exit_val = validate_exit_reports_populated(trade_count=int(trade_n))
         if exit_val.get("verdict") == "INSUFFICIENT_DATA":
             print(
@@ -18881,6 +18899,7 @@ def write_report_manifest(payload=None):
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
         from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
+        from research.research_v3_report import build_safe_policy_genome_v3_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
@@ -18889,6 +18908,10 @@ def write_report_manifest(payload=None):
             report_dir=policy_report_dir,
         )
         build_shadow_lane_comprehensive_report(
+            data_dir=policy_data_dir,
+            report_dir=policy_report_dir,
+        )
+        build_safe_policy_genome_v3_report(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
         )
@@ -19899,7 +19922,7 @@ def finalize_analyzer_outputs(
         pass
     write_report_manifest(payload)
     try:
-        from research_trade_accumulator import sync_accumulator_from_analyzer_run
+        from research.research_trade_accumulator import sync_accumulator_from_analyzer_run
 
         acc = sync_accumulator_from_analyzer_run(session=session, trades=trades)
         print(

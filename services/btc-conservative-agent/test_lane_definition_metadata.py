@@ -52,6 +52,9 @@ def main() -> int:
     assert rows["TYPE_B_HUNTER_V1"]["research_question"]
     assert rows["TYPE_B_HUNTER_V1"]["entry_conditions"]
     assert rows["TYPE_B_HUNTER_V1"]["depends_on_ai"] is True
+    assert rows["TYPE_B_HUNTER_V1"]["pathway_status"] == "RETIRED"
+    assert "TYPE_B_HUNTER_V1" not in report["active_roster"]
+    assert "TYPE_B_HUNTER_V1" in report["retired_lanes"]
     assert "SR_MICRO_TILE_V2_STATIC" not in rows
     assert "SR_MICRO_TILE_V2_STATIC" in report["retired_lanes"]
 

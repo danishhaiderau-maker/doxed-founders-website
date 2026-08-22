@@ -11,10 +11,11 @@ from conservative_fill_cohort import build_conservative_fill_cohort
 
 
 def tape_row(ts, *, ask=101, bid=99, ask_qty=2, bid_qty=2,
-             sell_qty=0, buy_qty=0, sell_vwap=None, buy_vwap=None):
+             sell_qty=0, buy_qty=0, sell_vwap=None, buy_vwap=None,
+             fresh=True, symbol="BTC"):
     return {
-        "schema": "market_microstructure_1s_v1", "symbol": "BTC",
-        "bucket_ts": ts, "fresh": True, "valid_bbo": True,
+        "schema": "market_microstructure_1s_v1", "symbol": symbol,
+        "bucket_ts": ts, "fresh": fresh, "valid_bbo": True,
         "ask": ask, "bid": bid, "ask_qty": ask_qty, "bid_qty": bid_qty,
         "sell_qty": sell_qty, "buy_qty": buy_qty,
         "sell_vwap": sell_vwap, "buy_vwap": buy_vwap,
@@ -40,12 +41,13 @@ def event(qty=1, *, schema="research_event_v2.2"):
 def test_new_event_records_exact_source_qty_without_rewriting_legacy():
     new = build_research_event(
         trade_id="new", epoch_id="epoch", signal_ts=100, signal_price=100,
-        requested_qty=.25, candles_1m=[],
+        requested_qty=.25, market_microstructure_symbol="tBTCF0:USTF0", candles_1m=[],
     )
     basis = new["research_execution_basis"]
     assert basis["requested_qty"] == .25
     assert basis["requested_qty_provenance"] == "SOURCE_TICKET_QTY"
     assert basis["exchange_qty_claim"] is True
+    assert basis["market_microstructure_symbol"] == "tBTCF0:USTF0"
     legacy = {"schema": "research_event_v2.1", "event_id": "old"}
     assert "research_execution_basis" not in legacy
 
@@ -88,6 +90,41 @@ def test_legacy_is_unsupported_and_cohort_cannot_promote_qualification():
     assert result["conservative_execution_gate_changed"] is False
 
 
-def test_incomplete_microstructure_never_reaches_evaluator():
+def test_incomplete_microstructure_cannot_claim_no_fill():
     result = build_conservative_fill_cohort([event()], [tape_row(100), tape_row(102)])
-    assert result["receipts"][0]["negative_reasons"] == ["MICROSTRUCTURE_WINDOW_INCOMPLETE"]
+    receipt = result["receipts"][0]
+    assert receipt["outcome"] == "UNSUPPORTED"
+    assert receipt["negative_reasons"][0] == "MICROSTRUCTURE_WINDOW_INCOMPLETE"
+    assert "EVIDENCE_GAP" in receipt["negative_reasons"]
+
+
+def test_fresh_trigger_can_prove_fill_despite_unrelated_stale_second():
+    e = event()
+    e["research_chase_schedule"]["intervals"][0]["end_ts"] = 104
+    rows = [
+        tape_row(100, fresh=False),
+        tape_row(101),
+        tape_row(102),
+        tape_row(103, ask=100, sell_qty=1, sell_vwap=100),
+    ]
+    receipt = build_conservative_fill_cohort([e], rows)["receipts"][0]
+    assert receipt["outcome"] == "FILL"
+    assert receipt["supported"] is True
+    assert receipt["trigger_bucket_ts"] == 103
+    assert receipt["microstructure_completeness"]["eligible"] is False
+    assert receipt["fill_time_semantics"] == "LATEST_PROVEN_TRIGGER_BUCKET_NOT_EARLIEST_FILL"
+    assert receipt["window_integrity_scope"] == "TRIGGER_PROOF_ONLY"
+
+
+def test_strategy_symbol_alias_maps_to_exact_bitfinex_tape_instrument():
+    e = event()
+    e.pop("symbol")
+    e["event_episode"] = {"symbol": "BTCUSD"}
+    rows = [
+        tape_row(100, symbol="tBTCF0:USTF0"),
+        tape_row(101, symbol="tBTCF0:USTF0"),
+        tape_row(102, ask=100, sell_qty=1, sell_vwap=100, symbol="tBTCF0:USTF0"),
+    ]
+    receipt = build_conservative_fill_cohort([e], rows)["receipts"][0]
+    assert receipt["outcome"] == "FILL"
+    assert receipt["market_microstructure_symbol"] == "tBTCF0:USTF0"

@@ -26,7 +26,30 @@ SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
 SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(
     encoding="utf-8"
 )
+RELAY_SYNC = (ROOT.parents[1] / "scripts" / "sync-platform-relay-evidence.ps1").read_text(
+    encoding="utf-8"
+)
 ATOMIC_HELPER = ROOT.parents[1] / "scripts" / "fly-mirror-atomic.ps1"
+
+
+def test_analyzer_manifest_timestamp_is_canonicalized_before_publication():
+    assert "$analyzerGeneratedAt = [string]$reportManifest.generated_at" not in SYNC_SCRIPT
+    assert "$reportManifestRaw = Get-Content -LiteralPath $reportManifestPath -Raw" in SYNC_SCRIPT
+    assert "$generatedAtMatch = [regex]::Match(" in SYNC_SCRIPT
+    assert "$analyzerGeneratedAt = $generatedAtMatch.Groups['value'].Value" in SYNC_SCRIPT
+    assert "[DateTimeOffset]::TryParse(" in SYNC_SCRIPT
+    assert "[Globalization.CultureInfo]::InvariantCulture" in SYNC_SCRIPT
+    assert "$analyzerCommittedAtValue = [DateTimeOffset]$reportManifestItem.LastWriteTimeUtc" in SYNC_SCRIPT
+    assert "$analyzerGeneratedAtValue.AddMinutes(30)" in SYNC_SCRIPT
+    assert "$artifactModifiedAt -gt $analyzerCommittedAtValue.AddMinutes(1)" in SYNC_SCRIPT
+    assert "$artifactModifiedAt -gt $analyzerGeneratedAtValue.AddMinutes(5)" not in SYNC_SCRIPT
+
+
+def test_relay_evidence_timestamp_survives_powershell_json_date_conversion():
+    assert "[DateTimeOffset]::TryParse([string]$payload.generatedAt" not in RELAY_SYNC
+    assert "$generatedAtRaw = $payload.generatedAt" in RELAY_SYNC
+    assert "$generatedAtRaw -is [DateTime]" in RELAY_SYNC
+    assert "[Globalization.CultureInfo]::InvariantCulture" in RELAY_SYNC
 
 
 def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
@@ -527,6 +550,8 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "/api/data-sync/manifest" not in BOT[BOT.index("_READ_ONLY_GET_PATHS"):BOT.index("def _client_ip")]
     assert '"X-Bot-Admin-Token" = $AdminToken' in SYNC_SCRIPT
     assert "Chunk checksum mismatch" in SYNC_SCRIPT
+    assert "Fly sync chunk failed for $rel at offset $offset limit $limit" in SYNC_SCRIPT
+    assert "after $attempt/3 attempt(s): $($_.Exception.Message)" in SYNC_SCRIPT
     assert "expected_physical_size=$expectedPhysicalSize" in SYNC_SCRIPT
     assert "expected_published_size=$expectedPublishedSize" in SYNC_SCRIPT
     assert "consistency_mode=$consistencyMode" in SYNC_SCRIPT
@@ -731,7 +756,7 @@ def test_remote_analyzer_mirror_is_read_only_and_admin_gated():
     assert '"report_manifest.json"' in SYNC_SCRIPT
     assert "$reportManifest.text_artifacts" in SYNC_SCRIPT
     assert "Required analyzer artifact is missing" in SYNC_SCRIPT
-    assert "outside the current run window" in SYNC_SCRIPT
+    assert "outside the committed run window" in SYNC_SCRIPT
     assert "metadata does not match the snapshotted file" in SYNC_SCRIPT
     assert "analysis_provenance.cohort_schema" in SYNC_SCRIPT
     assert 'schema = "analyzer_mirror_bundle_v2"' in SYNC_SCRIPT
@@ -1128,6 +1153,30 @@ def test_legacy_html_publication_is_rejected_and_status_discloses_quarantine():
         assert status.status_code == 404
         assert status.json["available"] is False
         assert status.json["legacy_data_preserved"] is True
+
+
+def test_v3_normalized_ledgers_use_prefix_sync_but_segments_are_strict():
+    namespace = _load_bot_functions("_data_sync_consistency_mode")
+    namespace["_jsonl_serialized_append_targets"] = set()
+    namespace["SIGNAL_SNAPSHOT_FILE"] = "signal_snapshot.jsonl"
+    mode = namespace["_data_sync_consistency_mode"]
+    assert mode(Path("v3/ledgers/opportunity.jsonl")) == "append_prefix_v1"
+    assert mode(Path("v3/ledgers/lifecycle.jsonl")) == "append_prefix_v1"
+    assert mode(Path("v3/market_segments/ab/abcdef.json")) == "strict_generation_v1"
+
+
+def test_optional_analyzer_publication_failure_does_not_invalidate_canonical_sync():
+    sync = (ROOT.parent.parent / "scripts" / "sync-fly-bot-data.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "$analyzerPublished = $false" in sync
+    assert '$analyzerPublishErrorCode = "ANALYZER_PUBLICATION_FAILED"' in sync
+    assert "canonical evidence sync remains valid" in sync
+    assert "AnalyzerPublished = [bool]$analyzerPublished" in sync
+    assert "AnalyzerPublished = [bool]$PublishAnalyzerReport" not in sync
+    ack_pos = sync.index('$ack = Invoke-RestMethod')
+    publication_try_pos = sync.index("if ($PublishAnalyzerReport)")
+    assert ack_pos < publication_try_pos
 
 
 if __name__ == "__main__":

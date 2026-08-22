@@ -260,17 +260,16 @@ BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
+RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_VERSION = "v15-typeb-opportunity-v2"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 share one direction-only 3-minute AI call; "
-    "two-lane paper-research roster; all S/R tiles are archived data only; "
-    "fixed-policy Type B walk-forward collection; "
-    "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY); "
-    "paused-shadow outcome ledger/dashboard; non-monotonic ADX shared prompt; "
-    "Type B ADX-v3 shadow challenger; fail-closed relay executor watchdog"
+    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 share one direction-only 3-minute AI call; "
+    "two-lane paper-research roster; all retired lanes are analyzer-only; "
+    "registered 0.29% Patient Chase paper lifecycle; "
+    "independent lane capacity, orders, positions and ledgers; "
+    "fail-closed relay executor watchdog"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

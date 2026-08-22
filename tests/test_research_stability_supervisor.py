@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,153 @@ NOW = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    quarantine = tmp_path / "fly-data-quarantine" / "epoch-old"
+    mirror.mkdir()
+    quarantine.mkdir(parents=True)
+    (mirror / "active.jsonl").write_bytes(b"active")
+    (quarantine / "old.jsonl").write_bytes(b"quarantine")
+
+    ok, detail = module.local_storage_snapshot(
+        mirror,
+        disk_usage=lambda _path: (1000, 700, 300),
+    )
+
+    assert ok is True
+    assert detail["mirror_files"] == 1
+    assert detail["mirror_bytes"] == 6
+    assert detail["quarantine_files"] == 1
+    assert detail["quarantine_bytes"] == 10
+    assert detail["disk_free_percent"] == 30.0
+    assert detail["maximum_mirror_bytes"] == 25 * 1024**3
+    assert detail["maximum_quarantine_bytes"] == 25 * 1024**3
+    assert detail["retention_action"] == "QUARANTINE_AND_REVIEW; NEVER_SILENTLY_DELETE"
+    assert detail["automatic_delete"] is False
+
+
+def test_local_storage_snapshot_fails_before_disk_pressure(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    mirror.mkdir()
+
+    ok, detail = module.local_storage_snapshot(
+        mirror,
+        disk_usage=lambda _path: (1000, 900, 100),
+    )
+
+    assert ok is False
+    assert detail["disk_free_percent"] == 10.0
+
+
+def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    quarantine = tmp_path / "fly-data-quarantine"
+    mirror.mkdir()
+    quarantine.mkdir()
+
+    original = module.directory_size
+    module.directory_size = lambda path: (
+        (1, module.LOCAL_QUARANTINE_MAX_BYTES + 1)
+        if path == quarantine
+        else (1, 1024)
+    )
+    try:
+        ok, detail = module.local_storage_snapshot(
+            mirror,
+            disk_usage=lambda _path: (1024**4, 700 * 1024**3, 324 * 1024**3),
+        )
+    finally:
+        module.directory_size = original
+
+    assert ok is False
+    assert detail["quarantine_bytes"] > detail["maximum_quarantine_bytes"]
+
+
+def test_opportunity_progress_establishes_baseline_then_advances():
+    ok, detail, baseline = module.evaluate_opportunity_progress(
+        count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior={}, now=NOW, progress_expected=True,
+    )
+    assert ok is True
+    assert detail["state"] == "BASELINE_ESTABLISHED"
+
+    from datetime import timedelta
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=5, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior=baseline, now=NOW + timedelta(minutes=5), progress_expected=True,
+    )
+    assert ok is True
+    assert detail["state"] == "ADVANCING"
+    assert detail["advanced"] is True
+
+
+def test_opportunity_progress_fails_after_cadence_and_sync_grace():
+    from datetime import timedelta
+    prior = {
+        "epoch_key": "epoch-a", "source_revision": "a" * 40,
+        "independent_opportunities": 4,
+        "observed_at": (NOW - timedelta(minutes=13)).isoformat(),
+        "first_stalled_at": (NOW - timedelta(minutes=13)).isoformat(),
+    }
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior=prior, now=NOW, progress_expected=True,
+    )
+    assert ok is False
+    assert detail["state"] == "OPPORTUNITY_PROGRESS_STALLED"
+    assert detail["stalled_duration_seconds"] == 13 * 60
+
+
+def test_opportunity_progress_does_not_fail_while_paused_and_resets_on_new_epoch():
+    from datetime import timedelta
+    prior = {
+        "epoch_key": "epoch-a", "source_revision": "a" * 40,
+        "independent_opportunities": 4,
+        "observed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "first_stalled_at": (NOW - timedelta(hours=1)).isoformat(),
+    }
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,
+        prior=prior, now=NOW, progress_expected=False,
+    )
+    assert ok is True
+    assert detail["state"] == "PROGRESS_NOT_EXPECTED"
+
+    ok, detail, _ = module.evaluate_opportunity_progress(
+        count=0, epoch_ids=["epoch-b"], source_revision="b" * 40,
+        prior=prior, now=NOW, progress_expected=True,
+    )
+    assert ok is True
+    assert detail["state"] == "BASELINE_ESTABLISHED"
+
+
+def test_supervisor_reader_does_not_block_atomic_mirror_replace(tmp_path):
+    destination = tmp_path / "research_events_v22.jsonl"
+    candidate = tmp_path / "candidate.jsonl"
+    backup = tmp_path / "backup.jsonl"
+    destination.write_bytes(b"old\n")
+    candidate.write_bytes(b"new\n")
+
+    with module.open_replace_safe(destination) as held_reader:
+        if os.name == "nt":
+            command = (
+                f'[System.IO.File]::Replace("{candidate}", '
+                f'"{destination}", "{backup}")'
+            )
+            replaced = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", command],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert replaced.returncode == 0, replaced.stderr
+        else:
+            os.replace(candidate, destination)
+        assert held_reader.read() == b"old\n"
+
+    assert destination.read_bytes() == b"new\n"
 
 
 def make_fixture(tmp_path):
@@ -75,11 +223,28 @@ def fetcher(url, token, timeout):
 
 def processes():
     return [
-        {"ProcessId": 1, "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
-        {"ProcessId": 2, "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},
-        {"ProcessId": 3, "CommandLine": "python research_dashboard.py --standalone"},
-        {"ProcessId": 4, "CommandLine": "python research-stability-supervisor.py --loop"},
+        {"ProcessId": 1, "Name": "powershell.exe", "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
+        {"ProcessId": 2, "Name": "python.exe", "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},
+        {"ProcessId": 3, "Name": "python.exe", "CommandLine": "python research_dashboard.py --standalone"},
+        {"ProcessId": 4, "Name": "python.exe", "CommandLine": "python research-stability-supervisor.py --loop"},
     ]
+
+
+def test_process_classification_ignores_shell_commands_that_only_mention_worker_names():
+    rows = processes() + [
+        {
+            "ProcessId": 5,
+            "Name": "pwsh.exe",
+            "CommandLine": "pwsh -Command rg research-stability-supervisor.py analyzer_research_engine_v62.py",
+        }
+    ]
+
+    assert module.classify_processes(rows) == {
+        "sync": [1],
+        "analyzer": [2],
+        "dashboard": [3],
+        "supervisor": [4],
+    }
 
 
 def test_healthy_separate_data_and_report_directories(tmp_path):
@@ -90,12 +255,264 @@ def test_healthy_separate_data_and_report_directories(tmp_path):
     assert result["healthy"] is True
     fly_manifest = next(x for x in result["checks"] if x["name"] == "fly_collector_manifest")
     assert fly_manifest["detail"]["source_revision"] == "a" * 40
+
+
+def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def row(ledger, record_id, **extra):
+        return {"schema": "research_evidence_v3", "ledger": ledger, "epoch_id": "epoch-v3", "record_id": record_id, **extra}
+    (ledgers / "opportunity.jsonl").write_text(json.dumps(row("opportunity", "o-1", episode_id="e-1")) + "\n", encoding="utf-8")
+    (ledgers / "decision.jsonl").write_text(json.dumps(row("decision", "d-1", episode_id="e-1")) + "\n", encoding="utf-8")
+    (ledgers / "lifecycle.jsonl").write_text(json.dumps(row("lifecycle", "l-1", episode_id="e-1", terminal=True)) + "\n", encoding="utf-8")
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_COLLECTING", "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "real_bitfinex_trading_allowed": False, "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 1, "terminal_lifecycles": 1, "provisional_lifecycles": 0, "market_segments": 0},
+    })
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW, fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    parity = next(item for item in result["checks"] if item["name"] == "v3_report_fresh_and_count_parity")
+    money = next(item for item in result["checks"] if item["name"] == "v3_real_money_fail_closed")
+    assert parity["ok"] is True and parity["detail"]["status"] == "EXACT"
+    assert money["ok"] is True
     revision_parity = next(x for x in result["checks"] if x["name"] == "fly_sync_revision_parity")
     assert revision_parity["ok"] is True
     parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
     assert parity["detail"]["expected"]["policy_candidate_oos_report.json"] == {
         "current_events": 3, "eligible_events": 3, "eligible_independent_episodes": 2,
     }
+
+
+def test_v3_supervisor_fails_overdue_expected_order_and_accepts_terminal_no_order(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def row(ledger, record_id, **extra):
+        return {"schema": "research_evidence_v3", "ledger": ledger,
+                "epoch_id": "epoch-v3", "record_id": record_id, **extra}
+    (ledgers / "opportunity.jsonl").write_text(json.dumps(row(
+        "opportunity", "o-1", episode_id="e-1",
+    )) + "\n", encoding="utf-8")
+    (ledgers / "decision.jsonl").write_text(json.dumps(row(
+        "decision", "d-1", episode_id="e-1", decision_stage="LANE_POLICY_VERDICT",
+        research_lane="CONTINUOUS", policy_signature="sig-c",
+        order_intent_expected=True, resolution_deadline_ts=NOW.timestamp() - 1,
+    )) + "\n", encoding="utf-8")
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_ORDER_RESOLUTION_INTEGRITY_FAILED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 1,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token",
+                                now=lambda: NOW, fetcher=fetcher, process_reader=processes)
+    first = checker.check()
+    integrity = next(x for x in first["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    assert integrity["detail"]["entry_resolution_integrity"]["overdue_orphan"] == 1
+
+    (ledgers / "lifecycle.jsonl").write_text(json.dumps(row(
+        "lifecycle", "l-1", episode_id="e-1", research_lane="CONTINUOUS",
+        policy_signature="sig-c", resolution_scope="LANE_ENTRY",
+        entry_resolution="NO_ORDER", entry_resolution_terminal=True,
+        terminal=True, outcome_state="NO_TRADE",
+    )) + "\n", encoding="utf-8")
+    report = json.loads((reports / "safe_policy_genome_v3_report.json").read_text())
+    report["collection"].update(terminal_lifecycles=1)
+    write_json(reports / "safe_policy_genome_v3_report.json", report)
+    second = checker.check()
+    integrity = next(x for x in second["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is True
+    assert integrity["detail"]["entry_resolution_integrity"]["terminal_no_order"] == 1
+
+
+def test_v3_supervisor_accepts_awaiting_order_within_declared_deadline(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def write_ledger(name, rows):
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps({"schema": "research_evidence_v3", "ledger": name,
+                                "epoch_id": "epoch-v3", **row}) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+    write_ledger("opportunity", [{"record_id": "o-1", "episode_id": "e-1"}])
+    write_ledger("decision", [{
+        "record_id": "d-1", "episode_id": "e-1", "decision_stage": "LANE_POLICY_VERDICT",
+        "research_lane": "CONTINUOUS", "policy_signature": "sig-c",
+        "order_intent_expected": True, "resolution_deadline_ts": NOW.timestamp() + 60,
+    }])
+    write_ledger("lifecycle", [{
+        "record_id": "l-await", "episode_id": "e-1", "research_lane": "CONTINUOUS",
+        "policy_signature": "sig-c", "resolution_scope": "LANE_ENTRY",
+        "entry_resolution": "AWAITING", "resolution_deadline_ts": NOW.timestamp() + 60,
+        "entry_resolution_terminal": False, "terminal": False,
+    }])
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_COLLECTING",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 1,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 1,
+                       "market_segments": 0},
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+    integrity = next(x for x in result["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is True
+    assert integrity["detail"]["entry_resolution_integrity"]["awaiting_within_deadline"] == 1
+
+
+def test_v3_supervisor_fails_execution_and_paper_lifecycle_without_policy_provenance(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    def write_ledger(name, rows):
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps({"schema": "research_evidence_v3", "ledger": name,
+                                "epoch_id": "epoch-v3", **row}) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+    write_ledger("opportunity", [{"record_id": "o-1", "episode_id": "e-1"}])
+    incomplete = {
+        "episode_id": "e-1", "event_id": "event-1",
+        "policy_id": "PATIENT", "policy_signature": "sig-p",
+        "policy_epoch_id": "pe-p",
+    }
+    write_ledger("execution", [{"record_id": "e-1", **incomplete}])
+    write_ledger("lifecycle", [{
+        "record_id": "l-1", **incomplete,
+        "observation_status": "PAPER_POSITION_CLOSED", "terminal": True,
+    }])
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_EPOCH_CONTAMINATION_BLOCKED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 0,
+                       "terminal_lifecycles": 1, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+    integrity = next(x for x in result["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    provenance = integrity["detail"]["policy_provenance_integrity"]
+    assert provenance["checked_rows"] == 2
+    assert provenance["defect_count"] == 2
+    assert {tuple(row["missing_fields"]) for row in provenance["defects"]} == {
+        ("research_lane", "shared_ai_call_id"),
+    }
+
+
+def test_clean_v3_only_epoch_satisfies_mirror_schema_check(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    (mirror / "research_events_v22.jsonl").unlink()
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    for ledger in ("opportunity", "lifecycle"):
+        row = {
+            "schema": "research_evidence_v3", "ledger": ledger,
+            "epoch_id": "epoch-v3-fresh", "record_id": f"{ledger}-1",
+            "episode_id": "episode-1", "terminal": ledger == "lifecycle",
+        }
+        path = ledgers / f"{ledger}.jsonl"
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        os.utime(path, (NOW.timestamp(), NOW.timestamp()))
+
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    )
+    result = checker.check()
+    schema = next(x for x in result["checks"] if x["name"] == "mirror_schema_and_freshness")
+    assert schema["ok"] is True
+    assert schema["detail"]["schema_source"] == "research_evidence_v3"
+    assert schema["detail"]["epoch_ids"] == ["epoch-v3-fresh"]
+
+
+def test_v3_identity_alias_fails_integrity_and_is_not_counted_twice(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    common = {
+        "schema": "research_evidence_v3", "ledger": "opportunity",
+        "epoch_id": "epoch-v3", "signal_ts": 1000.0,
+        "symbol": "BTCUSD", "raw_direction": "LONG",
+    }
+    rows = [
+        {**common, "record_id": "o-fallback", "episode_id": "episode-fallback", "grouping_basis": "TIME_DIRECTION_SYMBOL_FALLBACK"},
+        {**common, "record_id": "o-shared", "episode_id": "episode-shared", "grouping_basis": "SHARED_AI_CALL", "shared_ai_call_id": "scan-1"},
+    ]
+    (ledgers / "opportunity.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_EPOCH_CONTAMINATION_BLOCKED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 0, "terminal_lifecycles": 0, "provisional_lifecycles": 0, "market_segments": 0},
+    })
+    checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW, fetcher=fetcher, process_reader=processes)
+    result = checker.check()
+    integrity = next(item for item in result["checks"] if item["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    assert integrity["detail"]["raw_opportunity_rows"] == 2
+    assert integrity["detail"]["independent_opportunities"] == 1
+    assert integrity["detail"]["identity_alias_episode_ids"] == ["episode-fallback"]
+
+
+def test_v3_shared_call_alias_across_symbol_spellings_fails_integrity(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    rows = []
+    for suffix, symbol in (("venue", "TBTCF0:USTF0"), ("generic", "BTCUSD")):
+        rows.append({
+            "schema": "research_evidence_v3", "ledger": "opportunity",
+            "epoch_id": "epoch-v3", "record_id": f"o-{suffix}",
+            "episode_id": f"episode-{suffix}", "signal_ts": 1000.0,
+            "symbol": symbol, "raw_direction": "LONG",
+            "grouping_basis": "SHARED_AI_CALL", "shared_ai_call_id": "scan-same",
+        })
+    (ledgers / "opportunity.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_EPOCH_CONTAMINATION_BLOCKED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 0,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token",
+        now=lambda: NOW, fetcher=fetcher, process_reader=processes,
+    )
+    result = checker.check()
+    integrity = next(item for item in result["checks"] if item["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    assert integrity["detail"]["identity_alias_count"] == 1
+    assert integrity["detail"]["independent_opportunities"] == 1
+
+
+def test_missing_v2_and_v3_evidence_fails_mirror_schema_check(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    (mirror / "research_events_v22.jsonl").unlink()
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    )
+    result = checker.check()
+    schema = next(x for x in result["checks"] if x["name"] == "mirror_schema_and_freshness")
+    assert schema["ok"] is False
+    assert "neither research_events_v22.jsonl nor V3 normalized ledgers exist" in schema["detail"]
 
 
 def test_negative_evidence_uses_schema_aware_episode_denominators(tmp_path):
@@ -459,6 +876,39 @@ def test_dead_runtime_fails_immediately_without_remote_repair(tmp_path):
     assert ok is False
     assert detail["state"] == "PROCESS_NOT_ALIVE"
     assert persisted["first_starved_at"] is None
+
+
+def test_strategy_progress_failure_is_immediately_unhealthy_even_if_ready():
+    status = {
+        "process_alive": True,
+        "system_ready": True,
+        "signal_generation_ready": True,
+        "git_rev": "a" * 40,
+        "runtime_readiness": {
+            "prerequisites_ready": True,
+            "signal_generation_ready": True,
+            "readiness_reasons": [],
+        },
+        "strategy_progress": {
+            "ok": False,
+            "reasons": ["TRADE_LOCK_UNAVAILABLE", "AI_CADENCE_STALLED"],
+            "trade_lock_available": False,
+            "ws_age_sec": 2.0,
+            "ai_age_sec": 420.0,
+        },
+    }
+    ok, detail, _ = module.evaluate_runtime_readiness(
+        status,
+        {},
+        now=NOW,
+        counts={"virtual_count": 0, "pending_count": 2, "position_count": 2},
+    )
+    assert ok is False
+    assert detail["state"] == "STRATEGY_PROGRESS_FAILED"
+    assert detail["trade_lock_available"] is False
+    assert detail["strategy_progress_reasons"] == [
+        "TRADE_LOCK_UNAVAILABLE", "AI_CADENCE_STALLED",
+    ]
 
 
 def test_supervisor_releases_live_mirror_before_schema_counting(tmp_path, monkeypatch):

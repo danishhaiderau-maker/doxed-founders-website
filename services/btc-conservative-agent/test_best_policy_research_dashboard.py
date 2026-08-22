@@ -66,6 +66,32 @@ def _write_fixture(tmp_path: Path, events, report):
     )
 
 
+def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monkeypatch):
+    reports = {
+        "chase_threshold_report.json": {
+            "generated_at": "2026-08-20T00:00:00+00:00",
+            "thresholds": {"4": {"trades": 17, "ev_usd": 1.12}},
+        },
+        "chase_attribution_report.json": {"trades": []},
+        "exit_combinations_report.json": {"top": [{"type": "CONTINUOUS"}]},
+        "exit_leakage_by_reason_report.json": {"reasons": []},
+        "exit_ladder_simulator_report.json": {"profiles": []},
+    }
+    monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
+
+    payloads = [
+        dashboard._chase_threshold_payload(),
+        dashboard._exit_combos_payload(),
+        dashboard._exit_reason_leak_payload(),
+        dashboard._ladder_sim_payload(),
+    ]
+    for payload in payloads:
+        assert payload["qualified_v3_1"] is False
+        assert payload["ranking_eligible"] is False
+        assert payload["evidence_scope"].startswith("LEGACY")
+        assert payload["warning"]
+
+
 def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
     monkeypatch.setattr(dashboard, "_read_report", lambda name: {
         "top": [{
@@ -78,6 +104,10 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
     monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
         "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
         "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "research_design": {"counts": {
+            "entry_policy_cartesian": 2700,
+            "naive_full_cartesian": 8597534400,
+        }},
         "live_policy_change_allowed": False,
         "blockers": ["QUALIFICATION_GATE_FAILED:conservative_execution"],
     })
@@ -104,6 +134,9 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
     grid = payload["policy_grid"]
     assert grid["live_policy_change_allowed"] is False
     assert grid["evidence"]["oos_episodes"] == 40
+    assert grid["search_counts"]["entry_policy_cartesian"] == 2700
+    assert grid["search_counts"]["naive_full_cartesian"] == 8597534400
+    assert grid["rows_limit"] == 100
     row = grid["rows"][0]
     assert row["entry_offset_pct"] == 0.29
     assert row["chase_windows"] == "2, 3, 4"
@@ -129,8 +162,58 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED" in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
-    assert "Policy Grid &amp; Legacy" not in html  # labels are rendered client-side JSON
-    assert "Policy Grid & Legacy" in html
+    assert "Top 100 Policy Combinations" in html
+    assert "Top 100 Policy Combos" in html
+    assert "Entry configurations" in html
+    assert "Distinct policies tested" in html
+    assert "Profitable in train + OOS" in html
+    assert "Theoretical search space" in html
+    assert "Hierarchical search space" in html
+    assert "pg.policy_rows || pg.rows || []" in html
+
+
+def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):
+    policies = []
+    for index in range(120):
+        policies.append({
+            "policy_id": f"OFFSET_0.0_CHASE_none|atr_tp_k{index + 1}",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "train": {"independent_episodes": 70},
+            "oos": {
+                "independent_episodes": 30,
+                "fills": 30,
+                "wins": 20,
+                "losses": 10,
+                "net_pnl_usd": 10.0,
+                "expectancy_usd": 0.333333,
+                "max_drawdown_usd": -5.0,
+            },
+        })
+    monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
+        "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "research_design": {"counts": {"entry_policy_cartesian": 2700}},
+    })
+    monkeypatch.setattr(dashboard, "_read_json", lambda _name: {
+        "epoch_id": "epoch-clean",
+        "policy_epoch_id": POLICY_EPOCH,
+        "evidence_policy_signature": EVIDENCE_SIGNATURE,
+        "descriptive_challenger": {
+            "profitable_static_policies": policies,
+            "policy_search_statistics": {
+                "distinct_policies_tested": 12601,
+                "train_and_oos_profitable_policies": 1449,
+            },
+        },
+    })
+
+    grid = dashboard._current_policy_grid_rows()
+
+    assert len(grid["rows"]) == 100
+    assert grid["rows_available"] == 1449
+    assert grid["policy_search_statistics"]["distinct_policies_tested"] == 12601
+    assert grid["rows_limit"] == 100
 
 
 def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monkeypatch):
@@ -441,6 +524,7 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
 
 def test_main_dashboard_links_to_all_policy_research_pages():
     source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert 'href="/safe-policy-genome-v3.1"' in source
     assert 'href="/static-policies"' in source
     assert 'href="/dynamic-policies"' in source
     assert 'href="/shadow-research"' in source
@@ -448,6 +532,22 @@ def test_main_dashboard_links_to_all_policy_research_pages():
     assert "NONE — both candidates unprofitable" in source
     assert "Relative leader only" in source
     assert "Descriptive winner" not in source
+
+
+def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
+    payload = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "status": "V3_COLLECTING",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "collection": {"independent_opportunities": 12},
+    }
+    monkeypatch.setattr(dashboard, "_read_json", lambda *_args, **_kwargs: payload)
+    client = dashboard.app.test_client()
+
+    assert client.get("/safe-policy-genome-v3.1").status_code == 200
+    assert client.get("/api/safe-policy-genome-v3.1").get_json() == payload
+    assert client.get("/safe-policy-genome-v3").status_code == 200
+    assert client.get("/api/safe-policy-genome-v3").get_json() == payload
 
 
 def test_analyzer_policy_reports_use_configured_data_and_report_roots():

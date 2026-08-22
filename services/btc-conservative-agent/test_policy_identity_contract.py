@@ -39,9 +39,28 @@ def test_event_and_replay_preserve_policy_identity_and_raw_direction():
     report = replay_event_report(event)
 
     assert event["envelope"]["raw_direction"] == "LONG"
+    assert event["event_episode"]["direction"] == "LONG"
     assert event["envelope"]["executed_direction"] == "SHORT"
     assert event["policy_signature"] == event["envelope"]["policy_signature"]
     assert event["policy_epoch_id"] == event["envelope"]["policy_epoch_id"]
     assert report["policy_signature"] == event["policy_signature"]
     assert report["policy_epoch_id"] == event["policy_epoch_id"]
     assert report["control_cell"]["invert_on"] is True
+
+
+def test_invert_treatment_does_not_change_causal_episode_identity():
+    common = dict(
+        trade_id="episode-invert",
+        epoch_id="epoch-a",
+        signal_price=100.0,
+        signal_ts=1_700_000_000.0,
+        candles_1m=[],
+        submitted=False,
+        rejected=True,
+        shared_ai_call_id="scan-same-causal-call",
+    )
+    raw = build_research_event(direction="LONG", invert_on=False, **common)
+    inverted = build_research_event(direction="SHORT", invert_on=True, **common)
+    assert raw["envelope"]["raw_direction"] == "LONG"
+    assert inverted["envelope"]["raw_direction"] == "LONG"
+    assert raw["event_episode_id"] == inverted["event_episode_id"]

@@ -96,3 +96,41 @@ def test_no_active_lane_declares_an_independent_prompt() -> None:
         spec = config.COMBO_LANE_SPECS[lane]
         assert not spec.get("prompt_id")
         assert not spec.get("prompt_template")
+
+
+def test_paper_lane_toggles_cannot_disable_shared_research_observation() -> None:
+    source = BOT_PATH.read_text(encoding="utf-8")
+    tree = _bot_tree()
+    wanted = {
+        "shared_research_ai_observation_enabled",
+        "is_research_lane_enabled",
+        "lane_pipeline_allowed",
+        "should_invoke_ai",
+        "detect_event_light",
+        "state_monitor_loop",
+        "_spawn_combo_lane",
+    }
+    functions = {
+        node.name: ast.get_source_segment(source, node)
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    }
+
+    helper = functions["shared_research_ai_observation_enabled"]
+    assert "_sole_ai_research_mode()" in helper
+    assert "AI_RESEARCH_MODE_ENABLED" in helper
+    assert "continuous_ai_research_enabled" not in helper
+    assert "research_lane_enabled_map" not in helper
+
+    for name in ("is_research_lane_enabled", "lane_pipeline_allowed", "should_invoke_ai", "detect_event_light"):
+        fn = functions[name]
+        assert "shared_research_ai_observation_enabled()" in fn
+        assert "ALL_COMBO_OFF" not in fn
+
+    monitor = functions["state_monitor_loop"]
+    assert "and shared_research_ai_observation_enabled()" in monitor
+    assert "any_combo_execution_enabled(research_lane_enabled_map(), continuous_ai_research_enabled())" not in monitor
+
+    spawn = functions["_spawn_combo_lane"]
+    assert "LANE_TOGGLE_OFF_LAB" in spawn
+    assert "_spawn_lab_combo_shadow" in spawn

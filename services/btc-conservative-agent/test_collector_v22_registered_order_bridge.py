@@ -51,6 +51,7 @@ def _load_refresh(pending, upserts):
 
     namespace = {
         "copy": copy,
+        "_collector_epoch_serialized": lambda fn: fn,
         "_order_multiverse_pending_src": pending,
         "_collector_v22_epoch_id": lambda: "epoch-1",
         "upsert_provisional_event": upsert,
@@ -118,14 +119,15 @@ def test_non_pending_or_virtual_registration_cannot_promote_collector_source():
     assert calls == []
 
 
-def test_lane_registration_invokes_bridge_after_schedule_initialization():
+def test_lane_registration_enqueues_bridge_after_schedule_initialization():
     lane_start = BOT_SOURCE.index("def lane_register_pending_order(order: dict):")
     lane_end = BOT_SOURCE.index("\ndef lane_unregister_pending_order", lane_start)
     body = BOT_SOURCE[lane_start:lane_end]
 
     assert "schedule_initializer(" in body
-    assert "collector_bridge(" in body
-    assert body.index("schedule_initializer(") < body.index("collector_bridge(")
+    assert ".submit(" in body
+    assert body.index("schedule_initializer(") < body.index(".submit(")
+    assert "collector_bridge(" not in body
 
 
 def test_reprice_and_terminal_close_refresh_durable_schedule_snapshot():
@@ -179,5 +181,5 @@ def test_reprice_and_terminal_close_refresh_durable_schedule_snapshot():
 
 def test_schedule_mutation_paths_refresh_collector_after_mutation():
     assert BOT_SOURCE.count("_refresh_collector_v22_registered_order_evidence") >= 6
-    assert "schedule_reprice(\n                order," in BOT_SOURCE
-    assert "schedule_close(\n                    order," in BOT_SOURCE
+    assert "schedule_reprice(\n            order," in BOT_SOURCE
+    assert "schedule_close(\n                order," in BOT_SOURCE

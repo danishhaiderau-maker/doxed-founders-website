@@ -549,15 +549,21 @@ def build_research_event(
     evaluation_ts: Optional[float] = None,
     requested_qty: Optional[float] = None,
     research_notional_usd: Optional[float] = STANDARD_RESEARCH_NOTIONAL_USD,
+    market_microstructure_symbol: Optional[str] = None,
     chase_schedule: Optional[Sequence[Mapping[str, Any]]] = None,
     chase_schedule_authoritative: bool = False,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
+    raw_direction = (
+        "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
+    ) if invert_on else direction_u
     event_id = make_event_id(trade_id, signal_ts)
     episode = make_event_episode(
         signal_ts=signal_ts,
-        direction=direction_u,
+        # Episode identity belongs to the causal signal. Inversion is a policy
+        # treatment and must not split the same opportunity into a new sample.
+        direction=raw_direction,
         symbol=symbol,
         shared_ai_call_id=shared_ai_call_id,
     )
@@ -650,9 +656,6 @@ def build_research_event(
     policy_identity = build_policy_identity(
         epoch_id=str(epoch_id), control_cell=control_cell, invert_on=bool(invert_on),
     )
-    raw_direction = (
-        "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
-    ) if invert_on else direction_u
     exact_requested_qty = None
     try:
         exact_requested_qty = float(requested_qty) if requested_qty is not None else None
@@ -686,6 +689,10 @@ def build_research_event(
         "source_ticket_qty": exact_requested_qty,
         "standardized_notional_usd": standardized_notional if exact_requested_qty is None else None,
         "signal_price": float(signal_price),
+        "market_microstructure_symbol": (
+            str(market_microstructure_symbol).strip()
+            if market_microstructure_symbol else None
+        ),
         "exchange_qty_claim": exchange_qty_claim,
         "note": (
             "Exact source ticket quantity" if exchange_qty_claim else
@@ -921,7 +928,16 @@ def write_research_event_once(
         }
         index["events_file_size"] = os.path.getsize(events_path)
         _save_event_index(index_path, index)
-        return True, "written"
+        # V3 dual-write is deliberately downstream of the durable v2 append.
+        # V2 remains the recovery source during migration; V3 failures are
+        # surfaced in a receipt without corrupting or duplicating the source.
+        try:
+            from research_v3_bridge import dual_write_v22_record
+            v3_receipt = dual_write_v22_record(record, data_dir=root)
+            v3_reason = "v3-written" if v3_receipt.get("store_verification", {}).get("passed") else "v3-integrity-failed"
+        except Exception as exc:
+            v3_reason = f"v3-failed:{type(exc).__name__}:{exc}"
+        return True, f"written;{v3_reason}"
 
 
 def terminal_observation(status: str) -> bool:
