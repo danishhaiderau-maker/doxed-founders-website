@@ -17233,7 +17233,7 @@ def lane_retirement_report(trades=None, session=None, benchmark_report=None):
 
 def _adx_bucket_val(v) -> str:
     try:
-        from research_trade_accumulator import _adx_bucket as _ab
+        from research.research_trade_accumulator import _adx_bucket as _ab
         return _ab(v)
     except ImportError:
         pass
@@ -17251,7 +17251,7 @@ def _adx_bucket_val(v) -> str:
 def _trades_for_regime_analysis(trades=None, session=None):
     """Prefer fresh accumulator DB (v9.83+ epoch) over session CSV slice."""
     try:
-        from research_trade_accumulator import load_accumulated_trades_df
+        from research.research_trade_accumulator import load_accumulated_trades_df
 
         acc = load_accumulated_trades_df()
         if acc is not None and not acc.empty:
@@ -17263,7 +17263,7 @@ def _trades_for_regime_analysis(trades=None, session=None):
 
 def _regime_tags_from_row(row) -> dict:
     try:
-        from research_trade_accumulator import compute_regime_tags
+        from research.research_trade_accumulator import compute_regime_tags
 
         if hasattr(row, "to_dict"):
             row = row.to_dict()
@@ -18102,7 +18102,12 @@ def pre_test_analytics_reports(
         run_ai_scan_independence_self_test(retired_status=dict(PATHWAY_LANE_STATUS))
         run_ai_scan_role_validation()
         verify_repo_version_sync()
-        trade_n = len(trades.drop_duplicates(subset=["trade_id"])) if trades is not None and not trades.empty and "trade_id" in trades.columns else len(trades or [])
+        if trades is None or trades.empty:
+            trade_n = 0
+        elif "trade_id" in trades.columns:
+            trade_n = len(trades.drop_duplicates(subset=["trade_id"]))
+        else:
+            trade_n = len(trades)
         exit_val = validate_exit_reports_populated(trade_count=int(trade_n))
         if exit_val.get("verdict") == "INSUFFICIENT_DATA":
             print(
@@ -19910,7 +19915,7 @@ def finalize_analyzer_outputs(
         pass
     write_report_manifest(payload)
     try:
-        from research_trade_accumulator import sync_accumulator_from_analyzer_run
+        from research.research_trade_accumulator import sync_accumulator_from_analyzer_run
 
         acc = sync_accumulator_from_analyzer_run(session=session, trades=trades)
         print(
