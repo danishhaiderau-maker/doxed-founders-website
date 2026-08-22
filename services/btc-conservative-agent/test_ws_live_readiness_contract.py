@@ -102,6 +102,12 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             "time": time,
             "state": self.state,
             "state_lock": threading.RLock(),
+            "_strategy_progress_incident_lock": threading.Lock(),
+            "_strategy_progress_incident": {"active": False, "reasons": []},
+            "_strategy_progress_incident_snapshot": lambda now=None: {
+                "active": False,
+                "reasons": [],
+            },
             "WS_ENTRY_FRESH_SEC": 60.0,
             "REST_ENTRY_FRESH_SEC": 10.0,
             "STALE_HARD_SEC": 180.0,
