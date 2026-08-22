@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 import copy
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -33,6 +34,61 @@ def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str,
 
 def _first(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
+
+
+def _timestamp(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            return None
+
+
+def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Load the immutable one-second tape covering one observed paper path."""
+    source = Path(data_dir) / "market_microstructure_1s.jsonl"
+    rows_by_ts: dict[float, dict[str, Any]] = {}
+    parse_errors = 0
+    if source.is_file() and end_ts >= start_ts:
+        with source.open("r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                try:
+                    raw = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    parse_errors += 1
+                    continue
+                if not isinstance(raw, Mapping):
+                    continue
+                ts = _timestamp(_first(raw.get("bucket_ts"), raw.get("ts"), raw.get("t")))
+                price = _first(raw.get("last"), raw.get("price"), raw.get("mark"))
+                if ts is None or price in (None, "") or ts < start_ts or ts > end_ts:
+                    continue
+                row = dict(raw)
+                # Candidate replay consumes explicit ts/price while the full
+                # BBO/depth row remains available for conservative fills.
+                row["ts"] = ts
+                row["price"] = float(price)
+                rows_by_ts[ts] = row
+    rows = [rows_by_ts[key] for key in sorted(rows_by_ts)]
+    times = list(sorted(rows_by_ts))
+    gaps = [right - left for left, right in zip(times, times[1:])]
+    max_gap = max(gaps) if gaps else None
+    coverage = {
+        "schema": "paper_market_segment_coverage_v1",
+        "requested_start_ts": float(start_ts),
+        "requested_end_ts": float(end_ts),
+        "observed_start_ts": times[0] if times else None,
+        "observed_end_ts": times[-1] if times else None,
+        "row_count": len(rows),
+        "max_gap_sec": max_gap,
+        "two_second_or_better": bool(rows) and (max_gap is None or max_gap <= 2.0),
+        "parse_errors": parse_errors,
+    }
+    return rows, coverage
 
 
 def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -396,6 +452,41 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         **policy,
     }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    start_ts = _timestamp(_first(
+        signal.get("created_ts_ts"), signal.get("signal_ts"),
+        position.get("signal_created_ts"), position.get("entry_ts"),
+    ))
+    close_ts = _timestamp(_first(outcome.get("close_ts"), outcome.get("ts")))
+    segment_refs = []
+    segment_writes = []
+    segment_coverage = {
+        "schema": "paper_market_segment_coverage_v1",
+        "row_count": 0,
+        "two_second_or_better": False,
+        "reason": "PATH_TIME_BOUNDS_MISSING",
+    }
+    if start_ts is not None and close_ts is not None and close_ts >= start_ts:
+        segment_rows, segment_coverage = _paper_market_segment(
+            data_dir, start_ts=start_ts, end_ts=close_ts,
+        )
+        if segment_rows:
+            segment_ref = store.put_market_segment(
+                source="LIVE_MICROSTRUCTURE_1S",
+                symbol=identity["symbol"],
+                timeframe="1s",
+                start_ts=start_ts,
+                end_ts=close_ts,
+                rows=segment_rows,
+            )
+            segment_refs.append(segment_ref)
+            segment_writes.append(store.append("market_segment", {
+                "record_id": f"market-segment:{event_id}:{segment_ref['sha256']}",
+                "episode_id": identity["episode_id"],
+                "event_id": event_id,
+                "segment_ref": segment_ref,
+                "coverage": segment_coverage,
+                **lifecycle_identity,
+            }))
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
@@ -412,12 +503,19 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
             "PAPER_REALIZED", net_pnl_usd=outcome.get("net_pnl_usd")
         ),
         "effective_execution_mode": "PAPER_OBSERVED",
-        "terminal": True, "ranking_eligible": False, "ranking_blocker": "REPLAY_PATH_NOT_MATURED",
+        "terminal": True,
+        "ranking_eligible": False,
+        "ranking_blocker": (
+            "POLICY_REPLAY_PENDING" if segment_refs and segment_coverage.get("two_second_or_better")
+            else "MARKET_PATH_INCOMPLETE"
+        ),
+        "market_segment_refs": segment_refs,
+        "market_segment_coverage": segment_coverage,
         "net_pnl_usd": outcome.get("net_pnl_usd"), "exit_reason": outcome.get("exit_reason"),
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
-            "writes": [execution, lifecycle], "store_verification": store.verify()}
+            "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
 
 
 def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:

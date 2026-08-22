@@ -433,6 +433,76 @@ class V3BridgeTests(unittest.TestCase):
                 self.assertEqual(row["policy_id"], "PATIENT")
                 self.assertTrue(row["policy_signature"].startswith("paper-policy-"))
 
+    def test_paper_close_freezes_one_second_market_path_for_policy_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "market_microstructure_1s.jsonl"
+            tape.write_text("\n".join(json.dumps({
+                "schema": "market_microstructure_1s_v1",
+                "symbol": "tBTCF0:USTF0",
+                "bucket_ts": ts,
+                "last": 100.0 + (ts - 1000),
+                "bid": 99.5 + (ts - 1000),
+                "ask": 100.5 + (ts - 1000),
+                "bid_qty": 2.0,
+                "ask_qty": 3.0,
+                "fresh": True,
+                "valid_bbo": True,
+            }) for ts in range(999, 1005)) + "\n", encoding="utf-8")
+            signal = {
+                "trade_id": "p-path", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "shared_ai_call_id": "scan-path",
+                "policy_id": "PATIENT", "research_lane": "PATIENT",
+                "symbol": "tBTCF0:USTF0",
+            }
+            position = {
+                "trade_id": "p-path", "entry_ts": 1001, "entry": 100,
+                "qty": 0.1, "dir": "LONG", "research_lane": "PATIENT",
+            }
+            outcome = {
+                "trade_id": "p-path", "close_ts": 1004, "exit": 104,
+                "net_pnl_usd": 4.0, "exit_reason": "ATR_TP_2_5",
+            }
+
+            receipt = dual_write_paper_close(
+                position, signal, outcome, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
+            market_row = json.loads(store.ledger_path("market_segment").read_text().strip())
+            ref = lifecycle["market_segment_refs"][0]
+            envelope = json.loads((Path(tmp) / ref["relative_path"]).read_text())
+
+            self.assertTrue(receipt["store_verification"]["passed"])
+            self.assertEqual(receipt["store_verification"]["market_segment_count"], 1)
+            self.assertEqual(ref["row_count"], 5)
+            self.assertEqual(market_row["coverage"]["max_gap_sec"], 1.0)
+            self.assertTrue(market_row["coverage"]["two_second_or_better"])
+            self.assertEqual(envelope["rows"][0]["ts"], 1000.0)
+            self.assertEqual(envelope["rows"][0]["price"], 100.0)
+            self.assertEqual(envelope["rows"][-1]["ask_qty"], 3.0)
+            self.assertEqual(lifecycle["ranking_blocker"], "POLICY_REPLAY_PENDING")
+
+    def test_paper_close_fails_path_qualification_when_tape_has_large_gap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "market_microstructure_1s.jsonl").write_text(
+                "\n".join(json.dumps({"bucket_ts": ts, "last": 100 + ts}) for ts in (1000, 1004)) + "\n",
+                encoding="utf-8",
+            )
+            signal = {"trade_id": "p-gap", "created_ts_ts": 1000,
+                      "raw_direction": "LONG", "shared_ai_call_id": "scan-gap"}
+            position = {"trade_id": "p-gap", "entry_ts": 1000, "entry": 100, "qty": 0.1}
+            outcome = {"trade_id": "p-gap", "close_ts": 1004, "exit": 101,
+                       "net_pnl_usd": 1.0, "exit_reason": "TEST"}
+
+            dual_write_paper_close(
+                position, signal, outcome, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            lifecycle = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("lifecycle").read_text().strip()
+            )
+            self.assertFalse(lifecycle["market_segment_coverage"]["two_second_or_better"])
+            self.assertEqual(lifecycle["ranking_blocker"], "MARKET_PATH_INCOMPLETE")
+
     def test_close_reuses_frozen_submit_identity_instead_of_recomputing_sparse_position(self):
         with tempfile.TemporaryDirectory() as tmp:
             signal = {
