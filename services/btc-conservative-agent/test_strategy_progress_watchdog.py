@@ -302,6 +302,33 @@ class StrategyProgressIncidentTest(unittest.TestCase):
             process_source.index("spawn_continuous_lane_from_ai_scan("),
         )
 
+    def test_stale_reconciliation_never_runs_slow_expiry_io_under_trade_lock(self):
+        reconcile_source = ast.get_source_segment(
+            SOURCE,
+            next(
+                node for node in TREE.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "reconcile_stale_signals"
+            ),
+        )
+        outside_boundary = reconcile_source.index(
+            "Expiry persistence, relay publication, collector writes"
+        )
+        self.assertNotIn(
+            "_record_expired_order(", reconcile_source[:outside_boundary]
+        )
+        self.assertNotIn(
+            "_cancel_pending_order_confirmed(",
+            reconcile_source[:outside_boundary],
+        )
+        self.assertGreater(
+            reconcile_source.index("_record_expired_order("), outside_boundary
+        )
+        self.assertGreater(
+            reconcile_source.index("_cancel_pending_order_confirmed("),
+            outside_boundary,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

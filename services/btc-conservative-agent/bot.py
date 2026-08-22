@@ -10819,6 +10819,9 @@ def reconcile_stale_signals():
     fixed = 0
     orphans_removed = 0
     now = time.time()
+    expiry_records = []
+    pending_removals = []
+    pending_cancellations = []
     with trade_lock:
         for tid in open_ids:
             sig = trades_map.get(tid, {}).get("signal_ref", {}) or {}
@@ -10840,9 +10843,8 @@ def reconcile_stale_signals():
             if outcome in TERMINAL_SIGNAL_OUTCOMES and st not in TERMINAL_SIGNAL_STATUSES:
                 sig["status"] = "EXPIRED"
                 fixed += 1
-                _record_expired_order(sig, outcome)
-                if _remove_pending_for_trade(tid, "OUTCOME_TERMINAL_SYNC"):
-                    orphans_removed += 1
+                expiry_records.append((sig, outcome, False))
+                pending_removals.append((tid, "OUTCOME_TERMINAL_SYNC"))
                 continue
             created_ts = sig.get("created_ts_ts", 0)
             if created_ts and now - created_ts < ORDER_PLACEMENT_GRACE_SEC:
@@ -10862,26 +10864,22 @@ def reconcile_stale_signals():
                     sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                     sig["exit_reason"] = sig["outcome"]
                     fixed += 1
-                    _record_expired_order(sig, sig["outcome"])
-                    _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
-                    if _remove_pending_for_trade(tid, sig["outcome"]):
-                        orphans_removed += 1
+                    expiry_records.append((sig, sig["outcome"], True))
+                    pending_removals.append((tid, sig["outcome"]))
                 elif sig.get("order_placed") and missing_exposure and not promotion_in_progress:
                     sig["status"] = "EXPIRED"
                     sig["outcome"] = "STALE_NO_EXPOSURE"
                     sig["exit_reason"] = sig["outcome"]
                     fixed += 1
-                    _record_expired_order(sig, sig["outcome"])
-                    if _remove_pending_for_trade(tid, sig["outcome"]):
-                        orphans_removed += 1
+                    expiry_records.append((sig, sig["outcome"], False))
+                    pending_removals.append((tid, sig["outcome"]))
                 continue
             elif st in (SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE) and ttl_expired:
                 sig["status"] = "EXPIRED"
                 sig["outcome"] = "SIGNAL_TTL_EXPIRED"
                 sig["exit_reason"] = sig["outcome"]
                 fixed += 1
-                _record_expired_order(sig, "SIGNAL_TTL_EXPIRED")
-                _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
+                expiry_records.append((sig, "SIGNAL_TTL_EXPIRED", True))
         for order in list(pending_orders):
             tid = order.get("trade_id")
             if order.get("status") != "PENDING" or not tid:
@@ -10889,19 +10887,33 @@ def reconcile_stale_signals():
             master = trades_map.get(tid, {}).get("signal_ref", {}) or {}
             if is_terminal_signal(master) or (master.get("created_ts_ts", 0) and now - master.get("created_ts_ts", 0) > SIGNAL_TTL_SEC):
                 expire_reason = master.get("outcome") or master.get("exit_reason") or "TTL_EXPIRED"
-                outcome = _cancel_pending_order_confirmed(
-                    order,
-                    expire_reason,
-                    record_expired=True,
-                    expire_signal=False,
-                )
-                if outcome.get("finalized"):
-                    orphans_removed += 1
-                    logger.info(
-                        f"[ORDER CLEANUP] Dropped confirmed orphan pending "
-                        f"trade_id={tid} signal_status={master.get('status')} "
-                        f"outcome={master.get('outcome')} [PIPELINE ENFORCEMENT]"
-                    )
+                pending_cancellations.append((order, expire_reason, tid, master))
+
+    # Expiry persistence, relay publication, collector writes, and private
+    # cancellation can block on network or disk.  They must never run while
+    # the global execution lock is held; the status mutations above are the
+    # atomic boundary and these idempotent side effects follow it.
+    for sig, reason, funnel_expired in expiry_records:
+        _record_expired_order(sig, reason)
+        if funnel_expired:
+            _funnel_signal_expired(sig, "SIGNAL_EXPIRED")
+    for tid, reason in pending_removals:
+        if _remove_pending_for_trade(tid, reason):
+            orphans_removed += 1
+    for order, expire_reason, tid, master in pending_cancellations:
+        outcome = _cancel_pending_order_confirmed(
+            order,
+            expire_reason,
+            record_expired=True,
+            expire_signal=False,
+        )
+        if outcome.get("finalized"):
+            orphans_removed += 1
+            logger.info(
+                f"[ORDER CLEANUP] Dropped confirmed orphan pending "
+                f"trade_id={tid} signal_status={master.get('status')} "
+                f"outcome={master.get('outcome')} [PIPELINE ENFORCEMENT]"
+            )
     if fixed or orphans_removed:
         logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] reconciled {fixed} stale signals, removed {orphans_removed} orphan pending orders")
         _agent_dbg("H1", "reconcile_stale_signals", "reconciled", {"count": fixed, "orphans_removed": orphans_removed, "pending_ids": len(_pending_trade_ids()), "open_ids": len(_open_trade_ids())})
