@@ -283,6 +283,28 @@ def test_api_cache_key_changes_with_analyzer_report_generation(tmp_path, monkeyp
     assert first != second
 
 
+def test_integrity_api_is_fail_closed_and_exposes_valid_receipt(monkeypatch):
+    dashboard._API_RESPONSE_CACHE.clear()
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, *args: (
+            {"schema": "analyzer_integrity_v1", "valid": True, "failed_checks": []}
+            if name == dashboard.ANALYZER_INTEGRITY_FILE else {}
+        ),
+    )
+    with dashboard.app.test_client() as client:
+        response = client.get("/api/integrity")
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, *args: {})
+    with dashboard.app.test_client() as client:
+        missing = client.get("/api/integrity")
+    assert missing.status_code == 503
+    assert missing.get_json()["valid"] is False
+
+
 def test_best_policy_is_hidden_until_current_epoch_oos_is_qualified(tmp_path, monkeypatch):
     events = [
         _event("filled", "ACCEPTED_FILLED", "episode-1"),

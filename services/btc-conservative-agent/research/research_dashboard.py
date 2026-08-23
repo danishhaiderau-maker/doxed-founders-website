@@ -2143,6 +2143,23 @@ def api_static_policy_research():
     })
 
 
+@app.route("/api/integrity")
+def api_integrity():
+    """Expose the analyzer's canonical fail-closed integrity receipt."""
+    payload = _read_json(ANALYZER_INTEGRITY_FILE) or {}
+    if not payload:
+        return jsonify({
+            "schema": "analyzer_integrity_v1",
+            "ok": False,
+            "valid": False,
+            "report_status": "MISSING",
+            "failed_checks": ["ANALYZER_INTEGRITY_REPORT_MISSING"],
+        }), 503
+    payload = dict(payload)
+    payload["ok"] = payload.get("valid") is True
+    return jsonify(payload), (200 if payload["ok"] else 503)
+
+
 @app.route("/api/dynamic-policy-research")
 def api_dynamic_policy_research():
     source = _safe_policy_v3_dashboard_source()
