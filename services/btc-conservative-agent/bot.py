@@ -31887,7 +31887,12 @@ def _refresh_bitfinex_exposure_audit() -> dict:
         "orphan_position_ids": [],
         "error": None,
     }
-    if not _direct_private_exchange_owner() or bitfinex_private is None:
+    # This is a read-only boundary proof, not an execution-owner decision.
+    # Forced paper mode deliberately makes ``_direct_private_exchange_owner``
+    # false so order mutations stay impossible, but it must not disable
+    # authenticated position/order reads needed to prove that the real venue is
+    # flat before a deploy or epoch transition.
+    if not _private_api_keys_ok() or bitfinex_private is None:
         audit["error"] = "PRIVATE_API_UNAVAILABLE"
         with state_lock:
             state["exchange_sync_audit"] = audit

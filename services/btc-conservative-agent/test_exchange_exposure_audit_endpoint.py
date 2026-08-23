@@ -86,3 +86,28 @@ def test_exchange_exposure_audit_fails_closed_when_private_read_is_unavailable()
     assert payload["ok"] is False
     assert payload["flat"] is False
     assert payload["error"] == "PRIVATE_API_UNAVAILABLE"
+
+
+def test_private_read_audit_remains_available_in_forced_paper_mode():
+    """Paper-mode mutation gating must not suppress read-only flat proof."""
+
+    def empty_private_read(fn, label="EXCHANGE", max_attempts=5):
+        return []
+
+    with mock.patch.object(bot, "_private_api_keys_ok", return_value=True), mock.patch.object(
+        bot, "_direct_private_exchange_owner", return_value=False
+    ), mock.patch.object(bot, "bitfinex_private", object()), mock.patch.object(
+        bot, "_exchange_call_with_retry", side_effect=empty_private_read
+    ), mock.patch.object(
+        bot,
+        "_managed_exchange_identity_snapshot",
+        return_value={"order_ids": set(), "position_ids": set(), "trade_ids": set(), "pending_candidates": []},
+    ):
+        audit = bot._refresh_bitfinex_exposure_audit()
+
+    assert audit["authoritative"] is True
+    assert audit["fresh"] is True
+    assert audit["flat"] is True
+    assert audit["open_order_count"] == 0
+    assert audit["open_position_count"] == 0
+    assert audit["error"] is None

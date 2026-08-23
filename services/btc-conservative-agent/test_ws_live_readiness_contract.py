@@ -443,6 +443,7 @@ class ExchangeAuditBehaviorTest(unittest.TestCase):
             "open_positions": positions,
             "bitfinex_private": exchange,
             "SYMBOL_CCXT": "BTC/USDT:USDT",
+            "_private_api_keys_ok": lambda: True,
             "_direct_private_exchange_owner": lambda: True,
             "_exchange_call_with_retry": lambda fn, label=None: fn(),
             "_normalize_order_side_to_dir": lambda value: (
