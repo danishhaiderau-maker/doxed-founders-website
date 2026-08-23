@@ -46,6 +46,14 @@ RECOVERY_GATE_FUNCTION = next(
 
 
 def compile_snapshot(namespace):
+    # The production watchdog now includes bounded replay-lock and post-AI
+    # worker diagnostics. Source-extracted tests supply lightweight defaults
+    # so each case can continue to override only the dependency it exercises.
+    namespace.setdefault("replay_lock", threading.RLock())
+    namespace.setdefault("post_ai_evidence_health_snapshot", lambda: {})
+    namespace.setdefault("sys", __import__("sys"))
+    namespace.setdefault("traceback", __import__("traceback"))
+    namespace.setdefault("Path", Path)
     module = ast.Module(body=[FUNCTION], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
