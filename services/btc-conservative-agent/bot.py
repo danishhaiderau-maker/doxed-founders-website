@@ -26600,6 +26600,7 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
+    global _cached_pathway_lane_specs
     # A research epoch boundary must never become a money-path mutation. Read
     # the authoritative in-memory books before archiving or clearing anything,
     # and require the operator to have paused and disarmed the source first.
@@ -26689,6 +26690,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     # memory and would otherwise be written back with pre-reset/test values.
     reset_tile2_counters_for_fresh_holdout()
     _cached_pathway_scorecard = {}
+    _cached_pathway_lane_specs = {}
     _reset_runtime_log_handlers()
     reset_runtime_state()
     reset_session_risk_state()
@@ -28067,6 +28069,52 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "lab_ledger_close_delta": int(m.get("lab_ledger_close_delta") or 0),
         "lab_summary_line": lab_line,
     }
+
+
+def _scope_pathway_specs_to_signed_epoch(
+    payload: dict,
+    session_trades: list,
+    lane_opportunity_counters: dict,
+    epoch_cutoff_utc: str,
+) -> dict:
+    """Replace cumulative tile headlines with the current signed-epoch truth."""
+    if not epoch_cutoff_utc:
+        return payload
+    scoped = copy.deepcopy(payload or {})
+    ledger = _derive_lane_pnl_ledger_from_trades(session_trades or [])
+    counters = lane_opportunity_counters or {}
+    settings = _settings_period_breakdown()
+    for row in scoped.get("lanes") or []:
+        lane = str(row.get("lane") or "").upper()
+        lb = ledger.get(lane) or {}
+        lc = counters.get(lane) or {}
+        closes = int(lb.get("closes") or 0)
+        pnl = round(float(lb.get("net_pnl_usd") or 0.0), 2)
+        approves = int(lc.get("approves") or 0)
+        metrics = {
+            "approves": approves,
+            "real_fills": closes,
+            "approve_to_fill_pct": round(100.0 * closes / approves, 1) if approves else 0.0,
+            "net_pnl_real": pnl,
+            "per_approve_ev": round(pnl / approves, 2) if approves else 0.0,
+            "wins": int(lb.get("wins") or 0),
+            "losses": int(lb.get("losses") or 0),
+            "win_rate_pct": (
+                round(100.0 * int(lb.get("wins") or 0) / closes, 1)
+                if closes else 0.0
+            ),
+            "verdict": "current signed clean epoch",
+        }
+        stats = _session_stats_from_lane_metrics(metrics)
+        stats["scope"] = "SIGNED_FRESH_EPOCH"
+        stats["epoch_cutoff_utc"] = epoch_cutoff_utc
+        stats["settings_periods"] = _reconcile_settings_periods_to_headline(
+            stats, settings.get(lane) or []
+        )
+        row["session_stats"] = stats
+    scoped["session_scope"] = "SIGNED_FRESH_EPOCH"
+    scoped["epoch_cutoff_utc"] = epoch_cutoff_utc
+    return scoped
 
 
 def write_static_pathway_lane_specs(cwd: str = None) -> dict:
@@ -30067,8 +30115,11 @@ DASHBOARD_JS = """(function () {
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + (periodEv == null ? '—' : ('$' + Number(periodEv).toFixed(2))) + '</td>'
               + '</tr>';
           }).join('');
+          const statsScope = stats.scope === 'SIGNED_FRESH_EPOCH'
+            ? 'current signed clean-epoch total'
+            : 'historical/analyzer total';
           const settingsBreakdown = '<div style="margin-top:8px;border:1px solid #30363d;border-radius:8px;overflow:auto;">'
-            + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the complete Fresh Collection total</div>'
+            + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the ' + statsScope + '</div>'
             + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
             + '<thead><tr style="color:#8b949e;background:#101820;">'
             + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Chase</th>'
@@ -34488,7 +34539,7 @@ def _build_api_state_snapshot():
         snapshot["pipeline_funnel_counters"] = copy.deepcopy(snapshot.get("pipeline_funnel_counters") or {})
         snapshot["research_isolation_mode"] = research_isolation_enabled()
         snapshot["lane_opportunity_counters"] = copy.deepcopy(snapshot.get("lane_opportunity_counters") or {})
-        snapshot["lane_pnl_ledger"] = get_lane_pnl_ledger()
+        snapshot["lane_pnl_ledger"] = _derive_lane_pnl_ledger_from_trades(trades_copy)
         snapshot["lane_lab_pnl_ledger"] = get_lane_lab_pnl_ledger()
         snapshot["lab_open_shadows"] = count_open_lab_shadows()
         snapshot["retired_lane_archive"] = (
@@ -34678,7 +34729,12 @@ def _build_api_state_snapshot():
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached(for_api=True)
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached(for_api=True)
-        snapshot["pathway_lane_specs"] = get_pathway_lane_specs_cached(for_api=True)
+        snapshot["pathway_lane_specs"] = _scope_pathway_specs_to_signed_epoch(
+            get_pathway_lane_specs_cached(for_api=True),
+            trades_copy,
+            snapshot.get("lane_opportunity_counters") or {},
+            _epoch_cutoff,
+        )
         snapshot["continuous_ai_direct_entry_enabled"] = continuous_ai_direct_entry_enabled()
         snapshot["golden_stack_config"] = golden_stack_config_for_dashboard()
         snapshot["duplicate_limit_block_enabled"] = duplicate_limit_block_enabled()
@@ -38324,6 +38380,11 @@ def reset_runtime_state():
             "debug_state": _fresh_debug_state(),
             "last_pipeline_stage": "IDLE",
             "ai_call_count": 0,
+            "stability_ai_call_count": 0,
+            "lane_opportunity_counters": {},
+            "pipeline_funnel_counters": {},
+            "lane_pnl_ledger": {},
+            "lane_lab_pnl_ledger": {},
         })
     logger.warning("[RESET] HARD RESET COMPLETE - true clean slate achieved")
 
