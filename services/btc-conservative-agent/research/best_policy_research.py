@@ -110,6 +110,62 @@ def _events(path: Path) -> list[dict]:
 def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
     data_root = Path(data_dir)
     report_root = Path(report_dir)
+    from research.v3_policy_report_adapter import has_v3_evidence, load_or_build_genome, load_v3_cycle_snapshot
+
+    if has_v3_evidence(data_dir):
+        genome = load_or_build_genome(data_dir, report_dir)
+        snapshot = cycle_snapshot or load_v3_cycle_snapshot(data_dir)
+        oos = _json(report_root / POLICY_CANDIDATE_OOS_REPORT_FILE)
+        collection = genome.get("collection") or {}
+        identities = collection.get("effective_paper_execution_identities") or []
+        identity = identities[0] if len(identities) == 1 else {}
+        gates = oos.get("qualification_gates") or {}
+        candidate = oos.get("candidate") or oos.get("current_candidate")
+        blockers = sorted(set(list(oos.get("blockers") or []) + qualification_gate_blockers(gates) + candidate_contract_blockers(candidate)))
+        qualified = bool(str(oos.get("status") or "").upper() == "QUALIFIED" and candidate and not blockers)
+        evidence = oos.get("evidence") or {}
+        report = {
+            "schema": "best_policy_research_v3_1_adapter_v1",
+            "cycle_snapshot": snapshot,
+            "conservative_microstructure_evidence": microstructure_evidence,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "epoch_id": genome.get("epoch_id"),
+            "policy_epoch_id": identity.get("policy_epoch_id"),
+            "evidence_policy_signature": identity.get("policy_signature"),
+            "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
+            "independent_oos_qualified": qualified,
+            "current_candidate": candidate if qualified else None,
+            "descriptive_challenger": oos.get("descriptive_challenger"),
+            "qualification_gates": gates,
+            "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+            "evidence": {
+                "current_epoch_events": int(evidence.get("current_events") or 0),
+                "collection_epoch_events": int(evidence.get("current_events") or 0),
+                "collection_policy_epoch_count": len({row.get("policy_epoch_id") for row in identities if row.get("policy_epoch_id")}),
+                "completed_paths": int(evidence.get("eligible_events") or 0),
+                "replay_eligible_events": int(evidence.get("eligible_events") or 0),
+                "replay_ineligible_events": int(evidence.get("excluded_events") or 0),
+                "independent_episode_count": int(evidence.get("independent_episodes") or 0),
+                "events_missing_episode_id": 0,
+                "qualified_oos_episodes": int(evidence.get("qualified_oos_episodes") or 0),
+                "terminal_lifecycles": int(evidence.get("terminal_lifecycles") or 0),
+                "provisional_lifecycles": int(evidence.get("provisional_lifecycles") or 0),
+                "market_segments": int(evidence.get("market_segments") or 0),
+                "order_intents": int(evidence.get("order_intents") or 0),
+            },
+            "blockers": blockers,
+            "source_oos_report": POLICY_CANDIDATE_OOS_REPORT_FILE,
+            "source_report": "safe_policy_genome_v3_report.json",
+            "source_schema": genome.get("schema"),
+            "research_design": {"search": genome.get("search"), "ranking": (genome.get("contract") or {}).get("ranking")},
+            "live_policy_change_allowed": False,
+        }
+        report_root.mkdir(parents=True, exist_ok=True)
+        target = report_root / BEST_POLICY_RESEARCH_REPORT_FILE
+        temp = target.with_suffix(target.suffix + ".tmp")
+        temp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        temp.replace(target)
+        return report
     rows = list(events) if events is not None else _events(data_root / RESEARCH_EVENTS_FILE)
 
     def signal_ts(row):

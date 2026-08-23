@@ -149,3 +149,75 @@ def test_dashboard_releases_live_mirror_before_expensive_json_parsing(tmp_path, 
         worker.join(5)
     assert not worker.is_alive()
     assert [row["event_id"] for row in result["events"]] == ["event-1"]
+
+
+def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    opportunity = {
+        "schema": "research_evidence_v3",
+        "collector_version": "collector_v3.1",
+        "ledger": "opportunity",
+        "record_id": "opportunity:episode-v31",
+        "episode_id": "episode-v31",
+        "epoch_id": "epoch-v31-clean",
+        "signal_ts": SIGNAL_TS,
+        "feature_snapshot_at_signal": {"market_context": {"regime_label": "BULL"}},
+    }
+    decision = {
+        "schema": "research_evidence_v3",
+        "ledger": "decision",
+        "record_id": "decision:episode-v31:policy-v31",
+        "episode_id": "episode-v31",
+        "epoch_id": "epoch-v31-clean",
+        "policy_epoch_id": "policy-epoch-v31",
+        "policy_signature": "policy-signature-v31",
+        "policy_id": "OFFSET_V31",
+        "execution_disposition": "ORDER_ELIGIBLE",
+        "outcome_state": "CENSORED",
+    }
+    intent = {
+        "schema": "research_evidence_v3",
+        "ledger": "order_intent",
+        "record_id": "order-intent:event-v31",
+        "event_id": "event-v31",
+        "episode_id": "episode-v31",
+        "epoch_id": "epoch-v31-clean",
+        "policy_epoch_id": "policy-epoch-v31",
+        "policy_signature": "policy-signature-v31",
+        "policy_id": "OFFSET_V31",
+    }
+    lifecycle = {
+        "schema": "research_evidence_v3",
+        "ledger": "lifecycle",
+        "record_id": "lifecycle:event-v31:terminal",
+        "event_id": "event-v31",
+        "episode_id": "episode-v31",
+        "epoch_id": "epoch-v31-clean",
+        "policy_epoch_id": "policy-epoch-v31",
+        "policy_signature": "policy-signature-v31",
+        "policy_id": "OFFSET_V31",
+        "terminal": True,
+        "outcome_state": "NO_TRADE",
+    }
+    for name, rows in {
+        "opportunity": [opportunity], "decision": [decision],
+        "order_intent": [intent], "lifecycle": [lifecycle],
+    }.items():
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+    # The retired file may exist but is no longer authoritative once V3.1 is present.
+    (tmp_path / RESEARCH_EVENTS_FILE).write_text("", encoding="utf-8")
+
+    reports = build_policy_cycle_reports(tmp_path, tmp_path)
+    assert reports["cycle_snapshot"]["schema"] == "policy_cycle_snapshot_v3_1"
+    assert reports["cycle_snapshot"]["epoch_id"] == "epoch-v31-clean"
+    assert reports["cycle_snapshot"]["row_count"] == 1
+    assert reports["candidate"]["schema"] == "policy_candidate_oos_v3_1_adapter_v1"
+    assert reports["candidate"]["evidence"]["current_events"] == 1
+    assert reports["best"]["schema"] == "best_policy_research_v3_1_adapter_v1"
+    assert reports["best"]["epoch_id"] == "epoch-v31-clean"
+    assert reports["best"]["evidence"]["current_epoch_events"] == 1
+    assert "NO_CURRENT_V22_EPOCH" not in reports["best"]["blockers"]
+    assert reports["best"]["status"] == "NO QUALIFIED POLICY"

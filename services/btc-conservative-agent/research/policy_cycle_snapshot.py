@@ -99,6 +99,17 @@ def _microstructure_evidence(events, tape_snapshot) -> dict:
 
 
 def load_policy_cycle_snapshot(data_dir=".") -> dict:
+    from research.v3_policy_report_adapter import has_v3_evidence, load_v3_cycle_snapshot
+
+    if has_v3_evidence(data_dir):
+        receipt = load_v3_cycle_snapshot(data_dir)
+        tape_snapshot = _load_microstructure_snapshot(data_dir)
+        return {
+            "events": tuple(),
+            "receipt": receipt,
+            "microstructure": _microstructure_evidence([], tape_snapshot),
+            "microstructure_snapshot": tape_snapshot,
+        }
     path = Path(data_dir) / RESEARCH_EVENTS_FILE
     events = []
     digest = hashlib.sha256()

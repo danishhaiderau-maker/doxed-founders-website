@@ -241,6 +241,26 @@ def _evaluate(policy_id: str, rows: list[dict], cache: dict[str, dict[str, float
 
 
 def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
+    from research.v3_policy_report_adapter import (
+        candidate_from_genome,
+        has_v3_evidence,
+        load_or_build_genome,
+        load_v3_cycle_snapshot,
+    )
+
+    if has_v3_evidence(data_dir):
+        snapshot = cycle_snapshot or load_v3_cycle_snapshot(data_dir)
+        report = candidate_from_genome(
+            load_or_build_genome(data_dir, report_dir),
+            snapshot,
+            microstructure_evidence,
+        )
+        target = Path(report_dir) / POLICY_CANDIDATE_OOS_REPORT_FILE
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(target.suffix + ".tmp")
+        temp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        temp.replace(target)
+        return report
     events = list(events) if events is not None else _read_events(Path(data_dir) / RESEARCH_EVENTS_FILE)
     latest = max(events, key=_signal_ts, default={})
     epoch = str(latest.get("epoch_id") or (latest.get("envelope") or {}).get("epoch_id") or "")
