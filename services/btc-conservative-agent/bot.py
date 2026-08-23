@@ -11934,6 +11934,27 @@ _execution_terminal_trade_ids = set()
 _collector_epoch_lock = threading.RLock()
 
 
+def _collector_cached_candles_1m(limit: int = 2000) -> list:
+    """Return a bounded causal candle snapshot without network I/O.
+
+    Collector persistence runs on the scheduled AI owner.  Calling the shared
+    REST session from that path can wait behind another HTTP worker and wedge
+    the entire three-minute cadence even though the AI request already
+    completed.  The dedicated OHLCV worker owns refreshes; collector writes
+    consume only its last published in-memory snapshot and truthfully retain a
+    partial horizon when the cache has not matured yet.
+    """
+    requested = max(0, int(limit or 0))
+    bucket = _mtf_cache.get("1m") or {}
+    cached = bucket.get("candles") or []
+    if not cached:
+        # latest_candles is maintained by the independent OHLCV worker and is
+        # safe to snapshot without holding a network or collector lock.
+        cached = latest_candles or []
+    rows = list(cached)
+    return rows[-requested:] if requested else rows
+
+
 def _collector_epoch_serialized(fn):
     """Serialize collector writes with the official fresh-epoch boundary."""
     @functools.wraps(fn)
@@ -12336,7 +12357,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
                 live_fill_price = None
             if live_fill_price is not None and live_fill_price <= 0:
                 live_fill_price = None
-        candles_1m = fetch_mtf_candles("1m", limit=2000) or []
+        candles_1m = _collector_cached_candles_1m(limit=2000)
         ticks_1s = []
         replay_complete = bool(path_complete or ticket_closed)
         with replay_lock:
@@ -12575,7 +12596,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         if ts <= 0:
             ts = float(signal.get("snapshot_ts") or time.time())
         direction = signal.get("final_direction") or (ai or {}).get("direction") or "SHORT"
-        candles_1m = fetch_mtf_candles("1m", limit=500) or []
+        candles_1m = _collector_cached_candles_1m(limit=500)
         with state_lock:
             univ = dict(state.get("last_cycle_3m_universe") or {})
         feature_snapshot = _collector_feature_snapshot(signal, signal_ts=ts)
