@@ -48,6 +48,32 @@ def _timestamp(value: Any) -> float | None:
             return None
 
 
+def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
+    """Read an explicitly observed 3-minute ATR receipt without inventing one."""
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        context = source.get("context") if isinstance(source.get("context"), Mapping) else {}
+        cycle = context.get("cycle_3m_universe") if isinstance(context.get("cycle_3m_universe"), Mapping) else {}
+        research = source.get("research_feature_snapshot") if isinstance(source.get("research_feature_snapshot"), Mapping) else {}
+        market = research.get("market_context") if isinstance(research.get("market_context"), Mapping) else {}
+        for value in (
+            source.get("atr14_pct_at_fill"),
+            source.get("atr14_pct_3m"),
+            source.get("atr14_pct"),
+            cycle.get("atr14_pct_3m"),
+            research.get("atr14_pct_3m"),
+            market.get("atr14_pct_3m"),
+        ):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                return number
+    return None
+
+
 def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load the immutable one-second tape covering one observed paper path."""
     source = Path(data_dir) / "market_microstructure_1s.jsonl"
@@ -367,17 +393,50 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "feature_snapshot_at_signal": signal.get("research_feature_snapshot") or {},
         "grouping_basis": identity["grouping_basis"], "collector_version": COLLECTOR_VERSION,
     })
+    atr14_pct_at_signal = _paper_atr14_pct_3m(order, signal)
+    signal_price = _first(order.get("signal_price"), signal.get("signal_price"))
+    limit_price = _first(order.get("limit_price"), order.get("price"))
+    entry_policy_id = str(
+        policy["paper_policy_spec"].get("entry_limit_policy")
+        or policy.get("policy_id")
+        or ""
+    )
+    offset_fraction = _first(
+        policy["paper_policy_spec"].get("entry_offset_fraction"),
+        order.get("entry_offset_fraction"),
+        signal.get("entry_offset_fraction"),
+    )
+    if offset_fraction is None:
+        try:
+            if float(signal_price) > 0:
+                offset_fraction = abs(float(limit_price) - float(signal_price)) / float(signal_price)
+        except (TypeError, ValueError):
+            offset_fraction = None
+    entry_children = []
+    if entry_policy_id:
+        entry_children.append({
+            "entry_policy_id": entry_policy_id,
+            "offset_pct": (float(offset_fraction) * 100.0) if offset_fraction is not None else None,
+            "chase_id": entry_policy_id,
+            "fill_ts": None,
+            "fill_price": None,
+            "fill_model": None,
+        })
     intent = store.append("order_intent", {
         "record_id": f"order-intent:{event_id}:paper-submit", "episode_id": identity["episode_id"], "event_id": event_id,
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
-        "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
-        "limit_price": _first(order.get("limit_price"), order.get("price")), "requested_qty": order.get("qty"),
+        "signal_price": signal_price,
+        "limit_price": limit_price, "requested_qty": order.get("qty"),
         "executed_direction": identity["executed_direction"], "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
         "paper_only": bool(policy["paper_policy_spec"]["paper_only"]),
         "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "chase_schedule": order.get("research_chase_schedule") or signal.get("research_chase_schedule") or {},
         "chase_schedule_authoritative": bool(order.get("chase_schedule_authoritative") or signal.get("chase_schedule_authoritative")),
+        "entry_children": entry_children,
+        "entry_children_count": len(entry_children),
+        "atr14_pct_at_signal": atr14_pct_at_signal,
+        "atr14_pct_basis": "SIGNAL_TIME_3M_ATR14" if atr14_pct_at_signal is not None else "UNAVAILABLE",
         **policy,
         "effective_execution_mode": "PAPER_OBSERVED",
     })
@@ -420,12 +479,15 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         **policy,
     }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    atr14_pct_at_fill = _paper_atr14_pct_3m(position, order)
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:primary-fill", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "fill_ts": _first(position.get("entry_ts"), order.get("fill_ts")),
         "fill_price": _first(position.get("entry"), order.get("fill_price")), "filled_qty": _first(position.get("qty"), order.get("qty")),
         "requested_qty": order.get("qty"), "partial_fill": bool(order.get("partial_fill")),
         "fill_model": _first(position.get("fill_model"), order.get("fill_model")),
+        "atr14_pct_at_fill": atr14_pct_at_fill,
+        "atr14_pct_basis": "FILL_TIME_3M_ATR14" if atr14_pct_at_fill is not None else "UNAVAILABLE",
         "authenticated_exchange_actual": False, "paper_observation": True,
         "source_market_evidence_required_for_conservative_claim": True,
         **lifecycle_identity,

@@ -306,6 +306,9 @@ class V3BridgeTests(unittest.TestCase):
                 "paper_only": True, "relay_eligible": False,
                 "policy_id": "OFFSET_029_ATR_TP_25", "policy_signature": "policy-paper",
                 "policy_epoch_id": "policy-epoch-paper",
+                "entry_limit_policy": "OFFSET_0.29_CHASE_w234_s25_i60",
+                "entry_offset_fraction": 0.0029,
+                "context": {"cycle_3m_universe": {"atr14_pct_3m": 0.081}},
             }
             order = {
                 "trade_id": "o29atr-1", "created_ts": 1001, "signal_dir": "LONG",
@@ -315,7 +318,8 @@ class V3BridgeTests(unittest.TestCase):
                 "research_chase_schedule": {"authoritative": True, "intervals": [{"step": 0}]},
             }
             submit = dual_write_paper_order_intent(order, signal, epoch_id="epoch-v3-test", data_dir=tmp)
-            position = {"trade_id": "o29atr-1", "entry_ts": 1010, "entry": 100.7071, "qty": 0.2, "fill_model": "LIMIT_TOUCH"}
+            position = {"trade_id": "o29atr-1", "entry_ts": 1010, "entry": 100.7071, "qty": 0.2,
+                        "fill_model": "LIMIT_TOUCH", "atr14_pct_3m": 0.083}
             fill = dual_write_paper_fill(order, signal, position, epoch_id="epoch-v3-test", data_dir=tmp)
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             self.assertTrue(submit["store_verification"]["passed"])
@@ -325,6 +329,10 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(intent["intent_kind"], "ACTUAL_PAPER_LIMIT_SUBMIT")
             self.assertEqual(intent["requested_qty"], 0.2)
             self.assertTrue(intent["chase_schedule_authoritative"])
+            self.assertEqual(intent["atr14_pct_at_signal"], 0.081)
+            self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
+            self.assertEqual(intent["entry_children_count"], 1)
+            self.assertEqual(intent["entry_children"][0]["offset_pct"], 0.29)
             self.assertTrue(intent["policy_signature"].startswith("paper-policy-"))
             self.assertTrue(intent["policy_epoch_id"].startswith("paper-policy-epoch-"))
             self.assertEqual(intent["base_policy_signature"], "policy-paper")
@@ -332,6 +340,8 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(execution["execution_world"], "SHOWCASE_PAPER_OBSERVED")
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertEqual(execution["filled_qty"], 0.2)
+            self.assertEqual(execution["atr14_pct_at_fill"], 0.083)
+            self.assertEqual(execution["atr14_pct_basis"], "FILL_TIME_3M_ATR14")
             self.assertEqual(intent["episode_id"], execution["episode_id"])
             lifecycle_rows = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
             fill_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_POSITION_OPEN")

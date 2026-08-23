@@ -37,6 +37,73 @@ def source(event_id="event-1", episode_id="episode-1"):
 
 
 class V3CandidateTests(unittest.TestCase):
+    def test_current_actual_paper_schema_materializes_complete_policy_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-clean")
+            segment = store.put_market_segment(
+                source="TEST_1S", symbol="BTCUSD", timeframe="1s",
+                start_ts=1000, end_ts=1002,
+                rows=[
+                    {"ts": 1000, "price": 100},
+                    {"ts": 1001, "price": 100.2},
+                    {"ts": 1002, "price": 100.4},
+                ],
+            )
+            store.append("opportunity", {
+                "record_id": "opportunity:episode-1", "episode_id": "episode-1",
+                "signal_ts": 1000,
+                "feature_snapshot_at_signal": {"market_context": {"regime_label": "BULL"}},
+            })
+            store.append("order_intent", {
+                "record_id": "order-intent:event-1:paper-submit", "episode_id": "episode-1",
+                "event_id": "event-1", "executed_direction": "LONG",
+                "signal_price": 99.71, "limit_price": 100.0,
+                "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+                "paper_policy_spec": {
+                    "entry_limit_policy": "OFFSET_0.29_CHASE_w234_s25_i60",
+                    "entry_offset_fraction": 0.0029,
+                },
+            })
+            store.append("execution", {
+                "record_id": "execution:event-1:primary-fill", "episode_id": "episode-1",
+                "event_id": "event-1", "fill_ts": 1000, "fill_price": 100,
+                "fill_model": "PAPER_OBSERVED",
+            })
+            store.append("lifecycle", {
+                "record_id": "lifecycle:event-1:terminal", "episode_id": "episode-1",
+                "event_id": "event-1", "terminal": True,
+                "outcome_state": "REALIZED_PROFIT", "market_segment_refs": [segment],
+            })
+            with open(store.root / "cycle_3m_universe.jsonl", "w", encoding="utf-8") as handle:
+                handle.write('{"trade_id":"event-1","atr14_pct_3m":0.1}\n')
+
+            rows = load_candidate_inputs(tmp, epoch_id="epoch-clean")
+            report = evaluate_protection_screen(rows)
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["atr14_pct"], 0.1)
+            self.assertEqual(rows[0]["entry_children"][0]["fill_price"], 100)
+            self.assertEqual(rows[0]["entry_children"][0]["offset_pct"], 0.29)
+            self.assertEqual(report["unique_policies_evaluated"], len(protection_screen()))
+
+    def test_current_schema_identity_mismatch_is_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-clean")
+            store.append("opportunity", {
+                "record_id": "opportunity:episode-good", "episode_id": "episode-good",
+                "signal_ts": 1000,
+            })
+            store.append("order_intent", {
+                "record_id": "order-intent:event-1", "episode_id": "episode-wrong",
+                "event_id": "event-1", "executed_direction": "LONG",
+                "policy_id": "OFFSET_0.29_CHASE_patient",
+            })
+            store.append("lifecycle", {
+                "record_id": "lifecycle:event-1:terminal", "episode_id": "episode-good",
+                "event_id": "event-1", "terminal": True,
+            })
+            self.assertEqual(load_candidate_inputs(tmp, epoch_id="epoch-clean"), [])
+
     def test_candidate_regime_reads_nested_signal_market_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-clean")

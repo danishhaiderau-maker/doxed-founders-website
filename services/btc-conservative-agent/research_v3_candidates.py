@@ -103,6 +103,72 @@ def _load_segment(root: Path, ref: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in (envelope.get("rows") or []) if isinstance(row, dict)]
 
 
+def _number(value: Any) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cycle_atr_by_event(root: Path) -> dict[str, float]:
+    """Index the immutable 3-minute receipt used by pre-normalized V3.1 rows."""
+    result: dict[str, float] = {}
+    for row in _read_jsonl(root / "cycle_3m_universe.jsonl"):
+        event_id = str(row.get("trade_id") or row.get("event_id") or "")
+        atr = _number(row.get("atr14_pct_3m"))
+        if event_id and atr is not None and atr > 0:
+            result[event_id] = atr
+    return result
+
+
+def _normalized_entry_children(
+    intent: Mapping[str, Any],
+    executions: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize both multiverse and actual-paper V3.1 intent schemas."""
+    children = [dict(row) for row in (intent.get("entry_children") or []) if isinstance(row, Mapping)]
+    fill = next((
+        row for row in sorted(executions, key=lambda value: _number(value.get("fill_ts")) or float("inf"))
+        if _number(row.get("fill_ts")) is not None and _number(row.get("fill_price")) is not None
+    ), None)
+    if children:
+        if fill is not None:
+            for child in children:
+                child.setdefault("fill_ts", fill.get("fill_ts"))
+                child.setdefault("fill_price", fill.get("fill_price"))
+                child.setdefault("fill_model", fill.get("fill_model") or "PAPER_OBSERVED")
+        return children
+
+    spec = intent.get("paper_policy_spec") if isinstance(intent.get("paper_policy_spec"), Mapping) else {}
+    policy_id = str(
+        spec.get("entry_limit_policy")
+        or spec.get("policy_id")
+        or intent.get("policy_id")
+        or ""
+    )
+    if not policy_id:
+        return []
+    offset = _number(spec.get("entry_offset_fraction"))
+    offset_pct = offset * 100.0 if offset is not None else None
+    schedule = intent.get("chase_schedule") if isinstance(intent.get("chase_schedule"), Mapping) else {}
+    intervals = [row for row in (schedule.get("intervals") or []) if isinstance(row, Mapping)]
+    if offset_pct is None and intervals:
+        offset_pct = _number(intervals[0].get("offset_pct"))
+    if offset_pct is None:
+        signal_price = _number(intent.get("signal_price"))
+        limit_price = _number(intent.get("limit_price"))
+        if signal_price and limit_price is not None:
+            offset_pct = abs(limit_price - signal_price) / signal_price * 100.0
+    return [{
+        "entry_policy_id": policy_id,
+        "offset_pct": offset_pct,
+        "chase_id": policy_id,
+        "fill_ts": fill.get("fill_ts") if fill is not None else None,
+        "fill_price": fill.get("fill_price") if fill is not None else None,
+        "fill_model": ((fill.get("fill_model") or "PAPER_OBSERVED") if fill is not None else None),
+    }]
+
+
 def load_candidate_inputs(
     data_dir: str | Path,
     *,
@@ -140,10 +206,21 @@ def load_candidate_inputs(
         and in_scope(row)
         and str(row.get("episode_id") or "") in allowed_episodes
     }
+    executions_by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _read_jsonl(ledgers / "execution.jsonl"):
+        if not in_scope(row) or str(row.get("episode_id") or "") not in allowed_episodes:
+            continue
+        executions_by_event[str(row.get("event_id") or "")].append(row)
+    cycle_atr = _cycle_atr_by_event(root)
     result = []
     for event_id in sorted(set(intents) & set(terminal)):
         intent, lifecycle = intents[event_id], terminal[event_id]
         episode_id = str(lifecycle.get("episode_id") or intent.get("episode_id") or "")
+        if str(intent.get("episode_id") or "") != episode_id:
+            continue
+        executions = executions_by_event.get(event_id, [])
+        if any(str(row.get("episode_id") or "") != episode_id for row in executions):
+            continue
         one_second_rows = []
         one_minute_rows = []
         for ref in lifecycle.get("market_segment_refs") or []:
@@ -153,6 +230,17 @@ def load_candidate_inputs(
                 one_minute_rows.extend(_load_segment(root, ref))
         feature = (opportunities.get(episode_id) or {}).get("feature_snapshot_at_signal") or {}
         market_context = feature.get("market_context") if isinstance(feature.get("market_context"), Mapping) else {}
+        fill_execution = next((
+            row for row in executions
+            if _number(row.get("fill_ts")) is not None and _number(row.get("fill_price")) is not None
+        ), {})
+        atr14_pct = next((value for value in (
+            _number(fill_execution.get("atr14_pct_at_fill")),
+            _number(intent.get("atr14_pct_at_signal")),
+            _number(intent.get("atr14_pct")),
+            _number(feature.get("atr14_pct_3m")),
+            cycle_atr.get(event_id),
+        ) if value is not None and value > 0), None)
         result.append({
             "event_id": event_id,
             "episode_id": episode_id,
@@ -164,10 +252,15 @@ def load_candidate_inputs(
                 or "UNKNOWN"
             ),
             "direction": intent.get("executed_direction"),
-            "atr14_pct": intent.get("atr14_pct"),
+            "atr14_pct": atr14_pct,
+            "atr14_pct_basis": (
+                "FILL_TIME_3M_ATR14" if _number(fill_execution.get("atr14_pct_at_fill")) is not None
+                else "SIGNAL_TIME_3M_ATR14" if atr14_pct is not None
+                else "UNAVAILABLE"
+            ),
             "leverage": intent.get("leverage") or 100.0,
             "margin_usd": intent.get("margin_usd") or 20.0,
-            "entry_children": intent.get("entry_children") or [],
+            "entry_children": _normalized_entry_children(intent, executions),
             "ordered_1s_prices": one_second_rows,
             "canonical_1m_ohlc": one_minute_rows,
             "terminal_outcome_state": lifecycle.get("outcome_state"),
