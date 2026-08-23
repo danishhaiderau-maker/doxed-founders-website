@@ -103,3 +103,11 @@ def test_continuous_saved_off_choice_overrides_legacy_direct_entry_flag() -> Non
         },
     )
     assert fn() is False
+
+
+def test_fresh_reset_removes_duplicate_intent_audit_and_rotations() -> None:
+    wipe_paths = _function_source("research_wipe_file_paths")
+    rotated_paths = _function_source("_research_wipe_rotated_jsonl_paths")
+
+    assert "DUPLICATE_INTENT_AUDIT_FILE" in wipe_paths
+    assert "DUPLICATE_INTENT_AUDIT_FILE" in rotated_paths
