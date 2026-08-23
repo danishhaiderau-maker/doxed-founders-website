@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -195,6 +196,42 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertEqual(result["status"], "SKIPPED_INTERVAL")
             self.assertEqual(len(list(history.iterdir())), 3)
             self.assertGreater(result["derived_deleted_bytes"], 0)
+
+    def test_interval_skip_refreshes_paths_after_repository_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old_root = base / "OneDrive" / "old-repo"
+            new_root = base / "canonical" / "new-repo"
+            mirror = base / "canonical" / "fly-data-mirror"
+            old_root.mkdir(parents=True)
+            new_root.mkdir(parents=True)
+            mirror.mkdir(parents=True)
+            now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+
+            retention.run_analyzer_retention(old_root, data_root=mirror, now=now, force=True)
+            shutil.copy2(
+                old_root / retention.MARKER_FILE,
+                new_root / retention.MARKER_FILE,
+            )
+            shutil.copy2(
+                old_root / retention.STATUS_FILE,
+                new_root / retention.STATUS_FILE,
+            )
+
+            result = retention.run_analyzer_retention(
+                new_root,
+                data_root=mirror,
+                now=now + timedelta(hours=1),
+            )
+
+            self.assertEqual(result["status"], "SKIPPED_INTERVAL")
+            self.assertEqual(result["report_root"], str(new_root.resolve()))
+            self.assertEqual(result["data_root"], str(mirror.resolve()))
+            self.assertIsNone(result["daily_snapshot"])
+            public_status = json.loads(
+                (new_root / retention.STATUS_FILE).read_text(encoding="utf-8")
+            )
+            self.assertNotIn("OneDrive", json.dumps(public_status))
 
 
 if __name__ == "__main__":

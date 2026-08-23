@@ -536,16 +536,50 @@ def run_analyzer_retention(
                     ),
                 ]
                 _reconcile_session_index(root)
-                return {
+                skipped = {
                     "schema": RETENTION_SCHEMA,
                     "status": "SKIPPED_INTERVAL",
                     "last_completed_at": previous_at.isoformat(),
                     "next_due_in_hours": round(interval_hours - age_hours, 2),
+                    "report_root": str(root),
+                    "data_root": str(data_root),
                     "derived_pruned": derived_pruned,
                     "derived_deleted_bytes": sum(
                         int(row.get("deleted_bytes") or 0) for row in derived_pruned
                     ),
                 }
+                # The repository or mirror may have moved since the last daily
+                # retention pass.  Leaving the prior status file untouched made
+                # the read-only dashboard advertise obsolete (notably OneDrive)
+                # paths for up to 24 hours even though the analyzer was already
+                # running from the canonical location.  Refresh public metadata
+                # on every analyzer cycle without repeating destructive cleanup.
+                prior_status: dict = {}
+                status_path = root / STATUS_FILE
+                try:
+                    prior_status = json.loads(status_path.read_text(encoding="utf-8"))
+                    if not isinstance(prior_status, dict):
+                        prior_status = {}
+                except (OSError, ValueError, TypeError):
+                    prior_status = {}
+                prior_data_root = str(prior_status.get("data_root") or "")
+                refreshed = {**prior_status, **skipped}
+                refreshed["pruned"] = derived_pruned
+                prior_snapshot = Path(str(prior_status.get("daily_snapshot") or ""))
+                try:
+                    prior_snapshot.relative_to(root)
+                    refreshed["daily_snapshot"] = str(prior_snapshot)
+                except (ValueError, OSError):
+                    refreshed["daily_snapshot"] = None
+                if prior_data_root and prior_data_root != str(data_root):
+                    for key in (
+                        "raw_mirror_bytes",
+                        "raw_mirror_usage_pct",
+                        "raw_mirror_cap_status",
+                    ):
+                        refreshed.pop(key, None)
+                _atomic_json(status_path, refreshed)
+                return refreshed
         except (OSError, ValueError, TypeError, KeyError):
             pass
 
