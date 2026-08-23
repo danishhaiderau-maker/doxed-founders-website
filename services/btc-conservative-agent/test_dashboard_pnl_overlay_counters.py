@@ -79,6 +79,7 @@ def test_relay_snapshot_emits_pnl_and_counter_keys() -> None:
         'snapshot["session_pnl_usd"]',
         'snapshot["trades_display_limit"]',
         'snapshot["lane_pnl_ledger"]',
+        'snapshot["lane_position_counts"]',
         'snapshot["account_balance"]',
         'snapshot["equity"]',
     ]
@@ -111,6 +112,7 @@ def test_overlay_key_list_includes_pnl_and_counter_keys() -> None:
         '"session_pnl_usd"',
         '"trades_display_limit"',
         '"lane_pnl_ledger"',
+        '"lane_position_counts"',
         '"account_balance"',
         '"equity"',
     ]
@@ -121,6 +123,19 @@ def test_overlay_key_list_includes_pnl_and_counter_keys() -> None:
         "freezes at the first heavy build and under-counts trades that "
         "close afterwards (regression detected 2026-08-06)."
     )
+
+
+def test_relay_snapshot_derives_lane_exposure_from_current_rows() -> None:
+    """Patient Chase tile counts must not freeze at the first heavy build."""
+    body = ast.get_source_segment(
+        BOT_SOURCE, _function("_build_relay_execution_state_snapshot")
+    )
+    assert body is not None
+    assert 'snapshot["lane_position_counts"] = {}' in body
+    assert "for position in positions_copy" in body
+    assert "for order in pending_copy" in body
+    assert "_normalize_lane_key(position) == lane_name" in body
+    assert "_normalize_lane_key(order) == lane_name" in body
 
 
 def _overlay_key_list_literal() -> tuple:

@@ -33765,6 +33765,28 @@ def _build_relay_execution_state_snapshot() -> dict:
         "count": len(active_list),
         "signals": active_list,
     }
+    # Keep per-lane tile exposure aligned with the same bounded execution
+    # snapshot used for Positions and Pending Orders.  The heavy presentation
+    # payload is intentionally cached while paper execution is running, so
+    # these counts must travel through the live overlay as well or they freeze
+    # at the values observed during the first heavy build.
+    snapshot["lane_position_counts"] = {}
+    for lane_name in dict.fromkeys(
+        PATHWAY_LAB_LANES + (RESEARCH_LANE_CONTINUOUS,)
+    ):
+        snapshot["lane_position_counts"][lane_name] = {
+            "open": sum(
+                1
+                for position in positions_copy
+                if position.get("status") == "OPEN"
+                and _normalize_lane_key(position) == lane_name
+            ),
+            "pending": sum(
+                1
+                for order in pending_copy
+                if _normalize_lane_key(order) == lane_name
+            ),
+        }
     snapshot["trades_map"] = trades_map_lite
     # Money-path PnL / counters / lane ledger: these feed the dashboard
     # tiles via the ACTIVE_EXECUTION_OVERLAY path (see
@@ -34890,6 +34912,7 @@ def _api_state_cache_refresher_loop():
                     "session_pnl_usd",
                     "trades_display_limit",
                     "lane_pnl_ledger",
+                    "lane_position_counts",
                     "account_balance",
                     "equity",
                     "source_git_rev",
