@@ -29052,15 +29052,16 @@ HTML = """<!DOCTYPE html>
 
 <h1>3-Factor Research Bot — Bitfinex <span style="color:#3fb950;font-size:0.55em;vertical-align:middle;">__BOT_VERSION__</span></h1>
 <div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
-  <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Research stack build</div>
+  <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Execution/UI build</div>
   <div style="font-size:1.15rem;font-weight:700;color:#58a6ff;margin:4px 0;">__BOT_VERSION__</div>
+  <div style="font-size:0.85rem;color:#c9d1d9;margin:4px 0;">Collector: <strong id="collectorVersionBanner">checking…</strong> · Runtime revision: <strong id="runtimeRevisionBanner">checking…</strong> · Compatibility writer: <span id="legacyCollectorVersionBanner">checking…</span></div>
   <div style="font-size:0.85rem;color:#8b949e;">Research analyzer <a href="__ANALYZER_URL__" style="color:#58a6ff;">open reports</a> · Public desk <a href="__AGENT_HUB_URL__" style="color:#a371f7;font-weight:600;">Agent Hub →</a> (doxxedcrypto.digital)</div>
 </div>
 <p style="margin:8px 0;padding:10px 14px;background:#1f1630;border:1px solid #6e40c955;border-radius:8px;">
   <strong style="color:#a371f7;">Showcase + relay</strong> — live book and Bitfinex relay sim run on
   <a href="__AGENT_HUB_URL__" style="color:#58a6ff;">doxxedcrypto.digital Agent Hub</a>, not this local Flask page.
 </p>
-<p style="color:#8b949e;margin-top:0;">Bot build: <strong id="botVersionBanner">__BOT_VERSION__</strong> · Exchange: <strong>Bitfinex</strong> perp · Symbol: <span id="marketSymbol">tBTCF0:USTF0</span> · Research / sim mode · <a href="__DASHBOARD_URL__" style="color:#58a6ff;">__DASHBOARD_URL__</a></p>
+<p style="color:#8b949e;margin-top:0;">Execution/UI build: <strong id="botVersionBanner">__BOT_VERSION__</strong> · Exchange: <strong>Bitfinex</strong> perp · Symbol: <span id="marketSymbol">tBTCF0:USTF0</span> · Research / sim mode · <a href="__DASHBOARD_URL__" style="color:#58a6ff;">__DASHBOARD_URL__</a></p>
 <p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
   Server: checking…
 </p>
@@ -30309,6 +30310,9 @@ DASHBOARD_JS = """(function () {
         if (d.api_state_error) {
           throw new Error(d.api_state_error);
         }
+        safeText('collectorVersionBanner', d.collector_version || 'UNKNOWN');
+        safeText('runtimeRevisionBanner', d.git_rev || d.source_git_rev || 'UNKNOWN');
+        safeText('legacyCollectorVersionBanner', d.legacy_collector_version || 'none');
         const skipBlk = d.display_skip_block || {};
         const rs = document.getElementById('refreshStatus');
         if (rs) rs.innerText = 'Last updated ' + formatMelbourneNow() + ' (Melbourne)';
