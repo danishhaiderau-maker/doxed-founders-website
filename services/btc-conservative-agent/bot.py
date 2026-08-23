@@ -31958,10 +31958,12 @@ def _refresh_bitfinex_exposure_audit() -> dict:
         exchange_orders = _exchange_call_with_retry(
             lambda: bitfinex_private.fetch_open_orders(SYMBOL_CCXT),
             label="BITFINEX_EXPOSURE_AUDIT_ORDERS",
+            max_attempts=1,
         ) or []
         exchange_positions_raw = _exchange_call_with_retry(
             lambda: bitfinex_private.fetch_positions([SYMBOL_CCXT]),
             label="BITFINEX_EXPOSURE_AUDIT_POSITIONS",
+            max_attempts=1,
         ) or []
         exchange_trades = []
         trades_synced = False
@@ -31970,6 +31972,7 @@ def _refresh_bitfinex_exposure_audit() -> dict:
             exchange_trades = _exchange_call_with_retry(
                 lambda: bitfinex_private.fetch_my_trades(SYMBOL_CCXT, limit=50),
                 label="BITFINEX_EXPOSURE_AUDIT_TRADES",
+                max_attempts=1,
             ) or []
             trades_synced = True
         except Exception as exc:
