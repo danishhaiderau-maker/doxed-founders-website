@@ -52,8 +52,7 @@
     ["POST", "/api/spread-gate", "api_spread_gate"],
     ["OPTIONS", "/api/spread-gate", "api_spread_gate"],
     ["POST", "/api/set_spread_gate", "set_spread_gate_api"],
-    ["POST", "/api/set_edge_threshold", "api_set_edge_threshold"],
-    ["POST", "/api/set_edge_range", "api_set_edge_range"],
+    ["POST", "/api/live-copy-coordination", "api_live_copy_coordination"],
     ["GET", "/api/download_debug_config", "download_debug_config"],
     ["GET", "/api/data-sync/manifest", "api_data_sync_manifest"],
     ["GET", "/api/data-sync/file", "api_data_sync_file"],
@@ -67,8 +66,11 @@
     ["GET", "/analysis/login", "analyzer_mirror_login"],
     ["POST", "/analysis/login", "analyzer_mirror_login"],
     ["POST", "/analysis/logout", "analyzer_mirror_logout"],
+    ["GET", "/api/fresh_epoch_reset", "api_fresh_epoch_reset"],
+    ["POST", "/api/fresh_epoch_reset", "api_fresh_epoch_reset"],
     ["GET", "/api/export_debug", "export_debug"],
-    ["GET", "/api/export_csv", "export_csv"]
+    ["GET", "/api/export_csv", "export_csv"],
+    ["GET", "/api/export.csv", "export_csv"]
   ],
   "main_workers": [
     "run_flask",
@@ -84,7 +86,12 @@
     "periodic_pipeline_loop",
     "watchdog_loop",
     "bitfinex_live_reconcile_loop",
-    "_platform_relay_connection_keepalive_loop"
+    "_platform_relay_connection_keepalive_loop",
+    "ws_tick_lifecycle_worker",
+    "bbo_refresh_loop",
+    "order_book_refresh_loop",
+    "ohlcv_refresh_loop",
+    "microstructure_capture_loop"
   ],
   "worker_start_contract": [
     {"target": "run_flask", "safe_thread": false, "daemon": true},
@@ -100,7 +107,12 @@
     {"target": "periodic_pipeline_loop", "safe_thread": true, "daemon": true},
     {"target": "watchdog_loop", "safe_thread": true, "daemon": true},
     {"target": "bitfinex_live_reconcile_loop", "safe_thread": true, "daemon": true},
-    {"target": "_platform_relay_connection_keepalive_loop", "safe_thread": true, "daemon": true}
+    {"target": "_platform_relay_connection_keepalive_loop", "safe_thread": true, "daemon": true},
+    {"target": "ws_tick_lifecycle_worker", "safe_thread": true, "daemon": true},
+    {"target": "bbo_refresh_loop", "safe_thread": true, "daemon": true},
+    {"target": "order_book_refresh_loop", "safe_thread": true, "daemon": true},
+    {"target": "ohlcv_refresh_loop", "safe_thread": true, "daemon": true},
+    {"target": "microstructure_capture_loop", "safe_thread": true, "daemon": true}
   ],
   "import_side_effect_calls": [
     "requests.Session",
@@ -125,6 +137,7 @@
     "logger.handlers.clear",
     "logger.addHandler",
     "logger.addHandler",
+    "Queue",
     "signal.signal",
     "signal.signal"
   ],
@@ -156,6 +169,7 @@
     ["_adopt_from_rebuild", "trade_lock", "state_lock"],
     ["_arm_live_control", "_live_control_lock", "state_lock"],
     ["_disarm_live_control", "_live_control_lock", "state_lock"],
+    ["_reset_collector_epoch_state", "_collector_epoch_lock", "replay_lock"],
     ["process_signal", "lane_lock", "state_lock"],
     ["refresh_bbo_state", "_bbo_refresh_lock", "state_lock"],
     ["refresh_order_book_state", "_book_refresh_lock", "state_lock"]
