@@ -181,6 +181,16 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertFalse(result["ai_progressing"])
         self.assertIn("AI_CADENCE_STALLED", result["reasons"])
 
+    def test_latched_ai_stall_exposes_independent_recovery_probe(self):
+        self.snapshot.__globals__["_strategy_progress_incident"].update({
+            "active": True,
+            "reasons": ["AI_CADENCE_STALLED"],
+        })
+        result = self.snapshot(self.now)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["ai_progressing"])
+        self.assertTrue(result["recovery_probe_ok"])
+
     def test_failure_reasons_are_explicit(self):
         self.lock.acquire()
         try:
@@ -238,6 +248,34 @@ class StrategyProgressIncidentTest(unittest.TestCase):
             current = self.update(failed, self.now + offset)
         self.assertTrue(current["active"])
         self.assertEqual(6, current["consecutive_failures"])
+
+    def test_ai_only_latch_clears_after_real_recovery_probes(self):
+        failed = {"ok": False, "reasons": ["AI_CADENCE_STALLED"]}
+        for offset in range(3):
+            self.update(failed, self.now + offset)
+        self.assertTrue(self.incident["active"])
+
+        recovery = {
+            "ok": False,
+            "reasons": ["AI_CADENCE_STALLED"],
+            "recovery_probe_ok": True,
+        }
+        first = self.update(recovery, self.now + 5)
+        self.assertTrue(first["active"])
+        cleared = self.update(recovery, self.now + 10)
+        self.assertFalse(cleared["active"])
+
+    def test_non_ai_latch_cannot_clear_from_recovery_probe(self):
+        failed = {"ok": False, "reasons": ["TRADE_LOCK_UNAVAILABLE"]}
+        for offset in range(3):
+            self.update(failed, self.now + offset)
+        result = self.update({
+            "ok": False,
+            "reasons": ["TRADE_LOCK_UNAVAILABLE"],
+            "recovery_probe_ok": True,
+        }, self.now + 5)
+        self.assertTrue(result["active"])
+        self.assertEqual(0, result["consecutive_successes"])
 
     def test_latched_incident_blocks_only_new_entry_gate(self):
         self.incident.update({

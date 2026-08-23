@@ -28768,7 +28768,14 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         ws_ts and ws_age <= WATCHDOG_WS_TRADE_STALE_SEC
     )
     ws_progressing = bool(transport_progressing and trade_stream_progressing)
-    ai_progressing = bool(not ai_expected or (ai_ts and ai_age <= ai_stale_sec))
+    # Keep the raw observation separate from the entry-suppression latch.  The
+    # watchdog needs this independent signal to prove that a recovery AI call
+    # really completed; otherwise the latch forces ``ai_progressing`` false and
+    # can never accumulate the successful probes required to clear itself.
+    ai_observed_progressing = bool(
+        not ai_expected or (ai_ts and ai_age <= ai_stale_sec)
+    )
+    ai_progressing = ai_observed_progressing
     with _strategy_progress_incident_lock:
         ai_stall_latched = bool(
             _strategy_progress_incident.get("active")
@@ -28797,6 +28804,9 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         "ws_heartbeat_age_sec": ws_hb_age,
         "ai_expected": ai_expected,
         "ai_progressing": ai_progressing,
+        "recovery_probe_ok": bool(
+            lock_available and ws_progressing and ai_observed_progressing
+        ),
         "ai_age_sec": ai_age,
         "ai_stale_after_sec": ai_stale_sec,
         "ai_stall_latched": ai_stall_latched,
@@ -28823,7 +28833,18 @@ def _update_strategy_progress_incident(progress: dict, now: float = None) -> dic
     now = float(now or time.time())
     with _strategy_progress_incident_lock:
         incident = _strategy_progress_incident
-        if progress.get("ok"):
+        incident_is_ai_only = bool(
+            incident["active"]
+            and set(incident.get("reasons") or []) == {"AI_CADENCE_STALLED"}
+        )
+        healthy_probe = bool(
+            progress.get("ok")
+            or (
+                incident_is_ai_only
+                and progress.get("recovery_probe_ok")
+            )
+        )
+        if healthy_probe:
             incident["consecutive_failures"] = 0
             incident["consecutive_successes"] += 1
             if (

@@ -2339,6 +2339,12 @@ def research_jsonl_summary(datasets=None):
 def _paper_trade_index():
     """Map trades_3factor.csv paper fills by trade_id. Missing file → empty."""
     index = {}
+    # A clean epoch with no terminal paper trades legitimately has no CSV yet.
+    # Treat that as an empty terminal cohort without sending the generic robust
+    # reader through dozens of report builders that each log a false pipeline
+    # warning.  Once the writer creates the file, normal schema validation runs.
+    if not os.path.exists(TRADES_FILE):
+        return index
     try:
         frame = robust_read_csv(TRADES_FILE, "paper trade index")
         if frame is None or getattr(frame, "empty", True) or "trade_id" not in frame.columns:
