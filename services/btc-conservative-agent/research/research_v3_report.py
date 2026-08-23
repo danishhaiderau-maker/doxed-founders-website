@@ -219,9 +219,30 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         for (episode_id, policy_id), signatures in signatures_by_episode_policy.items()
         if len(signatures) > 1
     }
+    paper_world_contradiction_rows = []
+    policy_provenance_rows = [
+        *immediate_lane_decisions,
+        *order_intents,
+        *executions,
+        *policy_attributable_lifecycles,
+    ]
+    for row in policy_provenance_rows:
+        if str(row.get("policy_execution_scope") or "") != "PAPER_RESEARCH_ONLY":
+            continue
+        spec = row.get("paper_policy_spec")
+        spec_paper_only = spec.get("paper_only") if isinstance(spec, dict) else None
+        if row.get("paper_only") is not False and spec_paper_only is not False:
+            continue
+        paper_world_contradiction_rows.append({
+            "record_id": str(row.get("record_id") or ""),
+            "episode_id": str(row.get("episode_id") or ""),
+            "policy_id": str(row.get("policy_id") or ""),
+            "top_level_paper_only": row.get("paper_only"),
+            "spec_paper_only": spec_paper_only,
+        })
     policy_identity_contamination = bool(
         policy_signature_collisions or policy_signature_divergence
-        or missing_policy_identity_rows
+        or missing_policy_identity_rows or paper_world_contradiction_rows
     )
     contamination = bool(
         excluded_opportunities or identity_aliases or len(observed_epochs) > 1
@@ -359,6 +380,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "pending_policy_identity_rows": pending_policy_identity_rows,
             "policy_signature_collisions": policy_signature_collisions,
             "policy_signature_divergence": policy_signature_divergence,
+            "paper_world_contradiction_count": len(paper_world_contradiction_rows),
+            "paper_world_contradiction_rows": paper_world_contradiction_rows,
             "contamination_detected": contamination,
         },
         "collection": {

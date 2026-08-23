@@ -233,6 +233,31 @@ class V3ReportTests(unittest.TestCase):
             })
             self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
 
+    def test_report_blocks_paper_scope_with_false_paper_identity(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            store.append("decision", {
+                "record_id": "d-1", "episode_id": "episode-1",
+                "decision_stage": "LANE_POLICY_VERDICT",
+                "policy_id": "CONTINUOUS", "policy_signature": "sig-continuous",
+                "policy_epoch_id": "pe-continuous",
+                "policy_execution_scope": "PAPER_RESEARCH_ONLY",
+                "paper_only": False,
+                "paper_policy_spec": {"paper_only": False, "relay_eligible": True},
+            })
+            report = build_safe_policy_genome_v3_report(data, reports)
+            self.assertEqual(report["status"], "V3_EPOCH_CONTAMINATION_BLOCKED")
+            self.assertEqual(report["epoch_scope"]["paper_world_contradiction_count"], 1)
+            self.assertEqual(
+                report["epoch_scope"]["paper_world_contradiction_rows"][0]["record_id"],
+                "d-1",
+            )
+            self.assertIn("POLICY_IDENTITY_CONTAMINATION", report["blockers"])
+            self.assertIsNone(report["number_one_strategy"])
+
     def test_report_blocks_execution_and_paper_lifecycle_without_lane_provenance(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             store = V3EvidenceStore(data, epoch_id="epoch-v3")
