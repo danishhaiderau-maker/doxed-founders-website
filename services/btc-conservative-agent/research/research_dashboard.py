@@ -1251,21 +1251,29 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
 
 def _combos_payload():
     rep = _read_report("top_combinations_report.json")
-    top = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
-    top.sort(key=lambda x: (x.get("ev_usd") or 0, x.get("pnl_usd") or 0), reverse=True)
+    legacy_top = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
+    legacy_top.sort(key=lambda x: (x.get("ev_usd") or 0, x.get("pnl_usd") or 0), reverse=True)
+    policy_grid = _current_policy_grid_rows(limit=100)
+    current_top = list(policy_grid.get("rows") or [])
     return {
         "schema": "top_combinations_dashboard_v3_1",
         "current_evidence_source": "safe_policy_genome_v3_report.json",
-        "generated_at": rep.get("generated_at"),
-        "total_combos": len(top),
-        "min_trades": rep.get("min_trades_per_combo"),
-        "dimensions": rep.get("dimensions") or [],
-        "filter_note": rep.get("filter_note") or "Known ADX × score gap × entry × lane cohorts only (no UNKNOWN/TYPE_B/OTHER)",
-        "top": top[:100],
-        "policy_grid": _current_policy_grid_rows(limit=100),
+        "generated_at": (_safe_policy_v3_dashboard_source()["report"] or {}).get("generated_at"),
+        "total_combos": len(current_top),
+        "min_trades": None,
+        "dimensions": ["entry", "chase", "fill", "exit", "protection", "regime"],
+        "filter_note": (
+            "Canonical signed V3.1 complete-policy Top 100. The observed executed-lane "
+            "combos below are retained only as excluded legacy description."
+        ),
+        "top": current_top,
+        "policy_grid": policy_grid,
         "legacy_executed_combos": {
             "status": "DESCRIPTIVE_LEGACY_EXCLUDED_FROM_V3_1_QUALIFICATION",
-            "rows": top[:100],
+            "generated_at": rep.get("generated_at"),
+            "min_trades": rep.get("min_trades_per_combo"),
+            "dimensions": rep.get("dimensions") or [],
+            "rows": legacy_top[:100],
         },
     }
 
@@ -4158,14 +4166,16 @@ async function loadChase() {
 async function loadCombos() {
   const r = await fetch('/api/combos');
   const d = await r.json();
+  const legacy = d.legacy_executed_combos || {};
+  const legacyRows = legacy.rows || [];
   const note = document.getElementById('combos-note');
-  if (note) note.textContent = d.filter_note || `Direction-only ADX × score gap × entry × lane (min ${d.min_trades ?? 3} trades, ${d.total_combos ?? 0} shown).`;
+  if (note) note.textContent = `Separate excluded legacy direction-only cohort: ${legacyRows.length} observed combination(s).`;
   document.getElementById('combos-kpis').innerHTML = [
-    ['Known combos', d.total_combos ?? 0],
-    ['Shown', (d.top||[]).length],
-    ['Dimensions', (d.dimensions||[]).join(', ') || 'n/a'],
+    ['Known legacy combos', legacyRows.length],
+    ['Shown', legacyRows.length],
+    ['Dimensions', (legacy.dimensions||[]).join(', ') || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('combos-body').innerHTML = (d.top||[]).map(c => {
+  document.getElementById('combos-body').innerHTML = legacyRows.map(c => {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
     const combo = `${fmtAdxBucket(c.adx_bucket)} + gap ${c.spread_bucket||''} + ${c.entry_mode||''} + ${c.lane||''}`;
     return `<tr class="${cls}"><td>${combo}</td><td>${fmtAdxBucket(c.adx_bucket)}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
