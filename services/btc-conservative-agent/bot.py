@@ -40180,11 +40180,20 @@ def _compact_source_market_evidence(evidence):
 
 
 def close_replay_buffer(trade_id):
+    buf = None
     with replay_lock:
         buf = replay_buffers.get(trade_id)
         if buf:
             buf["closed"] = True
-            dump_replay(trade_id)
+    if not buf:
+        return
+    # ``dump_replay`` owns replay_lock. Calling it while holding this
+    # non-reentrant lock deadlocked the state-monitor thread and eventually
+    # starved the scheduled AI cycle. Keep the close marker atomic, then let
+    # the writer take the lock exactly once.
+    dump_replay(trade_id)
+    with replay_lock:
+        if replay_buffers.get(trade_id) is buf:
             replay_buffers.pop(trade_id, None)
 
 def dump_replay(trade_id: str):

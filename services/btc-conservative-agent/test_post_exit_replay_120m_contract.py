@@ -76,9 +76,32 @@ def test_ttl_complete_and_paper_id_hooks():
     assert "_sync_order_multiverse(signal, path_complete=False)" in SOURCE
 
 
+def test_close_replay_does_not_recursively_take_non_reentrant_lock():
+    close = _function_source("close_replay_buffer")
+    tree = ast.parse(close)
+    lock_blocks = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Name)
+            and item.context_expr.id == "replay_lock"
+            for item in node.items
+        )
+    ]
+    assert lock_blocks
+    for block in lock_blocks:
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "dump_replay"
+            for node in ast.walk(block)
+        )
+
+
 if __name__ == "__main__":
     test_post_exit_ring_survives_pre_exit_cap_and_covers_120m()
     test_executable_bbo_marks_and_restart_sidecar_are_persisted()
     test_missing_future_horizons_are_unknown_not_last_tick_substitutions()
     test_ttl_complete_and_paper_id_hooks()
+    test_close_replay_does_not_recursively_take_non_reentrant_lock()
     print("PASS: 120m replay collection and truthful horizon contract")
