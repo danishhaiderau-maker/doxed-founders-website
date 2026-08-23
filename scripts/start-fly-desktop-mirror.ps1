@@ -6,7 +6,20 @@ param(
 $ErrorActionPreference = "Continue"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-$python = (Get-Command python -ErrorAction Stop).Source
+$pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+if ($pythonCommand) {
+  $python = $pythonCommand.Source
+} else {
+  $pythonCandidates = @(
+    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\Python\Python313\python.exe")
+  )
+  $python = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if (-not $python) {
+    throw "Python runtime not found. Install Python or add python.exe to PATH before starting the Fly desktop mirror."
+  }
+}
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 
