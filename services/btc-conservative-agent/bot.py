@@ -29718,12 +29718,29 @@ DASHBOARD_JS = """(function () {
     function executionControlsBusy() {
       return Date.now() < executionControlsBusyUntil || executionControlSaveCount > 0;
     }
-    function renderUltimateGatePanel(gates) {
+    function renderUltimateGatePanel(gates, runtimeState) {
       const el = document.getElementById('ultimateGatePanel');
       if (!el || !gates) return;
+      const d = runtimeState || {};
       const bands = (gates.ai_bands_enabled || []).join(', ') || 'none';
       const chase = (gates.chase_buckets_enabled || []).join(', ') || 'none';
+      const paperEntriesAllowed = d.execution_paused !== true
+        && d.signal_generation_ready === true;
+      const paperEntryReason = paperEntriesAllowed
+        ? 'ALLOWED'
+        : (d.execution_reason || d.new_entry_block_reason || 'NOT READY');
+      const liveCopyAllowed = d.live_armed === true
+        && d.bitfinex_live_enabled === true;
+      const liveCopyReason = liveCopyAllowed
+        ? 'ARMED'
+        : 'BLOCKED — DISARMED';
       el.innerHTML =
+        '<div><strong>PAPER ENTRIES:</strong> <span style="color:'
+          + (paperEntriesAllowed ? '#3fb950' : '#f85149') + ';font-weight:700;">'
+          + paperEntryReason + '</span></div>' +
+        '<div><strong>BITFINEX LIVE:</strong> <span style="color:'
+          + (liveCopyAllowed ? '#f59e0b' : '#8b949e') + ';font-weight:700;">'
+          + liveCopyReason + '</span></div>' +
         '<div><strong>AI reviewer:</strong> ' + (gates.ai_reviewer_enabled ? 'ON' : 'OFF') + '</div>' +
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
@@ -30960,7 +30977,7 @@ DASHBOARD_JS = """(function () {
             mcp.value = d.max_active_signals;
           }
         }
-        renderUltimateGatePanel(d.dashboard_execution_gates || {});
+        renderUltimateGatePanel(d.dashboard_execution_gates || {}, d);
         if (!executionControlsBusy()) {
           if (d.ai_execution_bands) {
             syncAiBandControls(d.ai_execution_bands);
