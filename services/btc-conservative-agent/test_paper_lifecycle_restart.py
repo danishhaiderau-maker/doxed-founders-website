@@ -30,6 +30,8 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.addCleanup(os.chdir, self.cwd)
         self.bot.pending_orders.clear()
         self.bot.open_positions.clear()
+        self.bot.trades.clear()
+        self.bot.trades_map.clear()
         for rows in self.bot.lane_pending_orders.values():
             rows.clear()
         for rows in self.bot.lane_open_positions.values():
@@ -103,6 +105,44 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         result = self.bot.load_paper_lifecycle()
         self.assertEqual(result["invalid"], 1)
         self.assertFalse(self.bot.open_positions)
+
+    def test_terminal_trade_cannot_resurrect_from_stale_paper_snapshot(self):
+        position = self._position()
+        order = self._order()
+        order["trade_id"] = position["trade_id"]
+        self.bot.open_positions.append(position)
+        self.bot.pending_orders.append(order)
+        self.bot.lane_open_positions["OFFSET_029_ATR_TP_25"].append(position)
+        self.bot.lane_pending_orders["CONTINUOUS"].append(order)
+        self.bot.trades.append({
+            "trade_id": position["trade_id"],
+            "exit_reason": "PATH_END_120M",
+        })
+        self.bot.trades_map[position["trade_id"]] = {
+            "signal_ref": {
+                "trade_id": position["trade_id"],
+                "status": "CLOSED",
+                "outcome": "PATH_END_120M",
+            }
+        }
+
+        result = self.bot.reconcile_restored_paper_terminal_conflicts()
+
+        self.assertEqual(result["positions"], 1)
+        self.assertEqual(result["pending_orders"], 1)
+        self.assertFalse(self.bot.open_positions)
+        self.assertFalse(self.bot.pending_orders)
+        persisted = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(persisted["positions"], [])
+        self.assertEqual(persisted["pending_orders"], [])
+
+    def test_terminal_reconcile_never_removes_bitfinex_backed_exposure(self):
+        position = {**self._position(), "bitfinex_position_id": "live-pos"}
+        self.bot.open_positions.append(position)
+        self.bot.trades.append({"trade_id": position["trade_id"]})
+        result = self.bot.reconcile_restored_paper_terminal_conflicts()
+        self.assertEqual(result["positions"], 0)
+        self.assertEqual(self.bot.open_positions, [position])
 
     def test_emergency_snapshot_is_hash_addressed_and_guarded(self):
         self.bot.lane_register_open_position(self._position())

@@ -28633,6 +28633,12 @@ def _resolve_config_file_for_load() -> str:
     return scoped
 write_counter = 0
 bot_start_time = 0.0
+# Process-local boot time is deliberately separate from ``bot_start_time``.
+# The latter is a persisted research-session anchor and may be hours old after
+# a supervised restart.  Using it for watchdog startup grace makes a fresh
+# process immediately expect an AI call, latch AI_CADENCE_STALLED, and exit
+# before its first scheduled cycle can run.
+process_boot_time = time.time()
 last_engine_run = 0.0
 last_signal_create_global = 0.0
 last_setup_key = ""
@@ -28739,7 +28745,7 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     ws_age = max(0.0, now - ws_ts) if ws_ts else None
     ws_hb_age = max(0.0, now - ws_hb_ts) if ws_hb_ts else None
     ai_age = max(0.0, now - ai_ts) if ai_ts else None
-    startup_age = max(0.0, now - float(bot_start_time or now))
+    startup_age = max(0.0, now - float(process_boot_time or now))
     ai_stale_sec = max(300.0, float(get_effective_ai_cooldown_sec()) + 120.0)
     ai_expected = bool(
         not paused
@@ -28809,6 +28815,7 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         ),
         "ai_age_sec": ai_age,
         "ai_stale_after_sec": ai_stale_sec,
+        "process_startup_age_sec": startup_age,
         "ai_stall_latched": ai_stall_latched,
         "scheduled_ai_cycle": copy.deepcopy(scheduled_ai_cycle_state),
         "open_positions": len(open_positions),
@@ -38275,6 +38282,78 @@ def load_paper_lifecycle() -> dict:
     return result
 
 
+def reconcile_restored_paper_terminal_conflicts() -> dict:
+    """Remove only paper exposure whose authoritative lifecycle is terminal.
+
+    A crash can occur after the close ledger/trades_map commit but before the
+    older positions.json or paper_lifecycle.json snapshot is replaced.  On the
+    next boot those stale OPEN rows previously resurrected a closed trade and
+    made the strict-flat endpoint contradictory.  Terminal identity wins, but
+    this repair is deliberately limited to paper-only, disarmed rows and never
+    mutates any Bitfinex-backed exposure.
+    """
+    result = {"positions": 0, "pending_orders": 0, "terminal_ids": []}
+    if not _force_paper_mode_active() or state.get("live_armed"):
+        return result
+
+    terminal_ids = {
+        str(row.get("trade_id"))
+        for row in trades
+        if isinstance(row, dict) and row.get("trade_id")
+    }
+    for trade_id, entry in list(trades_map.items()):
+        signal = (entry or {}).get("signal_ref") if isinstance(entry, dict) else None
+        if isinstance(signal, dict) and is_terminal_signal(signal):
+            terminal_ids.add(str(trade_id))
+    if not terminal_ids:
+        return result
+
+    with trade_lock:
+        stale_positions = [
+            row for row in open_positions
+            if isinstance(row, dict)
+            and str(row.get("trade_id") or "") in terminal_ids
+            and not row.get("bitfinex_position_id")
+            and not row.get("bitfinex_live_entry")
+        ]
+        stale_orders = [
+            row for row in pending_orders
+            if isinstance(row, dict)
+            and str(row.get("trade_id") or "") in terminal_ids
+            and not row.get("bitfinex_order_id")
+            and not row.get("bitfinex_live_entry")
+        ]
+        for row in stale_positions:
+            if row in open_positions:
+                open_positions.remove(row)
+            bucket = lane_open_positions.get(_normalize_lane_key(row), [])
+            if row in bucket:
+                bucket.remove(row)
+        for row in stale_orders:
+            if row in pending_orders:
+                pending_orders.remove(row)
+            bucket = lane_pending_orders.get(_normalize_lane_key(row), [])
+            if row in bucket:
+                bucket.remove(row)
+
+    result.update({
+        "positions": len(stale_positions),
+        "pending_orders": len(stale_orders),
+        "terminal_ids": sorted({
+            str(row.get("trade_id")) for row in stale_positions + stale_orders
+        }),
+    })
+    if stale_positions or stale_orders:
+        save_positions()
+        save_paper_lifecycle(reason="terminal_identity_reconciled")
+        logger.error(
+            "[PAPER_LIFECYCLE] removed terminal-state resurrection "
+            "positions=%s pending=%s ids=%s [PIPELINE ENFORCEMENT]",
+            result["positions"], result["pending_orders"], result["terminal_ids"],
+        )
+    return result
+
+
 def capture_emergency_paper_lifecycle_snapshot() -> dict:
     """Create a hash-addressed operator snapshot only while paper-only/disarmed."""
     if not _force_paper_mode_active() or state.get("live_armed"):
@@ -41794,7 +41873,7 @@ def engine_loop():
         while not shutdown_event.is_set():
             try:
                 start = time.time()
-                if time.time() - bot_start_time < STARTUP_GRACE_PERIOD:
+                if time.time() - process_boot_time < STARTUP_GRACE_PERIOD:
                     time.sleep(1)
                     continue
                 if not should_run_pipeline():
@@ -42088,6 +42167,7 @@ def main():
     load_positions()
     load_paper_lifecycle()
     rebuild_state_from_snapshots()
+    reconcile_restored_paper_terminal_conflicts()
     reconcile_stale_signals()
     boot_exposure = get_active_signal_count()
     m_fee, t_fee = get_trading_fee_rates()

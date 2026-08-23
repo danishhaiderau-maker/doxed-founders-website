@@ -78,6 +78,11 @@ def test_tracked_rlock_reports_and_clears_owner_diagnostics():
     assert detail["depth"] == 0
 
 
+def test_all_process_startup_grace_uses_non_persisted_boot_clock():
+    assert "time.time() - bot_start_time < STARTUP_GRACE_PERIOD" not in SOURCE
+    assert "time.time() - process_boot_time < STARTUP_GRACE_PERIOD" in SOURCE
+
+
 class StrategyProgressHealthTest(unittest.TestCase):
     def setUp(self):
         self.now = 10_000.0
@@ -101,7 +106,7 @@ class StrategyProgressHealthTest(unittest.TestCase):
             "WATCHDOG_WS_STALE_SEC": 30.0,
             "WATCHDOG_WS_TRADE_STALE_SEC": 90.0,
             "get_effective_ai_cooldown_sec": lambda: 180,
-            "bot_start_time": self.now - 1_000,
+            "process_boot_time": self.now - 1_000,
             "open_positions": [],
             "pending_orders": [],
             "_strategy_progress_incident_lock": threading.Lock(),
@@ -143,7 +148,7 @@ class StrategyProgressHealthTest(unittest.TestCase):
             "WATCHDOG_WS_STALE_SEC": 30.0,
             "WATCHDOG_WS_TRADE_STALE_SEC": 90.0,
             "get_effective_ai_cooldown_sec": lambda: 180,
-            "bot_start_time": self.now - 1_000,
+            "process_boot_time": self.now - 1_000,
             "open_positions": [],
             "pending_orders": [],
             "_strategy_progress_incident_lock": threading.Lock(),
@@ -168,6 +173,26 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertTrue(result["ai_expected"])
         self.assertFalse(result["ai_progressing"])
         self.assertFalse(result["ok"])
+
+    def test_fresh_process_gets_bounded_ai_startup_grace_even_for_old_session(self):
+        self.snapshot.__globals__["process_boot_time"] = self.now - 10
+        self.state["last_ai_call_ts"] = 0
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertFalse(result["ai_expected"])
+        self.assertTrue(result["ai_progressing"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(10.0, result["process_startup_age_sec"])
+
+    def test_ai_startup_grace_expires_if_no_call_completes(self):
+        self.snapshot.__globals__["process_boot_time"] = self.now - 501
+        self.state["last_ai_call_ts"] = 0
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertTrue(result["ai_expected"])
+        self.assertFalse(result["ai_progressing"])
+        self.assertFalse(result["ok"])
+        self.assertIn("AI_CADENCE_STALLED", result["reasons"])
 
     def test_manual_pause_cannot_hide_an_already_latched_ai_stall(self):
         self.state["execution_paused"] = True
