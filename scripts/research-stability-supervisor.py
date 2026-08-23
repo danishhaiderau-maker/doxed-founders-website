@@ -509,6 +509,30 @@ def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, 
                 "record_id": str(row.get("record_id") or ""),
                 "missing_fields": missing,
             })
+    paper_scope_rows = [
+        *(("decision", row) for row in rows_by_ledger["decision"]
+          if str(row.get("decision_stage") or "") == "LANE_POLICY_VERDICT"),
+        *(("order_intent", row) for row in rows_by_ledger["order_intent"]),
+        *(("execution", row) for row in rows_by_ledger["execution"]),
+        *(("lifecycle", row) for row in rows_by_ledger["lifecycle"]
+          if str(row.get("observation_status") or "") in {
+              "PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED",
+          }),
+    ]
+    for ledger, row in paper_scope_rows:
+        if str(row.get("policy_execution_scope") or "") != "PAPER_RESEARCH_ONLY":
+            continue
+        spec = row.get("paper_policy_spec")
+        spec_paper_only = spec.get("paper_only") if isinstance(spec, dict) else None
+        if row.get("paper_only") is not False and spec_paper_only is not False:
+            continue
+        policy_provenance_defects.append({
+            "ledger": ledger,
+            "record_id": str(row.get("record_id") or ""),
+            "contradiction": "PAPER_SCOPE_WITH_FALSE_PAPER_ONLY",
+            "top_level_paper_only": row.get("paper_only"),
+            "spec_paper_only": spec_paper_only,
+        })
     return {
         "ledger_counts": counts,
         "independent_opportunities": counts["opportunity"] - len(identity_aliases),
@@ -527,7 +551,7 @@ def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, 
             "passed": resolution_counts["overdue_orphan"] == 0,
         },
         "policy_provenance_integrity": {
-            "checked_rows": len(attributable_rows),
+            "checked_rows": len(paper_scope_rows),
             "defect_count": len(policy_provenance_defects),
             "defects": policy_provenance_defects,
             "passed": not policy_provenance_defects,

@@ -498,6 +498,41 @@ def test_v3_supervisor_fails_execution_and_paper_lifecycle_without_policy_proven
     }
 
 
+def test_v3_supervisor_fails_paper_scope_with_false_paper_identity(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    (ledgers / "opportunity.jsonl").write_text(json.dumps({
+        "schema": "research_evidence_v3", "ledger": "opportunity",
+        "epoch_id": "epoch-v3", "record_id": "o-1", "episode_id": "e-1",
+    }) + "\n", encoding="utf-8")
+    (ledgers / "decision.jsonl").write_text(json.dumps({
+        "schema": "research_evidence_v3", "ledger": "decision",
+        "epoch_id": "epoch-v3", "record_id": "d-1", "episode_id": "e-1",
+        "decision_stage": "LANE_POLICY_VERDICT",
+        "policy_execution_scope": "PAPER_RESEARCH_ONLY",
+        "paper_only": False,
+        "paper_policy_spec": {"paper_only": False, "relay_eligible": True},
+    }) + "\n", encoding="utf-8")
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_EPOCH_CONTAMINATION_BLOCKED",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY", "real_bitfinex_trading_allowed": False,
+        "number_one_strategy": None,
+        "collection": {"independent_opportunities": 1, "decision_branches": 1,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+    integrity = next(x for x in result["checks"] if x["name"] == "v3_normalized_evidence_integrity")
+    assert integrity["ok"] is False
+    provenance = integrity["detail"]["policy_provenance_integrity"]
+    assert provenance["defect_count"] == 1
+    assert provenance["defects"][0]["contradiction"] == "PAPER_SCOPE_WITH_FALSE_PAPER_ONLY"
+
+
 def test_clean_v3_only_epoch_satisfies_mirror_schema_check(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     (mirror / "research_events_v22.jsonl").unlink()
