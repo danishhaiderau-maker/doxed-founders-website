@@ -2014,64 +2014,99 @@ def _policy_detail_is_current(detail: dict, best: dict) -> bool:
     )
 
 
+def _safe_policy_v3_dashboard_source() -> dict:
+    """Return the canonical signed V3.1 policy-research surface.
+
+    Static/dynamic pages previously inherited the retired V2.2 best-policy
+    adapter.  That made a healthy V3.1 collection look empty for V2.2 reasons.
+    These pages now consume the same artifact as the Safe Policy Genome page
+    and remain fail-closed when its evidence is immature or invalid.
+    """
+    report = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
+    screen = report.get("candidate_screen") or {}
+    ranking = report.get("safe_policy_ranking") or {}
+    return {
+        "report": report,
+        "screen": screen,
+        "ranking": ranking,
+        "epoch_id": report.get("epoch_id") or (report.get("epoch_scope") or {}).get("selected_epoch_id"),
+        "qualified": bool(
+            report.get("number_one_strategy")
+            and ranking.get("qualification") == "QUALIFIED"
+            and report.get("live_policy_change_allowed") is True
+        ),
+        "blockers": list(report.get("blockers") or (["V3_REPORT_NOT_GENERATED"] if not report else [])),
+    }
+
+
 @app.route("/api/static-policy-research")
 def api_static_policy_research():
-    best = _best_policy_research_payload()
-    detail = _read_json("policy_candidate_oos_report.json")
-    current = _policy_detail_is_current(detail, best)
-    challenger = (detail.get("descriptive_challenger") or {}) if current else {}
-    rows = challenger.get("profitable_static_policies") or []
+    source = _safe_policy_v3_dashboard_source()
+    report, screen = source["report"], source["screen"]
+    all_rows = screen.get("descriptive_top_100") or []
+    rows = [row for row in all_rows if float(row.get("sealed_oos_net_usd") or 0) > 0]
+    collection = report.get("collection") or {}
     return jsonify({
-        "schema": "static_policy_dashboard_v1",
+        "schema": "static_policy_dashboard_v3_1",
+        "evidence_source": "safe_policy_genome_v3_report.json",
+        "collector_generation": "V3.1",
         "status": "DESCRIPTIVE" if rows else "WAITING_FOR_EVIDENCE",
-        "qualification": "QUALIFIED" if best.get("live_policy_change_allowed") else "DESCRIPTIVE_ONLY",
-        "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
-        "epoch_id": best.get("epoch_id"),
-        "policy_epoch_id": best.get("policy_epoch_id"),
-        "independent_episodes": (detail.get("evidence") or {}).get("independent_episodes", 0) if current else 0,
-        "training_episodes": (detail.get("evidence") or {}).get("training_episodes", 0) if current else 0,
-        "oos_episodes": (detail.get("evidence") or {}).get("oos_episodes", 0) if current else 0,
+        "qualification": "QUALIFIED" if source["qualified"] else "DESCRIPTIVE_ONLY",
+        "live_policy_change_allowed": source["qualified"],
+        "epoch_id": source["epoch_id"],
+        "policy_epoch_id": None,
+        "independent_episodes": int(collection.get("independent_opportunities") or 0),
+        "training_episodes": int(screen.get("training_episodes") or 0),
+        "oos_episodes": int(screen.get("oos_episodes") or 0),
         "profitable_policies": rows,
-        "policy_search_statistics": challenger.get("policy_search_statistics") or {},
-        "warning": challenger.get("multiple_testing_warning") or (
-            "No current static policy report is available yet."
+        "policy_search_statistics": {
+            "unique_policies_evaluated": int(screen.get("unique_policies_evaluated") or 0),
+            "rows_shown": len(rows),
+            "nominal_search_space": (report.get("search") or {}).get("nominal_full_cartesian"),
+        },
+        "warning": screen.get("warning") or (
+            "V3.1 evidence is descriptive until conservative execution and sealed chronological OOS gates pass."
         ),
-        "blockers": best.get("blockers") or [],
+        "blockers": source["blockers"],
     })
 
 
 @app.route("/api/dynamic-policy-research")
 def api_dynamic_policy_research():
-    best = _best_policy_research_payload()
-    detail = _read_json("policy_candidate_oos_report.json")
-    current = _policy_detail_is_current(detail, best)
-    challenger = (detail.get("descriptive_challenger") or {}) if current else {}
-    rows = challenger.get("dynamic_regimes") or []
+    source = _safe_policy_v3_dashboard_source()
+    report, screen = source["report"], source["screen"]
+    leaders = screen.get("dynamic_regime_leaders") or {}
+    rows = [
+        {"regime": regime, "policies": policies}
+        for regime, policies in sorted(leaders.items())
+    ]
     return jsonify({
-        "schema": "dynamic_policy_dashboard_v1",
+        "schema": "dynamic_policy_dashboard_v3_1",
+        "evidence_source": "safe_policy_genome_v3_report.json",
+        "collector_generation": "V3.1",
         "status": "DESCRIPTIVE" if rows else "WAITING_FOR_REGIME_COVERAGE",
-        "qualification": "QUALIFIED" if best.get("live_policy_change_allowed") else "DESCRIPTIVE_ONLY",
-        "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
-        "epoch_id": best.get("epoch_id"),
-        "policy_epoch_id": best.get("policy_epoch_id"),
-        "winner_kind": challenger.get("winner_kind") or "NONE",
-        "winner_status": challenger.get("winner_status") or "NO_PROFITABLE_OOS_WINNER",
-        "relative_leader_kind": challenger.get("relative_leader_kind") or "NONE",
-        "comparison_delta": challenger.get("comparison_delta") or {},
-        "static_oos": challenger.get("static_oos"),
-        "dynamic_oos": challenger.get("dynamic_oos"),
+        "qualification": "QUALIFIED" if source["qualified"] else "DESCRIPTIVE_ONLY",
+        "live_policy_change_allowed": source["qualified"],
+        "epoch_id": source["epoch_id"],
+        "policy_epoch_id": None,
+        "winner_kind": "DYNAMIC" if source["qualified"] and rows else "NONE",
+        "winner_status": "QUALIFIED" if source["qualified"] and rows else "NO_PROFITABLE_OOS_WINNER",
+        "relative_leader_kind": "DYNAMIC" if rows else "NONE",
+        "comparison_delta": {},
+        "static_oos": None,
+        "dynamic_oos": None,
         "regimes": rows,
         "required_market_families": ["BULL", "BEAR", "SIDEWAYS"],
         "fallback": "CONTROL_OR_NO_TRADE",
         "warning": (
             "No profitable OOS winner. A relative leader may only be less negative; it is not a winning strategy. "
-            + (challenger.get("multiple_testing_warning") or
-               "Dynamic selection remains unavailable until causal regimes have later OOS evidence.")
-        ) if challenger.get("winner_kind") in (None, "NONE") else (
-            challenger.get("multiple_testing_warning") or
+            + (screen.get("warning") or
+               "Dynamic selection remains unavailable until causal V3.1 regimes have later sealed OOS evidence.")
+        ) if not source["qualified"] else (
+            screen.get("warning") or
             "Any profitable descriptive result remains unavailable for live policy changes."
         ),
-        "blockers": best.get("blockers") or [],
+        "blockers": source["blockers"],
     })
 
 

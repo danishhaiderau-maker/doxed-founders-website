@@ -336,6 +336,54 @@ def test_dashboard_retires_five_question_cards():
     assert "fetch('/api/best-policy-research')" in source
 
 
+def test_static_and_dynamic_routes_use_v31_genome_not_retired_v22(monkeypatch):
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "status": "V3_COLLECTING",
+        "epoch_id": "epoch-v31-clean",
+        "live_policy_change_allowed": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+        "collection": {"independent_opportunities": 42},
+        "search": {"nominal_full_cartesian": 8597534400},
+        "candidate_screen": {
+            "unique_policies_evaluated": 2700,
+            "training_episodes": 28,
+            "oos_episodes": 14,
+            "descriptive_top_100": [
+                {"policy_id": "profitable", "sealed_oos_net_usd": 12.5},
+                {"policy_id": "losing", "sealed_oos_net_usd": -1.0},
+            ],
+            "dynamic_regime_leaders": {
+                "BULL": [{"policy_id": "bull-policy", "sealed_oos_net_usd": 3.0}],
+            },
+        },
+        "safe_policy_ranking": {"qualification": "NO_SAFE_QUALIFIED_POLICY"},
+        "number_one_strategy": None,
+    }
+
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, *args: report if str(name) == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else {},
+    )
+    client = dashboard.app.test_client()
+
+    static = client.get("/api/static-policy-research").get_json()
+    dynamic = client.get("/api/dynamic-policy-research").get_json()
+
+    assert static["schema"] == "static_policy_dashboard_v3_1"
+    assert static["collector_generation"] == "V3.1"
+    assert static["epoch_id"] == "epoch-v31-clean"
+    assert static["independent_episodes"] == 42
+    assert [row["policy_id"] for row in static["profitable_policies"]] == ["profitable"]
+    assert "NO_CURRENT_V22_EPOCH" not in static["blockers"]
+    assert dynamic["schema"] == "dynamic_policy_dashboard_v3_1"
+    assert dynamic["collector_generation"] == "V3.1"
+    assert dynamic["regimes"][0]["regime"] == "BULL"
+    assert dynamic["live_policy_change_allowed"] is False
+    assert "NO_CURRENT_V22_EPOCH" not in dynamic["blockers"]
+
+
 def test_analyzer_adapter_emits_fail_closed_current_epoch_artifact(tmp_path):
     events = [
         _event("filled", "ACCEPTED_FILLED", "episode-1"),
