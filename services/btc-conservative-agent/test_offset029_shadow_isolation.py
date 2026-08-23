@@ -381,6 +381,20 @@ def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
     assert 'master.get("shared_ai_call_id")' in close
 
 
+def test_relay_lifecycle_projections_preserve_shared_ai_identity():
+    """Authenticated live overlays must not sever Patient Chase from its AI call."""
+    for function_name in (
+        "_relay_signal_ref_lite",
+        "_relay_order_row_lite",
+        "_relay_position_row_lite",
+        "_relay_trade_row_lite",
+    ):
+        source = _function_source(BOT, function_name)
+        assert '"shared_ai_call_id"' in source, function_name
+        assert '"shared_ai_call_ts"' in source, function_name
+        assert '"source_trade_id"' in source, function_name
+
+
 def test_lightweight_dashboard_signal_keeps_patient_join_identity():
     tree = ast.parse(BOT.read_text(encoding="utf-8"))
     assignment = next(

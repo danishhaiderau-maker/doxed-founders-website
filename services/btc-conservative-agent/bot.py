@@ -32874,6 +32874,9 @@ def _relay_signal_ref_lite(sig: dict) -> dict:
         return {}
     return {
         "trade_id": sig.get("trade_id"),
+        "shared_ai_call_id": sig.get("shared_ai_call_id"),
+        "shared_ai_call_ts": sig.get("shared_ai_call_ts"),
+        "source_trade_id": sig.get("source_trade_id"),
         "status": sig.get("status"),
         "exit_reason": sig.get("exit_reason"),
         "exit_price": sig.get("exit_price"),
@@ -33566,6 +33569,9 @@ def _relay_trade_row_lite(row: dict) -> dict:
     return {
         "ts": row.get("ts") or row.get("close_ts") or row.get("closed_ts"),
         "trade_id": row.get("trade_id"),
+        "shared_ai_call_id": row.get("shared_ai_call_id"),
+        "shared_ai_call_ts": row.get("shared_ai_call_ts"),
+        "source_trade_id": row.get("source_trade_id"),
         "dir": row.get("dir") or row.get("final_direction"),
         "final_direction": row.get("final_direction") or row.get("dir"),
         "entry": row.get("entry"),
@@ -33608,6 +33614,9 @@ def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
         return {}
     out = {
         "trade_id": row.get("trade_id"),
+        "shared_ai_call_id": row.get("shared_ai_call_id"),
+        "shared_ai_call_ts": row.get("shared_ai_call_ts"),
+        "source_trade_id": row.get("source_trade_id"),
         "status": row.get("status"),
         "side": row.get("side") or row.get("signal_dir") or row.get("dir"),
         "signal_dir": row.get("signal_dir") or row.get("dir") or row.get("side"),
@@ -33640,6 +33649,9 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
     protection_view = _position_protection_view(row)
     out = {
         "trade_id": row.get("trade_id"),
+        "shared_ai_call_id": row.get("shared_ai_call_id"),
+        "shared_ai_call_ts": row.get("shared_ai_call_ts"),
+        "source_trade_id": row.get("source_trade_id"),
         "status": row.get("status"),
         "dir": row.get("dir") or row.get("side"),
         "side": row.get("side") or row.get("dir"),
