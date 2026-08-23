@@ -716,6 +716,23 @@ def runtime_counts(payload: dict[str, Any]) -> dict[str, int | None]:
     }
 
 
+def mirror_partial_artifacts(mirror: Path) -> list[str]:
+    """Return atomic-sync candidates that must never enter analyzer evidence."""
+    if not mirror.is_dir():
+        return []
+    artifacts: list[str] = []
+    for candidate in mirror.rglob("*"):
+        try:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+        except OSError:
+            continue
+        name = candidate.name.lower()
+        if name.endswith(".download") or name.endswith(".download.replace-backup"):
+            artifacts.append(candidate.relative_to(mirror).as_posix())
+    return sorted(artifacts)
+
+
 def evaluate_runtime_readiness(
     status: dict[str, Any],
     prior: dict[str, Any],
@@ -864,6 +881,14 @@ class Supervisor:
             add("local_storage", local_ok, local_detail)
         except Exception as exc:
             add("local_storage", False, f"{type(exc).__name__}: {exc}")
+        try:
+            partials = mirror_partial_artifacts(self.mirror)
+            add("mirror_partial_artifacts", not partials, {
+                "count": len(partials),
+                "paths": partials[:20],
+            })
+        except Exception as exc:
+            add("mirror_partial_artifacts", False, f"{type(exc).__name__}: {exc}")
 
         readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
         status: dict[str, Any] = {}

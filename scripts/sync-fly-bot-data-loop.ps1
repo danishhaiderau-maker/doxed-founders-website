@@ -79,6 +79,26 @@ function Write-Utf8NoBomJsonAtomic {
   }
 }
 
+function Remove-OrphanedMirrorCandidates {
+  param([Parameter(Mandatory = $true)][string]$MirrorPath)
+  if (-not (Test-Path -LiteralPath $MirrorPath -PathType Container)) { return }
+  foreach ($candidate in @(Get-ChildItem -LiteralPath $MirrorPath -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -match '\.(?<owner>\d+)\.[0-9a-fA-F]{32}\.download(?:\.replace-backup)?$'
+  })) {
+    $owner = 0
+    if ($candidate.Name -match '\.(?<owner>\d+)\.[0-9a-fA-F]{32}\.download(?:\.replace-backup)?$') {
+      $owner = [int]$matches['owner']
+    }
+    # The exclusive loop guard proves this process has no in-flight candidate
+    # at the top of a cycle. Candidates owned by this PID are leftovers from a
+    # completed/failed prior cycle; candidates from dead PIDs are abandoned.
+    $ownerAlive = $owner -gt 0 -and $null -ne (Get-Process -Id $owner -ErrorAction SilentlyContinue)
+    if ($owner -eq $PID -or -not $ownerAlive) {
+      Remove-Item -LiteralPath $candidate.FullName -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
 # Growth trigger (default 50 MB). Override with FLY_VOLUME_SYNC_THRESHOLD_MB.
 # Poll cadence is faster than the force-sync interval so large jsonl growth is
 # mirrored for the analyzer without waiting a full IntervalSec cycle.
@@ -246,6 +266,7 @@ if (Test-Path -LiteralPath $growthStateFile) {
 
 try {
   while ($true) {
+    Remove-OrphanedMirrorCandidates -MirrorPath $mirrorDir
     $started = Get-Date
     $didSync = $false
     $relayEvidenceStatus = [ordered]@{

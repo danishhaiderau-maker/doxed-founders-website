@@ -86,6 +86,30 @@ def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap
     assert detail["quarantine_bytes"] > detail["maximum_quarantine_bytes"]
 
 
+def test_mirror_partial_artifacts_detects_atomic_sync_leftovers(tmp_path):
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    (mirror / "valid.jsonl").write_text("{}\n", encoding="utf-8")
+    orphan = mirror / "valid.jsonl.123.0123456789abcdef0123456789abcdef.download"
+    orphan.write_bytes(b"partial")
+
+    assert module.mirror_partial_artifacts(mirror) == [orphan.name]
+
+
+def test_supervisor_fails_closed_when_partial_download_is_present(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    (mirror / "evidence.jsonl.123.0123456789abcdef0123456789abcdef.download").write_bytes(b"partial")
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+
+    check = next(x for x in result["checks"] if x["name"] == "mirror_partial_artifacts")
+    assert check["ok"] is False
+    assert check["detail"]["count"] == 1
+    assert result["healthy"] is False
+
+
 def test_runtime_counts_supports_current_state_and_nested_health_contracts():
     state_counts = module.runtime_counts({
         "active_signals": [{"id": "a"}, {"id": "b"}],
