@@ -185,3 +185,42 @@ def test_chase_attribution_without_trade_rows_keeps_unknown_hold_fail_closed(tmp
 
     assert report["trades"][0]["trade_id"] == "cont-no-trade-row"
     assert report["trades"][0]["avg_hold_min"] is None
+
+
+def test_fresh_epoch_chase_attribution_excludes_pre_epoch_relay_only_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [])
+    monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    monkeypatch.setattr(analyzer, "_platform_relay_evidence_index", lambda _path: {
+        "legacy-trade": {
+            "records": [{
+                "canonicalTradeId": "legacy-trade",
+                "createdAt": "2026-06-18T10:18:44.999Z",
+                "closedAt": "2026-06-18T10:28:58.289Z",
+                "events": [],
+            }],
+        },
+    })
+
+    report = analyzer.chase_attribution_report(
+        trades=pd.DataFrame(),
+        session={"fresh_collection_start_time": 1787520261.5305245},
+    )
+
+    assert report["trades"] == []
+
+
+def test_empty_current_epoch_overwrites_scenario_c_reports(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    stale_leak = tmp_path / analyzer.SCENARIO_C_LEAKAGE_REPORT_FILE
+    stale_capture = tmp_path / analyzer.SCENARIO_C_CAPTURE_RATIO_REPORT_FILE
+    stale_leak.write_text('{"overall":{"left_on_table_usd":24.84}}', encoding="utf-8")
+    stale_capture.write_text('{"overall_mfe_positive":{"aggregate_capture_pct":-4.2}}', encoding="utf-8")
+
+    leak = analyzer.scenario_c_leakage_report(trades=pd.DataFrame(), session={})
+    capture = analyzer.scenario_c_capture_ratio_report(trades=pd.DataFrame(), session={})
+
+    assert leak["overall"]["left_on_table_usd"] is None
+    assert capture["overall_mfe_positive"] == {"trades": 0}
+    assert json.loads(stale_leak.read_text(encoding="utf-8"))["evidence_status"] == "INSUFFICIENT_CURRENT_EPOCH_TERMINALS"
+    assert json.loads(stale_capture.read_text(encoding="utf-8"))["evidence_status"] == "INSUFFICIENT_CURRENT_EPOCH_TERMINALS"

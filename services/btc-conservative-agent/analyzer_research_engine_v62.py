@@ -12605,6 +12605,30 @@ def chase_attribution_report(trades=None, session=None):
     except Exception:
         relay_index = {}
 
+    # The platform relay export is cumulative and can contain months of
+    # lifecycles. Fresh-collection reports must never seed relay-only rows
+    # from before the active epoch. Existing current-epoch funnel/trade IDs
+    # may still join their matching relay receipt below.
+    session_start = _session_start_ts(session)
+
+    def _relay_join_is_in_session(joined_relay):
+        if session_start is None or pd.isna(session_start):
+            return True
+        newest = None
+        for record in (joined_relay or {}).get("records") or []:
+            values = [record.get("createdAt"), record.get("closedAt")]
+            values.extend(
+                event.get("createdAt") or event.get("created_at")
+                for event in (record.get("events") or [])
+                if isinstance(event, dict)
+            )
+            for value in values:
+                parsed = pd.to_datetime(value, utc=True, errors="coerce")
+                if pd.isna(parsed):
+                    continue
+                newest = parsed if newest is None or parsed > newest else newest
+        return newest is not None and newest >= session_start
+
     attributions = []
     chase_events_total = 0
     for tid, events in by_tid.items():
@@ -12787,6 +12811,8 @@ def chase_attribution_report(trades=None, session=None):
     seen_tids = {a.get("trade_id") for a in attributions}
     for tid, joined_relay in (relay_index or {}).items():
         if tid in seen_tids or not joined_relay:
+            continue
+        if not _relay_join_is_in_session(joined_relay):
             continue
         copy_evidence = _normalize_platform_bitfinex_evidence(
             joined_relay.get("records") or [], tid
@@ -13378,7 +13404,26 @@ def scenario_c_leakage_report(trades=None, session=None):
     print(f"\n=== SCENARIO C LEAKAGE REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
     if trades is None or trades.empty:
         print(f"  No trades {PIPELINE_ENFORCEMENT_TAG}")
-        return {}
+        payload = {
+            "schema": "scenario_c_leakage_v1",
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "expected_bot_version": EXPECTED_BOT_VERSION,
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "evidence_status": "INSUFFICIENT_CURRENT_EPOCH_TERMINALS",
+            "overall": {
+                "trades": 0,
+                "peak_profit_usd": 0.0,
+                "booked_profit_usd": 0.0,
+                "left_on_table_usd": None,
+                "capture_ratio_pct": None,
+                "avg_mfe_margin_pct": None,
+            },
+            "by_exit_reason": {},
+        }
+        with open(analyzer_report_path(SCENARIO_C_LEAKAGE_REPORT_FILE), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
     work = trades.copy()
     if "trade_id" in work.columns:
         work = work.drop_duplicates(subset=["trade_id"], keep="last")
@@ -14047,7 +14092,23 @@ def scenario_c_capture_ratio_report(trades=None, session=None):
 
     if trades is None or trades.empty:
         print(f"  No trades {PIPELINE_ENFORCEMENT_TAG}")
-        return {}
+        payload = {
+            "schema": "scenario_c_capture_ratio_v1",
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "expected_bot_version": EXPECTED_BOT_VERSION,
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "evidence_status": "INSUFFICIENT_CURRENT_EPOCH_TERMINALS",
+            "method": "capture_pct = net_pnl_usd / (max_profit_margin_pct * margin_usdt / 100) per trade",
+            "overall_mfe_positive": {"trades": 0},
+            "winners_only": {"trades": 0},
+            "ladder_exits_only": {"trades": 0},
+            "capture_distribution": [],
+            "by_exit_reason": {},
+        }
+        with open(analyzer_report_path(SCENARIO_C_CAPTURE_RATIO_REPORT_FILE), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
 
     work = trades.copy()
     if "trade_id" in work.columns:

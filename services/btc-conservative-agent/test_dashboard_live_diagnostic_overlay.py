@@ -48,3 +48,11 @@ def test_active_overlay_refreshes_and_reprojects_diagnostics() -> None:
         assert key in body
     assert "snap.update(build_dashboard_display(snap))" in body
     assert 'snap["strategy_progress"] = _strategy_progress_health_snapshot()' in body
+
+
+def test_dashboard_display_does_not_present_historical_manual_pause_as_current() -> None:
+    body = ast.get_source_segment(BOT_SOURCE, _function("build_dashboard_display"))
+    assert body is not None
+    assert "stale_pause_labels = {" in body
+    assert 'snapshot.get("execution_paused")' in body
+    assert "ALLOWED — prior manual-pause receipt is historical" in body

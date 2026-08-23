@@ -10697,6 +10697,24 @@ def build_dashboard_display(snapshot: dict) -> dict:
     ag = dbg.get("ai_gate") or {}
     la = snapshot.get("last_ai") or {}
     sk, bl = _dashboard_skip_block(dbg, la)
+    current_pause = bool(
+        snapshot.get("manual_admin_pause")
+        or snapshot.get("execution_paused")
+    )
+    stale_pause_labels = {
+        "MANUAL_PAUSE",
+        "ADMIN_MANUAL_PAUSE",
+        "ADMIN_MANUAL_PAUSED_SHADOW",
+    }
+    # debug_state is a last-cycle receipt and may legitimately retain the
+    # reason from a cycle that ran while paused. It must not be presented as
+    # current control authority after /api/resume has cleared the pause.
+    if not current_pause and (
+        str(sk or "").upper() in stale_pause_labels
+        or str(bl or "").upper() in stale_pause_labels
+    ):
+        sk = "WAITING_FOR_PERIODIC_DIRECTION_SCAN"
+        bl = "ALLOWED — prior manual-pause receipt is historical"
     symbol = BITFINEX_WS_SYMBOL
     if _ai_gate_was_called(dbg):
         dec = la.get("decision") or snapshot.get("ai_outcome") or "UNKNOWN"
