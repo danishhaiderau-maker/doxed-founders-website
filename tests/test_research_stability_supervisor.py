@@ -86,6 +86,32 @@ def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap
     assert detail["quarantine_bytes"] > detail["maximum_quarantine_bytes"]
 
 
+def test_runtime_counts_supports_current_state_and_nested_health_contracts():
+    state_counts = module.runtime_counts({
+        "active_signals": [{"id": "a"}, {"id": "b"}],
+        "orders": [{"id": "o1"}],
+        "positions": [{"id": "p1"}, {"id": "p2"}],
+    })
+    assert state_counts == {
+        "virtual_count": 2,
+        "pending_count": 1,
+        "position_count": 2,
+    }
+
+    health_counts = module.runtime_counts({
+        "strategy_progress": {
+            "active_signal_count": 3,
+            "pending_orders": 4,
+            "open_positions": 5,
+        },
+    })
+    assert health_counts == {
+        "virtual_count": 3,
+        "pending_count": 4,
+        "position_count": 5,
+    }
+
+
 def test_opportunity_progress_establishes_baseline_then_advances():
     ok, detail, baseline = module.evaluate_opportunity_progress(
         count=4, epoch_ids=["epoch-a"], source_revision="a" * 40,

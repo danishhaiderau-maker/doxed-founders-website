@@ -657,29 +657,62 @@ def bounded_pending_parity(
 
 
 def runtime_counts(payload: dict[str, Any]) -> dict[str, int | None]:
-    def count(explicit: tuple[str, ...], collections: tuple[str, ...]) -> int | None:
+    def count_from_payload(
+        source: dict[str, Any],
+        explicit: tuple[str, ...],
+        collections: tuple[str, ...],
+    ) -> int | None:
         for key in explicit:
-            if payload.get(key) is not None:
+            if source.get(key) is not None:
                 try:
-                    return int(payload[key])
+                    return int(source[key])
                 except (TypeError, ValueError):
                     return None
         for key in collections:
-            if isinstance(payload.get(key), list):
-                return len(payload[key])
+            if isinstance(source.get(key), list):
+                return len(source[key])
         return None
 
-    return {
+    def count(explicit: tuple[str, ...], collections: tuple[str, ...]) -> int | None:
+        return count_from_payload(payload, explicit, collections)
+
+    strategy_progress = (
+        payload.get("strategy_progress")
+        if isinstance(payload.get("strategy_progress"), dict)
+        else {}
+    )
+    top_level = {
         "virtual_count": count(
             ("virtual_count", "virtual_candidate_count", "active_signal_count"),
             ("virtual_chase_candidates", "active_signals"),
         ),
         "pending_count": count(
-            ("pending_count", "pending_order_count"), ("pending_orders",),
+            ("pending_count", "pending_order_count"), ("pending_orders", "orders"),
         ),
         "position_count": count(
             ("position_count", "open_position_count"), ("positions",),
         ),
+    }
+    nested = {
+        "virtual_count": count_from_payload(
+            strategy_progress,
+            ("virtual_count", "virtual_candidate_count", "active_signal_count"),
+            ("virtual_chase_candidates", "active_signals"),
+        ),
+        "pending_count": count_from_payload(
+            strategy_progress,
+            ("pending_count", "pending_order_count", "pending_orders"),
+            (),
+        ),
+        "position_count": count_from_payload(
+            strategy_progress,
+            ("position_count", "open_position_count", "open_positions"),
+            (),
+        ),
+    }
+    return {
+        key: top_level[key] if top_level[key] is not None else nested[key]
+        for key in top_level
     }
 
 
