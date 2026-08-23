@@ -23,9 +23,11 @@ if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
 # source + Neon + authenticated Bitfinex boundary to be paused, disarmed, flat,
 # and reconciled before starting the deployment.
 $priorCanonicalOwner = $env:REQUIRE_CANONICAL_FLY_OWNER
+$priorAdminProof = $env:REQUIRE_BOT_ADMIN_TOKEN
 $priorOwnerUrl = $env:SHOWCASE_OWNER_URL
 try {
   $env:REQUIRE_CANONICAL_FLY_OWNER = "YES"
+  $env:REQUIRE_BOT_ADMIN_TOKEN = "YES"
   $env:SHOWCASE_OWNER_URL = "https://doxed-btc-bot.fly.dev"
   & node (Join-Path $PSScriptRoot "check-relay-flat.mjs")
   if ($LASTEXITCODE -ne 0) {
@@ -33,6 +35,7 @@ try {
   }
 } finally {
   $env:REQUIRE_CANONICAL_FLY_OWNER = $priorCanonicalOwner
+  $env:REQUIRE_BOT_ADMIN_TOKEN = $priorAdminProof
   $env:SHOWCASE_OWNER_URL = $priorOwnerUrl
 }
 

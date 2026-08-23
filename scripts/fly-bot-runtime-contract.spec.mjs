@@ -115,6 +115,7 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
   assert.match(helper, /Push-Location \$serviceRoot/);
   assert.match(helper, /check-relay-flat\.mjs/);
   assert.match(helper, /REQUIRE_CANONICAL_FLY_OWNER = "YES"/);
+  assert.match(helper, /REQUIRE_BOT_ADMIN_TOKEN = "YES"/);
   assert.match(helper, /SOURCE_GIT_REV=\$revision/);
   assert.match(helper, /source_git_rev/);
   assert.match(helper, /live_armed -eq \$false/);
