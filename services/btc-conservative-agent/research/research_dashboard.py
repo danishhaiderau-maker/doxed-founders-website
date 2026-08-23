@@ -1995,7 +1995,7 @@ def api_best_policy_research():
 @app.route("/api/safe-policy-genome-v3")
 @app.route("/api/safe-policy-genome-v3.1")
 def api_safe_policy_genome_v3():
-    payload = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
+    payload = _safe_policy_v3_dashboard_source()["report"]
     if not payload:
         payload = {
             "schema": "safe_policy_genome_v3_1_report_v1",
@@ -2055,14 +2055,28 @@ def _safe_policy_v3_dashboard_source() -> dict:
     These pages now consume the same artifact as the Safe Policy Genome page
     and remain fail-closed when its evidence is immature or invalid.
     """
-    report = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
+    report = dict(_read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {})
+    epoch_id = report.get("epoch_id") or (report.get("epoch_scope") or {}).get("selected_epoch_id")
+    # The compatibility report evaluates explicit cohort-level maturity gates
+    # (minimum independent episodes, execution paths, market segments and OOS).
+    # Surface those exact blockers on every V3.1 dashboard instead of reducing
+    # an empty Top 100 table to the unhelpful NO_SAFE_QUALIFIED_POLICY label.
+    compatibility = _read_json(BEST_POLICY_RESEARCH_REPORT_FILE) or {}
+    compatibility_schema = str(compatibility.get("schema") or "")
+    if (
+        compatibility_schema.startswith("best_policy_research_v3_1_adapter")
+        and compatibility.get("epoch_id") == epoch_id
+    ):
+        report["blockers"] = sorted(set(
+            list(report.get("blockers") or []) + list(compatibility.get("blockers") or [])
+        ))
     screen = report.get("candidate_screen") or {}
     ranking = report.get("safe_policy_ranking") or {}
     return {
         "report": report,
         "screen": screen,
         "ranking": ranking,
-        "epoch_id": report.get("epoch_id") or (report.get("epoch_scope") or {}).get("selected_epoch_id"),
+        "epoch_id": epoch_id,
         "qualified": bool(
             report.get("number_one_strategy")
             and ranking.get("qualification") == "QUALIFIED"

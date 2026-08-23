@@ -247,6 +247,26 @@ def test_process_classification_ignores_shell_commands_that_only_mention_worker_
     }
 
 
+def test_process_classification_counts_launcher_and_child_as_one_sync_worker():
+    rows = processes() + [
+        {
+            "ProcessId": 10,
+            "ParentProcessId": 0,
+            "Name": "pwsh.exe",
+            "CommandLine": "pwsh -Command powershell -File sync-fly-bot-data-loop.ps1",
+        },
+        {
+            "ProcessId": 11,
+            "ParentProcessId": 10,
+            "Name": "powershell.exe",
+            "CommandLine": "powershell -File sync-fly-bot-data-loop.ps1",
+        },
+    ]
+    rows[0]["ParentProcessId"] = 10
+
+    assert module.classify_processes(rows)["sync"] == [10]
+
+
 def test_healthy_separate_data_and_report_directories(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,

@@ -688,6 +688,40 @@ def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
     assert client.get("/api/safe-policy-genome-v3").get_json() == payload
 
 
+def test_safe_policy_dashboard_surfaces_exact_v31_maturity_blockers(monkeypatch):
+    safe = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "epoch_id": "epoch-clean",
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    }
+    compatibility = {
+        "schema": "best_policy_research_v3_1_adapter_v1",
+        "epoch_id": "epoch-clean",
+        "blockers": [
+            "V3_MARKET_SEGMENTS_NOT_MATURED",
+            "V3_MINIMUM_INDEPENDENT_EPISODES_NOT_MET",
+        ],
+    }
+
+    def fake_read(name, default=None):
+        if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE:
+            return safe
+        if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE:
+            return compatibility
+        return default or {}
+
+    monkeypatch.setattr(dashboard, "_read_json", fake_read)
+    source = dashboard._safe_policy_v3_dashboard_source()
+
+    assert source["epoch_id"] == "epoch-clean"
+    assert source["blockers"] == [
+        "NO_SAFE_QUALIFIED_POLICY",
+        "V3_MARKET_SEGMENTS_NOT_MATURED",
+        "V3_MINIMUM_INDEPENDENT_EPISODES_NOT_MET",
+    ]
+    assert safe["blockers"] == ["NO_SAFE_QUALIFIED_POLICY"]
+
+
 def test_analyzer_policy_reports_use_configured_data_and_report_roots():
     analyzer = Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8")
     assert 'policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."' in analyzer

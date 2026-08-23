@@ -267,7 +267,7 @@ def read_replace_safe_bytes(path: Path) -> bytes:
 def process_inventory() -> list[dict[str, Any]]:
     command = (
         "Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+        "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"
     )
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", command],
@@ -282,12 +282,14 @@ def process_inventory() -> list[dict[str, Any]]:
 
 def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
     groups = {"sync": [], "analyzer": [], "dashboard": [], "supervisor": []}
+    parent_by_pid: dict[int, int] = {}
     for row in rows:
         cmd = str(row.get("CommandLine") or "").lower()
         name = str(row.get("Name") or "").lower()
         pid = int(row.get("ProcessId") or 0)
         if pid <= 0:
             continue
+        parent_by_pid[pid] = int(row.get("ParentProcessId") or 0)
         is_python = not name or "python" in name
         is_powershell = not name or "powershell" in name or name.startswith("pwsh")
         if is_powershell and "sync-fly-bot-data-loop.ps1" in cmd:
@@ -298,7 +300,15 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
             groups["dashboard"].append(pid)
         if is_python and "research-stability-supervisor.py" in cmd:
             groups["supervisor"].append(pid)
-    return {key: sorted(set(value)) for key, value in groups.items()}
+    logical_groups: dict[str, list[int]] = {}
+    for key, values in groups.items():
+        members = set(values)
+        # A pwsh launcher commonly starts powershell.exe with the same sync
+        # script. They are one worker tree, not two independent sync loops.
+        # Count only roots whose matched parent is not another member.
+        roots = [pid for pid in members if parent_by_pid.get(pid) not in members]
+        logical_groups[key] = sorted(roots)
+    return logical_groups
 
 
 def read_current_events(path: Path) -> dict[str, Any]:
