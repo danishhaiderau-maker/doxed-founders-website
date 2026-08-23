@@ -3339,6 +3339,135 @@ def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
     return True if worker is None else worker.shutdown(drain_timeout=timeout)
 
 
+# Optional post-AI studies are deliberately isolated from the authoritative AI
+# decision path.  A replay writer or research ledger may be degraded without
+# preventing the next scheduled AI opportunity from being recorded.
+_post_ai_evidence_workers = {}
+_post_ai_evidence_workers_lock = threading.Lock()
+_post_ai_evidence_status = {
+    "submitted": 0,
+    "rejected": 0,
+    "completed": 0,
+    "last_submit_ts": 0.0,
+    "last_complete_ts": 0.0,
+    "last_completed_hook": None,
+    "last_gap": None,
+}
+
+
+def _record_post_ai_evidence_gap(hook: str, reason: str, key: str, detail: str = "") -> None:
+    receipt = {
+        "schema": "post_ai_evidence_gap_v1",
+        "ts": utc_iso(),
+        "hook": str(hook),
+        "reason": str(reason),
+        "key": str(key),
+        "detail": str(detail or "")[:500],
+        "collector_version": COLLECTOR_VERSION,
+        "git_rev": _runtime_git_rev(),
+    }
+    with state_lock:
+        _post_ai_evidence_status["last_gap"] = copy.deepcopy(receipt)
+    logger.error(
+        "[POST_AI_EVIDENCE_GAP] hook=%s reason=%s key=%s detail=%s "
+        "[PIPELINE ENFORCEMENT]",
+        hook, reason, key, receipt["detail"],
+    )
+
+
+def _run_post_ai_evidence_hook(job: dict) -> None:
+    payload = job.get("payload") or {}
+    hook = str(payload.get("hook") or "")
+    ctx = payload.get("ctx") or {}
+    ai_result = payload.get("ai_result") or {}
+    research_lane = str(payload.get("research_lane") or "")
+    if hook == "reversal_study":
+        started = start_reversal_study_replay(ctx, ai_result, research_lane)
+        if started is False:
+            _record_post_ai_evidence_gap(hook, "REPLAY_LOCK_TIMEOUT", job.get("key"))
+    elif hook == "ai_reason":
+        log_ai_reason_research(ctx, ai_result, research_lane)
+    else:
+        raise ValueError(f"unknown post-AI evidence hook: {hook}")
+    with state_lock:
+        _post_ai_evidence_status["completed"] += 1
+        _post_ai_evidence_status["last_complete_ts"] = time.time()
+        _post_ai_evidence_status["last_completed_hook"] = hook
+        scheduled_ai_cycle_state["last_completed_hook"] = hook
+
+
+def _post_ai_dead_letter(hook: str, row: dict) -> None:
+    _record_post_ai_evidence_gap(
+        hook,
+        str(row.get("reason") or "DEAD_LETTER"),
+        str(row.get("key") or ""),
+        str(row.get("error") or ""),
+    )
+
+
+def _get_post_ai_evidence_worker(hook: str):
+    with _post_ai_evidence_workers_lock:
+        worker = _post_ai_evidence_workers.get(hook)
+        if worker is None:
+            worker = BoundedEvidenceWorker(
+                _run_post_ai_evidence_hook,
+                max_queue=64,
+                max_retries=0,
+                name=f"post-ai-{hook}",
+                on_dead_letter=lambda row, _hook=hook: _post_ai_dead_letter(_hook, row),
+            )
+            _post_ai_evidence_workers[hook] = worker
+        return worker
+
+
+def enqueue_post_ai_research_hooks(ctx: dict, ai_result: dict, research_lane: str) -> dict:
+    trade_id = str(ai_result.get("trade_id") or ctx.get("trade_id") or uuid.uuid4().hex)
+    accepted = {}
+    with state_lock:
+        scheduled_ai_cycle_state.update({
+            "stage": "POST_AI_ENQUEUE",
+            "stage_started_ts": time.time(),
+        })
+    for hook in ("reversal_study", "ai_reason"):
+        key = f"{hook}:{trade_id}"
+        queued = _get_post_ai_evidence_worker(hook).submit(
+            key,
+            {
+                "hook": hook,
+                "ctx": ctx,
+                "ai_result": ai_result,
+                "research_lane": research_lane,
+            },
+            source_ts=time.time(),
+        )
+        accepted[hook] = bool(queued)
+        with state_lock:
+            _post_ai_evidence_status["submitted"] += int(bool(queued))
+            _post_ai_evidence_status["rejected"] += int(not queued)
+            _post_ai_evidence_status["last_submit_ts"] = time.time()
+        if not queued:
+            _record_post_ai_evidence_gap(hook, "QUEUE_REJECTED", key)
+    with state_lock:
+        scheduled_ai_cycle_state["last_completed_hook"] = "post_ai_hooks_enqueued"
+    return accepted
+
+
+def post_ai_evidence_health_snapshot() -> dict:
+    with state_lock:
+        snapshot = copy.deepcopy(_post_ai_evidence_status)
+    with _post_ai_evidence_workers_lock:
+        snapshot["workers"] = {
+            hook: worker.snapshot() for hook, worker in _post_ai_evidence_workers.items()
+        }
+    return snapshot
+
+
+def _shutdown_post_ai_evidence_workers(timeout: float = 2.0) -> bool:
+    with _post_ai_evidence_workers_lock:
+        workers = list(_post_ai_evidence_workers.values())
+    return all(worker.shutdown(drain_timeout=timeout) for worker in workers)
+
+
 def lane_register_pending_order(order: dict):
     """Dual-write once: global pending_orders + lane-owned bucket.
 
@@ -14321,15 +14450,15 @@ def compute_horizon_outcomes_from_replay(buf: dict) -> dict:
 def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
     """Track reversal_risk_score vs 30m MFE/MAE for offline validation."""
     if not is_research_data_collection():
-        return
+        return True
     upgrade = ctx.get("ai_input_upgrade") or {}
     reversal_risk = upgrade.get("reversal_risk_score") or ctx.get("reversal_risk_score")
     if reversal_risk is None:
-        return
+        return True
     trade_id = ai.get("trade_id") or ctx.get("trade_id")
     price = float(ctx.get("price") or state.get("price") or 0)
     if not trade_id or price <= 0:
-        return
+        return True
     direction = str(ai.get("direction") or "LONG").upper()
     if direction not in ("LONG", "SHORT"):
         direction = "LONG"
@@ -14348,8 +14477,8 @@ def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
         "bot_version": EXECUTION_FIX_VERSION,
     }
     if not _safe_append_jsonl(REVERSAL_STUDY_FILE, row, label="REVERSAL_STUDY"):
-        return
-    start_replay_buffer(
+        return False
+    started = start_replay_buffer(
         study_id,
         price,
         lane="reversal_study",
@@ -14362,6 +14491,8 @@ def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
         entry_stage=upgrade.get("entry_stage") or ctx.get("entry_stage"),
         trend_health_state=upgrade.get("trend_health_state") or ctx.get("trend_health_state"),
     )
+    if not started:
+        return False
     log_reversal_research(
         study_id,
         {
@@ -14375,6 +14506,7 @@ def start_reversal_study_replay(ctx: dict, ai: dict, research_lane: str):
         {},
         phase="start",
     )
+    return True
 
 
 def log_reversal_research(study_id: str, buf: dict, horizons: dict, phase: str = "outcome"):
@@ -17359,8 +17491,10 @@ def evaluate_signal_with_ai(
                 ctx, ai_result, replay_eval, temperature, trigger_reason,
                 research_lane=research_lane, shadow_only=shadow_only,
             )
-            start_reversal_study_replay(ctx, ai_result, research_lane)
-            log_ai_reason_research(ctx, ai_result, research_lane)
+            # These are optional, derived research studies.  Never execute them
+            # synchronously on the sole periodic-AI cadence thread: replay-lock
+            # contention previously wedged all subsequent three-minute calls.
+            enqueue_post_ai_research_hooks(ctx, ai_result, research_lane)
         if not shadow_only:
             increment_pipeline_funnel("AI_CALLED")
             tier = str(ai_result.get("execution_tier") or ai_result.get("decision") or "").upper()
@@ -26012,7 +26146,10 @@ def _patch_api_state_cache_fields(**updates) -> None:
 
 
 csv_lock = threading.RLock()
-replay_lock = threading.RLock()
+# Replay evidence is non-authoritative research telemetry.  It must never hold
+# the three-minute AI cadence hostage, and production health must be able to
+# identify its owner when contention occurs.
+replay_lock = _TrackedRLock("replay_lock")
 ws_lock = threading.RLock()
 console_lock = threading.Lock()
 pipeline_lock = threading.Lock()
@@ -26022,8 +26159,12 @@ pipeline_lock = threading.Lock()
 scheduled_ai_cycle_lock = threading.Lock()
 scheduled_ai_cycle_state = {
     "owner": None,
+    "owner_ident": None,
     "started_ts": 0.0,
     "completed_ts": 0.0,
+    "stage": "IDLE",
+    "stage_started_ts": 0.0,
+    "last_completed_hook": None,
     "skipped_busy": 0,
 }
 process_lock = threading.RLock()
@@ -28834,6 +28975,28 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         reasons.append("WS_TRADE_STREAM_STALLED")
     if not ai_progressing:
         reasons.append("AI_CADENCE_STALLED")
+    scheduled_snapshot = copy.deepcopy(scheduled_ai_cycle_state)
+    owner_ident = scheduled_snapshot.get("owner_ident")
+    owner_frame = sys._current_frames().get(owner_ident) if owner_ident else None
+    scheduled_snapshot["stack_tail"] = (
+        [
+            f"{Path(item.filename).name}:{item.lineno}:{item.name}"
+            for item in traceback.extract_stack(owner_frame)[-12:]
+        ]
+        if owner_frame is not None else []
+    )
+    stage_started = float(scheduled_snapshot.get("stage_started_ts") or 0)
+    scheduled_snapshot["stage_age_sec"] = (
+        max(0.0, now - stage_started) if stage_started else 0.0
+    )
+    replay_available = replay_lock.acquire(timeout=0.05)
+    if replay_available:
+        replay_lock.release()
+    replay_diagnostics = (
+        {"name": "replay_lock", "available": True}
+        if replay_available
+        else {**replay_lock.diagnostics(now), "available": False}
+    )
     return {
         "ok": bool(lock_available and ws_progressing and ai_progressing),
         "reasons": reasons,
@@ -28851,7 +29014,9 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         "ai_stale_after_sec": ai_stale_sec,
         "process_startup_age_sec": startup_age,
         "ai_stall_latched": ai_stall_latched,
-        "scheduled_ai_cycle": copy.deepcopy(scheduled_ai_cycle_state),
+        "scheduled_ai_cycle": scheduled_snapshot,
+        "replay_lock_diagnostics": replay_diagnostics,
+        "post_ai_evidence": post_ai_evidence_health_snapshot(),
         "open_positions": len(open_positions),
         "pending_orders": len(pending_orders),
         "live_armed": live_armed,
@@ -37935,6 +38100,8 @@ def shutdown_handler(signum, frame):
     shutdown_event.set()
     drained = _shutdown_pending_order_evidence_worker(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Pending-order evidence drained={drained}")
+    post_ai_drained = _shutdown_post_ai_evidence_workers(timeout=2.0)
+    logger.warning(f"[SHUTDOWN] Post-AI evidence drained={post_ai_drained}")
     logger.warning("[SHUTDOWN] Controlled shutdown initiated")
 
 signal.signal(signal.SIGINT, shutdown_handler)
@@ -39345,7 +39512,7 @@ def finalize_shadow_research(trade_id: str, block_reason: str, signal: dict = No
 def start_replay_buffer(trade_id: str, start_price: float, **meta):
     sp = _buf_float(start_price, 0)
     if not trade_id or sp <= 0:
-        return
+        return False
     lev_default = _replay_leverage_default()
     pullback_default = _buf_float(state.get("pullback_threshold"), 0.001)
     fee_model = meta.get("fee_model") or _canonical_counterfactual_profile(
@@ -39374,9 +39541,19 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             invert_on=invert_on,
         )
     policy_identity = copy.deepcopy(policy_identity or {})
-    with replay_lock:
+    # A replay study is optional evidence, never an execution prerequisite.
+    # Bound acquisition so a busy/corrupt replay service cannot wedge the sole
+    # periodic AI scheduler or its isolated evidence worker indefinitely.
+    if not replay_lock.acquire(timeout=2.0):
+        logger.error(
+            "[REPLAY_BUFFER] lock timeout trade_id=%s lane=%s diagnostics=%s "
+            "[PIPELINE ENFORCEMENT]",
+            trade_id, meta.get("lane"), replay_lock.diagnostics(),
+        )
+        return False
+    try:
         if trade_id in replay_buffers and not replay_buffers[trade_id].get("closed"):
-            return
+            return True
         replay_buffers[trade_id] = {
             "start_ts": time.time(),
             "start_price": sp,
@@ -39442,6 +39619,9 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "invert_on": bool(meta.get("invert_on", False)),
             **fill_stamps,
         }
+    finally:
+        replay_lock.release()
+    return True
 
 
 def append_replay_tick(
@@ -41903,19 +42083,35 @@ def periodic_pipeline_loop():
                 with state_lock:
                     scheduled_ai_cycle_state.update({
                         "owner": threading.current_thread().name,
+                        "owner_ident": threading.get_ident(),
                         "started_ts": time.time(),
+                        "stage": "DETECT_EVENT",
+                        "stage_started_ts": time.time(),
                     })
                 logger.info("[HEARTBEAT] V3.1 periodic AI check [PIPELINE ENFORCEMENT]")
                 event = detect_event_light()
                 if event and event.get("event_trigger"):
                     if recovery_observation_only:
                         event["strategy_recovery_observation_only"] = True
+                    with state_lock:
+                        scheduled_ai_cycle_state.update({
+                            "stage": "PROCESS_SIGNAL",
+                            "stage_started_ts": time.time(),
+                        })
                     process_signal(event)
+                    with state_lock:
+                        scheduled_ai_cycle_state.update({
+                            "stage": "AUTHORITATIVE_COMPLETE",
+                            "stage_started_ts": time.time(),
+                        })
             finally:
                 with state_lock:
                     scheduled_ai_cycle_state.update({
                         "owner": None,
+                        "owner_ident": None,
                         "completed_ts": time.time(),
+                        "stage": "IDLE",
+                        "stage_started_ts": 0.0,
                     })
                 scheduled_ai_cycle_lock.release()
             continue
