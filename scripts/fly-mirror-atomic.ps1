@@ -4,6 +4,12 @@ function Test-MirrorCandidate {
     [Parameter(Mandatory = $true)][string]$RelativePath
   )
   $name = $RelativePath.ToLowerInvariant()
+  # This legacy filename is an append-only newline-delimited crash journal,
+  # not one JSON document. Validating the whole file as JSON stalls the mirror
+  # as soon as a second crash record is appended.
+  if ($name -eq "crash_dump.json") {
+    $name = "crash_dump.jsonl"
+  }
   if ($name -match '\.json$') {
     try {
       $null = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json

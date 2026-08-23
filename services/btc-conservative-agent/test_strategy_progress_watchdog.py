@@ -104,6 +104,12 @@ class StrategyProgressHealthTest(unittest.TestCase):
             "bot_start_time": self.now - 1_000,
             "open_positions": [],
             "pending_orders": [],
+            "_strategy_progress_incident_lock": threading.Lock(),
+            "_strategy_progress_incident": {
+                "active": False, "reasons": [],
+            },
+            "scheduled_ai_cycle_state": {},
+            "copy": __import__("copy"),
         })
 
     def test_healthy_requires_real_progress_not_only_process_heartbeat(self):
@@ -140,6 +146,12 @@ class StrategyProgressHealthTest(unittest.TestCase):
             "bot_start_time": self.now - 1_000,
             "open_positions": [],
             "pending_orders": [],
+            "_strategy_progress_incident_lock": threading.Lock(),
+            "_strategy_progress_incident": {
+                "active": False, "reasons": [],
+            },
+            "scheduled_ai_cycle_state": {},
+            "copy": __import__("copy"),
         })
         result = snapshot(self.now)
         self.assertEqual(result["trade_lock_diagnostics"]["owner_thread"], "paper-engine")
@@ -156,6 +168,18 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertTrue(result["ai_expected"])
         self.assertFalse(result["ai_progressing"])
         self.assertFalse(result["ok"])
+
+    def test_manual_pause_cannot_hide_an_already_latched_ai_stall(self):
+        self.state["execution_paused"] = True
+        self.state["manual_admin_pause"] = True
+        self.snapshot.__globals__["_strategy_progress_incident"].update({
+            "active": True,
+            "reasons": ["AI_CADENCE_STALLED"],
+        })
+        result = self.snapshot(self.now)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["ai_progressing"])
+        self.assertIn("AI_CADENCE_STALLED", result["reasons"])
 
     def test_failure_reasons_are_explicit(self):
         self.lock.acquire()

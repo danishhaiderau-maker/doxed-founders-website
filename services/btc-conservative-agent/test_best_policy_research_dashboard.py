@@ -542,6 +542,15 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
         "safety": {"executed_pnl_merged": False},
     }), encoding="utf-8")
     (tmp_path / "real_edge_summary.json").write_text(json.dumps({"executed_pnl_usd": -2.5}), encoding="utf-8")
+    (tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE).write_text(
+        json.dumps({
+            "schema": "safe_policy_genome_v3_1_report_v1",
+            "epoch_id": "epoch-clean",
+            "candidate_screen": {},
+            "blockers": ["INSUFFICIENT_V3_1_EVIDENCE"],
+        }),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
 
     client = dashboard.app.test_client()
@@ -549,16 +558,15 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     dynamic = client.get("/api/dynamic-policy-research").get_json()
     shadow = client.get("/api/shadow-policy-research").get_json()
 
-    assert static["profitable_policies"][0]["policy_id"] == "policy-a"
+    # Retired V2.2 policy detail must never repopulate V3.1 policy pages.
+    assert static["profitable_policies"] == []
+    assert static["evidence_source"] == "safe_policy_genome_v3_report.json"
     assert static["live_policy_change_allowed"] is False
-    assert dynamic["regimes"][0]["regime"] == "BULL"
     assert dynamic["winner_kind"] == "NONE"
     assert dynamic["winner_status"] == "NO_PROFITABLE_OOS_WINNER"
-    assert dynamic["relative_leader_kind"] == "DYNAMIC"
-    assert dynamic["comparison_delta"]["dynamic_minus_static_expectancy_usd"] == 3.0467
+    assert dynamic["relative_leader_kind"] == "NONE"
+    assert dynamic["regimes"] == []
     assert "No profitable OOS winner" in dynamic["warning"]
-    assert dynamic["regimes"][0]["fallback"] is True
-    assert dynamic["regimes"][0]["selected_policy_id"] == "CONTROL_OR_NO_TRADE"
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
     assert shadow["v22_shadow"]["independent_episodes"] == 1
     assert shadow["paused_shadow"]["overall"]["closed"] == 3

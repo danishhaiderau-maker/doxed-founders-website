@@ -620,6 +620,28 @@ def test_invalid_jsonl_candidate_preserves_previous_mirror_and_valid_candidate_r
     }
 
 
+def test_legacy_crash_dump_json_is_validated_as_jsonl():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        valid = root / "valid-crash.download"
+        invalid = root / "invalid-crash.download"
+        valid.write_text('{"time":"first"}\n{"time":"second"}\n', encoding="utf-8")
+        invalid.write_text('{"time":"first"}\n{"time":', encoding="utf-8")
+        command = (
+            f". '{ATOMIC_HELPER}'; "
+            f"Test-MirrorCandidate -Path '{valid}' -RelativePath 'crash_dump.json'; "
+            "$failed=$false; try { "
+            f"Test-MirrorCandidate -Path '{invalid}' -RelativePath 'crash_dump.json' "
+            "} catch { $failed=$true }; if(-not $failed){ exit 9 }"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
 def test_atomic_publish_retries_a_transient_windows_reader_lock_without_losing_either_file():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

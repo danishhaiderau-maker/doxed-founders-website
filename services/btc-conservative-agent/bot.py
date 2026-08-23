@@ -23754,7 +23754,12 @@ def state_monitor_loop():
             process_pending_orders()
             process_positions()
             pipeline_heartbeat()
-            if time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL:
+            # The V3.1 periodic worker exclusively owns shared-AI cadence.
+            # Retain this legacy analyzer probe only outside sole-AI mode.
+            if (
+                not _sole_ai_research_mode()
+                and time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL
+            ):
                 now = time.time()
                 prev_lane_ts = _lane_last_ts.get('SR_MICRO_TILE_V1', _lane_last_ts.get('TYPE_B_HUNTER_V1', 0))
                 if now >= prev_lane_ts + 60 and now >= _lane_last_ts.get('CONTINUOUS', 0) + 120:
@@ -25968,6 +25973,16 @@ replay_lock = threading.RLock()
 ws_lock = threading.RLock()
 console_lock = threading.Lock()
 pipeline_lock = threading.Lock()
+# The shared direction AI has exactly one cadence owner. Historically several
+# loops could start the same three-minute cycle and wedge provider work while
+# market-data threads continued. Scheduled callers claim this single-flight.
+scheduled_ai_cycle_lock = threading.Lock()
+scheduled_ai_cycle_state = {
+    "owner": None,
+    "started_ts": 0.0,
+    "completed_ts": 0.0,
+    "skipped_busy": 0,
+}
 process_lock = threading.RLock()
 positions_file_lock = threading.RLock()
 config_file_lock = threading.RLock()
@@ -28745,6 +28760,15 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     )
     ws_progressing = bool(transport_progressing and trade_stream_progressing)
     ai_progressing = bool(not ai_expected or (ai_ts and ai_age <= ai_stale_sec))
+    with _strategy_progress_incident_lock:
+        ai_stall_latched = bool(
+            _strategy_progress_incident.get("active")
+            and "AI_CADENCE_STALLED" in _strategy_progress_incident.get("reasons", [])
+        )
+    # Pausing after a detected stall must not turn a half-alive process green.
+    # The incident clears only after real successful cycles following recovery.
+    if ai_stall_latched:
+        ai_progressing = False
     reasons = []
     if not lock_available:
         reasons.append("TRADE_LOCK_UNAVAILABLE")
@@ -28766,6 +28790,8 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         "ai_progressing": ai_progressing,
         "ai_age_sec": ai_age,
         "ai_stale_after_sec": ai_stale_sec,
+        "ai_stall_latched": ai_stall_latched,
+        "scheduled_ai_cycle": copy.deepcopy(scheduled_ai_cycle_state),
         "open_positions": len(open_positions),
         "pending_orders": len(pending_orders),
         "live_armed": live_armed,
@@ -41661,7 +41687,7 @@ def heartbeat_loop():
 
 
 def periodic_pipeline_loop():
-    """Keep the legacy five-minute pipeline cadence off the liveness thread."""
+    """Sole owner of the shared direction-AI cadence."""
     while not shutdown_event.is_set():
         if shutdown_event.wait(HEARTBEAT_INTERVAL):
             break
@@ -41680,12 +41706,30 @@ def periodic_pipeline_loop():
             )
             continue
         if _sole_ai_research_mode():
-            logger.info("[HEARTBEAT] v83 periodic AI check [PIPELINE ENFORCEMENT]")
-            event = detect_event_light()
-            if event and event.get("event_trigger"):
-                if recovery_observation_only:
-                    event["strategy_recovery_observation_only"] = True
-                process_signal(event)
+            if not scheduled_ai_cycle_lock.acquire(blocking=False):
+                with state_lock:
+                    scheduled_ai_cycle_state["skipped_busy"] += 1
+                logger.warning("[AI SCHEDULER] skipped overlapping periodic cycle")
+                continue
+            try:
+                with state_lock:
+                    scheduled_ai_cycle_state.update({
+                        "owner": threading.current_thread().name,
+                        "started_ts": time.time(),
+                    })
+                logger.info("[HEARTBEAT] V3.1 periodic AI check [PIPELINE ENFORCEMENT]")
+                event = detect_event_light()
+                if event and event.get("event_trigger"):
+                    if recovery_observation_only:
+                        event["strategy_recovery_observation_only"] = True
+                    process_signal(event)
+            finally:
+                with state_lock:
+                    scheduled_ai_cycle_state.update({
+                        "owner": None,
+                        "completed_ts": time.time(),
+                    })
+                scheduled_ai_cycle_lock.release()
             continue
         logger.info("[HEARTBEAT] Periodic pipeline check (no direct AI call) [PIPELINE ENFORCEMENT]")
         event = detect_event_light()
@@ -41732,7 +41776,12 @@ def engine_loop():
                         process_signal(ctx)
                     except Empty:
                         break
-                if time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL:
+                # In shared-AI research mode the periodic worker exclusively
+                # owns cadence; the engine only services lifecycle/queues.
+                if (
+                    not _sole_ai_research_mode()
+                    and time.time() - last_pipeline_run >= MIN_PIPELINE_INTERVAL
+                ):
                     logger.info("[ENGINE LOOP] PERIODIC PIPELINE TRIGGER [PIPELINE ENFORCEMENT]")
                     event = detect_event_light()
                     if event and event.get("event_trigger"):
