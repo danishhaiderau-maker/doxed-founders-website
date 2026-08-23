@@ -194,6 +194,7 @@ foreach ($row in $selectedFiles) {
   try {
     $fullReplaceRetry = $false
     $generationRefreshCount = 0
+    $atomicSnapshotFallback = $false
     while ($true) {
       $refreshGeneration = $false
       if ($sameGeneration -and -not $fullReplaceRetry -and (Test-Path -LiteralPath $local)) {
@@ -204,7 +205,11 @@ foreach ($row in $selectedFiles) {
         $offset = 0
       }
       while ($offset -lt $remoteSize) {
-      $limit = [Math]::Min($chunkLimit, $remoteSize - $offset)
+      $limit = if ($atomicSnapshotFallback) {
+        $chunkLimit
+      } else {
+        [Math]::Min($chunkLimit, $remoteSize - $offset)
+      }
       $chunkComplete = $false
       for ($attempt = 1; $attempt -le 3 -and -not $chunkComplete; $attempt++) {
         $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
@@ -215,11 +220,14 @@ foreach ($row in $selectedFiles) {
           $expectedInode = [int64]$row.inode
           $expectedPublishedSize = [int64]$row.size
           $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
-          $response = $downloadClient.GetAsync(
-            "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit" +
-            "&expected_physical_size=$expectedPhysicalSize&expected_published_size=$expectedPublishedSize" +
-            "&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode&consistency_mode=$consistencyMode"
-          ).GetAwaiter().GetResult()
+          $requestUrl = "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
+          if (-not $atomicSnapshotFallback) {
+            $requestUrl += (
+              "&expected_physical_size=$expectedPhysicalSize&expected_published_size=$expectedPublishedSize" +
+              "&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode&consistency_mode=$consistencyMode"
+            )
+          }
+          $response = $downloadClient.GetAsync($requestUrl).GetAwaiter().GetResult()
           if (-not $response.IsSuccessStatusCode) {
             $errorBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
             $statusCode = [int]$response.StatusCode
@@ -232,6 +240,23 @@ foreach ($row in $selectedFiles) {
             $expectedHash = [string](
               $response.Headers.GetValues("X-Chunk-Sha256") | Select-Object -First 1
             )
+            if ($atomicSnapshotFallback) {
+              # The server validates that this complete small-file read stayed
+              # on one generation.  Adopt the exact generation returned by
+              # that read instead of the already-obsolete manifest row.
+              $snapshotSize = [int64]($response.Headers.GetValues("X-Data-Size") | Select-Object -First 1)
+              $snapshotMtime = [int64]($response.Headers.GetValues("X-Data-Mtime-Ns") | Select-Object -First 1)
+              $snapshotInode = [int64]($response.Headers.GetValues("X-Data-Inode") | Select-Object -First 1)
+              if ($snapshotSize -gt $chunkLimit -or $payload.Length -ne $snapshotSize) {
+                throw "Atomic snapshot fallback did not return one complete small file for $rel."
+              }
+              $remoteSize = $snapshotSize
+              $remoteInode = $snapshotInode
+              $row.size = $snapshotSize
+              $row.physical_size = $snapshotSize
+              $row.mtime_ns = $snapshotMtime
+              $row.inode = $snapshotInode
+            }
           } finally {
             $response.Dispose()
           }
@@ -277,6 +302,24 @@ foreach ($row in $selectedFiles) {
       }
       if ($refreshGeneration) {
         $generationRefreshCount += 1
+        if (
+          $generationRefreshCount -ge 3 -and
+          $consistencyMode -eq "strict_generation_v1" -and
+          $remoteSize -le $chunkLimit
+        ) {
+          # Small atomically-rewritten documents may never remain equal to a
+          # preceding manifest long enough to download. The endpoint can read
+          # one complete generation and verify before/after identity itself.
+          # Never use this for multi-chunk/raw evidence streams.
+          $atomicSnapshotFallback = $true
+          $sameGeneration = $false
+          $fullReplaceRetry = $true
+          Write-Host (
+            "Fly generation remained hot for $rel; using one-read verified " +
+            "atomic snapshot fallback for a $remoteSize-byte strict document."
+          )
+          continue
+        }
         $freshManifest = Invoke-RestMethod -Uri "$base/api/data-sync/manifest" -Headers $headers -TimeoutSec 30
         if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
           throw "Unexpected Fly sync manifest schema during generation refresh."

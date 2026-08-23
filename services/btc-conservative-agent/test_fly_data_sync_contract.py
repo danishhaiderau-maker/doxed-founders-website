@@ -585,6 +585,20 @@ def test_local_mirror_download_is_validated_then_atomically_published():
     assert "Remove-Item -LiteralPath $local -Force" not in SYNC_SCRIPT
 
 
+def test_hot_small_strict_document_uses_verified_single_read_snapshot_only():
+    assert '$atomicSnapshotFallback = $false' in SYNC_SCRIPT
+    assert '$generationRefreshCount -ge 3' in SYNC_SCRIPT
+    assert '$consistencyMode -eq "strict_generation_v1"' in SYNC_SCRIPT
+    assert '$remoteSize -le $chunkLimit' in SYNC_SCRIPT
+    assert 'if (-not $atomicSnapshotFallback)' in SYNC_SCRIPT
+    assert 'X-Data-Size' in SYNC_SCRIPT
+    assert 'X-Data-Mtime-Ns' in SYNC_SCRIPT
+    assert 'X-Data-Inode' in SYNC_SCRIPT
+    assert '$payload.Length -ne $snapshotSize' in SYNC_SCRIPT
+    # Raw/multi-chunk evidence is never admitted to the relaxed one-read path.
+    assert 'Never use this for multi-chunk/raw evidence streams.' in SYNC_SCRIPT
+
+
 def test_invalid_jsonl_candidate_preserves_previous_mirror_and_valid_candidate_replaces_it():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
