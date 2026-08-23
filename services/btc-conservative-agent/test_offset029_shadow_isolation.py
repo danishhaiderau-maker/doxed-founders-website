@@ -367,8 +367,14 @@ def test_offset_spawn_and_terminal_records_preserve_shared_ai_identity():
     assert '"pre_ai": spawn_ai' in spawn
 
     position = _function_source(BOT, "_build_open_position")
+    market_order = _function_source(BOT, "execute_market_order")
+    limit_order = _function_source(BOT, "create_limit_order")
     expired = _function_source(BOT, "_record_expired_order")
     close = _function_source(BOT, "close_position")
+    for order_source in (market_order, limit_order):
+        assert '"shared_ai_call_id": signal.get("shared_ai_call_id")' in order_source
+        assert '"shared_ai_call_ts": signal.get("shared_ai_call_ts")' in order_source
+        assert '"source_trade_id": signal.get("source_trade_id")' in order_source
     assert '"shared_ai_call_ts": (' in position
     assert '"shared_ai_call_ts": source.get("shared_ai_call_ts")' in expired
     assert '"research_lane": pos.get("research_lane") or master.get("research_lane")' in close

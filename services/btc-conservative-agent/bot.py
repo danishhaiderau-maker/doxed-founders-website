@@ -24159,6 +24159,13 @@ def execute_market_order(signal):
     fill_px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else price
     order = {
         "trade_id": signal["trade_id"],
+        # Preserve the canonical parent scan on every lifecycle object.  The
+        # dashboard and analyzer must never infer that a Patient Chase order
+        # was "not selected" merely because the child order id differs from
+        # the shared three-minute AI-call id.
+        "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
+        "shared_ai_call_ts": signal.get("shared_ai_call_ts"),
+        "source_trade_id": signal.get("source_trade_id") or signal.get("shared_ai_call_id"),
         "signal_dir": signal["final_direction"],
         "side": side,
         "limit_price": fill_px,
@@ -24241,6 +24248,13 @@ def create_limit_order(signal):
     assert limit_price > 0, "INVALID LIMIT PRICE"
     order = {
         "trade_id": signal["trade_id"],
+        # Keep the canonical AI parent through pending, fill, expiry and close
+        # projections.  Without these fields a genuine Patient Chase paper
+        # order was counted as an unlinked lifecycle and AI History displayed
+        # NOT_SELECTED beside an order that actually existed.
+        "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
+        "shared_ai_call_ts": signal.get("shared_ai_call_ts"),
+        "source_trade_id": signal.get("source_trade_id") or signal.get("shared_ai_call_id"),
         "research_lane": str(
             signal.get("research_lane") or RESEARCH_LANE_CONTINUOUS
         ).upper(),
