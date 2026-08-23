@@ -416,6 +416,25 @@ class StrategyProgressIncidentTest(unittest.TestCase):
             outside_boundary,
         )
 
+    def test_periodic_ai_poll_cannot_stretch_research_cooldown(self):
+        """The scheduler poll must stay well below the configured AI cadence."""
+        heartbeat_assign = next(
+            node for node in TREE.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "HEARTBEAT_INTERVAL"
+                for target in node.targets
+            )
+        )
+        namespace = {"max": max, "min": min, "float": float, "os": __import__("os")}
+        interval = eval(
+            compile(ast.Expression(heartbeat_assign.value), str(BOT_PATH), "eval"),
+            namespace,
+        )
+        self.assertLessEqual(interval, 30.0)
+        self.assertLess(interval, 180.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7649,7 +7649,14 @@ POST_EXIT_REPLAY_FILE = os.getenv("POST_EXIT_REPLAY_FILE", "post_exit_replay.jso
 # Live exit knobs stay unchanged (thesis −12 / Scenario C / hard-stop-does-not-close-paper).
 # 4pp / 5pp numbers are analysis grouping in path_replay_v1, not a live knob grid.
 GLOBAL_SIGNAL_COOLDOWN = 300
-HEARTBEAT_INTERVAL = 300.0
+# This worker only polls eligibility; the actual API-call cadence is governed
+# by ``get_effective_ai_cooldown_sec()`` (normally 180 seconds). Sleeping for
+# 300 seconds here stretched the configured three-minute cadence to five
+# minutes and left a fresh epoch falsely stalled until the next long wake-up.
+HEARTBEAT_INTERVAL = max(
+    1.0,
+    min(30.0, float(os.getenv("AI_SCHEDULER_POLL_INTERVAL_SEC", "5"))),
+)
 PROCESS_HEARTBEAT_INTERVAL_SEC = max(
     1.0,
     min(10.0, float(os.getenv("PROCESS_HEARTBEAT_INTERVAL_SEC", "5"))),
