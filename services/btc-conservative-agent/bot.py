@@ -14793,7 +14793,14 @@ def _v3_lane_policy_material(lane: str) -> dict:
         "entry_limit_policy": entry_limit_policy,
         "entry_ttl_sec": float(SIGNAL_TTL_SEC),
         "exit_config": get_exit_config_for_lane(lane),
-        "paper_only": not relay_eligible,
+        # Every lane decision produced here describes the canonical LOCAL
+        # paper lifecycle. Relay eligibility is a separate capability: an
+        # authenticated platform may later copy an eligible local lifecycle,
+        # but that must never rewrite the source evidence as a live event.
+        # Conflating these fields produced CONTINUOUS rows with
+        # paper_only=false while policy_execution_scope remained
+        # PAPER_RESEARCH_ONLY, making provenance look mixed/contaminated.
+        "paper_only": True,
         "relay_eligible": relay_eligible,
     }
     base_control = dict(CONTROL_CELL)

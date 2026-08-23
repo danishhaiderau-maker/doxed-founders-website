@@ -418,11 +418,12 @@ def test_every_shared_call_writes_patient_and_continuous_v3_lane_verdicts():
     assert "_write_v3_shared_lane_decision(" in continuous
 
 
-def test_v3_lane_identity_distinguishes_relay_capable_continuous_from_paper_only_patient():
+def test_v3_lane_identity_separates_local_paper_world_from_relay_capability():
     bridge = _function_source(BOT, "_write_v3_shared_lane_decision")
     identity = _function_source(BOT, "_v3_lane_policy_material")
     assert "_v3_lane_policy_material(lane)" in bridge
-    assert '"paper_only": not relay_eligible' in identity
+    assert '"paper_only": True' in identity
+    assert '"relay_eligible": relay_eligible' in identity
     assert 'lane == RESEARCH_LANE_CONTINUOUS' in identity
 
 
