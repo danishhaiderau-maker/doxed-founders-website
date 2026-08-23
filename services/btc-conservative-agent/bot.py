@@ -3397,11 +3397,15 @@ def _run_post_ai_evidence_hook(job: dict) -> None:
 
 
 def _post_ai_dead_letter(hook: str, row: dict) -> None:
+    error = str(row.get("error") or "")
+    reason = str(row.get("reason") or "DEAD_LETTER")
+    if "evidence handler exceeded" in error:
+        reason = "HOOK_TIMEOUT"
     _record_post_ai_evidence_gap(
         hook,
-        str(row.get("reason") or "DEAD_LETTER"),
+        reason,
         str(row.get("key") or ""),
-        str(row.get("error") or ""),
+        error,
     )
 
 
@@ -3414,6 +3418,7 @@ def _get_post_ai_evidence_worker(hook: str):
                 max_queue=64,
                 max_retries=0,
                 name=f"post-ai-{hook}",
+                handler_timeout_sec=5.0,
                 on_dead_letter=lambda row, _hook=hook: _post_ai_dead_letter(_hook, row),
             )
             _post_ai_evidence_workers[hook] = worker

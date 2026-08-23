@@ -75,3 +75,69 @@ def test_a_blocked_optional_worker_does_not_block_caller_or_other_worker() -> No
     assert reversal.shutdown(drain_timeout=1.0)
     assert reason.shutdown(drain_timeout=1.0)
 
+
+def test_slow_optional_hook_is_time_bounded_and_dead_lettered() -> None:
+    release = threading.Event()
+    dead = threading.Event()
+    receipts = []
+
+    def slow_handler(_job: dict) -> None:
+        release.wait(2.0)
+
+    worker = BoundedEvidenceWorker(
+        slow_handler,
+        max_queue=2,
+        max_retries=0,
+        handler_timeout_sec=0.05,
+        on_dead_letter=lambda row: (receipts.append(row), dead.set()),
+    )
+    assert worker.submit("slow:one", {"hook": "reversal_study"}) is True
+    assert dead.wait(0.5)
+    assert receipts[0]["reason"] == "retries_exhausted"
+    assert "exceeded" in receipts[0]["error"]
+    release.set()
+    assert worker.shutdown(drain_timeout=1.0)
+
+
+def test_exception_in_each_post_ai_hook_is_isolated_and_next_jobs_run() -> None:
+    receipts = []
+    completed = []
+
+    def handler(job: dict) -> None:
+        hook = job["payload"]["hook"]
+        if job["payload"].get("fail"):
+            raise RuntimeError(f"{hook} failed")
+        completed.append(job["key"])
+
+    for hook in ("reversal_study", "ai_reason"):
+        worker = BoundedEvidenceWorker(
+            handler,
+            max_queue=4,
+            max_retries=0,
+            handler_timeout_sec=0.25,
+            on_dead_letter=receipts.append,
+        )
+        assert worker.submit(f"{hook}:failed", {"hook": hook, "fail": True})
+        deadline = time.monotonic() + 0.5
+        while len(receipts) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert receipts[-1]["reason"] == "retries_exhausted"
+        assert worker.submit(f"{hook}:next", {"hook": hook, "fail": False})
+        deadline = time.monotonic() + 0.5
+        while f"{hook}:next" not in completed and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert f"{hook}:next" in completed
+        assert worker.shutdown(drain_timeout=1.0)
+
+
+def test_ready_contract_fails_closed_for_genuine_scheduler_stall() -> None:
+    body = _source("ready")
+    assert "strategy_progress" in body
+    assert 'strategy_progress["ok"]' in body
+
+
+def test_post_ai_timeout_is_reported_as_an_explicit_evidence_gap() -> None:
+    body = _source("_post_ai_dead_letter")
+    assert "evidence handler exceeded" in body
+    assert "HOOK_TIMEOUT" in body
+    assert "_record_post_ai_evidence_gap" in body

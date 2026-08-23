@@ -25,6 +25,7 @@ class BoundedEvidenceWorker:
         name: str = "evidence-writer",
         clock: Callable[[], float] = time.time,
         on_dead_letter: Optional[Callable[[Dict[str, Any]], None]] = None,
+        handler_timeout_sec: Optional[float] = None,
     ) -> None:
         self._handler = handler
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
@@ -32,6 +33,11 @@ class BoundedEvidenceWorker:
         self._completed_limit = max(1, int(completed_keys))
         self._clock = clock
         self._on_dead_letter = on_dead_letter
+        self._handler_timeout_sec = (
+            None
+            if handler_timeout_sec is None
+            else max(0.01, float(handler_timeout_sec))
+        )
         self._lock = threading.Lock()
         self._active_keys = set()
         self._completed = deque()
@@ -40,6 +46,44 @@ class BoundedEvidenceWorker:
         self._accepting = True
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
+
+    def _invoke_handler(self, job: Dict[str, Any]) -> None:
+        """Run one handler with an optional hard wall-clock budget.
+
+        The timeout is opt-in because some evidence writers are authoritative
+        and must retain their existing synchronous delivery semantics.  For
+        optional research hooks, the handler runs in a daemon helper so a
+        wedged filesystem/library call cannot consume the sole queue worker
+        forever.  Python cannot safely kill a blocked thread; timed-out work is
+        therefore dead-lettered and any eventual late write remains derived,
+        idempotent evidence rather than scheduler authority.
+        """
+        if self._handler_timeout_sec is None:
+            self._handler(job)
+            return
+        finished = threading.Event()
+        outcome: Dict[str, Any] = {}
+
+        def invoke() -> None:
+            try:
+                self._handler(job)
+            except BaseException as exc:  # propagated on the owning worker
+                outcome["error"] = exc
+            finally:
+                finished.set()
+
+        helper = threading.Thread(
+            target=invoke,
+            name=f"{self._thread.name}-handler",
+            daemon=True,
+        )
+        helper.start()
+        if not finished.wait(self._handler_timeout_sec):
+            raise TimeoutError(
+                f"evidence handler exceeded {self._handler_timeout_sec:.3f}s"
+            )
+        if "error" in outcome:
+            raise outcome["error"]
 
     def _dead_letter(self, record: Dict[str, Any]) -> None:
         with self._lock:
@@ -110,7 +154,7 @@ class BoundedEvidenceWorker:
                 if job is None:
                     return
                 try:
-                    self._handler(job)
+                    self._invoke_handler(job)
                 except Exception as exc:
                     job["attempt"] += 1
                     if job["attempt"] <= self._max_retries:
