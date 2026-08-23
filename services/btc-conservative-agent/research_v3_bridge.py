@@ -54,7 +54,22 @@ def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
         if not isinstance(source, Mapping):
             continue
         context = source.get("context") if isinstance(source.get("context"), Mapping) else {}
-        cycle = context.get("cycle_3m_universe") if isinstance(context.get("cycle_3m_universe"), Mapping) else {}
+        ai_input = source.get("ai_input") if isinstance(source.get("ai_input"), Mapping) else {}
+        # Persisted AI inputs wrap this receipt under ``context``. Shared
+        # in-process child-lane signals carry the same observed receipt at the
+        # top level. Accept both shapes without deriving or fabricating ATR.
+        direct_cycle = source.get("cycle_3m_universe")
+        nested_cycle = context.get("cycle_3m_universe")
+        ai_input_cycle = ai_input.get("cycle_3m_universe")
+        cycle = (
+            direct_cycle
+            if isinstance(direct_cycle, Mapping)
+            else nested_cycle
+            if isinstance(nested_cycle, Mapping)
+            else ai_input_cycle
+            if isinstance(ai_input_cycle, Mapping)
+            else {}
+        )
         research = source.get("research_feature_snapshot") if isinstance(source.get("research_feature_snapshot"), Mapping) else {}
         market = research.get("market_context") if isinstance(research.get("market_context"), Mapping) else {}
         for value in (

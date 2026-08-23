@@ -362,6 +362,68 @@ class V3BridgeTests(unittest.TestCase):
                 self.assertEqual(row["policy_signature"], intent["policy_signature"])
                 self.assertEqual(row["policy_epoch_id"], intent["policy_epoch_id"])
 
+    def test_paper_submit_reads_direct_shared_signal_cycle_atr_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "o29atr-direct-cycle", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "symbol": "tBTCF0:USTF0", "shared_ai_call_id": "scan-direct-cycle",
+                "signal_price": 101.0, "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+                "cycle_3m_universe": {"atr14_pct_3m": 0.079},
+            }
+            order = {
+                "trade_id": "o29atr-direct-cycle", "created_ts": 1001,
+                "signal_dir": "LONG", "signal_price": 101.0,
+                "limit_price": 100.7071, "qty": 0.2,
+                "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+            }
+
+            receipt = dual_write_paper_order_intent(
+                order, signal, epoch_id="epoch-v3-direct-cycle", data_dir=tmp,
+            )
+
+            self.assertTrue(receipt["store_verification"]["passed"])
+            intent = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-direct-cycle")
+                .ledger_path("order_intent")
+                .read_text()
+                .strip()
+            )
+            self.assertEqual(intent["atr14_pct_at_signal"], 0.079)
+            self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
+
+    def test_paper_submit_reads_frozen_ai_input_cycle_atr_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "o29atr-ai-input-cycle", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "symbol": "tBTCF0:USTF0", "shared_ai_call_id": "scan-ai-input-cycle",
+                "signal_price": 101.0, "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+                "ai_input": {"cycle_3m_universe": {"atr14_pct_3m": 0.082}},
+            }
+            order = {
+                "trade_id": "o29atr-ai-input-cycle", "created_ts": 1001,
+                "signal_dir": "LONG", "signal_price": 101.0,
+                "limit_price": 100.7071, "qty": 0.2,
+                "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+            }
+
+            dual_write_paper_order_intent(
+                order, signal, epoch_id="epoch-v3-ai-input-cycle", data_dir=tmp,
+            )
+            intent = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-ai-input-cycle")
+                .ledger_path("order_intent")
+                .read_text()
+                .strip()
+            )
+            self.assertEqual(intent["atr14_pct_at_signal"], 0.082)
+            self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
+
     def test_different_paper_lanes_never_share_inherited_control_signature(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = {
