@@ -59,6 +59,26 @@ $relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestinati
 $env:PLATFORM_RELAY_EVIDENCE_FILE = $relayEvidenceDestination
 $env:PLATFORM_SOURCE_BOT_URL = $SourceUrl
 
+function Write-Utf8NoBomJsonAtomic {
+  param(
+    [Parameter(Mandatory = $true)]$Value,
+    [Parameter(Mandatory = $true)][string]$LiteralPath,
+    [int]$Depth = 6
+  )
+  $target = [System.IO.Path]::GetFullPath($LiteralPath)
+  $temporary = "$target.tmp-$PID-$([Guid]::NewGuid().ToString('N'))"
+  $json = $Value | ConvertTo-Json -Depth $Depth
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  try {
+    [System.IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, $encoding)
+    Move-Item -LiteralPath $temporary -Destination $target -Force
+  } finally {
+    if (Test-Path -LiteralPath $temporary) {
+      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
 # Growth trigger (default 50 MB). Override with FLY_VOLUME_SYNC_THRESHOLD_MB.
 # Poll cadence is faster than the force-sync interval so large jsonl growth is
 # mirrored for the analyzer without waiting a full IntervalSec cycle.
@@ -128,7 +148,7 @@ function Write-SizeReport {
       }
     }
 
-    $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ReportFile -Encoding UTF8
+    Write-Utf8NoBomJsonAtomic -Value $report -LiteralPath $ReportFile -Depth 6
   } catch {
     Add-Content -LiteralPath $logFile -Value (
       "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report failed: $($_.Exception.Message)"

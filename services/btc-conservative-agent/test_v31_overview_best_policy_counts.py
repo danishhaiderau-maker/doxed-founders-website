@@ -12,6 +12,7 @@ def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypat
             "independent_opportunities": 3,
             "decision_branches": 6,
             "terminal_lifecycles": 3,
+            "execution_rows": 1,
             "decision_outcomes": {"CENSORED": 3, "NO_TRADE": 3},
             "effective_paper_execution_identities": [{
                 "policy_epoch_id": "paper-epoch-clean",
@@ -31,8 +32,15 @@ def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypat
             },
         },
     }
+    compatibility = {
+        "schema": "best_policy_research_v3_1_adapter_v1",
+        "epoch_id": "epoch-clean-808",
+        "evidence": {"completed_paths": 1},
+    }
     monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: (
-        report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else (default or {})
+        report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
+        else compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE
+        else (default or {})
     ))
 
     # Exercise the adapter directly so this focused test cannot seed the
@@ -41,7 +49,7 @@ def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypat
 
     assert payload["epoch_id"] == "epoch-clean-808"
     assert payload["evidence"]["current_epoch_events"] == 3
-    assert payload["evidence"]["completed_paths"] == 3
+    assert payload["evidence"]["completed_paths"] == 1
     assert payload["evidence"]["independent_episode_count"] == 3
     assert payload["evidence"]["decision_branches"] == 6
     assert payload["policy_epoch_id"] == "paper-epoch-clean"
@@ -51,3 +59,33 @@ def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypat
     assert payload["research_design"]["static_vs_dynamic"]["required"] is True
     assert payload["status"] == "NO QUALIFIED POLICY"
     assert payload["current_candidate"] is None
+
+
+def test_best_policy_overview_does_not_count_no_order_terminals_as_paths(monkeypatch):
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "epoch_id": "epoch-clean-no-orders",
+        "collection": {
+            "independent_opportunities": 2,
+            "terminal_lifecycles": 2,
+            "execution_rows": 0,
+        },
+        "candidate_screen": {"descriptive_top_100": [], "split": {}},
+        "safe_policy_ranking": {"qualification": "NO_SAFE_QUALIFIED_POLICY"},
+    }
+    compatibility = {
+        "schema": "best_policy_research_v3_1_adapter_v1",
+        "epoch_id": "epoch-clean-no-orders",
+        "evidence": {"completed_paths": 0},
+    }
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: (
+        report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
+        else compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE
+        else (default or {})
+    ))
+
+    payload = dashboard._best_policy_research_v31_payload()
+
+    assert payload["evidence"]["current_epoch_events"] == 2
+    assert payload["evidence"]["terminal_lifecycles"] == 2
+    assert payload["evidence"]["completed_paths"] == 0

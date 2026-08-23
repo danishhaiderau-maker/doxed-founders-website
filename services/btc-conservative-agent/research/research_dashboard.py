@@ -2099,13 +2099,28 @@ def _best_policy_research_v31_payload() -> dict:
     source = _safe_policy_v3_dashboard_source()
     report, screen, ranking = source["report"], source["screen"], source["ranking"]
     collection = report.get("collection") or {}
+    compatibility = _read_json(BEST_POLICY_RESEARCH_REPORT_FILE) or {}
+    compatibility_evidence = compatibility.get("evidence") or {}
+    compatibility_matches = bool(
+        str(compatibility.get("schema") or "").startswith("best_policy_research_v3_1_adapter")
+        and compatibility.get("epoch_id") == source["epoch_id"]
+    )
+    # A terminal lifecycle may truthfully be NO_ORDER (for example, a disabled
+    # benchmark decision).  It is not a completed replay/execution path.  Use
+    # the canonical cohort report when identities match and otherwise fail
+    # closed to the explicit execution-path count.
+    completed_paths = int(
+        (compatibility_evidence.get("completed_paths") or 0)
+        if compatibility_matches
+        else (collection.get("execution_rows") or 0)
+    )
     # Keep the compatibility endpoint truthful for clients which still render
     # the retired V2.2 field names.  The values are projections of canonical
     # V3.1 counts, not a second evidence source.
     evidence = dict(collection)
     evidence.update({
         "current_epoch_events": int(collection.get("independent_opportunities") or 0),
-        "completed_paths": int(collection.get("terminal_lifecycles") or 0),
+        "completed_paths": completed_paths,
         "independent_episode_count": int(collection.get("independent_opportunities") or 0),
         "qualified_oos_episodes": int(
             (screen.get("split") or {}).get("oos") or 0
@@ -2348,7 +2363,9 @@ def api_summary():
     mirror_size_path = DATA_ROOT / MIRROR_SIZE_REPORT_FILE
     if mirror_size_path.is_file():
         try:
-            mirror_size = json.loads(mirror_size_path.read_text(encoding="utf-8"))
+            # Windows PowerShell 5.1's ``-Encoding UTF8`` emits a BOM.  Accept
+            # existing receipts while the sync writer now emits BOM-free UTF-8.
+            mirror_size = json.loads(mirror_size_path.read_text(encoding="utf-8-sig"))
         except (OSError, ValueError, TypeError):
             mirror_size = {}
     stale_meta = _summary_stale_meta(compact)
