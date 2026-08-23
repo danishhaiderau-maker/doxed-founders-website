@@ -247,6 +247,22 @@ def test_process_classification_ignores_shell_commands_that_only_mention_worker_
     }
 
 
+def test_process_classification_does_not_count_one_shot_audit_as_supervisor():
+    rows = processes() + [
+        {
+            "ProcessId": 8,
+            "ParentProcessId": 1,
+            "Name": "python.exe",
+            "CommandLine": (
+                "python research-stability-supervisor.py "
+                "--status-file one-shot.json"
+            ),
+        }
+    ]
+
+    assert module.classify_processes(rows)["supervisor"] == [4]
+
+
 def test_process_classification_counts_launcher_and_child_as_one_sync_worker():
     rows = processes() + [
         {

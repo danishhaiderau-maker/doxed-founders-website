@@ -298,7 +298,14 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
             groups["analyzer"].append(pid)
         if is_python and "research_dashboard.py" in cmd and "--standalone" in cmd:
             groups["dashboard"].append(pid)
-        if is_python and "research-stability-supervisor.py" in cmd:
+        # Only the long-running --loop instance owns continuous supervision.
+        # One-shot audits intentionally run alongside it and must not create a
+        # false duplicate-supervisor alert.
+        if (
+            is_python
+            and "research-stability-supervisor.py" in cmd
+            and "--loop" in cmd.split()
+        ):
             groups["supervisor"].append(pid)
     logical_groups: dict[str, list[int]] = {}
     for key, values in groups.items():
