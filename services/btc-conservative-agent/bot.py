@@ -33690,7 +33690,19 @@ def _build_relay_execution_state_snapshot() -> dict:
             "last_edge": state.get("last_edge"),
             "leverage": state.get("leverage"),
             "regime": state.get("regime"),
-            "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
+            # Dashboard diagnostics are presentation-only, but they must come
+            # from the same live state receipt as price and execution rows.
+            # Keeping only last_edge_score froze heartbeat, AI-call, funnel,
+            # and lane-opportunity fields at the first heavy dashboard build.
+            "debug_state": copy.deepcopy(debug_state),
+            "heartbeat": state.get("heartbeat"),
+            "last_heartbeat": state.get("last_heartbeat"),
+            "pipeline_funnel_counters": copy.deepcopy(
+                state.get("pipeline_funnel_counters") or {}
+            ),
+            "lane_opportunity_counters": copy.deepcopy(
+                state.get("lane_opportunity_counters") or {}
+            ),
             "live_armed": bool(state.get("live_armed", False)),
             "system_ready": runtime["system_ready"],
             "signal_generation_ready": runtime["signal_generation_ready"],
@@ -34897,6 +34909,10 @@ def _api_state_cache_refresher_loop():
                     "leverage",
                     "regime",
                     "debug_state",
+                    "heartbeat",
+                    "last_heartbeat",
+                    "pipeline_funnel_counters",
+                    "lane_opportunity_counters",
                     "orders",
                     "positions",
                     "trades",
@@ -34956,6 +34972,11 @@ def _api_state_cache_refresher_loop():
                     )
                 snap["collector_version"] = COLLECTOR_V31_VERSION
                 snap["legacy_collector_version"] = COLLECTOR_V22_VERSION
+                # Rebuild the small server-side display projection after the
+                # live diagnostic overlay. Otherwise display_pipeline and the
+                # AI/debug labels still describe the paused-built base.
+                snap.update(build_dashboard_display(snap))
+                snap["strategy_progress"] = _strategy_progress_health_snapshot()
                 snap["server_ts_melbourne"] = _format_melbourne_hm(
                     snap.get("server_ts") or utc_iso()
                 )
