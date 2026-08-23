@@ -6435,6 +6435,12 @@ def resolve_ai_planner_limit(
 
 def continuous_ai_direct_entry_enabled() -> bool:
     """CONTINUOUS lane: place AI-suggested limit immediately (no AWAITING_MICRO)."""
+    # The operator-facing Continuous toggle is the authoritative execution
+    # decision.  The legacy direct-entry preference may select the route only
+    # while Continuous execution is ON; it must never resurrect orders after
+    # the saved dashboard choice is OFF.
+    if not continuous_ai_research_enabled():
+        return False
     with state_lock:
         if "continuous_ai_direct_entry_enabled" in state:
             return bool(state.get("continuous_ai_direct_entry_enabled"))
@@ -30967,9 +30973,12 @@ DASHBOARD_JS = """(function () {
         if (tradesHint) {
           const shown = (d.trades || []).length;
           const total = d.trade_count_session != null ? d.trade_count_session : shown;
+          const tradeScopeLabel = d.trade_scope === 'SIGNED_FRESH_EPOCH'
+            ? 'current signed clean-epoch'
+            : 'historical/all-history';
           tradesHint.innerText = total > shown
-            ? ('Showing last ' + shown + ' of ' + total + ' session trades — full export: /api/export_csv')
-            : ('Last ' + shown + ' closed trades — full export: /api/export_csv');
+            ? ('Showing last ' + shown + ' of ' + total + ' ' + tradeScopeLabel + ' closed trades — full export: /api/export_csv')
+            : ('Last ' + shown + ' ' + tradeScopeLabel + ' closed trades — full export: /api/export_csv');
         }
         const aiHist = d.ai_history || [];
         const aiHint = document.getElementById('aiHistoryTableHint');
@@ -36206,6 +36215,22 @@ def api_fresh_epoch_reset():
 
     result = perform_fresh_collection_reset(send_local_signal=True)
     epoch_id, cutoff, kind = _fresh_epoch_identity_from_session()
+    if result.get("ok"):
+        # The presentation snapshot is intentionally long-lived.  Publish the
+        # new signed identity and empty evidence scope synchronously so the
+        # successful reset response cannot be followed by an authenticated
+        # /api/state response from the previous epoch.
+        _patch_api_state_cache_fields(
+            fresh_collection_mode=True,
+            fresh_epoch_id=epoch_id,
+            fresh_epoch_cutoff_utc=cutoff,
+            fresh_epoch_kind=kind,
+            trade_scope="SIGNED_FRESH_EPOCH" if cutoff else "ALL_HISTORY",
+            trade_scope_cutoff_utc=cutoff,
+            trades=[],
+            trade_count_session=0,
+            session_pnl_usd=0.0,
+        )
     status = 200 if result.get("ok") else 409
     return jsonify({
         "ok": bool(result.get("ok")),
