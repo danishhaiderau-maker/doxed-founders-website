@@ -2099,6 +2099,32 @@ def _best_policy_research_v31_payload() -> dict:
     source = _safe_policy_v3_dashboard_source()
     report, screen, ranking = source["report"], source["screen"], source["ranking"]
     collection = report.get("collection") or {}
+    # Keep the compatibility endpoint truthful for clients which still render
+    # the retired V2.2 field names.  The values are projections of canonical
+    # V3.1 counts, not a second evidence source.
+    evidence = dict(collection)
+    evidence.update({
+        "current_epoch_events": int(collection.get("independent_opportunities") or 0),
+        "completed_paths": int(collection.get("terminal_lifecycles") or 0),
+        "independent_episode_count": int(collection.get("independent_opportunities") or 0),
+        "qualified_oos_episodes": int(
+            (screen.get("split") or {}).get("oos") or 0
+        ),
+        "outcome_coverage": dict(collection.get("decision_outcomes") or {}),
+    })
+    search = dict(report.get("search") or report.get("search_progress") or {})
+    search_counts = dict(search.get("counts") or {})
+    search_counts.update({
+        "entry_policy_cartesian": int(search_counts.get("entry_cartesian") or 0),
+        "naive_full_cartesian": int(search_counts.get("nominal_full_cartesian") or 0),
+    })
+    search["counts"] = search_counts
+    search["static_vs_dynamic"] = {
+        "required": True,
+        "source": "V3.1_HIERARCHICAL_POLICY_GENOME",
+    }
+    execution_identities = collection.get("effective_paper_execution_identities") or []
+    execution_identity = execution_identities[0] if len(execution_identities) == 1 else {}
     descriptive = screen.get("descriptive_top_100") or []
     generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
     qualified = source["qualified"]
@@ -2113,11 +2139,11 @@ def _best_policy_research_v31_payload() -> dict:
         "current_candidate": ranking.get("number_one") if qualified else None,
         "descriptive_challenger": descriptive[0] if descriptive else None,
         "epoch_id": source["epoch_id"],
-        "policy_epoch_id": None,
-        "evidence_policy_signature": None,
+        "policy_epoch_id": execution_identity.get("policy_epoch_id"),
+        "evidence_policy_signature": execution_identity.get("policy_signature"),
         "last_analysis": generated_at,
         "last_analysis_melbourne": format_melbourne_dt(generated_at),
-        "evidence": collection,
+        "evidence": evidence,
         "live_observed_evidence": collection,
         "blockers": source["blockers"],
         "note": (
@@ -2129,7 +2155,7 @@ def _best_policy_research_v31_payload() -> dict:
             "status": "RETIRED_V2_2_EXCLUDED_FROM_CURRENT_QUALIFICATION",
             "source": "best_policy_research_report.json",
         },
-        "research_design": report.get("search") or report.get("search_progress") or {},
+        "research_design": search,
     }
 
 
