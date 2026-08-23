@@ -36712,6 +36712,42 @@ def _disarm_live_control(reason: str) -> dict:
     }
 
 
+@app.route('/api/exchange_exposure_audit', methods=['GET'])
+def api_exchange_exposure_audit():
+    """Refresh the private Bitfinex boundary without changing live controls.
+
+    This operator-only endpoint exists so deployment and epoch-reset tooling can
+    prove the real exchange boundary directly.  It performs private read calls
+    only; it never arms live execution, submits/cancels orders, or returns raw
+    private exchange rows.
+    """
+    if not _admin_authed_strict():
+        return jsonify({"ok": False, "error": "admin token required"}), 401
+    audit = _refresh_bitfinex_exposure_audit()
+    audit.pop("_rebuild_payload", None)
+    authoritative = bool(audit.get("authoritative"))
+    fresh = bool(audit.get("fresh"))
+    flat = bool(audit.get("flat"))
+    return jsonify({
+        "ok": authoritative and fresh,
+        "authoritative": authoritative,
+        "fresh": fresh,
+        "flat": flat,
+        "checked_ts": audit.get("checked_ts"),
+        "open_order_count": audit.get("open_order_count"),
+        "open_position_count": audit.get("open_position_count"),
+        "orphan_order_ids": list(audit.get("orphan_order_ids") or []),
+        "orphan_position_ids": list(audit.get("orphan_position_ids") or []),
+        "orders_synced": bool(audit.get("orders_synced")),
+        "positions_synced": bool(audit.get("positions_synced")),
+        "trades_synced": bool(audit.get("trades_synced")),
+        "error": audit.get("error"),
+        "live_armed": bool(state.get("live_armed", False)),
+        "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
+        "mutating": False,
+    }), (200 if authoritative and fresh else 503)
+
+
 @app.route('/api/live_arm', methods=['POST'])
 def live_arm():
     data = request.get_json(silent=True)
