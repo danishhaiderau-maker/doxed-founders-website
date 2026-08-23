@@ -420,8 +420,10 @@ def test_every_shared_call_writes_patient_and_continuous_v3_lane_verdicts():
 
 def test_v3_lane_identity_distinguishes_relay_capable_continuous_from_paper_only_patient():
     bridge = _function_source(BOT, "_write_v3_shared_lane_decision")
-    assert '"paper_only": not relay_eligible' in bridge
-    assert 'lane == RESEARCH_LANE_CONTINUOUS' in bridge
+    identity = _function_source(BOT, "_v3_lane_policy_material")
+    assert "_v3_lane_policy_material(lane)" in bridge
+    assert '"paper_only": not relay_eligible' in identity
+    assert 'lane == RESEARCH_LANE_CONTINUOUS' in identity
 
 
 def test_api_distinguishes_legacy_approved_no_order_from_pending():
@@ -490,9 +492,12 @@ def test_sanitized_overlay_preserves_verified_patient_route():
 def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     source = BOT.read_text(encoding="utf-8")
     assert "<th>Type B research verdict</th>" not in source
-    assert "<th>Patient Chase route / outcome</th>" in source
+    assert "<th>Raw AI verdict</th>" in source
+    assert "<th>Continuous benchmark evaluation</th>" in source
+    assert "<th>Patient Chase execution route / outcome</th>" in source
+    assert "<th>AI explanation / block reason</th>" in source
     assert "formatPatientRoute(patientRoute)" in source
-    assert "Continuous ACCEPT is an evaluation, not proof of an order" in source
+    assert "Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate" in source
     assert "lifecycle row(s) are missing parent AI identity" in source
     assert "statRow('Pending', laneNow.pending || 0)" in source
     assert "statRow('Open', laneNow.open || 0)" in source

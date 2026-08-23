@@ -130,6 +130,7 @@ class V3ReportTests(unittest.TestCase):
         original = dashboard._read_json
         try:
             dashboard._read_json = lambda name, default=None: {} if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else original(name, default)
+            dashboard._API_RESPONSE_CACHE.clear()
             client = dashboard.app.test_client()
             payload = client.get("/api/safe-policy-genome-v3").get_json()
             self.assertEqual(payload["status"], "V3_REPORT_NOT_GENERATED")

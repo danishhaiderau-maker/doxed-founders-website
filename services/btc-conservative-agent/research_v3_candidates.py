@@ -152,11 +152,17 @@ def load_candidate_inputs(
             elif str(ref.get("timeframe")) == "1m":
                 one_minute_rows.extend(_load_segment(root, ref))
         feature = (opportunities.get(episode_id) or {}).get("feature_snapshot_at_signal") or {}
+        market_context = feature.get("market_context") if isinstance(feature.get("market_context"), Mapping) else {}
         result.append({
             "event_id": event_id,
             "episode_id": episode_id,
             "signal_ts": (opportunities.get(episode_id) or {}).get("signal_ts"),
-            "regime": feature.get("regime") or feature.get("market_regime") or "UNKNOWN",
+            "regime": (
+                feature.get("regime")
+                or feature.get("market_regime")
+                or market_context.get("regime_label")
+                or "UNKNOWN"
+            ),
             "direction": intent.get("executed_direction"),
             "atr14_pct": intent.get("atr14_pct"),
             "leverage": intent.get("leverage") or 100.0,

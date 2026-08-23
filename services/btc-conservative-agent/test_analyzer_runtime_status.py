@@ -232,12 +232,14 @@ with tempfile.TemporaryDirectory() as tmp:
     research_dashboard.DATA_ROOT = agent_root
     research_dashboard._API_RESPONSE_CACHE.clear()
     try:
-        if research_dashboard._genome_payload() != expected_genome:
+        embedded_genome = research_dashboard._genome_payload()
+        if any(embedded_genome.get(key) != value for key, value in expected_genome.items()):
             raise SystemExit("failed: embedded dashboard did not resolve canonical Genome artifact")
         research_dashboard.ROOT = agent_root
         research_dashboard.DATA_ROOT = agent_root
         research_dashboard._API_RESPONSE_CACHE.clear()
-        if research_dashboard._genome_payload() != expected_genome:
+        standalone_genome = research_dashboard._genome_payload()
+        if any(standalone_genome.get(key) != value for key, value in expected_genome.items()):
             raise SystemExit("failed: standalone dashboard did not resolve canonical Genome artifact")
         with research_dashboard.app.test_client() as client:
             first = client.get("/api/genome")

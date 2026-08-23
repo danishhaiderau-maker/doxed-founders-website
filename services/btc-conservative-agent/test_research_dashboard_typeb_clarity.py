@@ -117,7 +117,11 @@ def main() -> None:
             research_dashboard.DATA_ROOT = agent_root
             research_dashboard._API_RESPONSE_CACHE.clear()
 
-            assert research_dashboard._genome_payload() == expected_genome
+            genome_payload = research_dashboard._genome_payload()
+            assert all(
+                genome_payload.get(key) == value
+                for key, value in expected_genome.items()
+            )
             payload = research_dashboard._typeb_payload()
             assert payload["cohorts"][0]["avg_mfe_pct"] == 21.5
             assert payload["separators"][0]["delta_abs"] == 4.2

@@ -18495,10 +18495,19 @@ def _trade_row_in_session(trade: dict, session_start: float) -> bool:
     return False
 
 def _showcase_trade_session_start() -> float:
-    """Epoch for trade filtering: full CSV history unless fresh-collection mode is on."""
+    """Epoch for trade filtering: full history unless fresh collection is on.
+
+    The signed fresh-collection boundary is durable across process restarts;
+    ``bot_start_time`` is not.  Using the latter hid valid clean-epoch trades
+    whenever Fly restarted.
+    """
     if not state.get("fresh_collection_mode", False):
         return 0.0
-    return float(bot_start_time or 0.0)
+    session = _load_research_session_meta() or {}
+    try:
+        return float(session.get("fresh_collection_start_time") or bot_start_time or 0.0)
+    except (TypeError, ValueError):
+        return float(bot_start_time or 0.0)
 
 def _recompute_research_balance_from_trades():
     """Restore RESEARCH showcase balance from persisted trades after restart/upgrade."""
@@ -29263,9 +29272,9 @@ __ADMIN_ACCESS_CONTROLS__
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. REJECT / ACCEPT is in the lane verdict and Reason columns — these rows are not pending orders. Executable orders are only in Pending Orders. After a restart, Reason still shows APPROVE/REJECT plus the block comment.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution route are independent facts. Executable orders are only in Pending Orders.</p>
 <table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>Raw</th><th>Candidate</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous evaluation</th><th>Patient Chase route / outcome</th><th>Reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous benchmark evaluation</th><th>Patient Chase execution route / outcome</th><th>AI explanation / block reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -30911,7 +30920,7 @@ DASHBOARD_JS = """(function () {
             ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls. ')
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
-            + 'Continuous ACCEPT is an evaluation, not proof of an order. Patient Chase shows the matched paper lifecycle. '
+            + 'Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate. Continuous ACCEPT is not proof of an order. Patient Chase shows the matched paper lifecycle. '
             + `Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. `
             + ((d.patient_chase_counts?.unlinked_lifecycle_rows || 0) > 0
               ? `${d.patient_chase_counts.unlinked_lifecycle_rows} lifecycle row(s) are missing parent AI identity; totals include them but per-call routing is incomplete. `
@@ -30949,8 +30958,14 @@ DASHBOARD_JS = """(function () {
             : status === 'APPROVED_NO_ORDER' ? '#d29922' : '#8b949e';
           return `<span style="color:${colour}" title="${route.trade_id || ''}">${status}${detail}${price}${reason}</span>`;
         };
+        const formatRawAiVerdict = (row) => {
+          const raw = String(row?.decision || row?.verdict || '').trim().toUpperCase();
+          if (!raw) return '<span style="color:#8b949e">not recorded</span>';
+          const accepted = raw === 'APPROVE' || raw === 'ACCEPT';
+          return `<span style="color:${accepted ? '#3fb950' : '#f85149'}">${raw}</span>`;
+        };
         safeHTML('aiHistoryTable', aiHist.length ? aiHist.map(a => {
-          const c = [a.decision, a.reason, a.comment].filter(function (part, idx, arr) {
+          const c = [a.reason, a.comment].filter(function (part, idx, arr) {
             const text = String(part || '').trim();
             if (!text) return false;
             return arr.findIndex(function (other) { return String(other || '').trim() === text; }) === idx;
@@ -30973,6 +30988,7 @@ DASHBOARD_JS = """(function () {
             <td>${a.shared_ai_call_id || a.trade_id || '-'}</td>
             <td>${a.ai_direction_raw || '-'}</td>
             <td>${a.candidate_direction || a.final_direction || '-'}</td>
+            <td style="font-size:0.85em">${formatRawAiVerdict(a)}</td>
             <td>${a.long_score != null ? a.long_score : '-'}</td>
             <td>${a.short_score != null ? a.short_score : '-'}</td>
             <td>${rawGap != null && !Number.isNaN(rawGap) ? rawGap : '-'}</td>
@@ -30981,7 +30997,7 @@ DASHBOARD_JS = """(function () {
             <td style="font-size:0.85em">${formatPatientRoute(patientRoute)}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="11" style="color:#8b949e">No AI calls yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="12" style="color:#8b949e">No AI calls yet this session</td></tr>');
         safeHTML('exitReasonsAnalytics', Object.entries(d.analytics?.exit_reasons || {}).map(([k,v])=>`
           <tr>
             <td>${k}</td>
@@ -34379,6 +34395,8 @@ def _build_api_state_snapshot():
         snapshot["fresh_epoch_id"] = _epoch_id
         snapshot["fresh_epoch_cutoff_utc"] = _epoch_cutoff
         snapshot["fresh_epoch_kind"] = _epoch_kind
+        snapshot["trade_scope"] = "SIGNED_FRESH_EPOCH" if _epoch_cutoff else "ALL_HISTORY"
+        snapshot["trade_scope_cutoff_utc"] = _epoch_cutoff
         # Stage 1 Fix #6 (2026-08-06): when LAST_AI_PAYLOAD is empty (e.g.
         # after restart), report an honest "NO_AI_CALL_YET" status instead of
         # silently falling back to state.feature_snapshot (a live orderflow
@@ -34416,6 +34434,8 @@ def _build_api_state_snapshot():
         snapshot["taker_fee_pct"] = t_fee
         snapshot["funding_simulation_enabled"] = FUNDING_SIMULATION_ENABLED
         snapshot["bot_version"] = EXECUTION_FIX_VERSION
+        snapshot["collector_version"] = COLLECTOR_V31_VERSION
+        snapshot["legacy_collector_version"] = COLLECTOR_V22_VERSION
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached(for_api=True)
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached(for_api=True)
@@ -34562,6 +34582,8 @@ def _api_state_cache_refresher_loop():
                     "state_integrity",
                     "server_ts",
                     "bot_version",
+                    "collector_version",
+                    "legacy_collector_version",
                     # PnL / counters / lane ledger must overlay each cycle --
                     # otherwise the tile freezes at the first heavy build
                     # and under-counts any trade that closed afterwards
@@ -34600,9 +34622,18 @@ def _api_state_cache_refresher_loop():
                     )
                     snap["ai_history_total"] = len(ai_history_all)
                     snap["ai_history_updated"] = state.get("ai_history_updated", 0.0)
+                    snap["ai_call_count"] = int(state.get("ai_call_count") or 0)
+                    snap["stability_ai_call_count"] = int(
+                        state.get("stability_ai_call_count") or 0
+                    )
                     snap["shared_ai_lane_counters"] = copy.deepcopy(
                         state.get("shared_ai_lane_counters") or {}
                     )
+                snap["collector_version"] = COLLECTOR_V31_VERSION
+                snap["legacy_collector_version"] = COLLECTOR_V22_VERSION
+                snap["server_ts_melbourne"] = _format_melbourne_hm(
+                    snap.get("server_ts") or utc_iso()
+                )
                 overlay_signals = snap.get("trades_map") or {}
                 snap["ai_history"], snap["patient_chase_counts"] = _attach_patient_chase_routes(
                     snap.get("ai_history") or [],

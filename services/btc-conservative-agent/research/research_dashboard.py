@@ -247,13 +247,32 @@ _API_RESPONSE_CACHE: dict[str, tuple[float, int, str, bytes]] = {}
 _API_CACHE_LOCK = threading.Lock()
 
 
+def _report_cache_generation_token() -> str:
+    """Invalidate cached APIs immediately when the analyzer publishes reports."""
+    parts = []
+    for name in (REPORT_MANIFEST_FILE, SAFE_POLICY_GENOME_V3_REPORT_FILE):
+        fingerprints = []
+        for path in _data_file_candidates(name):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            fingerprints.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
+        parts.append(f"{name}:" + (";".join(fingerprints) if fingerprints else "missing"))
+    return "|".join(parts)
+
+
+def _read_api_cache_key() -> str:
+    return f"{request.full_path}|reports={_report_cache_generation_token()}"
+
+
 @app.before_request
 def _serve_cached_read_api():
     if request.method != "GET" or not request.path.startswith("/api/"):
         return None
     if request.path in ("/api/health", "/api/status", "/api/integrity"):
         return None
-    key = request.full_path
+    key = _read_api_cache_key()
     now = time.monotonic()
     with _API_CACHE_LOCK:
         item = _API_RESPONSE_CACHE.get(key)
@@ -286,7 +305,7 @@ def _cache_read_api_response(response):
         body = response.get_data()
         if len(body) <= 5 * 1024 * 1024:
             with _API_CACHE_LOCK:
-                _API_RESPONSE_CACHE[request.full_path] = (
+                _API_RESPONSE_CACHE[_read_api_cache_key()] = (
                     time.monotonic() + _API_CACHE_TTL_SEC,
                     response.status_code,
                     response.content_type,
@@ -1171,57 +1190,61 @@ def _decode_counterfactual_policy_id(policy_id: str) -> dict:
 
 
 def _current_policy_grid_rows(limit: int = 100) -> dict:
-    """Expose pinned current-epoch OOS leaders separately from legacy trade combos."""
-    best = _best_policy_research_payload()
-    detail = _read_json("policy_candidate_oos_report.json")
-    current = _policy_detail_is_current(detail, best)
-    challenger = (detail.get("descriptive_challenger") or {}) if current else {}
-    statistics = challenger.get("policy_search_statistics") or {}
+    """Expose canonical signed V3.1 candidates, never retired V2.2 leaders."""
+    source = _safe_policy_v3_dashboard_source()
+    report, screen = source["report"], source["screen"]
     rows = []
-    for rank, item in enumerate(challenger.get("profitable_static_policies") or [], start=1):
-        train = item.get("train") or {}
-        oos = item.get("oos") or {}
-        episodes = int(oos.get("independent_episodes") or 0)
-        wins = int(oos.get("wins") or 0)
-        losses = int(oos.get("losses") or 0)
-        low, high = _wilson_interval_95(wins, max(episodes, wins + losses))
+    candidates = screen.get("descriptive_top_100") or []
+    for rank, item in enumerate(candidates, start=1):
+        episodes = int(item.get("oos_episodes") or 0)
+        wins = item.get("oos_wins")
+        losses = item.get("oos_losses")
+        low, high = (None, None)
+        if wins is not None and losses is not None:
+            low, high = _wilson_interval_95(int(wins), max(episodes, int(wins) + int(losses)))
         rows.append({
             "rank": rank,
             "policy_id": item.get("policy_id"),
             **_decode_counterfactual_policy_id(item.get("policy_id")),
-            "train_episodes": int(train.get("independent_episodes") or 0),
+            "policy_family": item.get("policy_family"),
+            "policy_spec": item.get("policy_spec") or {},
+            "train_episodes": max(0, int(item.get("episodes_total") or 0) - episodes),
             "oos_episodes": episodes,
-            "oos_fills": int(oos.get("fills") or 0),
+            "oos_fills": int(item.get("oos_fills") or 0),
             "oos_wins": wins,
             "oos_losses": losses,
-            "oos_win_probability_pct": round((wins / episodes * 100.0), 2) if episodes else None,
+            "oos_win_probability_pct": round((int(wins) / episodes * 100.0), 2) if episodes and wins is not None else None,
             "oos_win_probability_ci95_low_pct": low,
             "oos_win_probability_ci95_high_pct": high,
-            "oos_net_pnl_usd": round(float(oos.get("net_pnl_usd") or 0.0), 4),
-            "oos_expectancy_usd": round(float(oos.get("expectancy_usd") or 0.0), 6),
-            "oos_max_drawdown_usd": round(float(oos.get("max_drawdown_usd") or 0.0), 4),
-            "qualification": item.get("qualification") or "DESCRIPTIVE_ONLY",
+            "oos_net_pnl_usd": item.get("sealed_oos_net_usd"),
+            "oos_expectancy_usd": item.get("expectancy_lcb_usd"),
+            "oos_max_drawdown_usd": item.get("max_drawdown_usd"),
+            "gates": item.get("gates") or {},
+            "qualification": "QUALIFIED" if item.get("ranking_eligible") else "DESCRIPTIVE_ONLY",
         })
         if len(rows) >= max(1, limit):
             break
-    evidence = detail.get("evidence") or {}
+    collection = report.get("collection") or {}
     return {
-        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_CURRENT_EPOCH_POLICY_REPORT",
+        "schema": "current_policy_grid_v3_1",
+        "evidence_source": "safe_policy_genome_v3_report.json",
+        "collector_generation": "V3.1",
+        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_MATURE_V3_1_PATHS",
         "rows": rows,
-        "epoch_id": detail.get("epoch_id") if current else best.get("epoch_id"),
-        "policy_epoch_id": detail.get("policy_epoch_id") if current else best.get("policy_epoch_id"),
-        "policy_signature": detail.get("evidence_policy_signature") if current else None,
-        "cycle_snapshot": detail.get("cycle_snapshot") if current else None,
-        "evidence": evidence if current else {},
-        "search_counts": ((best.get("research_design") or {}).get("counts") or {}),
-        "rows_available": int(statistics.get("train_and_oos_profitable_policies") or len(challenger.get("profitable_static_policies") or [])),
-        "policy_search_statistics": statistics,
+        "epoch_id": source["epoch_id"],
+        "policy_epoch_id": None,
+        "policy_signature": None,
+        "cycle_snapshot": report.get("cycle_snapshot"),
+        "evidence": collection,
+        "search_counts": report.get("search_progress") or report.get("search") or {},
+        "rows_available": len(candidates),
+        "policy_search_statistics": report.get("safe_policy_ranking") or {},
         "rows_limit": max(1, int(limit)),
-        "blockers": best.get("blockers") or [],
-        "live_policy_change_allowed": bool(best.get("live_policy_change_allowed")),
+        "blockers": source["blockers"],
+        "live_policy_change_allowed": source["qualified"],
         "warning": (
-            "Counterfactual OOS replay only. Empirical win probability includes a 95% Wilson interval; "
-            "it is not a forecast. Rows cannot authorize live trading until every qualification gate passes."
+            "Canonical signed V3.1 complete-policy replay only. Empty rows mean no terminal paths have matured; "
+            "descriptive rows cannot authorize live trading until every safety and OOS gate passes."
         ),
     }
 
@@ -1231,6 +1254,8 @@ def _combos_payload():
     top = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
     top.sort(key=lambda x: (x.get("ev_usd") or 0, x.get("pnl_usd") or 0), reverse=True)
     return {
+        "schema": "top_combinations_dashboard_v3_1",
+        "current_evidence_source": "safe_policy_genome_v3_report.json",
         "generated_at": rep.get("generated_at"),
         "total_combos": len(top),
         "min_trades": rep.get("min_trades_per_combo"),
@@ -1238,6 +1263,10 @@ def _combos_payload():
         "filter_note": rep.get("filter_note") or "Known ADX × score gap × entry × lane cohorts only (no UNKNOWN/TYPE_B/OTHER)",
         "top": top[:100],
         "policy_grid": _current_policy_grid_rows(limit=100),
+        "legacy_executed_combos": {
+            "status": "DESCRIPTIVE_LEGACY_EXCLUDED_FROM_V3_1_QUALIFICATION",
+            "rows": top[:100],
+        },
     }
 
 
@@ -1934,14 +1963,18 @@ def _best_policy_research_payload():
 
 def _decision_readiness_payload():
     """Compatibility wrapper for clients of the retired five-card endpoint."""
-    payload = _best_policy_research_payload()
+    payload = _best_policy_research_v31_payload()
     evidence = payload["evidence"]
     payload["questions"] = [{
         "key": "best_policy_research",
         "question": "Best Policy Research",
         "status": payload["status"],
         "live_policy_change_allowed": payload["live_policy_change_allowed"],
-        "current_epoch_qualified_rows": evidence["replay_eligible_events"],
+        "current_epoch_qualified_rows": int(
+            evidence.get("replay_eligible_events")
+            or evidence.get("independent_opportunities")
+            or 0
+        ),
         "historical_showcase_rows": 0,
         "blockers": payload["blockers"],
         "detail": payload["note"],
@@ -1956,7 +1989,7 @@ def api_decision_readiness():
 
 @app.route("/api/best-policy-research")
 def api_best_policy_research():
-    return jsonify(_best_policy_research_payload())
+    return jsonify(_best_policy_research_v31_payload())
 
 
 @app.route("/api/safe-policy-genome-v3")
@@ -2022,7 +2055,7 @@ def _safe_policy_v3_dashboard_source() -> dict:
     These pages now consume the same artifact as the Safe Policy Genome page
     and remain fail-closed when its evidence is immature or invalid.
     """
-    report = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
+    report = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
     screen = report.get("candidate_screen") or {}
     ranking = report.get("safe_policy_ranking") or {}
     return {
@@ -2036,6 +2069,45 @@ def _safe_policy_v3_dashboard_source() -> dict:
             and report.get("live_policy_change_allowed") is True
         ),
         "blockers": list(report.get("blockers") or (["V3_REPORT_NOT_GENERATED"] if not report else [])),
+    }
+
+
+def _best_policy_research_v31_payload() -> dict:
+    """Compatibility answer backed exclusively by canonical signed V3.1 data."""
+    source = _safe_policy_v3_dashboard_source()
+    report, screen, ranking = source["report"], source["screen"], source["ranking"]
+    collection = report.get("collection") or {}
+    descriptive = screen.get("descriptive_top_100") or []
+    generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
+    qualified = source["qualified"]
+    return {
+        "schema": "best_policy_research_v3_1",
+        "evidence_source": "safe_policy_genome_v3_report.json",
+        "collector_generation": "V3.1",
+        "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
+        "qualification": report.get("qualification") or "NO_SAFE_QUALIFIED_POLICY",
+        "live_policy_change_allowed": qualified,
+        "real_bitfinex_trading_allowed": bool(qualified and report.get("real_bitfinex_trading_allowed")),
+        "current_candidate": ranking.get("number_one") if qualified else None,
+        "descriptive_challenger": descriptive[0] if descriptive else None,
+        "epoch_id": source["epoch_id"],
+        "policy_epoch_id": None,
+        "evidence_policy_signature": None,
+        "last_analysis": generated_at,
+        "last_analysis_melbourne": format_melbourne_dt(generated_at),
+        "evidence": collection,
+        "live_observed_evidence": collection,
+        "blockers": source["blockers"],
+        "note": (
+            "This endpoint is a V3.1 compatibility projection. A winner appears only after complete "
+            "terminal paths pass chronological OOS, conservative execution, drawdown, tail-risk, "
+            "multiple-testing, regime and sealed-holdout gates."
+        ),
+        "legacy_historical": {
+            "status": "RETIRED_V2_2_EXCLUDED_FROM_CURRENT_QUALIFICATION",
+            "source": "best_policy_research_report.json",
+        },
+        "research_design": report.get("search") or report.get("search_progress") or {},
     }
 
 
@@ -2112,26 +2184,35 @@ def api_dynamic_policy_research():
 
 @app.route("/api/shadow-policy-research")
 def api_shadow_policy_research():
-    best = _best_policy_research_payload()
-    detail = _read_json("policy_candidate_oos_report.json")
-    current = _policy_detail_is_current(detail, best)
-    shadow = (detail.get("shadow_research") or {}) if current else {}
+    source = _safe_policy_v3_dashboard_source()
+    report = source["report"]
+    collection = report.get("collection") or {}
     paused = _read_json("paused_shadow_research_report.json")
     real_edge = _read_json("real_edge_summary.json")
     comprehensive = _read_json("shadow_lane_comprehensive_report.json")
+    legacy_detail = _read_json("policy_candidate_oos_report.json")
+    legacy_shadow = legacy_detail.get("shadow_research") or {}
     return jsonify({
-        "schema": "shadow_policy_dashboard_v1",
+        "schema": "shadow_policy_dashboard_v3_1",
+        "evidence_source": "safe_policy_genome_v3_report.json + shadow_lane_comprehensive_report.json",
+        "collector_generation": "V3.1",
         "status": "DESCRIPTIVE_ONLY",
         "live_policy_change_allowed": False,
-        "epoch_id": best.get("epoch_id"),
-        "current_epoch_rejected": ((best.get("evidence") or {}).get("outcome_coverage") or {}).get("REJECTED", 0),
-        "v22_shadow": shadow,
+        "epoch_id": source["epoch_id"],
+        "current_epoch_rejected": int((collection.get("decision_outcomes") or {}).get("REJECTED") or 0),
+        "current_v3_1_collection": collection,
+        "v22_shadow": {},
         "comprehensive_shadow_lanes": comprehensive,
         "paused_shadow": paused,
         "real_edge": real_edge,
+        "legacy_v22_excluded": {
+            "status": "RETIRED_V2_2_EXCLUDED_FROM_CURRENT_QUALIFICATION",
+            "shadow_research": legacy_shadow,
+        },
+        "blockers": source["blockers"],
         "warning": (
-            "Shadow and rejected-path PnL is counterfactual. It is never merged with actual "
-            "executed PnL and cannot authorize a live policy."
+            "Current signed V3.1 shadow and rejected paths are shown separately from retired V2.2. "
+            "Counterfactual PnL is never merged with executed PnL and cannot authorize a live policy."
         ),
     })
 
@@ -2410,6 +2491,38 @@ def api_lane_retirement():
 
 
 def _genome_payload():
+    # V3.1 Safe Policy Genome is the canonical current collector/analyzer
+    # surface. The older research.db DNA engine is a legacy fallback only.
+    safe_v31 = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
+    if safe_v31.get("schema"):
+        return {
+            "schema": "genome_dashboard_v3_1_compat_v1",
+            "available": True,
+            "collector_generation": "V3.1",
+            "evidence_source": SAFE_POLICY_GENOME_V3_REPORT_FILE,
+            "status": safe_v31.get("status") or "COLLECTING",
+            "qualification": safe_v31.get("qualification") or "NO_SAFE_QUALIFIED_POLICY",
+            "generated_at": safe_v31.get("generated_at"),
+            "epoch_id": safe_v31.get("epoch_id")
+            or (safe_v31.get("epoch_scope") or {}).get("selected_epoch_id"),
+            "policy_signature": safe_v31.get("policy_signature")
+            or (safe_v31.get("epoch_scope") or {}).get("policy_signature"),
+            "collection": safe_v31.get("collection") or {},
+            "search_progress": safe_v31.get("search_progress") or {},
+            "candidate_screen": safe_v31.get("candidate_screen") or {},
+            "safe_policy_ranking": safe_v31.get("safe_policy_ranking") or {},
+            "integrity": safe_v31.get("integrity") or {},
+            "blockers": list(safe_v31.get("blockers") or []),
+            "number_one_strategy": safe_v31.get("number_one_strategy"),
+            "live_policy_change_allowed": safe_v31.get("live_policy_change_allowed") is True,
+            "legacy_genome": {
+                "status": "RETIRED_RESEARCH_DB_DNA_EXCLUDED_FROM_V3_1_QUALIFICATION",
+            },
+            "warning": (
+                "Current V3.1 Safe Policy Genome evidence. Descriptive rows do not "
+                "authorize live trading until every chronological OOS and risk gate passes."
+            ),
+        }
     # Standalone mode sets ROOT/DATA_ROOT to the agent root, while the Genome
     # writer publishes under agent/research/genome. Embedded/legacy mode may
     # instead set ROOT directly to agent/research. Support both layouts so a
@@ -4402,6 +4515,31 @@ async function loadGenome() {
   }
   empty.style.display = 'none';
   content.style.display = 'block';
+  if (d.collector_generation === 'V3.1') {
+    const c = d.collection || {}, s = d.search_progress || {}, cs = d.candidate_screen || {};
+    const rows = cs.descriptive_top_100 || [];
+    document.getElementById('genome-kpis').innerHTML = [
+      ['Collector generation', 'V3.1'],
+      ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
+      ['Independent opportunities', c.independent_opportunities ?? 0],
+      ['Decision branches', c.decision_branches ?? 0],
+      ['Terminal lifecycles', c.terminal_lifecycles ?? 0],
+      ['Market segments', c.market_segments ?? 0],
+      ['Policies evaluated', cs.unique_policies_evaluated ?? s.unique_policies_evaluated ?? 0],
+      ['Qualification', d.qualification || 'NO SAFE QUALIFIED POLICY'],
+    ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+    document.getElementById('genome-note').textContent = d.warning || 'Current signed V3.1 Safe Policy Genome evidence.';
+    document.getElementById('genome-taxonomy-note').textContent = `Signed epoch ${d.epoch_id || 'not reported'} · source ${d.evidence_source || 'n/a'} · live policy changes ${d.live_policy_change_allowed ? 'allowed' : 'blocked'}.`;
+    document.getElementById('genome-cluster').textContent = JSON.stringify({epoch_id:d.epoch_id, collection:c, integrity:d.integrity}, null, 2);
+    document.getElementById('genome-decision').textContent = JSON.stringify({search_progress:s, qualification:d.qualification}, null, 2);
+    document.getElementById('genome-lifecycle').textContent = JSON.stringify({collection:c, blockers:d.blockers}, null, 2);
+    document.getElementById('genome-hypotheses').textContent = JSON.stringify({candidate_screen:cs, number_one_strategy:d.number_one_strategy}, null, 2);
+    document.getElementById('genome-replay').textContent = JSON.stringify({integrity:d.integrity, safe_policy_ranking:d.safe_policy_ranking}, null, 2);
+    document.getElementById('genome-discoveries').innerHTML = rows.length ? rows.slice(0, 20).map(row =>
+      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 0} · OOS=${row.oos_episodes ?? 0} · OOS net $${fmtUsd(row.sealed_oos_net_usd)} · max DD $${fmtUsd(row.max_drawdown_usd)}</div></div>`
+    ).join('') : '<p class="note">No matured V3.1 policy rows yet. See the blockers above.</p>';
+    return;
+  }
   const dq = (d.dna_quality || {}).overall || {};
   const tax = d.genome_taxonomy || {};
   document.getElementById('genome-kpis').innerHTML = [

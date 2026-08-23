@@ -1,6 +1,13 @@
+import tempfile
 import unittest
 
-from research_v3_candidates import _conservative_ohlc_prices, evaluate_protection_screen, protection_screen
+from research_v3_candidates import (
+    _conservative_ohlc_prices,
+    evaluate_protection_screen,
+    load_candidate_inputs,
+    protection_screen,
+)
+from research_v3_store import V3EvidenceStore
 from research_v3_ranking import rank_safe_policies
 
 
@@ -30,6 +37,34 @@ def source(event_id="event-1", episode_id="episode-1"):
 
 
 class V3CandidateTests(unittest.TestCase):
+    def test_candidate_regime_reads_nested_signal_market_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-clean")
+            segment = store.put_market_segment(
+                source="TEST_1S", symbol="BTCUSD", timeframe="1s",
+                start_ts=1000, end_ts=1001,
+                rows=[{"ts": 1000, "price": 100}, {"ts": 1001, "price": 101}],
+            )
+            store.append("opportunity", {
+                "record_id": "opportunity:episode-1", "episode_id": "episode-1",
+                "signal_ts": 1000,
+                "feature_snapshot_at_signal": {"market_context": {"regime_label": "BULL"}},
+            })
+            store.append("order_intent", {
+                "record_id": "order-intent:event-1", "episode_id": "episode-1",
+                "event_id": "event-1", "executed_direction": "LONG",
+            })
+            store.append("lifecycle", {
+                "record_id": "lifecycle:event-1:terminal", "episode_id": "episode-1",
+                "event_id": "event-1", "terminal": True,
+                "market_segment_refs": [segment],
+            })
+
+            rows = load_candidate_inputs(tmp, epoch_id="epoch-clean")
+
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["regime"], "BULL")
+
     def test_one_minute_fallback_is_adverse_first(self):
         candle = [{"t": 60, "o": 100, "h": 102, "l": 98, "c": 101}]
         self.assertEqual([row["price"] for row in _conservative_ohlc_prices(candle, direction="LONG")], [100, 98, 102, 101])

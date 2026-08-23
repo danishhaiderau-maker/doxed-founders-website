@@ -101,30 +101,24 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
         }],
         "dimensions": ["adx_bucket"],
     })
-    monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
-        "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "research_design": {"counts": {
-            "entry_policy_cartesian": 2700,
-            "naive_full_cartesian": 8597534400,
-        }},
-        "live_policy_change_allowed": False,
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "epoch_id": "epoch-clean", "qualified": False,
         "blockers": ["QUALIFICATION_GATE_FAILED:conservative_execution"],
-    })
-    monkeypatch.setattr(dashboard, "_read_json", lambda name: {
-        "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "cycle_snapshot": {"snapshot_id": "snap-1"},
-        "evidence": {"independent_episodes": 133, "training_episodes": 93, "oos_episodes": 40},
-        "descriptive_challenger": {"profitable_static_policies": [{
-            "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
-            "qualification": "DESCRIPTIVE_ONLY",
-            "train": {"independent_episodes": 93},
-            "oos": {
-                "independent_episodes": 40, "fills": 40, "wins": 30, "losses": 10,
-                "net_pnl_usd": 101.7442, "expectancy_usd": 2.543605,
-                "max_drawdown_usd": -100.5837,
+        "ranking": {},
+        "report": {
+            "collection": {"oos_episodes": 40},
+            "search_progress": {
+                "entry_policy_cartesian": 2700,
+                "naive_full_cartesian": 8597534400,
             },
+        },
+        "screen": {"descriptive_top_100": [{
+            "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+            "episodes_total": 133, "oos_episodes": 40, "oos_fills": 40,
+            "oos_wins": 30, "oos_losses": 10,
+            "sealed_oos_net_usd": 101.7442,
+            "expectancy_lcb_usd": 2.543605,
+            "max_drawdown_usd": -100.5837,
         }]},
     })
 
@@ -189,29 +183,30 @@ def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):
                 "max_drawdown_usd": -5.0,
             },
         })
-    monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
-        "epoch_id": "epoch-clean",
-        "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "research_design": {"counts": {"entry_policy_cartesian": 2700}},
-    })
-    monkeypatch.setattr(dashboard, "_read_json", lambda _name: {
-        "epoch_id": "epoch-clean",
-        "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "descriptive_challenger": {
-            "profitable_static_policies": policies,
-            "policy_search_statistics": {
+    v31_policies = [{
+        "policy_id": row["policy_id"], "episodes_total": 100,
+        "oos_episodes": 30, "oos_fills": 30, "oos_wins": 20,
+        "oos_losses": 10, "sealed_oos_net_usd": 10.0,
+        "expectancy_lcb_usd": 0.333333, "max_drawdown_usd": -5.0,
+    } for row in policies]
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "epoch_id": "epoch-clean", "qualified": False, "blockers": [],
+        "ranking": {},
+        "report": {
+            "collection": {},
+            "search_progress": {"entry_policy_cartesian": 2700},
+            "safe_policy_ranking": {
                 "distinct_policies_tested": 12601,
                 "train_and_oos_profitable_policies": 1449,
             },
         },
+        "screen": {"descriptive_top_100": v31_policies},
     })
 
     grid = dashboard._current_policy_grid_rows()
 
     assert len(grid["rows"]) == 100
-    assert grid["rows_available"] == 1449
+    assert grid["rows_available"] == 120
     assert grid["policy_search_statistics"]["distinct_policies_tested"] == 12601
     assert grid["rows_limit"] == 100
 
@@ -237,6 +232,55 @@ def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monke
     assert payload["status"] == "GENOME_SOURCE_UNAVAILABLE"
     assert payload["preserved_report_available"] is True
     assert "not rendered as current evidence" in payload["warning"]
+
+
+def test_genome_prefers_current_safe_v31_over_retired_missing_source(monkeypatch):
+    def fake_read(name, *args):
+        text = str(name).replace("\\", "/")
+        if text.endswith("safe_policy_genome_v3_report.json"):
+            return {
+                "schema": "safe_policy_genome_v3_1_report_v1",
+                "status": "COLLECTING",
+                "qualification": "NO_SAFE_QUALIFIED_POLICY",
+                "generated_at": "2026-08-23T04:30:00Z",
+                "epoch_id": "epoch-clean",
+                "collection": {"independent_opportunities": 12},
+                "candidate_screen": {"descriptive_top_100": []},
+                "blockers": ["INSUFFICIENT_OOS_EPISODES"],
+                "live_policy_change_allowed": False,
+            }
+        if text.endswith("genome_source_status.json"):
+            return {"status": "GENOME_SOURCE_UNAVAILABLE"}
+        return {}
+    monkeypatch.setattr(dashboard, "_read_json", fake_read)
+
+    payload = dashboard._genome_payload()
+
+    assert payload["available"] is True
+    assert payload["collector_generation"] == "V3.1"
+    assert payload["epoch_id"] == "epoch-clean"
+    assert payload["collection"]["independent_opportunities"] == 12
+    assert payload["live_policy_change_allowed"] is False
+    assert payload["legacy_genome"]["status"].startswith("RETIRED_RESEARCH_DB")
+
+
+def test_api_cache_key_changes_with_analyzer_report_generation(tmp_path, monkeypatch):
+    manifest = tmp_path / dashboard.REPORT_MANIFEST_FILE
+    safe = tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
+    manifest.write_text('{"generated_at":"one"}', encoding="utf-8")
+    safe.write_text('{"schema":"safe_policy_genome_v3_1_report_v1"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        dashboard,
+        "_data_file_candidates",
+        lambda name: [manifest if name == dashboard.REPORT_MANIFEST_FILE else safe],
+    )
+    with dashboard.app.test_request_context("/api/genome"):
+        first = dashboard._read_api_cache_key()
+        manifest.write_text('{"generated_at":"generation-two"}', encoding="utf-8")
+        second = dashboard._read_api_cache_key()
+
+    assert first != second
 
 
 def test_best_policy_is_hidden_until_current_epoch_oos_is_qualified(tmp_path, monkeypatch):
@@ -361,11 +405,14 @@ def test_static_and_dynamic_routes_use_v31_genome_not_retired_v22(monkeypatch):
         "number_one_strategy": None,
     }
 
-    monkeypatch.setattr(
-        dashboard,
-        "_read_json",
-        lambda name, *args: report if str(name) == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else {},
-    )
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": report["safe_policy_ranking"],
+        "epoch_id": report["epoch_id"],
+        "qualified": False,
+        "blockers": report["blockers"],
+    })
     client = dashboard.app.test_client()
 
     static = client.get("/api/static-policy-research").get_json()
@@ -552,6 +599,18 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
         encoding="utf-8",
     )
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": {
+            "schema": "safe_policy_genome_v3_1_report_v1",
+            "epoch_id": "epoch-clean",
+            "candidate_screen": {},
+            "collection": {"decision_outcomes": {"REJECTED": 2}},
+            "blockers": ["INSUFFICIENT_V3_1_EVIDENCE"],
+        },
+        "screen": {}, "ranking": {}, "epoch_id": "epoch-clean",
+        "qualified": False, "blockers": ["INSUFFICIENT_V3_1_EVIDENCE"],
+    })
+    dashboard._API_RESPONSE_CACHE.clear()
 
     client = dashboard.app.test_client()
     static = client.get("/api/static-policy-research").get_json()
@@ -568,7 +627,8 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     assert dynamic["regimes"] == []
     assert "No profitable OOS winner" in dynamic["warning"]
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
-    assert shadow["v22_shadow"]["independent_episodes"] == 1
+    assert shadow["v22_shadow"] == {}
+    assert shadow["legacy_v22_excluded"]["shadow_research"]["independent_episodes"] == 1
     assert shadow["paused_shadow"]["overall"]["closed"] == 3
     assert shadow["comprehensive_shadow_lanes"]["coverage"]["independent_shared_ai_episodes"] == 4
     assert shadow["comprehensive_shadow_lanes"]["safety"]["executed_pnl_merged"] is False
