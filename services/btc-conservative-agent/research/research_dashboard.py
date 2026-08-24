@@ -2192,10 +2192,10 @@ def api_partial_reduction_reconciliation():
 @app.route("/partial-reduction-reconciliation")
 def partial_reduction_reconciliation_page():
     return """<!doctype html><html><head><meta charset="utf-8"><title>Partial Reduction Reconciliation</title>
-<style>body{background:#081019;color:#dbeafe;font:14px system-ui;margin:24px}a{color:#60a5fa}.card{border:1px solid #334155;border-radius:8px;padding:14px;margin:12px 0}pre{white-space:pre-wrap}</style></head>
+<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#081019;color:#dbeafe;font:14px system-ui;margin:24px;overflow-wrap:anywhere}a{color:#60a5fa}.card{border:1px solid #334155;border-radius:8px;padding:14px;margin:12px 0;max-width:100%}pre{white-space:pre-wrap;overflow:auto}@media(max-width:600px){body{margin:12px}.card{padding:10px}}</style></head>
 <body><a href="/">← Research Dashboard</a><h1>Tiles 3/4 — Partial Reduction Reconciliation</h1>
 <div id="status" class="card">Loading completed analyzer generation…</div><div id="lanes"></div><pre id="detail" class="card"></pre>
-<script>fetch('/api/partial-reduction-reconciliation').then(r=>r.json()).then(d=>{document.getElementById('status').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Live copy allowed: '+(d.live_copy_allowed?'YES':'NO');document.getElementById('lanes').innerHTML=Object.entries(d.lanes||{}).map(([lane,v])=>'<div class="card"><b>'+lane+'</b><br>lifecycles '+(v.lifecycles||0)+' · receipts '+(v.partial_reduction_receipts||0)+' · signed '+(v.signed_receipts||0)+' · reconciled '+(v.reconciled_lifecycles||0)+'<br>live evidence sufficient: '+(v.live_copy_evidence_sufficient?'YES':'NO')+'</div>').join('');document.getElementById('detail').textContent=JSON.stringify({summary:d.summary,integrity:d.integrity,blockers:d.blockers,note:d.note},null,2);});</script></body></html>"""
+<script>fetch('/api/partial-reduction-reconciliation').then(r=>r.json()).then(d=>{document.getElementById('status').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Live copy allowed: '+(d.live_copy_allowed?'YES':'NO');document.getElementById('lanes').innerHTML=Object.entries(d.lanes||{}).map(([lane,v])=>'<div class="card"><b>'+lane+'</b><br>lifecycles '+(v.lifecycles||0)+' · receipts '+(v.partial_reduction_receipts||0)+' · signed '+(v.signed_receipts||0)+' · reconciled '+(v.reconciled_lifecycles||0)+'<br>paper receipt evidence sufficient: '+(v.live_copy_evidence_sufficient?'YES':'NO')+'</div>').join('');document.getElementById('detail').textContent=JSON.stringify({summary:d.summary,integrity:d.integrity,blockers:d.blockers,note:d.note},null,2);});</script></body></html>"""
 
 
 @app.route("/safe-policy-genome-v3")
@@ -3731,14 +3731,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   nav.subnav button.active { opacity: 1; }
   .lane-toggle { display: inline-flex; align-items: center; gap: 8px; margin: 8px 0 4px; color: var(--muted); font-size: 0.85rem; cursor: pointer; }
   .lane-toggle input { accent-color: var(--accent); }
-  main { padding: 20px 24px; max-width: 1200px; }
-  section { display: none; }
+  main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }
+  section { display: none; min-width: 0; max-width: 100%; }
   section.active { display: block; }
   .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
   .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
   .kpi .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
   .kpi .val { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 12px; }
+  table { display: block; width: 100%; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.9rem; margin-top: 12px; }
   th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   th { background: var(--panel); }
   tr:nth-child(even) { background: #101820; }
@@ -3749,7 +3749,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .btn { display: inline-block; background: var(--accent); color: #001018; padding: 12px 20px; border-radius: 8px; text-decoration: none; font-weight: 700; margin: 8px 8px 8px 0; }
   .btn.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
   .grid2 { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
-  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  @media (max-width: 800px) {
+    header, nav, main { padding-left: 12px; padding-right: 12px; }
+    .grid2 { grid-template-columns: 1fr; }
+    .kpis { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+    pre { max-width: 100%; }
+  }
   ul.findings li { margin-bottom: 8px; line-height: 1.4; }
   .explorer-list { list-style: none; padding: 0; margin: 0; max-height: 70vh; overflow: auto; }
   .explorer-list li { padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.85rem; }

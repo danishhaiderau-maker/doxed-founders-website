@@ -29813,6 +29813,11 @@ HTML = """<!DOCTYPE html>
         @media (max-width:900px) {
           body { padding:12px 12px 36px; }
           #pathwayLaneTiles { grid-template-columns:1fr !important; }
+          #pathwayLaneTiles > div { min-width:0; max-width:100%; overflow:hidden; }
+          #pathwayLaneTiles > div > div { min-width:0; max-width:100%; }
+          #pathwayLaneTiles > div > div:first-child { flex-wrap:wrap; }
+          #pathwayLaneTiles > div > div:first-child > div { min-width:0; overflow-wrap:anywhere; }
+          #pathwayLaneTiles [style*="grid-template-columns:repeat(6,1fr)"] { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
           #pathwayLaneTiles [style*="grid-template-columns:repeat(4,1fr)"] { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
           #dashboardToggles { display:flex; flex-wrap:wrap; gap:4px; }
           #dashboardToggles strong { flex:0 0 100%; }

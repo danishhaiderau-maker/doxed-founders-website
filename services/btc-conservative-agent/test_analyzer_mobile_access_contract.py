@@ -38,6 +38,13 @@ def test_fly_dashboard_link_uses_same_origin_mobile_analysis_route():
     assert helper.index('os.getenv("FLY_APP_NAME")') < helper.index('return "http://127.0.0.1:9001/"')
 
 
+def test_four_tile_dashboard_cards_do_not_expand_the_mobile_page():
+    assert "#pathwayLaneTiles > div { min-width:0; max-width:100%; overflow:hidden; }" in SOURCE
+    assert "#pathwayLaneTiles > div > div:first-child { flex-wrap:wrap; }" in SOURCE
+    assert '#pathwayLaneTiles [style*="grid-template-columns:repeat(6,1fr)"]' in SOURCE
+    assert "grid-template-columns:repeat(2,minmax(0,1fr)) !important" in SOURCE
+
+
 def test_expired_order_hint_explains_zero_age_duplicate_rejection():
     assert "Age 0.0 with DUPLICATE_LIMIT_PRICE" in SOURCE
     assert "rejected before placement" in SOURCE

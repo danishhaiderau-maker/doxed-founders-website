@@ -63,3 +63,13 @@ def test_partial_reduction_subtab_exposes_explicit_insufficiency_copy():
     assert 'id="sec-partial-reductions"' in source
     assert "No signed partial-reduction evidence is available yet. Live copy remains blocked." in source
     assert "'partial-reductions': [loadPartialReductions]" in source
+
+
+def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
+    source = dashboard.DASHBOARD_HTML
+    assert "main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }" in source
+    assert "table { display: block; width: 100%; max-width: 100%; overflow-x: auto;" in source
+    page = dashboard.app.test_client().get("/partial-reduction-reconciliation").get_data(as_text=True)
+    assert 'name="viewport"' in page
+    assert "paper receipt evidence sufficient" in page
+    assert "live evidence sufficient" not in page
