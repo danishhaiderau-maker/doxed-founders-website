@@ -1,6 +1,25 @@
 import paper_policy_offset029_regime as policy
 
 
+def test_strong_profile_requires_direction_alignment_and_nonweakening_adx():
+    assert policy.classify_regime(
+        direction="LONG", market_regime="BULL", trend_state="BULL",
+        base_state="BULL", adx=31,
+    ) == "STRONG_ALIGNED_TREND"
+    assert policy.classify_regime(
+        direction="LONG", market_regime="BEAR", trend_state="BEAR",
+        base_state="BEAR", adx=40,
+    ) == "ORDINARY_TREND"
+    assert policy.classify_regime(
+        direction="LONG", market_regime="BULL", trend_state="BULL_WEAKENING",
+        base_state="BULL", adx=40,
+    ) == "ORDINARY_TREND"
+    assert policy.classify_regime(
+        direction="SHORT", market_regime="RANGE", trend_state="MIXED",
+        base_state="BEAR", adx=40,
+    ) == "SIDEWAYS"
+
+
 def test_regime_transition_is_dynamic_but_never_widens_existing_risk():
     tightened = policy.transition(
         previous_regime="STRONG_ALIGNED_TREND", observed_regime="SIDEWAYS",

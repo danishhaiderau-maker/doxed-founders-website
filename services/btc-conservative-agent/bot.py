@@ -4539,7 +4539,15 @@ def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> 
     age = now - float(pos.get("entry_ts") or now)
     remaining = float(pos.get("policy_remaining_fraction", 1.0))
     if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
-        observed = str((state.get("trend_health") or {}).get("trend_state") or state.get("regime") or "")
+        health = state.get("trend_health") or {}
+        market_context = state.get("market_context") or {}
+        observed = offset029_regime_policy.classify_regime(
+            direction=direction,
+            market_regime=state.get("regime"),
+            trend_state=health.get("trend_state"),
+            base_state=health.get("base_state"),
+            adx=(market_context.get("trend_strength") or {}).get("adx"),
+        )
         prior = str(pos.get("policy_regime") or observed)
         prior_stop = float(pos.get("policy_stop_distance_atr") or offset029_regime_policy.PROFILES[offset029_regime_policy.normalize_regime(prior)]["stop"])
         change = offset029_regime_policy.transition(previous_regime=prior, observed_regime=observed,

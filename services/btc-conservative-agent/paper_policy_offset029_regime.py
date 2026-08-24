@@ -15,6 +15,24 @@ PROFILES = {
     "ORDINARY_TREND": {"stop": 1.0, "partials": ((1.0, .25), (1.5, .25)), "trail": 1.0, "final": 2.5},
     "STRONG_ALIGNED_TREND": {"stop": 1.25, "partials": ((1.25, .25),), "trail": 1.25, "final": 2.5},
 }
+STRONG_TREND_ADX_MIN = 30.0
+
+
+def classify_regime(*, direction: str, market_regime: str = "",
+                    trend_state: str = "", base_state: str = "",
+                    adx: float = 0.0) -> str:
+    """Causal profile selection from fields available on the current tick."""
+    direction = str(direction or "").upper()
+    market = str(market_regime or "").upper()
+    trend = str(trend_state or "").upper()
+    base = str(base_state or "").upper()
+    if market in {"RANGE", "SIDEWAYS", "CHOPPY"} or "COMPRESSION" in market or trend == "MIXED":
+        return "SIDEWAYS"
+    aligned = (direction == "LONG" and base == "BULL") or (direction == "SHORT" and base == "BEAR")
+    weakening = trend.endswith("_WEAKENING")
+    if aligned and not weakening and float(adx or 0.0) >= STRONG_TREND_ADX_MIN:
+        return "STRONG_ALIGNED_TREND"
+    return "ORDINARY_TREND"
 
 
 def normalize_regime(value: str) -> str:
