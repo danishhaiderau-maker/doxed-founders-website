@@ -35038,6 +35038,28 @@ def _api_state_cache_refresher_loop():
                     snap["stability_ai_call_count"] = int(
                         state.get("stability_ai_call_count") or 0
                     )
+                    # The heavy presentation snapshot is intentionally reused
+                    # while entries are enabled.  Refresh the live AI clock and
+                    # payload explicitly so the dashboard cannot show a
+                    # pre-resume/pre-epoch "Last AI Call" beside advancing AI
+                    # History and a healthy strategy-progress clock.
+                    snap["last_ai_call_ts"] = float(
+                        state.get("last_ai_call_ts") or 0.0
+                    )
+                    snap["lane_last_ai_call_ts"] = copy.deepcopy(
+                        state.get("lane_last_ai_call_ts") or {}
+                    )
+                    snap["ai_input"] = copy.deepcopy(
+                        LAST_AI_PAYLOAD
+                        or {
+                            "status": "NO_AI_CALL_YET",
+                            "message": (
+                                "No AI call has been made since startup. Real payload "
+                                "will appear here after the first scan cycle."
+                            ),
+                        }
+                    )
+                    snap["ai_input_time"] = LAST_AI_TIMESTAMP
                     snap["shared_ai_lane_counters"] = copy.deepcopy(
                         state.get("shared_ai_lane_counters") or {}
                     )
@@ -35050,6 +35072,11 @@ def _api_state_cache_refresher_loop():
                 snap["strategy_progress"] = _strategy_progress_health_snapshot()
                 snap["server_ts_melbourne"] = _format_melbourne_hm(
                     snap.get("server_ts") or utc_iso()
+                )
+                snap["ai_input_time_melbourne"] = (
+                    _format_melbourne_hm(LAST_AI_TIMESTAMP)
+                    if LAST_AI_TIMESTAMP
+                    else "-"
                 )
                 overlay_signals = snap.get("trades_map") or {}
                 snap["ai_history"], snap["patient_chase_counts"] = _attach_patient_chase_routes(

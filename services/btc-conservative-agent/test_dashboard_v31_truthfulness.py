@@ -40,6 +40,11 @@ def test_active_overlay_refreshes_ai_history_counters_and_server_clock() -> None
         'snap["ai_history_total"]',
         'snap["ai_call_count"]',
         'snap["stability_ai_call_count"]',
+        'snap["last_ai_call_ts"]',
+        'snap["lane_last_ai_call_ts"]',
+        'snap["ai_input"]',
+        'snap["ai_input_time"]',
+        'snap["ai_input_time_melbourne"]',
         'snap["server_ts_melbourne"]',
     ):
         assert assignment in body, f"active overlay no longer refreshes {assignment}"
