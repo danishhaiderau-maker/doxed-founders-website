@@ -493,7 +493,9 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
     """Write an observed paper fill once, without claiming exchange execution."""
     event_id = str(_first(position.get("trade_id"), order.get("trade_id"), signal.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, order, position)
-    policy = _paper_policy_identity(str(epoch_id), signal, order, position)
+    # The lane-owned position/order is authoritative.  ``signal`` is shared
+    # across sibling lanes and may carry only the base/control identity.
+    policy = _paper_policy_identity(str(epoch_id), position, order, signal)
     lifecycle_identity = {
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": policy["paper_policy_spec"].get("research_lane"),
@@ -528,7 +530,9 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     """Write the observed terminal paper result while replay paths continue."""
     event_id = str(_first(position.get("trade_id"), signal.get("trade_id"), outcome.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, position, outcome)
-    policy = _paper_policy_identity(str(epoch_id), signal, position, outcome)
+    # Preserve the identity frozen on the lane-owned position.  A shared AI
+    # signal must never override it during terminal attribution.
+    policy = _paper_policy_identity(str(epoch_id), position, outcome, signal)
     lifecycle_identity = {
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": policy["paper_policy_spec"].get("research_lane"),

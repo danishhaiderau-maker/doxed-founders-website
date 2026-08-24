@@ -115,7 +115,11 @@ def test_pending_registration_freezes_policy_identity_before_async_evidence_and_
     )
     assert "frozen_identity = paper_policy_identity_for_sources(" in register
     assert "order.update(copy.deepcopy(frozen_identity))" in register
-    assert "master_signal.update(copy.deepcopy(frozen_identity))" in register
+    assert "master_signal.update(copy.deepcopy(frozen_identity))" not in register
+    assert register.index("order,", register.index("paper_policy_identity_for_sources(")) < register.index(
+        "master_signal if isinstance(master_signal, dict) else {}",
+        register.index("paper_policy_identity_for_sources("),
+    )
     assert '"order": copy.deepcopy(order)' in register
     assert "paper_policy_identity_for_sources(" in fill
 

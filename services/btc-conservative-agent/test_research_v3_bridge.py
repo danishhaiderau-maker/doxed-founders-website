@@ -629,6 +629,46 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual({row["policy_signature"] for row in attributable}, {intent["policy_signature"]})
             self.assertEqual({row["policy_epoch_id"] for row in attributable}, {intent["policy_epoch_id"]})
 
+    def test_shared_signal_identity_cannot_override_lane_owned_fill_and_close_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared_signal = {
+                "trade_id": "shared-control", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "shared_ai_call_id": "scan-two-lanes",
+                "research_lane": "CONTINUOUS", "policy_id": "CONTROL",
+                "policy_signature": "control-signature", "policy_epoch_id": "control-epoch",
+                "policy_identity_schema": "paper_policy_identity_v3",
+                "paper_policy_spec": {"paper_only": True, "policy_id": "CONTROL"},
+            }
+            lane_order = {
+                "trade_id": "lane-3", "created_ts": 1001, "signal_dir": "LONG",
+                "limit_price": 99.9, "qty": 0.1, "research_lane": "OFFSET_029_ATR_PROTECTED",
+                "policy_id": "LANE_3_POLICY", "policy_signature": "lane-3-signature",
+                "policy_epoch_id": "lane-3-epoch", "policy_identity_schema": "paper_policy_identity_v3",
+                "paper_policy_spec": {
+                    "paper_only": True, "policy_id": "LANE_3_POLICY",
+                    "research_lane": "OFFSET_029_ATR_PROTECTED",
+                },
+            }
+            lane_position = {
+                **lane_order, "entry_ts": 1010, "entry": 99.9, "dir": "LONG",
+            }
+            dual_write_paper_fill(
+                lane_order, shared_signal, lane_position,
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            dual_write_paper_close(
+                lane_position, shared_signal,
+                {"trade_id": "lane-3", "close_ts": 1020, "exit": 100.1,
+                 "net_pnl_usd": 0.2, "exit_reason": "TEST"},
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            rows = [
+                json.loads(line)
+                for line in V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("execution").read_text().splitlines()
+            ]
+            self.assertEqual({row["policy_signature"] for row in rows}, {"lane-3-signature"})
+            self.assertEqual({row["policy_id"] for row in rows}, {"LANE_3_POLICY"})
+
     def test_provisional_without_stable_identity_is_deferred_without_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             receipt = dual_write_provisional_source("cont-pending", {

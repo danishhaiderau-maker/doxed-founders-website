@@ -3641,12 +3641,14 @@ def lane_register_pending_order(order: dict):
         # state, but must never mint a second signature for this episode.
         frozen_identity = paper_policy_identity_for_sources(
             _collector_v22_epoch_id(),
-            master_signal if isinstance(master_signal, dict) else {},
             order,
+            master_signal if isinstance(master_signal, dict) else {},
         )
         order.update(copy.deepcopy(frozen_identity))
-        if isinstance(master_signal, dict):
-            master_signal.update(copy.deepcopy(frozen_identity))
+        # ``master_signal`` is shared by every research lane spawned from one
+        # AI call.  A lane-scoped paper identity belongs to its order and
+        # position only; writing it back here lets the next lane inherit the
+        # wrong policy signature.
     source_ts = float(order.get("created_ts") or time.time())
     evidence_key = f"pending-order:{tid}"
     queued = _get_pending_order_evidence_worker().submit(
@@ -22026,9 +22028,9 @@ def fill_order(order):
     candidate_pos = _build_open_position(order, signal, ai)
     frozen_paper_identity = paper_policy_identity_for_sources(
         _collector_v22_epoch_id(),
-        signal if isinstance(signal, dict) else {},
         order,
         candidate_pos,
+        signal if isinstance(signal, dict) else {},
     )
     candidate_pos.update(copy.deepcopy(frozen_paper_identity))
     candidate_pos["research_lane"] = (
