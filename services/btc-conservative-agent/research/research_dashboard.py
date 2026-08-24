@@ -1339,6 +1339,40 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         **(search.get("counts") or {}),
         **(report.get("search_progress") or {}),
     }
+    terminal_oos_rows = [
+        row for row in rows
+        if int(row.get("oos_episodes") or 0) > 0
+        and int(row.get("oos_fills") or 0) > 0
+    ]
+    profitable_terminal_oos_rows = [
+        row for row in terminal_oos_rows
+        if isinstance(row.get("oos_net_pnl_usd"), (int, float))
+        and float(row["oos_net_pnl_usd"]) > 0
+    ]
+    split = screen.get("split") or {}
+    training_episodes = int(
+        split.get("training")
+        or screen.get("training_episodes")
+        or max((row.get("train_episodes") or 0 for row in rows), default=0)
+    )
+    oos_episodes = int(
+        split.get("oos")
+        or screen.get("oos_episodes")
+        or max((row.get("oos_episodes") or 0 for row in rows), default=0)
+    )
+    policy_search_statistics = {
+        "descriptive_rows_available": len(candidates),
+        "descriptive_rows_displayed": len(rows),
+        "policy_specs_enumerated": int(
+            screen.get("unique_policies_evaluated") or len(candidates)
+        ),
+        "terminal_oos_policies_tested": len(terminal_oos_rows),
+        "profitable_terminal_oos_policies": len(profitable_terminal_oos_rows),
+        "metric_contract": (
+            "Descriptive rows are enumerated counterfactual policy specs. A tested policy "
+            "requires at least one terminal OOS fill; profitability requires positive terminal OOS net PnL."
+        ),
+    }
     return {
         "schema": "current_policy_grid_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
@@ -1352,9 +1386,12 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "evidence": collection,
         "search_counts": search_counts,
         "rows_available": len(candidates),
-        "policy_search_statistics": _bounded_safe_policy_payload(report).get(
-            "safe_policy_ranking", {}
-        ),
+        "policy_search_statistics": policy_search_statistics,
+        "policy_episode_split": {
+            "training_episodes": training_episodes,
+            "oos_episodes": oos_episodes,
+            "unit": "INDEPENDENT_MARKET_EPISODES_REUSED_ACROSS_POLICY_SPECS",
+        },
         "rows_limit": max(1, int(limit)),
         "blockers": source["blockers"],
         "live_policy_change_allowed": source["qualified"],
@@ -3805,8 +3842,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table id="chase-iso-table"><thead><tr><th>Metric</th><th id="chase-iso-direct-h">Direct</th><th id="chase-iso-chase-h">Chase 3+</th></tr></thead><tbody id="chase-iso-body"></tbody></table>
   </section>
   <section id="sec-combos">
-    <h2>Top 100 Policy Combinations</h2>
-    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid — up to 100 training-ranked policies with pinned chronological OOS results. Descriptive only until every qualification gate passes.</p>
+    <h2>Descriptive Policy Screen (up to 100 rows)</h2>
+    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid. Displayed rows are enumerated policy specifications, not profitable or empirically tested policies unless terminal OOS fills are shown. Descriptive only until every qualification gate passes.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
     <table><thead><tr><th>#</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
@@ -4369,17 +4406,19 @@ async function loadCombos() {
   const pe = pg.evidence || {};
   const searchCounts = pg.search_counts || {};
   const policyStats = pg.policy_search_statistics || {};
+  const policySplit = pg.policy_episode_split || {};
   const policyRows = pg.policy_rows || pg.rows || [];
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
-    ['Profitable policies shown', policyRows.length],
-    ['Profitable in train + OOS', Number(policyStats.train_and_oos_profitable_policies ?? pg.rows_available ?? 0).toLocaleString()],
-    ['Distinct policies tested', Number(policyStats.distinct_policies_tested || 0).toLocaleString()],
+    ['Descriptive rows displayed', Number(policyStats.descriptive_rows_displayed ?? policyRows.length).toLocaleString()],
+    ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
+    ['Policies with terminal OOS fills', Number(policyStats.terminal_oos_policies_tested || 0).toLocaleString()],
+    ['Profitable terminal OOS policies', Number(policyStats.profitable_terminal_oos_policies || 0).toLocaleString()],
     ['Entry configurations', Number(searchCounts.entry_cartesian ?? searchCounts.entry_policy_cartesian ?? 0).toLocaleString()],
     ['Theoretical search space', Number(searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian ?? 0).toLocaleString()],
-    ['Independent episodes', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 0],
-    ['Train / OOS', `${pe.training_episodes ?? 0} / ${pe.oos_episodes ?? 0}`],
+    ['Independent opportunities (shared episodes)', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 0],
+    ['Policy episode split (train / OOS)', `${policySplit.training_episodes ?? 0} / ${policySplit.oos_episodes ?? 0}`],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {

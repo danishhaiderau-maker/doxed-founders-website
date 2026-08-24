@@ -156,11 +156,14 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED" in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
-    assert "Top 100 Policy Combinations" in html
+    assert "Descriptive Policy Screen (up to 100 rows)" in html
     assert "Top 100 Policy Combos" in html
     assert "Entry configurations" in html
-    assert "Distinct policies tested" in html
-    assert "Profitable in train + OOS" in html
+    assert "Policy specs enumerated" in html
+    assert "Policies with terminal OOS fills" in html
+    assert "Profitable terminal OOS policies" in html
+    assert "Profitable policies shown" not in html
+    assert "Profitable in train + OOS" not in html
     assert "Theoretical search space" in html
     assert "Hierarchical search space" in html
     assert "pg.policy_rows || pg.rows || []" in html
@@ -200,15 +203,71 @@ def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):
                 "train_and_oos_profitable_policies": 1449,
             },
         },
-        "screen": {"descriptive_top_100": v31_policies},
+        "screen": {
+            "unique_policies_evaluated": 12601,
+            "descriptive_top_100": v31_policies,
+        },
     })
 
     grid = dashboard._current_policy_grid_rows()
 
     assert len(grid["rows"]) == 100
     assert grid["rows_available"] == 120
-    assert grid["policy_search_statistics"]["distinct_policies_tested"] == 12601
+    assert grid["policy_search_statistics"]["policy_specs_enumerated"] == 12601
+    assert grid["policy_search_statistics"]["terminal_oos_policies_tested"] == 100
+    assert grid["policy_search_statistics"]["profitable_terminal_oos_policies"] == 100
     assert grid["rows_limit"] == 100
+
+
+def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monkeypatch):
+    rows = [{
+        "policy_id": f"counterfactual-{index}",
+        "policy_family": "ATR_TARGET",
+        "episodes_total": 11,
+        "oos_episodes": 0,
+        "oos_fills": 0,
+        "oos_wins": 0,
+        "oos_losses": 0,
+        "sealed_oos_net_usd": 0.0,
+        "expectancy_lcb_usd": None,
+        "max_drawdown_usd": 0.0,
+        "gates": {},
+    } for index in range(100)]
+    report = {
+        "collection": {"independent_opportunities": 11},
+        "search": {"counts": {"entry_cartesian": 2700}},
+        "candidate_screen": {
+            "unique_policies_evaluated": 100,
+            "descriptive_top_100": rows,
+        },
+        "safe_policy_ranking": {
+            "policies_assessed": 100,
+            "policies_qualified": 0,
+        },
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": report["safe_policy_ranking"],
+        "epoch_id": "epoch-zero-fill",
+        "qualified": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    })
+
+    grid = dashboard._current_policy_grid_rows()
+
+    assert len(grid["rows"]) == 100
+    assert grid["evidence"]["independent_opportunities"] == 11
+    assert grid["policy_episode_split"] == {
+        "training_episodes": 11,
+        "oos_episodes": 0,
+        "unit": "INDEPENDENT_MARKET_EPISODES_REUSED_ACROSS_POLICY_SPECS",
+    }
+    stats = grid["policy_search_statistics"]
+    assert stats["descriptive_rows_displayed"] == 100
+    assert stats["policy_specs_enumerated"] == 100
+    assert stats["terminal_oos_policies_tested"] == 0
+    assert stats["profitable_terminal_oos_policies"] == 0
 
 
 def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monkeypatch):
