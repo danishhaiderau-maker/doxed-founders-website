@@ -18970,7 +18970,6 @@ def write_report_manifest(payload=None):
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
         from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
-        from research.research_v3_report import build_safe_policy_genome_v3_report
         from research.partial_reduction_reconciliation import build_partial_reduction_reconciliation_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
@@ -18983,10 +18982,11 @@ def write_report_manifest(payload=None):
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
         )
-        build_safe_policy_genome_v3_report(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
-        )
+        # The policy-cycle orchestrator already builds the V3.1 Safe Policy
+        # Genome through the best-policy adapter from the same
+        # pinned cycle snapshot. Rebuilding it here duplicated every replay and
+        # bootstrap calculation, delaying manifest publication by many minutes
+        # and allowing the dashboard to look stale while collection advanced.
         build_partial_reduction_reconciliation_report(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,

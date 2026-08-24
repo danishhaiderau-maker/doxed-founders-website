@@ -82,6 +82,7 @@ def test_analyzer_uses_single_policy_cycle_orchestrator():
     assert "build_policy_cycle_reports" in manifest_body
     assert "build_policy_candidate_oos_report(" not in manifest_body
     assert "build_best_policy_research_report(" not in manifest_body
+    assert "build_safe_policy_genome_v3_report(" not in manifest_body
 
 
 def test_policy_snapshot_releases_live_mirror_before_expensive_json_parsing(tmp_path, monkeypatch):
