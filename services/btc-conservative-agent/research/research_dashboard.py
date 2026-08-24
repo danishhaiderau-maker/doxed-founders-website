@@ -214,7 +214,7 @@ REPORT_NAV_GROUPS = (
     )),
     ("deep-group", "Genome & Reports", (
         ("partial-reductions", "Partial Reductions", PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE),
-        ("genome", "Genome (Unavailable)", "genome/genome_analysis_report.json"),
+        ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
         ("archives", "Archives", None),
@@ -4196,13 +4196,13 @@ async function loadSummary() {
       : 'Pending first retention measurement'],
     ['Local Fly mirror cache', storage.local_size_mb == null
       ? 'No size report'
-      : (Number(storage.local_size_mb).toFixed(1) + ' MB / 30 GB Â· '
-        + Number(storage.local_limit_pct || 0).toFixed(2) + '% Â· '
+      : (Number(storage.local_size_mb).toFixed(1) + ' MB / 30 GB · '
+        + Number(storage.local_limit_pct || 0).toFixed(2) + '% · '
         + (storage.local_file_count ?? 0) + ' files')],
     ['Fly runtime data', storage.fly_size_mb == null
       ? 'No Fly size report'
       : (Number(storage.fly_size_mb).toFixed(1) + ' MB / '
-        + Number(storage.fly_volume_total_mb || 1024).toFixed(0) + ' MB Â· '
+        + Number(storage.fly_volume_total_mb || 1024).toFixed(0) + ' MB · '
         + Number(storage.fly_volume_pct || 0).toFixed(1) + '%')],
     ['Mirror sync receipt', storage.sync_computed_at
       ? ('local cache refreshed ' + fmtMelb(storage.sync_computed_at))
@@ -5026,6 +5026,10 @@ async function refreshActiveSection() {
   return job;
 }
 
+// Header provenance is global, so populate it even when the browser restores a
+// non-summary tab.  Previously the header remained stuck on `loading...` until
+// Overview was opened, despite current reports being available.
+if (activeSection !== 'summary') void loadSummary();
 show(activeSection);
 setInterval(refreshActiveSection, 180000);
 </script></body></html>"""
