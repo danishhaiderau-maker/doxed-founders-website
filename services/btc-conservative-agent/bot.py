@@ -28278,6 +28278,24 @@ def build_static_pathway_lane_specs() -> dict:
     }
 
 
+def _truthful_approve_to_fill_pct(approves: int, fills: int, reported) -> float:
+    """Prefer lifecycle arithmetic when a cached analyzer percentage disagrees.
+
+    A stale benchmark report previously left enabled tiles showing ``0% fill``
+    beside non-zero closed-trade counts. The count pair is the auditable source
+    of truth for this compact dashboard metric; the cached percentage is only a
+    fallback when counts cannot define it.
+    """
+    approves = max(0, int(approves or 0))
+    fills = max(0, int(fills or 0))
+    if approves:
+        return round(100.0 * fills / approves, 1)
+    try:
+        return float(reported or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _load_lane_metrics_from_disk() -> dict:
     """Benchmark report + ledger — PnL/fills for live tiles and retired archive."""
     bench_lanes = {}
@@ -28310,9 +28328,9 @@ def _load_lane_metrics_from_disk() -> dict:
         fills = int(bm.get("real_fills") or bm.get("fills") or lb.get("closes") or 0)
         pnl = float(bm.get("net_pnl_real") or bm.get("net_pnl_usd") or lb.get("net_pnl_usd") or 0)
         approves = int(bm.get("approves") or 0)
-        fill_pct = bm.get("approve_to_fill_pct")
-        if approves and fill_pct is None:
-            fill_pct = round(100.0 * fills / approves, 1)
+        fill_pct = _truthful_approve_to_fill_pct(
+            approves, fills, bm.get("approve_to_fill_pct")
+        )
         wins = int(lb.get("wins") or bm.get("wins") or 0)
         losses = int(lb.get("losses") or bm.get("losses") or 0)
         win_rate = round(100.0 * wins / fills, 1) if fills else float(bm.get("win_rate_pct") or 0)
@@ -28552,9 +28570,9 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     fills = int(m.get("real_fills") or 0)
     pnl = float(m.get("net_pnl_real") or 0)
     ev = float(m.get("per_approve_ev") or 0)
-    fill_pct = m.get("approve_to_fill_pct")
-    if approves and fill_pct is None:
-        fill_pct = round(100.0 * fills / approves, 1)
+    fill_pct = _truthful_approve_to_fill_pct(
+        approves, fills, m.get("approve_to_fill_pct")
+    )
     lab_closes = int(m.get("lab_closes") or 0)
     lab_pnl = float(m.get("lab_net_pnl") or 0)
     lab_wins = int(m.get("lab_wins") or 0)
@@ -31167,11 +31185,11 @@ DASHBOARD_JS = """(function () {
             src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
             src.className = 'text-red-500 font-bold animate-pulse';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
-          } else if (d.price_source === 'WS') {
+          } else if (d.ws_transport_ready === true || d.ws_ready === true || d.market_data_mode === 'WS' || d.price_source === 'WS') {
             src.innerHTML = d.data_banner_ws || ('REAL BITFINEX MARKET DATA (WS) · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-green-400 font-bold';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
-          } else if (d.price_source === 'REST') {
+          } else if (d.rest_fallback_ready === true || d.market_data_mode === 'REST' || d.price_source === 'REST') {
             src.innerHTML = d.data_banner_rest || ('BITFINEX REST FALLBACK · ' + (d.market_symbol || 'tBTCF0:USTF0'));
             src.className = 'text-orange-400 font-bold';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-orange-600';
