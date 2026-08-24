@@ -31273,6 +31273,7 @@ DASHBOARD_JS = """(function () {
             + ((d.patient_chase_counts?.unlinked_lifecycle_rows || 0) > 0
               ? `${d.patient_chase_counts.unlinked_lifecycle_rows} lifecycle row(s) are missing parent AI identity; totals include them but per-call routing is incomplete. `
               : '')
+            + 'Restored pre-restart calls may lack the newer per-lane verdict metadata. '
             + 'Older CSV-only calls show lane metadata unavailable only when no matching journal verdict exists.';
         }
         const formatLaneVerdict = (v, row) => {
