@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
-from research_v3_policy_replay import replay_protected_policy
+from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
 from research_v3_validation import validate_policy
 
 
@@ -342,6 +342,11 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
             entry_id = str(child.get("entry_policy_id") or "")
             if not entry_id:
                 continue
+            prepared_price_path = None
+            if child.get("fill_ts") is not None and prices and source.get("atr14_pct") is not None:
+                prepared_price_path = prepare_replay_price_path(
+                    prices, fill_ts=float(child["fill_ts"]),
+                )
             for protection in protections:
                 policy_id = f"{entry_id}|{protection['protection_id']}"
                 spec = {
@@ -367,6 +372,8 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
                         leverage=float(source.get("leverage") or 100),
                         margin_usd=float(source.get("margin_usd") or 20),
                         policy_spec=spec,
+                        prepared_price_path=prepared_price_path,
+                        collect_trace=False,
                     )
                     outcome = {
                         "outcome_state": "FULL_FILL" if replay.get("status") == "COMPLETE" else str(replay.get("status") or "UNSUPPORTED"),

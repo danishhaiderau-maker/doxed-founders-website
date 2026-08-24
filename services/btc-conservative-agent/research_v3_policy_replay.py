@@ -6,6 +6,24 @@ from typing import Any, Iterable, Mapping
 from research_v3_contract import validate_policy_spec
 
 
+def prepare_replay_price_path(
+    prices: Iterable[Mapping[str, Any]], *, fill_ts: float,
+) -> dict[str, Any]:
+    """Normalize one post-fill path once for a family of policy replays."""
+    ordered: list[tuple[float, float]] = []
+    previous = None
+    for row in prices:
+        ts = float(row.get("ts") or row.get("t") or 0)
+        price = float(row.get("price") or row.get("mark") or row.get("close") or 0)
+        if ts < fill_ts or price <= 0:
+            continue
+        if previous is not None and ts <= previous:
+            return {"ordered": (), "error": "NON_MONOTONIC_PRICE_PATH"}
+        ordered.append((ts, price))
+        previous = ts
+    return {"ordered": tuple(ordered), "error": None}
+
+
 def _margin_return_pct(direction: str, entry: float, price: float, leverage: float) -> float:
     raw = (price - entry) / entry * 100.0
     return raw * leverage if direction == "LONG" else -raw * leverage
@@ -23,6 +41,8 @@ def replay_protected_policy(
     policy_spec: Mapping[str, Any],
     funding_usd: float = 0.0,
     slippage_usd: float = 0.0,
+    prepared_price_path: Mapping[str, Any] | None = None,
+    collect_trace: bool = True,
 ) -> dict[str, Any]:
     """Replay ordered marks; ambiguous OHLC bars must be rejected upstream.
 
@@ -32,17 +52,10 @@ def replay_protected_policy(
     defects = validate_policy_spec(policy_spec)
     if defects:
         return {"schema": "safe_policy_replay_v3", "status": "UNSUPPORTED", "reasons": defects, "ranking_eligible": False}
-    ordered = []
-    previous = None
-    for row in prices:
-        ts = float(row.get("ts") or row.get("t") or 0)
-        price = float(row.get("price") or row.get("mark") or row.get("close") or 0)
-        if ts < fill_ts or price <= 0:
-            continue
-        if previous is not None and ts <= previous:
-            return {"schema": "safe_policy_replay_v3", "status": "DATA_ERROR", "reasons": ["NON_MONOTONIC_PRICE_PATH"], "ranking_eligible": False}
-        ordered.append((ts, price))
-        previous = ts
+    prepared = prepared_price_path or prepare_replay_price_path(prices, fill_ts=fill_ts)
+    if prepared.get("error"):
+        return {"schema": "safe_policy_replay_v3", "status": "DATA_ERROR", "reasons": [str(prepared["error"])], "ranking_eligible": False}
+    ordered = prepared.get("ordered") or ()
     if not ordered:
         return {"schema": "safe_policy_replay_v3", "status": "CENSORED", "reasons": ["NO_POST_FILL_PATH"], "ranking_eligible": False}
 
@@ -132,7 +145,8 @@ def replay_protected_policy(
             reason = "TIME_STOP"
         elif mode in {"ATR_TARGET", "HYBRID_RUNNER"} and tp_margin_pct is not None and current >= tp_margin_pct:
             reason = "ATR_TAKE_PROFIT"
-        trace.append({"ts": ts, "margin_return_pct": round(current, 8), "mfe_pct": round(mfe, 8), "active_floor_pct": active_floor, "remaining_fraction": round(remaining_fraction, 8), "partial_exits": partial_events, "exit_reason": reason})
+        if collect_trace:
+            trace.append({"ts": ts, "margin_return_pct": round(current, 8), "mfe_pct": round(mfe, 8), "active_floor_pct": active_floor, "remaining_fraction": round(remaining_fraction, 8), "partial_exits": partial_events, "exit_reason": reason})
         if reason:
             exit_reason, exit_ts, exit_price, exit_margin = reason, ts, price, current
             break
