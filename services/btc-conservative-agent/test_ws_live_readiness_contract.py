@@ -445,7 +445,7 @@ class ExchangeAuditBehaviorTest(unittest.TestCase):
             "SYMBOL_CCXT": "BTC/USDT:USDT",
             "_private_api_keys_ok": lambda: True,
             "_direct_private_exchange_owner": lambda: True,
-            "_exchange_call_with_retry": lambda fn, label=None: fn(),
+            "_exchange_call_with_retry": lambda fn, label=None, **_kwargs: fn(),
             "_normalize_order_side_to_dir": lambda value: (
                 "LONG"
                 if str(value).upper() in ("BUY", "LONG")

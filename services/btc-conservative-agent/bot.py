@@ -26270,6 +26270,30 @@ bitfinex_private = ccxt.bitfinex({
         "adjustForTimeDifference": True,
     },
 })
+# The platform relay and this paper-research owner share one Bitfinex API key.
+# Bitfinex requires a strictly increasing nonce per key, and the platform lane
+# deliberately uses Date.now() * 10_000.  CCXT's default millisecond nonce (and
+# even its microsecond helper) is therefore permanently "small" after the
+# platform has authenticated once.  Keep this client on the same scale so the
+# bounded, read-only strict-flat audit remains authoritative.  The local lock
+# also guarantees monotonicity when two bot threads request an audit in the
+# same millisecond.
+_bitfinex_private_nonce_lock = threading.Lock()
+_bitfinex_private_last_nonce = 0
+
+
+def _bitfinex_shared_key_nonce() -> int:
+    global _bitfinex_private_last_nonce
+    with _bitfinex_private_nonce_lock:
+        floor = int(time.time() * 1000) * 10_000
+        _bitfinex_private_last_nonce = max(
+            floor,
+            _bitfinex_private_last_nonce + 1,
+        )
+        return _bitfinex_private_last_nonce
+
+
+bitfinex_private.nonce = _bitfinex_shared_key_nonce
 tick_prices = deque(maxlen=300)
 price_seq = 0
 logger = logging.getLogger("3factor-bot")
