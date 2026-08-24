@@ -127,7 +127,7 @@ def exit_action(*, entry: float, direction: str, price: float, atr_abs: float,
 
 def dashboard_policy() -> dict:
     return {
-        "filter_chips": ["Shared AI", "Offset 0.29%", "$2 margin cap", "0.5% account risk",
+        "filter_chips": ["Shared AI", "Offset 0.29%", "$0.25 margin cap", "0.5% account risk",
                          "Continuous regime", "Risk never widens", "120m cap"],
         "entry": {"trigger": "Every shared AI_SCAN APPROVE direction",
                   "entry_path": "OFFSET_029_PATIENT_CHASE", "fill_path": "CONSERVATIVE_PAPER_LIMIT",
@@ -140,5 +140,6 @@ def dashboard_policy() -> dict:
         "strategy_detail": ["SIDEWAYS: .75 ATR stop/partials/trail", "ORDINARY: 1 ATR stop/trail",
                             "STRONG: 1.25 ATR stop/trail and 75% runner",
                             "Regime may change during trade; existing stop and risk never widen",
-                            "Every transition is timestamped; relay OFF means paper only"],
+                            "Every transition is timestamped; stop and account risk never widen",
+                            "Live copy fail-closed until partial-close relay support is verified"],
     }

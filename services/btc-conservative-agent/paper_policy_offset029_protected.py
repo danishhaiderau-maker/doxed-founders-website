@@ -206,7 +206,7 @@ def account_risk_quantity(*, equity_usd: float, entry_price: float,
 
 def dashboard_policy() -> dict:
     return {
-        "filter_chips": ["Shared AI", "Offset 0.29%", "$2 margin cap", "0.5% account risk",
+        "filter_chips": ["Shared AI", "Offset 0.29%", "$0.25 margin cap", "0.5% account risk",
                          "SL 1 ATR", "25% @1 ATR", "BE @1.25 ATR", "25% @1.5 ATR",
                          "Trail 1 ATR", "Final 2.5 ATR", "120m cap"],
         "entry": {"trigger": "Every shared AI_SCAN APPROVE direction",
@@ -217,6 +217,7 @@ def dashboard_policy() -> dict:
                  "thesis_stop_margin_pct": "n/a", "hard_stop_margin_pct": "1 ATR",
                  "mfe_protect_margin_pct": "BE arm 1.25 ATR", "thesis_pause_above_margin_pct": "n/a",
                  "fixed_time_exit": "120m"},
-        "strategy_detail": ["Initial full stop 1 ATR from fill", "Account risk <=0.5% and margin <=$2",
-                            "After profit milestones, stop/trail never widens", "Relay OFF means paper only"],
+        "strategy_detail": ["Initial full stop 1 ATR from fill", "Account risk <=0.5% and margin <=$0.25",
+                            "After profit milestones, stop/trail never widens",
+                            "Live copy fail-closed until partial-close relay support is verified"],
     }

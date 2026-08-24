@@ -57,3 +57,17 @@ def test_v31_all_active_tiles_use_approved_quarter_dollar_margin_cap():
         and any(isinstance(target, ast.Name) and target.id == "FIXED_MARGIN_USDT" for target in node.targets)
     )
     assert fixed_margin == 0.25
+
+
+def test_protected_tile_subtitles_do_not_claim_unproven_live_copy():
+    for lane in ("OFFSET_029_ATR_PROTECTED", "OFFSET_029_ATR_REGIME"):
+        spec = COMBO_LANE_SPECS[lane]
+        assert spec["relay_copy_readiness"] == "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"
+        assert "live copy blocked" in spec["subtitle"].lower()
+        assert "relay-copy eligible" not in spec["subtitle"].lower()
+
+
+def test_dashboard_margin_display_preserves_quarter_dollar_precision():
+    source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "entry.get('margin_usd', shared['margin_usd']):.2f" in source
+    assert "entry.get('margin_usd', shared['margin_usd']):.0f" not in source

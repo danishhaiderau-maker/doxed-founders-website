@@ -27132,7 +27132,7 @@ def _strategy_detail_lines(entry: dict, exit: dict, extra: list = None) -> list:
         f"MFE protect: peak ≥{exit.get('mfe_protect_margin_pct')}% margin → skip fast thesis cut",
         f"Thesis pause above: +{exit.get('thesis_pause_above_margin_pct')}% unreal",
         f"Time cap: {exit.get('fixed_time_exit')}",
-        f"Margin: ${entry.get('margin_usd', shared['margin_usd']):.0f} · signal TTL {shared['signal_ttl_min']}m",
+        f"Margin: ${entry.get('margin_usd', shared['margin_usd']):.2f} · signal TTL {shared['signal_ttl_min']}m",
         f"Post-AI: {entry.get('post_ai_gates') or shared['post_ai_gates']}",
     ]
     if extra:
@@ -27704,7 +27704,13 @@ def build_static_pathway_lane_specs() -> dict:
                 )
             ),
             "expected_risk": (
-                "Paper-only; no protective hard stop. Path-end losses and execution uncertainty remain"
+                (
+                    "Protected by the registered static ATR stop, partial exits, break-even and trailing runner; paper execution remains unqualified"
+                    if lane_id == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED else
+                    "Protected by causal regime-aware ATR stops and partial exits that may tighten but never widen; paper execution remains unqualified"
+                    if lane_id == RESEARCH_LANE_OFFSET_029_ATR_REGIME else
+                    "Paper-only; no protective hard stop. Path-end losses and execution uncertainty remain"
+                )
                 if offset_029 else (
                 (
                     "Lower fill rate (TTL_EXPIRED) · missed moves that chase would catch"

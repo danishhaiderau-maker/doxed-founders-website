@@ -75,3 +75,13 @@ def test_entry_identity_is_distinct_but_entry_price_matches_tile_one():
     assert row["relay_configured"] is True
     assert row["relay_copy_readiness"] == "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"
     assert row["margin_cap_usd"] == 0.25
+
+
+def test_dashboard_describes_actual_quarter_dollar_protection_and_relay_block():
+    dashboard = policy.dashboard_policy()
+    assert "$0.25 margin cap" in dashboard["filter_chips"]
+    detail = " | ".join(dashboard["strategy_detail"])
+    assert "margin <=$0.25" in detail
+    assert "Initial full stop 1 ATR" in detail
+    assert "fail-closed until partial-close relay support is verified" in detail
+    assert "$2 margin" not in detail

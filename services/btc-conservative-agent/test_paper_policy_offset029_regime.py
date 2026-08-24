@@ -84,3 +84,12 @@ def test_default_position_size_never_exceeds_quarter_dollar_margin():
     )
     assert sized["margin_cap_usd"] == 0.25
     assert sized["quantity"] <= 0.25
+
+
+def test_dashboard_describes_actual_quarter_dollar_protection_and_relay_block():
+    dashboard = policy.dashboard_policy()
+    assert "$0.25 margin cap" in dashboard["filter_chips"]
+    detail = " | ".join(dashboard["strategy_detail"])
+    assert "stop and account risk never widen" in detail
+    assert "fail-closed until partial-close relay support is verified" in detail
+    assert "$2 margin" not in detail

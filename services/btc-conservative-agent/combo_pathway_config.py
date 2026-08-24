@@ -122,7 +122,7 @@ COMBO_LANE_SPECS = {
     },
     RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
         "label": "Protected Patient Chase · Static ATR risk",
-        "subtitle": "PAPER when ON; relay-copy eligible only while the separate Bitfinex relay is armed",
+        "subtitle": "PAPER when ON; live copy blocked until partial-close relay support is verified",
         "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
         "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
         "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
@@ -145,7 +145,7 @@ COMBO_LANE_SPECS = {
     },
     RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
         "label": "Protected Patient Chase · Dynamic regime",
-        "subtitle": "PAPER when ON; preregistered in-trade regime transitions may tighten but never widen risk",
+        "subtitle": "PAPER when ON; live copy blocked until partial-close relay support is verified; regime transitions may only tighten risk",
         "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
         "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
         "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
