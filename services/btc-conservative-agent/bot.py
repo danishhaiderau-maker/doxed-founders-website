@@ -15136,9 +15136,12 @@ def _v3_lane_policy_material(lane: str) -> dict:
             float(spec.get("entry_offset_pct")) / 100.0
             if spec.get("entry_offset_pct") is not None else None
         )
-    relay_eligible = bool(
-        spec.get("platform_relay_eligible", lane == RESEARCH_LANE_CONTINUOUS)
-    )
+    # The signed paper identity must use the executable relay allow-list, not
+    # the older static tile declaration.  Tile 3/4 may be relay-configured for
+    # future use while still fail-closed behind a partial-reduction blocker.
+    # Hashing the configured flag at decision time and the executable flag at
+    # order time minted two policy signatures for one causal episode.
+    relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES
     material = {
         "policy_id": spec.get("raw_policy_id") or lane,
         "raw_policy_id": spec.get("raw_policy_id") or lane,
