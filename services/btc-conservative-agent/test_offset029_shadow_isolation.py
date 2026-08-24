@@ -522,6 +522,8 @@ def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     assert "<th>AI explanation / block reason</th>" in source
     assert "formatPatientRoute(patientRoute)" in source
     assert "Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate" in source
+    assert "Baseline Patient Chase now:" in source
+    assert "Protected Tile 3/4 lifecycle totals are shown on their tiles" in source
     assert "lifecycle row(s) are missing parent AI identity" in source
     assert "statRow('Pending', laneNow.pending || 0)" in source
     assert "statRow('Open', laneNow.open || 0)" in source

@@ -31759,7 +31759,7 @@ DASHBOARD_JS = """(function () {
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
             + 'Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate. Continuous ACCEPT is not proof of an order. Patient Chase shows the matched paper lifecycle. '
-            + `Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. `
+            + `Baseline Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. Protected Tile 3/4 lifecycle totals are shown on their tiles and in the order/position tables. `
             + ((d.patient_chase_counts?.unlinked_lifecycle_rows || 0) > 0
               ? `${d.patient_chase_counts.unlinked_lifecycle_rows} lifecycle row(s) are missing parent AI identity; totals include them but per-call routing is incomplete. `
               : '')
