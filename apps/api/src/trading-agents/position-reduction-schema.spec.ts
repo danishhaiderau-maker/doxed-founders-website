@@ -30,4 +30,10 @@ test('POSITION_REDUCED ingress remains HMAC-gated and returns before any executo
   assert.ok(verify >= 0 && verify < reduction);
   assert.ok(auditReturn > reduction && auditReturn < preWake);
   assert.match(source.slice(reduction, preWake), /exchange_mutation: false/);
+  assert.match(source, /Number\(body\.prior_qty\)/);
+  assert.match(source, /Number\(body\.reduced_qty\)/);
+  assert.match(source, /Number\(body\.remaining_qty\)/);
+  assert.match(source, /Number\(body\.fill_price\)/);
+  assert.match(source, /body\.reduction_id\?\.trim\(\)/);
+  assert.doesNotMatch(source, /Number\(body\.before_qty\)/);
 });

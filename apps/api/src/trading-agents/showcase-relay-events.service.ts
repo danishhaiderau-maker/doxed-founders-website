@@ -51,10 +51,6 @@ export type ShowcaseRelayEventBody = {
   reduced_qty?: number | null;
   remaining_qty?: number | null;
   reduce_only?: boolean | null;
-  before_qty?: number | null;
-  closed_qty?: number | null;
-  after_qty?: number | null;
-  price?: number | null;
   exit_price?: number | null;
   reason?: string | null;
   exit_reason?: string | null;
@@ -107,13 +103,12 @@ export function positionReducedEvidence(
 ): PositionReducedEvidence | undefined {
   if (body.event !== 'POSITION_REDUCED' || body.schema !== 'dcf-showcase-intent-v1') return;
   const eventId = body.event_id?.trim() ?? '';
-  // The canonical bot receipt uses event_id as its immutable reduction fence.
-  const reductionId = body.reduction_id?.trim() || eventId;
+  const reductionId = body.reduction_id?.trim() ?? '';
   const ts = Date.parse(String(body.ts ?? ''));
-  const prior = Number(body.before_qty);
-  const reduced = Number(body.closed_qty);
-  const remaining = Number(body.after_qty);
-  const fill = Number(body.price);
+  const prior = Number(body.prior_qty);
+  const reduced = Number(body.reduced_qty);
+  const remaining = Number(body.remaining_qty);
+  const fill = Number(body.fill_price);
   if (
     !eventId || eventId.length > 255 || !reductionId || reductionId.length > 255
     || !Number.isInteger(body.event_seq) || Number(body.event_seq) < 0

@@ -2739,7 +2739,8 @@ model SignalCycleParticipantReduction {
   @@index([exchangeOrderId])
 }
 
-/// Durable, idempotent audit/fence for signed partial-reduction evidence.
+/// Durable, idempotent audit/fence for signed partial-reduction evidence using
+/// canonical reduction_id, prior_qty, reduced_qty, remaining_qty and fill_price.
 /// This model does not authorize or request exchange execution.
 model RelayPositionReductionAudit {
   id                 String   @id @default(cuid())

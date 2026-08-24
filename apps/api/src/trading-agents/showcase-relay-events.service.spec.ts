@@ -20,15 +20,23 @@ test('POSITION_REDUCED accepts only reconciled reduce-only evidence', () => {
     event_id: 'reduce-event-1',
     event_seq: 4,
     ts: new Date().toISOString(),
-    before_qty: 0.03, closed_qty: 0.01, after_qty: 0.02, price: 64_250,
+    prior_qty: 0.03, reduced_qty: 0.01, remaining_qty: 0.02,
+    fill_price: 64_250, reduction_id: 'reduce-command-1',
   });
-  assert.equal(valid?.reductionId, 'reduce-event-1');
+  assert.equal(valid?.reductionId, 'reduce-command-1');
   assert.equal(valid?.remainingQty, 0.02);
 
   assert.equal(positionReducedEvidence({
     schema: 'dcf-showcase-intent-v1', event: 'POSITION_REDUCED',
-    event_id: 'bad', event_seq: 1, ts: new Date().toISOString(),
-    before_qty: 0.03, closed_qty: 0.01, after_qty: 0.025, price: 64_250,
+    event_id: 'bad', reduction_id: 'bad-command', event_seq: 1,
+    ts: new Date().toISOString(), prior_qty: 0.03, reduced_qty: 0.01,
+    remaining_qty: 0.025, fill_price: 64_250,
+  }), undefined);
+  assert.equal(positionReducedEvidence({
+    schema: 'dcf-showcase-intent-v1', event: 'POSITION_REDUCED',
+    event_id: 'missing-reduction-id', event_seq: 1,
+    ts: new Date().toISOString(), prior_qty: 0.03, reduced_qty: 0.01,
+    remaining_qty: 0.02, fill_price: 64_250,
   }), undefined);
   assert.equal(isReductionEvidenceIdentity('o29ps-a', 'OFFSET_029_ATR_PROTECTED'), true);
   assert.equal(isReductionEvidenceIdentity('o29rd-a', 'OFFSET_029_ATR_REGIME'), true);
