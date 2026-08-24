@@ -292,8 +292,14 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             root / "safe_policy_genome_v3_report.json",
             {
                 "epoch_id": "epoch-test",
-                "policy_signature": "policy-test",
                 "generation_revision": "test-revision",
+                "collection": {
+                    "effective_paper_execution_identities": [
+                        {"policy_signature": "policy-tile-4"},
+                        {"policy_signature": "policy-tile-3"},
+                        {"policy_signature": "policy-tile-4"},
+                    ]
+                },
             },
         )
         (root / "research" / "genome" / "__pycache__" / "bad.pyc").write_bytes(b"x")
@@ -324,7 +330,10 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert manifest["generation_revision"] == "test-revision"
                     assert manifest["source_data_revision"] == "test-data-revision"
                     assert manifest["epoch_id"] == "epoch-test"
-                    assert manifest["policy_signature"] == "policy-test"
+                    assert manifest["policy_signatures"] == [
+                        "policy-tile-3",
+                        "policy-tile-4",
+                    ]
                     assert manifest["notes"]["source_revision"] == "test-revision"
                     coverage = manifest["notes"]["component_coverage"]
                     assert coverage["relay_lifecycle_evidence_v1"] is True

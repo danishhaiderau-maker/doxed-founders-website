@@ -3115,9 +3115,22 @@ def download_everything():
     current_epoch_id = current_safe_genome.get("epoch_id") or (
         current_safe_genome.get("epoch_scope") or {}
     ).get("selected_epoch_id")
-    current_policy_signature = current_safe_genome.get("policy_signature") or (
+    current_policy_signatures = sorted({
+        str(identity.get("policy_signature") or "").strip()
+        for identity in (
+            (current_safe_genome.get("collection") or {}).get(
+                "effective_paper_execution_identities"
+            )
+            or []
+        )
+        if isinstance(identity, dict)
+        and str(identity.get("policy_signature") or "").strip()
+    })
+    legacy_single_policy_signature = current_safe_genome.get("policy_signature") or (
         current_safe_genome.get("epoch_scope") or {}
     ).get("policy_signature")
+    if legacy_single_policy_signature and not current_policy_signatures:
+        current_policy_signatures = [str(legacy_single_policy_signature)]
     current_generation_revision = (
         current_report_manifest.get("generation_revision")
         or current_safe_genome.get("generation_revision")
@@ -3130,7 +3143,10 @@ def download_everything():
         "generation_revision": current_generation_revision,
         "source_data_revision": current_report_manifest.get("source_data_revision"),
         "epoch_id": current_epoch_id,
-        "policy_signature": current_policy_signature,
+        # A V3.1 epoch can intentionally contain multiple independently signed
+        # tile policies.  Export the complete sorted set rather than implying a
+        # single identity or emitting a misleading null value.
+        "policy_signatures": current_policy_signatures,
         "files": [],
         "notes": {
             "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
