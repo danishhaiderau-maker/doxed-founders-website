@@ -74,3 +74,4 @@ def test_entry_identity_is_distinct_but_entry_price_matches_tile_one():
     assert row["relay_eligible"] is False
     assert row["relay_configured"] is True
     assert row["relay_copy_readiness"] == "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"
+    assert row["margin_cap_usd"] == 0.25

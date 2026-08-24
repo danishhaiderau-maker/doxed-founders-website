@@ -1820,7 +1820,7 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
             "initial_stop_atr_k": 1.0, "partial_targets_atr": [1.0, 1.5],
             "partial_fractions": [0.25, 0.25], "break_even_arm_atr_k": 1.25,
             "trailing_stop_atr_k": 1.0, "atr_tp_multiple": 2.5,
-            "path_end_sec": 7200, "margin_cap_usd": 2.0, "account_risk_pct": 0.5,
+            "path_end_sec": 7200, "margin_cap_usd": 0.25, "account_risk_pct": 0.5,
         }
     if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
         return {
@@ -1832,7 +1832,7 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
             "exit_mode": "DYNAMIC_REGIME_PROTECTED_PATIENT_CHASE",
             "regime_profiles": offset029_regime_policy.PROFILES,
             "transition_invariant": "STOP_AND_RISK_NEVER_WIDEN",
-            "path_end_sec": 7200, "margin_cap_usd": 2.0, "account_risk_pct": 0.5,
+            "path_end_sec": 7200, "margin_cap_usd": 0.25, "account_risk_pct": 0.5,
         }
     thesis_pct = THESIS_FAST_EXIT_UNREAL_PCT
     mfe_protect = THESIS_MFE_PROTECT_PCT
@@ -6994,7 +6994,9 @@ def compute_offset_029_atr_entry(signal: dict) -> dict:
             risk_budget / (leverage * stop_k * atr_abs / price)
             if risk_budget > 0 and atr_abs > 0 and price > 0 else 0.0
         )
-        signal["margin_usdt"] = round(min(2.0, risk_margin), 4) if risk_margin > 0 else 0.0
+        signal["margin_usdt"] = round(min(0.25, risk_margin), 4) if risk_margin > 0 else 0.0
+        signal["requested_margin_usd"] = signal["margin_usdt"]
+        signal["requested_notional_usd"] = round(signal["margin_usdt"] * leverage, 4)
         signal["account_risk_budget_usd"] = round(risk_budget, 4)
         signal["sizing_atr_abs"] = atr_abs
         signal["sizing_stop_atr_k"] = stop_k
@@ -20085,6 +20087,11 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "entry_reason": signal.get("entry_reason"),
         "entry_limit_policy": signal.get("entry_limit_policy"),
         "qty": qty,
+        "margin_usdt": margin_usdt,
+        "requested_margin_usd": signal.get("requested_margin_usd") or margin_usdt,
+        "requested_notional_usd": signal.get("requested_notional_usd") or round(margin_usdt * float(lev), 4),
+        "accepted_margin_usd": None,
+        "accepted_notional_usd": None,
         "status": "PENDING",
         "created_ts": order_created_ts,
         "signal_created_ts": signal.get("created_ts_ts") or (signal.get("timing") or {}).get("signal_ts"),
@@ -33917,6 +33924,10 @@ def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
         "signal_dir": row.get("signal_dir") or row.get("dir") or row.get("side"),
         "dir": row.get("dir") or row.get("signal_dir") or row.get("side"),
         "qty": row.get("qty"),
+        "requested_margin_usd": row.get("requested_margin_usd") or row.get("margin_usdt"),
+        "requested_notional_usd": row.get("requested_notional_usd"),
+        "accepted_margin_usd": row.get("accepted_margin_usd"),
+        "accepted_notional_usd": row.get("accepted_notional_usd"),
         "limit_price": row.get("limit_price"),
         "original_limit_price": row.get("original_limit_price") or row.get("planned_limit_price"),
         "signal_price": row.get("signal_price"),
@@ -33952,6 +33963,10 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "side": row.get("side") or row.get("dir"),
         "entry": row.get("entry"),
         "qty": row.get("qty"),
+        "requested_margin_usd": row.get("requested_margin_usd") or row.get("margin_usdt"),
+        "requested_notional_usd": row.get("requested_notional_usd"),
+        "accepted_margin_usd": row.get("accepted_margin_usd"),
+        "accepted_notional_usd": row.get("accepted_notional_usd"),
         "sl": protection_view["sl"],
         "sl_enforced": protection_view["sl_enforced"],
         "stop_policy": protection_view["stop_policy"],

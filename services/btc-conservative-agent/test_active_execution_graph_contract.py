@@ -1,7 +1,7 @@
 """Fail-closed contract for the production paper-research execution graph.
 
 Historical lane implementations and their immutable evidence may remain readable,
-but only CONTINUOUS and OFFSET_029_ATR_TP_25 may produce new paper orders.  Both
+but only the frozen four-tile stack may produce new paper orders. All four
 must consume the single shared AI_SCAN result; an alternate prompt/call path is a
 release-blocking regression.
 """
@@ -19,7 +19,12 @@ import pathway_lane_roster as roster
 
 SERVICE_DIR = Path(__file__).resolve().parent
 BOT_PATH = SERVICE_DIR / "bot.py"
-ACTIVE_PAPER_LANES = {"CONTINUOUS", "OFFSET_029_ATR_TP_25"}
+ACTIVE_PAPER_LANES = {
+    "CONTINUOUS",
+    "OFFSET_029_ATR_TP_25",
+    "OFFSET_029_ATR_PROTECTED",
+    "OFFSET_029_ATR_REGIME",
+}
 
 
 def _bot_tree() -> ast.Module:
@@ -35,9 +40,13 @@ def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str |
     return None
 
 
-def test_exactly_two_active_order_producing_lanes() -> None:
+def test_exactly_four_active_order_producing_lanes() -> None:
     configured = set(config.COMBO_EXECUTION_LANES)
-    assert configured == {config.RESEARCH_LANE_OFFSET_029_ATR_TP_25}
+    assert configured == {
+        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        config.RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+        config.RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+    }
 
     active = {config.COMPARISON_BENCHMARK_LANE, *configured}
     assert active == ACTIVE_PAPER_LANES

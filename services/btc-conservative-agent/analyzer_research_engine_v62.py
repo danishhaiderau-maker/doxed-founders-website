@@ -156,6 +156,7 @@ POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
+PUBLISHED_REPORTS_DIR = "published_reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 REPORTS_HISTORY_DIR = os.path.join("reports", "history")
 HORIZON_MIN_COVERAGE_PCT = 80
@@ -19092,12 +19093,71 @@ def write_report_manifest(payload=None):
             "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
+    manifest["generation_id"] = hashlib.sha256(
+        json.dumps(
+            {
+                "generated_at": manifest["generated_at"],
+                "revision": manifest["generation_revision"],
+                "epoch": manifest["fresh_epoch"].get("epoch_id"),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
     try:
-        with open(REPORT_MANIFEST_FILE, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+        _publish_completed_report_generation(manifest)
     except Exception as exc:
         print(f"  ⚠️ Could not write {REPORT_MANIFEST_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     return manifest
+
+
+def _publish_completed_report_generation(manifest):
+    """Atomically expose one completed analyzer generation.
+
+    Analyzer builders intentionally write their potentially large artifacts to
+    the working directory.  The dashboard must never observe those files while
+    a pass is still replacing them.  Copy the completed set to a sibling
+    staging directory, include its manifest, then atomically exchange the
+    published directory.  The top-level manifest remains a compatibility copy
+    and is also replaced atomically only after publication succeeds.
+    """
+    published = Path(PUBLISHED_REPORTS_DIR)
+    staging = Path(f".{PUBLISHED_REPORTS_DIR}.staging-{os.getpid()}-{time.time_ns()}")
+    backup = Path(f".{PUBLISHED_REPORTS_DIR}.previous-{os.getpid()}-{time.time_ns()}")
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        names = {
+            str(row.get("file"))
+            for row in (manifest.get("reports") or [])
+            if isinstance(row, dict) and row.get("file")
+        }
+        names.update(
+            str(name) for name in (manifest.get("text_artifacts") or []) if name
+        )
+        for name in sorted(names):
+            source = Path(name)
+            if source.is_file():
+                destination = staging / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+        (staging / REPORT_MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        if published.exists():
+            os.replace(published, backup)
+        try:
+            os.replace(staging, published)
+        except Exception:
+            if backup.exists() and not published.exists():
+                os.replace(backup, published)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        manifest_tmp = Path(f"{REPORT_MANIFEST_FILE}.published.tmp")
+        manifest_tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(manifest_tmp, REPORT_MANIFEST_FILE)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _manifest_category(title: str) -> str:

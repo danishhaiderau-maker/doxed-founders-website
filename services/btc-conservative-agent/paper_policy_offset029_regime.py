@@ -57,7 +57,7 @@ def transition(*, previous_regime: str, observed_regime: str,
 
 def account_risk_quantity(*, equity_usd: float, account_risk_pct: float,
                           entry_price: float, atr_abs: float,
-                          leverage: float, margin_cap_usd: float = 2.0) -> dict:
+                          leverage: float, margin_cap_usd: float = 0.25) -> dict:
     risk_budget = max(0.0, float(equity_usd)) * max(0.0, float(account_risk_pct)) / 100.0
     stop_move = max(0.0, float(atr_abs))
     risk_qty = risk_budget / stop_move if stop_move else 0.0
@@ -71,7 +71,7 @@ def entry_fields(direction: str, reference_price: float) -> dict:
     fields = entry_policy.entry_fields(direction, reference_price)
     fields.update({"entry_limit_policy": POLICY_ID, "raw_policy_id": POLICY_ID,
                    "policy_id": POLICY_ID, "exit_profile_id": EXIT_PROFILE_ID,
-                   "account_risk_pct": .5, "margin_cap_usd": 2.0,
+                   "account_risk_pct": .5, "margin_cap_usd": 0.25,
                    "regime_profiles": PROFILES, "path_end_sec": PATH_END_SEC,
                    "relay_eligible": False, "relay_configured": True,
                    "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"})

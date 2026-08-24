@@ -74,3 +74,13 @@ def test_entry_is_paper_capable_but_partial_relay_is_fail_closed():
     assert row["relay_configured"] is True
     assert row["relay_eligible"] is False
     assert row["relay_copy_readiness"] == "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"
+    assert row["margin_cap_usd"] == 0.25
+
+
+def test_default_position_size_never_exceeds_quarter_dollar_margin():
+    sized = policy.account_risk_quantity(
+        equity_usd=500, account_risk_pct=0.5, entry_price=100,
+        atr_abs=1, leverage=100,
+    )
+    assert sized["margin_cap_usd"] == 0.25
+    assert sized["quantity"] <= 0.25

@@ -166,6 +166,7 @@ DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 ANALYZER_LOG_FILE = "analyzer_run.log"
 REPORTS_DIR = "reports"
+PUBLISHED_REPORTS_DIR = "published_reports"
 ALL_DATA_REPORTS_DIR = os.path.join(REPORTS_DIR, "all_data")
 HISTORICAL_COHORT_REPORT_FILE = "historical_trade_cohort_report.json"
 RETENTION_STATUS_FILE = "research_retention_status.json"
@@ -515,6 +516,25 @@ def _read_report(name: str, default=None):
     """Load JSON from project root, reports/, or all_data fallback when SESSION file is empty."""
     if default is None:
         default = {}
+    # A completed atomic generation is authoritative. If it intentionally did
+    # not publish this report, do not resurrect a stale or in-progress working
+    # copy from the analyzer directory.
+    for base in (ROOT, DATA_ROOT):
+        published_manifest = base / PUBLISHED_REPORTS_DIR / REPORT_MANIFEST_FILE
+        if not published_manifest.is_file():
+            continue
+        try:
+            manifest = json.loads(published_manifest.read_text(encoding="utf-8"))
+            declared = {
+                str(row.get("file"))
+                for row in (manifest.get("reports") or [])
+                if isinstance(row, dict) and row.get("file")
+            }
+            if name not in declared:
+                return default
+        except Exception:
+            continue
+        break
     session = _load_bot_session() or {}
     fresh = bool(session.get("fresh_collection_mode"))
     primary = None
@@ -542,6 +562,22 @@ def _read_report(name: str, default=None):
 
 def _best_report_path(name: str) -> Path | None:
     """Return the same scope-aware file that ``_read_report`` would expose."""
+    for base in (ROOT, DATA_ROOT):
+        published_manifest = base / PUBLISHED_REPORTS_DIR / REPORT_MANIFEST_FILE
+        if not published_manifest.is_file():
+            continue
+        try:
+            manifest = json.loads(published_manifest.read_text(encoding="utf-8"))
+            declared = {
+                str(row.get("file"))
+                for row in (manifest.get("reports") or [])
+                if isinstance(row, dict) and row.get("file")
+            }
+            if name not in declared:
+                return None
+        except Exception:
+            continue
+        break
     session = _load_bot_session() or {}
     fresh = bool(session.get("fresh_collection_mode"))
     primary = None
@@ -573,6 +609,28 @@ def _best_report_path(name: str) -> Path | None:
 
 def _data_file_candidates(name: str) -> list[Path]:
     """Analyzer writes to agent root (DATA_ROOT); legacy copies may sit under research/."""
+    # Once an atomic generation exists, its manifest and declared artifacts are
+    # the sole public report source. Working-directory files may belong to the
+    # next analyzer pass and must not leak into API/dashboard responses.
+    for base in (ROOT, DATA_ROOT):
+        published_manifest = base / PUBLISHED_REPORTS_DIR / REPORT_MANIFEST_FILE
+        if not published_manifest.is_file():
+            continue
+        try:
+            manifest = json.loads(published_manifest.read_text(encoding="utf-8"))
+            declared = {
+                str(row.get("file"))
+                for row in (manifest.get("reports") or [])
+                if isinstance(row, dict) and row.get("file")
+            }
+            declared.update(str(item) for item in (manifest.get("text_artifacts") or []))
+            declared.add(REPORT_MANIFEST_FILE)
+            if name in declared:
+                return [base / PUBLISHED_REPORTS_DIR / name]
+        except Exception:
+            # A malformed/incomplete publication is ignored; the last valid
+            # directory exchange leaves no partial directory under this name.
+            continue
     bases = [DATA_ROOT, ROOT]
     seen: set[Path] = set()
     out: list[Path] = []
@@ -581,6 +639,55 @@ def _data_file_candidates(name: str) -> list[Path]:
             if candidate not in seen:
                 seen.add(candidate)
                 out.append(candidate)
+    return out
+
+
+def _bounded_safe_policy_payload(report: dict) -> dict:
+    """Public Safe/Top APIs expose summaries; full artifact stays downloadable."""
+    if not report:
+        return {}
+    out = {
+        key: report.get(key)
+        for key in (
+            "schema", "extension", "generated_at", "status", "qualification",
+            "note", "epoch_id", "epoch_scope", "integrity", "collection",
+            "search", "search_progress", "blockers", "number_one_strategy",
+            "live_policy_change_allowed", "real_bitfinex_trading_allowed",
+        )
+        if key in report
+    }
+    if "candidate_screen" in report:
+        screen = report.get("candidate_screen") or {}
+        out["candidate_screen"] = {
+            key: value
+            for key, value in screen.items()
+            if not isinstance(value, (list, dict))
+        }
+        out["candidate_screen"]["descriptive_top_100"] = list(
+            screen.get("descriptive_top_100") or []
+        )[:100]
+        out["candidate_screen"]["drawdown_control_leaders"] = list(
+            screen.get("drawdown_control_leaders") or []
+        )[:100]
+        out["candidate_screen"]["profit_capture_leaders"] = {
+            str(family): list(rows or [])[:10]
+            for family, rows in (screen.get("profit_capture_leaders") or {}).items()
+        }
+    if "safe_policy_ranking" in report:
+        ranking = report.get("safe_policy_ranking") or {}
+        out["safe_policy_ranking"] = {
+            key: value
+            for key, value in ranking.items()
+            if not isinstance(value, (list, dict))
+        }
+        for key in ("blockers", "warning", "number_one_strategy"):
+            if key in ranking:
+                out["safe_policy_ranking"][key] = ranking[key]
+        ranked = ranking.get("ranked_policies") or ranking.get("ranked") or []
+        if ranked:
+            out["safe_policy_ranking"]["ranked_policies"] = list(ranked)[:100]
+    if "candidate_screen" in report or "safe_policy_ranking" in report:
+        out["full_artifact"] = f"/api/report/{SAFE_POLICY_GENOME_V3_REPORT_FILE}"
     return out
 
 
@@ -1243,7 +1350,9 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "evidence": collection,
         "search_counts": search_counts,
         "rows_available": len(candidates),
-        "policy_search_statistics": report.get("safe_policy_ranking") or {},
+        "policy_search_statistics": _bounded_safe_policy_payload(report).get(
+            "safe_policy_ranking", {}
+        ),
         "rows_limit": max(1, int(limit)),
         "blockers": source["blockers"],
         "live_policy_change_allowed": source["qualified"],
@@ -2021,7 +2130,7 @@ def api_safe_policy_genome_v3():
             "collection": {},
             "blockers": ["V3_REPORT_NOT_GENERATED"],
         }
-    return jsonify(payload)
+    return jsonify(_bounded_safe_policy_payload(payload))
 
 
 @app.route("/safe-policy-genome-v3")
