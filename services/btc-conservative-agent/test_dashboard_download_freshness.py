@@ -283,7 +283,17 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             root / "report_manifest.json",
             {
                 "generated_at": "now",
+                "generation_revision": "test-revision",
+                "source_data_revision": "test-data-revision",
                 "reports": [{"file": "historical_trade_cohort_report.json"}],
+            },
+        )
+        _write_json(
+            root / "safe_policy_genome_v3_report.json",
+            {
+                "epoch_id": "epoch-test",
+                "policy_signature": "policy-test",
+                "generation_revision": "test-revision",
             },
         )
         (root / "research" / "genome" / "__pycache__" / "bad.pyc").write_bytes(b"x")
@@ -311,6 +321,11 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
                     manifest = json.loads(zf.read("MANIFEST.json"))
                     assert manifest["schema"] == "doxxed_everything_bundle_v2"
+                    assert manifest["generation_revision"] == "test-revision"
+                    assert manifest["source_data_revision"] == "test-data-revision"
+                    assert manifest["epoch_id"] == "epoch-test"
+                    assert manifest["policy_signature"] == "policy-test"
+                    assert manifest["notes"]["source_revision"] == "test-revision"
                     coverage = manifest["notes"]["component_coverage"]
                     assert coverage["relay_lifecycle_evidence_v1"] is True
                     assert coverage["counterfactual_evidence"] is True

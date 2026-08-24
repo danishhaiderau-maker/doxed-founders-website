@@ -3110,9 +3110,27 @@ def download_everything():
     for path, arcname in candidates:
         unique.setdefault(arcname, path)
     member_names = set(unique)
+    current_report_manifest = _read_json(REPORT_MANIFEST_FILE) or {}
+    current_safe_genome = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
+    current_epoch_id = current_safe_genome.get("epoch_id") or (
+        current_safe_genome.get("epoch_scope") or {}
+    ).get("selected_epoch_id")
+    current_policy_signature = current_safe_genome.get("policy_signature") or (
+        current_safe_genome.get("epoch_scope") or {}
+    ).get("policy_signature")
+    current_generation_revision = (
+        current_report_manifest.get("generation_revision")
+        or current_safe_genome.get("generation_revision")
+        or os.getenv("SOURCE_GIT_REV")
+        or "UNKNOWN"
+    )
     manifest = {
         "schema": "doxxed_everything_bundle_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_revision": current_generation_revision,
+        "source_data_revision": current_report_manifest.get("source_data_revision"),
+        "epoch_id": current_epoch_id,
+        "policy_signature": current_policy_signature,
         "files": [],
         "notes": {
             "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
@@ -3121,7 +3139,7 @@ def download_everything():
             "current_report_scope": "FRESH-COLLECTION",
             "live_trading_data": False,
             "purpose": "research audit and offline analysis",
-            "source_revision": os.getenv("SOURCE_GIT_REV") or "UNKNOWN",
+            "source_revision": current_generation_revision,
             "component_coverage": {
                 "relay_lifecycle_evidence_v1": any(
                     name.endswith("/relay_lifecycle_evidence_v1.json")
@@ -4009,7 +4027,7 @@ const EVIDENCE_SCOPES = {
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current 12,601-policy v2.2 grid.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   'partial-reductions': ['CURRENT V3.1 RECONCILIATION', 'Signed source and relay receipts only. Insufficient or unreconciled evidence blocks live-copy readiness.'],
-  genome: ['SOURCE UNAVAILABLE', 'The required six raw Genome source tables are missing. Prior artifacts are preserved but current conclusions are blocked.'],
+  genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
   explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
   archives: ['PRESERVED HISTORY', 'Sealed prior reports and sessions; not current-epoch policy evidence.'],
@@ -4097,6 +4115,12 @@ function show(id) {
   renderNav();
   savePrefs();
   void refreshActiveSection();
+}
+function setEvidenceScope(id, title, note) {
+  const sec = document.getElementById('sec-' + id);
+  if (!sec) return;
+  const banner = sec.querySelector(':scope > .evidence-scope-banner');
+  if (banner) banner.innerHTML = `<b>Evidence scope: ${title}</b><br>${note}`;
 }
 const showAllEl = document.getElementById('show-all-lanes');
 if (showAllEl) {
@@ -4780,6 +4804,7 @@ async function loadGenome() {
   const empty = document.getElementById('genome-empty');
   const content = document.getElementById('genome-content');
   if (!d || !d.schema || d.available === false) {
+    setEvidenceScope('genome', 'SOURCE UNAVAILABLE', 'The required current Genome evidence is unavailable. Prior artifacts are preserved but current conclusions are blocked.');
     content.style.display = 'none';
     empty.style.display = 'block';
     const src = (d && d.source_status) || {};
@@ -4788,6 +4813,7 @@ async function loadGenome() {
     document.getElementById('genome-note').textContent = `SOURCE UNAVAILABLE · missing tables: ${missing || 'not reported'} · prior artifacts preserved but blocked · execution unaffected.`;
     return;
   }
+  setEvidenceScope('genome', 'CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.');
   empty.style.display = 'none';
   content.style.display = 'block';
   if (d.collector_generation === 'V3.1') {

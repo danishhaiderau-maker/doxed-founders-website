@@ -9,6 +9,9 @@ def test_genome_navigation_is_not_hard_coded_unavailable():
 
     assert '("genome", "Safe Policy Genome V3.1"' in source
     assert "Genome (Unavailable)" not in source
+    assert "genome: ['CURRENT V3.1 SAFE POLICY GENOME'" in source
+    assert "setEvidenceScope('genome', 'SOURCE UNAVAILABLE'" in source
+    assert "setEvidenceScope('genome', 'CURRENT V3.1 SAFE POLICY GENOME'" in source
 
 
 def test_restored_non_summary_tab_still_loads_global_provenance():
