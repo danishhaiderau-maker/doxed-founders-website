@@ -14,7 +14,14 @@
 - A tile toggle never arms Bitfinex.
 - Relay OFF means paper only.
 - Relay ON may copy only new, signed, allowlisted paper intents created after arming. It must never copy historical or already-open paper state.
-- Only the user may arm or disarm the Bitfinex relay.
+- The user normally arms or disarms the Bitfinex relay. For the current goal,
+  the user has explicitly delegated arming authority to the primary agent only
+  after every technical-readiness, exact-size, protection, partial-reduction,
+  restart-recovery, reconciliation, analyzer-parity, dashboard-truthfulness,
+  visual-QA, and safe-boundary gate is current and GREEN. Any uncertainty must
+  fail closed. This delegation never permits early arming, upward size rounding,
+  strategy/risk expansion, copying historical paper state, or force-closing
+  real exposure.
 
 ## Live-test safety
 
