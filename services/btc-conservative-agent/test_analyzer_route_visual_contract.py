@@ -62,6 +62,8 @@ def test_partial_reduction_subtab_exposes_explicit_insufficiency_copy():
     source = dashboard.DASHBOARD_HTML
     assert 'id="sec-partial-reductions"' in source
     assert "No signed partial-reduction evidence is available yet. Live copy remains blocked." in source
+    assert "Eligible current" in source
+    assert "Legacy excluded" in source
     assert "'partial-reductions': [loadPartialReductions]" in source
 
 

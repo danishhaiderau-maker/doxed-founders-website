@@ -141,6 +141,13 @@ def test_terminal_exit_is_not_mislabeled_as_partial_reduction() -> None:
     assert pushed == []
 
 
+def test_terminal_trade_rows_version_the_zero_remaining_contract() -> None:
+    """Analyzer eligibility must be tied to the repaired writer contract."""
+    assert 'pos["policy_remaining_fraction"] = 0.0' in BOT_SOURCE
+    assert '"partial_reduction_terminal_schema": (' in BOT_SOURCE
+    assert '"terminal_remaining_zero_v1" if protected_partial_policy else None' in BOT_SOURCE
+
+
 def test_failed_local_commit_rolls_back_and_never_delivers() -> None:
     ns, order, pushed = _namespace(save_result=False)
     apply_exit = _compile("_apply_protected_patient_chase_exit", ns)

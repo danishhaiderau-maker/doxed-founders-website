@@ -12,6 +12,7 @@ from typing import Any
 REPORT_FILE = "partial_reduction_reconciliation_report.json"
 LANES = ("OFFSET_029_ATR_PROTECTED", "OFFSET_029_ATR_REGIME")
 EPSILON = 1e-8
+TERMINAL_SCHEMA = "terminal_remaining_zero_v1"
 
 
 def _number(value: Any) -> float | None:
@@ -68,6 +69,7 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
     current_qty = _number(row.get("qty"))
     current_fraction = _number(row.get("policy_remaining_fraction"))
     issues: list[str] = []
+    exclusions: list[str] = []
     previous = 1.0
     last_remaining_qty: float | None = None
     signed = 0
@@ -119,7 +121,10 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
         # A terminal trade row proves the last runner was closed through its
         # explicit zero remaining fraction and final execution quantity.
         terminal_close_qty = _number(row.get("execution_qty"))
-        if current_fraction is None or abs(current_fraction) > EPSILON:
+        terminal_schema = str(row.get("partial_reduction_terminal_schema") or "")
+        if terminal_schema != TERMINAL_SCHEMA:
+            exclusions.append("LEGACY_TERMINAL_QUANTITY_SCHEMA")
+        elif current_fraction is None or abs(current_fraction) > EPSILON:
             issues.append("TERMINAL_REMAINING_NOT_ZERO")
         if previous > EPSILON and (
             terminal_close_qty is None or last_remaining_qty is None
@@ -147,7 +152,9 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
         "original_qty": original_qty,
         "current_qty": current_qty,
         "issues": issues,
-        "reconciled": bool(receipts) and not issues,
+        "exclusions": exclusions,
+        "eligible_current_evidence": bool(receipts) and not exclusions,
+        "reconciled": bool(receipts) and not issues and not exclusions,
     }
 
 
@@ -163,10 +170,26 @@ def build_partial_reduction_reconciliation_report(data_dir=".", report_dir=".") 
         if str(row.get("research_lane") or "").upper() in LANES:
             audits.append(_audit_row(row, terminal=True))
     with_receipts = [row for row in audits if row["receipt_count"]]
+    eligible_with_receipts = [
+        row for row in with_receipts if row["eligible_current_evidence"]
+    ]
     issues = sorted({issue for row in audits for issue in row["issues"]})
     blockers = []
     if not with_receipts:
         blockers.append("INSUFFICIENT_PARTIAL_REDUCTION_RECEIPTS")
+    if not any(row["terminal"] for row in eligible_with_receipts):
+        blockers.append("INSUFFICIENT_CURRENT_PARTIAL_REDUCTION_TERMINALS")
+    for lane in LANES:
+        lane_receipt_rows = [
+            row for row in with_receipts if row["research_lane"] == lane
+        ]
+        if lane_receipt_rows and not any(
+            row["terminal"] and row["eligible_current_evidence"]
+            for row in lane_receipt_rows
+        ):
+            blockers.append(
+                f"INSUFFICIENT_CURRENT_PARTIAL_REDUCTION_TERMINALS:{lane}"
+            )
     if any("UNSIGNED_OR_UNIDENTIFIED" in issue for issue in issues):
         blockers.append("PARTIAL_REDUCTION_RECEIPTS_UNSIGNED_OR_UNIDENTIFIED")
     if any(issue for issue in issues if "UNSIGNED_OR_UNIDENTIFIED" not in issue):
@@ -175,14 +198,23 @@ def build_partial_reduction_reconciliation_report(data_dir=".", report_dir=".") 
     for lane in LANES:
         lane_rows = [row for row in audits if row["research_lane"] == lane]
         lane_receipts = sum(row["receipt_count"] for row in lane_rows)
+        lane_eligible = [
+            row for row in lane_rows if row["eligible_current_evidence"]
+        ]
         per_lane[lane] = {
             "lifecycles": len(lane_rows),
             "open_positions": sum(not row["terminal"] for row in lane_rows),
             "terminal_trades": sum(row["terminal"] for row in lane_rows),
             "partial_reduction_receipts": lane_receipts,
             "signed_receipts": sum(row["signed_receipt_count"] for row in lane_rows),
+            "eligible_current_receipts": sum(
+                row["receipt_count"] for row in lane_eligible
+            ),
+            "legacy_excluded_lifecycles": sum(bool(row["exclusions"]) for row in lane_rows),
             "reconciled_lifecycles": sum(row["reconciled"] for row in lane_rows),
-            "live_copy_evidence_sufficient": bool(lane_receipts) and all(row["reconciled"] for row in lane_rows if row["receipt_count"]),
+            "live_copy_evidence_sufficient": bool(lane_eligible) and any(
+                row["terminal"] and row["reconciled"] for row in lane_eligible
+            ) and all(row["reconciled"] for row in lane_eligible),
         }
     report = {
         "schema": "partial_reduction_reconciliation_v1",
@@ -196,13 +228,15 @@ def build_partial_reduction_reconciliation_report(data_dir=".", report_dir=".") 
             "lifecycles_with_receipts": len(with_receipts),
             "partial_reduction_receipts": sum(row["receipt_count"] for row in audits),
             "signed_receipts": sum(row["signed_receipt_count"] for row in audits),
+            "eligible_current_receipts": sum(row["receipt_count"] for row in eligible_with_receipts),
+            "legacy_excluded_lifecycles": sum(bool(row["exclusions"]) for row in audits),
             "reconciled_lifecycles": sum(row["reconciled"] for row in audits),
         },
         "integrity": {"passed": not any(issue for issue in issues if "UNSIGNED_OR_UNIDENTIFIED" not in issue), "issues": issues},
         "blockers": blockers,
         "paper_lifecycle_source": lifecycle,
         "lifecycle_audits": audits[:200],
-        "note": "Paper evidence only. Tiles 3/4 remain live fail-closed until identified partial-reduction receipts and remaining-quantity reconciliation are proven.",
+        "note": "Paper evidence only. Legacy terminal rows are preserved but excluded from current reconciliation. Tiles 3/4 remain live fail-closed until post-repair partial-reduction terminals and remaining-quantity reconciliation are proven.",
     }
     output = Path(report_dir) / REPORT_FILE
     output.parent.mkdir(parents=True, exist_ok=True)

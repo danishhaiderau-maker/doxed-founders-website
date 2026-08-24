@@ -2195,7 +2195,7 @@ def partial_reduction_reconciliation_page():
 <meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#081019;color:#dbeafe;font:14px system-ui;margin:24px;overflow-wrap:anywhere}a{color:#60a5fa}.card{border:1px solid #334155;border-radius:8px;padding:14px;margin:12px 0;max-width:100%}pre{white-space:pre-wrap;overflow:auto}@media(max-width:600px){body{margin:12px}.card{padding:10px}}</style></head>
 <body><a href="/">← Research Dashboard</a><h1>Tiles 3/4 — Partial Reduction Reconciliation</h1>
 <div id="status" class="card">Loading completed analyzer generation…</div><div id="lanes"></div><pre id="detail" class="card"></pre>
-<script>fetch('/api/partial-reduction-reconciliation').then(r=>r.json()).then(d=>{document.getElementById('status').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Live copy allowed: '+(d.live_copy_allowed?'YES':'NO');document.getElementById('lanes').innerHTML=Object.entries(d.lanes||{}).map(([lane,v])=>'<div class="card"><b>'+lane+'</b><br>lifecycles '+(v.lifecycles||0)+' · receipts '+(v.partial_reduction_receipts||0)+' · signed '+(v.signed_receipts||0)+' · reconciled '+(v.reconciled_lifecycles||0)+'<br>paper receipt evidence sufficient: '+(v.live_copy_evidence_sufficient?'YES':'NO')+'</div>').join('');document.getElementById('detail').textContent=JSON.stringify({summary:d.summary,integrity:d.integrity,blockers:d.blockers,note:d.note},null,2);});</script></body></html>"""
+<script>fetch('/api/partial-reduction-reconciliation').then(r=>r.json()).then(d=>{document.getElementById('status').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Live copy allowed: '+(d.live_copy_allowed?'YES':'NO');document.getElementById('lanes').innerHTML=Object.entries(d.lanes||{}).map(([lane,v])=>'<div class="card"><b>'+lane+'</b><br>lifecycles '+(v.lifecycles||0)+' · observed receipts '+(v.partial_reduction_receipts||0)+' · eligible current receipts '+(v.eligible_current_receipts||0)+' · legacy excluded '+(v.legacy_excluded_lifecycles||0)+' · reconciled '+(v.reconciled_lifecycles||0)+'<br>paper receipt evidence sufficient: '+(v.live_copy_evidence_sufficient?'YES':'NO')+'</div>').join('');document.getElementById('detail').textContent=JSON.stringify({summary:d.summary,integrity:d.integrity,blockers:d.blockers,note:d.note},null,2);});</script></body></html>"""
 
 
 @app.route("/safe-policy-genome-v3")
@@ -3966,7 +3966,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Signed source and relay receipts for Tiles 3/4. This is analyzer-only evidence; insufficient or unreconciled evidence keeps live copy blocked.</p>
     <div class="kpis" id="partial-reductions-kpis"></div>
     <div class="empty-state" id="partial-reductions-empty">Loading signed partial-reduction evidence…</div>
-    <table><thead><tr><th>Lane</th><th>Lifecycles</th><th>Receipts</th><th>Signed</th><th>Reconciled</th><th>Evidence sufficient</th></tr></thead><tbody id="partial-reductions-body"></tbody></table>
+    <table><thead><tr><th>Lane</th><th>Lifecycles</th><th>Observed receipts</th><th>Eligible current</th><th>Legacy excluded</th><th>Reconciled</th><th>Evidence sufficient</th></tr></thead><tbody id="partial-reductions-body"></tbody></table>
     <p><a class="btn" href="/partial-reduction-reconciliation">Open full reconciliation report</a></p>
     <pre id="partial-reductions-detail"></pre>
   </section>
@@ -4935,7 +4935,7 @@ async function loadPartialReductions() {
   empty.style.display = lanes.length ? 'none' : 'block';
   empty.textContent = 'No signed partial-reduction evidence is available yet. Live copy remains blocked.';
   document.getElementById('partial-reductions-body').innerHTML = lanes.map(([lane,v]) =>
-    `<tr><td>${lane}</td><td>${v.lifecycles ?? 0}</td><td>${v.partial_reduction_receipts ?? 0}</td><td>${v.signed_receipts ?? 0}</td><td>${v.reconciled_lifecycles ?? 0}</td><td class="${v.live_copy_evidence_sufficient ? 'green' : 'red'}">${v.live_copy_evidence_sufficient ? 'YES' : 'NO'}</td></tr>`
+    `<tr><td>${lane}</td><td>${v.lifecycles ?? 0}</td><td>${v.partial_reduction_receipts ?? 0}</td><td>${v.eligible_current_receipts ?? 0}</td><td>${v.legacy_excluded_lifecycles ?? 0}</td><td>${v.reconciled_lifecycles ?? 0}</td><td class="${v.live_copy_evidence_sufficient ? 'green' : 'red'}">${v.live_copy_evidence_sufficient ? 'YES' : 'NO'}</td></tr>`
   ).join('');
   document.getElementById('partial-reductions-detail').textContent = JSON.stringify({
     summary: d.summary || {}, integrity, blockers: d.blockers || [], note: d.note || '',

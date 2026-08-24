@@ -25629,6 +25629,14 @@ def close_position(pos: dict, exit_reason: str):
             "partial_exit_receipts": copy.deepcopy(pos.get("partial_exit_receipts") or []),
             "policy_original_qty": pos.get("policy_original_qty"),
             "policy_remaining_fraction": pos.get("policy_remaining_fraction"),
+            # Version the terminal quantity contract explicitly.  Older rows
+            # were able to persist the pre-close runner fraction even though
+            # ``execution_qty`` proved that the runner had been closed.  The
+            # analyzer must not mix those rows with post-repair reconciliation
+            # evidence.
+            "partial_reduction_terminal_schema": (
+                "terminal_remaining_zero_v1" if protected_partial_policy else None
+            ),
             "trading_fees_usd": round(trading_fees, 2),
             "fees_usd": round(trading_fees, 2),
             "funding_fees_usd": round(funding_total, 2),

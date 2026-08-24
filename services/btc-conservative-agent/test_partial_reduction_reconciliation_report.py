@@ -50,6 +50,7 @@ def test_report_reconciles_open_and_terminal_remaining_quantity(tmp_path):
     _write_trades(tmp_path / "trades_3factor.csv", [{
         "trade_id": "closed-1", "research_lane": "OFFSET_029_ATR_REGIME",
         "policy_remaining_fraction": 0.0,
+        "partial_reduction_terminal_schema": "terminal_remaining_zero_v1",
         "partial_exit_receipts": json.dumps([
             _receipt("r-1", 0.5, 0.5), _receipt("r-2", 0.0, 0.5),
         ]),
@@ -57,14 +58,21 @@ def test_report_reconciles_open_and_terminal_remaining_quantity(tmp_path):
 
     report = build_partial_reduction_reconciliation_report(tmp_path, tmp_path)
 
-    assert report["status"] == "DESCRIPTIVE_RECONCILED"
+    assert report["status"] == "BLOCKED"
     assert report["summary"] == {
         "lifecycles": 2, "lifecycles_with_receipts": 2,
         "partial_reduction_receipts": 3, "signed_receipts": 3,
+        "eligible_current_receipts": 3, "legacy_excluded_lifecycles": 0,
         "reconciled_lifecycles": 2,
     }
-    assert report["lanes"]["OFFSET_029_ATR_PROTECTED"]["live_copy_evidence_sufficient"] is True
+    # An open reduction proves quantity bookkeeping, but cannot prove the
+    # terminal runner contract required for live-copy readiness.
+    assert report["lanes"]["OFFSET_029_ATR_PROTECTED"]["live_copy_evidence_sufficient"] is False
     assert report["lanes"]["OFFSET_029_ATR_REGIME"]["live_copy_evidence_sufficient"] is True
+    assert (
+        "INSUFFICIENT_CURRENT_PARTIAL_REDUCTION_TERMINALS:OFFSET_029_ATR_PROTECTED"
+        in report["blockers"]
+    )
     assert report["live_copy_allowed"] is False
     assert json.loads((tmp_path / "partial_reduction_reconciliation_report.json").read_text()) == report
 
@@ -82,6 +90,7 @@ def test_terminal_reconciliation_uses_signed_receipt_quantity_basis_not_rounded_
         "research_lane": "OFFSET_029_ATR_PROTECTED",
         "policy_original_qty": 0.000317,
         "policy_remaining_fraction": 0.0,
+        "partial_reduction_terminal_schema": "terminal_remaining_zero_v1",
         "execution_qty": round(original * 0.50, 6),
         "partial_exit_receipts": json.dumps([first, second]),
     }])
@@ -91,6 +100,32 @@ def test_terminal_reconciliation_uses_signed_receipt_quantity_basis_not_rounded_
     assert report["integrity"]["passed"] is True
     assert report["lifecycle_audits"][0]["issues"] == []
     assert report["lifecycle_audits"][0]["remaining_fraction"] == 0.0
+
+
+def test_legacy_terminal_fraction_is_excluded_without_poisoning_current_integrity(tmp_path):
+    original = 0.00031747
+    receipt = _receipt("legacy-r", 0.75, 0.25, original=original)
+    for key in ("original_qty", "prior_qty", "closed_qty", "remaining_qty"):
+        receipt[key] = round(receipt[key], 8)
+    _write_trades(tmp_path / "trades_3factor.csv", [{
+        "trade_id": "legacy-terminal",
+        "research_lane": "OFFSET_029_ATR_PROTECTED",
+        "policy_original_qty": round(original, 6),
+        "policy_remaining_fraction": 0.75,
+        "execution_qty": round(original * 0.75, 6),
+        "partial_exit_receipts": json.dumps([receipt]),
+    }])
+
+    report = build_partial_reduction_reconciliation_report(tmp_path, tmp_path)
+
+    audit = report["lifecycle_audits"][0]
+    assert audit["issues"] == []
+    assert audit["exclusions"] == ["LEGACY_TERMINAL_QUANTITY_SCHEMA"]
+    assert audit["reconciled"] is False
+    assert report["integrity"]["passed"] is True
+    assert report["summary"]["eligible_current_receipts"] == 0
+    assert report["summary"]["legacy_excluded_lifecycles"] == 1
+    assert "INSUFFICIENT_CURRENT_PARTIAL_REDUCTION_TERMINALS" in report["blockers"]
 
 
 def test_report_truthfully_blocks_unsigned_or_quantity_mismatched_receipts(tmp_path):
