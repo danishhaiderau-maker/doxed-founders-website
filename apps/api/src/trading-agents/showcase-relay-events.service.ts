@@ -760,6 +760,21 @@ export class ShowcaseRelayEventsService {
         throw new BadRequestException('Position reduction evidence is stale or future-dated');
       }
       const receipt = await this.persistRelayEvent(slug, persistBody);
+      let subscribersProcessed = 0;
+      if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true') {
+        const processed = await this.execution.processAuditedPositionReductionEvent(
+          tradeId,
+          {
+            eventId: evidence.eventId,
+            reductionId: evidence.reductionId,
+            eventSeq: evidence.eventSeq,
+            priorQty: evidence.priorQty,
+            reducedQty: evidence.reducedQty,
+            remainingQty: evidence.remainingQty,
+          },
+        );
+        subscribersProcessed = processed.processed;
+      }
       return {
         ok: true,
         accepted: true,
@@ -768,6 +783,7 @@ export class ShowcaseRelayEventsService {
         event,
         trade_id: tradeId,
         persisted: receipt.persisted,
+        subscribers_processed: subscribersProcessed,
         intentCreated: false,
         platform_received_at: persistBody.platform_received_at ?? null,
         ingest_ms: Date.now() - ingestStartedAt,

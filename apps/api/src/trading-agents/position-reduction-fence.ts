@@ -57,8 +57,9 @@ function sameFence(fence: ParticipantReductionFence, source: SignedReduction): b
 }
 
 /**
- * Dormant subscriber processor. Nothing wires this into relay ingestion or a
- * Tile allowlist. A future executor may call it only after live-copy approval.
+ * Fail-closed subscriber processor. Relay ingestion can reach it only through
+ * the durable-audit adapter and explicit rollout gate; this does not add any
+ * Tile to the ordinary live execution allowlist.
  */
 export async function processDormantPositionReduction(input: {
   participantId: string; source: SignedReduction; venueStep: number;

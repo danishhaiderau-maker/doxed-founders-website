@@ -93,6 +93,10 @@ import {
 } from './relay-fidelity.mapper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BitfinexAuthTradeStream, type BitfinexWsTrade } from '../exchanges/bitfinex-auth-trade-stream';
+import {
+  assessBitfinexLiveCopySizingReadiness,
+  missingBitfinexVenueEvidenceReadiness,
+} from './bitfinex-live-copy-readiness';
 import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
 import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
 
@@ -3678,9 +3682,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /**
-   * Real subscriber adapters for the dormant reduction fence. No controller,
-   * relay wake, allowlist, or scheduled runner calls this method. It also stays
-   * fail-closed unless an explicit future rollout gate is enabled.
+   * Real subscriber adapters for the reduction fence. Signed relay ingestion
+   * may reach this only after the durable audit exists and the explicit
+   * rollout gate is enabled; the ordinary Tile execution allowlists remain
+   * unchanged.
    */
   async processAuditedPositionReductionDormant(
     participantId: string,
@@ -3769,6 +3774,42 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       },
     });
     return result;
+  }
+
+  /** Resolve the exact durable source audit to every OPEN subscriber lot. */
+  async processAuditedPositionReductionEvent(
+    tradeId: string,
+    source: SignedReduction,
+  ): Promise<{ processed: number }> {
+    if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') !== 'true') {
+      throw new Error('POSITION_REDUCTION_EXECUTION_DISABLED');
+    }
+    const audit = await this.prisma.relayPositionReductionAudit.findFirst({
+      where: {
+        tradeId,
+        eventId: source.eventId,
+        reductionId: source.reductionId,
+        eventSeq: source.eventSeq,
+      },
+      select: { cycleId: true },
+    });
+    if (!audit) throw new Error('POSITION_REDUCTION_DURABLE_AUDIT_NOT_FOUND');
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: { cycleId: audit.cycleId, status: SignalCycleStatus.OPEN },
+      select: { id: true },
+    });
+    if (participants.length === 0) {
+      throw new Error('POSITION_REDUCTION_OPEN_PARTICIPANT_NOT_FOUND');
+    }
+    let processed = 0;
+    for (const participant of participants) {
+      const result = await this.processAuditedPositionReductionDormant(participant.id, source);
+      if (result.phase !== 'CONFIRMED') {
+        throw new Error(`POSITION_REDUCTION_NOT_CONFIRMED:${participant.id}:${result.reason}`);
+      }
+      processed += 1;
+    }
+    return { processed };
   }
 
   onModuleInit() {
@@ -9345,6 +9386,47 @@ await this.notifications
     const exchangeAckAtMs = Date.now();
     if (timing) timing.exchangeAckAtMs = exchangeAckAtMs;
 
+    let bitfinexSizingReadiness = missingBitfinexVenueEvidenceReadiness();
+    if (venue === 'bitfinex') {
+      try {
+        const [constraints, activeOrder, position, executions] = await Promise.all([
+          this.bitfinex.getBtcPerpVenueConstraints(),
+          this.bitfinex.findOrder(creds, orderId),
+          this.bitfinex.getOpenPositionDetail(creds),
+          this.bitfinex.fetchOrderTrades(creds, orderId),
+        ]);
+        const executedQty = executions.reduce((sum, row) => sum + Math.abs(row.execAmount), 0);
+        const acceptedQtyBtc = Math.abs(activeOrder?.amountOrig ?? 0) || executedQty;
+        const acceptedLimitPrice = activeOrder?.price
+          ?? (executedQty > 0
+            ? executions.reduce((sum, row) => sum + Math.abs(row.execAmount) * row.execPrice, 0) / executedQty
+            : 0);
+        const acceptedNotionalUsd = acceptedQtyBtc * acceptedLimitPrice;
+        bitfinexSizingReadiness = assessBitfinexLiveCopySizingReadiness({
+          requestedMarginUsd: marginUsd,
+          requestedQtyBtc: qty,
+          requestedLimitPrice: limitPrice,
+          leverage,
+          constraints,
+          acceptance: acceptedQtyBtc > 0 && acceptedLimitPrice > 0 ? {
+            authenticated: true,
+            orderId,
+            requestedQtyBtc: qty,
+            acceptedQtyBtc,
+            acceptedLimitPrice,
+            leverage,
+            acceptedNotionalUsd,
+            acceptedMarginUsd: acceptedNotionalUsd / leverage,
+            activeOrdersReconciled: true,
+            positionsReconciled: position == null || Number.isFinite(position.amount),
+            executionsReconciled: Array.isArray(executions),
+          } : null,
+        });
+      } catch (err) {
+        this.logger.warn(`Bitfinex sizing readiness remains NOT_PROVEN order=${orderId}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
     const payload: ExecutionPayload = {
       bitfinexOrderId: orderId,
       limitPrice,
@@ -9403,6 +9485,7 @@ await this.notifications
         margin_usd: marginUsd,
         margin_cap_usd: effectiveCap,
         leverage,
+        bitfinex_sizing_readiness: bitfinexSizingReadiness,
         correlated_cluster_evidence: {
           schema: 'correlated_exposure_cluster_v2',
           allowed: cluster.allowed,

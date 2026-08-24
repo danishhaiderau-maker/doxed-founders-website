@@ -38,7 +38,7 @@ test('POSITION_REDUCED ingress remains HMAC-gated and returns before any executo
   assert.doesNotMatch(source, /Number\(body\.before_qty\)/);
 });
 
-test('subscriber adapter is real but remains explicitly disabled and unreachable', () => {
+test('subscriber adapter is reachable only after the explicit gate and durable audit', () => {
   const source = readFileSync(resolve(process.cwd(), 'apps/api/src/trading-agents/signal-subscriber-execution.service.ts'), 'utf8');
   assert.match(source, /processAuditedPositionReductionDormant/);
   assert.match(source, /SUBSCRIBER_POSITION_REDUCTION_ENABLED/);
@@ -46,6 +46,16 @@ test('subscriber adapter is real but remains explicitly disabled and unreachable
   assert.match(source, /new PrismaReductionFenceRepository\(this\.prisma\)/);
   assert.match(source, /submitMarketClose/);
   assert.match(source, /protectiveStopPhase: true, protectiveStopQty: true/);
-  const references = source.match(/processAuditedPositionReductionDormant/g) ?? [];
-  assert.equal(references.length, 1);
+  assert.match(source, /processAuditedPositionReductionEvent/);
+  assert.match(source, /POSITION_REDUCTION_DURABLE_AUDIT_NOT_FOUND/);
+  assert.match(source, /relayPositionReductionAudit\.findFirst/);
+  assert.match(source, /status: SignalCycleStatus\.OPEN/);
+
+  const relay = readFileSync(resolve(process.cwd(), 'apps/api/src/trading-agents/showcase-relay-events.service.ts'), 'utf8');
+  const verify = relay.indexOf('const verifiedSignedPayload = this.verifySignature');
+  const identity = relay.indexOf('const reductionEvidenceIdentity');
+  const persist = relay.indexOf('const receipt = await this.persistRelayEvent(slug, persistBody)');
+  const gate = relay.indexOf("SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true'", persist);
+  const invoke = relay.indexOf('processAuditedPositionReductionEvent', gate);
+  assert.ok(verify >= 0 && verify < identity && identity < persist && persist < gate && gate < invoke);
 });
