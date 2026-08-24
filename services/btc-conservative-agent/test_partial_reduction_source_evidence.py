@@ -201,7 +201,7 @@ def test_durable_ack_removes_outbox_but_retains_immutable_receipt() -> None:
         {
             "copy": copy,
             "trade_lock": _Lock(),
-            "paper_positions": [pos],
+            "open_positions": [pos],
             "save_paper_lifecycle": lambda **_kwargs: True,
         },
     )
@@ -220,7 +220,7 @@ def test_failed_ack_persistence_restores_outbox() -> None:
         {
             "copy": copy,
             "trade_lock": _Lock(),
-            "paper_positions": [pos],
+            "open_positions": [pos],
             "save_paper_lifecycle": lambda **_kwargs: False,
         },
     )
@@ -251,7 +251,7 @@ def test_restart_drain_replays_once_and_ack_removes_event() -> None:
         {
             "copy": copy,
             "trade_lock": _Lock(),
-            "paper_positions": [pos],
+            "open_positions": [pos],
             "_partial_reduction_drain_lock": threading.Lock(),
             "_push_showcase_relay_event": push,
             "_ack_partial_reduction_outbox": ack,

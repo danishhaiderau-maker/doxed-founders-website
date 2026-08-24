@@ -9182,7 +9182,7 @@ def _ack_partial_reduction_outbox(trade_id: str, event_id: str) -> bool:
     removed = None
     with trade_lock:
         pos = next(
-            (row for row in paper_positions if row.get("trade_id") == trade_id),
+            (row for row in open_positions if row.get("trade_id") == trade_id),
             None,
         )
         if not pos:
@@ -9200,7 +9200,7 @@ def _ack_partial_reduction_outbox(trade_id: str, event_id: str) -> bool:
         return True
     with trade_lock:
         pos = next(
-            (row for row in paper_positions if row.get("trade_id") == trade_id),
+            (row for row in open_positions if row.get("trade_id") == trade_id),
             None,
         )
         if pos is not None:
@@ -9221,7 +9221,7 @@ def _drain_partial_reduction_outbox_once() -> dict:
         with trade_lock:
             pending = [
                 (str(pos.get("trade_id") or ""), copy.deepcopy(receipt))
-                for pos in paper_positions
+                for pos in open_positions
                 for receipt in (pos.get("partial_reduction_outbox") or [])
                 if isinstance(receipt, dict) and receipt.get("event_id")
             ]
