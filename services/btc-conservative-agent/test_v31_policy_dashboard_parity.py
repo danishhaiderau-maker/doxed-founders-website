@@ -36,6 +36,16 @@ def _safe_source():
             "qualification": "NO_SAFE_QUALIFIED_POLICY",
             "number_one": None,
         },
+        "search": {
+            "counts": {
+                "entry_cartesian": 2700,
+                "nominal_full_cartesian": 1106127912960000000,
+            }
+        },
+        "search_progress": {
+            "independent_episodes": 5,
+            "unique_policies_evaluated": 1,
+        },
         "number_one_strategy": None,
     }
     return {
@@ -76,6 +86,9 @@ def test_best_top_and_shadow_share_canonical_v31_epoch_and_counts(monkeypatch):
     assert combos["current_evidence_source"] == "safe_policy_genome_v3_report.json"
     assert [row["policy_id"] for row in combos["top"]] == ["v31-policy-1"]
     assert combos["policy_grid"]["epoch_id"] == "epoch-v31-clean"
+    assert combos["policy_grid"]["search_counts"]["entry_cartesian"] == 2700
+    assert combos["policy_grid"]["search_counts"]["nominal_full_cartesian"] == 1106127912960000000
+    assert combos["policy_grid"]["search_counts"]["independent_episodes"] == 5
     assert combos["legacy_executed_combos"]["rows"] == [legacy_combo]
     assert combos["legacy_executed_combos"]["status"].startswith("DESCRIPTIVE_LEGACY")
 

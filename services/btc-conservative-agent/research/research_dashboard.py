@@ -1225,6 +1225,11 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         if len(rows) >= max(1, limit):
             break
     collection = report.get("collection") or {}
+    search = report.get("search") or {}
+    search_counts = {
+        **(search.get("counts") or {}),
+        **(report.get("search_progress") or {}),
+    }
     return {
         "schema": "current_policy_grid_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
@@ -1236,7 +1241,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "policy_signature": None,
         "cycle_snapshot": report.get("cycle_snapshot"),
         "evidence": collection,
-        "search_counts": report.get("search_progress") or report.get("search") or {},
+        "search_counts": search_counts,
         "rows_available": len(candidates),
         "policy_search_statistics": report.get("safe_policy_ranking") or {},
         "rows_limit": max(1, int(limit)),
@@ -4234,9 +4239,9 @@ async function loadCombos() {
     ['Profitable policies shown', policyRows.length],
     ['Profitable in train + OOS', Number(policyStats.train_and_oos_profitable_policies ?? pg.rows_available ?? 0).toLocaleString()],
     ['Distinct policies tested', Number(policyStats.distinct_policies_tested || 0).toLocaleString()],
-    ['Entry configurations', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString()],
-    ['Theoretical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString()],
-    ['Independent episodes', pe.independent_episodes ?? 0],
+    ['Entry configurations', Number(searchCounts.entry_cartesian ?? searchCounts.entry_policy_cartesian ?? 0).toLocaleString()],
+    ['Theoretical search space', Number(searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian ?? 0).toLocaleString()],
+    ['Independent episodes', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 0],
     ['Train / OOS', `${pe.training_episodes ?? 0} / ${pe.oos_episodes ?? 0}`],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
