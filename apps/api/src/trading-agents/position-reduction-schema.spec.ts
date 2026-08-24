@@ -37,3 +37,15 @@ test('POSITION_REDUCED ingress remains HMAC-gated and returns before any executo
   assert.match(source, /body\.reduction_id\?\.trim\(\)/);
   assert.doesNotMatch(source, /Number\(body\.before_qty\)/);
 });
+
+test('subscriber adapter is real but remains explicitly disabled and unreachable', () => {
+  const source = readFileSync(resolve(process.cwd(), 'apps/api/src/trading-agents/signal-subscriber-execution.service.ts'), 'utf8');
+  assert.match(source, /processAuditedPositionReductionDormant/);
+  assert.match(source, /SUBSCRIBER_POSITION_REDUCTION_ENABLED/);
+  assert.match(source, /POSITION_REDUCTION_EXECUTION_DISABLED/);
+  assert.match(source, /new PrismaReductionFenceRepository\(this\.prisma\)/);
+  assert.match(source, /submitMarketClose/);
+  assert.match(source, /protectiveStopPhase: true, protectiveStopQty: true/);
+  const references = source.match(/processAuditedPositionReductionDormant/g) ?? [];
+  assert.equal(references.length, 1);
+});

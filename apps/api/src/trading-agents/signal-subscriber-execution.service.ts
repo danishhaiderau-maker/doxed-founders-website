@@ -93,6 +93,8 @@ import {
 } from './relay-fidelity.mapper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BitfinexAuthTradeStream, type BitfinexWsTrade } from '../exchanges/bitfinex-auth-trade-stream';
+import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
+import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -3673,6 +3675,100 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     private readonly notifications: NotificationsService,
   ) {
     this.activeTrading = this.bitfinex;
+  }
+
+  /**
+   * Real subscriber adapters for the dormant reduction fence. No controller,
+   * relay wake, allowlist, or scheduled runner calls this method. It also stays
+   * fail-closed unless an explicit future rollout gate is enabled.
+   */
+  async processAuditedPositionReductionDormant(
+    participantId: string,
+    source: SignedReduction,
+  ) {
+    if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') !== 'true') {
+      throw new Error('POSITION_REDUCTION_EXECUTION_DISABLED');
+    }
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: participantId },
+      include: { cycle: true },
+    });
+    if (!participant || participant.status !== SignalCycleStatus.OPEN) {
+      throw new Error('POSITION_REDUCTION_PARTICIPANT_NOT_OPEN');
+    }
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: participant.cycle.agentId, userId: participant.userId } },
+    });
+    if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') {
+      throw new Error('POSITION_REDUCTION_LIVE_CREDENTIALS_REQUIRED');
+    }
+    const creds = await this.exchanges.getUserCredentials(participant.userId, instance.exchangeProvider);
+    if (!creds) throw new Error('POSITION_REDUCTION_LIVE_CREDENTIALS_REQUIRED');
+    const meta = await this.loadExecutionMeta(participantId);
+    const intent = participant.cycle.intentEnvelope as unknown as SignalIntentEnvelope;
+    if (!meta.direction || !meta.qty || !intent?.risk) throw new Error('POSITION_REDUCTION_META_INCOMPLETE');
+    const repo = new PrismaReductionFenceRepository(this.prisma);
+    const leverage = resolveSubscriberLeverage(intent);
+    const result = await processDormantPositionReduction({
+      participantId, source, venueStep: 0.00001,
+      requestToken: `reduce:${participantId}:${source.reductionId}`,
+      repo,
+      venue: {
+        authenticatedPositionQty: async () => Math.abs((await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? 0),
+        submitReduceOnly: async (qty, _requestToken) => ({
+          orderId: String(await this.activeTrading.submitMarketClose(creds, {
+            positionDirection: meta.direction!, qty, leverage,
+          })),
+        }),
+        replaceReduceOnlyProtection: async (targetQty) => {
+          const entry = meta.fillPrice ?? meta.limitPrice;
+          if (!entry || !meta.direction) return false;
+          const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+            intent.risk.stop_loss_margin_pct,
+            { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
+          );
+          const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
+          const replacement = await this.ensureDurableProtectiveStop({
+            participantId, purpose: 'PARTIAL_REDUCTION_REPLACEMENT', creds,
+            positionDirection: meta.direction, qty: targetQty, stopPrice, leverage,
+            predecessorOrderId: meta.stopOrderId,
+          });
+          if (!replacement.ok) return false;
+          if (meta.stopOrderId != null && meta.stopOrderId !== replacement.orderId) {
+            const retired = await this.cancelManagedOrderGone(
+              creds, meta.stopOrderId,
+              `POSITION_REDUCTION replace stop ${meta.stopOrderId} with ${replacement.orderId}`,
+            );
+            if (!retired.gone) return false;
+          }
+          await this.cycles.recordHireExecutionEvent(
+            participant.userId, participant.cycle.agentId, participant.cycleId,
+            'UPDATE_STOPS', {
+              venue: 'bitfinex', event: 'POSITION_REDUCTION_STOP_REPLACED',
+              stopOrderId: replacement.orderId, qty: targetQty,
+              direction: meta.direction, source: 'hire',
+            },
+          );
+          const protectedRow = await this.prisma.signalCycleParticipant.findUnique({
+            where: { id: participantId },
+            select: { protectiveStopPhase: true, protectiveStopQty: true },
+          });
+          return protectedRow?.protectiveStopPhase === 'OWNED'
+            && btcToSats(Number(protectedRow.protectiveStopQty)) === btcToSats(targetQty);
+        },
+        updateConfirmedRemainingQty: async (targetQty) => {
+          await this.cycles.recordHireExecutionEvent(
+            participant.userId, participant.cycle.agentId, participant.cycleId,
+            'UPDATE_STOPS', {
+              venue: 'bitfinex', event: 'POSITION_REDUCTION_CONFIRMED',
+              qty: targetQty, direction: meta.direction, reduction_id: source.reductionId,
+              source_event_id: source.eventId, source_event_seq: source.eventSeq, source: 'hire',
+            },
+          );
+        },
+      },
+    });
+    return result;
   }
 
   onModuleInit() {
@@ -14173,7 +14269,7 @@ await this.notifications
    */
   private async ensureDurableProtectiveStop(input: {
     participantId: string;
-    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT' | 'MARKET_CATCHUP';
+    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT' | 'MARKET_CATCHUP' | 'PARTIAL_REDUCTION_REPLACEMENT';
     creds: ExchangeCredentials;
     positionDirection: 'LONG' | 'SHORT';
     qty: number;
