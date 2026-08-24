@@ -681,6 +681,60 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(lifecycle["outcome_state"], "NO_FILL")
             self.assertNotEqual(lifecycle["outcome_state"], "REALIZED_ZERO_PNL")
 
+    def test_source_fill_without_shared_ai_identity_is_not_normalized_as_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event("scan-legacy-fill", "episode-legacy-fill")
+            event["event_episode"] = {
+                "shared_ai_call_id": None,
+                "grouping_basis": "TIME_DIRECTION_SYMBOL_FALLBACK",
+            }
+            event["base_policy_id"] = "CONTROL_V1"
+            event["envelope"] = {
+                **event["envelope"],
+                "policy_id": "CONTROL_V1",
+            }
+            event["live_fill_ts"] = 1005.0
+            event["live_fill_price"] = 100.25
+
+            receipt = dual_write_v22_record(event, data_dir=tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
+
+            self.assertFalse(store.ledger_path("execution").exists())
+            self.assertFalse(receipt["execution_normalized"])
+            self.assertEqual(
+                receipt["execution_normalization_blocker"],
+                "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE",
+            )
+            self.assertFalse(lifecycle["ranking_eligible"])
+            self.assertEqual(
+                lifecycle["ranking_blocker"],
+                "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE",
+            )
+
+    def test_source_fill_with_complete_identity_preserves_policy_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event("scan-attributable-fill", "episode-attributable-fill")
+            event["base_policy_id"] = "CONTROL_V1"
+            event["envelope"] = {
+                **event["envelope"],
+                "policy_id": "CONTROL_V1",
+            }
+            event["live_fill_ts"] = 1005.0
+            event["live_fill_price"] = 100.25
+
+            receipt = dual_write_v22_record(event, data_dir=tmp)
+            execution = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("execution").read_text().strip())
+
+            self.assertTrue(receipt["execution_normalized"])
+            self.assertEqual(execution["shared_ai_call_id"], "scan-1")
+            self.assertEqual(execution["policy_id"], "CONTROL_V1")
+            self.assertEqual(execution["policy_signature"], "policy-a")
+            self.assertEqual(execution["policy_epoch_id"], "pe-a")
+            self.assertEqual(execution["research_lane"], "CONTROL_V1")
+
     def test_order_intent_preserves_exact_entry_children_for_v3_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = _event()

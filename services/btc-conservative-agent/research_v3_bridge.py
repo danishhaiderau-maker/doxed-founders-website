@@ -665,6 +665,35 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         event_episode.get("shared_ai_call_id"), record.get("shared_ai_call_id"),
         source_features.get("shared_ai_call_id"), envelope.get("shared_ai_call_id"),
     ) or "").strip()
+    policy_identity = record.get("policy_identity") if isinstance(record.get("policy_identity"), Mapping) else {}
+    envelope_policy_identity = envelope.get("policy_identity") if isinstance(envelope.get("policy_identity"), Mapping) else {}
+    policy_id = str(_first(
+        record.get("base_policy_id"), record.get("policy_id"),
+        envelope.get("base_policy_id"), envelope.get("policy_id"),
+        policy_identity.get("base_policy_id"), envelope_policy_identity.get("base_policy_id"),
+    ) or "").strip()
+    policy_signature = str(_first(
+        record.get("policy_signature"), envelope.get("policy_signature"),
+        policy_identity.get("policy_signature"), envelope_policy_identity.get("policy_signature"),
+    ) or "").strip()
+    policy_epoch_id = str(_first(
+        record.get("policy_epoch_id"), envelope.get("policy_epoch_id"),
+        policy_identity.get("policy_epoch_id"), envelope_policy_identity.get("policy_epoch_id"),
+    ) or "").strip()
+    # The durable V2.2 writer did not always record a lane name.  Its explicit
+    # base policy is still a truthful source-policy scope, but an event-episode
+    # fallback is not a shared AI-call ID and must never be relabelled as one.
+    research_lane = str(_first(
+        record.get("research_lane"), envelope.get("research_lane"), policy_id,
+    ) or "").strip()
+    policy_provenance = {
+        "policy_id": policy_id or None,
+        "policy_signature": policy_signature or None,
+        "policy_epoch_id": policy_epoch_id or None,
+        "research_lane": research_lane or None,
+        "shared_ai_call_id": shared_ai_call_id or None,
+    }
+    complete_execution_identity = all(policy_provenance.values())
     stable_episode_id = str(_first(record.get("event_episode_id"), envelope.get("event_episode_id")) or "")
     identity_symbol = str(_first(record.get("symbol"), record.get("pair"), envelope.get("symbol"), "BTCUSD")).upper()
     identity_direction = str(_first(envelope.get("raw_direction"), record.get("raw_direction"), record.get("direction"), "UNKNOWN")).upper()
@@ -720,8 +749,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "exact_reason": record.get("exact_reason"),
         "would_block": record.get("would_block"),
         "would_block_reason": record.get("would_block_reason"),
-        "policy_signature": _first(record.get("policy_signature"), envelope.get("policy_signature")),
-        "policy_epoch_id": _first(record.get("policy_epoch_id"), envelope.get("policy_epoch_id")),
+        **policy_provenance,
     }))
     writes.append(store.append("order_intent", {
         "record_id": f"order-intent:{event_id}",
@@ -740,8 +768,10 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "leverage": _first((record.get("research_execution_basis") or {}).get("leverage"), (envelope.get("control_cell") or {}).get("leverage"), 100.0),
         "margin_usd": _first((record.get("research_execution_basis") or {}).get("margin_usd"), (envelope.get("control_cell") or {}).get("margin_usd"), 20.0),
         "search_receipt": envelope.get("policy_search") or {},
+        **policy_provenance,
     }))
-    if record.get("live_fill_ts") is not None or record.get("live_fill_price") is not None:
+    source_fill_present = record.get("live_fill_ts") is not None or record.get("live_fill_price") is not None
+    if source_fill_present and complete_execution_identity:
         writes.append(store.append("execution", {
             "record_id": f"execution:{event_id}:primary-fill",
             "episode_id": episode_id,
@@ -751,6 +781,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             "fill_price": record.get("live_fill_price"),
             "quantity_basis": record.get("research_execution_basis") or {},
             "authenticated_exchange_actual": False,
+            **policy_provenance,
         }))
     for ref in segment_refs:
         writes.append(store.append("market_segment", {
@@ -760,6 +791,9 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             "segment_ref": ref,
             "coverage": tape.get("coverage") or {},
         }))
+    ranking_eligible = bool(record.get("ranking_eligible")) and (
+        not source_fill_present or complete_execution_identity
+    )
     writes.append(store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:terminal",
         "episode_id": episode_id,
@@ -774,9 +808,15 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             else "NO_FILL" if record.get("primary_outcome") == "ACCEPTED_UNFILLED"
             else "UNSUPPORTED"
         ),
-        "ranking_eligible": bool(record.get("ranking_eligible")),
+        "ranking_eligible": ranking_eligible,
+        "ranking_blocker": (
+            None if ranking_eligible
+            else "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE" if source_fill_present and not complete_execution_identity
+            else "SOURCE_NOT_RANKING_ELIGIBLE"
+        ),
         "replay_eligibility": record.get("replay_eligibility") or {},
         "market_segment_refs": segment_refs,
+        **policy_provenance,
     }))
     return {
         "schema": "v22_to_v3_dual_write_receipt_v1",
@@ -784,6 +824,12 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "event_id": event_id,
         "episode_id": episode_id,
         "writes": writes,
+        "source_fill_recorded": source_fill_present,
+        "execution_normalized": bool(source_fill_present and complete_execution_identity),
+        "execution_normalization_blocker": (
+            None if not source_fill_present or complete_execution_identity
+            else "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE"
+        ),
         "store_verification": store.verify(),
     }
 
