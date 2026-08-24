@@ -2,8 +2,10 @@
 Trading Genome Architecture v1 — frozen execution tiles.
 
 CONTINUOUS: permanent benchmark / scientific control group.
-TYPE_B_HUNTER_V1: research candidate — shared direction AI + independent fixed gate.
-  v12 policy: ADX-flipped, volume-inverted, regime-aware, confidence-blind.
+
+Retired 2026-08-21:
+  TYPE_B_HUNTER_V1 — active tile and execution fan-out removed. Historical
+  specs and evidence remain readable for archive/analyzer compatibility.
 
 Retired 2026-07-30:
   SR_MICRO_TILE_V2_STATIC — negative shadow expectancy; code/spec/history retained.
@@ -24,7 +26,8 @@ Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data pre
 """
 from __future__ import annotations
 
-# [CLEAN 2026-07-30] Only CONTINUOUS + Type B remain executable.
+# Active experimental tiles share one frozen execution contract. CONTINUOUS is
+# configured separately as the benchmark; retired specs remain decode-only.
 from scenario_c_config import (
     SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
     SCENARIO_C_LEGACY_10_6_PROFILE_ID,
@@ -33,9 +36,12 @@ from scenario_c_config import (
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 
-# Research candidates. Type B shares the benchmark direction call but owns its
-# policy, order book, chase lifecycle, and outcome ledger.
+# Historical research lane identifiers. They remain stable so immutable rows
+# and archived reports continue to decode after a lane is retired.
 RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
+RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
+RESEARCH_LANE_OFFSET_029_ATR_PROTECTED = "OFFSET_029_ATR_PROTECTED"
+RESEARCH_LANE_OFFSET_029_ATR_REGIME = "OFFSET_029_ATR_REGIME"
 RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
@@ -52,17 +58,117 @@ RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
+# Retired lanes must never reappear as active tiles through stale persisted config.
 COMBO_TILE_DISPLAY_ORDER = (
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 COMBO_LANE_SPECS = {
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: {
+        "label": "0.29% Patient Chase · ATR 2.5×",
+        "subtitle": (
+            "PAPER when ON — independent order, position, capacity and ledger; "
+            "relay-copy eligible only while the separate operator relay is armed"
+        ),
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+        "ai_min": 0,
+        "ai_max": 101,
+        "spread_min": -99,
+        "spread_max": 99,
+        "entry_mode": "IMMEDIATE",
+        "is_benchmark": False,
+        "is_research_candidate": True,
+        "is_legacy": False,
+        "is_independent_ai": False,
+        "uses_shared_ai_direction": True,
+        "paper_only": False,
+        "platform_relay_eligible": True,
+        "id_prefix": "o29atr",
+        "entry_offset_pct": 0.29,
+        "initial_rest_sec": 600,
+        "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500),
+        "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0,
+        "entry_ttl_sec": 1800,
+        "margin_usd": 0.25,
+        "atr_tp_multiple": 2.5,
+        "atr_source": "frozen fill-time 3m ATR(14)",
+        "path_end_sec": 7200,
+        "exit_profile_id": "ATR_TP_2.5X_PATH_END_120M_V1",
+        "promotion_criteria": (
+            "PAPER RESEARCH: independent OOS evidence across multiple regimes, "
+            "conservative execution parity and explicit operator authorization"
+        ),
+        "kill_criteria": (
+            "Stop new entries on integrity, lifecycle, or evidence mismatch"
+        ),
+        "hypothesis": (
+            "A patient 0.29% maker anchor followed by 25% remaining-gap reprices may "
+            "retain entry quality while a frozen 3m ATR 2.5x target captures movement."
+        ),
+        "research_question": (
+            "Does OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5 retain positive "
+            "out-of-sample EV under conservative paper execution?"
+        ),
+    },
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
+        "label": "Protected Patient Chase · Static ATR risk",
+        "subtitle": "PAPER when ON; live copy blocked until partial-close relay support is verified",
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE", "is_benchmark": False,
+        "is_research_candidate": True, "is_legacy": False,
+        "is_independent_ai": False, "uses_shared_ai_direction": True,
+        "paper_only": False, "platform_relay_eligible": True,
+        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
+        "id_prefix": "o29ps", "entry_offset_pct": 0.29,
+        "initial_rest_sec": 600, "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500), "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0, "entry_ttl_sec": 1800,
+        "margin_usd": 0.25, "account_risk_pct": 0.5,
+        "initial_stop_atr_k": 1.0, "partial_targets_atr": (1.0, 1.5),
+        "partial_fractions": (0.25, 0.25), "break_even_arm_atr_k": 1.25,
+        "trailing_stop_atr_k": 1.0, "atr_tp_multiple": 2.5,
+        "path_end_sec": 7200, "exit_profile_id": "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5_120M_V1",
+        "hypothesis": "The Patient Chase entry can retain its edge while a complete ATR protection stack reduces drawdown.",
+        "research_question": "Does the static protected Patient Chase improve OOS return-to-drawdown under conservative fills?",
+    },
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
+        "label": "Protected Patient Chase · Dynamic regime",
+        "subtitle": "PAPER when ON; live copy blocked until partial-close relay support is verified; regime transitions may only tighten risk",
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE", "is_benchmark": False,
+        "is_research_candidate": True, "is_legacy": False,
+        "is_independent_ai": False, "uses_shared_ai_direction": True,
+        "paper_only": False, "platform_relay_eligible": True,
+        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
+        "id_prefix": "o29rd", "entry_offset_pct": 0.29,
+        "initial_rest_sec": 600, "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500), "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0, "entry_ttl_sec": 1800,
+        "margin_usd": 0.25, "account_risk_pct": 0.5,
+        "regime_profiles": ("SIDEWAYS", "ORDINARY_TREND", "STRONG_ALIGNED_TREND"),
+        "regime_transition_rule": "continuous; stop/size/risk may only tighten, never widen",
+        "atr_tp_multiple": 2.5, "path_end_sec": 7200,
+        "exit_profile_id": "REGIME_ATR_PROTECTION_V1",
+        "hypothesis": "Pre-registered regime-aware protection improves capture without increasing initial account risk.",
+        "research_question": "Does dynamic protection beat the static protected control on chronological OOS risk-adjusted return?",
+    },
     # =====================================================================
-    # Active paper-research candidate: TYPE_B_HUNTER_V1.
-    # Other entries below are retained only for historical CSV/outcome decoding.
+    # Retired paper-research candidate: TYPE_B_HUNTER_V1.
+    # This entry is retained only for historical CSV/outcome decoding.
     # =====================================================================
     RESEARCH_LANE_TYPE_B_HUNTER_V1: {
         "label": "Type B Hunter — shared direction / fixed policy",
@@ -77,20 +183,16 @@ COMBO_LANE_SPECS = {
         "spread_max": 99,
         "entry_mode": "IMMEDIATE",
         "is_benchmark": False,
-        "is_research_candidate": True,
+        "is_research_candidate": False,
+        "is_legacy": True,
         "is_independent_ai": False,
         "uses_shared_ai_direction": True,
         "id_prefix": "tbhv1",
         "module": "type_b_hunter_v1.py",
         "ai_cadence_offset_sec": 0,
-        # v12 (historical): TYPE_B_HUNTER_V1 used to keep a legacy 10→6 first rung
-        # because tightening the global ladder (12→10) made Type B Hunter worse
-        # (-$22.20 in the v2a backtest). As of 2026-08-06 (Danish decision) the
-        # v2a backtest is considered stale — Stage 1 strategy fixes (commit
-        # f03640dd) changed entry direction logic — and TYPE_B now uses the same
-        # (8, 5) first rung as CONTINUOUS. The constant NAME
-        # (TRAIL_LADDER_SCENARIO_C_LEGACY_10_6) is retained only for backwards
-        # compatibility; its first rung is now (8, 5). See scenario_c_config.py.
+        # Compatibility names remain, but TYPE_B uses the exact operator-approved
+        # eight-rung Scenario C policy. A distinct treatment requires its own
+        # explicit treatment signature and qualification evidence.
         "ladder": TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
         "ladder_label": SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
         "ladder_profile_id": SCENARIO_C_LEGACY_10_6_PROFILE_ID,
@@ -212,17 +314,16 @@ BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_TYPE_B_HUNTER_V1
+RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_VERSION = "v15-typeb-opportunity-v2"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + TYPE_B_HUNTER_V1 share one direction-only 3-minute AI call; "
-    "two-lane paper-research roster; all S/R tiles are archived data only; "
-    "fixed-policy Type B walk-forward collection; "
-    "toggle contract (LAB_SHADOW/PAPER/LIVE/EXIT_ONLY); "
-    "paused-shadow outcome ledger/dashboard; non-monotonic ADX shared prompt; "
-    "Type B ADX-v3 shadow challenger; fail-closed relay executor watchdog"
+    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 share one direction-only 3-minute AI call; "
+    "two-lane paper-research roster; all retired lanes are analyzer-only; "
+    "registered 0.29% Patient Chase paper lifecycle; "
+    "independent lane capacity, orders, positions and ledgers; "
+    "fail-closed relay executor watchdog"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -244,7 +345,8 @@ COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chas
 COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static (retired)"
 
 _COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
-# Research candidates start OFF (shadow collecting)
+# Retired compatibility keys remain explicitly false. They are not allowlisted
+# by COMBO_EXECUTION_LANES and therefore cannot become executable.
 _COMBO_TOGGLE_DEFAULTS.update({
     RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,

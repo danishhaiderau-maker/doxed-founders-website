@@ -1,13 +1,14 @@
 {
-  "description": "Frozen parity cases for the v12 shared-direction stack. AI confidence is absent or zero; Type B matches on directional spread while retired and deterministic lanes never use combo fan-out.",
+  "description": "Frozen parity cases for the V3.1 four-tile stack. Retired Type B and legacy deterministic lanes never re-enter combo fan-out, regardless of directional spread or legacy confidence.",
   "cases": [
     {
       "id": "type-b-long-shared-direction",
       "ai": { "win_prob": 0, "bull_score": 8, "bear_score": 4 },
       "direction": "LONG",
       "spread": 4,
-      "expect_lanes": ["TYPE_B_HUNTER_V1"],
+      "expect_lanes": [],
       "reject_lanes": [
+        "TYPE_B_HUNTER_V1",
         "AI60_SP3_VIRTUAL_CHASE",
         "COMBO_65_SP5_CHASE_3PLUS",
         "SR_MICRO_TILE_V2_STATIC"
@@ -18,8 +19,9 @@
       "ai": { "win_prob": 0, "bull_score": 3, "bear_score": 8 },
       "direction": "SHORT",
       "spread": null,
-      "expect_lanes": ["TYPE_B_HUNTER_V1"],
+      "expect_lanes": [],
       "reject_lanes": [
+        "TYPE_B_HUNTER_V1",
         "AI60_SP3_VIRTUAL_CHASE",
         "COMBO_604_SP4_CHASE_3PLUS",
         "SR_MICRO_TILE_V2_STATIC"
@@ -30,8 +32,8 @@
       "ai": { "win_prob": 0, "bull_score": 6, "bear_score": 5 },
       "direction": "LONG",
       "spread": 2,
-      "expect_lanes": ["TYPE_B_HUNTER_V1"],
-      "reject_lanes": ["AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_DIRECT"]
+      "expect_lanes": [],
+      "reject_lanes": ["TYPE_B_HUNTER_V1", "AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_DIRECT"]
     },
     {
       "id": "type-b-spread-too-low",
@@ -50,8 +52,9 @@
       "ai": { "win_prob": 99, "bull_score": 10, "bear_score": 0 },
       "direction": "LONG",
       "spread": 10,
-      "expect_lanes": ["TYPE_B_HUNTER_V1"],
+      "expect_lanes": [],
       "reject_lanes": [
+        "TYPE_B_HUNTER_V1",
         "AI60_SP3_VIRTUAL_CHASE",
         "COMBO_65_SP5_CHASE_3PLUS",
         "COMBO_604_SP4_CHASE_3PLUS",
