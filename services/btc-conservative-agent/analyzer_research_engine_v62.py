@@ -154,6 +154,7 @@ RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
 COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
 POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
+PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE = "partial_reduction_reconciliation_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 PUBLISHED_REPORTS_DIR = "published_reports"
@@ -683,6 +684,7 @@ ANALYZER_JSON_REPORT_FILES = (
     BEST_POLICY_RESEARCH_REPORT_FILE,
     SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
+    PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
@@ -690,6 +692,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
+    ("Partial Reduction Reconciliation", PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE, "Tiles 3/4 partial-reduction receipts, remaining quantity, and fail-closed reconciliation evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
@@ -18968,6 +18971,7 @@ def write_report_manifest(payload=None):
         from research.policy_cycle_snapshot import build_policy_cycle_reports
         from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
         from research.research_v3_report import build_safe_policy_genome_v3_report
+        from research.partial_reduction_reconciliation import build_partial_reduction_reconciliation_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
@@ -18980,6 +18984,10 @@ def write_report_manifest(payload=None):
             report_dir=policy_report_dir,
         )
         build_safe_policy_genome_v3_report(
+            data_dir=policy_data_dir,
+            report_dir=policy_report_dir,
+        )
+        build_partial_reduction_reconciliation_report(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
         )

@@ -156,6 +156,7 @@ REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
+PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE = "partial_reduction_reconciliation_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -212,6 +213,7 @@ REPORT_NAV_GROUPS = (
         ("exits", "Historical Exit Leakage", "top_leakage_report.json"),
     )),
     ("deep-group", "Genome & Reports", (
+        ("partial-reductions", "Partial Reductions", PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE),
         ("genome", "Genome (Unavailable)", "genome/genome_analysis_report.json"),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
@@ -2131,6 +2133,32 @@ def api_safe_policy_genome_v3():
             "blockers": ["V3_REPORT_NOT_GENERATED"],
         }
     return jsonify(_bounded_safe_policy_payload(payload))
+
+
+@app.route("/api/partial-reduction-reconciliation")
+def api_partial_reduction_reconciliation():
+    payload = _read_report(PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE)
+    if not payload:
+        payload = {
+            "schema": "partial_reduction_reconciliation_v1",
+            "status": "BLOCKED",
+            "qualification": "INSUFFICIENT",
+            "live_copy_allowed": False,
+            "lanes": {},
+            "summary": {},
+            "integrity": {"passed": False, "issues": ["REPORT_NOT_GENERATED"]},
+            "blockers": ["PARTIAL_REDUCTION_REPORT_NOT_GENERATED"],
+        }
+    return jsonify(payload)
+
+
+@app.route("/partial-reduction-reconciliation")
+def partial_reduction_reconciliation_page():
+    return """<!doctype html><html><head><meta charset="utf-8"><title>Partial Reduction Reconciliation</title>
+<style>body{background:#081019;color:#dbeafe;font:14px system-ui;margin:24px}a{color:#60a5fa}.card{border:1px solid #334155;border-radius:8px;padding:14px;margin:12px 0}pre{white-space:pre-wrap}</style></head>
+<body><a href="/">← Research Dashboard</a><h1>Tiles 3/4 — Partial Reduction Reconciliation</h1>
+<div id="status" class="card">Loading completed analyzer generation…</div><div id="lanes"></div><pre id="detail" class="card"></pre>
+<script>fetch('/api/partial-reduction-reconciliation').then(r=>r.json()).then(d=>{document.getElementById('status').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Live copy allowed: '+(d.live_copy_allowed?'YES':'NO');document.getElementById('lanes').innerHTML=Object.entries(d.lanes||{}).map(([lane,v])=>'<div class="card"><b>'+lane+'</b><br>lifecycles '+(v.lifecycles||0)+' · receipts '+(v.partial_reduction_receipts||0)+' · signed '+(v.signed_receipts||0)+' · reconciled '+(v.reconciled_lifecycles||0)+'<br>live evidence sufficient: '+(v.live_copy_evidence_sufficient?'YES':'NO')+'</div>').join('');document.getElementById('detail').textContent=JSON.stringify({summary:d.summary,integrity:d.integrity,blockers:d.blockers,note:d.note},null,2);});</script></body></html>"""
 
 
 @app.route("/safe-policy-genome-v3")

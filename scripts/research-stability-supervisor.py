@@ -1157,6 +1157,44 @@ class Supervisor:
             except Exception as exc:
                 add("v3_normalized_evidence_integrity", False, f"{type(exc).__name__}: {exc}")
 
+        partial_report_path = self.report_dir / "partial_reduction_reconciliation_report.json"
+        if partial_report_path.is_file():
+            try:
+                partial = read_json(partial_report_path)
+                generated = parse_time(partial.get("generated_at"))
+                age = (self.now() - generated).total_seconds() if generated else float("inf")
+                integrity = partial.get("integrity") or {}
+                summary = partial.get("summary") or {}
+                lanes = partial.get("lanes") or {}
+                truthful = (
+                    partial.get("schema") == "partial_reduction_reconciliation_v1"
+                    and partial.get("live_copy_allowed") is False
+                    and isinstance(partial.get("blockers"), list)
+                    and all(lane in lanes for lane in (
+                        "OFFSET_029_ATR_PROTECTED", "OFFSET_029_ATR_REGIME",
+                    ))
+                )
+                add("partial_reduction_report_fresh_and_truthful", age <= REPORT_MAX_AGE_SECONDS and truthful, {
+                    "age_seconds": round(age, 1),
+                    "status": partial.get("status"),
+                    "qualification": partial.get("qualification"),
+                    "summary": summary,
+                    "blockers": partial.get("blockers"),
+                    "quantity_integrity_passed": integrity.get("passed"),
+                })
+                # This is capability evidence, not general collector health. A
+                # truthful insufficiency is surfaced without pretending Tiles
+                # 3/4 are technically ready for live relay.
+                add("partial_reduction_live_copy_fail_closed", partial.get("live_copy_allowed") is False, {
+                    "lane_readiness": {
+                        lane: (value or {}).get("live_copy_evidence_sufficient", False)
+                        for lane, value in lanes.items()
+                    },
+                    "blockers": partial.get("blockers"),
+                })
+            except Exception as exc:
+                add("partial_reduction_report_fresh_and_truthful", False, f"{type(exc).__name__}: {exc}")
+
         return {
             "schema": "research_stability_supervisor_v1",
             "generated_at": self.now().isoformat(),
