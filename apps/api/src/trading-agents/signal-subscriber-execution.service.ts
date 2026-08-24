@@ -2315,7 +2315,7 @@ export function hireExpiryRequiresExitOnlyProcessing(
 const RELAY_EXECUTOR_WAKE_KEY = 'relayExecutorWake';
 
 export type RelayExecutorWakeRequest = {
-  trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
+  trigger: 'POSITION_CLOSED' | 'POSITION_REDUCED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
   at: string;
   tradeId?: string | null;
   /** HMAC-verified close evidence carried by the latency-only private prewake. */
@@ -4311,7 +4311,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * so the isolated relay-executor worker picks it up on the next poll / tick.
    */
   async requestExecutorWake(
-    trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
+    trigger: RelayExecutorWakeRequest['trigger'],
     tradeId?: string | null,
     receivedAt?: string,
     signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'] | RelayExecutorWakeRequest['signedOpen'],
@@ -5603,7 +5603,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
-  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
+  async wakeNow(trigger?: RelayExecutorWakeRequest['trigger']) {
     if (!executionEnabled()) return;
     if (trigger) {
       this.lastShowcaseWakeAt = Date.now();

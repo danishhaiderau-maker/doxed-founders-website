@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import test from 'node:test';
 
 const subscriberSource = readFileSync(
-  new URL('./signal-subscriber-execution.service.ts', import.meta.url),
+  resolve(__dirname, 'signal-subscriber-execution.service.ts'),
   'utf8',
 );
 const agentServiceSource = readFileSync(
-  new URL('./trading-agents.service.ts', import.meta.url),
+  resolve(__dirname, 'trading-agents.service.ts'),
   'utf8',
 );
 

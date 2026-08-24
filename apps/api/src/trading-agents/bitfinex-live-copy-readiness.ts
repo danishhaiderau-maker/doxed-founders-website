@@ -22,9 +22,9 @@ export type BitfinexAcceptedSizingReceipt = {
   leverage: number;
   acceptedNotionalUsd: number;
   acceptedMarginUsd: number;
-  activeOrdersReconciled: true;
-  positionsReconciled: true;
-  executionsReconciled: true;
+  activeOrdersReconciled: boolean;
+  positionsReconciled: boolean;
+  executionsReconciled: boolean;
 };
 
 export function assessBitfinexLiveCopySizingReadiness(input: {
