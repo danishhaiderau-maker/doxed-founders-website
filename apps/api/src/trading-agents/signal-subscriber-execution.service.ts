@@ -9446,7 +9446,6 @@ await this.notifications
         },
       });
     }
-
     const payload: ExecutionPayload = {
       bitfinexOrderId: orderId,
       limitPrice,
