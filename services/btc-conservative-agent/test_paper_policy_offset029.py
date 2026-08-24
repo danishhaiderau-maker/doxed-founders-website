@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import paper_policy_offset029 as policy
+import pathway_lab_validation
 from combo_pathway_config import (
     COMBO_EXECUTION_LANES,
     COMBO_LANE_SPECS,
@@ -64,6 +65,13 @@ def test_active_roster_contains_patient_chase_family_and_not_retired_type_b():
     assert spec["is_legacy"] is False
     assert RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_EXECUTION_LANES
     assert COMBO_LANE_SPECS[RESEARCH_LANE_TYPE_B_HUNTER_V1]["is_legacy"] is True
+
+
+def test_startup_shared_ai_validator_accepts_frozen_four_tile_roster():
+    report = pathway_lab_validation.run_independent_v1_post_ai_spawn_validation()
+    assert report["verdict"] == "PASS"
+    assert report["lanes"] == list(COMBO_EXECUTION_LANES)
+    assert all(check["passed"] for check in report["checks"])
 
 
 def test_bot_adapter_is_paper_first_and_separately_relay_allowlisted():

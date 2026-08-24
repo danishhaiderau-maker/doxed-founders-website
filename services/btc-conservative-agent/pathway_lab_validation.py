@@ -22,6 +22,8 @@ from combo_pathway_config import (
     EXPECTED_EXCHANGE,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI_SCAN,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
@@ -921,17 +923,21 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
 
     checks.extend([
         {
-            "check": "offset candidate is the only executable combo lane",
-            "passed": tuple(COMBO_EXECUTION_LANES) == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,),
+            "check": "frozen four-tile candidate roster is the executable combo allowlist",
+            "passed": tuple(COMBO_EXECUTION_LANES) == (
+                RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+                RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+                RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+            ),
             "detail": f"execution_lanes={tuple(COMBO_EXECUTION_LANES)}",
         },
         {
-            "check": "offset candidate is declared as a shared-direction lane",
-            "passed": (
-                is_shared_ai_direction_lane(RESEARCH_LANE_OFFSET_029_ATR_TP_25)
-                and not is_independent_ai_lane(RESEARCH_LANE_OFFSET_029_ATR_TP_25)
+            "check": "all three candidate tiles are declared as shared-direction lanes",
+            "passed": all(
+                is_shared_ai_direction_lane(lane) and not is_independent_ai_lane(lane)
+                for lane in COMBO_EXECUTION_LANES
             ),
-            "detail": "candidate consumes AI_SCAN direction; no independent prompt",
+            "detail": "each candidate consumes AI_SCAN direction; no independent prompt",
         },
         {
             "check": "generic fan-out routes only the executable allowlist",
@@ -978,11 +984,12 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
         "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION,
         "verdict": "PASS" if passed else "FAIL",
-        "lanes": [RESEARCH_LANE_TYPE_B_HUNTER_V1],
+        "lanes": list(COMBO_EXECUTION_LANES),
         "checks": checks,
         "policy": (
-            "One direction-only AI_SCAN result feeds Continuous and Type B. Type B "
-            "keeps its own fixed gate and order book without issuing another AI request."
+            "One direction-only AI_SCAN result feeds Continuous and the three frozen "
+            "candidate tiles. Each tile keeps an independent paper lifecycle without "
+            "issuing another AI request."
         ),
     }
     _write_json(INDEPENDENT_V1_POST_AI_SPAWN_FILE, payload)
