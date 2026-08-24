@@ -24,6 +24,7 @@ def protection_screen() -> list[dict[str, Any]]:
     def add(name: str, *, family="FIXED_TARGET", mode="ATR_TARGET", atr_tp=2.5,
             atr_sl=None, thesis=None, thesis_sec=0, hard=30,
             time_stop=None, ladder="none", be_arm=None, be_floor=0,
+            be_arm_atr=None,
             giveback_abs=None, giveback_fraction=None, atr_trail=None,
             chandelier=None, trail_activation=0, partial_plan="none") -> None:
         rows.append({
@@ -41,6 +42,7 @@ def protection_screen() -> list[dict[str, Any]]:
                 "atr_tp_k": atr_tp,
                 "ladder": [list(rung) for rung in LADDERS[ladder]],
                 "break_even_arm_mfe_pct": be_arm,
+                "break_even_arm_atr_k": be_arm_atr,
                 "break_even_floor_pct": be_floor,
                 "mfe_giveback_abs_pct": giveback_abs,
                 "mfe_giveback_fraction": giveback_fraction,
@@ -73,6 +75,22 @@ def protection_screen() -> list[dict[str, Any]]:
     for plan in ("secure_25_25_runner", "secure_33_runner", "late_25_25_runner"):
         for trail in (0.75, 1.0, 1.5):
             add(f"HYBRID_{plan}_TRAIL_{trail:g}", family="HYBRID_RUNNER", mode="HYBRID_RUNNER", atr_tp=None, atr_sl=1.5, atr_trail=trail, trail_activation=1.0, partial_plan=plan)
+    # Predeclared paper-only sibling of Patient Chase.  It retains the existing
+    # entry family while adding a volatility-sized stop, partial realization,
+    # ATR-based break-even arm, runner trail and final 2.5 ATR target.  Keeping
+    # it as a distinct protection_id prevents mid-epoch policy contamination.
+    add(
+        "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
+        family="HYBRID_RUNNER",
+        mode="HYBRID_RUNNER",
+        atr_tp=2.5,
+        atr_sl=1.0,
+        atr_trail=1.0,
+        trail_activation=1.25,
+        partial_plan="secure_25_25_runner",
+        be_arm_atr=1.25,
+        be_floor=0.5,
+    )
     return rows
 
 

@@ -144,6 +144,16 @@ class V3CandidateTests(unittest.TestCase):
         self.assertIn("ATR_TP_2.5_TIME_120", names)
         self.assertIn("ATR_TP_2.5_BE_4_LOCK_1", names)
         self.assertIn("ATR_TP_2.5_GIVEBACK_40PCT", names)
+        self.assertIn("HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5", names)
+
+        candidate = next(
+            row for row in protection_screen()
+            if row["protection_id"] == "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5"
+        )
+        self.assertEqual(candidate["loss_protection"]["atr_stop_k"], 1.0)
+        self.assertEqual(candidate["profit_protection"]["atr_tp_k"], 2.5)
+        self.assertEqual(candidate["profit_protection"]["break_even_arm_atr_k"], 1.25)
+        self.assertEqual(candidate["profit_protection"]["partial_take_profits"], [[1.0, 0.25], [1.5, 0.25]])
 
     def test_descriptive_policies_are_visible_but_never_safe_qualified(self):
         report = evaluate_protection_screen([source()])

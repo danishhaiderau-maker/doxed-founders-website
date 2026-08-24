@@ -72,6 +72,7 @@ THESIS_WINDOWS_SEC = (60, 180, 300, 600)
 HARD_STOP_MARGIN_PCT = (10, 12, 15, 18, 20, 25, 30)
 TIME_STOPS_MIN = (5, 10, 15, 20, 30, 45, 60, 90, 120)
 BREAK_EVEN_ARM_MFE_PCT = (2, 3, 4, 5, 6, 8, 10)
+BREAK_EVEN_ARM_ATR_MULTIPLIERS = (0.75, 1.0, 1.25, 1.5, 2.0)
 BREAK_EVEN_FLOOR_PCT = (0, 0.5, 1, 2)
 MFE_GIVEBACK_ABS_PCT = (1, 2, 3, 4, 5, 8, 10)
 MFE_GIVEBACK_FRACTION = (0.2, 0.3, 0.4, 0.5, 0.6)
@@ -219,6 +220,7 @@ def build_contract() -> dict[str, Any]:
             "hard_stop_margin_pct": list(HARD_STOP_MARGIN_PCT),
             "time_stop_min": list(TIME_STOPS_MIN),
             "break_even_arm_mfe_pct": list(BREAK_EVEN_ARM_MFE_PCT),
+            "break_even_arm_atr_k": list(BREAK_EVEN_ARM_ATR_MULTIPLIERS),
             "break_even_floor_pct": list(BREAK_EVEN_FLOOR_PCT),
             "mfe_giveback_abs_pct": list(MFE_GIVEBACK_ABS_PCT),
             "mfe_giveback_fraction": list(MFE_GIVEBACK_FRACTION),

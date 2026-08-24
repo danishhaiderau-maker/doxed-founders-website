@@ -57,6 +57,7 @@ def replay_protected_policy(
     thesis_window = float(loss.get("thesis_window_sec") or 0)
     time_stop_sec = None if loss.get("time_stop_min") is None else float(loss["time_stop_min"]) * 60.0
     be_arm = profit.get("break_even_arm_mfe_pct")
+    be_arm_atr = profit.get("break_even_arm_atr_k")
     be_floor = float(profit.get("break_even_floor_pct") or 0)
     giveback_abs = profit.get("mfe_giveback_abs_pct")
     giveback_fraction = profit.get("mfe_giveback_fraction")
@@ -88,6 +89,8 @@ def replay_protected_policy(
         underwater_observations += int(current < 0)
         candidate_floors = []
         if be_arm is not None and mfe >= float(be_arm):
+            candidate_floors.append(be_floor)
+        if be_arm_atr is not None and mfe >= float(be_arm_atr) * atr_margin_pct:
             candidate_floors.append(be_floor)
         if giveback_abs is not None and mfe > 0:
             candidate_floors.append(mfe - float(giveback_abs))
@@ -127,7 +130,7 @@ def replay_protected_policy(
             reason = "PROFIT_PROTECTION_FLOOR"
         elif time_stop_sec is not None and age >= time_stop_sec:
             reason = "TIME_STOP"
-        elif mode == "ATR_TARGET" and tp_margin_pct is not None and current >= tp_margin_pct:
+        elif mode in {"ATR_TARGET", "HYBRID_RUNNER"} and tp_margin_pct is not None and current >= tp_margin_pct:
             reason = "ATR_TAKE_PROFIT"
         trace.append({"ts": ts, "margin_return_pct": round(current, 8), "mfe_pct": round(mfe, 8), "active_floor_pct": active_floor, "remaining_fraction": round(remaining_fraction, 8), "partial_exits": partial_events, "exit_reason": reason})
         if reason:
