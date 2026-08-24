@@ -30,6 +30,7 @@ export type ShowcaseRelayEventType =
   | 'APPROVE_PENDING'
   | 'ORDER_PLACED'
   | 'POSITION_OPENED'
+  | 'POSITION_REDUCED'
   | 'POSITION_CLOSED'
   | 'ORDER_EXPIRED'
   | 'LIMIT_UPDATED';
@@ -45,6 +46,15 @@ export type ShowcaseRelayEventBody = {
   limit_price?: number | null;
   fill_price?: number | null;
   qty?: number | null;
+  reduction_id?: string | null;
+  prior_qty?: number | null;
+  reduced_qty?: number | null;
+  remaining_qty?: number | null;
+  reduce_only?: boolean | null;
+  before_qty?: number | null;
+  closed_qty?: number | null;
+  after_qty?: number | null;
+  price?: number | null;
   exit_price?: number | null;
   reason?: string | null;
   exit_reason?: string | null;
@@ -79,6 +89,68 @@ export type ShowcaseRelayEventBody = {
   /** Internal receipt timestamp added only after HMAC verification. */
   platform_received_at?: string | null;
 };
+
+export type PositionReducedEvidence = {
+  eventId: string;
+  reductionId: string;
+  eventSeq: number;
+  priorQty: number;
+  reducedQty: number;
+  remainingQty: number;
+  fillPrice: number;
+  sourceEventAt: Date;
+};
+
+/** Strict audit-only contract. It deliberately carries no execution request. */
+export function positionReducedEvidence(
+  body: ShowcaseRelayEventBody,
+): PositionReducedEvidence | undefined {
+  if (body.event !== 'POSITION_REDUCED' || body.schema !== 'dcf-showcase-intent-v1') return;
+  const eventId = body.event_id?.trim() ?? '';
+  // The canonical bot receipt uses event_id as its immutable reduction fence.
+  const reductionId = body.reduction_id?.trim() || eventId;
+  const ts = Date.parse(String(body.ts ?? ''));
+  const prior = Number(body.before_qty);
+  const reduced = Number(body.closed_qty);
+  const remaining = Number(body.after_qty);
+  const fill = Number(body.price);
+  if (
+    !eventId || eventId.length > 255 || !reductionId || reductionId.length > 255
+    || !Number.isInteger(body.event_seq) || Number(body.event_seq) < 0
+    || !Number.isFinite(ts) || ts > Date.now() + 5_000
+    || !Number.isFinite(prior) || prior <= 0
+    || !Number.isFinite(reduced) || reduced <= 0
+    || !Number.isFinite(remaining) || remaining < 0
+    || reduced > prior || Math.abs(prior - reduced - remaining) > 1e-8
+    || !Number.isFinite(fill) || fill <= 0
+  ) return;
+  return {
+    eventId, reductionId, eventSeq: Number(body.event_seq), priorQty: prior,
+    reducedQty: reduced, remainingQty: remaining, fillPrice: fill,
+    sourceEventAt: new Date(ts),
+  };
+}
+
+export function isReductionEvidenceIdentity(tradeId: string, lane: string): boolean {
+  return (tradeId.startsWith('o29ps-') && lane === 'OFFSET_029_ATR_PROTECTED')
+    || (tradeId.startsWith('o29rd-') && lane === 'OFFSET_029_ATR_REGIME');
+}
+
+export function reductionAuditMatches(
+  stored: { tradeId: string; eventSeq: number; priorQty: unknown; reducedQty: unknown; remainingQty: unknown; fillPrice: unknown },
+  incoming: PositionReducedEvidence,
+  tradeId: string,
+): boolean {
+  return stored.tradeId === tradeId && stored.eventSeq === incoming.eventSeq
+    && btcQuantityMatches(Number(stored.priorQty), incoming.priorQty)
+    && btcQuantityMatches(Number(stored.reducedQty), incoming.reducedQty)
+    && btcQuantityMatches(Number(stored.remainingQty), incoming.remainingQty)
+    && Math.abs(Number(stored.fillPrice) - incoming.fillPrice) < 0.005;
+}
+
+export function isReductionSequenceStale(latestSeq: number | undefined, incomingSeq: number): boolean {
+  return Number.isInteger(latestSeq) && incomingSeq <= Number(latestSeq);
+}
 
 type RelayLifecycleEnvelope = {
   action?: unknown;
@@ -587,10 +659,12 @@ export class ShowcaseRelayEventsService {
 
     const tradeId = (body.trade_id ?? '').trim();
     const researchLane = (body.research_lane ?? '').trim().toUpperCase();
-    if (
+    const reductionEvidenceIdentity = body.event === 'POSITION_REDUCED'
+      && isReductionEvidenceIdentity(tradeId, researchLane);
+    if (!reductionEvidenceIdentity && (
       !isMirrorableLaneTradeId(tradeId)
       || (researchLane && researchLane !== 'CONTINUOUS')
-    ) {
+    )) {
       this.logger.warn(
         `Rejected non-mirrorable showcase relay event=${body.event} ` +
         `trade=${tradeId || '?'} lane=${researchLane || 'UNKNOWN'}`,
@@ -625,6 +699,32 @@ export class ShowcaseRelayEventsService {
       && body.schema === 'dcf-showcase-intent-v1'
       && (body.direction?.toUpperCase() === 'LONG'
         || body.direction?.toUpperCase() === 'SHORT');
+    if (event === 'POSITION_REDUCED') {
+      const evidence = signedLifecycleEvent ? positionReducedEvidence(body) : undefined;
+      if (!evidence) {
+        throw new BadRequestException(
+          'Signed position reduction requires an idempotent reduce-only quantity reconciliation',
+        );
+      }
+      const receivedMs = Date.parse(String(persistBody.platform_received_at));
+      if (receivedMs < evidence.sourceEventAt.getTime() - 5_000
+        || receivedMs - evidence.sourceEventAt.getTime() > 5 * 60_000) {
+        throw new BadRequestException('Position reduction evidence is stale or future-dated');
+      }
+      const receipt = await this.persistRelayEvent(slug, persistBody);
+      return {
+        ok: true,
+        accepted: true,
+        action: 'POSITION_REDUCTION_AUDITED',
+        exchange_mutation: false,
+        event,
+        trade_id: tradeId,
+        persisted: receipt.persisted,
+        intentCreated: false,
+        platform_received_at: persistBody.platform_received_at ?? null,
+        ingest_ms: Date.now() - ingestStartedAt,
+      };
+    }
     const directExecutableIntent =
       signedLifecycleEvent
       && (event === 'ORDER_PLACED' || event === 'LIMIT_UPDATED')
@@ -1112,6 +1212,43 @@ export class ShowcaseRelayEventsService {
         );
         if (!cycleReceipt) return { persisted: false, intentApplied: false };
         const { cycleId, intentApplied } = cycleReceipt;
+
+        if (eventBody.event === 'POSITION_REDUCED') {
+          const reduction = positionReducedEvidence(eventBody);
+          if (!reduction) throw new BadRequestException('Invalid position reduction evidence');
+          const existingReduction = await tx.relayPositionReductionAudit.findFirst({
+            where: { OR: [
+              { eventId: reduction.eventId }, { reductionId: reduction.reductionId },
+              { tradeId, eventSeq: reduction.eventSeq },
+            ] },
+          });
+          if (existingReduction) {
+            if (!reductionAuditMatches(existingReduction, reduction, tradeId)) {
+              throw new BadRequestException('Conflicting position reduction replay');
+            }
+          } else {
+            const latest = await tx.relayPositionReductionAudit.findFirst({
+              where: { tradeId }, orderBy: { eventSeq: 'desc' }, select: { eventSeq: true },
+            });
+            if (latest && isReductionSequenceStale(latest.eventSeq, reduction.eventSeq)) {
+              throw new BadRequestException('Out-of-order position reduction evidence');
+            }
+            await tx.relayPositionReductionAudit.create({ data: {
+              eventId: reduction.eventId,
+              reductionId: reduction.reductionId,
+              cycleId,
+              tradeId,
+              eventSeq: reduction.eventSeq,
+              priorQty: reduction.priorQty,
+              reducedQty: reduction.reducedQty,
+              remainingQty: reduction.remainingQty,
+              fillPrice: reduction.fillPrice,
+              sourceEventAt: reduction.sourceEventAt,
+              platformReceivedAt: new Date(String(eventBody.platform_received_at)),
+              payload: eventBody as unknown as Prisma.InputJsonValue,
+            } });
+          }
+        }
 
         // The showcase ORDER_PLACED event is audit evidence, not proof that
         // this subscriber has an exchange order. Only the subscriber execution

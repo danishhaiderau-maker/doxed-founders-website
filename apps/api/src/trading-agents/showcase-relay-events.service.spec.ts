@@ -6,8 +6,46 @@ import {
   canClaimExpiredCycleForCurrentGeneration,
   exactLifecycleRevisionMatches,
   relayIntentEnvelope,
+  positionReducedEvidence,
+  isReductionEvidenceIdentity,
+  reductionAuditMatches,
+  isReductionSequenceStale,
   shouldApplyExactLifecycleUpdate,
 } from './showcase-relay-events.service';
+
+test('POSITION_REDUCED accepts only reconciled reduce-only evidence', () => {
+  const valid = positionReducedEvidence({
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_REDUCED',
+    event_id: 'reduce-event-1',
+    event_seq: 4,
+    ts: new Date().toISOString(),
+    before_qty: 0.03, closed_qty: 0.01, after_qty: 0.02, price: 64_250,
+  });
+  assert.equal(valid?.reductionId, 'reduce-event-1');
+  assert.equal(valid?.remainingQty, 0.02);
+
+  assert.equal(positionReducedEvidence({
+    schema: 'dcf-showcase-intent-v1', event: 'POSITION_REDUCED',
+    event_id: 'bad', event_seq: 1, ts: new Date().toISOString(),
+    before_qty: 0.03, closed_qty: 0.01, after_qty: 0.025, price: 64_250,
+  }), undefined);
+  assert.equal(isReductionEvidenceIdentity('o29ps-a', 'OFFSET_029_ATR_PROTECTED'), true);
+  assert.equal(isReductionEvidenceIdentity('o29rd-a', 'OFFSET_029_ATR_REGIME'), true);
+  assert.equal(isReductionEvidenceIdentity('o29ps-a', 'OFFSET_029_ATR_REGIME'), false);
+  assert.equal(isReductionEvidenceIdentity('cont-a', 'CONTINUOUS'), false);
+  assert.equal(reductionAuditMatches({
+    tradeId: 'o29ps-a', eventSeq: 4, priorQty: 0.03, reducedQty: 0.01,
+    remainingQty: 0.02, fillPrice: 64250,
+  }, valid!, 'o29ps-a'), true);
+  assert.equal(reductionAuditMatches({
+    tradeId: 'o29ps-a', eventSeq: 4, priorQty: 0.03, reducedQty: 0.02,
+    remainingQty: 0.01, fillPrice: 64250,
+  }, valid!, 'o29ps-a'), false);
+  assert.equal(isReductionSequenceStale(4, 3), true);
+  assert.equal(isReductionSequenceStale(4, 4), true);
+  assert.equal(isReductionSequenceStale(4, 5), false);
+});
 
 test('durable receipt matches the exact canonical event id, sequence, and limit', () => {
   const current = {

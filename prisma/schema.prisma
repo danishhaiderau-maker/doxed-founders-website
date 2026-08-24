@@ -2585,6 +2585,13 @@ enum SignalCycleSettlementStatus {
   FAILED
 }
 
+enum ParticipantReductionPhase {
+  CLAIMED
+  SUBMITTING
+  ACKNOWLEDGED
+  CONFIRMED
+}
+
 /**
  * API keys for signal-cycle webhooks (hashed at rest).
  */
@@ -2693,11 +2700,66 @@ model SignalCycleParticipant {
   cycle  SignalCycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
   user   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   events SignalCycleEvent[]
+  reductions SignalCycleParticipantReduction[]
 
   @@unique([cycleId, userId])
   @@index([userId])
   @@index([userId, status, createdAt(sort: Desc)])
   @@index([feePaymentReference])
+}
+
+/// Dormant execution fence for a future reduce-only subscriber implementation.
+/// No current executor reads or writes this model.
+model SignalCycleParticipantReduction {
+  id              String @id @default(cuid())
+  participantId   String
+  reductionId     String
+  sourceEventId   String
+  sourceEventSeq  Int
+  phase           ParticipantReductionPhase @default(CLAIMED)
+  ownerToken      String @unique
+  requestToken    String @unique
+  beforeQty       Decimal @db.Decimal(20, 8)
+  targetQty       Decimal @db.Decimal(20, 8)
+  reduceQty       Decimal @db.Decimal(20, 8)
+  exchangeOrderId BigInt?
+  claimedAt       DateTime @default(now())
+  submittingAt    DateTime?
+  acknowledgedAt DateTime?
+  confirmedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  participant SignalCycleParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([participantId, reductionId])
+  @@unique([participantId, sourceEventId])
+  @@unique([participantId, sourceEventSeq])
+  @@index([participantId, phase, createdAt(sort: Desc)])
+  @@index([exchangeOrderId])
+}
+
+/// Durable, idempotent audit/fence for signed partial-reduction evidence.
+/// This model does not authorize or request exchange execution.
+model RelayPositionReductionAudit {
+  id                 String   @id @default(cuid())
+  eventId            String   @unique
+  reductionId        String   @unique
+  cycleId            String
+  tradeId            String
+  eventSeq           Int
+  priorQty            Decimal  @db.Decimal(20, 8)
+  reducedQty          Decimal  @db.Decimal(20, 8)
+  remainingQty        Decimal  @db.Decimal(20, 8)
+  fillPrice           Decimal  @db.Decimal(20, 8)
+  sourceEventAt       DateTime
+  platformReceivedAt DateTime
+  payload             Json
+  createdAt           DateTime @default(now())
+
+  @@unique([tradeId, eventSeq])
+  @@index([cycleId, createdAt(sort: Desc)])
+  @@index([tradeId, createdAt(sort: Desc)])
 }
 
 model SignalCycleEvent {
