@@ -3922,6 +3922,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
     </div>
   </section>
+  <section id="sec-partial-reductions">
+    <h2>Partial Reduction Reconciliation</h2>
+    <p class="note">Signed source and relay receipts for Tiles 3/4. This is analyzer-only evidence; insufficient or unreconciled evidence keeps live copy blocked.</p>
+    <div class="kpis" id="partial-reductions-kpis"></div>
+    <div class="empty-state" id="partial-reductions-empty">Loading signed partial-reduction evidence…</div>
+    <table><thead><tr><th>Lane</th><th>Lifecycles</th><th>Receipts</th><th>Signed</th><th>Reconciled</th><th>Evidence sufficient</th></tr></thead><tbody id="partial-reductions-body"></tbody></table>
+    <p><a class="btn" href="/partial-reduction-reconciliation">Open full reconciliation report</a></p>
+    <pre id="partial-reductions-detail"></pre>
+  </section>
   <section id="sec-genome">
     <h2>Trading Genome research</h2>
     <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
@@ -3999,6 +4008,7 @@ const EVIDENCE_SCOPES = {
   'exit-reason-leak': ['LEGACY HINDSIGHT', 'Peak-to-close hindsight gap; not directly capturable profit or a policy recommendation.'],
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current 12,601-policy v2.2 grid.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
+  'partial-reductions': ['CURRENT V3.1 RECONCILIATION', 'Signed source and relay receipts only. Insufficient or unreconciled evidence blocks live-copy readiness.'],
   genome: ['SOURCE UNAVAILABLE', 'The required six raw Genome source tables are missing. Prior artifacts are preserved but current conclusions are blocked.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
   explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
@@ -4863,6 +4873,28 @@ async function loadGenome() {
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
 
+async function loadPartialReductions() {
+  const r = await fetch('/api/partial-reduction-reconciliation');
+  const d = await r.json();
+  const lanes = Object.entries(d.lanes || {});
+  const integrity = d.integrity || {};
+  const empty = document.getElementById('partial-reductions-empty');
+  document.getElementById('partial-reductions-kpis').innerHTML = [
+    ['Status', d.status || 'BLOCKED'],
+    ['Qualification', d.qualification || 'INSUFFICIENT'],
+    ['Live copy allowed', d.live_copy_allowed ? 'YES' : 'NO'],
+    ['Integrity', integrity.passed ? 'PASS' : 'BLOCKED'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  empty.style.display = lanes.length ? 'none' : 'block';
+  empty.textContent = 'No signed partial-reduction evidence is available yet. Live copy remains blocked.';
+  document.getElementById('partial-reductions-body').innerHTML = lanes.map(([lane,v]) =>
+    `<tr><td>${lane}</td><td>${v.lifecycles ?? 0}</td><td>${v.partial_reduction_receipts ?? 0}</td><td>${v.signed_receipts ?? 0}</td><td>${v.reconciled_lifecycles ?? 0}</td><td class="${v.live_copy_evidence_sufficient ? 'green' : 'red'}">${v.live_copy_evidence_sufficient ? 'YES' : 'NO'}</td></tr>`
+  ).join('');
+  document.getElementById('partial-reductions-detail').textContent = JSON.stringify({
+    summary: d.summary || {}, integrity, blockers: d.blockers || [], note: d.note || '',
+  }, null, 2);
+}
+
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
@@ -4975,7 +5007,7 @@ const SECTION_LOADERS = {
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
   'chase-iso': [loadChaseIso], combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
-  'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
+  'ladder-sim': [loadLadderSim], exits: [loadLeakage], 'partial-reductions': [loadPartialReductions], genome: [loadGenome],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
   download: [loadArchives, loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };
