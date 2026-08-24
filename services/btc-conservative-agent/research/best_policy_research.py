@@ -107,13 +107,13 @@ def _events(path: Path) -> list[dict]:
     return rows
 
 
-def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
+def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None, genome=None) -> dict:
     data_root = Path(data_dir)
     report_root = Path(report_dir)
     from research.v3_policy_report_adapter import has_v3_evidence, load_or_build_genome, load_v3_cycle_snapshot
 
     if has_v3_evidence(data_dir):
-        genome = load_or_build_genome(data_dir, report_dir)
+        genome = genome if genome is not None else load_or_build_genome(data_dir, report_dir)
         snapshot = cycle_snapshot or load_v3_cycle_snapshot(data_dir)
         oos = _json(report_root / POLICY_CANDIDATE_OOS_REPORT_FILE)
         collection = genome.get("collection") or {}

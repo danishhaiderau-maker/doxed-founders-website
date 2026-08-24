@@ -152,7 +152,7 @@ def test_dashboard_releases_live_mirror_before_expensive_json_parsing(tmp_path, 
     assert [row["event_id"] for row in result["events"]] == ["event-1"]
 
 
-def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path):
+def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path, monkeypatch):
     ledgers = tmp_path / "v3" / "ledgers"
     ledgers.mkdir(parents=True)
     opportunity = {
@@ -211,7 +211,18 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path)
     # The retired file may exist but is no longer authoritative once V3.1 is present.
     (tmp_path / RESEARCH_EVENTS_FILE).write_text("", encoding="utf-8")
 
+    from research import v3_policy_report_adapter
+    actual_build = v3_policy_report_adapter.load_or_build_genome
+    build_calls = 0
+
+    def counted_build(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        return actual_build(*args, **kwargs)
+
+    monkeypatch.setattr(v3_policy_report_adapter, "load_or_build_genome", counted_build)
     reports = build_policy_cycle_reports(tmp_path, tmp_path)
+    assert build_calls == 1
     assert reports["cycle_snapshot"]["schema"] == "policy_cycle_snapshot_v3_1"
     assert reports["cycle_snapshot"]["epoch_id"] == "epoch-v31-clean"
     assert reports["cycle_snapshot"]["row_count"] == 1

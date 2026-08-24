@@ -240,7 +240,7 @@ def _evaluate(policy_id: str, rows: list[dict], cache: dict[str, dict[str, float
     }
 
 
-def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
+def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None, genome=None) -> dict:
     from research.v3_policy_report_adapter import (
         candidate_from_genome,
         has_v3_evidence,
@@ -251,7 +251,7 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
     if has_v3_evidence(data_dir):
         snapshot = cycle_snapshot or load_v3_cycle_snapshot(data_dir)
         report = candidate_from_genome(
-            load_or_build_genome(data_dir, report_dir),
+            genome if genome is not None else load_or_build_genome(data_dir, report_dir),
             snapshot,
             microstructure_evidence,
         )

@@ -158,10 +158,15 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
     from research.conservative_fill_cohort import build_conservative_fill_cohort
 
     snapshot = load_policy_cycle_snapshot(data_dir)
+    genome = None
+    from research.v3_policy_report_adapter import has_v3_evidence, load_or_build_genome
+    if has_v3_evidence(data_dir):
+        genome = load_or_build_genome(data_dir, report_dir)
     candidate = build_policy_candidate_oos_report(
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
+        genome=genome,
     )
     if between_builders_hook:
         between_builders_hook()
@@ -169,6 +174,7 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
+        genome=genome,
     )
     conservative_fill = build_conservative_fill_cohort(
         snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
