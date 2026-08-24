@@ -693,7 +693,11 @@ export class TradingAgentsService implements OnModuleInit {
     return {
       schema: 'relay_lifecycle_evidence_v1',
       generatedAt: new Date().toISOString(),
-      generatingRevision: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      generatingRevision:
+        process.env.RAILWAY_GIT_COMMIT_SHA ||
+        process.env.SOURCE_GIT_REV ||
+        process.env.GIT_SHA ||
+        null,
       runIdentity: process.env.RAILWAY_DEPLOYMENT_ID || process.env.FLY_ALLOC_ID || null,
       agentSlug: slug,
       userId: scopedUserId,

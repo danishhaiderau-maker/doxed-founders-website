@@ -22,6 +22,7 @@ def test_export_is_authenticated_user_scoped_and_event_complete():
     assert "canonicalTradeId" in SERVICE
     assert "eventType: event.eventType" in SERVICE
     assert "generatingRevision" in SERVICE and "runIdentity" in SERVICE
+    assert "process.env.SOURCE_GIT_REV" in SERVICE
 
 
 def test_sync_is_atomic_and_fails_closed_on_missing_provenance():
