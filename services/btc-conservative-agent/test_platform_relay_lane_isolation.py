@@ -143,6 +143,75 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert '"ts": utc_iso()' in chase_commit_source
 
 
+def test_protected_lane_chase_cannot_promote_relay_eligibility() -> None:
+    chase_source = ast.get_source_segment(
+        BOT_SOURCE,
+        _function("_apply_offset_029_policy_chase"),
+    )
+
+    assert "lane in PLATFORM_RELAY_ELIGIBLE_LANES" in chase_source
+    assert 'order["relay_eligible"] = True' not in chase_source
+    assert 'signal["relay_eligible"] = True' not in chase_source
+
+
+def test_order_identity_and_sizing_are_canonical_not_signal_promoted() -> None:
+    place_source = ast.get_source_segment(
+        BOT_SOURCE,
+        _function("_place_simulated_limit_order"),
+    )
+
+    assert "relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES" in place_source
+    assert '"relay_eligible": relay_eligible' in place_source
+    assert "requested_margin_usd = margin_usdt" in place_source
+    assert "requested_notional_usd = round(margin_usdt * float(lev), 4)" in place_source
+
+
+def test_relay_projection_preserves_explicit_zero_sizing_evidence() -> None:
+    project = _compile_function(
+        "_relay_order_row_lite",
+        {"_pending_limit_touched": lambda _row, _price: False},
+    )
+    row = {
+        "trade_id": "o29ps-zero",
+        "created_ts": 100.0,
+        "margin_usdt": 0.25,
+        "requested_margin_usd": 0.0,
+    }
+
+    projected = project(row, 160.0, None)
+
+    assert projected["requested_margin_usd"] == 0.0
+
+
+def test_lifecycle_restore_canonicalizes_protected_identity_and_size() -> None:
+    canonicalize = _compile_function(
+        "_canonicalize_paper_lifecycle_identity",
+        {
+            "_normalize_lane_key": lambda row: row.get("research_lane"),
+            "PLATFORM_RELAY_ELIGIBLE_LANES": frozenset({"CONTINUOUS"}),
+            "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED": "OFFSET_029_ATR_PROTECTED",
+            "RESEARCH_LANE_OFFSET_029_ATR_REGIME": "OFFSET_029_ATR_REGIME",
+        },
+    )
+    restored = canonicalize(
+        {
+            "research_lane": "OFFSET_029_ATR_PROTECTED",
+            "relay_eligible": True,
+            "paper_only": False,
+            "margin_usdt": 0.25,
+            "requested_margin_usd": 0.0,
+            "requested_notional_usd": 0.0,
+            "qty": 0.0003,
+            "limit_price": 80_000.0,
+        }
+    )
+
+    assert restored["paper_only"] is True
+    assert restored["relay_eligible"] is False
+    assert restored["requested_margin_usd"] == 0.25
+    assert restored["requested_notional_usd"] == 24.0
+
+
 def test_terminal_close_dominates_a_late_fill_thread() -> None:
     allowed = _compile_function(
         "_position_open_relay_allowed",

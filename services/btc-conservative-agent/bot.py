@@ -20274,6 +20274,17 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     # chase interval before it is allowed to advance; otherwise a chase-3
     # activation can silently become chase 4 during the same function call.
     dashboard_exact_chase_managed = not registered_offset_policy
+    relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES
+    requested_margin_usd = signal.get("requested_margin_usd")
+    requested_notional_usd = signal.get("requested_notional_usd")
+    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+        # Protected lanes persist their exact executable paper sizing.  An
+        # explicit zero is fail-closed evidence and must never be hidden by a
+        # display fallback after the positive margin gate above has passed.
+        requested_margin_usd = margin_usdt
+        requested_notional_usd = round(margin_usdt * float(lev), 4)
+        signal["requested_margin_usd"] = requested_margin_usd
+        signal["requested_notional_usd"] = requested_notional_usd
     order = {
         "trade_id": signal["trade_id"],
         "research_lane": lane,
@@ -20289,13 +20300,13 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "qty": qty,
         "margin_usdt": margin_usdt,
         "requested_margin_usd": (
-            margin_usdt if signal.get("requested_margin_usd") is None
-            else signal.get("requested_margin_usd")
+            margin_usdt if requested_margin_usd is None
+            else requested_margin_usd
         ),
         "requested_notional_usd": (
             round(margin_usdt * float(lev), 4)
-            if signal.get("requested_notional_usd") is None
-            else signal.get("requested_notional_usd")
+            if requested_notional_usd is None
+            else requested_notional_usd
         ),
         "accepted_margin_usd": None,
         "accepted_notional_usd": None,
@@ -20322,7 +20333,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "raw_policy_id": signal.get("raw_policy_id"),
         "policy_id": signal.get("policy_id"),
         "paper_only": bool(signal.get("paper_only")),
-        "relay_eligible": bool(signal.get("relay_eligible", True)),
+        "relay_eligible": relay_eligible,
         "chase_start_sec": signal.get("chase_start_sec"),
         "chase_end_sec": signal.get("chase_end_sec"),
         "chase_interval_sec": signal.get("chase_interval_sec"),
@@ -23645,12 +23656,13 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
     )
     if committed is None:
         return False
-    # A Patient Chase reprice is part of the signed paper lifecycle.  Relay
-    # OFF remains paper-only; an independently armed, safety-ready relay may
-    # copy the same update for an allowlisted lane.
-    order["relay_eligible"] = True
+    # Chase preserves the immutable lane allow-list. Repricing a protected
+    # Tile 3/4 paper order must never promote it into a live-copy intent.
+    lane = _normalize_lane_key(signal or order or {})
+    relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES
+    order["relay_eligible"] = relay_eligible
     if isinstance(signal, dict):
-        signal["relay_eligible"] = True
+        signal["relay_eligible"] = relay_eligible
     _push_showcase_relay_event(
         "LIMIT_UPDATED",
         order.get("trade_id"),
@@ -34141,7 +34153,11 @@ def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
         "signal_dir": row.get("signal_dir") or row.get("dir") or row.get("side"),
         "dir": row.get("dir") or row.get("signal_dir") or row.get("side"),
         "qty": row.get("qty"),
-        "requested_margin_usd": row.get("requested_margin_usd") or row.get("margin_usdt"),
+        "requested_margin_usd": (
+            row.get("margin_usdt")
+            if row.get("requested_margin_usd") is None
+            else row.get("requested_margin_usd")
+        ),
         "requested_notional_usd": row.get("requested_notional_usd"),
         "accepted_margin_usd": row.get("accepted_margin_usd"),
         "accepted_notional_usd": row.get("accepted_notional_usd"),
@@ -39249,7 +39265,24 @@ def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     snapshot["sl"] = protection["sl"]
     snapshot["sl_enforced"] = protection["sl_enforced"]
     snapshot["stop_policy"] = protection["stop_policy"]
+    _canonicalize_paper_lifecycle_identity(snapshot)
     return snapshot
+
+
+def _canonicalize_paper_lifecycle_identity(row: dict) -> dict:
+    """Make restored paper identity and sizing fail-closed and self-consistent."""
+    if not isinstance(row, dict):
+        return {}
+    lane = _normalize_lane_key(row)
+    row["paper_only"] = True
+    row["relay_eligible"] = lane in PLATFORM_RELAY_ELIGIBLE_LANES
+    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+        margin = float(row.get("margin_usdt") or 0)
+        price = float(row.get("limit_price") or row.get("entry") or 0)
+        qty = abs(float(row.get("qty") or 0))
+        row["requested_margin_usd"] = margin
+        row["requested_notional_usd"] = round(qty * price, 4) if qty > 0 and price > 0 else 0.0
+    return row
 
 
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
@@ -39257,7 +39290,7 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
     with trade_lock:
         positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
                      if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
-        orders = [copy.deepcopy(row) for row in pending_orders
+        orders = [_canonicalize_paper_lifecycle_identity(copy.deepcopy(row)) for row in pending_orders
                   if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
     payload = {
         "schema": "paper_lifecycle_v1", "saved_at": utc_iso(), "git_rev": _runtime_git_rev(),
@@ -39305,7 +39338,8 @@ def load_paper_lifecycle() -> dict:
             expires = float(row.get("entry_expires_ts") or 0)
             if expires and expires <= now:
                 continue
-            row["paper_only"] = True; row["exchange_submission_blocked"] = True
+            row = _canonicalize_paper_lifecycle_identity(row)
+            row["exchange_submission_blocked"] = True
             lane_register_pending_order(row)
             known_orders.add(tid); result["pending_orders"] += 1
     logger.warning(f"[PAPER_LIFECYCLE] restart restored positions={result['positions']} "
