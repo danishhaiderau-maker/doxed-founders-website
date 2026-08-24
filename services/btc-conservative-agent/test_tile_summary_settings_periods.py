@@ -1,4 +1,4 @@
-"""Static regression checks for the two-tile accounting contract."""
+"""Static regression checks for the four-tile accounting contract."""
 
 from pathlib import Path
 
@@ -37,7 +37,9 @@ def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
     assert '_record_execution_settings_epoch("GAP_CHANGED")' in SOURCE
     assert '_record_execution_settings_epoch("TRACKING_STARTED")' in SOURCE
     assert '_record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)' in SOURCE
-    assert SOURCE.count('["settings_periods"] = _reconcile_settings_periods_to_headline(') == 2
+    # Current signed-epoch normalization plus the disk and analyzer-backed
+    # payload paths must all reconcile their period rows to the same headline.
+    assert SOURCE.count('["settings_periods"] = _reconcile_settings_periods_to_headline(') == 3
     assert "def _reconcile_settings_periods_to_headline" in SOURCE
     chunk = _render_chunk()
     assert "Settings-period breakdown" in chunk

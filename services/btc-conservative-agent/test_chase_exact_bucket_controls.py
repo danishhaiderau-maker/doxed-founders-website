@@ -89,10 +89,14 @@ def test_pending_order_registration_is_trade_id_idempotent():
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {
+            "paper_policy_signature": "paper-policy-test"
+        },
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
             submit=lambda *_args, **_kwargs: True
         ),
         "time": time,
+        "copy": copy,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "time": time,
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
@@ -180,10 +184,14 @@ def test_registration_releases_trade_lock_before_slow_schedule_hydration():
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {
+            "paper_policy_signature": "paper-policy-test"
+        },
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
             submit=lambda *_args, **_kwargs: True
         ),
         "time": time,
+        "copy": copy,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
     }
@@ -230,10 +238,14 @@ def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelle
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {
+            "paper_policy_signature": "paper-policy-test"
+        },
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
             submit=lambda *_args, **_kwargs: True
         ),
         "time": time,
+        "copy": copy,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
         "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
