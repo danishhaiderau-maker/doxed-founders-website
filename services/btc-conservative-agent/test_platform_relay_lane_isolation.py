@@ -107,7 +107,7 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     close_source = ast.get_source_segment(BOT_SOURCE, _function("close_position"))
 
     assert (
-        'event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED")'
+        'event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED")'
         in push_source
     )
     assert "_platform_relay_lane_for_event" in push_source

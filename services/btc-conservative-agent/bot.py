@@ -481,6 +481,14 @@ PLATFORM_RELAY_TRADE_PREFIX_LANES = {
     "cont": RESEARCH_LANE_CONTINUOUS,
     "o29atr": RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 }
+# Evidence transport is deliberately broader than the live-copy allowlist.
+# Tiles 3/4 may publish signed paper reduction receipts for audit and future
+# relay verification, but remain ineligible for exchange mutation.
+PLATFORM_RELAY_EVIDENCE_PREFIX_LANES = {
+    **PLATFORM_RELAY_TRADE_PREFIX_LANES,
+    "o29ps": RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    "o29rd": RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+}
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
 PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
@@ -4531,6 +4539,7 @@ def _apply_offset_029_atr_exit(pos: dict, price: float, now: float) -> bool:
 
 def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> bool:
     """Apply a frozen protected policy and persist partial/transition receipts."""
+    position_before_action = copy.deepcopy(pos)
     lane = str(pos.get("research_lane") or "").upper()
     entry = float(pos.get("entry") or 0); direction = str(pos.get("dir") or "").upper()
     atr_abs = _buf_float(pos.get("atr14_3m"), 0.0)
@@ -4599,21 +4608,66 @@ def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> 
     # field so a future non-zero model can allocate costs per reduction without
     # changing the lifecycle schema.
     pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
-    pos.setdefault("partial_exit_receipts", []).append({
+    reduction_seq = 1 + max(
+        [
+            int(receipt.get("event_seq") or 0)
+            for receipt in (pos.get("partial_exit_receipts") or [])
+            if isinstance(receipt, dict)
+        ]
+        or [0]
+    )
+    reduction_key = str(
+        action.get("partial_key") if isinstance(action, dict) else reason
+    ).strip().replace(" ", "_")
+    reduction_event_id = f"{pos.get('trade_id')}:POSITION_REDUCED:{reduction_key}"
+    reduction_id = f"{pos.get('trade_id')}:{reduction_key}"
+    before_qty = float(pos.get("qty") or 0)
+    after_qty = max(0.0, original_qty * remaining_after)
+    reduction_receipt = {
+        "schema": "paper_position_reduction_v1",
+        "event": "POSITION_REDUCED",
+        "event_id": reduction_event_id,
+        "reduction_id": reduction_id,
+        "event_seq": reduction_seq,
         "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
-        "remaining_fraction": remaining_after, "price": float(price), "policy_id": pos.get("policy_id"),
-        "closed_qty": close_qty if remaining_after > 0 else float(pos.get("qty") or 0),
+        "remaining_fraction": remaining_after, "fill_price": float(price), "policy_id": pos.get("policy_id"),
+        "original_qty": round(original_qty, 8),
+        "prior_qty": round(before_qty, 8),
+        "reduced_qty": round(close_qty if remaining_after > 0 else before_qty, 8),
+        "remaining_qty": round(after_qty, 8),
         "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
         "cumulative_realized_net_usd": pos["policy_partial_realized_net_usd"],
-    })
+        "direction": direction,
+        "research_lane": lane,
+    }
+    pos.setdefault("partial_exit_receipts", []).append(copy.deepcopy(reduction_receipt))
     pos["policy_remaining_fraction"] = remaining_after
     if remaining_after <= 0:
         close_position(pos, reason)
         return True
     # Reduce only the local paper leg. Relay reconciliation consumes the signed
     # receipt and may copy it only when separately armed.
-    pos["qty"] = original_qty * remaining_after
-    save_paper_lifecycle(reason=f"partial_exit:{reason}")
+    # Persist the immutable outbox receipt in the same atomic paper snapshot as
+    # the reduced quantity. Delivery happens only after that local commit.
+    pos.setdefault("partial_reduction_outbox", []).append(copy.deepcopy(reduction_receipt))
+    pos["qty"] = after_qty
+    if not save_paper_lifecycle(reason=f"partial_exit:{reason}"):
+        pos.clear()
+        pos.update(position_before_action)
+        logger.error(
+            f"[PAPER REDUCTION] persistence failed; rolled back trade="
+            f"{pos.get('trade_id')} event={reduction_event_id}"
+        )
+        return False
+    if _push_showcase_relay_event(
+        "POSITION_REDUCED",
+        pos.get("trade_id"),
+        copy.deepcopy(reduction_receipt),
+        wait_for_durable_receipt=True,
+    ):
+        _ack_partial_reduction_outbox(
+            pos.get("trade_id"), reduction_receipt["event_id"]
+        )
     return False
 
 
@@ -8648,6 +8702,7 @@ _relay_push_state = {
 }
 _relay_push_history = deque(maxlen=20)
 _relay_push_history_lock = threading.Lock()
+_partial_reduction_drain_lock = threading.Lock()
 _relay_http_session = requests.Session()
 _relay_http_adapter = requests.adapters.HTTPAdapter(
     pool_connections=4,
@@ -8677,6 +8732,7 @@ def _platform_relay_connection_keepalive_loop():
     if not url:
         return
     while not shutdown_event.is_set():
+        _drain_partial_reduction_outbox_once()
         try:
             response = _relay_http_session.get(
                 url,
@@ -8912,6 +8968,22 @@ def _platform_relay_lane_for_event(
     return derived_lane
 
 
+def _platform_relay_evidence_lane_for_event(
+    trade_id: str = None,
+    research_lane: str = None,
+) -> str:
+    """Resolve signed evidence identity without granting live-copy authority."""
+    trade_key = str(trade_id or "").strip().lower()
+    prefix, separator, _ = trade_key.partition("-")
+    if not separator:
+        return ""
+    derived_lane = PLATFORM_RELAY_EVIDENCE_PREFIX_LANES.get(prefix, "")
+    explicit_lane = str(research_lane or "").strip().upper()
+    if not derived_lane or (explicit_lane and explicit_lane != derived_lane):
+        return ""
+    return derived_lane
+
+
 def _push_showcase_relay_event(
     event: str,
     trade_id: str = None,
@@ -8950,12 +9022,17 @@ def _push_showcase_relay_event(
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
-    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED"):
-        relay_lane = _platform_relay_lane_for_event(
+    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED"):
+        evidence_only = event == "POSITION_REDUCED"
+        relay_lane = (
+            _platform_relay_evidence_lane_for_event
+            if evidence_only else _platform_relay_lane_for_event
+        )(
             trade_id,
             payload.get("research_lane"),
         )
-        if relay_lane not in PLATFORM_RELAY_ELIGIBLE_LANES:
+        allowed_lanes = PLATFORM_RELAY_CONFIGURED_LANES if evidence_only else PLATFORM_RELAY_ELIGIBLE_LANES
+        if relay_lane not in allowed_lanes:
             logger.warning(
                 f"[RELAY PUSH] blocked non-relay lifecycle lane="
                 f"{payload.get('research_lane') or 'UNKNOWN'} "
@@ -8974,7 +9051,7 @@ def _push_showcase_relay_event(
     # only when this canonical owner also HMAC-signs the payload.
     if (
         webhook_secret
-        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED")
+        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED")
         and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
         and (
             (
@@ -8997,6 +9074,22 @@ def _push_showcase_relay_event(
                 event == "ORDER_EXPIRED"
                 and isinstance(payload.get("source_expires_at"), str)
             )
+            or (
+                event == "POSITION_REDUCED"
+                and isinstance(payload.get("event_id"), str)
+                and isinstance(payload.get("reduction_id"), str)
+                and isinstance(payload.get("event_seq"), int)
+                and int(payload.get("event_seq") or 0) > 0
+                and isinstance(payload.get("prior_qty"), (int, float))
+                and isinstance(payload.get("reduced_qty"), (int, float))
+                and isinstance(payload.get("remaining_qty"), (int, float))
+                and isinstance(payload.get("fill_price"), (int, float))
+                and float(payload.get("prior_qty") or 0) > 0
+                and float(payload.get("reduced_qty") or 0) > 0
+                and float(payload.get("remaining_qty") or 0) > 0
+                and float(payload.get("fill_price") or 0) > 0
+                and abs(float(payload.get("prior_qty")) - float(payload.get("reduced_qty")) - float(payload.get("remaining_qty"))) <= 0.00000001
+            )
         )
     ):
         payload["schema"] = "dcf-showcase-intent-v1"
@@ -9007,8 +9100,9 @@ def _push_showcase_relay_event(
         # POSITION_CLOSED must not drop on a 2.5s Railway blip — exits are
         # latency-critical and the poll backstop is slower. Allow a longer
         # client timeout plus a couple of tight retries for that event only.
-        post_timeout = 8.0 if event in ("POSITION_CLOSED", "ORDER_EXPIRED") else 2.5
-        attempts = 3 if event in ("POSITION_CLOSED", "ORDER_EXPIRED") else 1
+        durable_events = ("POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED")
+        post_timeout = 8.0 if event in durable_events else 2.5
+        attempts = 3 if event in durable_events else 1
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -9080,6 +9174,68 @@ def _push_showcase_relay_event(
         return _post()
     threading.Thread(target=_post, daemon=True).start()
     return True
+
+
+def _ack_partial_reduction_outbox(trade_id: str, event_id: str) -> bool:
+    """Remove one durably acknowledged event while retaining its audit receipt."""
+    removed = None
+    with trade_lock:
+        pos = next(
+            (row for row in paper_positions if row.get("trade_id") == trade_id),
+            None,
+        )
+        if not pos:
+            return False
+        outbox = pos.get("partial_reduction_outbox") or []
+        for index, receipt in enumerate(outbox):
+            if isinstance(receipt, dict) and receipt.get("event_id") == event_id:
+                removed = (index, copy.deepcopy(receipt))
+                del outbox[index]
+                pos["partial_reduction_outbox"] = outbox
+                break
+    if removed is None:
+        return False
+    if save_paper_lifecycle(reason=f"partial_reduction_ack:{event_id}"):
+        return True
+    with trade_lock:
+        pos = next(
+            (row for row in paper_positions if row.get("trade_id") == trade_id),
+            None,
+        )
+        if pos is not None:
+            outbox = pos.setdefault("partial_reduction_outbox", [])
+            if not any(
+                isinstance(row, dict) and row.get("event_id") == event_id
+                for row in outbox
+            ):
+                outbox.insert(min(removed[0], len(outbox)), removed[1])
+    return False
+
+
+def _drain_partial_reduction_outbox_once() -> dict:
+    """Replay persisted reductions after restart and ACK only durable receipts."""
+    if not _partial_reduction_drain_lock.acquire(blocking=False):
+        return {"attempted": 0, "acked": 0, "busy": True}
+    try:
+        with trade_lock:
+            pending = [
+                (str(pos.get("trade_id") or ""), copy.deepcopy(receipt))
+                for pos in paper_positions
+                for receipt in (pos.get("partial_reduction_outbox") or [])
+                if isinstance(receipt, dict) and receipt.get("event_id")
+            ]
+        acked = 0
+        for trade_id, receipt in pending:
+            if _push_showcase_relay_event(
+                "POSITION_REDUCED",
+                trade_id,
+                receipt,
+                wait_for_durable_receipt=True,
+            ) and _ack_partial_reduction_outbox(trade_id, receipt["event_id"]):
+                acked += 1
+        return {"attempted": len(pending), "acked": acked, "busy": False}
+    finally:
+        _partial_reduction_drain_lock.release()
 
 
 def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
@@ -33990,6 +34146,9 @@ def _relay_position_row_lite(row: dict, tick_px) -> dict:
         "current_price": tick_px,
         "research_lane": row.get("research_lane"),
         "research_model": row.get("research_model"),
+        "policy_remaining_fraction": row.get("policy_remaining_fraction"),
+        "partial_exit_receipts": copy.deepcopy(row.get("partial_exit_receipts") or []),
+        "partial_reduction_outbox": copy.deepcopy(row.get("partial_reduction_outbox") or []),
     }
     # The active dashboard overlays this bounded relay row while paper execution
     # is running. Keep the presentation P&L fields in the overlay too; otherwise
