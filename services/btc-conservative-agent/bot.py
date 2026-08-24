@@ -3635,13 +3635,25 @@ def lane_register_pending_order(order: dict):
             observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
         )
     is_paper_entry = not bool(order.get("bitfinex_order_id") or order.get("bitfinex_live_entry")) and str(order.get("entry_type") or "").upper() not in {"POSTONLY_TP", "REDUCE_ONLY", "EXIT"}
+    if is_paper_entry:
+        # Freeze the signed paper-policy identity at the atomic order boundary.
+        # Later entry helpers and relay-capability checks may enrich mutable
+        # state, but must never mint a second signature for this episode.
+        frozen_identity = paper_policy_identity_for_sources(
+            _collector_v22_epoch_id(),
+            master_signal if isinstance(master_signal, dict) else {},
+            order,
+        )
+        order.update(copy.deepcopy(frozen_identity))
+        if isinstance(master_signal, dict):
+            master_signal.update(copy.deepcopy(frozen_identity))
     source_ts = float(order.get("created_ts") or time.time())
     evidence_key = f"pending-order:{tid}"
     queued = _get_pending_order_evidence_worker().submit(
         evidence_key,
         {
-            "order": order,
-            "signal": master_signal if isinstance(master_signal, dict) else {},
+            "order": copy.deepcopy(order),
+            "signal": copy.deepcopy(master_signal) if isinstance(master_signal, dict) else {},
             "is_paper_entry": is_paper_entry,
         },
         source_ts=source_ts,
@@ -4628,23 +4640,30 @@ def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> 
         "event": "POSITION_REDUCED",
         "event_id": reduction_event_id,
         "reduction_id": reduction_id,
+        "receipt_id": reduction_id,
         "event_seq": reduction_seq,
         "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
         "remaining_fraction": remaining_after, "fill_price": float(price), "policy_id": pos.get("policy_id"),
         "original_qty": round(original_qty, 8),
         "prior_qty": round(before_qty, 8),
         "reduced_qty": round(close_qty if remaining_after > 0 else before_qty, 8),
+        "closed_qty": round(close_qty if remaining_after > 0 else before_qty, 8),
         "remaining_qty": round(after_qty, 8),
         "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
         "cumulative_realized_net_usd": pos["policy_partial_realized_net_usd"],
         "direction": direction,
         "research_lane": lane,
+        "policy_signature": pos.get("policy_signature"),
+        "policy_epoch_id": pos.get("policy_epoch_id"),
     }
-    pos.setdefault("partial_exit_receipts", []).append(copy.deepcopy(reduction_receipt))
     pos["policy_remaining_fraction"] = remaining_after
     if remaining_after <= 0:
+        # A terminal stop/target is a full close, not a partial reduction.
+        # Putting it in the partial ledger makes a valid terminal lifecycle
+        # appear to contain an unsigned partial-close receipt.
         close_position(pos, reason)
         return True
+    pos.setdefault("partial_exit_receipts", []).append(copy.deepcopy(reduction_receipt))
     # Reduce only the local paper leg. Relay reconciliation consumes the signed
     # receipt and may copy it only when separately armed.
     # Persist the immutable outbox receipt in the same atomic paper snapshot as
@@ -7035,7 +7054,9 @@ def compute_offset_029_atr_entry(signal: dict) -> dict:
         offset029_policy
     )
     signal.update(policy.entry_fields(direction, price))
-    signal["paper_only"] = False
+    # This remains the canonical local-paper lifecycle even when a separate
+    # platform relay is capable of copying a newly signed intent.
+    signal["paper_only"] = True
     signal["relay_eligible"] = lane in PLATFORM_RELAY_ELIGIBLE_LANES
     if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
         features = signal.get("features") or {}
@@ -25570,6 +25591,8 @@ def close_position(pos: dict, exit_reason: str):
                 _buf_float(pos.get("policy_partial_realized_net_usd"), 0.0), 4
             ),
             "partial_exit_receipts": copy.deepcopy(pos.get("partial_exit_receipts") or []),
+            "policy_original_qty": pos.get("policy_original_qty"),
+            "policy_remaining_fraction": pos.get("policy_remaining_fraction"),
             "trading_fees_usd": round(trading_fees, 2),
             "fees_usd": round(trading_fees, 2),
             "funding_fees_usd": round(funding_total, 2),

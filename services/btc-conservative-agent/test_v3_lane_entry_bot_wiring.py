@@ -103,3 +103,19 @@ def test_verdict_and_resolution_share_one_policy_material_builder():
     assert '"entry_ttl_sec": float(SIGNAL_TTL_SEC)' in SOURCE
     assert "dual_write_paper_order_intent(" in SOURCE
 
+
+def test_pending_registration_freezes_policy_identity_before_async_evidence_and_fill():
+    register = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "lane_register_pending_order"),
+    )
+    fill = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "fill_order"),
+    )
+    assert "frozen_identity = paper_policy_identity_for_sources(" in register
+    assert "order.update(copy.deepcopy(frozen_identity))" in register
+    assert "master_signal.update(copy.deepcopy(frozen_identity))" in register
+    assert '"order": copy.deepcopy(order)' in register
+    assert "paper_policy_identity_for_sources(" in fill
+

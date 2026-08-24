@@ -106,12 +106,39 @@ def test_partial_receipt_is_persisted_before_signed_delivery() -> None:
     assert receipt == pos["partial_exit_receipts"][0]
     assert receipt["event_id"] == "o29ps-proof:POSITION_REDUCED:PARTIAL_TP_1_ATR"
     assert receipt["reduction_id"] == "o29ps-proof:PARTIAL_TP_1_ATR"
+    assert receipt["receipt_id"] == receipt["reduction_id"]
     assert receipt["event_seq"] == 1
     assert receipt["prior_qty"] == 0.02
     assert receipt["reduced_qty"] == 0.005
+    assert receipt["closed_qty"] == 0.005
     assert receipt["remaining_qty"] == 0.015
     assert receipt["fill_price"] == 101.0
     assert pushed == [("POSITION_REDUCED", "o29ps-proof", receipt, True)]
+
+
+def test_terminal_exit_is_not_mislabeled_as_partial_reduction() -> None:
+    class TerminalAction:
+        reason = "INITIAL_STOP_1_ATR"
+        close_fraction = 1.0
+        remaining_fraction = 0.0
+        first_partial_done = False
+        second_partial_done = False
+        break_even_armed = False
+        peak_price = 100.0
+
+    ns, order, pushed = _namespace()
+    ns["offset029_protected_policy"].exit_action = lambda **_kwargs: TerminalAction()
+    closed = []
+    ns["close_position"] = lambda pos, reason: closed.append((pos["trade_id"], reason))
+    apply_exit = _compile("_apply_protected_patient_chase_exit", ns)
+    pos = _position()
+
+    assert apply_exit(pos, 99.0, 10.0) is True
+    assert closed == [("o29ps-proof", "INITIAL_STOP_1_ATR")]
+    assert pos.get("partial_exit_receipts") in (None, [])
+    assert pos.get("partial_reduction_outbox") in (None, [])
+    assert order == []
+    assert pushed == []
 
 
 def test_failed_local_commit_rolls_back_and_never_delivers() -> None:
