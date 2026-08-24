@@ -6,6 +6,7 @@ import {
   canClaimExpiredCycleForCurrentGeneration,
   exactLifecycleRevisionMatches,
   relayIntentEnvelope,
+  resolveSignedShowcaseSizing,
   positionReducedEvidence,
   isReductionEvidenceIdentity,
   reductionAuditMatches,
@@ -59,7 +60,8 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
   const current = {
     action: 'ENTER',
     trade_id: 'cont-race',
-    entry: { exact_limit_price: 63_167, exact_qty_btc: 0.02361 },
+    entry: { exact_limit_price: 63_167, exact_qty_btc: 25 / 63_167 },
+    risk: { max_margin_usd: 0.25 },
     context: {
       showcase_event: 'LIMIT_UPDATED',
       showcase_event_id: 'revision-a',
@@ -73,7 +75,7 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
       event_id: 'revision-a',
       event_seq: 4,
       limit_price: 63_167,
-      qty: 0.02361,
+      qty: 25 / 63_167, margin_usdt: 0.25, leverage: 100,
     }),
     true,
   );
@@ -84,7 +86,7 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
       event_id: 'revision-b',
       event_seq: 4,
       limit_price: 63_166,
-      qty: 0.02361,
+      qty: 25 / 63_166, margin_usdt: 0.25, leverage: 100,
     }),
     false,
   );
@@ -101,9 +103,37 @@ test('signed executable envelope preserves the exact showcase quantity', () => {
     executable: true,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     limit_price: 63_614.55,
-    qty: 0.02361832782239017,
-  }) as { entry?: { exact_qty_btc?: number } };
-  assert.equal(envelope.entry?.exact_qty_btc, 0.02361832782239017);
+    qty: 25 / 63_614.55,
+    margin_usdt: 0.25,
+    leverage: 100,
+  }) as {
+    entry?: { exact_qty_btc?: number };
+    risk?: { max_margin_usd?: number };
+    context?: Record<string, unknown>;
+  };
+  assert.equal(envelope.entry?.exact_qty_btc, 25 / 63_614.55);
+  assert.equal(envelope.risk?.max_margin_usd, 0.25);
+  assert.equal(envelope.context?.requested_margin_source, 'SIGNED_SHOWCASE_MARGIN_USDT');
+  assert.equal(envelope.context?.requested_notional_usd, 25);
+});
+
+test('signed showcase sizing binds exact margin provenance and fails closed above 25 cents', () => {
+  const valid = resolveSignedShowcaseSizing({
+    marginUsd: 0.2, leverage: 100, limitPrice: 64_000, qtyBtc: 20 / 64_000,
+  });
+  assert.deepEqual(valid, {
+    ok: true, marginUsd: 0.2, leverage: 100, requestedNotionalUsd: 20,
+    provenance: 'SIGNED_SHOWCASE_MARGIN_USDT',
+  });
+  assert.equal(resolveSignedShowcaseSizing({
+    marginUsd: 0.250001, leverage: 100, limitPrice: 64_000, qtyBtc: 25 / 64_000,
+  }).ok, false);
+  assert.equal(resolveSignedShowcaseSizing({
+    marginUsd: 0, leverage: 100, limitPrice: 64_000, qtyBtc: 0,
+  }).ok, false);
+  assert.equal(resolveSignedShowcaseSizing({
+    marginUsd: 0.25, leverage: 100, limitPrice: 64_000, qtyBtc: 0.01,
+  }).ok, false);
 });
 
 test('terminal fallback marker survives only on its signed exact-limit revision', () => {
@@ -118,6 +148,9 @@ test('terminal fallback marker survives only on its signed exact-limit revision'
     executable: true,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     limit_price: 63_167,
+    qty: 25 / 63_167,
+    margin_usdt: 0.25,
+    leverage: 100,
   };
   const terminal = relayIntentEnvelope('cycle-1', 'cont-settle', {
     ...base,

@@ -11,7 +11,6 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
-  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   isExecutableEntryPolicy,
   isMirrorableLaneTradeId,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
@@ -171,6 +170,42 @@ type CanonicalRelayPersistenceReceipt = RelayPersistenceReceipt & {
   cycleId?: string;
 };
 
+export const SIGNED_SHOWCASE_MAX_MARGIN_USD = 0.25;
+const SIGNED_SHOWCASE_LEVERAGE = 100;
+const SIGNED_SHOWCASE_MARGIN_EQUALITY_EPSILON_USD = 1e-8;
+
+export function resolveSignedShowcaseSizing(input: {
+  marginUsd: unknown;
+  leverage: unknown;
+  qtyBtc: unknown;
+  limitPrice: unknown;
+}) {
+  const marginUsd = Number(input.marginUsd);
+  const leverage = Number(input.leverage);
+  const qtyBtc = Number(input.qtyBtc);
+  const limitPrice = Number(input.limitPrice);
+  if (!Number.isFinite(marginUsd) || marginUsd <= 0 || marginUsd > SIGNED_SHOWCASE_MAX_MARGIN_USD) {
+    return { ok: false as const, reason: 'SIGNED_MARGIN_OUT_OF_RANGE' };
+  }
+  if (leverage !== SIGNED_SHOWCASE_LEVERAGE) {
+    return { ok: false as const, reason: 'SIGNED_LEVERAGE_MISMATCH' };
+  }
+  if (!Number.isFinite(qtyBtc) || qtyBtc <= 0 || !Number.isFinite(limitPrice) || limitPrice <= 0) {
+    return { ok: false as const, reason: 'SIGNED_SIZING_FIELDS_INVALID' };
+  }
+  const impliedMarginUsd = qtyBtc * limitPrice / leverage;
+  if (Math.abs(impliedMarginUsd - marginUsd) > SIGNED_SHOWCASE_MARGIN_EQUALITY_EPSILON_USD) {
+    return { ok: false as const, reason: 'SIGNED_MARGIN_QTY_MISMATCH' };
+  }
+  return {
+    ok: true as const,
+    marginUsd,
+    leverage,
+    requestedNotionalUsd: marginUsd * leverage,
+    provenance: 'SIGNED_SHOWCASE_MARGIN_USDT' as const,
+  };
+}
+
 /** Prove that the exact incoming revision is the cycle's canonical envelope. */
 export function exactLifecycleRevisionMatches(
   current: RelayLifecycleEnvelope | null | undefined,
@@ -180,6 +215,12 @@ export function exactLifecycleRevisionMatches(
   const incomingLimit = Number(incoming.limit_price);
   const currentQty = Number(current?.entry?.exact_qty_btc);
   const incomingQty = Number(incoming.qty);
+  const sizing = resolveSignedShowcaseSizing({
+    marginUsd: incoming.margin_usdt,
+    leverage: incoming.leverage,
+    qtyBtc: incomingQty,
+    limitPrice: incomingLimit,
+  });
   return Boolean(
     current?.action === 'ENTER'
     && String(current?.trade_id ?? '') === String(incoming.trade_id ?? '')
@@ -193,7 +234,9 @@ export function exactLifecycleRevisionMatches(
     && currentQty > 0
     && Number.isFinite(incomingQty)
     && incomingQty > 0
-    && btcQuantityMatches(currentQty, incomingQty),
+    && btcQuantityMatches(currentQty, incomingQty)
+    && sizing.ok
+    && Number((current as { risk?: { max_margin_usd?: unknown } }).risk?.max_margin_usd) === sizing.marginUsd,
   );
 }
 
@@ -311,6 +354,12 @@ export function relayIntentEnvelope(
     && body.qty > 0
       ? body.qty
       : null;
+  const signedSizing = resolveSignedShowcaseSizing({
+    marginUsd: body?.margin_usdt,
+    leverage: body?.leverage,
+    qtyBtc: exactQtyBtc,
+    limitPrice: exactLimitPrice,
+  });
   const settleNotBeforeMs = Date.parse(
     String(body?.relay_settle_not_before_ts ?? ''),
   );
@@ -359,7 +408,7 @@ export function relayIntentEnvelope(
       ? { source_expires_at: body.source_expires_at }
       : {}),
   };
-  if (exactLimitPrice == null) {
+  if (exactLimitPrice == null || exactQtyBtc == null || !signedSizing.ok) {
     return {
       cycle_id: cycleId,
       trade_id: tradeId,
@@ -368,6 +417,7 @@ export function relayIntentEnvelope(
       direction: dir,
       version: body?.bot_version ?? 'showcase-relay-v2',
       context: lifecycleContext,
+      sizing_blocker: signedSizing.ok ? undefined : signedSizing.reason,
     };
   }
   const envelope: SignalIntentEnvelope & {
@@ -416,7 +466,7 @@ export function relayIntentEnvelope(
         }),
       ),
       leverage_hint: DEFAULT_SUBSCRIBER_LEVERAGE,
-      max_margin_usd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+      max_margin_usd: signedSizing.marginUsd,
     },
     context: {
       regime: 'UNKNOWN',
@@ -426,6 +476,9 @@ export function relayIntentEnvelope(
       research_venue: 'bitfinex',
       disclaimer:
         'Signed exact showcase limit. Subscriber execution remains subject to platform and exchange safety gates.',
+      requested_margin_source: signedSizing.provenance,
+      requested_margin_usd: signedSizing.marginUsd,
+      requested_notional_usd: signedSizing.requestedNotionalUsd,
       ...lifecycleContext,
     },
     ...(body?.intent_source ? { intent_source: body.intent_source } : {}),

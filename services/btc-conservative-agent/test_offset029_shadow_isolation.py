@@ -201,6 +201,9 @@ def test_offset_order_path_disables_generic_chase_and_direct_exchange_submit():
     assert "if not registered_offset_policy:\n        _log_shadow_vs_live_entry" in place
     assert "funnel_on_order(signal, order)" in place
     assert "lane_register_pending_order(order)" in place
+    assert "FIXED_MARGIN_USDT if raw_margin_usdt is None else raw_margin_usdt" in place
+    assert "if margin_usdt <= 0 or margin_usdt > SIGNED_SHOWCASE_MAX_MARGIN_USDT:" in place
+    assert "qty = margin_usdt * lev / limit_price" in place
     assert LANE in touch_grid and touch_grid.index("return") < touch_grid.index("arm_touch_grid_rows")
 
 

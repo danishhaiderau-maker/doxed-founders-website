@@ -109,12 +109,14 @@ const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
 const SHOWCASE_ORDER_SNAPSHOT_PROPAGATION_GRACE_MS = 15_000;
 const BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS = 15_000;
 /**
- * The showcase sizes collateral at its signal price, then posts its canonical
- * deterministic limit up to 0.1% away. Preserve that exact quantity while
- * allowing only a tightly bounded extra margin for the signed anchor offset
- * and decimal transport. Materially larger source sizing still fails closed.
+ * Exact signed quantity is deterministically floored to Bitfinex precision.
+ * The signed margin is a strict ceiling: no anchor or transport tolerance may
+ * expand it, and any larger source sizing fails closed.
  */
-export const EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT = 0.2;
+export const EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT = 0;
+export const MAX_SIGNED_COPY_MARGIN_PER_LEG_USD = 0.25;
+export const MAX_AGGREGATE_COPY_MARGIN_USD = 5;
+export const MAX_AGGREGATE_COPY_NOTIONAL_USD = 500;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
 export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
@@ -123,7 +125,7 @@ const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
 
 export type ExactShowcaseEntryQtyResolution =
   | { ok: true; qty: number; requiredMarginUsd: number; capQty: number }
-  | { ok: false; reason: 'MISSING_EXACT_QTY' | 'INVALID_SIZING_CONTEXT' | 'BELOW_EXCHANGE_MIN_QTY' | 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
+  | { ok: false; reason: 'MISSING_EXACT_QTY' | 'INVALID_SIZING_CONTEXT' | 'MARGIN_CEILING_EXCEEDED' | 'BELOW_EXCHANGE_MIN_QTY' | 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
 
 /**
  * Prisma Decimal values support Number(...), while the deliberately small
@@ -161,6 +163,9 @@ export function resolveExactShowcaseEntryQty(input: {
     || !Number.isFinite(input.leverage) || input.leverage <= 0
     || !Number.isFinite(input.limitPrice) || input.limitPrice <= 0
   ) return { ok: false, reason: 'INVALID_SIZING_CONTEXT' };
+  if (input.maxMarginUsd > MAX_SIGNED_COPY_MARGIN_PER_LEG_USD) {
+    return { ok: false, reason: 'MARGIN_CEILING_EXCEEDED' };
+  }
   const qty = Math.floor((exact + Number.EPSILON) * 1e5) / 1e5;
   const minQty = input.minQtyBtc ?? MIN_QTY_BTC;
   if (qty < minQty) return { ok: false, reason: 'BELOW_EXCHANGE_MIN_QTY' };
@@ -3028,6 +3033,29 @@ export function assessCorrelatedExposureCluster(input: {
       aggregateQty: null, aggregateMarginUsd: null, nearest: null,
     };
   }
+  const aggregateParticipants = new Map<string, CorrelatedExposureCandidate>();
+  for (const row of [...input.active, input.candidate]) aggregateParticipants.set(row.participantId, row);
+  const allActive = [...aggregateParticipants.values()];
+  if (allActive.some((row) => row.marginUsd == null || !Number.isFinite(row.marginUsd) || row.marginUsd <= 0)) {
+    return {
+      allowed: false, reason: 'RISK_STATE_UNAVAILABLE', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd: null, aggregateNotionalUsd: null, nearest: null,
+    };
+  }
+  const aggregateMarginUsd = allActive.reduce((sum, row) => sum + Number(row.marginUsd), 0);
+  const aggregateNotionalUsd = aggregateMarginUsd * DEFAULT_SUBSCRIBER_LEVERAGE;
+  if (aggregateMarginUsd > MAX_AGGREGATE_COPY_MARGIN_USD + Number.EPSILON) {
+    return {
+      allowed: false, reason: 'AGGREGATE_MARGIN_CEILING', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd, aggregateNotionalUsd, nearest: null,
+    };
+  }
+  if (aggregateNotionalUsd > MAX_AGGREGATE_COPY_NOTIONAL_USD + Number.EPSILON) {
+    return {
+      allowed: false, reason: 'AGGREGATE_NOTIONAL_CEILING', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd, aggregateNotionalUsd, nearest: null,
+    };
+  }
   const sameDirection = input.active.filter(
     (row) => row.direction === input.candidate.direction
       && row.participantId !== input.candidate.participantId,
@@ -3067,9 +3095,8 @@ export function assessCorrelatedExposureCluster(input: {
     aggregateQty: [input.candidate, ...sameDirection].every((row) => row.qty != null)
       ? [input.candidate, ...sameDirection].reduce((sum, row) => sum + Number(row.qty), 0)
       : null,
-    aggregateMarginUsd: [input.candidate, ...sameDirection].every((row) => row.marginUsd != null)
-      ? [input.candidate, ...sameDirection].reduce((sum, row) => sum + Number(row.marginUsd), 0)
-      : null,
+    aggregateMarginUsd,
+    aggregateNotionalUsd,
     nearest,
   };
 }

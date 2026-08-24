@@ -5426,6 +5426,7 @@ def compute_exposure():
     return total
 
 FIXED_MARGIN_USDT = 0.25
+SIGNED_SHOWCASE_MAX_MARGIN_USDT = 0.25
 # V3.1 controlled validation: every enabled research tile requests at most
 # $0.25 margin. At 100x this is $25 notional; live copy remains separately
 # fail-closed until the user arms the relay and the venue accepts the size.
@@ -9287,7 +9288,8 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         or state.get("price")
         or 0
     )
-    margin_usdt = float(sig.get("margin_usdt") or FIXED_MARGIN_USDT)
+    raw_margin_usdt = sig.get("margin_usdt")
+    margin_usdt = float(FIXED_MARGIN_USDT if raw_margin_usdt is None else raw_margin_usdt)
     try:
         exact_qty = float(sig.get("qty"))
     except (TypeError, ValueError):
@@ -20223,9 +20225,23 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         return False
     pullback_pct = signal.get("pullback_pct", state.get("pullback_threshold", 0.001))
     signal_price = signal.get("signal_price", price)
-    margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+    raw_margin_usdt = signal.get("margin_usdt")
+    margin_usdt = float(FIXED_MARGIN_USDT if raw_margin_usdt is None else raw_margin_usdt)
+    if margin_usdt <= 0 or margin_usdt > SIGNED_SHOWCASE_MAX_MARGIN_USDT:
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = "SIZING_FAIL_CLOSED"
+        signal["exit_reason"] = "SIZING_FAIL_CLOSED"
+        signal["order_placed"] = False
+        logger.warning(
+            f"[SIZING] blocked non-positive explicit margin trade_id={signal.get('trade_id')} "
+            f"margin_usdt={margin_usdt} [PIPELINE ENFORCEMENT]"
+        )
+        return False
     lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
-    qty = margin_usdt * lev / price
+    # The signed relay copies this exact resting limit and quantity.  Size at
+    # that exact limit so the requested collateral remains a hard ceiling after
+    # the 0.29% anchor is applied (especially for SHORT limits above market).
+    qty = margin_usdt * lev / limit_price
     order_created_ts = time.time()
     # Every order created through this path has passed the dashboard's exact
     # chase selector. The selected activation bucket must rest for a complete
@@ -20246,8 +20262,15 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         "entry_limit_policy": signal.get("entry_limit_policy"),
         "qty": qty,
         "margin_usdt": margin_usdt,
-        "requested_margin_usd": signal.get("requested_margin_usd") or margin_usdt,
-        "requested_notional_usd": signal.get("requested_notional_usd") or round(margin_usdt * float(lev), 4),
+        "requested_margin_usd": (
+            margin_usdt if signal.get("requested_margin_usd") is None
+            else signal.get("requested_margin_usd")
+        ),
+        "requested_notional_usd": (
+            round(margin_usdt * float(lev), 4)
+            if signal.get("requested_notional_usd") is None
+            else signal.get("requested_notional_usd")
+        ),
         "accepted_margin_usd": None,
         "accepted_notional_usd": None,
         "status": "PENDING",
@@ -20625,7 +20648,8 @@ def _promote_signal_to_limit_order_claimed(signal: dict, skip_virtual_defer: boo
         signal["status"] = SIGNAL_STATUS_AWAITING_5M
         signal["awaiting_5m_since"] = time.time()
         signal["order_placed"] = False
-        margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+        raw_margin_usdt = signal.get("margin_usdt")
+        margin_usdt = float(FIXED_MARGIN_USDT if raw_margin_usdt is None else raw_margin_usdt)
         lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
         signal["qty"] = margin_usdt * lev / price
         logger.info(
@@ -20641,7 +20665,8 @@ def _promote_signal_to_limit_order_claimed(signal: dict, skip_virtual_defer: boo
         signal["status"] = SIGNAL_STATUS_AWAITING_MICRO
         signal["awaiting_micro_since"] = time.time()
         signal["order_placed"] = False
-        margin_usdt = float(signal.get("margin_usdt") or FIXED_MARGIN_USDT)
+        raw_margin_usdt = signal.get("margin_usdt")
+        margin_usdt = float(FIXED_MARGIN_USDT if raw_margin_usdt is None else raw_margin_usdt)
         lev = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
         signal["qty"] = margin_usdt * lev / price
         logger.info(

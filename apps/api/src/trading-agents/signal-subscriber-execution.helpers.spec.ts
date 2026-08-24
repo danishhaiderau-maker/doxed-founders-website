@@ -303,16 +303,16 @@ test('decimal-like terminal fill prices remain finite for partial-close P&L acco
 
 test('exact showcase quantity is preserved below the subscriber cap', () => {
   const result = resolveExactShowcaseEntryQty({
-    exactQtyBtc: 0.02361832782239017,
-    maxMarginUsd: 20,
+    exactQtyBtc: 20 / 63_614.55,
+    maxMarginUsd: 0.2,
     leverage: 100,
     limitPrice: 63_614.55,
   });
   assert.deepEqual(result, {
     ok: true,
-    qty: 0.02361,
-    requiredMarginUsd: 0.02361 * 63_614.55 / 100,
-    capQty: 0.03143,
+    qty: 0.00031,
+    requiredMarginUsd: 0.00031 * 63_614.55 / 100,
+    capQty: 0.00031,
   });
 });
 
@@ -397,7 +397,7 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   assert.deepEqual(
     resolveExactShowcaseEntryQty({
       exactQtyBtc: 0.03143,
-      maxMarginUsd: 15,
+      maxMarginUsd: 0.2,
       leverage: 100,
       limitPrice: 63_614.55,
     }),
@@ -406,7 +406,7 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   assert.deepEqual(
     resolveExactShowcaseEntryQty({
       exactQtyBtc: null,
-      maxMarginUsd: 20,
+      maxMarginUsd: 0.2,
       leverage: 100,
       limitPrice: 63_614.55,
     }),
@@ -414,23 +414,23 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   );
 });
 
-test('exact showcase quantity allows only the deterministic anchor margin overhead', () => {
+test('exact showcase quantity is deterministically floored under the strict signed margin ceiling', () => {
   const canonical = resolveExactShowcaseEntryQty({
-    exactQtyBtc: 0.03143566690767344,
-    maxMarginUsd: 20,
+    exactQtyBtc: 25 / 63_685.62,
+    maxMarginUsd: 0.25,
     leverage: 100,
     limitPrice: 63_685.62,
   });
   assert.deepEqual(canonical, {
     ok: true,
-    qty: 0.03143,
-    requiredMarginUsd: 0.03143 * 63_685.62 / 100,
-    capQty: 0.0314,
+    qty: 0.00039,
+    requiredMarginUsd: 0.00039 * 63_685.62 / 100,
+    capQty: 0.00039,
   });
   assert.deepEqual(
     resolveExactShowcaseEntryQty({
-      exactQtyBtc: 0.03148,
-      maxMarginUsd: 20,
+      exactQtyBtc: 0.0004,
+      maxMarginUsd: 0.25,
       leverage: 100,
       limitPrice: 63_685.62,
     }),
@@ -491,14 +491,14 @@ test('correlated exposure uses an inclusive normalized 9 bps boundary', () => {
   const candidate = {
     participantId: 'candidate', cycleId: 'candidate-cycle', tradeId: 'cont-candidate',
     direction: 'SHORT' as const, limitPrice: 100_000, createdAtMs: 2_000,
-    qty: 0.01, marginUsd: 20,
+    qty: 0.0001, marginUsd: 0.25,
   };
   const assessDistance = (distanceUsd: number) => assessCorrelatedExposureCluster({
     candidate,
     active: [candidate, {
       participantId: 'existing', cycleId: 'existing-cycle', tradeId: 'cont-existing',
       direction: 'SHORT', limitPrice: 100_000 + distanceUsd, createdAtMs: 1_000,
-      qty: 0.02, marginUsd: 30,
+      qty: 0.0002, marginUsd: 0.25,
     }],
     riskStateAvailable: true,
   });
@@ -508,19 +508,19 @@ test('correlated exposure uses an inclusive normalized 9 bps boundary', () => {
   assert.equal(inclusive.reason, 'SAME_DIRECTION_PRICE_CLUSTER');
   assert.equal(inclusive.nearest?.priceDistanceUsd, 90);
   assert.equal(inclusive.nearest?.priceDistanceFraction, 0.0009);
-  assert.equal(inclusive.aggregateQty, 0.03);
-  assert.equal(inclusive.aggregateMarginUsd, 50);
+  assert.equal(inclusive.aggregateQty, 0.00030000000000000003);
+  assert.equal(inclusive.aggregateMarginUsd, 0.5);
   assert.equal(assessDistance(90.1).allowed, true); // 0.0901%
 });
 
 test('correlated exposure boundary ignores opposite direction and fails closed without risk state', () => {
   const candidate = {
     participantId: 'p4', cycleId: 'c4', tradeId: 'cont-4', direction: 'LONG' as const,
-    limitPrice: 64_000, createdAtMs: 4_000, qty: 0.01, marginUsd: 20,
+    limitPrice: 64_000, createdAtMs: 4_000, qty: 0.0001, marginUsd: 0.25,
   };
   const shorts = [1, 2, 3].map((n) => ({
     participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction: 'SHORT' as const,
-    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.01, marginUsd: 20,
+    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.0001, marginUsd: 0.25,
   }));
   assert.equal(assessCorrelatedExposureCluster({
     candidate, active: [...shorts, candidate], riskStateAvailable: true,
@@ -528,6 +528,25 @@ test('correlated exposure boundary ignores opposite direction and fails closed w
   const unknown = assessCorrelatedExposureCluster({ candidate, active: [], riskStateAvailable: false });
   assert.equal(unknown.allowed, false);
   assert.equal(unknown.reason, 'RISK_STATE_UNAVAILABLE');
+});
+
+test('aggregate copy exposure fails closed above five dollars margin and 500 dollars notional', () => {
+  const candidate = {
+    participantId: 'candidate', cycleId: 'candidate-cycle', tradeId: 'candidate-trade',
+    direction: 'LONG' as const, limitPrice: 64_000, createdAtMs: 21_000,
+    qty: 0.00039, marginUsd: 0.25,
+  };
+  const active = Array.from({ length: 20 }, (_, index) => ({
+    participantId: `p-${index}`, cycleId: `c-${index}`, tradeId: `t-${index}`,
+    direction: (index % 2 ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT',
+    limitPrice: 60_000 + index * 1_000, createdAtMs: index * 1_000,
+    qty: 0.00039, marginUsd: 0.25,
+  }));
+  const result = assessCorrelatedExposureCluster({ candidate, active, riskStateAvailable: true });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, 'AGGREGATE_MARGIN_CEILING');
+  assert.equal(result.aggregateMarginUsd, 5.25);
+  assert.equal(result.aggregateNotionalUsd, 525);
 });
 
 test('entry claim and correlated boundary snapshot are serialized by one database transaction', () => {
