@@ -69,11 +69,15 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
     current_fraction = _number(row.get("policy_remaining_fraction"))
     issues: list[str] = []
     previous = 1.0
+    last_remaining_qty: float | None = None
     signed = 0
     for index, receipt in enumerate(receipts):
         remaining = _number(receipt.get("remaining_fraction"))
         close_fraction = _number(receipt.get("close_fraction"))
         closed_qty = _number(receipt.get("closed_qty"))
+        receipt_original_qty = _number(receipt.get("original_qty"))
+        receipt_prior_qty = _number(receipt.get("prior_qty"))
+        receipt_remaining_qty = _number(receipt.get("remaining_qty"))
         if receipt.get("receipt_id") and receipt.get("policy_id") and receipt.get("ts"):
             signed += 1
         if remaining is None or close_fraction is None:
@@ -84,9 +88,24 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
         expected_close = max(0.0, previous - remaining)
         if abs(close_fraction - expected_close) > EPSILON:
             issues.append(f"RECEIPT_{index}_CLOSE_FRACTION_MISMATCH")
-        if original_qty is not None and closed_qty is not None:
-            if abs(closed_qty - original_qty * close_fraction) > max(EPSILON, original_qty * 1e-6):
+        # CSV quantities are display-rounded, while each signed reduction
+        # receipt carries the execution-time quantity basis.  Reconcile against
+        # that receipt basis when present; using the rounded CSV value creates
+        # false mismatches on valid small-quantity reductions.
+        quantity_basis = receipt_original_qty or original_qty
+        if quantity_basis is not None and closed_qty is not None:
+            quantity_tolerance = max(EPSILON, quantity_basis * 1e-6)
+            if abs(closed_qty - quantity_basis * close_fraction) > quantity_tolerance:
                 issues.append(f"RECEIPT_{index}_CLOSED_QTY_MISMATCH")
+            if receipt_prior_qty is not None and abs(
+                receipt_prior_qty - quantity_basis * previous
+            ) > quantity_tolerance:
+                issues.append(f"RECEIPT_{index}_PRIOR_QTY_MISMATCH")
+            if receipt_remaining_qty is not None and abs(
+                receipt_remaining_qty - quantity_basis * remaining
+            ) > quantity_tolerance:
+                issues.append(f"RECEIPT_{index}_REMAINING_QTY_MISMATCH")
+        last_remaining_qty = receipt_remaining_qty
         previous = remaining
     if receipts and not terminal:
         if current_fraction is None or abs(current_fraction - previous) > EPSILON:
@@ -95,8 +114,25 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
             issues.append("OPEN_QUANTITY_BASIS_MISSING")
         elif current_fraction is not None and abs(current_qty - original_qty * current_fraction) > max(EPSILON, original_qty * 1e-6):
             issues.append("OPEN_REMAINING_QTY_MISMATCH")
-    if receipts and terminal and abs(previous) > EPSILON:
-        issues.append("TERMINAL_REMAINING_NOT_ZERO")
+    if receipts and terminal:
+        # Partial receipts describe only the reductions before the final exit.
+        # A terminal trade row proves the last runner was closed through its
+        # explicit zero remaining fraction and final execution quantity.
+        terminal_close_qty = _number(row.get("execution_qty"))
+        if current_fraction is None or abs(current_fraction) > EPSILON:
+            issues.append("TERMINAL_REMAINING_NOT_ZERO")
+        if previous > EPSILON and (
+            terminal_close_qty is None or last_remaining_qty is None
+        ):
+            issues.append("TERMINAL_CLOSE_QUANTITY_BASIS_MISSING")
+        elif previous > EPSILON:
+            basis = original_qty or terminal_close_qty
+            if abs(terminal_close_qty - last_remaining_qty) > max(
+                # trades_3factor.csv stores the final execution quantity at
+                # six decimal places; allow only its half-unit quantization.
+                EPSILON, abs(basis) * 1e-6, 5.0e-7
+            ):
+                issues.append("TERMINAL_CLOSE_QTY_MISMATCH")
     if receipts and signed != len(receipts):
         issues.append("UNSIGNED_OR_UNIDENTIFIED_RECEIPT")
     return {
@@ -105,7 +141,9 @@ def _audit_row(row: dict[str, Any], *, terminal: bool) -> dict[str, Any]:
         "terminal": terminal,
         "receipt_count": len(receipts),
         "signed_receipt_count": signed,
-        "remaining_fraction": previous if receipts else current_fraction,
+        "remaining_fraction": current_fraction if terminal else (
+            previous if receipts else current_fraction
+        ),
         "original_qty": original_qty,
         "current_qty": current_qty,
         "issues": issues,

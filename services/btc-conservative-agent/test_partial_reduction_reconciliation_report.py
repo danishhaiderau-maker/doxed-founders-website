@@ -19,14 +19,18 @@ def _write_trades(path: Path, rows):
         writer.writerows(rows)
 
 
-def _receipt(receipt_id, remaining, close):
+def _receipt(receipt_id, remaining, close, *, original=1.0, prior=None):
+    prior = (remaining + close) * original if prior is None else prior
     return {
         "receipt_id": receipt_id,
         "policy_id": "protected-policy",
         "ts": "2026-08-24T00:00:00+00:00",
         "remaining_fraction": remaining,
         "close_fraction": close,
-        "closed_qty": close,
+        "original_qty": original,
+        "prior_qty": prior,
+        "closed_qty": close * original,
+        "remaining_qty": remaining * original,
     }
 
 
@@ -45,6 +49,7 @@ def test_report_reconciles_open_and_terminal_remaining_quantity(tmp_path):
     (tmp_path / "paper_lifecycle_v1.json").write_text(json.dumps(lifecycle), encoding="utf-8")
     _write_trades(tmp_path / "trades_3factor.csv", [{
         "trade_id": "closed-1", "research_lane": "OFFSET_029_ATR_REGIME",
+        "policy_remaining_fraction": 0.0,
         "partial_exit_receipts": json.dumps([
             _receipt("r-1", 0.5, 0.5), _receipt("r-2", 0.0, 0.5),
         ]),
@@ -62,6 +67,30 @@ def test_report_reconciles_open_and_terminal_remaining_quantity(tmp_path):
     assert report["lanes"]["OFFSET_029_ATR_REGIME"]["live_copy_evidence_sufficient"] is True
     assert report["live_copy_allowed"] is False
     assert json.loads((tmp_path / "partial_reduction_reconciliation_report.json").read_text()) == report
+
+
+def test_terminal_reconciliation_uses_signed_receipt_quantity_basis_not_rounded_csv(tmp_path):
+    original = 0.00031663
+    first = _receipt("r-1", 0.75, 0.25, original=original)
+    second = _receipt("r-2", 0.50, 0.25, original=original, prior=0.75 * original)
+    # Match venue/storage precision from real receipts.
+    for receipt in (first, second):
+        for key in ("original_qty", "prior_qty", "closed_qty", "remaining_qty"):
+            receipt[key] = round(receipt[key], 8)
+    _write_trades(tmp_path / "trades_3factor.csv", [{
+        "trade_id": "closed-rounded",
+        "research_lane": "OFFSET_029_ATR_PROTECTED",
+        "policy_original_qty": 0.000317,
+        "policy_remaining_fraction": 0.0,
+        "execution_qty": round(original * 0.50, 6),
+        "partial_exit_receipts": json.dumps([first, second]),
+    }])
+
+    report = build_partial_reduction_reconciliation_report(tmp_path, tmp_path)
+
+    assert report["integrity"]["passed"] is True
+    assert report["lifecycle_audits"][0]["issues"] == []
+    assert report["lifecycle_audits"][0]["remaining_fraction"] == 0.0
 
 
 def test_report_truthfully_blocks_unsigned_or_quantity_mismatched_receipts(tmp_path):
@@ -107,4 +136,3 @@ def test_dashboard_api_matches_completed_partial_reduction_report(monkeypatch):
     page = client.get("/partial-reduction-reconciliation")
     assert page.status_code == 200
     assert b"Partial Reduction Reconciliation" in page.data
-
