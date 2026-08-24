@@ -4864,8 +4864,10 @@ def compute_exposure():
             total += pos.get("qty", 0) * pos.get("entry", 0)
     return total
 
-FIXED_MARGIN_USDT = 20.0
-# v79: always deploy full $20 margin — conviction/regime/ADX scaling disabled (logged for analyzer)
+FIXED_MARGIN_USDT = 0.25
+# V3.1 controlled validation: every enabled research tile requests at most
+# $0.25 margin. At 100x this is $25 notional; live copy remains separately
+# fail-closed until the user arms the relay and the venue accepts the size.
 FLAT_MARGIN_EVERY_TRADE = True
 # Final fail-safe loss cap after the thesis window expires. During the first
 # THESIS_MIN_AGE_SEC the -12% thesis stop is the binding loss cap instead.

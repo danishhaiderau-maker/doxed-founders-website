@@ -99,6 +99,7 @@ COMBO_LANE_SPECS = {
         "chase_interval_sec": 60,
         "chase_remaining_gap_step_pct": 25.0,
         "entry_ttl_sec": 1800,
+        "margin_usd": 0.25,
         "atr_tp_multiple": 2.5,
         "atr_source": "frozen fill-time 3m ATR(14)",
         "path_end_sec": 7200,

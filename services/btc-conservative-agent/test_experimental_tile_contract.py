@@ -1,3 +1,7 @@
+import ast
+from pathlib import Path
+
+from combo_pathway_config import COMBO_EXECUTION_LANES, COMBO_LANE_SPECS
 from experimental_tile_contract import effective_route, relay_event_blockers
 from paper_policy_offset029_regime import account_risk_quantity, transition
 
@@ -37,3 +41,19 @@ def test_relay_event_requires_full_identity_and_supported_operation():
     ]
     event.pop("epoch_id")
     assert "MISSING_EPOCH_ID" in relay_event_blockers(event, supported_operations=("PARTIAL_CLOSE",))
+
+
+def test_v31_all_active_tiles_use_approved_quarter_dollar_margin_cap():
+    assert COMBO_EXECUTION_LANES
+    assert {COMBO_LANE_SPECS[lane]["margin_usd"] for lane in COMBO_EXECUTION_LANES} == {0.25}
+
+    # Verify the exact production module without importing its process-start
+    # side effects. This prevents a dashboard-only/config-only sizing change.
+    module = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    fixed_margin = next(
+        node.value.value
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "FIXED_MARGIN_USDT" for target in node.targets)
+    )
+    assert fixed_margin == 0.25

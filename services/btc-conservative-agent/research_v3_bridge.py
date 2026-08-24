@@ -766,7 +766,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "executed_direction": _first(envelope.get("executed_direction"), record.get("direction")),
         "atr14_pct": _first(record.get("atr14_pct"), envelope.get("atr14_pct")),
         "leverage": _first((record.get("research_execution_basis") or {}).get("leverage"), (envelope.get("control_cell") or {}).get("leverage"), 100.0),
-        "margin_usd": _first((record.get("research_execution_basis") or {}).get("margin_usd"), (envelope.get("control_cell") or {}).get("margin_usd"), 20.0),
+        "margin_usd": _first((record.get("research_execution_basis") or {}).get("margin_usd"), (envelope.get("control_cell") or {}).get("margin_usd"), 0.25),
         "search_receipt": envelope.get("policy_search") or {},
         **policy_provenance,
     }))

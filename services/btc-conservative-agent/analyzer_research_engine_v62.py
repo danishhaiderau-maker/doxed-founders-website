@@ -760,7 +760,7 @@ DEEP_DIVE_REPORT_CATALOG = (
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
-FLAT_MARGIN_LIVE_USD = 20.0
+FLAT_MARGIN_LIVE_USD = 0.25
 EDGE_CENSUS_FILE = "edge_census.jsonl"
 MARGIN_SIZE_SWEEP_USD = [5.0, 10.0, 15.0, 20.0, 25.0]
 RESEARCH_SESSION_FILE = "research_session.json"

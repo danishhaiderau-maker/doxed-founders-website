@@ -277,7 +277,7 @@ def load_candidate_inputs(
                 else "UNAVAILABLE"
             ),
             "leverage": intent.get("leverage") or 100.0,
-            "margin_usd": intent.get("margin_usd") or 20.0,
+            "margin_usd": intent.get("margin_usd") or 0.25,
             "entry_children": _normalized_entry_children(intent, executions),
             "ordered_1s_prices": one_second_rows,
             "canonical_1m_ohlc": one_minute_rows,
