@@ -206,7 +206,13 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         "declared_entry_ttl_sec": float(declared_entry_ttl_sec),
         "entry_reconciliation_allowance_sec": ENTRY_RECONCILIATION_ALLOWANCE_SEC,
         "exit_config": _first(*(source.get("exit_config") for source in sources)),
-        "paper_only": bool(_first(*(source.get("paper_only") for source in sources), True)),
+        # V3 policy evidence describes the canonical local paper lifecycle.
+        # Whether that lifecycle is eligible for a separately armed relay is
+        # represented only by ``relay_eligible``.  Deriving this signed field
+        # from sparse order dictionaries allowed a relay-capable lane to flip
+        # from paper_only=true at decision time to false at submit time,
+        # minting two policy signatures for one episode.
+        "paper_only": True,
         "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), relay_default)),
         "base_policy_signature": base_signature or None,
     }

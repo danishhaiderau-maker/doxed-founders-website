@@ -49,7 +49,7 @@ def test_v31_all_active_tiles_use_approved_quarter_dollar_margin_cap():
 
     # Verify the exact production module without importing its process-start
     # side effects. This prevents a dashboard-only/config-only sizing change.
-    module = ast.parse(Path("bot.py").read_text(encoding="utf-8"))
+    module = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
     fixed_margin = next(
         node.value.value
         for node in module.body

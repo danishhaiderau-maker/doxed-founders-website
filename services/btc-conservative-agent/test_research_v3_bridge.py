@@ -232,7 +232,7 @@ class V3BridgeTests(unittest.TestCase):
                 source, lane="CONTINUOUS", policy_decision="ACCEPT",
                 execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
                 epoch_id="epoch-v3-test", data_dir=tmp,
-                lane_policy={**source, "relay_eligible": True, "paper_only": False},
+                lane_policy={**source, "relay_eligible": True, "paper_only": True},
             )
             dual_write_paper_order_intent(
                 {"trade_id": "cont-child", "created_ts": 1001, "signal_dir": "LONG",
@@ -249,8 +249,12 @@ class V3BridgeTests(unittest.TestCase):
             self.assertTrue(decision["paper_policy_spec"]["relay_eligible"])
             self.assertTrue(intent["paper_policy_spec"]["relay_eligible"])
             self.assertTrue(intent["relay_eligible"])
-            self.assertFalse(decision["paper_policy_spec"]["paper_only"])
-            self.assertFalse(intent["paper_policy_spec"]["paper_only"])
+            # Relay capability must never rewrite the signed source evidence
+            # as non-paper.  The order source deliberately carries the old
+            # capability-shaped false value above; identity normalization must
+            # still keep decision and submit on one paper policy signature.
+            self.assertTrue(decision["paper_policy_spec"]["paper_only"])
+            self.assertTrue(intent["paper_policy_spec"]["paper_only"])
             self.assertEqual(
                 decision["paper_policy_spec"], intent["paper_policy_spec"],
             )
