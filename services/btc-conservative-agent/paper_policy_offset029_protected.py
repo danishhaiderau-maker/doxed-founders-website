@@ -1,4 +1,4 @@
-"""Immutable paper-only protection policy for Patient Chase Tile Three.
+"""Immutable protected policy for Patient Chase Tile Three.
 
 The entry path is intentionally identical to :mod:`paper_policy_offset029`.
 Only the exit/risk treatment changes, so Tile One and Tile Three can be
@@ -28,6 +28,8 @@ SECOND_PARTIAL_FRACTION = 0.25
 TRAIL_ATR = 1.0
 FINAL_TARGET_ATR = 2.5
 PATH_END_SEC = 7200
+ACCOUNT_RISK_PCT = 0.5
+MARGIN_CAP_USD = 2.0
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,40 @@ def entry_fields(direction: str, reference_price: float) -> dict:
         "trailing_stop_atr_k": TRAIL_ATR,
         "atr_tp_multiple": FINAL_TARGET_ATR,
         "path_end_sec": PATH_END_SEC,
+        "account_risk_pct": ACCOUNT_RISK_PCT,
+        "margin_cap_usd": MARGIN_CAP_USD,
+        "paper_only": False,
+        "relay_eligible": False,
+        "relay_configured": True,
+        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
     })
     return fields
 
+
+def account_risk_quantity(*, equity_usd: float, entry_price: float,
+                          atr_abs: float, leverage: float = 100.0) -> dict:
+    risk_budget = max(0.0, float(equity_usd)) * ACCOUNT_RISK_PCT / 100.0
+    risk_qty = risk_budget / max(float(atr_abs or 0), 1e-12)
+    margin_qty = MARGIN_CAP_USD * max(float(leverage or 0), 1.0) / max(float(entry_price or 0), 1.0)
+    qty = min(risk_qty, margin_qty)
+    return {"quantity": qty, "risk_budget_usd": risk_budget,
+            "margin_cap_usd": MARGIN_CAP_USD,
+            "capped_by": "MARGIN" if margin_qty <= risk_qty else "ACCOUNT_RISK"}
+
+
+def dashboard_policy() -> dict:
+    return {
+        "filter_chips": ["Shared AI", "Offset 0.29%", "$2 margin cap", "0.5% account risk",
+                         "SL 1 ATR", "25% @1 ATR", "BE @1.25 ATR", "25% @1.5 ATR",
+                         "Trail 1 ATR", "Final 2.5 ATR", "120m cap"],
+        "entry": {"trigger": "Every shared AI_SCAN APPROVE direction",
+                  "entry_path": "OFFSET_029_PATIENT_CHASE", "fill_path": "CONSERVATIVE_PAPER_LIMIT",
+                  "execution": "Tile ON creates paper lifecycle; separate armed relay may copy it",
+                  "chase_detail": "Rest 10m; reprice 25% of remaining gap every 60s at age 10–25m"},
+        "exit": {"profile": "Static protected ATR", "ladder": "25%@1 ATR, 25%@1.5 ATR, runner",
+                 "thesis_stop_margin_pct": "n/a", "hard_stop_margin_pct": "1 ATR",
+                 "mfe_protect_margin_pct": "BE arm 1.25 ATR", "thesis_pause_above_margin_pct": "n/a",
+                 "fixed_time_exit": "120m"},
+        "strategy_detail": ["Initial full stop 1 ATR from fill", "Account risk <=0.5% and margin <=$2",
+                            "After profit milestones, stop/trail never widens", "Relay OFF means paper only"],
+    }

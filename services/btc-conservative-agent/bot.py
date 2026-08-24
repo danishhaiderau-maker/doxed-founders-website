@@ -77,6 +77,8 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V2,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
@@ -119,6 +121,8 @@ from path_replay_v1 import (
     build_path_sample,
 )
 import paper_policy_offset029 as offset029_policy
+import paper_policy_offset029_protected as offset029_protected_policy
+import paper_policy_offset029_regime as offset029_regime_policy
 from microstructure_tape import (
     FILE_NAME as MICROSTRUCTURE_TAPE_FILE,
     SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
@@ -369,6 +373,15 @@ FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 #   CONTINUOUS / AI_DIRECT — frozen Scenario C benchmark
 #   spawn lanes from CONTINUOUS APPROVE — AI_DIRECT + AI_DIRECT_CHASE fill
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
+PATIENT_CHASE_LANES = frozenset({
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+})
+
+
+def is_patient_chase_lane(lane: str) -> bool:
+    return str(lane or "").upper() in PATIENT_CHASE_LANES
 RESEARCH_LANE_HIGH_EDGE_RUNNER = "HIGH_EDGE_RUNNER"
 RESEARCH_LANE_EXTREME_EDGE = "EXTREME_EDGE"
 RESEARCH_LANE_EDGE_ACCELERATION = "EDGE_ACCELERATION"  # legacy — disabled, no Pathway tile
@@ -390,6 +403,8 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "DATA_RETIRED",
     RESEARCH_LANE_TYPE_B_HUNTER_V1: "RETIRED",
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "RETIRED",
@@ -433,6 +448,8 @@ RESEARCH_SPAWN_LANES = ()
 # remain readable, but a stale config flag cannot revive a retired lane.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: True,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: False,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: False,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
 }
 
@@ -445,15 +462,24 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
-})
-PAPER_ONLY_RESEARCH_LANES = frozenset({
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 })
+PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
+    *PLATFORM_RELAY_ELIGIBLE_LANES,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+})
+PLATFORM_RELAY_BLOCKERS = {
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: "PARTIAL_CLOSE_RELAY_UNSUPPORTED",
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: "PARTIAL_CLOSE_RELAY_UNSUPPORTED",
+}
+PAPER_ONLY_RESEARCH_LANES = frozenset()
 # A relay event must prove both its declared lane and its trade-id namespace.
 # Keep this deliberately smaller than the research lane prefix registry: adding a
 # paper lane must never silently make it eligible for real-money mirroring.
 PLATFORM_RELAY_TRADE_PREFIX_LANES = {
     "cont": RESEARCH_LANE_CONTINUOUS,
+    "o29atr": RESEARCH_LANE_OFFSET_029_ATR_TP_25,
 }
 # Only combo execution lanes may submit limit orders on doxxedcrypto.digital showcase.
 PATHWAY_LIMIT_ORDER_LANES = frozenset(COMBO_EXECUTION_LANES)
@@ -471,6 +497,8 @@ _lane_locks = {
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: threading.Lock(),
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: threading.Lock(),
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: threading.Lock(),
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: threading.Lock(),
     RESEARCH_LANE_HIGH_EDGE_RUNNER: threading.Lock(),
     RESEARCH_LANE_EXTREME_EDGE: threading.Lock(),
     RESEARCH_LANE_EDGE_ACCELERATION: threading.Lock(),
@@ -1781,6 +1809,31 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
     lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
     if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
         return offset029_policy.exit_config(ANALYZER_SYNC_ID)
+    if lane == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED:
+        return {
+            "policy_snapshot_schema": "exit_policy_v1", "policy_source": "btc-conservative-agent",
+            "policy_version": offset029_protected_policy.POLICY_ID,
+            "raw_policy_id": offset029_protected_policy.POLICY_ID,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "exit_profile_id": offset029_protected_policy.EXIT_PROFILE_ID,
+            "exit_mode": "STATIC_PROTECTED_PATIENT_CHASE",
+            "initial_stop_atr_k": 1.0, "partial_targets_atr": [1.0, 1.5],
+            "partial_fractions": [0.25, 0.25], "break_even_arm_atr_k": 1.25,
+            "trailing_stop_atr_k": 1.0, "atr_tp_multiple": 2.5,
+            "path_end_sec": 7200, "margin_cap_usd": 2.0, "account_risk_pct": 0.5,
+        }
+    if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
+        return {
+            "policy_snapshot_schema": "exit_policy_v1", "policy_source": "btc-conservative-agent",
+            "policy_version": offset029_regime_policy.POLICY_ID,
+            "raw_policy_id": offset029_regime_policy.POLICY_ID,
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "exit_profile_id": offset029_regime_policy.EXIT_PROFILE_ID,
+            "exit_mode": "DYNAMIC_REGIME_PROTECTED_PATIENT_CHASE",
+            "regime_profiles": offset029_regime_policy.PROFILES,
+            "transition_invariant": "STOP_AND_RISK_NEVER_WIDEN",
+            "path_end_sec": 7200, "margin_cap_usd": 2.0, "account_risk_pct": 0.5,
+        }
     thesis_pct = THESIS_FAST_EXIT_UNREAL_PCT
     mfe_protect = THESIS_MFE_PROTECT_PCT
     if lane == RESEARCH_LANE_HIGH_EDGE_RUNNER:
@@ -4476,6 +4529,86 @@ def _apply_offset_029_atr_exit(pos: dict, price: float, now: float) -> bool:
     return False
 
 
+def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> bool:
+    """Apply a frozen protected policy and persist partial/transition receipts."""
+    lane = str(pos.get("research_lane") or "").upper()
+    entry = float(pos.get("entry") or 0); direction = str(pos.get("dir") or "").upper()
+    atr_abs = _buf_float(pos.get("atr14_3m"), 0.0)
+    if atr_abs <= 0:
+        atr_abs = entry * _buf_float(pos.get("atr14_pct_3m"), 0.0) / 100.0
+    age = now - float(pos.get("entry_ts") or now)
+    remaining = float(pos.get("policy_remaining_fraction", 1.0))
+    if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
+        observed = str((state.get("trend_health") or {}).get("trend_state") or state.get("regime") or "")
+        prior = str(pos.get("policy_regime") or observed)
+        prior_stop = float(pos.get("policy_stop_distance_atr") or offset029_regime_policy.PROFILES[offset029_regime_policy.normalize_regime(prior)]["stop"])
+        change = offset029_regime_policy.transition(previous_regime=prior, observed_regime=observed,
+                                                     current_stop_distance_atr=prior_stop)
+        if change["changed"]:
+            pos.setdefault("regime_transition_receipts", []).append({"ts": utc_iso(), **change})
+        pos["policy_regime"] = change["to"]
+        pos["policy_stop_distance_atr"] = change["applied_stop_atr"]
+        action = offset029_regime_policy.exit_action(
+            entry=entry, direction=direction, price=price, atr_abs=atr_abs, age_sec=age,
+            regime=change["to"], current_stop_distance_atr=change["applied_stop_atr"],
+            remaining_fraction=remaining, completed_partials=pos.get("policy_completed_partials") or (),
+            peak_price=pos.get("policy_peak_price"),
+        )
+        if action:
+            pos["policy_peak_price"] = action["peak_price"]
+            if action.get("partial_key") is not None:
+                pos.setdefault("policy_completed_partials", []).append(action["partial_key"])
+    else:
+        action = offset029_protected_policy.exit_action(
+            entry=entry, direction=direction, price=price, atr_abs=atr_abs, age_sec=age,
+            leverage=float(pos.get("leverage") or 100), remaining_fraction=remaining,
+            first_partial_done=bool(pos.get("policy_first_partial_done")),
+            second_partial_done=bool(pos.get("policy_second_partial_done")),
+            break_even_armed=bool(pos.get("policy_break_even_armed")),
+            peak_price=pos.get("policy_peak_price"),
+        )
+        if action:
+            pos["policy_first_partial_done"] = action.first_partial_done
+            pos["policy_second_partial_done"] = action.second_partial_done
+            pos["policy_break_even_armed"] = action.break_even_armed
+            pos["policy_peak_price"] = action.peak_price
+    if not action:
+        return False
+    close_fraction = float(action.get("close_fraction") if isinstance(action, dict) else action.close_fraction)
+    remaining_after = float(action.get("remaining_fraction") if isinstance(action, dict) else action.remaining_fraction)
+    reason = str(action.get("reason") if isinstance(action, dict) else action.reason)
+    original_qty = float(pos.get("policy_original_qty") or pos.get("qty") or 0)
+    pos.setdefault("policy_original_qty", original_qty)
+    # Terminal actions are valued by close_position.  Only an action that
+    # leaves a runner books an intermediate realized leg here.
+    close_qty = max(0.0, original_qty * close_fraction) if remaining_after > 0 else 0.0
+    dir_factor = 1.0 if direction == "LONG" else -1.0
+    realized_gross = (float(price) - entry) * dir_factor * close_qty
+    pos["policy_partial_realized_gross_usd"] = round(
+        _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0) + realized_gross, 8
+    )
+    # BITFINEX_ZERO is the active research fee model.  Keep a distinct net
+    # field so a future non-zero model can allocate costs per reduction without
+    # changing the lifecycle schema.
+    pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
+    pos.setdefault("partial_exit_receipts", []).append({
+        "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
+        "remaining_fraction": remaining_after, "price": float(price), "policy_id": pos.get("policy_id"),
+        "closed_qty": close_qty if remaining_after > 0 else float(pos.get("qty") or 0),
+        "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
+        "cumulative_realized_net_usd": pos["policy_partial_realized_net_usd"],
+    })
+    pos["policy_remaining_fraction"] = remaining_after
+    if remaining_after <= 0:
+        close_position(pos, reason)
+        return True
+    # Reduce only the local paper leg. Relay reconciliation consumes the signed
+    # receipt and may copy it only when separately armed.
+    pos["qty"] = original_qty * remaining_after
+    save_paper_lifecycle(reason=f"partial_exit:{reason}")
+    return False
+
+
 def _apply_position_exits(pos: dict, price: float, now: float = None):
     if now is None:
         now = time.time()
@@ -4530,6 +4663,11 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
 
     if str(pos.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
         return _apply_offset_029_atr_exit(pos, price, now)
+    if str(pos.get("research_lane") or "").upper() in {
+        RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+        RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+    }:
+        return _apply_protected_patient_chase_exit(pos, price, now)
 
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
@@ -6825,7 +6963,34 @@ def compute_offset_029_atr_entry(signal: dict) -> dict:
     """Thin lifecycle adapter over the immutable policy module."""
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
-    signal.update(offset029_policy.entry_fields(direction, price))
+    lane = str(signal.get("research_lane") or "").upper()
+    policy = (
+        offset029_protected_policy if lane == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED else
+        offset029_regime_policy if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME else
+        offset029_policy
+    )
+    signal.update(policy.entry_fields(direction, price))
+    signal["paper_only"] = False
+    signal["relay_eligible"] = lane in PLATFORM_RELAY_ELIGIBLE_LANES
+    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+        features = signal.get("features") or {}
+        atr_abs = _buf_float(signal.get("atr14_3m") or features.get("atr14_3m"), 0.0)
+        if atr_abs <= 0:
+            atr_pct = _buf_float(signal.get("atr14_pct_3m") or features.get("atr14_pct_3m"), 0.0)
+            atr_abs = price * atr_pct / 100.0
+        equity = _buf_float(state.get("equity") or state.get("account_balance"), 0.0)
+        leverage = max(1.0, _buf_float(state.get("leverage"), DEFAULT_RESEARCH_LEVERAGE))
+        stop_k = 1.0 if lane == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED else 1.25
+        risk_budget = equity * 0.005
+        risk_margin = (
+            risk_budget / (leverage * stop_k * atr_abs / price)
+            if risk_budget > 0 and atr_abs > 0 and price > 0 else 0.0
+        )
+        signal["margin_usdt"] = round(min(2.0, risk_margin), 4) if risk_margin > 0 else 0.0
+        signal["account_risk_budget_usd"] = round(risk_budget, 4)
+        signal["sizing_atr_abs"] = atr_abs
+        signal["sizing_stop_atr_k"] = stop_k
+        signal["sizing_fail_closed"] = signal["margin_usdt"] <= 0
     signal["entry_mode"] = ENTRY_MODE_AI_DIRECT
     return {
         "entry_mode": ENTRY_MODE_AI_DIRECT,
@@ -16128,12 +16293,13 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         return
     enriched = _enrich_combo_lane_features(features, ctx)
     if not is_research_lane_enabled(target_lane):
-        if str(target_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        if is_patient_chase_lane(target_lane):
             log_lane_opportunity_event(
-                target_lane, "SPAWN_CANCELLED", (ctx or {}).get("trade_id"),
+                target_lane, "SPAWN_SHADOW", (ctx or {}).get("trade_id"),
                 (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
-                block_reason="PAPER_LANE_TOGGLE_OFF_NO_SHADOW",
+                block_reason="TILE_OFF_SHADOW_ONLY",
             )
+            _spawn_lab_combo_shadow(ctx, ai, edge_score, target_lane, enriched)
             return
         logger.info(f"[{target_lane}] spawn LAB mode - lane OFF [PIPELINE ENFORCEMENT]")
         log_lane_opportunity_event(
@@ -16211,12 +16377,6 @@ def _spawn_lab_combo_shadow(
     """
     if not is_research_data_collection():
         return
-    if str(target_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
-        logger.error(
-            "[OFFSET029_CONTRACT] refused forbidden LAB/shadow replay "
-            f"lane={target_lane} [PIPELINE ENFORCEMENT]"
-        )
-        return
     if not (
         is_combo_execution_lane(target_lane)
         or str(target_lane or "").upper() == RESEARCH_LANE_CONTINUOUS
@@ -16256,9 +16416,12 @@ def _spawn_lab_combo_shadow(
     enriched = _enrich_combo_lane_features(features, ctx)
     margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
     paused_shadow = manual_admin_pause_active()
-    # Instant virtual fill (pullback_pct=0): OFF-tile LAB must accumulate closes into
-    # lane_lab_pnl_ledger. A non-zero pullback often never fills within LAB_REPLAY_TTL,
-    # so tiles stay at Trades=0 forever despite SPAWN_LAB.
+    patient_shadow = is_patient_chase_lane(target_lane)
+    if patient_shadow:
+        lane_spec = COMBO_LANE_SPECS.get(target_lane) or {}
+        margin_usdt = min(float(margin_usdt), float(lane_spec.get("margin_usd") or 2.0))
+    # Patient Chase OFF shadows retain the real 0.29% entry anchor. Other
+    # legacy LAB studies retain their established instant-fill behavior.
     start_replay_buffer(
         study_id,
         price,
@@ -16266,9 +16429,9 @@ def _spawn_lab_combo_shadow(
         direction=direction,
         leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
         margin_usdt=float(margin_usdt),
-        pullback_pct=0.0,
-        virtual_entry=price,
-        virtual_fill_t=0.0,
+        pullback_pct=offset029_policy.ENTRY_OFFSET if patient_shadow else 0.0,
+        virtual_entry=None if patient_shadow else price,
+        virtual_fill_t=None if patient_shadow else 0.0,
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
         exit_config=exit_cfg,
         ai_win_prob=(ai or {}).get("win_prob"),
@@ -16281,6 +16444,8 @@ def _spawn_lab_combo_shadow(
         paused_shadow=paused_shadow,
         is_counterfactual=bool(is_counterfactual),
         policy_version=(
+            (COMBO_LANE_SPECS.get(target_lane) or {}).get("raw_policy_id")
+            if patient_shadow else
             _type_b_policy_version()
             if str(target_lane).upper() == RESEARCH_LANE_TYPE_B_HUNTER_V1
             else "continuous_shared_direction_gap_v1"
@@ -16303,7 +16468,7 @@ def _spawn_lab_combo_shadow(
     logger.info(
         f"[{target_lane}] LAB shadow study_id={study_id} dir={direction} edge={float(edge_score):.1f} "
         f"margin=${margin_usdt:.2f} size_mult={size_mult:.2f} session={enriched.get('session_bucket')} "
-        f"— simulating full pipeline (virtual fill + Scenario C exit), no real orders [PIPELINE ENFORCEMENT]"
+        f"— simulating policy shadow path, no paper or real orders [PIPELINE ENFORCEMENT]"
     )
 
 
@@ -16987,7 +17152,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             is_independent_ai_lane(lane)
             or (
                 is_shared_ai_direction_lane(lane)
-                and lane != RESEARCH_LANE_OFFSET_029_ATR_TP_25
+                and not is_patient_chase_lane(lane)
             )
             or is_deterministic_bracket_lane(lane)
         ):
@@ -17039,7 +17204,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
 def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     """Simulate virtual fill + Scenario C exit for off-dashboard shadow lanes."""
     lane = str(buf.get("research_lane") or "").upper()
-    if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if is_patient_chase_lane(lane):
         logger.error(
             "[OFFSET029_CONTRACT] discarded forbidden shadow finalization "
             f"study_id={study_id}; genuine paper lifecycle only [PIPELINE ENFORCEMENT]"
@@ -18308,7 +18473,7 @@ def evaluate_dashboard_execution_gate(
     ):
         return False, str(signal.get("entry_reason") or "STRUCTURAL_LIMIT_UNAVAILABLE"), False
 
-    if str(lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if is_patient_chase_lane(lane):
         # Registered paper policy: shared AI APPROVE places its exact 0.29%
         # resting limit immediately. Global spread/AI-band/chase-bucket gates
         # belong to Continuous experiments and must not rewrite this cohort.
@@ -18463,7 +18628,7 @@ def enforce_dashboard_chase_gates_on_pending() -> None:
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
-        if str(order.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        if is_patient_chase_lane(order.get("research_lane")):
             continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
@@ -19847,7 +20012,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
             f"[PIPELINE ENFORCEMENT]"
         )
         return False
-    registered_offset_policy = str(lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25
+    registered_offset_policy = is_patient_chase_lane(lane)
     _spread_blocked, _spread_bucket = (
         (False, None) if registered_offset_policy else _spread_gate_blocks_signal(signal)
     )
@@ -20010,7 +20175,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         f"activation_chase={order.get('limit_chase_count')} "
         f"final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]"
     )
-    if not registered_offset_policy:
+    if relay_publishes_approve_outcome(lane):
         _relay_mirror(
             "ORDER_PLACED",
             {
@@ -20089,7 +20254,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
 
 def _try_immediate_first_chase(order: dict, signal: dict) -> bool:
     """Research chase #0 — re-anchor limit once at order creation before 60s cycle."""
-    if str(order.get("research_lane") or (signal or {}).get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if is_patient_chase_lane(order.get("research_lane") or (signal or {}).get("research_lane")):
         return False
     if order.get("dashboard_exact_chase_managed") or (signal or {}).get("dashboard_exact_chase_managed"):
         return False
@@ -21221,7 +21386,7 @@ def process_limit_chase(price: float):
             continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
-        if str(order.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        if is_patient_chase_lane(order.get("research_lane")):
             if _apply_offset_029_policy_chase(order, signal, price, now):
                 chased += 1
             continue
@@ -21904,7 +22069,7 @@ def process_signal(event: dict):
     )
     # This lane has no paused-shadow mode. A pause must cancel/refuse paper
     # exposure and leave cancellation evidence, never synthesize an outcome.
-    if event_lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if is_patient_chase_lane(event_lane):
         paused_shadow_mode = False
     if manual_pause and not paused_shadow_mode:
         # A manual stop may collect isolated counterfactual outcomes only in
@@ -21940,9 +22105,7 @@ def process_signal(event: dict):
             )
             return {"entry_resolution": "NO_ORDER", "exact_reason": entry_reason}
     research_lane = event.get("research_lane", RESEARCH_LANE_AI_SCAN)
-    registered_offset_policy = (
-        str(research_lane or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25
-    )
+    registered_offset_policy = is_patient_chase_lane(research_lane)
     skip_ai = bool(event.get("skip_ai"))
     pre_ai = event.get("pre_ai")
     pre_ctx = event.get("pre_ctx")
@@ -22433,7 +22596,7 @@ def process_signal(event: dict):
             signal["pullback_pct"] = state.get("pullback_threshold", 0.001)
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
-            if research_lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+            if is_patient_chase_lane(research_lane):
                 compute_offset_029_atr_entry(signal)
             elif research_lane in AI_DIRECT_RESEARCH_LANES and continuous_ai_direct_entry_enabled():
                 compute_continuous_ai_direct_entry(signal)
@@ -23208,7 +23371,7 @@ def _process_ws_ticker_update(payload) -> bool:
 
 def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
     """Reprice 25% of the remaining gap each minute from age 10m through 25m."""
-    if str(order.get("research_lane") or "").upper() != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if not is_patient_chase_lane(order.get("research_lane")):
         return False
     if order.get("status") != "PENDING" or price <= 0:
         return False
@@ -23258,10 +23421,17 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
     )
     if committed is None:
         return False
-    # Deliberately do not publish LIMIT_UPDATED: this lane is local paper only.
-    order["relay_eligible"] = False
+    # A Patient Chase reprice is part of the signed paper lifecycle.  Relay
+    # OFF remains paper-only; an independently armed, safety-ready relay may
+    # copy the same update for an allowlisted lane.
+    order["relay_eligible"] = True
     if isinstance(signal, dict):
-        signal["relay_eligible"] = False
+        signal["relay_eligible"] = True
+    _push_showcase_relay_event(
+        "LIMIT_UPDATED",
+        order.get("trade_id"),
+        committed,
+    )
     try:
         from execution_funnel import funnel_on_limit_chase
         funnel_on_limit_chase(
@@ -25082,6 +25252,17 @@ def close_position(pos: dict, exit_reason: str):
         price_move = ((price - entry) / entry) * dir_factor if entry > 0 else 0
         margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
         gross_pnl = price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * margin_usdt
+        if str(pos.get("research_lane") or "").upper() in {
+            RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+            RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+        }:
+            # For partial-exit policies ``qty`` is the remaining runner, while
+            # margin_usdt remains the original risk budget.  Value the runner
+            # from its actual remaining quantity and add already-realized legs.
+            gross_pnl = (
+                price_move * float(entry) * float(qty)
+                + _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0)
+            )
 
         position_value_entry = entry * qty
         position_value_exit = price * qty
@@ -25184,6 +25365,10 @@ def close_position(pos: dict, exit_reason: str):
             "market_bid_ask_spread_bps_at_entry": pos.get("market_bid_ask_spread_bps_at_entry"),
             "net_pnl_usd": round(net_pnl, 2),
             "gross_pnl_usd": round(gross_pnl, 2),
+            "partial_realized_pnl_usd": round(
+                _buf_float(pos.get("policy_partial_realized_net_usd"), 0.0), 4
+            ),
+            "partial_exit_receipts": copy.deepcopy(pos.get("partial_exit_receipts") or []),
             "trading_fees_usd": round(trading_fees, 2),
             "fees_usd": round(trading_fees, 2),
             "funding_fees_usd": round(funding_total, 2),
@@ -26840,6 +27025,8 @@ PATHWAY_LANE_SPECS_FILE = "pathway_lane_specs.json"
 PATHWAY_LANE_ORDER = (
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
 )
 
@@ -26957,10 +27144,17 @@ def _annotate_lanes_with_exec_mode(lanes: list) -> list:
             spec["platform_relay_eligible"] = (
                 lane_id in PLATFORM_RELAY_ELIGIBLE_LANES
             )
+            spec["platform_relay_configured"] = (
+                lane_id in PLATFORM_RELAY_CONFIGURED_LANES
+            )
+            spec["platform_relay_blocker"] = PLATFORM_RELAY_BLOCKERS.get(lane_id)
             spec["platform_relay_gate"] = (
                 "Tile ON + platform relay ON"
                 if spec["platform_relay_eligible"]
-                else "Not relay eligible"
+                else (
+                    f"Configured but blocked: {spec['platform_relay_blocker']}"
+                    if spec["platform_relay_configured"] else "Not relay eligible"
+                )
             )
             out.append(spec)
         except Exception:
@@ -26975,6 +27169,11 @@ def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
     if mode == EXEC_MODE_PAPER:
         if lane_id in PLATFORM_RELAY_ELIGIBLE_LANES:
             return "LOCAL PAPER ORDERS ENABLED — live copy requires platform relay ON"
+        if lane_id in PLATFORM_RELAY_CONFIGURED_LANES:
+            return (
+                "LOCAL PAPER ORDERS ENABLED — live copy blocked until partial-close "
+                "relay support is verified"
+            )
         return "PAPER ORDERS ENABLED — not eligible for live copy"
     if mode == EXEC_MODE_EXIT_ONLY:
         return "OFF — no new entries; existing positions still managed"
@@ -27028,7 +27227,13 @@ def build_static_pathway_lane_specs() -> dict:
         "ANY after ≥50 trades: negative EV · DNA Quality deterioration · failure to outperform CONTINUOUS"
     )
     lanes = []
-    for tile_idx, lane_id in enumerate(COMBO_TILE_DISPLAY_ORDER, start=1):
+    active_tile_numbers = {
+        RESEARCH_LANE_OFFSET_029_ATR_TP_25: 1,
+        RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: 3,
+        RESEARCH_LANE_OFFSET_029_ATR_REGIME: 4,
+    }
+    for lane_id in COMBO_TILE_DISPLAY_ORDER:
+        tile_idx = active_tile_numbers.get(lane_id, 99)
         # Retired studies keep their implementation and ledgers for auditability
         # but are absent from the active dashboard and cannot run new work.
         if is_research_lane_retired(lane_id):
@@ -27045,7 +27250,7 @@ def build_static_pathway_lane_specs() -> dict:
         )
         static_bracket = is_static_bracket_lane(lane_id)
         type_b_hunter = lane_id == RESEARCH_LANE_TYPE_B_HUNTER_V1
-        offset_029 = lane_id == RESEARCH_LANE_OFFSET_029_ATR_TP_25
+        offset_029 = is_patient_chase_lane(lane_id)
         ai_lo, ai_hi = spec["ai_min"], spec["ai_max"]
         sp_lo, sp_hi = spec["spread_min"], spec["spread_max"]
         spread_label = "≥3" if virtual_chase else ("5+" if sp_hi >= 99 else str(sp_lo))
@@ -27059,7 +27264,14 @@ def build_static_pathway_lane_specs() -> dict:
         )
         if offset_029:
             trigger = "Every shared AI_SCAN APPROVE direction; independent paper capacity"
-            execution = "Local PAPER limit only; structurally ineligible for Bitfinex relay"
+            execution = (
+                "Tile ON creates an independent local PAPER lifecycle; relay OFF never copies it. "
+                + (
+                    "A separately armed platform relay may copy NEW lifecycle events."
+                    if lane_id in PLATFORM_RELAY_ELIGIBLE_LANES else
+                    "Live copy is fail-closed until partial-close relay support is verified."
+                )
+            )
         elif deterministic_bracket:
             trigger = "Structural envelope + midpoint guard · tick 10–30s or pivot change"
             if static_bracket:
@@ -27101,13 +27313,19 @@ def build_static_pathway_lane_specs() -> dict:
         scenario_c = _scenario_c_exit_spec(lane_id)
         _, lane_ladder_label, _ = get_lane_ladder(lane_id)
         if offset_029:
-            policy_view = offset029_policy.dashboard_policy()
+            policy_view = (
+                offset029_protected_policy.dashboard_policy()
+                if lane_id == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED else
+                offset029_regime_policy.dashboard_policy()
+                if lane_id == RESEARCH_LANE_OFFSET_029_ATR_REGIME else
+                offset029_policy.dashboard_policy()
+            )
             filter_chips = policy_view["filter_chips"]
             hypothesis = spec.get("hypothesis")
             research_q = spec.get("research_question")
             strategy_extra = policy_view["strategy_detail"]
             offset_entry = {**policy_view["entry"], "ai_cadence": ai_cadence,
-                            "margin_usd": shared["margin_usd"], "filters": spec}
+                            "margin_usd": float(spec.get("margin_usd", shared["margin_usd"])), "filters": spec}
             scenario_c = policy_view["exit"]
         elif deterministic_bracket:
             # Per-lane ADX cap (v12): STATIC=40, V2 full-chase=40 (both retained
@@ -27627,6 +27845,8 @@ def build_static_pathway_lane_specs() -> dict:
         "shared_call_consumers": [
             RESEARCH_LANE_CONTINUOUS,
             RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+            RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+            RESEARCH_LANE_OFFSET_029_ATR_REGIME,
         ],
     }
     lanes.append({
@@ -27786,7 +28006,9 @@ def build_static_pathway_lane_specs() -> dict:
         "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": list(ARCHIVED_PATHWAY_LANES),
-        "lanes": _annotate_lanes_with_exec_mode(lanes),
+        "lanes": _annotate_lanes_with_exec_mode(
+            sorted(lanes, key=lambda item: int(item.get("tile_number") or 999))
+        ),
     }
 
 
@@ -33345,6 +33567,43 @@ def _position_protection_view(row: dict) -> dict:
             "tp": round(float(target), 2) if target else None,
             "tp_policy": "FROZEN_3M_ATR_TP_2_5X",
         }
+    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+        entry = _buf_float(row.get("entry"), 0.0)
+        direction = str(row.get("dir") or row.get("side") or "").upper()
+        sign = 1 if direction == "LONG" else -1 if direction == "SHORT" else 0
+        atr_abs = _buf_float(row.get("atr14_3m"), 0.0)
+        if atr_abs <= 0 and entry > 0:
+            atr_abs = entry * _buf_float(row.get("atr14_pct_3m"), 0.0) / 100.0
+        target = entry + sign * atr_abs * 2.5 if entry > 0 and atr_abs > 0 and sign else 0.0
+        if lane == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED:
+            stop_k = 1.0
+            stop = entry - sign * atr_abs * stop_k if target else 0.0
+            if bool(row.get("policy_break_even_armed")):
+                leverage = max(1.0, _buf_float(row.get("leverage"), 100.0))
+                floor = entry * (1.0 + sign * (0.005 / leverage))
+                peak = _buf_float(row.get("policy_peak_price"), entry)
+                trail = peak - sign * atr_abs
+                stop = max(floor, trail) if sign > 0 else min(floor, trail)
+            stop_policy = "STATIC_1_ATR_THEN_BE_TRAIL_1_ATR"
+            tp_policy = "PARTIAL_1_0_1_5_FINAL_2_5_ATR"
+        else:
+            regime = offset029_regime_policy.normalize_regime(row.get("policy_regime") or state.get("regime"))
+            profile = offset029_regime_policy.PROFILES[regime]
+            stop_k = min(_buf_float(row.get("policy_stop_distance_atr"), profile["stop"]), profile["stop"])
+            stop = entry - sign * atr_abs * stop_k if target else 0.0
+            if row.get("policy_completed_partials"):
+                peak = _buf_float(row.get("policy_peak_price"), entry)
+                trail = peak - sign * atr_abs * float(profile["trail"])
+                stop = max(stop, trail) if sign > 0 else min(stop, trail)
+            stop_policy = f"DYNAMIC_{regime}_{stop_k:g}_ATR_NO_WIDEN"
+            tp_policy = f"DYNAMIC_{regime}_PARTIALS_FINAL_2_5_ATR"
+        return {
+            "sl": round(float(stop), 2) if stop else None,
+            "sl_enforced": bool(stop),
+            "stop_policy": stop_policy,
+            "tp": round(float(target), 2) if target else None,
+            "tp_policy": tp_policy,
+        }
     return {
         "sl": row.get("sl"),
         "sl_enforced": bool(_buf_float(row.get("sl"), 0.0) > 0),
@@ -38733,14 +38992,19 @@ def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     the in-memory accounting object remains untouched.
     """
     snapshot = copy.deepcopy(row) if isinstance(row, dict) else {}
-    if str(snapshot.get("research_lane") or "").upper() != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    lane = str(snapshot.get("research_lane") or "").upper()
+    if lane not in {
+        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+        RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+    }:
         return snapshot
     protection = _position_protection_view(snapshot)
     snapshot["tp"] = protection["tp"]
     snapshot["atr_tp_price"] = protection["tp"]
     snapshot["tp_policy"] = protection["tp_policy"]
-    snapshot["sl"] = None
-    snapshot["sl_enforced"] = False
+    snapshot["sl"] = protection["sl"]
+    snapshot["sl_enforced"] = protection["sl_enforced"]
     snapshot["stop_policy"] = protection["stop_policy"]
     return snapshot
 

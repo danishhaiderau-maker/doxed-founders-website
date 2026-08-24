@@ -1,4 +1,4 @@
-"""Immutable paper-only policy math for OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5."""
+"""Immutable baseline policy math for OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5."""
 from __future__ import annotations
 
 POLICY_ID = "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5"
@@ -40,8 +40,8 @@ def entry_fields(direction: str, reference_price: float) -> dict:
         "await_5m_confirm": False,
         "micro_structure_confirmed": True,
         "order_placed": False,
-        "paper_only": True,
-        "relay_eligible": False,
+        "paper_only": False,
+        "relay_eligible": True,
         "chase_start_sec": CHASE_START_SEC,
         "chase_end_sec": CHASE_END_SEC,
         "chase_interval_sec": CHASE_INTERVAL_SEC,
@@ -148,8 +148,8 @@ def dashboard_policy() -> dict:
             "ai_path": "Shared AI_SCAN direction; no second AI call",
             "chase_detail": "Rest 10m; 25% remaining-gap reprice every 60s at age 10–25m",
             "post_ai_gates": "Shared APPROVE plus normal paper health/capacity checks",
-            "execution": "Local PAPER limit only; structurally ineligible for Bitfinex relay",
-            "orders": "Independent local paper lifecycle; never relayed",
+            "execution": "Independent paper limit; copy eligible only when the operator separately arms the relay",
+            "orders": "Independent signed paper lifecycle; relay OFF always remains paper-only",
         },
         "exit": {
             "profile": "ATR TP 2.5× + path end", "ladder": "disabled",
@@ -163,6 +163,7 @@ def dashboard_policy() -> dict:
             "Initial limit: LONG 0.29% below / SHORT 0.29% above signal reference",
             "Rest 0–10m; every 60s from 10–25m move 25% of remaining gap; rest to 30m TTL",
             "Exit at favorable 2.5 × frozen fill-time 3m ATR(14); otherwise 120m PATH_END mark",
-            "No Scenario C ladder, thesis cut, hard stop, marketable fallback, or Bitfinex relay",
+            "No Scenario C ladder, thesis cut, hard stop, or marketable fallback",
+            "Tile ON creates paper orders; only a separately armed and safety-ready relay may copy new orders",
         ],
     }

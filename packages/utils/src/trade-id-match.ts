@@ -96,7 +96,10 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
  * remembered to add it to the deny list (the exact bug that caused the
  * 2026-07-08 vc603-/szdc1-/slav1- live-mirror incident).
  */
-const MIRRORABLE_LANE_PREFIXES = new Set(['cont']);
+// Tiles 3/4 are architecturally relay-configured, but their partial reductions
+// are not yet supported by the subscriber.  Keep them fail-closed here until
+// an end-to-end partial-close receipt test exists.
+const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'o29atr']);
 
 /**
  * F7 — Returns true ONLY when the trade_id belongs to an explicitly

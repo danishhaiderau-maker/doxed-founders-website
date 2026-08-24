@@ -26,8 +26,8 @@ Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data pre
 """
 from __future__ import annotations
 
-# No combo lane is currently executable. CONTINUOUS is configured separately
-# as the benchmark; retired specs below remain available for historical decode.
+# Active experimental tiles share one frozen execution contract. CONTINUOUS is
+# configured separately as the benchmark; retired specs remain decode-only.
 from scenario_c_config import (
     SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
     SCENARIO_C_LEGACY_10_6_PROFILE_ID,
@@ -40,6 +40,8 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 # and archived reports continue to decode after a lane is retired.
 RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
+RESEARCH_LANE_OFFSET_029_ATR_PROTECTED = "OFFSET_029_ATR_PROTECTED"
+RESEARCH_LANE_OFFSET_029_ATR_REGIME = "OFFSET_029_ATR_REGIME"
 RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
@@ -57,19 +59,23 @@ RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 # Retired lanes must never reappear as active tiles through stale persisted config.
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 COMBO_LANE_SPECS = {
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: {
         "label": "0.29% Patient Chase · ATR 2.5×",
         "subtitle": (
-            "PAPER ONLY — independent local order, position, capacity and ledger; "
-            "never eligible for Bitfinex relay"
+            "PAPER when ON — independent order, position, capacity and ledger; "
+            "relay-copy eligible only while the separate operator relay is armed"
         ),
         "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
         "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
@@ -83,7 +89,8 @@ COMBO_LANE_SPECS = {
         "is_legacy": False,
         "is_independent_ai": False,
         "uses_shared_ai_direction": True,
-        "paper_only": True,
+        "paper_only": False,
+        "platform_relay_eligible": True,
         "id_prefix": "o29atr",
         "entry_offset_pct": 0.29,
         "initial_rest_sec": 600,
@@ -97,11 +104,11 @@ COMBO_LANE_SPECS = {
         "path_end_sec": 7200,
         "exit_profile_id": "ATR_TP_2.5X_PATH_END_120M_V1",
         "promotion_criteria": (
-            "PAPER RESEARCH ONLY: independent OOS evidence across multiple regimes, "
+            "PAPER RESEARCH: independent OOS evidence across multiple regimes, "
             "conservative execution parity and explicit operator authorization"
         ),
         "kill_criteria": (
-            "Remain paper-only; stop new entries on integrity, lifecycle, or evidence mismatch"
+            "Stop new entries on integrity, lifecycle, or evidence mismatch"
         ),
         "hypothesis": (
             "A patient 0.29% maker anchor followed by 25% remaining-gap reprices may "
@@ -111,6 +118,52 @@ COMBO_LANE_SPECS = {
             "Does OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5 retain positive "
             "out-of-sample EV under conservative paper execution?"
         ),
+    },
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
+        "label": "Protected Patient Chase · Static ATR risk",
+        "subtitle": "PAPER when ON; relay-copy eligible only while the separate Bitfinex relay is armed",
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE", "is_benchmark": False,
+        "is_research_candidate": True, "is_legacy": False,
+        "is_independent_ai": False, "uses_shared_ai_direction": True,
+        "paper_only": False, "platform_relay_eligible": True,
+        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
+        "id_prefix": "o29ps", "entry_offset_pct": 0.29,
+        "initial_rest_sec": 600, "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500), "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0, "entry_ttl_sec": 1800,
+        "margin_usd": 2.0, "account_risk_pct": 0.5,
+        "initial_stop_atr_k": 1.0, "partial_targets_atr": (1.0, 1.5),
+        "partial_fractions": (0.25, 0.25), "break_even_arm_atr_k": 1.25,
+        "trailing_stop_atr_k": 1.0, "atr_tp_multiple": 2.5,
+        "path_end_sec": 7200, "exit_profile_id": "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5_120M_V1",
+        "hypothesis": "The Patient Chase entry can retain its edge while a complete ATR protection stack reduces drawdown.",
+        "research_question": "Does the static protected Patient Chase improve OOS return-to-drawdown under conservative fills?",
+    },
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
+        "label": "Protected Patient Chase · Dynamic regime",
+        "subtitle": "PAPER when ON; preregistered in-trade regime transitions may tighten but never widen risk",
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE", "is_benchmark": False,
+        "is_research_candidate": True, "is_legacy": False,
+        "is_independent_ai": False, "uses_shared_ai_direction": True,
+        "paper_only": False, "platform_relay_eligible": True,
+        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
+        "id_prefix": "o29rd", "entry_offset_pct": 0.29,
+        "initial_rest_sec": 600, "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500), "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0, "entry_ttl_sec": 1800,
+        "margin_usd": 2.0, "account_risk_pct": 0.5,
+        "regime_profiles": ("SIDEWAYS", "ORDINARY_TREND", "STRONG_ALIGNED_TREND"),
+        "regime_transition_rule": "continuous; stop/size/risk may only tighten, never widen",
+        "atr_tp_multiple": 2.5, "path_end_sec": 7200,
+        "exit_profile_id": "REGIME_ATR_PROTECTION_V1",
+        "hypothesis": "Pre-registered regime-aware protection improves capture without increasing initial account risk.",
+        "research_question": "Does dynamic protection beat the static protected control on chronological OOS risk-adjusted return?",
     },
     # =====================================================================
     # Retired paper-research candidate: TYPE_B_HUNTER_V1.

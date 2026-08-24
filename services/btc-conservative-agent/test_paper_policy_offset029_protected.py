@@ -70,5 +70,7 @@ def test_entry_identity_is_distinct_but_entry_price_matches_tile_one():
     assert row["ai_direct_limit"] == 99.71
     assert row["policy_id"] == policy.POLICY_ID
     assert row["exit_profile_id"] == policy.EXIT_PROFILE_ID
-    assert row["paper_only"] is True
+    assert row["paper_only"] is False
     assert row["relay_eligible"] is False
+    assert row["relay_configured"] is True
+    assert row["relay_copy_readiness"] == "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"

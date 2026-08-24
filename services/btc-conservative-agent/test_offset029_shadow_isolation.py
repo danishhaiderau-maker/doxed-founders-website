@@ -35,6 +35,8 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
         "_position_protection_view",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
+            "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED": "OFFSET_029_ATR_PROTECTED",
+            "RESEARCH_LANE_OFFSET_029_ATR_REGIME": "OFFSET_029_ATR_REGIME",
             "_buf_float": lambda value, default=0.0: float(value or default),
             "offset029_policy": offset_policy,
         },
@@ -74,33 +76,28 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
     assert "_position_protection_view(row)" in relay_view
 
 
-def test_paused_offset_is_cancelled_not_shadow_replayed():
+def test_patient_chase_pause_blocks_orders_but_tile_off_collects_policy_shadow():
     process = _function_source(BOT, "process_signal")
     spawn = _function_source(BOT, "_spawn_combo_lane")
     lab = _function_source(BOT, "_spawn_lab_combo_shadow")
     cancel_pending = _function_source(BOT, "circuit_breaker_cancel_pending")
 
-    assert f"event_lane == {LANE}" in process
+    assert "is_patient_chase_lane(event_lane)" in process
     assert "paused_shadow_mode = False" in process
     assert "_manual_pause_block_entry" in process
-    assert "SPAWN_CANCELLED" in spawn
-    assert "PAPER_LANE_TOGGLE_OFF_NO_SHADOW" in spawn
-    assert f"upper() == {LANE}" in lab
-    assert "start_replay_buffer" in lab  # guard must precede the generic replay engine
-    assert lab.index("refused forbidden LAB/shadow replay") < lab.rindex("start_replay_buffer")
+    assert "SPAWN_SHADOW" in spawn
+    assert "TILE_OFF_SHADOW_ONLY" in spawn
+    assert "is_patient_chase_lane(target_lane)" in lab
+    assert "start_replay_buffer" in lab
+    assert "offset029_policy.ENTRY_OFFSET if patient_shadow else 0.0" in lab
     assert 'record_expired=True' in cancel_pending
     assert 'expire_signal=True' in cancel_pending
     assert "start_replay_buffer" not in cancel_pending
 
 
-def test_offset_never_writes_type_b_or_shadow_ledgers():
+def test_offset_never_writes_type_b_ledger():
     child = _function_source(BOT, "_record_type_b_research_v2_child")
-    finalize = _function_source(BOT, "finalize_shadow_lane_collecting")
-    shadow = _function_source(BOT, "log_shadow_outcome_jsonl")
-
     assert LANE in child and child.index("return") < child.index("append_type_b_research_v2_event")
-    assert LANE in finalize and finalize.index("return") < finalize.index("_safe_append_jsonl")
-    assert LANE in shadow and shadow.index("return") < shadow.index("_safe_append_jsonl")
 
 
 def test_offset_outcome_cannot_use_scenario_c_profit_lock():
@@ -119,14 +116,16 @@ def test_analyzer_excludes_preserved_policy_mismatch_rows():
     type_b_report = _function_source(ANALYZER, "type_b_research_v2_report")
 
     assert "OFFSET_029_ATR_TP_25" in shadow_loader
-    assert '== "OFFSET_029_ATR_TP_25"' in shadow_loader
+    assert '"OFFSET_029_ATR_PROTECTED"' in shadow_loader
     assert "policy_mismatch_rows_excluded" in shadow_loader
+    assert "PATIENT_CHASE_SHADOW_POLICY_IDENTITY_MISSING" in shadow_loader
     assert "policy_mismatch_events_excluded" in type_b_report
     assert "OFFSET029_PAPER_ONLY_FORBIDS_TYPE_B_SHADOW_EVENTS" in type_b_report
 
 
-def test_shadow_loader_behavior_keeps_evidence_but_excludes_offset_from_ranking():
+def test_shadow_loader_keeps_signed_patient_shadow_and_excludes_legacy_mismatch():
     rows = [
+        {"research_lane": "OFFSET_029_ATR_TP_25", "policy_version": offset_policy.POLICY_ID, "net_pnl_usd": 2.0},
         {"research_lane": "OFFSET_029_ATR_TP_25", "net_pnl_usd": 99.0},
         {"research_lane": "CONTINUOUS", "net_pnl_usd": 1.0},
     ]
@@ -142,9 +141,9 @@ def test_shadow_loader_behavior_keeps_evidence_but_excludes_offset_from_ranking(
         },
     )
     ranked = fn()
-    assert ranked["research_lane"].tolist() == ["CONTINUOUS"]
+    assert ranked["research_lane"].tolist() == ["OFFSET_029_ATR_TP_25", "CONTINUOUS"]
     assert ranked.attrs["policy_mismatch_rows_excluded"] == 1
-    assert rows[0]["net_pnl_usd"] == 99.0  # immutable source evidence untouched
+    assert rows[1]["net_pnl_usd"] == 99.0  # immutable source evidence untouched
 
 
 def test_offset_dashboard_gate_places_now_despite_global_chase_and_spread_filters():
@@ -155,6 +154,7 @@ def test_offset_dashboard_gate_places_now_despite_global_chase_and_spread_filter
             "state_lock": nullcontext(),
             "state": {"ai_enabled": True, "leverage": 100},
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "is_patient_chase_lane": lambda lane: lane == offset_policy.LANE,
             "MAX_RESEARCH_LEVERAGE": 100,
             "lane_orders_allowed": lambda _lane: True,
             "ensure_signal_capacity": lambda: True,
@@ -192,11 +192,11 @@ def test_offset_resolver_preserves_exact_anchor_without_smart_reanchor():
     assert meta["policy_id"] == offset_policy.POLICY_ID
 
 
-def test_offset_order_path_disables_generic_chase_and_relay_side_effects():
+def test_offset_order_path_disables_generic_chase_and_direct_exchange_submit():
     place = _function_source(BOT, "_place_simulated_limit_order")
     touch_grid = _function_source(BOT, "_arm_chase_offset_touch_grid")
     assert "dashboard_exact_chase_managed = not registered_offset_policy" in place
-    assert "if not registered_offset_policy:\n        _relay_mirror" in place
+    assert "if relay_publishes_approve_outcome(lane):\n        _relay_mirror" in place
     assert "if not registered_offset_policy:\n        _maybe_bitfinex_limit_entry" in place
     assert "if not registered_offset_policy:\n        _log_shadow_vs_live_entry" in place
     assert "funnel_on_order(signal, order)" in place

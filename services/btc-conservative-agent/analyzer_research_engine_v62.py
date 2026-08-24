@@ -3218,17 +3218,17 @@ def _load_shadow_lane_outcome_df(session: dict = None):
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     if "research_lane" in df.columns:
-        # OFFSET_029 is paper-only. Historical rows in this shadow file were
-        # emitted by an invalid generic Scenario-C replay route and are kept on
-        # disk as immutable evidence, but can never qualify for policy ranking.
-        mismatch = (
-            df["research_lane"].fillna("").astype(str).str.upper()
-            == "OFFSET_029_ATR_TP_25"
-        )
+        # Preserve valid frozen-policy Patient Chase shadows while excluding
+        # pre-contract generic Scenario-C rows that lacked policy identity.
+        patient = df["research_lane"].fillna("").astype(str).str.upper().isin({
+            "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED", "OFFSET_029_ATR_REGIME",
+        })
+        policy_series = df.get("policy_version", pd.Series(index=df.index, dtype=object)).fillna("").astype(str)
+        mismatch = patient & ~policy_series.str.startswith("OFFSET_0.29_CHASE_")
         mismatch_count = int(mismatch.sum())
         df = df[~mismatch].copy()
         df.attrs["policy_mismatch_rows_excluded"] = mismatch_count
-        df.attrs["policy_mismatch_reason"] = "OFFSET029_PAPER_ONLY_FORBIDS_SHADOW_OUTCOME"
+        df.attrs["policy_mismatch_reason"] = "PATIENT_CHASE_SHADOW_POLICY_IDENTITY_MISSING"
     if session and _session_start_ts(session) is not None:
         df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
     return df
