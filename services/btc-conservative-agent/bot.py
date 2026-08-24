@@ -25588,6 +25588,16 @@ def close_position(pos: dict, exit_reason: str):
             ai_factors = {}
         close_iso = utc_iso()
         close_mel = _format_melbourne_hm(close_iso)
+        protected_partial_policy = str(pos.get("research_lane") or "").upper() in {
+            RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+            RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+        }
+        if protected_partial_policy:
+            # A terminal close consumes the entire remaining runner. Keep the
+            # pre-close ``qty`` as execution evidence, but never persist the
+            # last partial-runner fraction as though exposure survived the
+            # terminal event (including ADMIN_MANUAL_CLOSE / force-flat).
+            pos["policy_remaining_fraction"] = 0.0
         trade_row = {
             "ts": close_iso,
             "close_ts": close_iso,

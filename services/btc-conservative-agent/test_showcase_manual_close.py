@@ -21,3 +21,15 @@ def test_manual_close_endpoint_is_single_position_and_paper_only():
         BOT_SOURCE.index("@app.route('/api/toggle_early_fail")
     ].lower()
     assert "close all" not in endpoint
+
+
+def test_terminal_close_zeros_protected_runner_fraction_before_trade_row():
+    close_start = BOT_SOURCE.index("def close_position(pos: dict, exit_reason: str):")
+    close_end = BOT_SOURCE.index("\ndef ", close_start + 1)
+    close_src = BOT_SOURCE[close_start:close_end]
+    normalize = 'pos["policy_remaining_fraction"] = 0.0'
+    terminal_row = '"policy_remaining_fraction": pos.get("policy_remaining_fraction")'
+
+    assert "protected_partial_policy" in close_src
+    assert close_src.index(normalize) < close_src.index(terminal_row)
+    assert "ADMIN_MANUAL_CLOSE / force-flat" in close_src
