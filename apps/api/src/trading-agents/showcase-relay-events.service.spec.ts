@@ -290,6 +290,7 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
     action: string;
     direction: string;
     entry: Record<string, unknown>;
+    risk?: Record<string, unknown>;
     context: Record<string, unknown>;
   };
   let storedEnvelope: StoredEnvelope = {
@@ -299,7 +300,9 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
       mode: 'EXACT_LIMIT',
       reference: 'SHOWCASE_EXACT_LIMIT',
       exact_limit_price: 63_940,
+      exact_qty_btc: 0.00039,
     },
+    risk: { max_margin_usd: 0.25 },
     context: {
       showcase_event: 'LIMIT_UPDATED',
       showcase_event_id: 'cont-race:LIMIT_UPDATED:4',
@@ -406,7 +409,9 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
     ts: `2026-07-30T01:00:0${seq}.000Z`,
     direction: 'LONG',
     limit_price: price,
-    qty: 0.02361,
+    qty: 0.00039,
+    margin_usdt: (0.00039 * price) / 100,
+    leverage: 100,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     entry_reason: 'LOCAL_SUPPORT_LIMIT',
     executable: true,

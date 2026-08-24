@@ -589,7 +589,7 @@ test('concurrent serialized nearby claims reserve the lane before exchange submi
     const run = advisoryLane.then(() => {
       const candidate = {
         participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction: 'SHORT' as const,
-        limitPrice: 64_000 + n, createdAtMs: n * 1_000, qty: 0.01, marginUsd: 20,
+        limitPrice: 64_000 + n, createdAtMs: n * 1_000, qty: 0.00039, marginUsd: 0.25,
       };
       active.push(candidate);
       return assessCorrelatedExposureCluster({ candidate, active: [...active], riskStateAvailable: true });
@@ -629,10 +629,10 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     entry: {
       type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0,
       exact_limit_price: 63_614.55,
-      exact_qty_btc: 0.02361832782239017,
+      exact_qty_btc: 25 / 63_614.55,
       reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1_800,
     },
-    risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+    risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     context: {
       regime: 'UNKNOWN', edge: 0, ai_win_prob: 0,
       entry_mode_source: 'test', entry_limit_policy: 'micro_sr_structural_limit_v1',
@@ -690,18 +690,18 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     'cycle-exact-qty',
     envelope,
     { apiKey: 'redacted', apiSecret: 'redacted' },
-    20,
+    0.25,
     'cont-e0ac7001',
     'bitfinex',
     { availableUsd: 100, markPrice: 63_620, exchangeBookProvenEmpty: true },
   );
   assert.equal(placed, true);
   assert.equal(submitted.length, 1);
-  assert.equal(submitted[0].qty, 0.02361);
-  assert.notEqual(submitted[0].qty, 0.03143);
-  assert.equal(events.at(-1)?.source_exact_qty_btc, 0.02361832782239017);
-  assert.equal(events.at(-1)?.venue_qty_btc, 0.02361);
-  assert.equal(events.at(-1)?.margin_cap_usd, 20);
+  assert.equal(submitted[0].qty, 0.00039);
+  assert.notEqual(submitted[0].qty, 0.0004);
+  assert.equal(events.at(-1)?.source_exact_qty_btc, 25 / 63_614.55);
+  assert.equal(events.at(-1)?.venue_qty_btc, 0.00039);
+  assert.equal(events.at(-1)?.margin_cap_usd, 0.25);
 });
 
 test('market catch-up money path also submits the exact showcase position quantity', async () => {
@@ -739,7 +739,7 @@ test('market catch-up money path also submits the exact showcase position quanti
   };
   service.resolveExchangeTradesFillEvidence = async () => ({
     price: 63_620,
-    qty: 0.02361,
+    qty: 0.00039,
     fillIds: [501],
     fees: [],
     firstExecutedAtMs: 1,
@@ -758,24 +758,24 @@ test('market catch-up money path also submits the exact showcase position quanti
     {
       direction: 'SHORT',
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
-      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
     { apiKey: 'redacted', apiSecret: 'redacted' },
-    20,
+    0.25,
     'cont-catchup-exact',
     63_614.55,
-    0.02361832782239017,
+    25 / 63_614.55,
     63_620,
     5.45,
   );
 
   assert.equal(placed, true);
   assert.equal(submitted.length, 1);
-  assert.equal(submitted[0].qty, 0.02361);
-  assert.notEqual(submitted[0].qty, 0.03143);
-  assert.equal(events[0].source_exact_qty_btc, 0.02361832782239017);
-  assert.equal(events[0].venue_qty_btc, 0.02361);
-  assert.equal(events[0].margin_cap_usd, 20);
+  assert.equal(submitted[0].qty, 0.00039);
+  assert.notEqual(submitted[0].qty, 0.0004);
+  assert.equal(events[0].source_exact_qty_btc, 25 / 63_614.55);
+  assert.equal(events[0].venue_qty_btc, 0.00039);
+  assert.equal(events[0].margin_cap_usd, 0.25);
 });
 
 test('market catch-up accepted-timeout retains its durable claim and pauses for exact CID recovery', async () => {
@@ -817,10 +817,10 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
     {
       direction: 'SHORT',
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
-      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 20, 'cont-catchup-timeout', 63_614.55,
-    0.02361832782239017, 63_620, 5.45,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-timeout', 63_614.55,
+    25 / 63_614.55, 63_620, 5.45,
   );
 
   assert.equal(placed, false);
@@ -877,10 +877,10 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
     {
       direction: 'SHORT',
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
-      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 20, 'cont-catchup-stop-fail', 63_614.55,
-    0.02361832782239017, 63_620, 5.45,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-stop-fail', 63_614.55,
+    25 / 63_614.55, 63_620, 5.45,
   );
 
   assert.equal(placed, false);
@@ -5665,16 +5665,16 @@ test('META_QTY_REPAIR appends only while its exact participant is nonterminal', 
   service.logger = { warn() {}, debug() {} };
   const intent = {
     direction: 'SHORT',
-    entry: { mode: 'EXACT_LIMIT', exact_limit_price: 64_000, exact_qty_btc: 0.02 },
-    risk: { max_margin_usd: 20, leverage_hint: 100 },
+    entry: { mode: 'EXACT_LIMIT', exact_limit_price: 64_000, exact_qty_btc: 0.00039 },
+    risk: { max_margin_usd: 0.25, leverage_hint: 100 },
   };
   const terminalMeta = await service.resolveLotMeta(
-    'participant', 'cycle', 'user', 'agent', intent, 20,
+    'participant', 'cycle', 'user', 'agent', intent, 0.25,
   );
-  assert.equal(terminalMeta.qty, 0.02);
+  assert.equal(terminalMeta.qty, 0.00039);
   assert.equal(events.length, 0);
   status = SignalCycleStatus.PENDING_ENTRY;
-  await service.resolveLotMeta('participant', 'cycle', 'user', 'agent', intent, 20);
+  await service.resolveLotMeta('participant', 'cycle', 'user', 'agent', intent, 0.25);
   assert.equal(events.length, 1);
   assert.equal((events[0] as unknown[])[3], 'UPDATE_STOPS');
   assert.equal(((events[0] as unknown[])[4] as { event: string }).event, 'META_QTY_REPAIR');
