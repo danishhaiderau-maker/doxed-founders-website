@@ -9,6 +9,24 @@ from research_v3_store import V3EvidenceStore
 
 
 class ResearchV3StoreTests(unittest.TestCase):
+    def test_verify_reuses_signature_validated_ids_after_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-cache")
+            store.append("opportunity", {"record_id": "opp-1"})
+
+            with mock.patch.object(
+                V3EvidenceStore,
+                "_load_ids",
+                wraps=V3EvidenceStore._load_ids,
+            ) as load_ids:
+                first = store.verify()
+                first_calls = load_ids.call_count
+                second = store.verify()
+
+            self.assertTrue(first["passed"])
+            self.assertEqual(second["ledger_counts"]["opportunity"], 1)
+            self.assertEqual(load_ids.call_count, first_calls)
+
     def test_normalized_ledgers_are_idempotent_and_epoch_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")

@@ -173,12 +173,21 @@ class V3EvidenceStore:
         }
 
     def verify(self) -> dict[str, Any]:
+        """Verify durable ledgers without reparsing unchanged append files.
+
+        ``append`` updates the signature-bound ID cache only after the row has
+        been flushed and fsynced. Reusing that cache preserves duplicate and
+        truncation detection while keeping synchronous collector work
+        independent of total ledger history. Any external write, replacement,
+        truncation, or recovery changes the signature and forces a full parse.
+        """
         counts: dict[str, int] = {}
         defects: list[dict[str, str]] = []
         for ledger in LEDGER_NAMES:
             path = self.ledger_path(ledger)
             try:
-                counts[ledger] = len(self._load_ids(path))
+                with _path_lock(path):
+                    counts[ledger] = len(self._cached_ids(path))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 counts[ledger] = 0
                 defects.append({"ledger": ledger, "reason": str(exc)})
