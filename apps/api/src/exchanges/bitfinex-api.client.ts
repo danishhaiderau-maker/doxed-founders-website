@@ -13,6 +13,36 @@ export const BITFINEX_SAFE_CLOSE_FLAGS =
   BITFINEX_POSITION_CLOSE_FLAG | BITFINEX_REDUCE_ONLY_FLAG;
 const STABLE_CURRENCIES = new Set(['USD', 'USDT', 'UST', 'USTF0']);
 
+export type BitfinexFuturesPairConstraints = {
+  symbol: string;
+  minQtyBtc: number;
+  maxQtyBtc: number;
+  initialMarginFraction: number;
+  maintenanceMarginFraction: number;
+  priceSignificantDigits: 5;
+  amountDecimals: 8;
+  observedAt: string;
+  source: 'BITFINEX_PUBLIC_FUTURES_CONFIG';
+};
+
+export function parseBitfinexBtcPerpConstraints(payload: unknown, observedAt = new Date().toISOString()): BitfinexFuturesPairConstraints | null {
+  const rows = Array.isArray(payload) && Array.isArray(payload[0]) ? payload[0] : null;
+  const match = rows?.find((row) => Array.isArray(row) && row[0] === 'BTCF0:USTF0');
+  const detail = Array.isArray(match) && Array.isArray(match[1]) ? match[1] : null;
+  if (!detail) return null;
+  const minQtyBtc = Number(detail[3]);
+  const maxQtyBtc = Number(detail[4]);
+  const initialMarginFraction = Number(detail[8]);
+  const maintenanceMarginFraction = Number(detail[9]);
+  if (!(minQtyBtc > 0) || !(maxQtyBtc >= minQtyBtc) || !(initialMarginFraction > 0) || !(maintenanceMarginFraction > 0)) return null;
+  return {
+    symbol: BITFINEX_BTC_PERP_SYMBOL, minQtyBtc, maxQtyBtc,
+    initialMarginFraction, maintenanceMarginFraction,
+    priceSignificantDigits: 5, amountDecimals: 8,
+    observedAt, source: 'BITFINEX_PUBLIC_FUTURES_CONFIG',
+  };
+}
+
 export type BitfinexWalletRow = {
   walletType: string;
   currency: string;
@@ -576,6 +606,12 @@ export function parseOpenPositionPayload(
 }
 
 export class BitfinexTradingClient {
+  async getBtcPerpVenueConstraints(): Promise<BitfinexFuturesPairConstraints> {
+    const payload = await bitfinexPublicGet<unknown>('v2/conf/pub:info:pair:futures');
+    const parsed = parseBitfinexBtcPerpConstraints(payload);
+    if (!parsed) throw new Error('Bitfinex BTC perpetual constraints missing or malformed');
+    return parsed;
+  }
   async validateCredentials(creds: ExchangeCredentials): Promise<{ ok: boolean; message: string }> {
     try {
       await bitfinexAuthPost(creds, 'v2/auth/r/wallets');

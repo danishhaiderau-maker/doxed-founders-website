@@ -73,6 +73,7 @@ export function assessBitfinexLiveCopySizingReadiness(input: {
   }
   return {
     schema: 'bitfinex_live_copy_sizing_readiness_v1' as const,
+    status: blockers.length === 0 ? 'ACCEPTED_PROVEN' as const : 'UNKNOWN_NOT_PROVEN' as const,
     ready: blockers.length === 0,
     blockers,
     venueConstraints: constraints ?? null,

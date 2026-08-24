@@ -8019,6 +8019,8 @@ await this.notifications
       data: {
         dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
           copyRelayCapacity: capacity,
+          bitfinexLiveCopySizingReadiness:
+            dash.bitfinexLiveCopySizingReadiness ?? missingBitfinexVenueEvidenceReadiness(),
           // Fix F — tick liveness watchdog. persistCapacityState already runs
           // once per processInstance (both exit-only and normal paths), so this
           // piggybacks on an existing per-tick dashboardState write — no extra
@@ -9425,6 +9427,24 @@ await this.notifications
       } catch (err) {
         this.logger.warn(`Bitfinex sizing readiness remains NOT_PROVEN order=${orderId}: ${err instanceof Error ? err.message : err}`);
       }
+    }
+
+    const sizingReadinessInstance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true, status: true },
+    });
+    if (sizingReadinessInstance) {
+      const sizingReadinessDash = (sizingReadinessInstance.dashboardState ?? {}) as Record<string, unknown>;
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          dashboardState: applyInstanceDashboardPatch(
+            sizingReadinessInstance.status,
+            sizingReadinessDash,
+            { bitfinexLiveCopySizingReadiness: bitfinexSizingReadiness },
+          ) as unknown as Prisma.InputJsonValue,
+        },
+      });
     }
 
     const payload: ExecutionPayload = {

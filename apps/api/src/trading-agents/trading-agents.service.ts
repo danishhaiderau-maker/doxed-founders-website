@@ -52,6 +52,7 @@ import {
   type BotApiState,
 } from './bot-state.mapper';
 import { normalizeAnalyzerGenomeStatus } from './analyzer-genome-status';
+import { missingBitfinexVenueEvidenceReadiness } from './bitfinex-live-copy-readiness';
 import {
   probePublicBotHealth,
   summarizeAnalyzerMirrorHealth,
@@ -632,6 +633,8 @@ export class TradingAgentsService implements OnModuleInit {
       positionMismatchAlert:
         typeof dash.positionMismatchAlert === 'string' ? dash.positionMismatchAlert : null,
       exchangeProvider: instance.exchangeProvider,
+      bitfinexLiveCopySizingReadiness:
+        dash.bitfinexLiveCopySizingReadiness ?? missingBitfinexVenueEvidenceReadiness(),
       reconciliation: reconcile
         ? {
             signedExchangePositionQty: reconcile.signedExchangePositionQty ?? null,

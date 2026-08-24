@@ -14,6 +14,7 @@ const constraints = {
 
 test('missing venue constraints and authenticated acceptance remain fail closed', () => {
   const report = missingBitfinexVenueEvidenceReadiness();
+  assert.equal(report.status, 'UNKNOWN_NOT_PROVEN');
   assert.equal(report.ready, false);
   assert.ok(report.blockers.includes('VENUE_CONSTRAINTS_EVIDENCE_MISSING'));
   assert.ok(report.blockers.includes('AUTHENTICATED_VENUE_ACCEPTANCE_RECEIPT_MISSING'));
@@ -34,6 +35,7 @@ test('exact authenticated accepted sizing reconciles offline', () => {
     },
   });
   assert.deepEqual(report.blockers, []);
+  assert.equal(report.status, 'ACCEPTED_PROVEN');
   assert.equal(report.ready, true);
 });
 
