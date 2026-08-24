@@ -10,6 +10,32 @@ from research_v3_store import V3EvidenceStore
 
 
 class V3ReportTests(unittest.TestCase):
+    def test_persisted_ranking_is_bounded_and_summarizes_blocked_candidates(self):
+        candidates = [
+            {
+                "policy_id": f"blocked-{index}",
+                "gates": {},
+            }
+            for index in range(150)
+        ]
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            report = build_safe_policy_genome_v3_report(
+                data, reports, candidates=candidates,
+            )
+            ranking = report["safe_policy_ranking"]
+            self.assertNotIn("blocked", ranking)
+            self.assertEqual(ranking["blocked_policy_count"], 150)
+            self.assertEqual(ranking["ranked"], [])
+            self.assertEqual(
+                ranking["blocked_gate_counts"]["integrity_pass"], 150,
+            )
+            persisted = json.loads(
+                (Path(reports) / "safe_policy_genome_v3_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertNotIn("blocked", persisted["safe_policy_ranking"])
+
     def test_empty_report_is_truthful_and_fail_closed(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             report = build_safe_policy_genome_v3_report(data, reports)

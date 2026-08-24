@@ -350,6 +350,33 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         ranking = dict(ranking)
         ranking["number_one"] = None
         ranking["qualification"] = "BLOCKED_ORDER_RESOLUTION_INTEGRITY"
+    # The replay engine may assess tens of thousands of complete policies.  The
+    # full candidate rows are working memory, not a report contract: persisting
+    # them under both candidate_screen.candidates and ranking.blocked made a
+    # small V3.1 cohort produce a ~200 MB artifact and held the scheduled
+    # analyzer in JSON serialization for minutes.  Keep the auditable counts,
+    # blocker distribution, bounded leaderboards and at most the public top 100
+    # qualified policies.  This is also the dashboard's documented exposure.
+    persisted_candidate_screen = dict(candidate_screen or {
+        "schema": "externally_supplied_safe_policy_candidates_v3",
+        "unique_policies_evaluated": len(candidates or []),
+        "descriptive_top_100": [],
+        "profit_capture_leaders": {},
+        "drawdown_control_leaders": [],
+        "dynamic_regime_leaders": {},
+    })
+    persisted_candidate_screen.pop("candidates", None)
+    blocked_rows = list(ranking.get("blocked") or [])
+    blocker_counts = Counter(
+        blocker
+        for row in blocked_rows
+        for blocker in (row.get("ranking_blockers") or [])
+    )
+    persisted_ranking = dict(ranking)
+    persisted_ranking.pop("blocked", None)
+    persisted_ranking["ranked"] = list(ranking.get("ranked") or [])[:100]
+    persisted_ranking["blocked_policy_count"] = len(blocked_rows)
+    persisted_ranking["blocked_gate_counts"] = dict(sorted(blocker_counts.items()))
     progress_receipts = []
     if candidate_screen is not None:
         progress_receipts.append({
@@ -404,15 +431,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         },
         "search": search,
         "search_progress": search_progress(search, progress_receipts),
-        "candidate_screen": candidate_screen or {
-            "schema": "externally_supplied_safe_policy_candidates_v3",
-            "unique_policies_evaluated": len(candidates or []),
-            "descriptive_top_100": [],
-            "profit_capture_leaders": {},
-            "drawdown_control_leaders": [],
-            "dynamic_regime_leaders": {},
-        },
-        "safe_policy_ranking": ranking,
+        "candidate_screen": persisted_candidate_screen,
+        "safe_policy_ranking": persisted_ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],
         "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
