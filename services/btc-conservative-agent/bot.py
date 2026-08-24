@@ -38697,10 +38697,34 @@ def _paper_lifecycle_row_valid(row: dict, kind: str) -> bool:
     return status == "PENDING" and float(row.get("limit_price") or 0) > 0
 
 
+def _canonicalize_paper_position_snapshot(row: dict) -> dict:
+    """Persist the protection fields enforced by the position's frozen policy.
+
+    Patient Chase positions still carry generic Scenario-C-shaped ``tp``/``sl``
+    fields created by the shared fill path.  Its exit branch does not enforce
+    those values: it uses the frozen 3m ATR target and deliberately has no stop
+    in the baseline research lane.  Writing the generic values into the crash
+    recovery snapshot makes the persisted lifecycle contradict both runtime
+    execution and V3.1 policy identity.  Normalize only the copied snapshot so
+    the in-memory accounting object remains untouched.
+    """
+    snapshot = copy.deepcopy(row) if isinstance(row, dict) else {}
+    if str(snapshot.get("research_lane") or "").upper() != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        return snapshot
+    protection = _position_protection_view(snapshot)
+    snapshot["tp"] = protection["tp"]
+    snapshot["atr_tp_price"] = protection["tp"]
+    snapshot["tp_policy"] = protection["tp_policy"]
+    snapshot["sl"] = None
+    snapshot["sl_enforced"] = False
+    snapshot["stop_policy"] = protection["stop_policy"]
+    return snapshot
+
+
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
     """Atomically persist every paper lane's executable lifecycle."""
     with trade_lock:
-        positions = [copy.deepcopy(row) for row in open_positions
+        positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
                      if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
         orders = [copy.deepcopy(row) for row in pending_orders
                   if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
@@ -38734,6 +38758,7 @@ def load_paper_lifecycle() -> dict:
         for row in payload.get("positions") or []:
             if not _paper_lifecycle_row_valid(row, "position"):
                 result["invalid"] += 1; continue
+            row = _canonicalize_paper_position_snapshot(row)
             tid = str(row["trade_id"])
             if tid in known_positions or tid in known_orders:
                 result["duplicates"] += 1; continue

@@ -42,7 +42,9 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         return {
             "trade_id": "patient-pos-1", "status": "OPEN", "entry": 78000.0,
             "entry_ts": 1000.0, "research_lane": "OFFSET_029_ATR_TP_25",
-            "exit_profile_id": "atr_tp_2_5", "atr_entry": 125.0,
+            "dir": "LONG", "exit_profile_id": "atr_tp_2_5", "atr_entry": 125.0,
+            "atr14_3m": 125.0, "atr_tp_price": 78312.5,
+            "tp": 79950.0, "sl": 77500.0, "sl_enforced": True,
             "peak_pct": 9.0, "mae_pct": -2.0,
         }
 
@@ -71,6 +73,33 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertEqual(self.bot.open_positions[0]["atr_entry"], 125.0)
         self.assertEqual(self.bot.pending_orders[0]["chase_count"], 3)
         self.assertEqual(self.bot.pending_orders[0]["exit_profile_id"], "scenario_c_ladder_12_to_10_v1")
+
+    def test_patient_snapshot_persists_only_enforced_atr_protection(self):
+        self.bot.open_positions.append(self._position())
+        self.assertTrue(self.bot.save_paper_lifecycle(reason="test"))
+        payload = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
+        saved = payload["positions"][0]
+        self.assertEqual(saved["tp"], 78312.5)
+        self.assertEqual(saved["atr_tp_price"], 78312.5)
+        self.assertEqual(saved["tp_policy"], "FROZEN_3M_ATR_TP_2_5X")
+        self.assertIsNone(saved["sl"])
+        self.assertFalse(saved["sl_enforced"])
+        self.assertEqual(saved["stop_policy"], "NONE_TP_ONLY_RESEARCH")
+        # Snapshot normalization must not rewrite the live accounting object.
+        self.assertEqual(self.bot.open_positions[0]["sl"], 77500.0)
+
+    def test_patient_restore_repairs_legacy_tp_sl_projection(self):
+        payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
+                   "positions": [self._position()], "pending_orders": []}
+        Path(self.bot.PAPER_LIFECYCLE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+        result = self.bot.load_paper_lifecycle()
+        self.assertEqual(result["positions"], 1)
+        restored = self.bot.open_positions[0]
+        self.assertEqual(restored["tp"], 78312.5)
+        self.assertEqual(restored["atr_tp_price"], 78312.5)
+        self.assertIsNone(restored["sl"])
+        self.assertFalse(restored["sl_enforced"])
+        self.assertEqual(restored["stop_policy"], "NONE_TP_ONLY_RESEARCH")
 
     def test_second_restore_is_idempotent(self):
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
