@@ -1,6 +1,6 @@
 import unittest
 
-from research_v3_validation import chronological_folds, validate_policy
+from research_v3_validation import chronological_folds, episode_block_bootstrap, validate_policy
 
 
 def episode(index, pnl, *, state="FULL_FILL", regime=None):
@@ -14,6 +14,15 @@ def episode(index, pnl, *, state="FULL_FILL", regime=None):
 
 
 class V3ValidationTests(unittest.TestCase):
+    def test_seeded_bootstrap_is_deterministic_and_bounded(self):
+        first = episode_block_bootstrap([1.0, -0.5, 2.0], samples=250, seed=19)
+        second = episode_block_bootstrap([1.0, -0.5, 2.0], samples=250, seed=19)
+        self.assertEqual(first, second)
+        self.assertEqual(first["samples"], 250)
+        self.assertLessEqual(first["mean_lcb95"], first["mean_ucb95"])
+        self.assertGreaterEqual(first["probability_mean_positive"], 0.0)
+        self.assertLessEqual(first["probability_mean_positive"], 1.0)
+
     def test_purge_removes_training_paths_overlapping_validation(self):
         rows = [episode(i, 1) for i in range(30)]
         folds = chronological_folds(rows, outer_folds=5, purge_sec=7200, embargo_sec=300)

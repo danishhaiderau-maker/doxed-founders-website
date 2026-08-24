@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import random
 from collections import Counter
-from statistics import mean
 from typing import Any, Iterable
 
 from research_v3_risk import drawdown_budget_gate, portfolio_risk_metrics
@@ -79,9 +78,18 @@ def episode_block_bootstrap(values: list[float], *, samples: int = 1000, seed: i
         return {"samples": 0, "mean_lcb95": None, "mean_ucb95": None, "probability_mean_positive": None}
     rng = random.Random(seed)
     means = []
+    value_count = len(values)
     for _ in range(samples):
-        draw = [values[rng.randrange(len(values))] for _ in values]
-        means.append(mean(draw))
+        # ``statistics.mean`` converts every float to an exact Fraction. That
+        # is needlessly expensive inside thousands of policy bootstraps and
+        # previously made a single analyzer generation exceed its 30-minute
+        # publication contract. Inputs are already normalized floats and the
+        # result is rounded to 8 decimals, so a direct floating-point sum is
+        # deterministic for this seeded, fixed-order draw.
+        total = 0.0
+        for _index in range(value_count):
+            total += float(values[rng.randrange(value_count)])
+        means.append(total / value_count)
     return {
         "samples": samples,
         "mean_lcb95": round(float(_percentile(means, 0.025)), 8),
