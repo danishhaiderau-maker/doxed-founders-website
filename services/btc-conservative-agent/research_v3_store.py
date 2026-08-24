@@ -12,12 +12,21 @@ from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
+_id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 
 
 def _path_lock(path: Path) -> threading.RLock:
     key = str(path.resolve())
     with _locks_guard:
         return _locks.setdefault(key, threading.RLock())
+
+
+def _path_signature(path: Path) -> tuple[int, int, int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -72,6 +81,24 @@ class V3EvidenceStore:
             pass
         return ids
 
+    @classmethod
+    def _cached_ids(cls, path: Path) -> set[str]:
+        """Return durable IDs without reparsing an unchanged append ledger.
+
+        The file signature makes the cache safe across separate store objects
+        and invalidates it when another writer or recovery tool changes the
+        ledger. The path lock held by ``append`` serializes the signature,
+        parse and write sequence.
+        """
+        key = str(path.resolve())
+        signature = _path_signature(path)
+        cached = _id_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return set(cached[1])
+        ids = cls._load_ids(path)
+        _id_cache[key] = (signature, frozenset(ids))
+        return ids
+
     def append(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
         path = self.ledger_path(ledger)
         record_id = str(row.get("record_id") or "")
@@ -85,13 +112,15 @@ class V3EvidenceStore:
         })
         line = canonical_json(material) + "\n"
         with _path_lock(path):
-            durable_ids = self._load_ids(path)
+            durable_ids = self._cached_ids(path)
             if record_id in durable_ids:
                 return {"written": False, "duplicate": True, "record_id": record_id, "ledger": ledger}
             with path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
+            durable_ids.add(record_id)
+            _id_cache[str(path.resolve())] = (_path_signature(path), frozenset(durable_ids))
             return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
     def put_market_segment(

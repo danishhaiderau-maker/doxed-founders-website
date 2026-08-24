@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from research_v3_store import V3EvidenceStore
 
@@ -49,6 +50,43 @@ class ResearchV3StoreTests(unittest.TestCase):
             report = store.verify()
             self.assertFalse(report["passed"])
             self.assertIn("TRUNCATED_JSONL_LINE", report["defects"][0]["reason"])
+
+    def test_repeated_appends_reuse_the_durable_id_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            original = V3EvidenceStore._load_ids
+            with mock.patch.object(V3EvidenceStore, "_load_ids", wraps=original) as load_ids:
+                for index in range(10):
+                    store.append("opportunity", {"record_id": f"opp-{index}", "episode_id": "episode-1"})
+            self.assertEqual(load_ids.call_count, 1)
+
+    def test_external_append_invalidates_cache_and_preserves_idempotency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            store.append("opportunity", {"record_id": "opp-1", "episode_id": "episode-1"})
+            path = store.ledger_path("opportunity")
+            external = {
+                "schema": "research_evidence_v3",
+                "ledger": "opportunity",
+                "epoch_id": "epoch-v3-test",
+                "record_id": "opp-external",
+                "episode_id": "episode-2",
+            }
+            with path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps(external, sort_keys=True, separators=(",", ":")) + "\n")
+            duplicate = store.append("opportunity", {"record_id": "opp-external", "episode_id": "episode-2"})
+            self.assertTrue(duplicate["duplicate"])
+            self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_external_truncation_invalidates_cache_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            store.append("execution", {"record_id": "exec-1", "episode_id": "episode-1"})
+            path = store.ledger_path("execution")
+            with path.open("a", encoding="utf-8", newline="") as handle:
+                handle.write('{"record_id":"broken"}')
+            with self.assertRaisesRegex(ValueError, "TRUNCATED_JSONL_LINE"):
+                store.append("execution", {"record_id": "exec-2", "episode_id": "episode-2"})
 
 
 if __name__ == "__main__":
