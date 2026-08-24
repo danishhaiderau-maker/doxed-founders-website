@@ -24559,7 +24559,13 @@ def execute_market_order(signal):
         exit_pipeline(signal, None, "BLOCKED_INSUFFICIENT_CAPITAL")
         return
     qty = calc_position_qty(price, _state_leverage(), signal.get("margin_usdt"))
-    assert qty > 0, "INVALID QTY"
+    if qty <= 0:
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE"
+        signal["exit_reason"] = "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE"
+        enforce_log(signal, "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE")
+        exit_pipeline(signal, None, "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE")
+        return False
     side = map_signal_to_exchange_side(signal["final_direction"])
     sim = simulate_market_fill(side, qty)
     fill_px = sim["avg_price"] if sim.get("avg_price", 0) > 0 else price
@@ -24649,8 +24655,14 @@ def create_limit_order(signal):
         return None
     if _reject_duplicate_limit_order(signal, limit_price, entry_mode):
         return None
-    qty = calc_position_qty(price, _state_leverage())
-    assert qty > 0, "INVALID QTY"
+    qty = calc_position_qty(price, _state_leverage(), signal.get("margin_usdt"))
+    if qty <= 0:
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE"
+        signal["exit_reason"] = "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE"
+        enforce_log(signal, "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE")
+        exit_pipeline(signal, None, "VENUE_MINIMUM_EXCEEDS_REQUESTED_SIZE")
+        return None
     assert limit_price > 0, "INVALID LIMIT PRICE"
     order = {
         "trade_id": signal["trade_id"],
@@ -38859,23 +38871,51 @@ def calc_position_qty(price, leverage, margin_usdt=None):
     try:
         if price is None or price <= 0 or leverage is None:
             logger.error(f"[QTY CALC FAIL] price={price} leverage={leverage}")
-            return 0.0001
+            return 0.0
         market = bitfinex_public.market(SYMBOL_CCXT)
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0.001)
         min_notional = market.get("limits", {}).get("cost", {}).get("min", 5.0)
         fee_buffer = 1 - (MAKER_FEE_PCT + TAKER_FEE_PCT)
-        notional = float(margin_usdt or FIXED_MARGIN_USDT) * (leverage or DEFAULT_RESEARCH_LEVERAGE) * fee_buffer
-        if notional < min_notional:
-            notional = min_notional
-        qty = notional / price
-        qty = max(min_qty, qty)
-        qty = float(bitfinex_public.amount_to_precision(SYMBOL_CCXT, qty))
-        if qty < min_qty:
-            qty = min_qty
+        requested_notional = (
+            float(FIXED_MARGIN_USDT if margin_usdt is None else margin_usdt)
+            * float(leverage or DEFAULT_RESEARCH_LEVERAGE)
+            * fee_buffer
+        )
+        # Live-copy safety contract: never make a requested small test larger
+        # merely to satisfy the venue.  The previous helper silently promoted
+        # both notional and quantity to Bitfinex minima, contradicting the
+        # operator's $0.20-$0.25 / 100x cap.  A venue-incompatible request must
+        # fail closed and remain paper/shadow evidence only.
+        if requested_notional <= 0 or requested_notional < float(min_notional or 0):
+            logger.error(
+                "[QTY CALC BLOCK] requested_notional=%.8f below venue_min_notional=%s",
+                requested_notional,
+                min_notional,
+            )
+            return 0.0
+        raw_qty = requested_notional / float(price)
+        if raw_qty < float(min_qty or 0):
+            logger.error(
+                "[QTY CALC BLOCK] requested_qty=%.12f below venue_min_qty=%s",
+                raw_qty,
+                min_qty,
+            )
+            return 0.0
+        qty = float(bitfinex_public.amount_to_precision(SYMBOL_CCXT, raw_qty))
+        if qty <= 0 or qty < float(min_qty or 0):
+            return 0.0
+        accepted_notional = qty * float(price)
+        if accepted_notional > requested_notional + 1e-8:
+            logger.error(
+                "[QTY CALC BLOCK] precision increased notional requested=%.8f accepted=%.8f",
+                requested_notional,
+                accepted_notional,
+            )
+            return 0.0
         return qty
     except Exception as e:
         logger.error(f"Qty calc failed: {e}")
-        return 0.0001
+        return 0.0
 
 def utc_iso(dt=None):
     if dt is None:
