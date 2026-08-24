@@ -29,7 +29,12 @@ export type DormantReductionVenue = {
 
 export function floorVenueQty(qty: number, step: number): number {
   if (!(qty > 0) || !(step > 0)) return 0;
-  return Math.floor((qty + 1e-12) / step) * step;
+  const units = Math.floor((qty + 1e-12) / step);
+  return Number((units * step).toFixed(12));
+}
+
+function normalizedQty(qty: number): number {
+  return Number(qty.toFixed(12));
 }
 
 export function participantReductionPlan(
@@ -41,7 +46,7 @@ export function participantReductionPlan(
     || !(liveQty > 0)) throw new Error('INVALID_REDUCTION_FRACTION');
   const reduceQty = floorVenueQty(liveQty * (source.reducedQty / source.priorQty), venueStep);
   if (!(reduceQty > 0) || reduceQty > liveQty) throw new Error('VENUE_REDUCTION_ROUNDS_TO_INVALID_QTY');
-  return { beforeQty: liveQty, reduceQty, targetQty: liveQty - reduceQty };
+  return { beforeQty: liveQty, reduceQty, targetQty: normalizedQty(liveQty - reduceQty) };
 }
 
 function sameFence(fence: ParticipantReductionFence, source: SignedReduction): boolean {
@@ -76,9 +81,11 @@ export async function processDormantPositionReduction(input: {
   if (fence.phase === 'CONFIRMED') return { phase: 'CONFIRMED', submitted: false, reason: 'IDEMPOTENT_CONFIRMED' };
   if (fence.phase === 'SUBMITTING' || fence.phase === 'ACKNOWLEDGED') {
     if (Math.abs(liveQty - fence.targetQty) <= input.venueStep / 2) {
-      await input.repo.transition(fence.id, ['SUBMITTING', 'ACKNOWLEDGED'], 'CONFIRMED');
       if (!await input.venue.replaceReduceOnlyProtection(fence.targetQty)) {
-        return { phase: 'CONFIRMED', submitted: false, reason: 'CONFIRMED_PROTECTION_REPLACEMENT_FAILED' };
+        return { phase: fence.phase, submitted: false, reason: 'TARGET_REACHED_PROTECTION_REPLACEMENT_FAILED' };
+      }
+      if (!await input.repo.transition(fence.id, ['SUBMITTING', 'ACKNOWLEDGED'], 'CONFIRMED')) {
+        return { phase: fence.phase, submitted: false, reason: 'CONFIRM_PERSISTENCE_UNCERTAIN_NO_RESUBMIT' };
       }
       await input.venue.updateConfirmedRemainingQty(fence.targetQty);
       return { phase: 'CONFIRMED', submitted: false, reason: 'RECOVERED_FROM_AUTHENTICATED_TARGET' };
@@ -96,9 +103,11 @@ export async function processDormantPositionReduction(input: {
   if (Math.abs(confirmedQty - fence.targetQty) > input.venueStep / 2) {
     return { phase: 'ACKNOWLEDGED', submitted: true, reason: 'ACCOUNT_TARGET_UNCONFIRMED' };
   }
-  await input.repo.transition(fence.id, ['ACKNOWLEDGED'], 'CONFIRMED');
   if (!await input.venue.replaceReduceOnlyProtection(fence.targetQty)) {
-    return { phase: 'CONFIRMED', submitted: true, reason: 'CONFIRMED_PROTECTION_REPLACEMENT_FAILED' };
+    return { phase: 'ACKNOWLEDGED', submitted: true, reason: 'TARGET_REACHED_PROTECTION_REPLACEMENT_FAILED' };
+  }
+  if (!await input.repo.transition(fence.id, ['ACKNOWLEDGED'], 'CONFIRMED')) {
+    return { phase: 'ACKNOWLEDGED', submitted: true, reason: 'CONFIRM_PERSISTENCE_UNCERTAIN_NO_RESUBMIT' };
   }
   await input.venue.updateConfirmedRemainingQty(fence.targetQty);
   return { phase: 'CONFIRMED', submitted: true, reason: 'AUTHENTICATED_TARGET_CONFIRMED' };
