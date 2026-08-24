@@ -43,6 +43,7 @@ class BoundedEvidenceWorker:
         self._completed = deque()
         self._completed_set = set()
         self._dead_letters = deque(maxlen=max_queue)
+        self._timed_out_handler: Optional[threading.Thread] = None
         self._accepting = True
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
@@ -61,6 +62,13 @@ class BoundedEvidenceWorker:
         if self._handler_timeout_sec is None:
             self._handler(job)
             return
+        with self._lock:
+            prior = self._timed_out_handler
+            if prior is not None and prior.is_alive():
+                raise TimeoutError(
+                    "previous timed-out evidence handler is still running"
+                )
+            self._timed_out_handler = None
         finished = threading.Event()
         outcome: Dict[str, Any] = {}
 
@@ -79,6 +87,8 @@ class BoundedEvidenceWorker:
         )
         helper.start()
         if not finished.wait(self._handler_timeout_sec):
+            with self._lock:
+                self._timed_out_handler = helper
             raise TimeoutError(
                 f"evidence handler exceeded {self._handler_timeout_sec:.3f}s"
             )
@@ -208,5 +218,9 @@ class BoundedEvidenceWorker:
                 "active": len(self._active_keys),
                 "completed": len(self._completed_set),
                 "dead_letters": copy.deepcopy(list(self._dead_letters)),
+                "timed_out_handler_alive": bool(
+                    self._timed_out_handler is not None
+                    and self._timed_out_handler.is_alive()
+                ),
                 "accepting": self._accepting,
             }

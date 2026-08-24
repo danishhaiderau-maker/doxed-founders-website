@@ -99,6 +99,39 @@ def test_slow_optional_hook_is_time_bounded_and_dead_lettered() -> None:
     assert worker.shutdown(drain_timeout=1.0)
 
 
+def test_repeated_jobs_do_not_spawn_more_helpers_while_timed_out_handler_lives() -> None:
+    release = threading.Event()
+    calls = []
+    dead_letters = []
+
+    def wedged_handler(job: dict) -> None:
+        calls.append(job["key"])
+        release.wait(2.0)
+
+    worker = BoundedEvidenceWorker(
+        wedged_handler,
+        max_queue=4,
+        max_retries=0,
+        handler_timeout_sec=0.05,
+        on_dead_letter=dead_letters.append,
+    )
+    assert worker.submit("wedged:first", {"hook": "reversal_study"})
+    deadline = time.monotonic() + 0.5
+    while len(dead_letters) < 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert worker.snapshot()["timed_out_handler_alive"] is True
+
+    assert worker.submit("wedged:second", {"hook": "reversal_study"})
+    deadline = time.monotonic() + 0.5
+    while len(dead_letters) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert calls == ["wedged:first"]
+    assert "previous timed-out" in dead_letters[-1]["error"]
+
+    release.set()
+    assert worker.shutdown(drain_timeout=1.0)
+
+
 def test_exception_in_each_post_ai_hook_is_isolated_and_next_jobs_run() -> None:
     receipts = []
     completed = []
