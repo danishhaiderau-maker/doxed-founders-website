@@ -1883,6 +1883,7 @@ def api_health():
 def api_status():
     manifest = _read_json(REPORT_MANIFEST_FILE)
     compact = _read_json(COMPACT_SUMMARY_FILE)
+    safe_genome = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE)
     manifest_sync = manifest.get("analyzer_sync_id") or compact.get("analyzer_sync_id")
     report_sync_ok = manifest_sync == EXPECTED_ANALYZER_SYNC_ID if manifest_sync else None
     run_state = _analyzer_run_state()
@@ -1895,6 +1896,28 @@ def api_status():
         and run_state.get("in_progress")
         and run_state.get("sync_id") == EXPECTED_ANALYZER_SYNC_ID
     )
+    fresh_epoch = manifest.get("fresh_epoch") or {}
+    fresh_epoch_id = (
+        fresh_epoch.get("epoch_id")
+        or safe_genome.get("epoch_id")
+        or (safe_genome.get("epoch_scope") or {}).get("selected_epoch_id")
+    )
+    policy_signatures = sorted({
+        str(identity.get("policy_signature") or "").strip()
+        for identity in (
+            (safe_genome.get("collection") or {}).get(
+                "effective_paper_execution_identities"
+            )
+            or []
+        )
+        if isinstance(identity, dict)
+        and str(identity.get("policy_signature") or "").strip()
+    })
+    legacy_policy_signature = safe_genome.get("policy_signature") or (
+        safe_genome.get("epoch_scope") or {}
+    ).get("policy_signature")
+    if legacy_policy_signature and not policy_signatures:
+        policy_signatures = [str(legacy_policy_signature)]
     return jsonify({
         "ok": bool(runtime_sync_ok and (report_sync_ok is True or report_pending)),
         "read_only": True,
@@ -1916,6 +1939,11 @@ def api_status():
         "public_url": PUBLIC_URL,
         "analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "report_analyzer_sync_id": manifest_sync,
+        "generation_revision": manifest.get("generation_revision"),
+        "source_data_revision": manifest.get("source_data_revision"),
+        "fresh_epoch_id": fresh_epoch_id,
+        "tile_registry_signature": manifest.get("tile_registry_signature"),
+        "policy_signatures": policy_signatures,
         "generated_at": previous_report_at,
         "generated_at_melbourne": format_melbourne_dt(previous_report_at),
         "melbourne_now": format_melbourne_dt(datetime.now(timezone.utc).isoformat()),
@@ -3658,6 +3686,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div>
     <span class="badge ok" id="health">READ-ONLY</span>
     <span class="badge" id="sync">—</span>
+    <span class="badge" id="revision" title="Analyzer generation revision">rev —</span>
+    <span class="badge" id="epoch" title="Signed collection epoch">epoch —</span>
     <span class="badge" id="melb-clock" title="Australia/Melbourne">Melbourne —</span>
     <span class="badge" id="updated">—</span>
   </div>
@@ -4673,6 +4703,18 @@ async function loadStatus() {
   const syncEl = document.getElementById('sync');
   if (syncEl && d.expected_analyzer_sync_id) {
     syncEl.textContent = d.expected_analyzer_sync_id + (d.analyzer_sync_match === true ? ' ✓' : (d.analyzer_sync_match === false ? ' ⚠' : ''));
+  }
+  const revisionEl = document.getElementById('revision');
+  if (revisionEl) {
+    const revision = d.generation_revision || 'UNKNOWN';
+    revisionEl.textContent = `rev ${revision.slice(0, 12)}`;
+    revisionEl.title = `Analyzer generation revision: ${revision}`;
+  }
+  const epochEl = document.getElementById('epoch');
+  if (epochEl) {
+    const epoch = d.fresh_epoch_id || 'UNBOUND';
+    epochEl.textContent = epoch === 'UNBOUND' ? 'epoch UNBOUND' : `epoch ${epoch.replace(/^epoch-/, '').slice(0, 8)}`;
+    epochEl.title = `Signed collection epoch: ${epoch}`;
   }
   const melbEl = document.getElementById('melb-clock');
   if (melbEl && d.melbourne_now) melbEl.textContent = d.melbourne_now;

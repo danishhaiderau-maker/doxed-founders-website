@@ -97,3 +97,47 @@ def test_pathway_audit_reports_missing_receipt_truthfully(tmp_path, monkeypatch)
 
     assert payload == {}
     assert status["status"] == "NOT_PUBLISHED"
+
+
+def test_status_api_and_header_publish_revision_epoch_and_policy_identity(tmp_path, monkeypatch):
+    manifest = tmp_path / "report_manifest.json"
+    compact = tmp_path / "research_compact_summary.json"
+    genome = tmp_path / "safe_policy_genome_v3_report.json"
+    manifest.write_text(
+        """{
+          "analyzer_sync_id": "v31-four-tile-protected-patient-chase",
+          "generated_at": "2026-08-26T03:57:50+10:00",
+          "generation_revision": "37b0e546c0a57e0b51196b0661547f82e05179c0",
+          "source_data_revision": "mirror-digest",
+          "tile_registry_signature": "registry-signature",
+          "fresh_epoch": {"epoch_id": "epoch-signed"},
+          "reports": []
+        }""",
+        encoding="utf-8",
+    )
+    compact.write_text("{}", encoding="utf-8")
+    genome.write_text(
+        """{
+          "collection": {
+            "effective_paper_execution_identities": [
+              {"policy_signature": "policy-b"},
+              {"policy_signature": "policy-a"}
+            ]
+          }
+        }""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "REPORT_MANIFEST_FILE", manifest)
+    monkeypatch.setattr(dashboard, "COMPACT_SUMMARY_FILE", compact)
+    monkeypatch.setattr(dashboard, "SAFE_POLICY_GENOME_V3_REPORT_FILE", genome)
+    monkeypatch.setattr(dashboard, "_analyzer_run_state", lambda: {"in_progress": False})
+
+    payload = dashboard.app.test_client().get("/api/status").get_json()
+
+    assert payload["generation_revision"] == "37b0e546c0a57e0b51196b0661547f82e05179c0"
+    assert payload["source_data_revision"] == "mirror-digest"
+    assert payload["fresh_epoch_id"] == "epoch-signed"
+    assert payload["tile_registry_signature"] == "registry-signature"
+    assert payload["policy_signatures"] == ["policy-a", "policy-b"]
+    assert 'id="revision"' in dashboard.DASHBOARD_HTML
+    assert 'id="epoch"' in dashboard.DASHBOARD_HTML
