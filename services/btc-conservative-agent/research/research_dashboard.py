@@ -20,6 +20,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
+CURRENT_RESEARCH_LANES = frozenset(("CONTINUOUS", "OFFSET_029_ATR_TP_25"))
 
 
 def format_melbourne_dt(value) -> str:
@@ -82,46 +83,15 @@ except ImportError:
     EXPECTED_BOT_VERSION = "unknown"
     EXPECTED_ANALYZER_SYNC_ID = "unknown"
     RESEARCH_DASHBOARD_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"
-    ALL_PATHWAY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "CONTINUOUS",
-        "AI_DISAGREEMENT_REPLAY",
-        "COMBO_65_SP5_DIRECT",
-        "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1",
-        "TYPE_B_PREDICTOR_V1",
-        "AI_DISAGREEMENT_ALPHA",
-        "EXTREME_EDGE",
-        "EDGE_PLUS_STACK",
-        "AI_SCAN",
-        "HIGH_EDGE_RUNNER",
-        "SHADOW_RUNNER",
-        "EDGE_ALPHA_4",
-        "TYPE_B_HUNTER",
-        "SHORT_BEAR_ALPHA",
-        "AI_60_65_ALPHA",
-        "URGENT_CHASE_ALPHA",
-        "CHASE_3PLUS_ALPHA",
-    )
-    DASHBOARD_PATHWAY_LANES = ("CONTINUOUS", "AI_SCAN")
-    DASHBOARD_PRIMARY_LANES = tuple(
-        lane for lane in ALL_PATHWAY_LANES
-        if str(lane).upper() == "CONTINUOUS"
-        or str(lane).upper().startswith(("AI", "A160"))
-        or "AI" in str(lane).upper()
-    )
+    ALL_PATHWAY_LANES = tuple(sorted(CURRENT_RESEARCH_LANES))
+    DASHBOARD_PATHWAY_LANES = ALL_PATHWAY_LANES
+    DASHBOARD_PRIMARY_LANES = ALL_PATHWAY_LANES
 
     def is_ai_focused_lane(lane: str) -> bool:
         u = str(lane or "").upper().strip()
         if not u:
             return False
-        if u == "CONTINUOUS":
-            return True
-        # v11.4 combo research tiles (LAB / Pathway Lab)
-        if u in ("SL_AVOIDANCE_V1", "SIZED_CONTINUOUS_V1") or u.startswith("SL_") or u.startswith("SIZED_"):
-            return True
-        return u.startswith("A160") or u.startswith("AI") or "AI" in u
+        return u in CURRENT_RESEARCH_LANES
 
 # ---------------------------------------------------------------------------
 # Config
@@ -129,24 +99,44 @@ except ImportError:
 _MODULE_ROOT = Path(os.path.abspath(os.path.dirname(__file__) or os.getcwd()))
 _AGENT_ROOT = _MODULE_ROOT.parent
 _CWD_ROOT = Path.cwd().resolve()
-DATA_ROOT = Path(os.getenv(
-    "BTC_AGENT_DATA_DIR",
-    str(_AGENT_ROOT if (_AGENT_ROOT / "trades_3factor.csv").is_file() else _MODULE_ROOT),
-)).resolve()
+
+
+def _approved_non_onedrive_path(value: str | os.PathLike[str] | None) -> Path | None:
+    """Resolve a configured path, rejecting stale OneDrive authority."""
+    if not value:
+        return None
+    candidate = Path(value).expanduser().resolve()
+    if "onedrive" in {part.casefold() for part in candidate.parts}:
+        return None
+    return candidate
+
+
+_configured_data_root = _approved_non_onedrive_path(os.getenv("BTC_AGENT_DATA_DIR"))
+_local_app_data = _approved_non_onedrive_path(os.getenv("LOCALAPPDATA"))
+_canonical_mirror = (
+    _local_app_data / "DoxxedCrypto" / "fly-data-mirror"
+    if _local_app_data is not None
+    else None
+)
+DATA_ROOT = (
+    _configured_data_root
+    or _canonical_mirror
+    or _AGENT_ROOT
+).resolve()
 # The canonical source lives in ``agent/research`` but the supported launcher
 # runs ``agent/analyzer_research_engine_v62.py`` and writes its live reports in
 # the agent root.  Resolve the report root from an explicit override first,
 # then the launch cwd, and finally the data root.  This prevents :9001 from
 # silently serving an older duplicate report set from ``agent/research``.
-_REPORT_ROOT_ENV = os.getenv("BTC_AGENT_REPORT_DIR", "").strip()
+_REPORT_ROOT_ENV = _approved_non_onedrive_path(os.getenv("BTC_AGENT_REPORT_DIR", "").strip())
 if _REPORT_ROOT_ENV:
-    ROOT = Path(_REPORT_ROOT_ENV).resolve()
+    ROOT = _REPORT_ROOT_ENV
 elif (_CWD_ROOT / "analyzer_research_engine_v62.py").is_file():
     ROOT = _CWD_ROOT
 elif (DATA_ROOT / "analyzer_research_engine_v62.py").is_file():
     ROOT = DATA_ROOT
 else:
-    ROOT = _MODULE_ROOT
+    ROOT = _AGENT_ROOT
 _parent = ROOT.parent
 BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
@@ -156,7 +146,6 @@ REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
-PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE = "partial_reduction_reconciliation_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -182,10 +171,10 @@ COMPLETE_BUNDLE_FALLBACKS = (
     "trading_sessions_complete_verified.zip",
 )
 _parent = ROOT.parent
-HISTORY_ROOT = Path(os.getenv(
-    "RESEARCH_HISTORY_ROOT",
-    str(ROOT if (ROOT / ARCHIVE_DIR).is_dir() else (_parent if (_parent / ARCHIVE_DIR).is_dir() else ROOT)),
-))
+HISTORY_ROOT = (
+    _approved_non_onedrive_path(os.getenv("RESEARCH_HISTORY_ROOT"))
+    or (ROOT if (ROOT / ARCHIVE_DIR).is_dir() else (_parent if (_parent / ARCHIVE_DIR).is_dir() else ROOT))
+)
 
 REPORT_NAV_GROUPS = (
     ("overview", "Overview", (
@@ -194,17 +183,13 @@ REPORT_NAV_GROUPS = (
         ("regime", "Regime & ADX", "regime_leaderboard.json"),
     )),
     ("lanes-group", "Lanes & AI", (
-        ("lanes", "Current Type-B", "benchmark_vs_lanes_report.json"),
-        ("lanes-retire", "Retirement", "lane_retirement_report.json"),
-        ("lanes-def", "Definitions", "lane_definition_report.json"),
+        ("lanes", "Current Lanes", "benchmark_vs_lanes_report.json"),
         ("ai", "Direction & Gap", "ai_calibration_report.json"),
-        ("typeb", "MFE Outcome Cohort", "type_b_predictor_report.json"),
     )),
     ("trading-group", "Chase & Exits", (
         ("chase", "Attribution", "chase_attribution_report.json"),
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("chase-delay", "Delay", "chase_delay_report.json"),
-        ("chase-iso", "Isolation", "lane_chase_isolation_report.json"),
         ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
         ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
@@ -213,7 +198,6 @@ REPORT_NAV_GROUPS = (
         ("exits", "Historical Exit Leakage", "top_leakage_report.json"),
     )),
     ("deep-group", "Genome & Reports", (
-        ("partial-reductions", "Partial Reductions", PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE),
         ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
@@ -675,6 +659,17 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
             str(family): list(rows or [])[:10]
             for family, rows in (screen.get("profit_capture_leaders") or {}).items()
         }
+        sweep = screen.get("scenario_c_atr_stop_sweep") or {}
+        out["candidate_screen"]["scenario_c_atr_stop_sweep"] = {
+            "qualification": sweep.get("qualification"),
+            "warning": sweep.get("warning"),
+            "policies_tested": sweep.get("policies_tested", 0),
+            "overall_leaders": list(sweep.get("overall_leaders") or [])[:25],
+            "leaders_by_stop": {
+                str(stop): list(rows or [])[:5]
+                for stop, rows in (sweep.get("leaders_by_stop") or {}).items()
+            },
+        }
     if "safe_policy_ranking" in report:
         ranking = report.get("safe_policy_ranking") or {}
         out["safe_policy_ranking"] = {
@@ -976,40 +971,20 @@ def _lane_rows():
     lab_ledger_file = _read_json("lane_lab_pnl_ledger.json")
     lab_ledger = lab_ledger_file.get("lanes") or {}
     opp_stats = _opportunity_lane_stats()
-    lane_def = _read_report("lane_definition_report.json")
     benchmark_lane = str(bench.get("benchmark_lane") or COMPARISON_BENCHMARK_LANE or BENCHMARK_LANE)
     bench_metrics = lanes.get(benchmark_lane) or {}
     benchmark_pnl = float(bench_metrics.get("net_pnl_real") or bench_metrics.get("net_pnl_usd") or 0)
     benchmark_ev = float(bench_metrics.get("per_approve_ev") or 0)
 
-    lane_def_by_lane = {}
-    for row in lane_def.get("lanes") or []:
-        if isinstance(row, dict) and row.get("lane"):
-            lane_def_by_lane[str(row["lane"])] = row
-
-    all_keys = set(ALL_PATHWAY_LANES)
+    all_keys = set(CURRENT_RESEARCH_LANES)
     all_keys.update(lanes.keys())
     all_keys.update(ledger.keys())
     all_keys.update(lab_ledger.keys())
     all_keys.update(opp_stats.keys())
-    for row in lane_def.get("lanes") or []:
-        if isinstance(row, dict) and row.get("lane"):
-            all_keys.add(str(row["lane"]))
-    for ln in lane_def.get("retired_lanes") or []:
-        all_keys.add(str(ln))
-    for ln in lane_def.get("active_roster") or []:
-        all_keys.add(str(ln))
-
-    status_by_lane = {}
-    for row in lane_def.get("lanes") or []:
-        if isinstance(row, dict) and row.get("lane"):
-            status_by_lane[str(row["lane"])] = row.get("pathway_status") or ""
-
     rows = []
     for lane in sorted(all_keys):
         m = lanes.get(lane) or {}
         lb = ledger.get(lane) or {}
-        ld = lane_def_by_lane.get(lane) or {}
         all_time = m.get("all_time") or {}
         if not all_time:
             ad = all_data_bench.get(lane) or {}
@@ -1022,10 +997,10 @@ def _lane_rows():
                 }
         lab = lab_ledger.get(lane) or {}
         opp = opp_stats.get(lane) or {}
-        fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or ld.get("sample_size") or 0)
+        fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or 0)
         if not fills and lab.get("closes"):
             fills = int(lab.get("closes") or 0)
-        approves = int(m.get("approves") or ld.get("approves") or 0)
+        approves = int(m.get("approves") or 0)
         opp_appr = int(opp.get("approves") or 0)
         orders_submitted = int(opp.get("orders_submitted") or 0)
         spawn_lab = int(opp.get("spawn_lab") or 0)
@@ -1042,24 +1017,24 @@ def _lane_rows():
         shadow_fill_pct = float(m.get("shadow_fill_pct") or 0)
         costly_blocks = float(m.get("costly_blocks_usd") or 0)
         good_blocks_saved = float(m.get("good_blocks_saved_usd") or 0)
-        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or ld.get("pnl_usd") or 0)
+        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or 0)
         if abs(pnl) < 1e-9 and lab.get("net_pnl_usd") is not None and fills:
             pnl = float(lab.get("net_pnl_usd") or 0)
-        ev = float(m.get("per_approve_ev") or ld.get("ev_per_approve") or 0)
-        at_fills = int(all_time.get("real_fills") or ld.get("all_time_fills") or 0)
-        at_pnl = float(all_time.get("net_pnl_real") or ld.get("all_time_pnl_usd") or 0)
+        ev = float(m.get("per_approve_ev") or 0)
+        at_fills = int(all_time.get("real_fills") or 0)
+        at_pnl = float(all_time.get("net_pnl_real") or 0)
         at_ev = float(all_time.get("ev_usd") or (at_pnl / at_fills if at_fills else 0))
-        pathway_status = status_by_lane.get(lane) or ld.get("pathway_status") or ""
-        # BENCHMARK is an active comparison role, not a retirement state.
-        is_retired = pathway_status in ("RETIRED", "DATA_RETIRED") or lane in (lane_def.get("retired_lanes") or [])
-        is_shadow = pathway_status == "SHADOW_COLLECTING"
-        is_benchmark = lane == benchmark_lane or pathway_status == "BENCHMARK"
+        is_current = str(lane).upper().strip() in CURRENT_RESEARCH_LANES
+        pathway_status = "BENCHMARK" if lane == benchmark_lane else ("ACTIVE" if is_current else "HISTORICAL")
+        is_retired = not is_current
+        is_shadow = False
+        is_benchmark = lane == benchmark_lane
         has_any_data = (
             fills or approves or pnl or at_fills or at_pnl
             or shadow_filled or abs(shadow_pnl) > 0.01
             or orders_submitted or spawn_lab
         )
-        if lane in ALL_PATHWAY_LANES:
+        if is_current:
             pass  # always show full catalog
         elif not has_any_data and lane != "AI_SCAN" and lane != benchmark_lane:
             continue
@@ -1067,14 +1042,12 @@ def _lane_rows():
         compare_ev = ev if approves else at_ev
         if is_benchmark:
             status = "BENCHMARK"
-        elif lane == PRIMARY_PRODUCTION_LANE:
-            status = "PRIMARY_PRODUCTION"
         elif is_retired and at_fills:
             status = "HISTORICAL"
         elif is_shadow:
             status = "SHADOW_COLLECTING"
         elif is_retired:
-            status = pathway_status or "DATA_RETIRED"
+            status = "HISTORICAL"
         elif compare_ev >= benchmark_ev and compare_pnl > benchmark_pnl and lane != benchmark_lane:
             status = "BEATS BENCHMARK"
         elif compare_pnl < benchmark_pnl or (benchmark_ev and compare_ev < benchmark_ev * 0.85):
@@ -1201,8 +1174,6 @@ def _combo_token_known(val) -> bool:
     tok = str(val or "").strip().upper()
     if not tok or tok in {"UNKNOWN", "UNK", "NAN", "NONE", "NULL", "OTHER", "MIXED"}:
         return False
-    if "TYPE_B" in tok:
-        return False
     return True
 
 
@@ -1210,8 +1181,6 @@ def _combo_row_known(row: dict) -> bool:
     if not row:
         return False
     lane = str(row.get("lane") or row.get("research_lane") or "").upper()
-    if lane.startswith("TYPE_B"):
-        return False
     return all(
         _combo_token_known(row.get(key))
         for key in ("ai_bucket", "spread_bucket", "entry_mode", "type", "lane")
@@ -1477,73 +1446,6 @@ def _spread_performance_payload():
     }
 
 
-def _typeb_payload():
-    rep = _read_report("type_b_predictor_report.json")
-    cohorts = rep.get("cohorts") or {}
-    cohort_rows = []
-    for key in ("TYPE_A", "TYPE_B", "MIXED"):
-        c = cohorts.get(key) or {}
-        if c.get("trades"):
-            cohort_rows.append({"cohort": key, **c})
-    return {
-        "generated_at": rep.get("generated_at"),
-        "classification": rep.get("classification"),
-        "cohorts": cohort_rows,
-        "separators": (rep.get("top_separators") or rep.get("separators_ranked") or [])[:12],
-        "rules": rep.get("predictor_rules") or rep.get("rules") or [],
-        "predictor_readiness": rep.get("predictor_readiness") or {},
-        "feature_coverage": rep.get("feature_coverage") or {},
-        "probability_table": rep.get("probability_table") or [],
-    }
-
-
-def _typeb_research_v2_payload():
-    rep = _read_report("type_b_research_v2_report.json")
-    generated_at = rep.get("generated_at")
-    stale_age_sec = None
-    if generated_at:
-        try:
-            generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
-            if generated_dt.tzinfo is None:
-                generated_dt = generated_dt.replace(tzinfo=timezone.utc)
-            stale_age_sec = max(
-                0,
-                int((datetime.now(timezone.utc) - generated_dt.astimezone(timezone.utc)).total_seconds()),
-            )
-        except (TypeError, ValueError):
-            stale_age_sec = None
-    return {
-        "schema": rep.get("schema") or "type_b_research_v2_report_v1",
-        "collection_id": rep.get("collection_id") or "TYPE_B_RESEARCH_V2",
-        "generated_at": generated_at,
-        "analyzer_sync_id": rep.get("analyzer_sync_id"),
-        "expected_bot_version": rep.get("expected_bot_version"),
-        "error": rep.get("error"),
-        "stale_age_sec": stale_age_sec,
-        "stale": bool(stale_age_sec is None or stale_age_sec > 3600),
-        "independent_opportunities": int(rep.get("independent_opportunities") or 0),
-        "valid_holdout_opportunities": int(rep.get("valid_holdout_opportunities") or 0),
-        "completed_opportunities": int(rep.get("completed_opportunities") or 0),
-        "filled_opportunities": int(rep.get("filled_opportunities") or 0),
-        "type_b_outcomes": int(rep.get("type_b_outcomes") or 0),
-        "benchmark_net_pnl_usd": float(
-            rep.get("benchmark_net_pnl_usd", rep.get("net_pnl_usd")) or 0.0
-        ),
-        "net_pnl_usd": float(rep.get("net_pnl_usd") or 0.0),
-        "modes_observed": rep.get("modes_observed") or {},
-        "feature_coverage": rep.get("feature_coverage") or {},
-        "entry_probability_table": rep.get("entry_probability_table") or [],
-        "rolling_holdout": rep.get("rolling_holdout") or {},
-        "readiness": rep.get("readiness") or "COLLECTING",
-        "execution_policy": rep.get("execution_policy") or "ADVISORY_ONLY_NEVER_AUTO_APPLY",
-        "recent_opportunities": rep.get("recent_opportunities") or [],
-        "usage_note": rep.get("usage_note") or (
-            "One shared market opportunity equals one sample. Paper, live and shadow "
-            "are audit modes, never separate research samples."
-        ),
-    }
-
-
 def _chase_bucket_stats_from_trades(rows):
     order = ["0", "1", "2", "3", "4", "5+"]
     buckets = {k: {"trades": 0, "wins": 0, "sum_pnl_usd": 0.0, "win_rate_pct": 0.0, "ev_usd": 0.0, "avg_hold_min": None} for k in order}
@@ -1625,58 +1527,11 @@ def _chase_delay_payload():
     }
 
 
-def _chase_iso_payload():
-    rep = _read_report("lane_chase_isolation_report.json")
-    primary = rep.get("primary_pair") or {}
-    direct = primary.get("direct") or rep.get("continuous_benchmark") or {}
-    chase = primary.get("chase") or rep.get("urgent_chase_alpha") or {}
-    has_evidence = bool(
-        primary
-        and (
-            int(direct.get("trades") or 0) > 0
-            or int(chase.get("trades") or 0) > 0
-        )
-    )
-    return {
-        **_nonqualifying_scope(
-            "LEGACY_EXECUTED",
-            "Historical pathway-lab chase isolation evidence; excluded from active V3.1 rankings.",
-        ),
-        "generated_at": rep.get("generated_at"),
-        "verdict": rep.get("verdict") if has_evidence else "COLLECTING",
-        "notes": rep.get("isolation_notes") or [],
-        "continuous": direct,
-        "urgent": chase,
-        "primary_pair": primary,
-        "primary_inactive": bool(rep.get("primary_inactive")) or not has_evidence,
-        "active_lanes": rep.get("active_lanes") or [],
-        "pairs": rep.get("pairs") or [],
-        "direct_lane": primary.get("direct_lane"),
-        "chase_lane": primary.get("chase_lane"),
-        "direct_label": primary.get("direct_label") or "Direct",
-        "chase_label": primary.get("chase_label") or "Chase 3+",
-        "global_fill_model": rep.get("global_fill_model") or {},
-    }
-
-
-def _lanes_def_payload():
-    rep = _read_report("lane_definition_report.json")
-    return {
-        "generated_at": rep.get("generated_at"),
-        "active_roster": rep.get("active_roster") or [],
-        "retired_lanes": rep.get("retired_lanes") or [],
-        "lanes": rep.get("lanes") or [],
-    }
-
-
 def _exit_combos_payload():
     rep = _read_report("exit_combinations_report.json")
 
-    def _ok(row):
-        return "TYPE_B" not in str((row or {}).get("type") or "").upper()
-
-    top = [r for r in (rep.get("top") or []) if _ok(r)]
-    worst = [r for r in (rep.get("worst_leakage") or []) if _ok(r)]
+    top = list(rep.get("top") or [])
+    worst = list(rep.get("worst_leakage") or [])
     return {
         **_nonqualifying_scope(
             "LEGACY_EXECUTED",
@@ -1686,7 +1541,7 @@ def _exit_combos_payload():
         "benchmark_lane": rep.get("benchmark_lane"),
         "overall_left_on_table_usd": rep.get("overall_left_on_table_usd"),
         "total_combos": len(top),
-        "filter_note": rep.get("filter_note") or "TYPE_B excluded from exit combos.",
+        "filter_note": rep.get("filter_note") or "Generic historical exit combinations.",
         "top": top[:50],
         "worst_leakage": worst[:30],
     }
@@ -1736,7 +1591,6 @@ def _ladder_sim_payload():
 
 def _pathway_audit_payload():
     tiles = _read_report("tile_independence_report.json")
-    type_b = _read_report("type_b_execution_audit.json")
     ai_scan = _read_report("ai_scan_independence_report.json")
     ai_scan_role = _read_report("ai_scan_role_validation.json")
     lane_mem = _read_report("lane_memory_validation.json")
@@ -1747,7 +1601,6 @@ def _pathway_audit_payload():
     bot_sync = _read_report("bot_analyzer_sync.json")
     return {
         "tile_independence": tiles,
-        "type_b_audit": type_b,
         "ai_scan_independence": ai_scan,
         "ai_scan_role": ai_scan_role,
         "lane_memory": lane_mem,
@@ -1803,14 +1656,6 @@ def _leakage_payload():
         "overall_left_usd": rep.get("overall_left_usd") or (leak.get("overall") or {}).get("left_on_table_usd"),
         "by_exit_reason": rep.get("by_exit_reason") or {},
         "trades": rep.get("trades") or [],
-    }
-
-
-def _lane_retirement_payload():
-    rep = _read_json("lane_retirement_report.json") or _read_json(str(Path(REPORTS_DIR) / "lane_retirement_report.json"))
-    return {
-        "lanes": rep.get("lanes") or [],
-        "retire_candidates": rep.get("retire_candidates") or [],
     }
 
 
@@ -2172,39 +2017,14 @@ def api_safe_policy_genome_v3():
     return jsonify(_bounded_safe_policy_payload(payload))
 
 
-@app.route("/api/partial-reduction-reconciliation")
-def api_partial_reduction_reconciliation():
-    payload = _read_report(PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE)
-    if not payload:
-        payload = {
-            "schema": "partial_reduction_reconciliation_v1",
-            "status": "BLOCKED",
-            "qualification": "INSUFFICIENT",
-            "live_copy_allowed": False,
-            "lanes": {},
-            "summary": {},
-            "integrity": {"passed": False, "issues": ["REPORT_NOT_GENERATED"]},
-            "blockers": ["PARTIAL_REDUCTION_REPORT_NOT_GENERATED"],
-        }
-    return jsonify(payload)
-
-
-@app.route("/partial-reduction-reconciliation")
-def partial_reduction_reconciliation_page():
-    return """<!doctype html><html><head><meta charset="utf-8"><title>Partial Reduction Reconciliation</title>
-<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#081019;color:#dbeafe;font:14px system-ui;margin:24px;overflow-wrap:anywhere}a{color:#60a5fa}.card{border:1px solid #334155;border-radius:8px;padding:14px;margin:12px 0;max-width:100%}pre{white-space:pre-wrap;overflow:auto}@media(max-width:600px){body{margin:12px}.card{padding:10px}}</style></head>
-<body><a href="/">← Research Dashboard</a><h1>Tiles 3/4 — Partial Reduction Reconciliation</h1>
-<div id="status" class="card">Loading completed analyzer generation…</div><div id="lanes"></div><pre id="detail" class="card"></pre>
-<script>fetch('/api/partial-reduction-reconciliation').then(r=>r.json()).then(d=>{document.getElementById('status').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Live copy allowed: '+(d.live_copy_allowed?'YES':'NO');document.getElementById('lanes').innerHTML=Object.entries(d.lanes||{}).map(([lane,v])=>'<div class="card"><b>'+lane+'</b><br>lifecycles '+(v.lifecycles||0)+' · observed receipts '+(v.partial_reduction_receipts||0)+' · eligible current receipts '+(v.eligible_current_receipts||0)+' · legacy excluded '+(v.legacy_excluded_lifecycles||0)+' · reconciled '+(v.reconciled_lifecycles||0)+'<br>paper receipt evidence sufficient: '+(v.live_copy_evidence_sufficient?'YES':'NO')+'</div>').join('');document.getElementById('detail').textContent=JSON.stringify({summary:d.summary,integrity:d.integrity,blockers:d.blockers,note:d.note},null,2);});</script></body></html>"""
-
-
 @app.route("/safe-policy-genome-v3")
 @app.route("/safe-policy-genome-v3.1")
 def safe_policy_genome_v3_page():
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Safe Policy Genome V3.1</title>
-<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{max-width:1500px;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre{white-space:pre-wrap}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{overflow:auto}.muted{color:#8b949e}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
-<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Complete policies evaluated',cs.unique_policies_evaluated||s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ol>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+'</li>').join('')+'</ol>').join('')||'<p>No matured family evidence yet.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">No matured drawdown evidence yet.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.cvar95_usd??'—')+'</td><td>'+Object.entries(r.gates||{}).filter(x=>x[1]!==true).map(x=>x[0]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">No matured V3.1 policy evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});</script></body></html>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Best entry policy</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
+<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Complete policies evaluated',cs.unique_policies_evaluated||s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ol>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+'</li>').join('')+'</ol>').join('')||'<p>No matured family evidence yet.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">No matured drawdown evidence yet.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.cvar95_usd??'—')+'</td><td>'+Object.entries(r.gates||{}).filter(x=>x[1]!==true).map(x=>x[0]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">No matured V3.1 policy evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});</script>
+<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const sweep=((d.candidate_screen||{}).scenario_c_atr_stop_sweep)||{},byStop=sweep.leaders_by_stop||{},orderedStops=Object.entries(byStop).sort(([a],[b])=>{if(a==='CONTROL_NO_ATR_STOP')return 1;if(b==='CONTROL_NO_ATR_STOP')return -1;return Number(a)-Number(b)});document.getElementById('scenario-warning').textContent=(sweep.qualification||'INSUFFICIENT')+' · '+(sweep.warning||'No Scenario C stop evidence yet.');document.getElementById('scenario-stops').innerHTML=orderedStops.map(([stop,items])=>{const row=(items||[])[0]||{};return '<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.oos_episodes??'—')+'</td><td>'+String(row.sealed_oos_net_usd??'—')+'</td><td>'+String(row.max_drawdown_usd??'—')+'</td><td>'+String(row.cvar95_usd??'—')+'</td><td>'+String(row.expectancy_lcb_usd??'—')+'</td></tr>'}).join('')||'<tr><td colspan="7">No Scenario C × ATR stop evidence yet.</td></tr>';});</script></body></html>
 """)
 
 
@@ -2535,8 +2355,6 @@ def api_summary():
     compact = _read_json(COMPACT_SUMMARY_FILE)
     real = _read_json("real_edge_summary.json")
     historical = _read_json(HISTORICAL_COHORT_REPORT_FILE)
-    paused_shadow = _read_json("paused_shadow_research_report.json")
-    typeb_research_v2 = _typeb_research_v2_payload()
     retention = _read_json(RETENTION_STATUS_FILE)
     mirror_size = {}
     mirror_size_path = DATA_ROOT / MIRROR_SIZE_REPORT_FILE
@@ -2577,8 +2395,6 @@ def api_summary():
         "integrity": _integrity_payload(),
         "all_data_fallback_active": all_data_active,
         "historical_cohort": historical,
-        "paused_shadow_cohort": paused_shadow,
-        "type_b_research_v2": typeb_research_v2,
         "retention": retention,
         "storage": {
             "mirror_identity": "LOCAL_CACHED_COPY_OF_FLY_RUNTIME_DATA",
@@ -2618,7 +2434,7 @@ def _wants_all_lanes() -> bool:
 
 
 def _filter_lane_rows(rows, *, all_lanes: bool = False):
-    """Default: AI-focused lanes + CONTINUOUS. Historical CSV data is never deleted."""
+    """Default to the two current lanes; historical rows remain opt-in."""
     if all_lanes:
         return list(rows or [])
     out = []
@@ -2628,7 +2444,7 @@ def _filter_lane_rows(rows, *, all_lanes: bool = False):
             lane = row.get("lane") or row.get("research_lane") or ""
         else:
             lane = str(row)
-        if is_ai_focused_lane(lane):
+        if str(lane).upper().strip() in CURRENT_RESEARCH_LANES:
             out.append(row)
     return out
 
@@ -2645,7 +2461,7 @@ def api_lanes():
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
-            else "Default: active research stack (CONTINUOUS + TYPE_B_HUNTER_V1) — toggle Show all lanes for retired historical studies"
+            else "Current active research stack: CONTINUOUS + OFFSET_029_ATR_TP_25"
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
     })
@@ -2667,16 +2483,6 @@ def api_spread_performance():
     return jsonify(_spread_performance_payload())
 
 
-@app.route("/api/typeb")
-def api_typeb():
-    return jsonify(_typeb_payload())
-
-
-@app.route("/api/typeb-research-v2")
-def api_typeb_research_v2():
-    return jsonify(_typeb_research_v2_payload())
-
-
 @app.route("/api/chase-threshold")
 def api_chase_threshold():
     lane = request.args.get("lane") or ""
@@ -2686,27 +2492,6 @@ def api_chase_threshold():
 @app.route("/api/chase-delay")
 def api_chase_delay():
     return jsonify(_chase_delay_payload())
-
-
-@app.route("/api/chase-iso")
-def api_chase_iso():
-    return jsonify(_chase_iso_payload())
-
-
-@app.route("/api/lanes-def")
-def api_lanes_def():
-    payload = _lanes_def_payload()
-    all_lanes = _wants_all_lanes()
-    payload["lanes"] = _filter_lane_rows(payload.get("lanes") or [], all_lanes=all_lanes)
-    if not all_lanes:
-        payload["active_roster"] = [
-            lane for lane in (payload.get("active_roster") or []) if is_ai_focused_lane(lane)
-        ]
-        payload["retired_lanes"] = [
-            lane for lane in (payload.get("retired_lanes") or []) if is_ai_focused_lane(lane)
-        ]
-    payload["lane_filter"] = "all" if all_lanes else "ai_continuous"
-    return jsonify(payload)
 
 
 @app.route("/api/exit-combos")
@@ -2737,18 +2522,6 @@ def api_horizon():
 @app.route("/api/leakage")
 def api_leakage():
     return jsonify(_leakage_payload())
-
-
-@app.route("/api/lane-retirement")
-def api_lane_retirement():
-    payload = _lane_retirement_payload()
-    all_lanes = _wants_all_lanes()
-    payload["lanes"] = _filter_lane_rows(payload.get("lanes") or [], all_lanes=all_lanes)
-    payload["retire_candidates"] = _filter_lane_rows(
-        payload.get("retire_candidates") or [], all_lanes=all_lanes
-    )
-    payload["lane_filter"] = "all" if all_lanes else "ai_continuous"
-    return jsonify(payload)
 
 
 def _genome_payload():
@@ -3786,7 +3559,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Executive Summary</h2>
     <div class="empty-state" id="collection-status">
       <b>Collection ON:</b> raw signal, feature, order, fill, lifecycle,
-      MFE/MAE, shadow and Type-B evidence continues independently of analysis.
+      MFE/MAE and generic shadow evidence continue independently of analysis.
       Dashboard reports are cached and deterministic. AI egress is reserved for
       the trading-direction pipeline only.
     </div>
@@ -3806,44 +3579,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <ol class="findings" id="findings-list"></ol>
   </section>
     <section id="sec-lanes">
-    <h2>Type-B Opportunity Collection</h2>
-    <p class="note" id="lanes-filter-note">One shared direction call is one independent opportunity. Paper, live and shadow are recorded as child audit evidence and never inflate the sample.</p>
-    <div class="kpis" id="opportunity-kpis"></div>
-    <div id="typeb-v2-health" class="empty-state" style="display:none"></div>
-    <table><thead><tr><th>Collection</th><th>Independent</th><th>Completed</th><th>Filled</th><th>Outcome Type B</th><th>Valid features</th><th>Benchmark outcome P&amp;L</th><th>Modes observed</th><th>Readiness</th></tr></thead><tbody id="lane-body"></tbody></table>
-    <h3>Recent independent opportunities</h3>
-    <table><thead><tr><th>Created</th><th>Opportunity</th><th>Dir</th><th>LONG / SHORT</th><th>Raw AI gap</th><th>Gap bucket</th><th>Exact ADX</th><th>ADX bucket</th><th>+DI / -DI</th><th>Volume percentile</th><th>Volume ratio</th><th>Modes</th><th>Lane evidence</th><th>Status</th><th>Outcome</th></tr></thead><tbody id="opportunity-body"></tbody></table>
-    <h3>Score-gap performance by evidence mode</h3>
-    <p class="note">The normalized gap is the raw LONG-vs-SHORT score difference divided by 10. Example: LONG 30 / SHORT 70 = raw gap 40 = GAP_4. Paper, lab and paused-shadow remain separate evidence modes.</p>
-    <table><thead><tr><th>Evidence mode</th><th>Gap bucket</th><th>N</th><th>Outcome Type B</th><th>P(Type B)%</th><th>WR%</th><th>Net P&amp;L</th><th>EV/opportunity</th></tr></thead><tbody id="opportunity-gap-body"></tbody></table>
-    <h3>Score-gap combinations in chronological holdouts</h3>
-    <p class="note" id="opportunity-gap-holdout-note">Gap combinations are selected on older opportunities and checked only on later windows. They remain research-only.</p>
-    <table><thead><tr><th>Window</th><th>Gap combination</th><th>Train N</th><th>Holdout N</th><th>Holdout P(Type B)%</th><th>Holdout lift</th><th>Result</th></tr></thead><tbody id="opportunity-gap-holdout-body"></tbody></table>
-    <p class="note">Raw lane verdicts and execution-mode events remain available in the V2 JSON report and JSONL audit stream; they are intentionally not shown as separate performance tiles.</p>
-  </section>
-    <section id="sec-lanes-retire">
-    <h2>Lane Retirement Engine</h2>
-    <p class="note" id="retire-filter-note">AI lanes + CONTINUOUS only by default. Toggle Show all lanes on Laboratory to include legacy pathways.</p>
-    <table><thead><tr><th>Lane</th><th>Sess Trades</th><th>All Trades</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Recommendation</th><th>Reason</th></tr></thead><tbody id="retire-body"></tbody></table>
-  </section>
-  <section id="sec-typeb">
-    <h2>MFE Type-B outcome cohort</h2>
-    <p class="note" id="typeb-note">Post-trade MFE≥15% classification. Entry-time fingerprints below use a chronological holdout and remain advisory until repeated samples validate them.</p>
-    <div class="kpis" id="typeb-kpis"></div>
-    <table><thead><tr><th>Cohort</th><th>Trades</th><th>WR%</th><th>Avg MFE%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="typeb-cohort-body"></tbody></table>
-    <h3>MFE-runner probability table (historical — not an entry gate)</h3>
-    <table><thead><tr><th>Dimension</th><th>Bucket</th><th>N</th><th>TYPE_B</th><th>P(TYPE_B)%</th><th>WR%</th></tr></thead><tbody id="typeb-prob-body"></tbody></table>
-    <h3>Entry-time fingerprints (chronological holdout)</h3>
-    <p class="note" id="typeb-readiness-note">Collecting entry-time evidence.</p>
-    <table><thead><tr><th>Entry rule</th><th>Train N</th><th>Train P(B)</th><th>Train lift</th><th>Holdout N</th><th>Holdout P(B)</th><th>Holdout lift</th><th>Status</th></tr></thead><tbody id="typeb-rules-body"></tbody></table>
-    <h3>Top separators (MFE outcome Type B vs Type A)</h3>
-    <table><thead><tr><th>Feature</th><th>TYPE_A mean</th><th>TYPE_B mean</th><th>|Δ|</th></tr></thead><tbody id="typeb-sep-body"></tbody></table>
-  </section>
-  <section id="sec-lanes-def">
-    <h2>Lane Definitions</h2>
-    <p class="note" id="lanes-def-note">Active roster, entry conditions, and research questions per pathway lane.</p>
-    <div class="kpis" id="lanes-def-kpis"></div>
-    <table><thead><tr><th>Lane</th><th>Status</th><th>Sess Fills</th><th>All Fills</th><th>Sess PnL</th><th>All PnL</th><th>EV/appr</th><th>Role</th></tr></thead><tbody id="lanes-def-body"></tbody></table>
+    <h2>Current Lane Analysis</h2>
+    <p class="note" id="lanes-filter-note">Only CONTINUOUS and OFFSET_029_ATR_TP_25 are current lanes. Archived lane names remain available only in quarantine artifacts.</p>
+    <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Fills</th><th>Net PnL</th><th>EV / approval</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-regime">
     <h2>Regime Leaderboard</h2>
@@ -3855,30 +3593,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
-    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
+    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option></select></label>
     <div class="kpis" id="chase-kpis"></div>
     <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option></select></label>
     <h2>Chase Threshold Analysis</h2>
     <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option></select></label>
     <h2>Chase Delay (Pathway Lab)</h2>
     <p class="note" id="chase-delay-note">COMBO Direct vs Chase 3+ — delayed virtual-chase entry within each AI/spread tier.</p>
     <div class="kpis" id="chase-delay-kpis"></div>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
-  </section>
-  <section id="sec-chase-iso">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="AI60_SP3_VIRTUAL_CHASE">AI60 SP3 — HISTORICAL RETIRED</option><option value="A160_CONTEXT_CHASE_EXIT_V2">A160 V2 — HISTORICAL RETIRED</option></select></label>
-    <h2>Chase Isolation</h2>
-    <p class="note" id="chase-iso-note">COMBO Direct vs Chase 3+ — fill_model and chase policy per tile pair.</p>
-    <div class="kpis" id="chase-iso-kpis"></div>
-    <ul class="findings" id="chase-iso-notes"></ul>
-    <table id="chase-iso-table"><thead><tr><th>Metric</th><th id="chase-iso-direct-h">Direct</th><th id="chase-iso-chase-h">Chase 3+</th></tr></thead><tbody id="chase-iso-body"></tbody></table>
   </section>
   <section id="sec-combos">
     <h2>Descriptive Policy Screen (up to 100 rows)</h2>
@@ -3911,7 +3641,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-exit-combos">
     <h2>Exit Combinations</h2>
-    <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane (TYPE_B excluded — not predictable).</p>
+    <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane.</p>
     <div class="kpis" id="exit-combos-kpis"></div>
     <h3>Best exit combos (by EV)</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
@@ -3961,15 +3691,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <table><thead><tr><th>Band</th><th>N</th><th>WR%</th><th>PnL</th></tr></thead><tbody id="ai-conf-body"></tbody></table>
     </div>
   </section>
-  <section id="sec-partial-reductions">
-    <h2>Partial Reduction Reconciliation</h2>
-    <p class="note">Signed source and relay receipts for Tiles 3/4. This is analyzer-only evidence; insufficient or unreconciled evidence keeps live copy blocked.</p>
-    <div class="kpis" id="partial-reductions-kpis"></div>
-    <div class="empty-state" id="partial-reductions-empty">Loading signed partial-reduction evidence…</div>
-    <table><thead><tr><th>Lane</th><th>Lifecycles</th><th>Observed receipts</th><th>Eligible current</th><th>Legacy excluded</th><th>Reconciled</th><th>Evidence sufficient</th></tr></thead><tbody id="partial-reductions-body"></tbody></table>
-    <p><a class="btn" href="/partial-reduction-reconciliation">Open full reconciliation report</a></p>
-    <pre id="partial-reductions-detail"></pre>
-  </section>
   <section id="sec-genome">
     <h2>Trading Genome research</h2>
     <p class="note" id="genome-note">DNA-first analysis from research.db — discoveries, cluster match, decision &amp; lifecycle DNA. Advisory only.</p>
@@ -4016,7 +3737,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Download Center</h2>
     <div class="empty-state" id="collection-contract">
       <b>Collection boundary:</b> raw trading, order, fill, lifecycle, MFE/MAE,
-      shadow and Type-B evidence is collected continuously. This dashboard and
+      generic shadow evidence is collected continuously. This dashboard and
       analyzer are deterministic and out-of-process; they never call an AI
       provider. DeepSeek is reserved for the bot's trading-direction decision.
     </div>
@@ -4032,22 +3753,17 @@ const EVIDENCE_SCOPES = {
   summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current v2.2 counterfactual policy grid.'],
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
-  lanes: ['CURRENT TYPE-B — MIXED PAPER/SHADOW CHILD EVIDENCE', 'One causal opportunity is counted once; child modes remain separated and do not imply live execution.'],
-  'lanes-retire': ['LEGACY CONFIGURATION', 'Historical lane retirement and roster evidence.'],
-  'lanes-def': ['LEGACY CONFIGURATION', 'Definitions retained for audit compatibility; retired lanes are not active strategies.'],
+  lanes: ['CURRENT TWO-LANE EVIDENCE', 'One causal opportunity is counted once; child modes remain separated and do not imply live execution.'],
   ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
-  typeb: ['LEGACY EXECUTED', 'Historical MFE outcome cohort; not the current v2.2 policy search.'],
   chase: ['LEGACY EXECUTED', 'Historical executed-lane chase attribution.'],
   'chase-threshold': ['LEGACY EXECUTED', 'Historical executed-lane chase thresholds.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
-  'chase-iso': ['LEGACY EXECUTED', 'Historical pathway-lab chase isolation comparison.'],
   combos: ['MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED', 'The first table is pinned current-epoch counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
   'exit-combos': ['LEGACY EXECUTED', 'Historical executed-lane exit combinations.'],
   'exit-reason-leak': ['LEGACY HINDSIGHT', 'Peak-to-close hindsight gap; not directly capturable profit or a policy recommendation.'],
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current 12,601-policy v2.2 grid.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
-  'partial-reductions': ['CURRENT V3.1 RECONCILIATION', 'Signed source and relay receipts only. Insufficient or unreconciled evidence blocks live-copy readiness.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
   explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
@@ -4150,8 +3866,6 @@ if (showAllEl) {
     showAllLanes = !!showAllEl.checked;
     savePrefs();
     loadLanes();
-    loadRetirement();
-    loadLaneDefs();
   });
 }
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
@@ -4180,7 +3894,6 @@ async function loadSummary() {
   const re = d.real_edge || {};
   const hist = d.historical_cohort || {};
   const histPerf = hist.performance || {};
-  const v2 = d.type_b_research_v2 || {};
   const retention = d.retention || {};
   const storage = d.storage || {};
   const integrity = d.integrity || {};
@@ -4227,7 +3940,6 @@ async function loadSummary() {
     ['Win Rate', (p.win_rate_pct ?? 'n/a') + '%'],
     ['Fresh executed', p.trades ?? 0],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
-    ['V2 opportunities', v2.independent_opportunities ?? 0],
     ['Storage cleanup', retention.status === 'COMPLETED'
       ? ((retention.rotated_raw_deleted ?? 0) + ' rotations · '
         + (retention.raw_db_rows_deleted ?? 0) + ' raw rows · '
@@ -4265,8 +3977,8 @@ async function loadSummary() {
     const dupes = hist.duplicates_removed ?? 0;
     const raw = hist.raw_rows ?? 0;
     cohortNote.textContent = hist.unique_trades != null
-      ? `Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical executed research remains separate: ${hist.unique_trades} unique trades from ${raw} exported rows (${dupes} duplicates removed).`
-      : 'Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical archives have not been imported on this machine.';
+      ? `Current V3.1 counts each shared market opportunity once across paper and shadow evidence. Historical executed research remains separate: ${hist.unique_trades} unique trades from ${raw} exported rows (${dupes} duplicates removed).`
+      : 'Current V3.1 counts each shared market opportunity once across paper and shadow evidence. Historical archives have not been imported on this machine.';
   }
   await loadDecisionReadiness();
 }
@@ -4327,105 +4039,17 @@ async function loadFindings() {
 }
 
 async function loadLanes() {
-  const r = await fetch('/api/typeb-research-v2');
-  const d = await r.json();
-  const note = document.getElementById('lanes-filter-note');
-  if (note) note.textContent = d.usage_note || note.textContent;
-  const health = document.getElementById('typeb-v2-health');
-  if (health) {
-    const issues = [];
-    if (d.error) issues.push(`Analyzer error: ${d.error}`);
-    if (d.stale) issues.push(`V2 report is stale or missing (${d.stale_age_sec == null ? 'unknown age' : d.stale_age_sec + 's old'}).`);
-    if (d.analyzer_sync_id) issues.push(`Analyzer sync: ${d.analyzer_sync_id}`);
-    if (d.expected_bot_version) issues.push(`Expected bot: ${d.expected_bot_version}`);
-    health.style.display = issues.length ? 'block' : 'none';
-    health.textContent = issues.join(' \u00b7 ');
-  }
-  const holdout = d.rolling_holdout || {};
-  document.getElementById('opportunity-kpis').innerHTML = [
-    ['Independent opportunities', d.independent_opportunities || 0],
-    ['Completed', d.completed_opportunities || 0],
-    ['Type-B outcomes', d.type_b_outcomes || 0],
-    ['Eligible outcomes', holdout.eligible_outcomes || 0],
-    ['Rolling windows', holdout.windows_completed || 0],
-    ['Repeated rules', (holdout.validated_rules || []).length],
-    ['Readiness', d.readiness || 'COLLECTING'],
-  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  const modeText = Object.entries(d.modes_observed || {}).map(([mode,n]) => `${mode}: ${n}`).join(' \u00b7 ') || '\u2014';
-  const readyClass = d.readiness === 'RESEARCH_VALIDATED' ? 'green' : 'amber';
-  document.getElementById('lane-body').innerHTML =
-    `<tr class="${readyClass}"><td>${d.collection_id || 'TYPE_B_RESEARCH_V2'}</td>`
-    + `<td>${d.independent_opportunities || 0}</td><td>${d.completed_opportunities || 0}</td>`
-    + `<td>${d.filled_opportunities || 0}</td><td>${d.type_b_outcomes || 0}</td>`
-    + `<td>${d.valid_holdout_opportunities || 0}</td><td>$${fmtUsd(d.benchmark_net_pnl_usd || 0)}</td>`
-    + `<td>${modeText}</td><td>${d.readiness || 'COLLECTING'}</td></tr>`;
-  document.getElementById('opportunity-body').innerHTML = (d.recent_opportunities || []).slice().reverse().slice(0, 50).map(row => {
-    const f = row.entry_features || {};
-    const fp = row.entry_fingerprint || {};
-    const out = row.preferred_outcome || {};
-    const lanes = Object.keys(row.lanes || {}).length;
-    const created = row.created_ts ? new Date(row.created_ts).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : '\u2014';
-    const adx = f.adx == null ? '\u2014' : Number(f.adx).toFixed(2);
-    const plusDi = f.plus_di == null ? '\u2014' : Number(f.plus_di).toFixed(2);
-    const minusDi = f.minus_di == null ? '\u2014' : Number(f.minus_di).toFixed(2);
-    const volp = f.volume_percentile == null ? '\u2014' : Number(f.volume_percentile).toFixed(1) + '%';
-    const volr = f.volume_ratio == null ? '\u2014' : Number(f.volume_ratio).toFixed(2);
-    const longScore = f.long_score == null ? '\u2014' : Number(f.long_score).toFixed(0);
-    const shortScore = f.short_score == null ? '\u2014' : Number(f.short_score).toFixed(0);
-    const rawGap = f.long_score == null || f.short_score == null
-      ? '\u2014'
-      : Math.abs(Number(f.long_score) - Number(f.short_score)).toFixed(0);
-    const pnl = out.net_pnl_usd == null ? '' : ` \u00b7 $${fmtUsd(out.net_pnl_usd)}`;
-    return `<tr><td>${created}</td><td>${row.opportunity_id || ''}</td><td>${row.direction || ''}</td>`
-      + `<td>${longScore} / ${shortScore}</td><td>${rawGap}</td><td>${fp.score_gap || 'MISSING'}</td>`
-      + `<td>${adx}</td><td>${fp.adx_5 || f.adx_bucket_5 || 'ADX_MISSING'}</td>`
-      + `<td>${plusDi} / ${minusDi}</td><td>${volp}</td><td>${volr}</td>`
-      + `<td>${(row.modes || []).join(', ') || '\u2014'}</td><td>${lanes}</td>`
-      + `<td>${row.status || 'COLLECTING'}</td><td>${row.outcome_label || '\u2014'}${pnl}</td></tr>`;
-  }).join('') || '<tr><td colspan="15">New V2 collection is empty. It starts after the clean reset and bot restart.</td></tr>';
-
-  const gapOrder = {GAP_0_1: 0, GAP_2: 1, GAP_3: 2, GAP_4: 3, GAP_5P: 4};
-  const gapRows = (d.entry_probability_table || [])
-    .filter(row => row.feature === 'score_gap')
-    .sort((a, b) => String(a.evidence_mode).localeCompare(String(b.evidence_mode))
-      || (gapOrder[a.bucket] ?? 99) - (gapOrder[b.bucket] ?? 99));
-  document.getElementById('opportunity-gap-body').innerHTML = gapRows.map(row =>
-    `<tr><td>${row.evidence_mode || '\u2014'}</td><td>${row.bucket || '\u2014'}</td>`
-      + `<td>${row.n || 0}</td><td>${row.type_b || 0}</td>`
-      + `<td>${row.type_b_rate_pct ?? 'n/a'}%</td><td>${row.win_rate_pct ?? 'n/a'}%</td>`
-      + `<td>$${fmtUsd(row.net_pnl_usd || 0)}</td><td>$${fmtUsd(row.ev_usd || 0)}</td></tr>`
-  ).join('') || '<tr><td colspan="8">No completed score-gap outcomes yet.</td></tr>';
-
-  const gapChecks = [];
-  (holdout.windows || []).forEach((window, index) => {
-    (window.rules || []).forEach(rule => {
-      if (!(rule.conditions || []).some(condition => condition.feature === 'score_gap')) return;
-      gapChecks.push({...rule, window_number: index + 1});
-    });
-  });
-  gapChecks.sort((a, b) => (b.window_number - a.window_number)
-    || ((b.holdout_n || 0) - (a.holdout_n || 0))
-    || String(a.rule_key || '').localeCompare(String(b.rule_key || '')));
-  document.getElementById('opportunity-gap-holdout-body').innerHTML = gapChecks.slice(0, 30).map(rule => {
-    const result = rule.positive
-      ? 'POSITIVE'
-      : (rule.holdout_n || 0) < 8 ? 'INSUFFICIENT' : 'NOT CONFIRMED';
-    const cls = rule.positive ? 'green' : (result === 'NOT CONFIRMED' ? 'red' : 'amber');
-    return `<tr><td>${rule.window_number}</td><td>${rule.rule_key || '\u2014'}</td>`
-      + `<td>${rule.n || 0}</td><td>${rule.holdout_n || 0}</td>`
-      + `<td>${rule.holdout_type_b_rate_pct ?? 'n/a'}%</td>`
-      + `<td>${rule.holdout_lift ?? 'n/a'}x</td><td class="${cls}">${result}</td></tr>`;
-  }).join('') || '<tr><td colspan="7">No score-gap combination has reached a chronological holdout yet.</td></tr>';
-  const gapHoldoutNote = document.getElementById('opportunity-gap-holdout-note');
-  if (gapHoldoutNote) {
-    const repeated = (holdout.validated_rules || []).filter(rule =>
-      (rule.conditions || []).some(condition => condition.feature === 'score_gap')).length;
-    gapHoldoutNote.textContent = `${holdout.eligible_outcomes || 0} eligible outcomes across `
-      + `${holdout.windows_completed || 0} chronological windows. ${repeated} score-gap rule(s) `
-      + `are repeated across all required windows. Research-only; no execution gate changes.`;
-  }
-}
-async function loadChase() {
+  const rCurrent = await fetch('/api/lanes');
+  const current = await rCurrent.json();
+  const noteCurrent = document.getElementById('lanes-filter-note');
+  if (noteCurrent) noteCurrent.textContent = current.lane_filter_note || noteCurrent.textContent;
+  document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
+    `<tr><td>${row.lane || row.research_lane || ''}</td><td>${row.status || row.pathway_status || 'COLLECTING'}</td>`
+    + `<td>${row.approves || 0}</td><td>${row.trades || row.fills || 0}</td>`
+    + `<td>$${fmtUsd(row.pnl || 0)}</td><td>$${fmtUsd(row.ev || 0)}</td></tr>`
+  ).join('') || '<tr><td colspan="6">No current-lane evidence yet.</td></tr>';
+  return;
+}async function loadChase() {
   const r = await fetch('/api/chase' + chaseLaneQuery());
   const d = await r.json();
   const t = d.totals || {};
@@ -4536,65 +4160,6 @@ async function loadChaseDelay() {
     const label = row.label ? `${lane} · ${row.label}` : lane;
     return `<tr class="${cls}"><td>${label}</td><td>${row.approves ?? 0}</td><td>${row.fills ?? 0}</td><td>${row.fill_pct ?? 'n/a'}%</td><td>${row.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(row.pnl_usd)}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td>$${fmtUsd(row.ev_usd)}</td><td>${row.avg_signal_age_sec ?? 'n/a'}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No delay report data.</td></tr>';
-}
-
-async function loadChaseIso() {
-  const r = await fetch('/api/chase-iso');
-  const d = await r.json();
-  const note = document.getElementById('chase-iso-note');
-  const cont = d.continuous || {};
-  const urg = d.urgent || {};
-  const inactive = d.primary_inactive || ((cont.trades||0) === 0 && (urg.trades||0) === 0);
-  if (note) {
-    note.textContent = inactive
-      ? `COMBO tiles inactive this session — primary: ${d.direct_label || 'CONTINUOUS'} vs ${d.chase_label || 'AI60 SP3'}. Global fill_model counts all lanes.`
-      : `Verdict: ${d.verdict || 'n/a'} — ${d.direct_label || 'Direct'} vs ${d.chase_label || 'Chase 3+'}.`;
-    note.style.color = inactive ? 'var(--amber)' : '';
-  }
-  const directH = document.getElementById('chase-iso-direct-h');
-  const chaseH = document.getElementById('chase-iso-chase-h');
-  if (directH) directH.textContent = d.direct_label || d.direct_lane || 'Direct';
-  if (chaseH) chaseH.textContent = d.chase_label || d.chase_lane || 'Chase 3+';
-  document.getElementById('chase-iso-kpis').innerHTML = [
-    ['Verdict', d.verdict || 'n/a'],
-    ['Direct EV', '$' + fmtUsd(cont.ev_usd)],
-    ['Chase EV', '$' + fmtUsd(urg.ev_usd)],
-    ['Direct trades', cont.trades ?? 0],
-    ['Chase trades', urg.trades ?? 0],
-    ['Global fill model', JSON.stringify(d.global_fill_model || {})],
-  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('chase-iso-notes').innerHTML = (d.notes||[]).map(n => `<li>${n}</li>`).join('') || '<li>No isolation notes.</li>';
-  const metrics = [
-    ['Trades', cont.trades, urg.trades],
-    ['Win rate %', cont.wr_pct, urg.wr_pct],
-    ['PnL', '$' + fmtUsd(cont.pnl_usd), '$' + fmtUsd(urg.pnl_usd)],
-    ['EV/trade', '$' + fmtUsd(cont.ev_usd), '$' + fmtUsd(urg.ev_usd)],
-    ['Avg chase count', cont.avg_chase_count, urg.avg_chase_count],
-    ['Avg signal age (s)', cont.avg_signal_age_sec, urg.avg_signal_age_sec],
-    ['Chase policy', cont.chase_policy || '', urg.chase_policy || ''],
-  ];
-  document.getElementById('chase-iso-body').innerHTML = metrics.map(([m, c, u]) =>
-    `<tr><td>${m}</td><td>${c ?? 'n/a'}</td><td>${u ?? 'n/a'}</td></tr>`).join('');
-}
-
-async function loadLaneDefs() {
-  const r = await fetch('/api/lanes-def' + laneQuery());
-  const d = await r.json();
-  const roster = (d.active_roster||[]).join(', ') || 'n/a';
-  const retired = (d.retired_lanes||[]).join(', ') || 'none';
-  document.getElementById('lanes-def-note').textContent = `Active: ${roster} · Retired: ${retired}`;
-  document.getElementById('lanes-def-kpis').innerHTML = [
-    ['Active lanes', (d.active_roster||[]).length],
-    ['Retired', (d.retired_lanes||[]).length],
-    ['Defined', (d.lanes||[]).length],
-  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('lanes-def-body').innerHTML = (d.lanes||[]).map(row => {
-    const st = row.pathway_status || '';
-    const cls = st.includes('RETIRED') ? 'red' : (st.includes('BENCHMARK') ? 'green' : '');
-    const atF = row.all_time_fills ?? 0;
-    const atP = row.all_time_pnl_usd ?? 0;
-    return `<tr class="${cls}"><td>${row.lane||''}</td><td>${st}</td><td>${row.sample_size ?? 0}</td><td>${atF || '—'}</td><td>$${fmtUsd(row.pnl_usd)}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td>${row.role||''}</td></tr>`;
-  }).join('') || '<tr><td colspan="8">No lane definitions.</td></tr>';
 }
 
 async function loadExitCombos() {
@@ -4739,17 +4304,6 @@ async function loadLeakage() {
     `<tr><td>${(t.trade_id||'').slice(0,12)}</td><td>${t.lane||''}</td><td>${t.exit_reason||''}</td><td>${t.mfe_margin_pct??'n/a'}%</td><td>${t.realized_margin_pct??'n/a'}%</td><td class="red">${t.leakage_margin_pct??'n/a'}%</td><td>$${fmtUsd(t.realized_usd)}</td><td>$${fmtUsd(t.peak_profit_usd)}</td><td class="red">$${fmtUsd(t.left_on_table_usd)}</td></tr>`).join('');
 }
 
-async function loadRetirement() {
-  const r = await fetch('/api/lane-retirement' + laneQuery());
-  const d = await r.json();
-  document.getElementById('retire-body').innerHTML = (d.lanes||[]).map(row => {
-    const cls = row.recommendation === 'RETIRE' ? 'red' : (row.recommendation.startsWith('KEEP') ? 'green' : 'amber');
-    const atF = row.all_time_fills ?? 0;
-    const atP = row.all_time_pnl_usd ?? 0;
-    return `<tr><td>${row.lane}</td><td>${row.trades}</td><td>${atF || '—'}</td><td>$${fmtUsd(row.pnl_usd)}</td><td>${atF ? '$'+fmtUsd(atP) : '—'}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td class="${cls}">${row.recommendation}</td><td>${row.reason||''}</td></tr>`;
-  }).join('');
-}
-
 async function loadRegime() {
   const [rr, rp] = await Promise.all([
     fetch('/api/report/regime_leaderboard.json'),
@@ -4786,37 +4340,6 @@ async function loadFeatures() {
     `<tr><td>${f.feature}</td><td>${f.abs_correlation}</td><td>${f.correlation_with_pnl>=0?'+':''}${f.correlation_with_pnl}</td><td>${f.n}</td></tr>`).join('');
   document.getElementById('weak-signals').textContent = d.weak_signals?.length ?
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
-}
-
-async function loadTypeB() {
-  const r = await fetch('/api/typeb');
-  const d = await r.json();
-  const readiness = d.predictor_readiness || {};
-  const note = document.getElementById('typeb-note');
-  if (note && d.classification) note.textContent = 'Post-trade MFE cohort only; not the Type B Hunter tile. ' + d.classification + ' Entry-time rules are selected on earlier trades and checked on the newest holdout; advisory research only.';
-  document.getElementById('typeb-kpis').innerHTML = [
-    ['Cohorts', (d.cohorts||[]).length],
-    ['Entry rows', readiness.total_trades ?? 0],
-    ['Outcome Type B', readiness.type_b_trades ?? 0],
-    ['Baseline P(B)', readiness.baseline_type_b_pct != null ? readiness.baseline_type_b_pct + '%' : 'n/a'],
-    ['Validated rules', readiness.validated_rules ?? 0],
-    ['Readiness', readiness.status || 'COLLECTING'],
-  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('typeb-cohort-body').innerHTML = (d.cohorts||[]).map(c =>
-    `<tr><td>${c.cohort}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>${c.avg_mfe_pct != null ? c.avg_mfe_pct + '%' : 'n/a'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`
-  ).join('') || '<tr><td colspan="6">Run analyzer — type_b_predictor_report.json</td></tr>';
-  document.getElementById('typeb-prob-body').innerHTML = (d.probability_table||[]).map(p =>
-    `<tr><td>${p.dimension||''}</td><td>${fmtResearchBucket(p.dimension, p.bucket)}</td><td>${p.trades||0}</td><td>${p.type_b_count||0}</td><td>${p.type_b_probability_pct??'n/a'}%</td><td>${p.wr_pct??'n/a'}%</td></tr>`
-  ).join('') || '<tr><td colspan="6">Run analyzer for Type B discovery table.</td></tr>';
-  const readinessNote = document.getElementById('typeb-readiness-note');
-  if (readinessNote) readinessNote.textContent = readiness.note || 'Collecting entry-time evidence.';
-  document.getElementById('typeb-rules-body').innerHTML = (d.rules||[]).map(rule => {
-    const statusClass = rule.status === 'HOLDOUT_POSITIVE' ? 'green' : (rule.status === 'FAILED_HOLDOUT' ? 'red' : '');
-    return `<tr class="${statusClass}"><td>${rule.rule||''}</td><td>${rule.train_n||0}</td><td>${rule.train_type_b_pct??'n/a'}%</td><td>${rule.train_lift??'n/a'}x</td><td>${rule.holdout_n||0}</td><td>${rule.holdout_type_b_pct??'n/a'}%</td><td>${rule.holdout_lift??'n/a'}x</td><td>${rule.status||'COLLECTING'}</td></tr>`;
-  }).join('') || '<tr><td colspan="8">No entry-time rule has enough chronological holdout evidence yet.</td></tr>';
-  document.getElementById('typeb-sep-body').innerHTML = (d.separators||[]).map(s =>
-    `<tr><td>${s.feature||s.name||''}</td><td>${s.type_a_mean ?? 'n/a'}</td><td>${s.type_b_mean ?? 'n/a'}</td><td>${s.delta_abs ?? s.abs_delta ?? s.delta ?? 'n/a'}</td></tr>`
-  ).join('') || '<tr><td colspan="4">No separators yet.</td></tr>';
 }
 
 async function loadGenome() {
@@ -4918,28 +4441,6 @@ async function loadGenome() {
       + (explDisc.why ? `<div class="note">${explDisc.why}</div>` : '')
       + `<div class="note"><em>${disc.recommendation || ''}</em></div></div>`;
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
-}
-
-async function loadPartialReductions() {
-  const r = await fetch('/api/partial-reduction-reconciliation');
-  const d = await r.json();
-  const lanes = Object.entries(d.lanes || {});
-  const integrity = d.integrity || {};
-  const empty = document.getElementById('partial-reductions-empty');
-  document.getElementById('partial-reductions-kpis').innerHTML = [
-    ['Status', d.status || 'BLOCKED'],
-    ['Qualification', d.qualification || 'INSUFFICIENT'],
-    ['Live copy allowed', d.live_copy_allowed ? 'YES' : 'NO'],
-    ['Integrity', integrity.passed ? 'PASS' : 'BLOCKED'],
-  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  empty.style.display = lanes.length ? 'none' : 'block';
-  empty.textContent = 'No signed partial-reduction evidence is available yet. Live copy remains blocked.';
-  document.getElementById('partial-reductions-body').innerHTML = lanes.map(([lane,v]) =>
-    `<tr><td>${lane}</td><td>${v.lifecycles ?? 0}</td><td>${v.partial_reduction_receipts ?? 0}</td><td>${v.eligible_current_receipts ?? 0}</td><td>${v.legacy_excluded_lifecycles ?? 0}</td><td>${v.reconciled_lifecycles ?? 0}</td><td class="${v.live_copy_evidence_sufficient ? 'green' : 'red'}">${v.live_copy_evidence_sufficient ? 'YES' : 'NO'}</td></tr>`
-  ).join('');
-  document.getElementById('partial-reductions-detail').textContent = JSON.stringify({
-    summary: d.summary || {}, integrity, blockers: d.blockers || [], note: d.note || '',
-  }, null, 2);
 }
 
 async function loadAI() {
@@ -5049,12 +4550,12 @@ async function loadGptAuditNote() {
 
 const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
-  lanes: [loadLanes], 'lanes-retire': [loadRetirement], 'lanes-def': [loadLaneDefs],
-  ai: [loadAI], typeb: [loadTypeB], chase: [loadChase],
+  lanes: [loadLanes],
+  ai: [loadAI], chase: [loadChase],
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
-  'chase-iso': [loadChaseIso], combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
+  combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
-  'ladder-sim': [loadLadderSim], exits: [loadLeakage], 'partial-reductions': [loadPartialReductions], genome: [loadGenome],
+  'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
   download: [loadArchives, loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };

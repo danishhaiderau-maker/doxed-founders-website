@@ -162,8 +162,8 @@ def test_order_identity_and_sizing_are_canonical_not_signal_promoted() -> None:
 
     assert "relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES" in place_source
     assert '"relay_eligible": relay_eligible' in place_source
-    assert "requested_margin_usd = margin_usdt" in place_source
-    assert "requested_notional_usd = round(margin_usdt * float(lev), 4)" in place_source
+    assert "margin_usdt if requested_margin_usd is None" in place_source
+    assert "round(margin_usdt * float(lev), 4)" in place_source
 
 
 def test_relay_projection_preserves_explicit_zero_sizing_evidence() -> None:
@@ -172,7 +172,7 @@ def test_relay_projection_preserves_explicit_zero_sizing_evidence() -> None:
         {"_pending_limit_touched": lambda _row, _price: False},
     )
     row = {
-        "trade_id": "o29ps-zero",
+        "trade_id": "o29atr-zero",
         "created_ts": 100.0,
         "margin_usdt": 0.25,
         "requested_margin_usd": 0.0,
@@ -183,19 +183,17 @@ def test_relay_projection_preserves_explicit_zero_sizing_evidence() -> None:
     assert projected["requested_margin_usd"] == 0.0
 
 
-def test_lifecycle_restore_canonicalizes_protected_identity_and_size() -> None:
+def test_lifecycle_restore_rejects_unregistered_lane_identity() -> None:
     canonicalize = _compile_function(
         "_canonicalize_paper_lifecycle_identity",
         {
             "_normalize_lane_key": lambda row: row.get("research_lane"),
-            "PLATFORM_RELAY_ELIGIBLE_LANES": frozenset({"CONTINUOUS"}),
-            "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED": "OFFSET_029_ATR_PROTECTED",
-            "RESEARCH_LANE_OFFSET_029_ATR_REGIME": "OFFSET_029_ATR_REGIME",
+            "PLATFORM_RELAY_ELIGIBLE_LANES": frozenset({"CONTINUOUS", "OFFSET_029_ATR_TP_25"}),
         },
     )
     restored = canonicalize(
         {
-            "research_lane": "OFFSET_029_ATR_PROTECTED",
+            "research_lane": "UNREGISTERED_RETIRED_LANE",
             "relay_eligible": True,
             "paper_only": False,
             "margin_usdt": 0.25,
@@ -208,8 +206,8 @@ def test_lifecycle_restore_canonicalizes_protected_identity_and_size() -> None:
 
     assert restored["paper_only"] is True
     assert restored["relay_eligible"] is False
-    assert restored["requested_margin_usd"] == 0.25
-    assert restored["requested_notional_usd"] == 24.0
+    assert restored["requested_margin_usd"] == 0.0
+    assert restored["requested_notional_usd"] == 0.0
 
 
 def test_terminal_close_dominates_a_late_fill_thread() -> None:

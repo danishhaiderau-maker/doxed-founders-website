@@ -218,6 +218,46 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(submitted["terminal"])
             self.assertEqual(submitted["policy_signature"], decision["policy_signature"])
 
+    def test_frozen_policy_spec_repairs_mismatched_base_signature_on_terminal_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "patient-child", "shared_ai_call_id": "scan-terminal",
+                "created_ts_ts": 1000, "raw_direction": "LONG",
+                "research_lane": "OFFSET_029_ATR_PROTECTED",
+                "policy_identity_schema": "paper_policy_identity_v3",
+                "policy_id": "PATIENT_PROTECTED",
+                "policy_signature": "policy-base-control",
+                "policy_epoch_id": "policy-epoch-base-control",
+                "paper_policy_spec": {
+                    "schema": "paper_policy_identity_spec_v3",
+                    "policy_id": "PATIENT_PROTECTED",
+                    "research_lane": "OFFSET_029_ATR_PROTECTED",
+                    "entry_limit_policy": "OFFSET_0.29_PROTECTED",
+                    "entry_offset_fraction": 0.0029,
+                    "declared_entry_ttl_sec": 1800.0,
+                    "entry_reconciliation_allowance_sec": 180,
+                    "exit_config": {"policy": "PROTECTED"},
+                    "paper_only": True,
+                    "relay_eligible": False,
+                    "base_policy_signature": "policy-base-control",
+                },
+            }
+            frozen = paper_policy_identity_for_sources("epoch-v3-test", source)
+            self.assertTrue(frozen["policy_signature"].startswith("paper-policy-"))
+            self.assertNotEqual(frozen["policy_signature"], source["policy_signature"])
+
+            dual_write_lane_entry_resolution(
+                source, lane="OFFSET_029_ATR_PROTECTED",
+                entry_resolution="NO_ORDER", exact_reason="TTL_EXPIRED",
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=1001,
+            )
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().strip())
+            self.assertEqual(row["policy_signature"], frozen["policy_signature"])
+            self.assertEqual(row["policy_epoch_id"], frozen["policy_epoch_id"])
+            self.assertEqual(row["policy_id"], "PATIENT_PROTECTED")
+
     def test_continuous_relay_capability_default_keeps_decision_and_order_identity_equal(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = {
@@ -652,6 +692,9 @@ class V3BridgeTests(unittest.TestCase):
             lane_position = {
                 **lane_order, "entry_ts": 1010, "entry": 99.9, "dir": "LONG",
             }
+            expected_lane_identity = paper_policy_identity_for_sources(
+                "epoch-v3-test", lane_order,
+            )
             dual_write_paper_fill(
                 lane_order, shared_signal, lane_position,
                 epoch_id="epoch-v3-test", data_dir=tmp,
@@ -666,7 +709,10 @@ class V3BridgeTests(unittest.TestCase):
                 json.loads(line)
                 for line in V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("execution").read_text().splitlines()
             ]
-            self.assertEqual({row["policy_signature"] for row in rows}, {"lane-3-signature"})
+            self.assertEqual(
+                {row["policy_signature"] for row in rows},
+                {expected_lane_identity["policy_signature"]},
+            )
             self.assertEqual({row["policy_id"] for row in rows}, {"LANE_3_POLICY"})
 
     def test_provisional_without_stable_identity_is_deferred_without_rows(self):

@@ -20,6 +20,12 @@ class _Logger:
         pass
 
 
+def _append_jsonl(path, row, **_kwargs):
+    with Path(path).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    return True
+
+
 def _load_functions(*names):
     tree = ast.parse(SOURCE)
     selected = [
@@ -119,6 +125,7 @@ def test_offline_simulator_joins_historical_rotations_and_appends_changed_platfo
         "build_counterfactual_observability_fields": lambda _buf, snap, _replay, _outcome: {
             "platform_evidence_revision": snap.get("platform_evidence_revision")
         },
+        "_safe_append_jsonl": _append_jsonl,
         "rotate_log": lambda _path: None,
     })
     funcs["offline_simulator"](str(snapshot), str(replay), str(output))

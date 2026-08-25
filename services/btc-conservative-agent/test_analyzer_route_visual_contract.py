@@ -23,7 +23,6 @@ def test_primary_analyzer_routes_and_links_render_without_dead_ends():
         "/static-policies": b"Static Profitable Policy Research",
         "/dynamic-policies": b"Dynamic Market-Regime Policy Research",
         "/shadow-research": b"Shadow and Rejected-Opportunity Research",
-        "/partial-reduction-reconciliation": b"Partial Reduction Reconciliation",
     }
     for route, marker in routes.items():
         response = client.get(route)
@@ -36,7 +35,7 @@ def test_primary_analyzer_routes_and_links_render_without_dead_ends():
             assert f'href="{route}"' in root
 
 
-def test_empty_safe_genome_and_partial_reduction_states_are_truthful(monkeypatch):
+def test_empty_safe_genome_state_is_truthful(monkeypatch):
     monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {"report": {}})
     monkeypatch.setattr(dashboard, "_read_report", lambda *args, **kwargs: {})
     dashboard._API_RESPONSE_CACHE.clear()
@@ -49,29 +48,9 @@ def test_empty_safe_genome_and_partial_reduction_states_are_truthful(monkeypatch
     assert genome["real_bitfinex_trading_allowed"] is False
     assert "V3_REPORT_NOT_GENERATED" in genome["blockers"]
 
-    reductions = client.get("/api/partial-reduction-reconciliation").get_json()
-    assert reductions["status"] == "BLOCKED"
-    assert reductions["qualification"] == "INSUFFICIENT"
-    assert reductions["live_copy_allowed"] is False
-    assert reductions["lanes"] == {}
-    assert reductions["integrity"]["passed"] is False
-    assert "PARTIAL_REDUCTION_REPORT_NOT_GENERATED" in reductions["blockers"]
-
-
-def test_partial_reduction_subtab_exposes_explicit_insufficiency_copy():
-    source = dashboard.DASHBOARD_HTML
-    assert 'id="sec-partial-reductions"' in source
-    assert "No signed partial-reduction evidence is available yet. Live copy remains blocked." in source
-    assert "Eligible current" in source
-    assert "Legacy excluded" in source
-    assert "'partial-reductions': [loadPartialReductions]" in source
-
-
 def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     source = dashboard.DASHBOARD_HTML
     assert "main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }" in source
     assert "table { display: block; width: 100%; max-width: 100%; overflow-x: auto;" in source
-    page = dashboard.app.test_client().get("/partial-reduction-reconciliation").get_data(as_text=True)
+    page = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)
     assert 'name="viewport"' in page
-    assert "paper receipt evidence sufficient" in page
-    assert "live evidence sufficient" not in page

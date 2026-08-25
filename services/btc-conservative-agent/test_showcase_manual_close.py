@@ -27,9 +27,6 @@ def test_terminal_close_zeros_protected_runner_fraction_before_trade_row():
     close_start = BOT_SOURCE.index("def close_position(pos: dict, exit_reason: str):")
     close_end = BOT_SOURCE.index("\ndef ", close_start + 1)
     close_src = BOT_SOURCE[close_start:close_end]
-    normalize = 'pos["policy_remaining_fraction"] = 0.0'
-    terminal_row = '"policy_remaining_fraction": pos.get("policy_remaining_fraction")'
-
-    assert "protected_partial_policy" in close_src
-    assert close_src.index(normalize) < close_src.index(terminal_row)
-    assert "ADMIN_MANUAL_CLOSE / force-flat" in close_src
+    assert '"partial_exit_receipts": copy.deepcopy' in close_src
+    assert '"partial_reduction_terminal_schema": (' in close_src
+    assert '"terminal_remaining_zero_v1"' in close_src

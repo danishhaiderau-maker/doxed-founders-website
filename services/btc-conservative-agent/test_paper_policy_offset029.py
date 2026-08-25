@@ -8,7 +8,6 @@ from combo_pathway_config import (
     COMBO_TILE_DISPLAY_ORDER,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_TYPE_B_HUNTER_V1,
 )
 
 
@@ -51,9 +50,9 @@ def test_atr_target_and_path_end_are_exact():
     ) == (None, None)
 
 
-def test_active_roster_contains_patient_chase_family_and_not_retired_type_b():
+def test_active_roster_contains_only_patient_chase_candidate():
     assert COMBO_EXECUTION_LANES[0] == RESEARCH_LANE_OFFSET_029_ATR_TP_25
-    assert len(COMBO_EXECUTION_LANES) == 3
+    assert len(COMBO_EXECUTION_LANES) == 1
     assert COMBO_TILE_DISPLAY_ORDER == COMBO_EXECUTION_LANES
     assert RESEARCH_CANDIDATE_LANE == RESEARCH_LANE_OFFSET_029_ATR_TP_25
     spec = COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25]
@@ -63,15 +62,12 @@ def test_active_roster_contains_patient_chase_family_and_not_retired_type_b():
     assert spec["uses_shared_ai_direction"] is True
     assert spec["is_independent_ai"] is False
     assert spec["is_legacy"] is False
-    assert RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_EXECUTION_LANES
-    assert COMBO_LANE_SPECS[RESEARCH_LANE_TYPE_B_HUNTER_V1]["is_legacy"] is True
+    assert set(COMBO_LANE_SPECS) == {RESEARCH_LANE_OFFSET_029_ATR_TP_25}
 
 
-def test_startup_shared_ai_validator_accepts_frozen_four_tile_roster():
-    report = pathway_lab_validation.run_independent_v1_post_ai_spawn_validation()
+def test_startup_validator_accepts_two_tile_roster():
+    report = pathway_lab_validation.run_startup_pathway_validation()
     assert report["verdict"] == "PASS"
-    assert report["lanes"] == list(COMBO_EXECUTION_LANES)
-    assert all(check["passed"] for check in report["checks"])
 
 
 def test_bot_adapter_is_paper_first_and_separately_relay_allowlisted():
@@ -100,8 +96,8 @@ def test_dashboard_copy_is_truthful_and_complete():
 
 def test_rendered_tile_has_exact_policy_copy_without_retired_defaults():
     source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
-    assert '"0.29% Patient Chase" if offset_029' in source
+    assert '"entry_mode_label": "0.29% Patient Chase"' in source
     assert '"Tests patient entry quality and ATR-normalized profit capture"' in source
-    assert '"Paper-only; no protective hard stop. Path-end losses and execution uncertainty remain"' in source
+    assert '"Paper research only until qualified; path-end and execution risk remain explicit"' in source
     assert '"Entry: 0.29% patient maker anchor vs Continuous 0.10% benchmark"' in source
-    assert '"Exit: 2.5× frozen 3m ATR target; otherwise 120m path end"' in source
+    assert '"Exit: 2.5x frozen 3m ATR target; otherwise 120m path end"' in source

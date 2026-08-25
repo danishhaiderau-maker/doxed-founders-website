@@ -141,6 +141,9 @@ class V3CandidateTests(unittest.TestCase):
         self.assertIn("ATR_TP_2.5_ATR_SL_1", names)
         self.assertIn("ATR_TP_2.5_THESIS_12_HARD_30", names)
         self.assertIn("ATR_TP_2.5_SCENARIO_C", names)
+        self.assertIn("ATR_TP_2.5_SCENARIO_C_ATR_SL_0.5", names)
+        self.assertIn("ATR_TP_2.5_SCENARIO_C_ATR_SL_1", names)
+        self.assertIn("ATR_TP_2.5_SCENARIO_C_ATR_SL_3", names)
         self.assertIn("ATR_TP_2.5_TIME_120", names)
         self.assertIn("ATR_TP_2.5_BE_4_LOCK_1", names)
         self.assertIn("ATR_TP_2.5_GIVEBACK_40PCT", names)
@@ -155,10 +158,33 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(candidate["profit_protection"]["break_even_arm_atr_k"], 1.25)
         self.assertEqual(candidate["profit_protection"]["partial_take_profits"], [[1.0, 0.25], [1.5, 0.25]])
 
+        scenario_with_stop = next(
+            row for row in protection_screen()
+            if row["protection_id"] == "ATR_TP_2.5_SCENARIO_C_ATR_SL_1"
+        )
+        self.assertEqual(scenario_with_stop["loss_protection"]["atr_stop_k"], 1.0)
+        self.assertEqual(scenario_with_stop["loss_protection"]["thesis_cut_margin_pct"], -12)
+        self.assertEqual(scenario_with_stop["profit_protection"]["atr_tp_k"], 2.5)
+        self.assertTrue(scenario_with_stop["profit_protection"]["ladder"])
+
     def test_descriptive_policies_are_visible_but_never_safe_qualified(self):
-        report = evaluate_protection_screen([source()])
+        progress = []
+        report = evaluate_protection_screen([source()], progress_callback=progress.append)
         self.assertEqual(report["unique_policies_evaluated"], len(protection_screen()))
         self.assertTrue(report["descriptive_top_100"])
+        self.assertEqual(progress[-1]["phase"], "PROTECTION_REPLAY")
+        self.assertEqual(progress[-1]["input_events_completed"], 1)
+        self.assertEqual(progress[-1]["input_events_total"], 1)
+        sweep = report["scenario_c_atr_stop_sweep"]
+        self.assertEqual(sweep["qualification"], "DESCRIPTIVE_ONLY")
+        self.assertEqual(
+            set(sweep["leaders_by_stop"]),
+            {"0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"},
+        )
+        self.assertEqual(
+            list(sweep["leaders_by_stop"]),
+            ["0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"],
+        )
         ranking = rank_safe_policies(report["candidates"])
         self.assertIsNone(ranking["number_one"])
         self.assertTrue(all("conservative_execution_pass" in row["ranking_blockers"] for row in ranking["blocked"]))

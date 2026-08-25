@@ -1064,15 +1064,12 @@ def test_exact_dashboard_chase_bucket_rests_before_next_chase():
         assert loads
         assert min(stores) < min(loads)
 
-    unrelated_tile = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_submit_tile2_paper_resting_limit"
-    )
+    # Retired Tile 2 submitters must be physically absent; the exact-bucket
+    # contract now belongs only to the shared Patient/Continuous limit path.
     assert not any(
-        isinstance(node, ast.Name)
-        and node.id in ("order_created_ts", "dashboard_exact_chase_managed")
-        for node in ast.walk(unrelated_tile)
+        isinstance(node, ast.FunctionDef)
+        and node.name == "_submit_tile2_paper_resting_limit"
+        for node in tree.body
     )
 
 
@@ -1181,7 +1178,7 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
 
 def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():
     assert "RESEARCH_LANE_CONTINUOUS: 0.0," in BOT_SOURCE
-    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0," in BOT_SOURCE
+    assert "RESEARCH_LANE_OFFSET_029_ATR_TP_25: 0.0," in BOT_SOURCE
     assert "A second lane offset here would make the" in BOT_SOURCE
 
 

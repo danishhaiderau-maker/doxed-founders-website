@@ -126,5 +126,5 @@ def test_bot_wires_only_post_registration_and_real_lifecycle_boundaries():
     assert "initialize_research_order_schedule" in lane_body
     assert "registered=True" in lane_body
     assert "def _commit_relay_limit_chase" in source
-    assert "append_research_reprice_interval" in source[source.index("def _commit_relay_limit_chase"):source.index("def _apply_urgent_marketable_chase")]
+    assert "append_research_reprice_interval" in source[source.index("def _commit_relay_limit_chase"):source.index("def _apply_limit_chase")]
     assert "close_research_order_schedule" in source[source.index("def _cancel_pending_order_confirmed"):source.index("def _log_shadow_vs_live_entry")]

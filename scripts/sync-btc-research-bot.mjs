@@ -24,7 +24,6 @@ const SOURCE_FILE = process.env.BTC_RESEARCH_FILE ?? 'bybit_bot.py';
 const EXTRA_SOURCE_FILES = [
   'combo_pathway_config.py',
   'legacy_pathway_config.py',
-  'experimental_pathway_config.py',
   'scenario_c_config.py',
   'pathway_lane_roster.py',
   'pathway_lab_validation.py',

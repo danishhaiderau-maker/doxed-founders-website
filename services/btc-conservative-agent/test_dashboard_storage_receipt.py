@@ -21,7 +21,6 @@ def test_summary_accepts_utf8_bom_size_report(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "_read_json", lambda *args, **kwargs: {})
     monkeypatch.setattr(dashboard, "_read_text", lambda *args, **kwargs: "")
     monkeypatch.setattr(dashboard, "_integrity_payload", lambda: {})
-    monkeypatch.setattr(dashboard, "_typeb_research_v2_payload", lambda: {})
 
     response = dashboard.app.test_client().get("/api/summary")
 

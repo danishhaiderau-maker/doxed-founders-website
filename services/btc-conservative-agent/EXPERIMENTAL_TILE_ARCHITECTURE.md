@@ -27,7 +27,7 @@ Current roster:
 
 - Tile 1: baseline 0.29% Patient Chase, ATR 2.5x/path-end control.
 - Tile 2: Continuous benchmark.
-- Tile 3: static protected Patient Chase.
-- Tile 4: regime-adaptive protected Patient Chase; risk may tighten during a
-  trade but may never widen and every transition is recorded.
 
+Rejected experiments are removed from executable source and current analyzer
+cohorts. Their immutable evidence is quarantine/archive data only. A new tile
+requires qualified evidence and explicit operator approval.

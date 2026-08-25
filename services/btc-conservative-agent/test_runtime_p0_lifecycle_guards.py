@@ -29,7 +29,7 @@ def test_pending_fill_slow_evidence_is_outside_trade_lock():
 
 
 def test_chase_research_persistence_is_outside_trade_lock():
-    for name in ("_commit_relay_limit_chase", "_apply_urgent_marketable_chase"):
+    for name in ("_commit_relay_limit_chase",):
         node = _function(name)
         for child in ast.walk(node):
             if not isinstance(child, (ast.With, ast.AsyncWith)):

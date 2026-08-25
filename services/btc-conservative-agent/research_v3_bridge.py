@@ -164,18 +164,37 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         if (
             source.get("policy_identity_schema") == "paper_policy_identity_v3"
             and isinstance(frozen_spec, Mapping)
-            and source.get("policy_id")
-            and source.get("policy_signature")
-            and source.get("policy_epoch_id")
+            and frozen_spec.get("policy_id")
         ):
+            # The immutable spec is the authority.  Sparse lifecycle merges can
+            # accidentally combine that spec with the base CONTROL signature
+            # carried by a master signal.  Trusting the mismatched top-level
+            # fields contaminated a terminal NO_ORDER row even though its
+            # policy material still described the correct Patient lane.
+            spec = copy.deepcopy(dict(frozen_spec))
+            signature = "paper-policy-" + hashlib.sha256(
+                canonical_json(spec).encode("utf-8")
+            ).hexdigest()[:20]
+            policy_epoch_id = "paper-policy-epoch-" + hashlib.sha256(
+                f"{epoch_id}|{signature}".encode("utf-8")
+            ).hexdigest()[:20]
             return {
                 "policy_identity_schema": "paper_policy_identity_v3",
-                "policy_id": str(source["policy_id"]),
-                "policy_signature": str(source["policy_signature"]),
-                "policy_epoch_id": str(source["policy_epoch_id"]),
-                "base_policy_signature": source.get("base_policy_signature"),
+                "policy_id": str(spec["policy_id"]),
+                "policy_signature": signature,
+                "policy_epoch_id": policy_epoch_id,
+                "base_policy_signature": (
+                    spec.get("base_policy_signature")
+                    or source.get("base_policy_signature")
+                ),
                 "base_policy_epoch_id": source.get("base_policy_epoch_id"),
-                "paper_policy_spec": copy.deepcopy(dict(frozen_spec)),
+                "paper_policy_spec": spec,
+                "policy_execution_scope": "PAPER_RESEARCH_ONLY",
+                "relay_capability": (
+                    "RELAY_ELIGIBLE"
+                    if bool(spec.get("relay_eligible"))
+                    else "NOT_RELAY_ELIGIBLE"
+                ),
             }
     research_lane = str(_first(*(source.get("research_lane") for source in sources)) or "").strip()
     policy_id = str(_first(

@@ -1,4 +1,4 @@
-"""Static regression checks for the four-tile accounting contract."""
+"""Static regression checks for the two-tile accounting contract."""
 
 from pathlib import Path
 

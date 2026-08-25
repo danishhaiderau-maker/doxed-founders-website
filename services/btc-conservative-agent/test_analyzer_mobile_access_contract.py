@@ -156,6 +156,15 @@ def test_report_manifest_exposes_cohort_provenance_and_revision():
     assert '"REPORT_NOT_COHORT_GATED"' in CANONICAL_ANALYZER_SOURCE
     assert 'report["source_data_revision"] = analysis_provenance["source_data_revision"]' in CANONICAL_ANALYZER_SOURCE
     assert 'report.setdefault("live_policy_change_allowed", False)' in CANONICAL_ANALYZER_SOURCE
+    assert "manifest_started_at = datetime.now(timezone.utc)" in manifest
+    assert '"generation_started_at": manifest_started_at.isoformat()' in manifest
+    for current_generator in (
+        "build_policy_cycle_reports(",
+        "build_shadow_lane_comprehensive_report(",
+    ):
+        assert manifest.index("manifest_generated_at = datetime.now(timezone.utc)") > manifest.index(
+            current_generator
+        )
 
 
 def test_demo_harness_runs_canonical_analyzer_and_propagates_failure():

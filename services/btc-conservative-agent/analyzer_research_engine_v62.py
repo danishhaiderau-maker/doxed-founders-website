@@ -27,7 +27,7 @@ thesis fast-cut -28%, MFE protect 8%. Sole-AI funnel unchanged (edge 0.0+, perio
 v81: Sole-AI research funnel — edge min 0.0+, periodic AI every 300s, post-AI gates log
 WOULD_BLOCK_* (zero-block mode for full replay dataset). Session-only dashboard AI history.
 v80: Edge histogram + funnel by bucket, monotonicity, spread/SR/AI cohort tables,
-Type-A vs Type-B, first-3-candle report; pairs with research_buckets + edge_census.jsonl.
+First-3-candle and generic feature reports; pairs with research_buckets + edge_census.jsonl.
 v72: Blocked APPROVE shadow PnL (shadow_outcome.jsonl), real-edge report, counterfactual v2.
 v71: Live defaults synced to v70 sweet-spot (pullback 0.2%, ladder 10→6%, thesis cut -6%).
 v70: Thesis fast-cut / ladder-first-rung sweet-spot sweeps, research data coverage audit,
@@ -79,21 +79,8 @@ from research.shadow_outcome_reconstruction import (
     attach_market_evidence as _attach_market_evidence,
     reconstruct_row as _reconstruct_research_row,
 )
-from research_opportunity_v2 import (
-    EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
-    REPORT_FILE as TYPE_B_RESEARCH_V2_REPORT_NAME,
-    load_events as load_type_b_research_v2_events,
-    materialize as materialize_type_b_research_v2,
-    summarize as summarize_type_b_research_v2,
-    summarize_lane_verdicts,
-)
-
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
-TYPE_B_DISCOVERY_MIN_TRADES = 120
-TYPE_B_GATE_MIN_TRADES = 220
-TYPE_B_RULE_MIN_TRAIN_N = 8
-TYPE_B_RULE_MIN_HOLDOUT_N = 5
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -117,7 +104,6 @@ REAL_EDGE_SUMMARY_FILE = "real_edge_summary.json"
 HORIZON_PROFITABILITY_REPORT_FILE = "horizon_profitability_report.json"
 HORIZON_PROFIT_HORIZONS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "120m": 7200}
 TOP_LEAKAGE_REPORT_FILE = "top_leakage_report.json"
-LANE_RETIREMENT_REPORT_FILE = "lane_retirement_report.json"
 FEATURE_IMPORTANCE_REPORT_FILE = "feature_importance_report.json"
 CHASE_PROFIT_REPORT_FILE = "chase_profit_report.json"
 CONFIDENCE_BAND_CROSS_REPORT_FILE = "confidence_band_cross_report.json"
@@ -126,14 +112,8 @@ BENCHMARK_CONTRIBUTION_REPORT_FILE = "benchmark_contribution_report.json"
 LANE_OVERLAP_REPORT_FILE = "lane_overlap_report.json"
 FAST_CUT_SWEEP_REPORT_FILE = "fast_cut_sweep_report.json"
 QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE = "qualified_exit_policy_grid_report.json"
-LANE_DEFINITION_REPORT_FILE = "lane_definition_report.json"
-URGENT_CHASE_REPORT_FILE = "urgent_chase_report.json"
-LANE_CHASE_ISOLATION_REPORT_FILE = "lane_chase_isolation_report.json"
 TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
 CHASE_EFFICIENCY_MATRIX_REPORT_FILE = "chase_efficiency_matrix_report.json"
-TYPE_B_PREDICTOR_REPORT_FILE = "type_b_predictor_report.json"
-TYPE_B_ADX_V3_SHADOW_REPORT_FILE = "type_b_adx_v3_shadow_report.json"
-TYPE_B_RESEARCH_V2_REPORT_FILE = TYPE_B_RESEARCH_V2_REPORT_NAME
 CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
 CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
@@ -154,7 +134,6 @@ RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
 COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
 POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
-PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE = "partial_reduction_reconciliation_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 PUBLISHED_REPORTS_DIR = "published_reports"
@@ -401,10 +380,6 @@ try:
     SHADOW_COLLECTING_LANES = ()
     EXPERIMENTAL_EXECUTION_LANES = ()
     EXPERIMENTAL_LANE_LABELS = {}
-    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA = "AI_DISAGREEMENT_ALPHA"
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY = "AI_DISAGREEMENT_REPLAY"
-    RESEARCH_LANE_RECOVERY_MONSTER_V1 = "RECOVERY_MONSTER_V1"
-    RESEARCH_LANE_TYPE_B_PREDICTOR_V1 = "TYPE_B_PREDICTOR_V1"
     ACTIVE_PATHWAY_LANES = tuple(COMBO_EXECUTION_LANES) + tuple(EXPERIMENTAL_EXECUTION_LANES)
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
@@ -450,30 +425,11 @@ except ImportError:
         "AI_DISAGREEMENT_REPLAY",
     )
     _COMBO_LANE_LABELS = {}
-    ANALYZER_COMPARE_LANES = ACTIVE_PATHWAY_LANES + (
-        "CONTINUOUS",
-        "COMBO_65_SP5_DIRECT",
-        "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1",
-        "TYPE_B_PREDICTOR_V1",
-        "AI_DISAGREEMENT_ALPHA",
-        "EXTREME_EDGE",
-        "EDGE_PLUS_STACK",
-        "AI_SCAN",
-        "HIGH_EDGE_RUNNER",
-        "SHADOW_RUNNER",
-        "EDGE_ALPHA_4",
-        "TYPE_B_HUNTER",
-        "SHORT_BEAR_ALPHA",
-        "AI_60_65_ALPHA",
-        "URGENT_CHASE_ALPHA",
-        "CHASE_3PLUS_ALPHA",
-    )
-    RETIRED_PATHWAY_LANES = frozenset({
-        "EXTREME_EDGE", "EDGE_PLUS_STACK",
-        "COMBO_65_SP5_DIRECT", "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1", "TYPE_B_PREDICTOR_V1", "AI_DISAGREEMENT_ALPHA",
-    })
+    ANALYZER_COMPARE_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
+    RETIRED_PATHWAY_LANES = frozenset()
+CURRENT_RESEARCH_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
+ANALYZER_COMPARE_LANES = CURRENT_RESEARCH_LANES
+ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
 EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
 BOT_VERSION = EXPECTED_BOT_VERSION
@@ -528,25 +484,8 @@ REALISM_ERA_LABELS = {
     "UNKNOWN": "Unknown sim era",
 }
 RESEARCH_LANE_LABELS = {
-    "CONTINUOUS": "Continuous AI Research",
-    "HIGH_EDGE_RUNNER": "High Edge Runner",
-    "EXTREME_EDGE": "Extreme Edge",
-    "EDGE_PLUS_STACK": "Edge Plus Stack",
-    "SHADOW_RUNNER": "Shadow Runner",
-    "EDGE_ALPHA_4": "Edge Alpha 4",
-    "TYPE_B_HUNTER": "Type B Hunter",
-    "SHORT_BEAR_ALPHA": "Short Bear Alpha",
-    "AI_60_65_ALPHA": "AI 60-65 Alpha",
-    "URGENT_CHASE_ALPHA": "Urgent Chase Alpha",
-    "CHASE_3PLUS_ALPHA": "Chase 3+ Alpha",
-    "COMBO_65_SP5_CHASE_3PLUS": "AI65+ · Spread5+ · Chase 3+",
-    "COMBO_65_SP5_DIRECT": "AI65+ · Spread5+ · Direct",
-    "COMBO_604_SP4_CHASE_3PLUS": "AI60-65 · Spread4 · Chase 3+",
-    "COMBO_604_SP4_DIRECT": "AI60-65 · Spread4 · Direct",
-    # Legacy — historical CSV/JSON only; excluded from active scorecards
-    "EDGE_ACCELERATION": "Edge Acceleration (legacy)",
-    "PROFIT_GATES": "Profit Gates (legacy)",
-    "STABILITY": "Stability (legacy)",
+    "CONTINUOUS": "Continuous Benchmark",
+    "OFFSET_029_ATR_TP_25": "0.29% Patient Chase · ATR 2.5x",
 }
 if _COMBO_LANE_LABELS:
     RESEARCH_LANE_LABELS.update(_COMBO_LANE_LABELS)
@@ -571,51 +510,7 @@ CONFIDENCE_BAND_BUCKET_ORDER = ["0-45", "45-50", "50-55", "55-60", "60-65", "65+
 AI_MATRIX_CONF_BUCKETS = ["50-55", "55-60"]
 AI_MATRIX_EDGE_BUCKETS = ["2-3", "3-4", "4+"]
 HORIZON_30M_SEC = 1800
-EXPERIMENT_LANES = (
-    "COMBO_65_SP5_DIRECT",
-    "COMBO_604_SP4_CHASE_3PLUS",
-    "COMBO_604_SP4_DIRECT",
-    "HIGH_EDGE_RUNNER",
-    "SHADOW_RUNNER",
-    "EDGE_ALPHA_4",
-    "TYPE_B_HUNTER",
-    "SHORT_BEAR_ALPHA",
-    "AI_60_65_ALPHA",
-    "URGENT_CHASE_ALPHA",
-    "CHASE_3PLUS_ALPHA",
-    "TYPE_B_PREDICTOR_V1",
-    "RECOVERY_MONSTER_V1",
-    "AI_DISAGREEMENT_ALPHA",
-    "AI_DISAGREEMENT_REPLAY",
-    "CONTINUOUS",
-)
-PATHWAY_LANE_STATUS = {
-    "COMBO_65_SP5_CHASE_3PLUS": "PRIMARY_PRODUCTION",
-    "COMBO_65_SP5_DIRECT": "RETIRED",
-    "COMBO_604_SP4_CHASE_3PLUS": "ACTIVE",
-    "COMBO_604_SP4_DIRECT": "RETIRED",
-    "CONTINUOUS": "BENCHMARK",
-    "TYPE_B_PREDICTOR_V1": "RETIRED",
-    "RECOVERY_MONSTER_V1": "RETIRED",
-    "AI_DISAGREEMENT_ALPHA": "RETIRED",
-    "AI_DISAGREEMENT_REPLAY": "ACTIVE",
-    "HIGH_EDGE_RUNNER": "SHADOW_COLLECTING",
-    "EXTREME_EDGE": "RETIRED",
-    "EDGE_PLUS_STACK": "RETIRED",
-    "SHADOW_RUNNER": "SHADOW_COLLECTING",
-    "EDGE_ALPHA_4": "SHADOW_COLLECTING",
-    "TYPE_B_HUNTER": "SHADOW_COLLECTING",
-    "SHORT_BEAR_ALPHA": "SHADOW_COLLECTING",
-    "AI_60_65_ALPHA": "SHADOW_COLLECTING",
-    "URGENT_CHASE_ALPHA": "SHADOW_COLLECTING",
-    "CHASE_3PLUS_ALPHA": "SHADOW_COLLECTING",
-    "AI_SCAN": "ACTIVE",
-}
-# The roster is the current execution authority. Historical comparison lanes
-# remain in analyzer reports so immutable evidence can still be decoded, but a
-# retired lane must never inherit the status helper's ACTIVE default.
-for _retired_lane in RETIRED_PATHWAY_LANES:
-    PATHWAY_LANE_STATUS[str(_retired_lane).upper()] = "RETIRED"
+ACTIVE_ANALYSIS_LANES = CURRENT_RESEARCH_LANES
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
 LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "PROFIT_GATES", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
@@ -653,7 +548,6 @@ ANALYZER_JSON_REPORT_FILES = (
     EXIT_LEAKAGE_BY_REASON_REPORT_FILE,
     EXIT_LADDER_SIMULATOR_REPORT_FILE,
     CORRELATED_PRICE_CLUSTER_REPORT_FILE,
-    LANE_RETIREMENT_REPORT_FILE,
     FEATURE_IMPORTANCE_REPORT_FILE,
     CHASE_PROFIT_REPORT_FILE,
     CONFIDENCE_BAND_CROSS_REPORT_FILE,
@@ -661,14 +555,8 @@ ANALYZER_JSON_REPORT_FILES = (
     BENCHMARK_CONTRIBUTION_REPORT_FILE,
     LANE_OVERLAP_REPORT_FILE,
     FAST_CUT_SWEEP_REPORT_FILE,
-    LANE_DEFINITION_REPORT_FILE,
-    URGENT_CHASE_REPORT_FILE,
-    LANE_CHASE_ISOLATION_REPORT_FILE,
     TOP_COMBINATIONS_REPORT_FILE,
     CHASE_EFFICIENCY_MATRIX_REPORT_FILE,
-    TYPE_B_PREDICTOR_REPORT_FILE,
-    TYPE_B_ADX_V3_SHADOW_REPORT_FILE,
-    TYPE_B_RESEARCH_V2_REPORT_FILE,
     CHASE_THRESHOLD_REPORT_FILE,
     CHASE_DELAY_REPORT_FILE,
     EXIT_COMBINATIONS_REPORT_FILE,
@@ -684,7 +572,6 @@ ANALYZER_JSON_REPORT_FILES = (
     BEST_POLICY_RESEARCH_REPORT_FILE,
     SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
-    PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
@@ -692,7 +579,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
-    ("Partial Reduction Reconciliation", PARTIAL_REDUCTION_RECONCILIATION_REPORT_FILE, "Tiles 3/4 partial-reduction receipts, remaining quantity, and fail-closed reconciliation evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
@@ -725,7 +611,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("AI Direction Bias", AI_DIRECTION_BIAS_REPORT_FILE, "AI directional skew vs outcomes"),
     ("Compact Summary", RESEARCH_COMPACT_SUMMARY_FILE, "Machine-readable rollup of all KPIs"),
     ("Top Leakage Trades", TOP_LEAKAGE_REPORT_FILE, "Top 50 trades — peak vs booked, money left on table"),
-    ("Lane Retirement", LANE_RETIREMENT_REPORT_FILE, "KEEP / RETIRE / COLLECT MORE per pathway lane"),
     ("Feature Importance", FEATURE_IMPORTANCE_REPORT_FILE, "Which trading features correlate with PnL"),
     ("Chase Profit", CHASE_PROFIT_REPORT_FILE, "Incremental PnL from chase-assisted vs static fills"),
     ("Confidence × Lane", CONFIDENCE_BAND_CROSS_REPORT_FILE, "Performance by AI band per lane"),
@@ -733,9 +618,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Benchmark Contribution", BENCHMARK_CONTRIBUTION_REPORT_FILE, "% of session PnL from each lane"),
     ("Lane Overlap", LANE_OVERLAP_REPORT_FILE, "Overlap vs CONTINUOUS — unique alpha signals"),
     ("Fast Cut Sweep", FAST_CUT_SWEEP_REPORT_FILE, "Replay sweep at -6/-8/-10/-12 vs booked PnL"),
-    ("Lane Definitions", LANE_DEFINITION_REPORT_FILE, "Entry conditions, dependencies, and status per pathway lane"),
-    ("Urgent Chase Alpha", URGENT_CHASE_REPORT_FILE, "Legacy URGENT_CHASE_ALPHA vs CONTINUOUS (historical)"),
-    ("Lane Chase Isolation", LANE_CHASE_ISOLATION_REPORT_FILE, "COMBO Direct vs Chase 3+ fill_model and chase policy"),
     ("Top Combinations", TOP_COMBINATIONS_REPORT_FILE, "AI × spread × type × lane ranked cohorts"),
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
     ("Exit Leakage by Reason", EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "Which exit reasons destroy the most value"),
@@ -745,14 +627,10 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),
     ("Bot↔Analyzer Sync", "bot_analyzer_sync.json", "SYSTEM_NOT_READY gate at startup"),
-    ("TYPE_B Execution Audit", "type_b_execution_audit.json", "Proof TYPE_B is not an entry gate"),
     ("Exit Reports Validation", "exit_reports_validation.json", "Analyzer gate — exit reports populated"),
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
-    ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
-    ("Type B ADX V3 Shadow", TYPE_B_ADX_V3_SHADOW_REPORT_FILE, "Replay-only challenger decisions, direction balance, ADX bands, and promotion gate"),
-    ("Type B Research V2", TYPE_B_RESEARCH_V2_REPORT_FILE, "One row per independent opportunity across paper, live and shadow evidence"),
-    ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Relay-ineligible outcomes collected during ADMIN_MANUAL pause, by lane and ADX band"),
     ("Historical Trade Cohort", HISTORICAL_COHORT_REPORT_FILE, "Deduplicated executed trades across downloaded 3factor archives; never mixed into current-session P&L"),
+    ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Generic quarantined outcomes collected during administrative pauses; never mixed into current qualification"),
     ("Showcase Strategy Outcomes", SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE, "Paper Showcase strategy outcomes only; copy fills never rewrite source truth"),
     ("Bitfinex Copy-Fidelity Lifecycles", BITFINEX_COPY_FIDELITY_REPORT_FILE, "Authenticated source-to-copy execution fidelity, including chase and protection"),
     ("Correlated Cluster Blocked", CORRELATED_CLUSTER_BLOCKED_REPORT_FILE, "Counterfactual 0.09% cluster-blocked opportunities; not missed copy failures"),
@@ -850,13 +728,11 @@ SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
 SOFT_REJECT_SHADOW_FILE = "soft_reject_shadow.jsonl"
-TYPE_B_ADX_V3_DECISION_FILE = "type_b_adx_v3_shadow_decisions.jsonl"
 EXPORT_ZIP_FILES = (
     TRADES_FILE, BLOCKED_FILE, DECISIONS_FILE, AI_TRANCHE_FILE, SETUP_LOG_FILE, CANDLES_FILE,
     PIPELINE_EVENTS_FILE, AI_ERRORS_FILE, SIGNAL_PERSIST_FILE, NEAR_EDGE_FILE,
     SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, SIGNAL_SNAPSHOT_FILE, COUNTERFACTUAL_FILE,
     APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
-    TYPE_B_ADX_V3_DECISION_FILE,
     EDGE_CENSUS_FILE,
 )
 RESEARCH_CSV_FILES = (
@@ -3225,7 +3101,7 @@ def _load_shadow_lane_outcome_df(session: dict = None):
         # Preserve valid frozen-policy Patient Chase shadows while excluding
         # pre-contract generic Scenario-C rows that lacked policy identity.
         patient = df["research_lane"].fillna("").astype(str).str.upper().isin({
-            "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED", "OFFSET_029_ATR_REGIME",
+            "OFFSET_029_ATR_TP_25",
         })
         policy_series = df.get("policy_version", pd.Series(index=df.index, dtype=object)).fillna("").astype(str)
         mismatch = patient & ~policy_series.str.startswith("OFFSET_0.29_CHASE_")
@@ -3274,13 +3150,6 @@ def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
     if work.empty:
         return empty
 
-    lane_u = str(lane or "").upper()
-    if lane_u == "TYPE_B_HUNTER_V1" and "policy_version" in work.columns:
-        try:
-            from type_b_hunter_v1 import POLICY_VERSION as active_policy
-            work = work[work["policy_version"].astype(str) == str(active_policy)]
-        except Exception:
-            pass
     elif lane_u == "SR_MICRO_TILE_V2_STATIC":
         try:
             from sr_micro_tile_v2 import POLICY_ID as active_policy
@@ -6652,65 +6521,6 @@ def edge_monotonicity_report(df):
     print(f"  Verdict: {verdict} {PIPELINE_ENFORCEMENT_TAG}")
 
 
-def type_a_vs_type_b_report(df, trade_outcomes):
-    print("\n=== V80 TYPE-A vs TYPE-B CLASSIFICATION ===")
-    print("Type A: MFE < 10% | Type B: MFE >= 15% | MIXED: between")
-    work = _enrich_trades_with_buckets(df) if df is not None and not df.empty else pd.DataFrame()
-    if trade_outcomes is not None and not trade_outcomes.empty:
-        tout = trade_outcomes.copy()
-        if "trade_mfe_type" in tout.columns:
-            for _, row in tout.iterrows():
-                tid = row.get("trade_id")
-                if tid and work.empty:
-                    continue
-        if not work.empty and "trade_id" in tout.columns:
-            tout = tout.set_index("trade_id", drop=False)
-    if work.empty:
-        print(f"No executed trades for Type A/B. {PIPELINE_ENFORCEMENT_TAG}")
-        return
-    mfe = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-    work["trade_mfe_type"] = np.where(mfe >= 15, "TYPE_B", np.where(mfe < 10, "TYPE_A", "MIXED"))
-    feature_cols = [
-        ("edge_score_at_entry", "edge_score"),
-        ("directional_spread", "spread"),
-        ("structure_score_at_entry", "structure"),
-        ("support_resistance_bucket", "sr_bucket"),
-        ("adx_at_entry", "adx"),
-        ("features_volume_ratio", "volume_ratio"),
-        ("features_imbalance", "imbalance"),
-        ("features_delta", "delta"),
-        ("features_velocity", "velocity"),
-        ("ai_win_prob", "ai_prob"),
-    ]
-    for ttype in ("TYPE_A", "TYPE_B", "MIXED"):
-        sub = work[work["trade_mfe_type"] == ttype]
-        print(f"\n{ttype}: n={len(sub)} sum_pnl=${pd.to_numeric(sub.get('net_pnl_usd',0), errors='coerce').sum():.2f}")
-        if sub.empty:
-            continue
-        if "edge_score_bucket" in sub.columns:
-            print(f"  edge buckets: {sub['edge_score_bucket'].value_counts().to_dict()}")
-        avgs = {}
-        for col, label in feature_cols:
-            src = col if col in sub.columns else None
-            if src:
-                avgs[label] = round(pd.to_numeric(sub[src], errors="coerce").mean(), 3)
-        if avgs:
-            print(f"  feature averages: {avgs}")
-    if len(work) >= 3:
-        a = work[work["trade_mfe_type"] == "TYPE_A"]
-        b = work[work["trade_mfe_type"] == "TYPE_B"]
-        if not a.empty and not b.empty:
-            sep = {}
-            for col, label in feature_cols:
-                if col not in work.columns:
-                    continue
-                am = pd.to_numeric(a[col], errors="coerce").mean()
-                bm = pd.to_numeric(b[col], errors="coerce").mean()
-                sep[label] = round(abs(float(bm) - float(am)), 3)
-            ranked = sorted(sep.items(), key=lambda x: x[1], reverse=True)
-            print(f"\n  Top separators (|TYPE_B mean - TYPE_A mean|): {ranked[:5]} {PIPELINE_ENFORCEMENT_TAG}")
-
-
 def _normalize_first_3_candles(raw):
     """Parse first_3_candles from JSONL/CSV — skip NaN floats from empty DataFrame cells."""
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
@@ -7394,11 +7204,6 @@ def profitable_ranges_report(trades):
         _top_bucket("entry_mode", "Entry mode")
     if "exit_reason" in work.columns:
         _top_bucket("exit_reason", "Exit reason")
-    if "mfe_margin_pct" in work.columns:
-        work["mfe_type"] = work["mfe_margin_pct"].apply(
-            lambda m: "TYPE_A" if float(m or 0) < 10 else ("TYPE_B" if float(m or 0) >= 15 else "MIXED")
-        )
-        _top_bucket("mfe_type", "MFE type (TYPE_A/B)")
     print(PIPELINE_ENFORCEMENT_TAG)
 
 
@@ -7434,7 +7239,6 @@ def v80_research_intelligence_report(df, decisions, ai_log, trades, near_edge, p
     else:
         print(f"\nNo executed trades — bucket performance tables skipped. {PIPELINE_ENFORCEMENT_TAG}")
 
-    type_a_vs_type_b_report(work, trade_outcomes)
     ladder_booking_slip_report(work if not work.empty else df)
     entry_health_exit_report(work if not work.empty else df)
     ema_hybrid_entry_report(work if not work.empty else df, trade_outcomes)
@@ -8942,7 +8746,6 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             )
             direction_attribution_report(trades=trades, decisions=decisions, session=session)
             confidence_band_report(trades=trades, decisions=decisions, session=session)
-            pathway_lane_specs_report(trades, session=session, benchmark_report=benchmark_report, shadow_report=shadow_report)
             horizon_counterfactual_report(trades=trades, session=session, shadow_report=shadow_report, blocked=blocked)
             shadow_vs_live_fill_audit(blocked)
             shadow_vs_live_entry_report()
@@ -9052,7 +8855,6 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             shadow_report=shadow_report,
             blocked=blocked,
         )
-        pathway_lane_specs_report(trades, session=session, shadow_report=shadow_report)
         horizon_counterfactual_report(trades=trades, session=session, shadow_report=shadow_report, blocked=blocked)
         ai_calibration_report(trades, session=session)
         direction_attribution_report(trades, decisions=decisions, session=session)
@@ -9528,12 +9330,8 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
 
     snapshots_all = _load_signal_snapshots()
     snapshots = _filter_snapshots_by_session(snapshots_all, session)
-    shared_verdict_summary = summarize_lane_verdicts(
-        load_type_b_research_v2_events(TYPE_B_RESEARCH_V2_EVENT_FILE),
-        since_epoch=_session_start_ts(session) or 0.0,
-    )
-    shared_verdict_lanes = shared_verdict_summary.get("lanes") or {}
-    if not snapshots and not shared_verdict_lanes:
+    shared_verdict_lanes = {}
+    if not snapshots:
         print(f"  No APPROVE snapshots for {scope.lower()} scope. {PIPELINE_ENFORCEMENT_TAG}")
         return None
 
@@ -9547,7 +9345,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         approve_rows,
         columns=["trade_id", "research_lane"],
     )
-    if approve_df.empty and not shared_verdict_lanes:
+    if approve_df.empty:
         print(f"  No lane-tagged APPROVE snapshots. {PIPELINE_ENFORCEMENT_TAG}")
         return None
 
@@ -9789,11 +9587,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "good_blocks_saved_usd": good_blocks_saved_usd,
             "lane_gate_evaluated": int(shared_verdict_metrics.get("evaluated") or 0),
             "lane_gate_rejected": int(shared_verdict_metrics.get("rejected") or 0),
-            "approval_source": (
-                "type_b_research_v2_lane_verdict"
-                if has_shared_verdict_truth
-                else "signal_snapshot"
-            ),
+            "approval_source": "lane_verdict" if has_shared_verdict_truth else "signal_snapshot",
             **lane_research_metrics,
             **v2_lane_extra,
         }
@@ -9880,443 +9674,6 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         print(f"\n  ⚠️ Could not write {BENCHMARK_VS_LANES_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     print(PIPELINE_ENFORCEMENT_TAG)
     return report
-
-
-def _static_pathway_lane_specs():
-    """Frozen lane definitions — entry/exit params and explicit diff vs CONTINUOUS benchmark."""
-    scenario_c_exit = {
-        "profile": "Scenario C",
-        "ladder": SCENARIO_C_LADDER_LABEL,
-        "thesis_stop_margin_pct": THESIS_FAST_EXIT_DEFAULT,
-        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_DEFAULT,
-        "thesis_pause_above_margin_pct": THESIS_EXIT_ABOVE_DEFAULT,
-        "type_a_stall": "OFF",
-        "fixed_time_exit": "2h global (7200s)",
-    }
-    runner_exit = {
-        "profile": "Scenario C Runner Variant",
-        "ladder": "18→14, 25→18, 40→28, 55→38",
-        "thesis_stop_margin_pct": THESIS_FAST_EXIT_DEFAULT,
-        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_DEFAULT,
-        "thesis_pause_above_margin_pct": THESIS_EXIT_ABOVE_DEFAULT,
-        "type_a_stall": "OFF",
-        "fixed_time_exit": "2h global (7200s)",
-    }
-    ai_direct = {
-        "entry_path": "AI_DIRECT",
-        "fill_path": "AI_DIRECT_CHASE",
-        "ai_path": "same as CONTINUOUS benchmark",
-        "execution": "fills-first, chase 0s",
-        "post_ai_gates": "log-only telemetry",
-        "margin_usd": FLAT_MARGIN_LIVE_USD,
-    }
-    promote = "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS"
-    kill = "EV <= CONTINUOUS benchmark over rolling window"
-    return {
-        BENCHMARK_LANE: {
-            "lane": BENCHMARK_LANE,
-            "label": RESEARCH_LANE_LABELS.get(BENCHMARK_LANE, BENCHMARK_LANE),
-            "subtitle": "FROZEN SCENARIO C BENCHMARK",
-            "role": "yardstick — all experiments compared to this",
-            "is_benchmark": True,
-            "badge": "★ BENCHMARK",
-            "toggle_key": "continuous_ai_research_enabled",
-            "hypothesis": "Periodic AI + AI_DIRECT is the minimum viable research baseline.",
-            "research_question": "What is baseline approve→fill→PnL under frozen Scenario C?",
-            "entry": {"trigger": "~180s AI when edge > 0", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": "N/A — benchmark",
-            "kill_criteria": "N/A — benchmark",
-            "expected_advantage": "Reference yardstick",
-            "expected_risk": "Baseline drawdown profile",
-            "benchmark_comparison": "Self",
-            "diff_vs_benchmark": [],
-        },
-        "TYPE_B_HUNTER_V1": {
-            "lane": "TYPE_B_HUNTER_V1",
-            "label": RESEARCH_LANE_LABELS.get("TYPE_B_HUNTER_V1", "Type B Hunter V1"),
-            "subtitle": "SHARED DIRECTION - FIXED DETERMINISTIC ENTRY POLICY",
-            "role": "shared-direction candidate lane with deterministic ADX, score-gap, and composite-score gates",
-            "parent_lane": BENCHMARK_LANE,
-            "toggle_key": "type_b_hunter_enabled",
-            "hypothesis": "A fixed market-strength gate can improve the shared AI direction without requesting a second AI call.",
-            "research_question": "Does the fixed Type B ADX/score-gap policy beat the CONTINUOUS shared-direction baseline?",
-            "entry": {
-                "trigger": (
-                    "reuse the shared LONG/SHORT direction; raw score gap >=20/100; normalized spread >=2; "
-                    "ADX >=20 (BULL >=28); composite score >=3.0"
-                ),
-                "entry_path": "SHARED_AI_DIRECTION_DETERMINISTIC_GATE",
-                "fill_path": "BOUNDED_LIMIT_CHASE",
-                "ai_path": "same shared direction call as CONTINUOUS; confidence not requested",
-                "execution": "fixed Type B policy; one accepted paper order per signal",
-                "policy_version": "type_b_shared_candidate_direction_v2_20260719",
-                "margin_usd": FLAT_MARGIN_LIVE_USD,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Type B frozen ladder policy",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Filters weak shared-direction calls without an extra AI request",
-            "expected_risk": "Deterministic gates reduce opportunity count",
-            "benchmark_comparison": "vs CONTINUOUS shared-direction baseline",
-            "diff_vs_benchmark": [
-                "Activation: fixed ADX, raw score-gap, normalized-spread, and composite-score gates",
-                "AI: one shared direction call; no independent confidence request",
-            ],
-        },
-        "SR_MICRO_TILE_V2_STATIC": {
-            "lane": "SR_MICRO_TILE_V2_STATIC",
-            "label": RESEARCH_LANE_LABELS.get("SR_MICRO_TILE_V2_STATIC", "S/R Micro Tile V2 Static"),
-            "subtitle": "DUAL RESTING S/R LIMITS - 30M TTL - NO CHASE",
-            "role": "deterministic dual-ended wick-capture lane with one resting order per direction",
-            "parent_lane": BENCHMARK_LANE,
-            "toggle_key": "sr_micro_tile_v2_enabled",
-            "hypothesis": "Resting at both micro-S/R extremes captures wicks without repricing or a separate AI call.",
-            "research_question": "Do dual static S/R limits add EV while preserving exact entry-price fidelity?",
-            "entry": {
-                "trigger": (
-                    "one LONG resting limit at micro-support and one SHORT resting limit at micro-resistance; "
-                    "one active slot per direction; ADX present and <=40; London 08:00-12:59 UTC excluded"
-                ),
-                "entry_path": "DETERMINISTIC_DUAL_SR_BRACKET",
-                "fill_path": "STATIC_RESTING_LIMIT",
-                "ai_path": "none",
-                "execution": "two independent paper slots; 30m unfilled TTL; no chase or repricing (max chases=0)",
-                "policy_version": "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720",
-                "margin_usd_per_leg": FLAT_MARGIN_LIVE_USD,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C 12->10 provisional cohort",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Captures either support or resistance wick with exact resting-limit entries",
-            "expected_risk": "Two opposing paper legs cannot be simultaneously copied into one merged Bitfinex net position",
-            "benchmark_comparison": "vs CONTINUOUS directional entry",
-            "diff_vs_benchmark": [
-                "Entry: deterministic dual S/R bracket, one active LONG and one active SHORT",
-                "Lifetime: 30m unfilled TTL; static price with zero replacements",
-                "AI: none",
-            ],
-        },
-        "HIGH_EDGE_RUNNER": {
-            "lane": "HIGH_EDGE_RUNNER",
-            "label": RESEARCH_LANE_LABELS["HIGH_EDGE_RUNNER"],
-            "subtitle": "EDGE≥3.5 · VOL≥1.5 · RUNNER EXIT PROFILE",
-            "role": "high-edge + volume continuation with wider runner exits",
-            "parent_lane": BENCHMARK_LANE,
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Strong edge + elevated volume deserves wider profit ladder rungs.",
-            "research_question": "Does runner exit capture more tail on high-edge/high-volume approves?",
-            "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥3.5 & vol_ratio≥1.5", **ai_direct},
-            "exit": runner_exit,
-            "exit_path": "Scenario C Runner Variant (18→14 first rung)",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Higher MFE capture on runners",
-            "expected_risk": "Wider ladder gives back more peak profit",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge≥3.5 & vol_ratio≥1.5", "Exit: runner ladder 18→14 vs 12→8"],
-        },
-        "EXTREME_EDGE": {
-            "lane": "EXTREME_EDGE",
-            "label": RESEARCH_LANE_LABELS["EXTREME_EDGE"],
-            "subtitle": "EDGE≥4.5 ONLY · RETIRED",
-            "role": "retired — edge has no predictive value; historical analytics only",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "RETIRED",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Tail-edge approves outperform average edge band.",
-            "research_question": "Is edge≥4.5 sufficient alone for superior EV?",
-            "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥4.5", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": "N/A — retired",
-            "kill_criteria": "RETIRED — edge hypothesis failed validation",
-            "expected_advantage": "N/A",
-            "expected_risk": "N/A",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge≥4.5 only", "Exit: frozen Scenario C"],
-        },
-        "SHORT_BEAR_ALPHA": {
-            "lane": "SHORT_BEAR_ALPHA",
-            "label": RESEARCH_LANE_LABELS["SHORT_BEAR_ALPHA"],
-            "subtitle": "SHORT · struct≤-3 · bear>bull · spread≥3 · AI≥55",
-            "role": "bearish regime asymmetry — highest session edge cohort",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Short + bear structure + wide spread beats broad CONTINUOUS.",
-            "research_question": "Can directional/regime filter beat benchmark EV?",
-            "entry": {
-                "trigger": "spawn SHORT when structure≤-3, bear>bull, spread≥3, AI≥55%",
-                **ai_direct,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Session data: SHORT 71% WR vs LONG 56%",
-            "expected_risk": "Direction filter reduces spawn rate",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: SHORT bear-alpha fingerprint", "Exit: frozen Scenario C"],
-        },
-        "AI_60_65_ALPHA": {
-            "lane": "AI_60_65_ALPHA",
-            "label": RESEARCH_LANE_LABELS["AI_60_65_ALPHA"],
-            "subtitle": "AI 60-65 · spread≥3 · edge≥3",
-            "role": "strongest AI confidence band (82% WR in session)",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "AI 60-65 band outperforms 65+ and 55-60 bands.",
-            "research_question": "Does mid-high confidence alone beat benchmark?",
-            "entry": {"trigger": "spawn when 60≤AI<65, spread≥3, edge≥3", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Session 60-65 band: 82% WR, +$122",
-            "expected_risk": "Narrow AI band — sparse spawns",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: AI 60-65 + spread≥3 + edge≥3", "Exit: frozen Scenario C"],
-        },
-        "EDGE_PLUS_STACK": {
-            "lane": "EDGE_PLUS_STACK",
-            "label": RESEARCH_LANE_LABELS["EDGE_PLUS_STACK"],
-            "subtitle": "EDGE≥3.5 · GS PASS · RETIRED",
-            "role": "retired — edge + extra filters; historical analytics only",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "RETIRED",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Golden-stack pass filters noise without blocking benchmark.",
-            "research_question": "Does GS-pass subset beat raw edge≥3.5?",
-            "entry": {"trigger": "spawn when edge≥3.5 AND golden_stack_eval pass", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": "N/A — retired",
-            "kill_criteria": "RETIRED — edge stack adds complexity without alpha",
-            "expected_advantage": "N/A",
-            "expected_risk": "N/A",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge≥3.5 + GS eval pass", "Exit: frozen Scenario C"],
-        },
-        "SHADOW_RUNNER": {
-            "lane": "SHADOW_RUNNER",
-            "label": RESEARCH_LANE_LABELS["SHADOW_RUNNER"],
-            "subtitle": "POST-EXIT HORIZON STUDY · PROBATION",
-            "role": "shadow-only — retire if no unique EV contribution",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "PROBATION",
-            "live_trading": False,
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Post-approve price paths reveal missed runner opportunity.",
-            "research_question": "What is +15/+30/+60/+90m outcome after APPROVE at edge≥3.5?",
-            "entry": {"trigger": "shadow log on CONTINUOUS APPROVE edge≥3.5", "entry_path": "SHADOW", "fill_path": "NONE"},
-            "exit": {"profile": "horizon study", "horizons_min": "15, 30, 60, 90"},
-            "exit_path": "Horizon counterfactual (+15/+30/+60/+90m)",
-            "promotion_criteria": "Inform runner exit design — not promoted to live",
-            "kill_criteria": "N/A — observational",
-            "expected_advantage": "Counterfactual insight",
-            "expected_risk": "None — shadow only",
-            "benchmark_comparison": "vs CONTINUOUS post-approve paths",
-            "diff_vs_benchmark": ["Live trading OFF", "Measures post-approve horizons"],
-        },
-        "EDGE_ALPHA_4": {
-            "lane": "EDGE_ALPHA_4",
-            "label": RESEARCH_LANE_LABELS["EDGE_ALPHA_4"],
-            "subtitle": "EDGE >= 4.0 · NEAR_SUPPORT · Scenario C",
-            "role": "high-edge concentration near support",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Edge 4+ near support outperforms the broad CONTINUOUS cohort.",
-            "research_question": "Can Edge 4+ outperform benchmark?",
-            "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge>=4.0 & NEAR_SUPPORT", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Elite edge band (session WR ~74% on edge 4+)",
-            "expected_risk": "Lower spawn rate vs CONTINUOUS",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge>=4.0 & NEAR_SUPPORT", "Exit: frozen Scenario C"],
-        },
-        "TYPE_B_HUNTER": {
-            "lane": "TYPE_B_HUNTER",
-            "label": RESEARCH_LANE_LABELS["TYPE_B_HUNTER"],
-            "subtitle": "Edge>=3.5 · Vol>1.2 · NEAR_SUPPORT · AI 50-55",
-            "role": "pre-Type-B fingerprint before entry",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Type-B winners share edge, volume, SR, and AI-prob fingerprints.",
-            "research_question": "Can we predict Type B before entry?",
-            "entry": {"trigger": "spawn when edge>=3.5, vol_ratio>1.2, NEAR_SUPPORT, AI 50-55%", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Capture Type-B runner profile early",
-            "expected_risk": "Strict filter — sparse samples",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": [
-                "Activation: edge>=3.5, vol>1.2, NEAR_SUPPORT, AI 50-55",
-                "Exit: frozen Scenario C",
-            ],
-        },
-        "URGENT_CHASE_ALPHA": {
-            "lane": "URGENT_CHASE_ALPHA",
-            "label": RESEARCH_LANE_LABELS["URGENT_CHASE_ALPHA"],
-            "subtitle": "VELOCITY-AWARE CHASE · SAME ENTRY/EXIT AS BENCHMARK",
-            "role": "execution experiment — velocity-aware chase vs benchmark 25% step",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Velocity-aware chase captures more profitable fills than fixed 25% step.",
-            "research_question": "Does market-velocity chase beat CONTINUOUS on EV or net PnL?",
-            "entry": {
-                "trigger": "spawn on every CONTINUOUS APPROVE — same AI, same limit plan",
-                "fill_path": "URGENT_VELOCITY_CHASE",
-                **{k: v for k, v in ai_direct.items() if k != "fill_path"},
-                "execution": "normal 25% · medium 50% · high 75% · extreme marketable",
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
-            "expected_advantage": "Better fills in fast markets without changing AI or exits",
-            "expected_risk": "Over-chasing in chop",
-            "benchmark_comparison": "vs CONTINUOUS chase (25% fixed step)",
-            "diff_vs_benchmark": [
-                "Chase only: normal 25% / medium 50% / high 75% / extreme marketable",
-                "Entry, AI, Scenario C exits, TTL: frozen same as CONTINUOUS",
-            ],
-        },
-        "CHASE_3PLUS_ALPHA": {
-            "lane": "CHASE_3PLUS_ALPHA",
-            "label": RESEARCH_LANE_LABELS["CHASE_3PLUS_ALPHA"],
-            "subtitle": "DELAYED ENTRY · VIRTUAL CHASE ≥3 OR 180s",
-            "role": "late-entry experiment — observe persistence before first limit",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Trades that would reach chase #3+ are stronger; delayed entry avoids weak early fills.",
-            "research_question": "Does waiting for virtual chase persistence beat immediate CONTINUOUS entry?",
-            "entry": {
-                "trigger": "spawn on every CONTINUOUS APPROVE — observe, do not submit immediately",
-                "entry_path": "AI_DIRECT",
-                "fill_path": "AI_DIRECT_CHASE",
-                "ai_path": "same as CONTINUOUS benchmark",
-                "execution": "activate when virtual_chase≥3 OR age≥180s OR signal distance threshold; then normal chase",
-                "post_ai_gates": "log-only telemetry",
-                "margin_usd": FLAT_MARGIN_LIVE_USD,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
-            "expected_advantage": "Skip 0–2 chase noise cohort; enter demonstrated trends",
-            "expected_risk": "Miss early fills; correlation≠causation on chase buckets",
-            "benchmark_comparison": "vs CONTINUOUS immediate entry",
-            "diff_vs_benchmark": [
-                "Entry delay: virtual chase observation before first limit",
-                "After activation: same AI limit, 25% chase, Scenario C, TTL",
-            ],
-        },
-        "TYPE_B_PREDICTOR_V1": {
-            "lane": "TYPE_B_PREDICTOR_V1",
-            "label": RESEARCH_LANE_LABELS.get("TYPE_B_PREDICTOR_V1", "Type B Predictor v1"),
-            "subtitle": "AI≥60 · spread≥4 · ADX≥20 · vol≥1.8 · struct≤-3",
-            "role": "pre-entry Type-B fingerprint test",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Entry features matching Type-B averages predict outsized MFE at entry.",
-            "research_question": "Can we identify Type-B runners before peak MFE is known?",
-            "entry": {
-                "trigger": "spawn on AI_SCAN APPROVE when predictor filters pass",
-                **ai_direct,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "TYPE_B cohort historically +$56 vs TYPE_A −$69 on session sample",
-            "expected_risk": "Filter stack may over-constrain spawn rate",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Entry: Type-B predictor fingerprint", "Exit: frozen Scenario C"],
-        },
-        "RECOVERY_MONSTER_V1": {
-            "lane": "RECOVERY_MONSTER_V1",
-            "label": RESEARCH_LANE_LABELS.get("RECOVERY_MONSTER_V1", "Recovery Monster v1"),
-            "subtitle": "Benchmark entry · thesis −40% · ladder 18→14",
-            "role": "exit-only experiment — wide thesis + runner ladder",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "−12% thesis fast-cut kills recoverable trades; replay sweep favors −40%.",
-            "research_question": "Do exits (not entries) explain benchmark underperformance?",
-            "entry": {"trigger": "spawn on every AI_SCAN APPROVE (benchmark entry)", **ai_direct},
-            "exit": {
-                "profile": "Recovery Monster v1",
-                "ladder": "18→14, 25→18, 40→28, 55→38",
-                "thesis_stop_margin_pct": -40.0,
-                "mfe_protect_margin_pct": THESIS_MFE_PROTECT_DEFAULT,
-                "thesis_pause_above_margin_pct": THESIS_EXIT_ABOVE_DEFAULT,
-                "type_a_stall": "OFF",
-                "fixed_time_exit": "2h global (7200s)",
-            },
-            "exit_path": "Thesis −40% · ladder 18→14 · MFE protect 2%",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Replay grid: +$79 vs live −12% on sample",
-            "expected_risk": "Wider stop increases tail loss on true failures",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C entry",
-            "diff_vs_benchmark": ["Entry: same as benchmark", "Exit: −40% thesis + runner ladder"],
-        },
-        "AI_DISAGREEMENT_ALPHA": {
-            "lane": "AI_DISAGREEMENT_ALPHA",
-            "label": RESEARCH_LANE_LABELS.get("AI_DISAGREEMENT_ALPHA", "AI Disagreement · AI Wins"),
-            "subtitle": "AI APPROVE + replay REJECT",
-            "role": "disagreement cohort — AI approves, replay scorecard rejects",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "AI may outperform deterministic replay on disagreement.",
-            "research_question": "Does AI APPROVE + replay REJECT still carry edge?",
-            "entry": {"trigger": "spawn when AI APPROVE and replay_approve=False", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Tests LLM vs replay where they diverge",
-            "expected_risk": "Replay may be right — AI false positives",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: AI/replay disagreement (AI side)"],
-        },
-        "AI_DISAGREEMENT_REPLAY": {
-            "lane": "AI_DISAGREEMENT_REPLAY",
-            "label": RESEARCH_LANE_LABELS.get("AI_DISAGREEMENT_REPLAY", "AI Disagreement · Replay Wins"),
-            "subtitle": "AI REJECT + replay APPROVE",
-            "role": "disagreement cohort — replay approves, AI rejected",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Replay-approved signals that AI skipped are hidden alpha.",
-            "research_question": "Does replay find winners the LLM rejects?",
-            "entry": {"trigger": "spawn when AI REJECT and replay_approve=True", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "201/242 AI calls disagreed with replay in session",
-            "expected_risk": "Replay model may be overfit to features",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: AI/replay disagreement (replay side)"],
-        },
-    }
 
 
 def _horizon_outcome_30m_pct(trade_id, snapshots, reversal_index, shadow_row=None, replay=None):
@@ -15081,271 +14438,6 @@ def top_leakage_report(trades=None, session=None, top_n=50):
     return payload
 
 
-def _pathway_lane_status(lane_key: str) -> str:
-    return PATHWAY_LANE_STATUS.get(str(lane_key or "").upper(), "ACTIVE")
-
-
-def _lane_entry_conditions(spec: dict) -> list:
-    entry = spec.get("entry") or {}
-    conditions = []
-    trigger = entry.get("trigger")
-    if trigger:
-        conditions.append(str(trigger))
-    for line in spec.get("diff_vs_benchmark") or []:
-        conditions.append(str(line))
-    return conditions
-
-
-def _lane_depends_on_edge(lane_key: str, spec: dict) -> bool:
-    if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
-        return False
-    text = " ".join(_lane_entry_conditions(spec)).lower()
-    return any(m in text for m in ("edge≥", "edge>=", "edge >=", "edge≥3", "edge>=3", "edge>=4"))
-
-
-def _lane_depends_on_ai(lane_key: str, spec: dict) -> bool:
-    if lane_key == "SHADOW_RUNNER":
-        return False
-    if lane_key == "SR_MICRO_TILE_V2_STATIC":
-        return False
-    text = " ".join(_lane_entry_conditions(spec)).lower()
-    return "ai" in text or lane_key in ("CONTINUOUS", "AI_60_65_ALPHA", "TYPE_B_HUNTER", "SHORT_BEAR_ALPHA")
-
-
-def _lane_depends_on_chase(lane_key: str, spec: dict) -> bool:
-    if lane_key == "SR_MICRO_TILE_V2_STATIC":
-        return False
-    if lane_key == "TYPE_B_HUNTER_V1":
-        return True
-    if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
-        return True
-    entry = spec.get("entry") or {}
-    blob = " ".join([
-        str(entry.get("fill_path") or ""),
-        str(entry.get("execution") or ""),
-        " ".join(spec.get("diff_vs_benchmark") or []),
-    ]).lower()
-    return "chase" in blob or lane_key == "CONTINUOUS"
-
-
-def lane_definition_report(trades=None, session=None, benchmark_report=None):
-    """Structured inventory — what each lane actually tests (names may drift from logic)."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE DEFINITION REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        benchmark_report = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    lanes_metrics = (benchmark_report or {}).get("lanes") or {}
-    static = _static_pathway_lane_specs()
-    rows = []
-    for lane_key in BENCHMARK_LANES:
-        spec = static.get(lane_key) or {}
-        metrics = lanes_metrics.get(lane_key) or {}
-        all_time = metrics.get("all_time") or {}
-        fills = int(metrics.get("real_fills") or metrics.get("fills") or 0)
-        approves = int(metrics.get("approves") or 0)
-        pnl = float(metrics.get("net_pnl_real") or metrics.get("net_pnl_usd") or 0)
-        ev = float(metrics.get("per_approve_ev") or 0)
-        at_fills = int(all_time.get("real_fills") or 0)
-        at_pnl = float(all_time.get("net_pnl_real") or 0)
-        rows.append({
-            "lane": lane_key,
-            "label": RESEARCH_LANE_LABELS.get(lane_key, lane_key),
-            "pathway_status": _pathway_lane_status(lane_key),
-            "entry_conditions": _lane_entry_conditions(spec),
-            "depends_on_edge": _lane_depends_on_edge(lane_key, spec),
-            "depends_on_ai": _lane_depends_on_ai(lane_key, spec),
-            "depends_on_chase": _lane_depends_on_chase(lane_key, spec),
-            "sample_size": fills,
-            "approves": approves,
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve": round(ev, 2),
-            "all_time_fills": at_fills,
-            "all_time_pnl_usd": round(at_pnl, 2),
-            "role": spec.get("role"),
-            "research_question": spec.get("research_question"),
-        })
-        print(
-            f"  {lane_key} [{_pathway_lane_status(lane_key)}]: edge={_lane_depends_on_edge(lane_key, spec)} "
-            f"ai={_lane_depends_on_ai(lane_key, spec)} chase={_lane_depends_on_chase(lane_key, spec)} "
-            f"n={fills} PnL=${pnl:+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-    payload = {
-        "schema": "lane_definition_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "active_roster": list(ACTIVE_PATHWAY_LANES),
-        "retired_lanes": sorted(RETIRED_PATHWAY_LANES),
-        "probation_lanes": [ln for ln, st in PATHWAY_LANE_STATUS.items() if st == "PROBATION"],
-        "lanes": rows,
-    }
-    try:
-        with open(LANE_DEFINITION_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_DEFINITION_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_DEFINITION_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def urgent_chase_report(trades=None, session=None, benchmark_report=None, chase_payload=None):
-    """URGENT_CHASE_ALPHA vs CONTINUOUS — velocity-aware chase experiment metrics."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== URGENT CHASE REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        benchmark_report = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    lanes = (benchmark_report or {}).get("lanes") or {}
-    bench = lanes.get("CONTINUOUS") or {}
-    urgent = lanes.get("URGENT_CHASE_ALPHA") or {}
-
-    def _lane_block(m):
-        fills = int(m.get("real_fills") or m.get("fills") or 0)
-        approves = int(m.get("approves") or 0)
-        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or 0)
-        ev = float(m.get("per_approve_ev") or 0)
-        fill_pct = float(m.get("approve_to_fill_pct") or 0)
-        return {
-            "fills": fills,
-            "approves": approves,
-            "fill_pct": round(fill_pct, 1),
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve": round(ev, 2),
-        }
-
-    bench_block = _lane_block(bench)
-    urgent_block = _lane_block(urgent)
-
-    if chase_payload is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
-        chase_payload = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
-    attrs = (chase_payload or {}).get("attributions") or (chase_payload or {}).get("trades") or []
-    chase_assisted = 0
-    ttl_prevented = 0
-    for a in attrs:
-        if str(a.get("research_lane") or "").upper() != "URGENT_CHASE_ALPHA":
-            continue
-        cc = int(a.get("chase_count") or a.get("limit_chase_count") or 0)
-        if cc > 0 or a.get("filled_after_chase"):
-            chase_assisted += 1
-        if a.get("ttl_saved") or a.get("chase_prevented_ttl"):
-            ttl_prevented += 1
-
-    delta_ev = round(urgent_block["ev_per_approve"] - bench_block["ev_per_approve"], 2)
-    delta_pnl = round(urgent_block["pnl_usd"] - bench_block["pnl_usd"], 2)
-    delta_fill = round(urgent_block["fill_pct"] - bench_block["fill_pct"], 1)
-    adequate = urgent_block["fills"] >= MIN_LANE_FILLS_FOR_RETIREMENT
-    beats_bench = (
-        urgent_block["ev_per_approve"] > bench_block["ev_per_approve"]
-        or urgent_block["pnl_usd"] > bench_block["pnl_usd"]
-    )
-
-    forensics = {}
-    if trades is not None and not trades.empty and "research_lane" in trades.columns:
-        work = _enrich_trades_with_buckets(trades.copy())
-        chase_by_tid = _chase_attr_by_trade_id(chase_payload)
-        for lane_key, label in (("CONTINUOUS", "continuous"), ("URGENT_CHASE_ALPHA", "urgent")):
-            sub = work[work["research_lane"].astype(str).str.upper() == lane_key]
-            if sub.empty:
-                continue
-            stats = _combo_stats_from_df(sub)
-            mfe = pd.to_numeric(sub.get("max_profit", sub.get("mfe_margin_pct")), errors="coerce")
-            mae = pd.to_numeric(sub.get("max_drawdown", sub.get("mae_margin_pct")), errors="coerce")
-            sa = pd.to_numeric(sub.get("signal_age_sec", sub.get("execution_fill_delay_sec")), errors="coerce")
-            slip = pd.to_numeric(sub.get("slippage"), errors="coerce")
-            chase_n = []
-            for _, row in sub.iterrows():
-                tid = str(row.get("trade_id") or "")
-                cc = chase_by_tid.get(tid, {}).get("chase_count")
-                if cc is None and "limit_chase_count" in row.index:
-                    cc = row.get("limit_chase_count")
-                try:
-                    chase_n.append(int(cc or 0))
-                except (TypeError, ValueError):
-                    chase_n.append(0)
-            forensics[label] = {
-                **stats,
-                "avg_mfe_margin_pct": round(float(mfe.mean()), 2) if mfe.notna().any() else None,
-                "avg_mae_margin_pct": round(float(mae.mean()), 2) if mae.notna().any() else None,
-                "avg_signal_age_sec": round(float(sa.mean()), 1) if sa.notna().any() else None,
-                "avg_entry_slippage_usd": round(float(slip.mean()), 2) if slip.notna().any() else None,
-                "avg_chase_count": round(float(np.mean(chase_n)), 2) if chase_n else 0.0,
-            }
-        if forensics.get("continuous") and forensics.get("urgent"):
-            fc, fu = forensics["continuous"], forensics["urgent"]
-            forensics["delta"] = {
-                "ev_usd": round(fu.get("ev_usd", 0) - fc.get("ev_usd", 0), 2),
-                "wr_pct": round(fu.get("wr_pct", 0) - fc.get("wr_pct", 0), 1),
-                "avg_signal_age_sec": (
-                    round(fu.get("avg_signal_age_sec", 0) - fc.get("avg_signal_age_sec", 0), 1)
-                    if fu.get("avg_signal_age_sec") is not None and fc.get("avg_signal_age_sec") is not None
-                    else None
-                ),
-                "avg_chase_count": round(fu.get("avg_chase_count", 0) - fc.get("avg_chase_count", 0), 2),
-                "avg_mfe_margin_pct": (
-                    round(fu.get("avg_mfe_margin_pct", 0) - fc.get("avg_mfe_margin_pct", 0), 2)
-                    if fu.get("avg_mfe_margin_pct") is not None and fc.get("avg_mfe_margin_pct") is not None
-                    else None
-                ),
-            }
-            forensics["question"] = "Did faster URGENT fill improve MFE? Compare avg_mfe_margin_pct."
-    if urgent_block["fills"] == 0:
-        verdict = "COLLECTING"
-    elif adequate and beats_bench:
-        verdict = "PROMISING"
-    elif adequate and not beats_bench:
-        verdict = "RETIRE_CANDIDATE"
-    else:
-        verdict = "INSUFFICIENT_SAMPLE"
-
-    payload = {
-        "schema": "urgent_chase_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "experiment_lane": "URGENT_CHASE_ALPHA",
-        "benchmark_lane": "CONTINUOUS",
-        "purpose": "Test whether velocity-aware chase improves benchmark performance",
-        "chase_tiers": {
-            "normal": "25% gap closure",
-            "medium": "50% gap closure",
-            "high": "75% gap closure",
-            "extreme": "immediate marketable limit",
-        },
-        "urgent_chase_alpha": {
-            **urgent_block,
-            "chase_assisted_fills": chase_assisted,
-            "ttl_prevented": ttl_prevented,
-        },
-        "continuous_benchmark": bench_block,
-        "benchmark_delta": {
-            "delta_ev_per_approve": delta_ev,
-            "delta_pnl_usd": delta_pnl,
-            "delta_fill_pct": delta_fill,
-        },
-        "forensics": forensics,
-        "success_criteria": "Must outperform CONTINUOUS on EV or net PnL after adequate sample",
-        "verdict": verdict,
-        "min_fills_for_decision": MIN_LANE_FILLS_FOR_RETIREMENT,
-    }
-    print(
-        f"  URGENT: fills={urgent_block['fills']} EV=${urgent_block['ev_per_approve']:+.2f} "
-        f"PnL=${urgent_block['pnl_usd']:+.2f} | BENCH: EV=${bench_block['ev_per_approve']:+.2f} "
-        f"ΔEV=${delta_ev:+.2f} verdict={verdict} {PIPELINE_ENFORCEMENT_TAG}"
-    )
-    try:
-        with open(URGENT_CHASE_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {URGENT_CHASE_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {URGENT_CHASE_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
 def _combo_stats_from_df(sub: pd.DataFrame) -> dict:
     if sub is None or sub.empty:
         return {"trades": 0, "wins": 0, "wr_pct": 0.0, "pnl_usd": 0.0, "ev_usd": 0.0}
@@ -15363,14 +14455,6 @@ def _combo_stats_from_df(sub: pd.DataFrame) -> dict:
     }
 
 
-def _trade_mfe_type_series(work: pd.DataFrame) -> pd.Series:
-    mfe = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-    return pd.Series(
-        np.where(mfe >= 15, "TYPE_B", np.where(mfe < 10, "TYPE_A", "MIXED")),
-        index=work.index,
-    )
-
-
 def _chase_attr_by_trade_id(chase_payload) -> dict:
     out = {}
     for row in (chase_payload or {}).get("trades") or []:
@@ -15378,169 +14462,6 @@ def _chase_attr_by_trade_id(chase_payload) -> dict:
         if tid:
             out[tid] = row
     return out
-
-
-def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
-    """COMBO Direct vs Chase 3+ — fill_model and chase policy per combo tile pair."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE CHASE ISOLATION — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if chase_payload is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
-        chase_payload = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
-    if chase_payload is None:
-        chase_payload = chase_attribution_report(trades=trades, session=session)
-
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
-    chase_by_tid = _chase_attr_by_trade_id(chase_payload)
-
-    def _lane_audit(lane_key: str) -> dict:
-        sub = work[work["research_lane"].astype(str).str.upper() == lane_key] if not work.empty and "research_lane" in work.columns else pd.DataFrame()
-        stats = _combo_stats_from_df(sub)
-        fill_models = sub["fill_model"].value_counts().to_dict() if not sub.empty and "fill_model" in sub.columns else {}
-        entry_paths = sub["entry_path"].value_counts().to_dict() if not sub.empty and "entry_path" in sub.columns else {}
-        chase_counts = []
-        for _, row in sub.iterrows():
-            tid = str(row.get("trade_id") or "")
-            cc = chase_by_tid.get(tid, {}).get("chase_count")
-            if cc is None and "limit_chase_count" in row.index:
-                cc = row.get("limit_chase_count")
-            try:
-                chase_counts.append(int(cc or 0))
-            except (TypeError, ValueError):
-                chase_counts.append(0)
-        avg_chase = round(float(np.mean(chase_counts)), 2) if chase_counts else 0.0
-        avg_signal_age = None
-        if not sub.empty and "signal_age_sec" in sub.columns:
-            sa = pd.to_numeric(sub["signal_age_sec"], errors="coerce").dropna()
-            if len(sa):
-                avg_signal_age = round(float(sa.mean()), 1)
-        avg_slip = None
-        if not sub.empty and "slippage" in sub.columns:
-            sl = pd.to_numeric(sub["slippage"], errors="coerce").dropna()
-            if len(sl):
-                avg_slip = round(float(sl.mean()), 2)
-        chase_assisted = sum(1 for c in chase_counts if c > 0)
-        static_fills = len(chase_counts) - chase_assisted
-        return {
-            **stats,
-            "fill_model": fill_models,
-            "entry_path": entry_paths,
-            "chase_assisted_fills": chase_assisted,
-            "static_limit_fills": static_fills,
-            "avg_chase_count": avg_chase,
-            "avg_signal_age_sec": avg_signal_age,
-            "avg_entry_slippage_usd": avg_slip,
-        }
-
-    global_fill = work["fill_model"].value_counts().to_dict() if not work.empty and "fill_model" in work.columns else {}
-    pairs_out = []
-    isolation_pairs = list(ACTIVE_CHASE_ISOLATION_PAIRS) + list(COMBO_CHASE_ISOLATION_PAIRS)
-
-    for direct_lane, chase_lane in isolation_pairs:
-        direct_a = _lane_audit(direct_lane)
-        chase_a = _lane_audit(chase_lane)
-        combo_retired = bool(COMBO_LANE_SPECS.get(direct_lane, {}).get("is_legacy"))
-        session_inactive = (direct_a.get("trades") or 0) == 0 and (chase_a.get("trades") or 0) == 0
-        pairs_out.append({
-            "direct_lane": direct_lane,
-            "chase_lane": chase_lane,
-            "direct_label": RESEARCH_LANE_LABELS.get(direct_lane, direct_lane),
-            "chase_label": RESEARCH_LANE_LABELS.get(chase_lane, chase_lane),
-            "combo_retired": combo_retired,
-            "session_inactive": session_inactive,
-            "direct": {
-                **direct_a,
-                "chase_policy": "immediate limit (COMBO Direct)" if combo_retired else "CONTINUOUS immediate limit",
-                "virtual_chase_gate": False,
-            },
-            "chase": {
-                **chase_a,
-                "chase_policy": (
-                    "virtual chase 3+ gate before fill"
-                    if combo_retired
-                    else "virtual chase 3+ (AI60 SP3 tile)"
-                ),
-                "virtual_chase_gate": True,
-            },
-            "delta": {
-                "ev_usd": round(chase_a.get("ev_usd", 0) - direct_a.get("ev_usd", 0), 2),
-                "wr_pct": round(chase_a.get("wr_pct", 0) - direct_a.get("wr_pct", 0), 1),
-                "avg_chase_count": round(chase_a.get("avg_chase_count", 0) - direct_a.get("avg_chase_count", 0), 2),
-                "avg_signal_age_sec": (
-                    round(chase_a.get("avg_signal_age_sec", 0) - direct_a.get("avg_signal_age_sec", 0), 1)
-                    if chase_a.get("avg_signal_age_sec") is not None and direct_a.get("avg_signal_age_sec") is not None
-                    else None
-                ),
-            },
-        })
-        print(
-            f"  {direct_lane} vs {chase_lane}: direct_n={direct_a.get('trades')} chase_n={chase_a.get('trades')} "
-            f"inactive={session_inactive} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-
-    active_pairs = [p for p in pairs_out if not p.get("session_inactive")]
-    primary = active_pairs[0] if active_pairs else (pairs_out[0] if pairs_out else {})
-    direct_primary = primary.get("direct") or {}
-    chase_primary = primary.get("chase") or {}
-    has_primary_evidence = bool(
-        primary
-        and (
-            int(direct_primary.get("trades") or 0) > 0
-            or int(chase_primary.get("trades") or 0) > 0
-        )
-    )
-    isolated = has_primary_evidence
-    notes = []
-    if not primary:
-        notes.append("No current direct/chase comparison pair has observations yet — continue collecting.")
-    elif primary.get("session_inactive"):
-        notes.append(
-            "COMBO tiles inactive this session (retired 2026-06-26) — compare CONTINUOUS vs AI60_SP3 instead."
-        )
-    else:
-        notes.append(
-            f"Primary pair: {primary.get('direct_label')} vs {primary.get('chase_label')} "
-            f"(direct n={direct_primary.get('trades', 0)}, chase n={chase_primary.get('trades', 0)})."
-        )
-    notes.extend([
-        "COMBO Direct lanes use immediate limit entry; COMBO Chase lanes require virtual chase 3+ (or age/dist) before fill.",
-        "fill_model=AI_DIRECT_CHASE tags limit_chase_count>0 on AI_DIRECT path — expected on both when chase steps fire.",
-        "Global fill_model counts all session fills — not limited to the primary isolation pair.",
-    ])
-    if direct_primary.get("fill_model") and chase_primary.get("fill_model"):
-        if direct_primary["fill_model"].keys() == chase_primary["fill_model"].keys():
-            notes.append("Primary pair fill_model keys match — parallel tagging, not cross-lane contamination.")
-
-    payload = {
-        "schema": "lane_chase_isolation_v2",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "verdict": "ISOLATED" if isolated else "COLLECTING",
-        "isolation_notes": notes,
-        "global_fill_model": global_fill,
-        "active_lanes": list(ACTIVE_CHASE_ISOLATION_LANES),
-        "pairs": pairs_out,
-        "primary_pair": primary,
-        "primary_inactive": not has_primary_evidence or bool(primary.get("session_inactive")),
-        "benchmark_lane": BENCHMARK_LANE,
-        "continuous_benchmark": direct_primary,
-        "urgent_chase_alpha": chase_primary,
-        "benchmark_delta": primary.get("delta") or {},
-    }
-    print(
-        f"  Primary {primary.get('direct_lane')} vs {primary.get('chase_lane')} "
-        f"verdict={payload['verdict']} {PIPELINE_ENFORCEMENT_TAG}"
-    )
-    try:
-        with open(LANE_CHASE_ISOLATION_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_CHASE_ISOLATION_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_CHASE_ISOLATION_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
 
 
 def _direction_only_trade_cohort(trades: pd.DataFrame) -> pd.DataFrame:
@@ -15630,7 +14551,6 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
             json.dump(payload, f, indent=2)
         return payload
 
-    work["trade_mfe_type"] = _trade_mfe_type_series(work)
     if "exit_reason" not in work.columns:
         work["exit_reason"] = "UNKNOWN"
     work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
@@ -15652,27 +14572,23 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         "directional_spread_bucket",
         "peak_mfe_bucket",
         "time_in_trade_bucket",
-        "trade_mfe_type",
         "research_lane",
     ]
     combos = []
     for keys, sub in work.groupby(dims, observed=True, dropna=False):
-        ex, ai_b, sp_b, mfe_b, time_b, ttype, lane = keys
-        if str(ttype).upper() == "TYPE_B":
-            continue
+        ex, ai_b, sp_b, mfe_b, time_b, lane = keys
         stats = _combo_stats_from_df(sub)
         if stats["trades"] < min_trades:
             continue
         left = round(float(sub["left_on_table_usd"].sum()), 2)
         avg_left = round(float(sub["left_on_table_usd"].mean()), 2)
         combos.append({
-            "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{ttype}+{str(lane).upper()}",
+            "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{str(lane).upper()}",
             "exit_reason": ex,
             "ai_bucket": ai_b,
             "spread_bucket": sp_b,
             "peak_mfe_bucket": mfe_b,
             "time_in_trade_bucket": time_b,
-            "type": ttype,
             "lane": str(lane).upper(),
             "left_on_table_usd": left,
             "avg_left_usd": avg_left,
@@ -15698,7 +14614,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         "dimensions": dims,
         "total_combos": len(combos),
         "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
-        "filter_note": "TYPE_B excluded — not predictable enough for exit combo optimization.",
+        "filter_note": "Generic historical exit combinations; current-lane qualification is handled separately.",
         "top": top,
         "worst_leakage": worst_leak,
     }
@@ -16515,800 +15431,6 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
     return payload
 
 
-def _type_b_bucket(val, kind: str) -> str:
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return "unknown"
-    if kind == "adx":
-        if v < ADX_RESEARCH_LOW_MAX:
-            return "adx<18"
-        if v < ADX_RESEARCH_MID_MAX:
-            return "adx18-30"
-        return "adx30+"
-    if kind == "spread":
-        if v <= 2:
-            return "spread0-2"
-        if v <= 4:
-            return "spread3-4"
-        return "spread5+"
-    if kind == "conf":
-        if v < 55:
-            return "conf<55"
-        if v < 65:
-            return "conf55-65"
-        return "conf65+"
-    if kind == "vol":
-        if v < 80:
-            return "vol_low"
-        if v < 150:
-            return "vol_mid"
-        return "vol_high"
-    return "unknown"
-
-
-def _type_b_probability_table(work: pd.DataFrame) -> list:
-    """Historical P(TYPE_B | feature bucket) — discovery only, not an entry gate."""
-    if work is None or work.empty:
-        return []
-    df = work.copy()
-    df["trade_mfe_type"] = _trade_mfe_type_series(df)
-    df["is_type_b"] = df["trade_mfe_type"].eq("TYPE_B")
-    if "adx_at_entry" in df.columns:
-        df["_adx_b"] = df["adx_at_entry"].map(lambda x: _type_b_bucket(x, "adx"))
-    if "conviction_spread" in df.columns:
-        df["_spread_b"] = df["conviction_spread"].map(lambda x: _type_b_bucket(x, "spread"))
-    elif "directional_spread" in df.columns:
-        df["_spread_b"] = df["directional_spread"].map(lambda x: _type_b_bucket(x, "spread"))
-    if "ai_win_prob" in df.columns:
-        df["_conf_b"] = df["ai_win_prob"].map(lambda x: _type_b_bucket(x, "conf"))
-    if "volatility" in df.columns:
-        df["_vol_b"] = df["volatility"].map(lambda x: _type_b_bucket(x, "vol"))
-    if "context_ema_slope" in df.columns:
-        df["_ema_b"] = pd.to_numeric(df["context_ema_slope"], errors="coerce").map(
-            lambda x: "ema_up" if (x or 0) > 0 else ("ema_down" if (x or 0) < 0 else "ema_flat")
-        )
-    if "research_lane" in df.columns:
-        df["_lane_b"] = df["research_lane"].fillna("").astype(str).str.upper()
-    dim_cols = {
-        "adx": "_adx_b", "spread": "_spread_b", "confidence": "_conf_b",
-        "volatility": "_vol_b", "ema_slope": "_ema_b", "lane": "_lane_b",
-    }
-    rows = []
-    for dim, col in dim_cols.items():
-        if col not in df.columns:
-            continue
-        for bucket, sub in df.groupby(col, observed=True):
-            if str(bucket) in ("unknown", "nan", ""):
-                continue
-            n = int(len(sub))
-            if n < 3:
-                continue
-            b_n = int(sub["is_type_b"].sum())
-            wr = round(100.0 * (sub["net_pnl_usd"].astype(float) > 0).mean(), 1) if "net_pnl_usd" in sub.columns else None
-            rows.append({
-                "dimension": dim,
-                "bucket": str(bucket),
-                "trades": n,
-                "type_b_count": b_n,
-                "type_b_probability_pct": round(100.0 * b_n / n, 1),
-                "wr_pct": wr,
-            })
-    rows.sort(key=lambda r: (-r["type_b_probability_pct"], -r["trades"]))
-    return rows[:40]
-
-
-def _type_b_entry_feature_frame(work: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Build a leak-free entry feature frame for Type-B outcome discovery."""
-    if work is None or work.empty:
-        return pd.DataFrame(), {}
-    frame = pd.DataFrame(index=work.index)
-    mfe_raw = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
-        work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
-    )
-    mfe = pd.to_numeric(mfe_raw, errors="coerce")
-    frame["is_type_b"] = mfe.ge(15)
-
-    timestamp = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns, UTC]")
-    for name in ("close_ts", "ts", "timestamp", "ts_melbourne"):
-        if name not in work.columns:
-            continue
-        missing = timestamp.isna()
-        if not missing.any():
-            break
-        parsed = pd.to_datetime(work.loc[missing, name], errors="coerce", utc=True)
-        timestamp.loc[missing] = parsed
-    frame["_time"] = timestamp
-    frame["_order"] = np.arange(len(frame))
-
-    adx_raw = work["adx_at_entry"] if "adx_at_entry" in work else pd.Series(np.nan, index=work.index)
-    adx = pd.to_numeric(adx_raw, errors="coerce")
-    frame["adx"] = adx.map(lambda v: _type_b_bucket(v, "adx"))
-
-    if "directional_spread" in work.columns:
-        spread_raw = work["directional_spread"]
-    else:
-        spread_raw = work["conviction_spread"] if "conviction_spread" in work else pd.Series(np.nan, index=work.index)
-    spread = pd.to_numeric(spread_raw, errors="coerce")
-    frame["spread"] = spread.map(lambda v: _type_b_bucket(v, "spread"))
-
-    volume_raw = work["features_volume_ratio"] if "features_volume_ratio" in work else (
-        work["feature_volume_ratio"] if "feature_volume_ratio" in work else pd.Series(np.nan, index=work.index)
-    )
-    volume = pd.to_numeric(volume_raw, errors="coerce")
-    frame["volume_ratio"] = pd.cut(
-        volume,
-        [-np.inf, 0.5, 0.75, np.inf],
-        right=False,
-        labels=["volume<0.50", "volume0.50-0.75", "volume0.75+"],
-    ).astype(str)
-
-    ema_raw = work["context_ema_slope"] if "context_ema_slope" in work else pd.Series(np.nan, index=work.index)
-    ema = pd.to_numeric(ema_raw, errors="coerce")
-    frame["ema_slope"] = ema.map(
-        lambda v: "ema_unknown" if pd.isna(v) else ("ema_up" if v > 0 else ("ema_down" if v < 0 else "ema_flat"))
-    )
-
-    structure_raw = work["structure_score_at_entry"] if "structure_score_at_entry" in work else (
-        work["structure"] if "structure" in work else pd.Series(np.nan, index=work.index)
-    )
-    structure = pd.to_numeric(structure_raw, errors="coerce")
-    frame["structure"] = pd.cut(
-        structure,
-        [-np.inf, -4, -1, np.inf],
-        right=False,
-        labels=["structure<-4", "structure-4--1", "structure>=-1"],
-    ).astype(str)
-
-    entry_raw = work["entry_mode_bucket"] if "entry_mode_bucket" in work else pd.Series("unknown", index=work.index)
-    frame["entry_mode"] = entry_raw.fillna("unknown").astype(str).str.upper()
-    direction_raw = work["final_direction"] if "final_direction" in work else (
-        work["dir"] if "dir" in work else pd.Series("unknown", index=work.index)
-    )
-    frame["direction"] = direction_raw.fillna("unknown").astype(str).str.upper()
-
-    raw_by_feature = {
-        "adx": adx,
-        "spread": spread,
-        "volume_ratio": volume,
-        "ema_slope": ema,
-        "structure": structure,
-        "entry_mode": entry_raw.replace("", np.nan),
-        "direction": direction_raw.replace("", np.nan),
-    }
-    coverage = {}
-    total = len(frame)
-    for feature, raw in raw_by_feature.items():
-        available = int(pd.Series(raw, index=frame.index).notna().sum())
-        coverage[feature] = {
-            "available": available,
-            "total": total,
-            "pct": round(100.0 * available / total, 1) if total else 0.0,
-        }
-    frame = frame[mfe.notna()].copy()
-    frame = frame.sort_values(["_time", "_order"], na_position="last")
-    return frame, coverage
-
-
-def _type_b_rule_part(feature: str, bucket: str) -> str:
-    labels = {
-        ("adx", "adx<18"): "ADX <18",
-        ("adx", "adx18-30"): "ADX 18–<30",
-        ("adx", "adx30+"): "ADX ≥30",
-        ("spread", "spread0-2"): "score gap 0–2",
-        ("spread", "spread3-4"): "score gap 3–4",
-        ("spread", "spread5+"): "score gap ≥5",
-        ("volume_ratio", "volume<0.50"): "volume ratio <0.50",
-        ("volume_ratio", "volume0.50-0.75"): "volume ratio 0.50–<0.75",
-        ("volume_ratio", "volume0.75+"): "volume ratio ≥0.75",
-        ("ema_slope", "ema_up"): "EMA slope up",
-        ("ema_slope", "ema_down"): "EMA slope down",
-        ("ema_slope", "ema_flat"): "EMA slope flat",
-        ("structure", "structure<-4"): "structure score <-4",
-        ("structure", "structure-4--1"): "structure score -4–<-1",
-        ("structure", "structure>=-1"): "structure score ≥-1",
-    }
-    if (feature, bucket) in labels:
-        return labels[(feature, bucket)]
-    if feature == "entry_mode":
-        return f"entry {bucket.replace('_', ' ')}"
-    if feature == "direction":
-        return f"direction {bucket}"
-    return f"{feature}={bucket}"
-
-
-def _type_b_entry_rule_analysis(work: pd.DataFrame) -> dict:
-    """Train on older outcomes and evaluate candidate entry rules on the newest 30%."""
-    frame, coverage = _type_b_entry_feature_frame(work)
-    total = len(frame)
-    if total < 20:
-        return {
-            "predictor_rules": [],
-            "feature_coverage": coverage,
-            "predictor_readiness": {
-                "status": "EARLY_COLLECTION",
-                "total_trades": total,
-                "type_b_trades": int(frame["is_type_b"].sum()) if total else 0,
-                "baseline_type_b_pct": round(100.0 * frame["is_type_b"].mean(), 1) if total else None,
-                "validated_rules": 0,
-                "note": f"Only {total} outcome-labelled trades; at least {TYPE_B_DISCOVERY_MIN_TRADES} are required for holdout discovery.",
-            },
-        }
-
-    holdout_n = max(20, int(round(total * 0.30)))
-    holdout_n = min(holdout_n, max(1, total - 12))
-    train = frame.iloc[:-holdout_n].copy()
-    holdout = frame.iloc[-holdout_n:].copy()
-    train_base = float(train["is_type_b"].mean()) if len(train) else 0.0
-    holdout_base = float(holdout["is_type_b"].mean()) if len(holdout) else 0.0
-    dimensions = ("adx", "spread", "volume_ratio", "ema_slope", "structure", "entry_mode", "direction")
-    rules = []
-    for width in (1, 2):
-        for dims in itertools.combinations(dimensions, width):
-            for raw_keys, sub in train.groupby(list(dims), observed=True, dropna=False):
-                keys = raw_keys if isinstance(raw_keys, tuple) else (raw_keys,)
-                if len(sub) < TYPE_B_RULE_MIN_TRAIN_N:
-                    continue
-                if any(str(value).lower() in ("unknown", "nan", "ema_unknown", "") for value in keys):
-                    continue
-                train_rate = float(sub["is_type_b"].mean())
-                train_lift = train_rate / train_base if train_base > 0 else 0.0
-                if train_lift < 1.05:
-                    continue
-                mask = pd.Series(True, index=holdout.index)
-                for dim, value in zip(dims, keys):
-                    mask &= holdout[dim].eq(value)
-                check = holdout[mask]
-                check_rate = float(check["is_type_b"].mean()) if len(check) else 0.0
-                check_lift = check_rate / holdout_base if holdout_base > 0 else 0.0
-                if len(check) < TYPE_B_RULE_MIN_HOLDOUT_N:
-                    status = "INSUFFICIENT_HOLDOUT"
-                elif train_lift >= 1.20 and check_lift >= 1.15 and int(check["is_type_b"].sum()) >= 3:
-                    status = "HOLDOUT_POSITIVE"
-                elif check_lift < 0.90:
-                    status = "FAILED_HOLDOUT"
-                else:
-                    status = "COLLECTING"
-                rules.append({
-                    "rule": " AND ".join(_type_b_rule_part(dim, str(value)) for dim, value in zip(dims, keys)),
-                    "features": list(dims),
-                    "train_n": int(len(sub)),
-                    "train_type_b_pct": round(100.0 * train_rate, 1),
-                    "train_lift": round(train_lift, 2),
-                    "holdout_n": int(len(check)),
-                    "holdout_type_b_pct": round(100.0 * check_rate, 1) if len(check) else None,
-                    "holdout_lift": round(check_lift, 2) if len(check) else None,
-                    "status": status,
-                    "out_of_sample": True,
-                })
-
-    # Candidate ordering uses training evidence only. Holdout outcomes are an
-    # independent falsification check; include every positive holdout result in
-    # the displayed set so a valid check is not hidden below sparse train-only
-    # combinations.
-    rules.sort(key=lambda row: (-row["train_lift"], -row["train_n"], row["rule"]))
-    holdout_positive = sum(1 for row in rules if row["status"] == "HOLDOUT_POSITIVE")
-    shown = list(rules[:8])
-    for row in rules:
-        if row["status"] == "HOLDOUT_POSITIVE" and row not in shown:
-            shown.append(row)
-    for row in rules:
-        if len(shown) >= 12:
-            break
-        if row not in shown:
-            shown.append(row)
-    shown = shown[:12]
-    if total < TYPE_B_DISCOVERY_MIN_TRADES:
-        status = "EARLY_COLLECTION"
-    elif total < TYPE_B_GATE_MIN_TRADES:
-        status = "COLLECTING"
-    elif not holdout_positive:
-        status = "NO_STABLE_RULE"
-    else:
-        status = "RESEARCH_CANDIDATE_READY"
-    note = (
-        f"{total} outcome-labelled trades: {len(train)} older trades select candidates and "
-        f"{len(holdout)} newest trades are untouched holdout evidence. "
-        f"{holdout_positive} rule(s) are holdout-positive. No live entry gate before "
-        f"≥{TYPE_B_GATE_MIN_TRADES} total outcomes and repeated rolling-window confirmation."
-    )
-    return {
-        "predictor_rules": shown,
-        "feature_coverage": coverage,
-        "predictor_readiness": {
-            "status": status,
-            "total_trades": total,
-            "type_b_trades": int(frame["is_type_b"].sum()),
-            "baseline_type_b_pct": round(100.0 * frame["is_type_b"].mean(), 1),
-            "train_trades": int(len(train)),
-            "train_baseline_type_b_pct": round(100.0 * train_base, 1),
-            "holdout_trades": int(len(holdout)),
-            "holdout_baseline_type_b_pct": round(100.0 * holdout_base, 1),
-            "validated_rules": holdout_positive,
-            "minimum_total_for_gate": TYPE_B_GATE_MIN_TRADES,
-            "note": note,
-        },
-    }
-
-
-def type_b_predictor_report(trades=None, session=None):
-    """Pre-entry feature separators — TYPE_A vs TYPE_B averages and ranked deltas."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== TYPE B PREDICTOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
-    feature_cols = [
-        ("edge_score_at_entry", "edge_score"),
-        ("directional_spread", "spread"),
-        ("structure_score_at_entry", "structure"),
-        ("support_resistance_bucket", "sr_bucket"),
-        ("adx_at_entry", "adx"),
-        ("features_volume_ratio", "volume_ratio"),
-        ("features_imbalance", "imbalance"),
-        ("features_delta", "delta"),
-        ("features_velocity", "velocity"),
-        ("ai_win_prob", "ai_prob"),
-        ("conviction_spread", "conviction_spread"),
-    ]
-    if work.empty:
-        payload = {"schema": "type_b_predictor_v1", "separators": [], "session_scope": scope}
-        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    mfe_source = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
-        work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
-    )
-    valid_mfe = pd.to_numeric(mfe_source, errors="coerce")
-    work = work[valid_mfe.notna()].copy()
-    if work.empty:
-        payload = {
-            "schema": "type_b_predictor_v3",
-            "session_scope": scope,
-            "classification": "TYPE_A: MFE<10% | TYPE_B: MFE>=15% | MIXED: between",
-            "cohorts": {},
-            "separators_ranked": [],
-            "top_separators": [],
-            "probability_table": [],
-            "predictor_rules": [],
-            "predictor_readiness": {
-                "status": "EARLY_COLLECTION",
-                "total_trades": 0,
-                "type_b_trades": 0,
-                "validated_rules": 0,
-                "note": "No trades have a valid MFE outcome yet.",
-            },
-        }
-        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    work["trade_mfe_type"] = _trade_mfe_type_series(work)
-    cohort_stats = {}
-    for ttype in ("TYPE_A", "TYPE_B", "MIXED"):
-        sub = work[work["trade_mfe_type"] == ttype]
-        stats = _combo_stats_from_df(sub)
-        sub_mfe_source = sub["mfe_margin_pct"] if "mfe_margin_pct" in sub else (
-            sub["max_profit"] if "max_profit" in sub else pd.Series(np.nan, index=sub.index)
-        )
-        sub_mfe = pd.to_numeric(sub_mfe_source, errors="coerce")
-        stats["avg_mfe_pct"] = round(float(sub_mfe.mean()), 2) if sub_mfe.notna().any() else None
-        avgs = {}
-        for col, label in feature_cols:
-            if col not in sub.columns:
-                continue
-            val = pd.to_numeric(sub[col], errors="coerce").mean()
-            if pd.notna(val):
-                avgs[label] = round(float(val), 3)
-        cohort_stats[ttype] = {**stats, "feature_averages": avgs}
-
-    separators = []
-    a = work[work["trade_mfe_type"] == "TYPE_A"]
-    b = work[work["trade_mfe_type"] == "TYPE_B"]
-    if not a.empty and not b.empty:
-        for col, label in feature_cols:
-            if col not in work.columns:
-                continue
-            am = pd.to_numeric(a[col], errors="coerce").mean()
-            bm = pd.to_numeric(b[col], errors="coerce").mean()
-            if pd.notna(am) and pd.notna(bm):
-                separators.append({
-                    "feature": label,
-                    "type_a_mean": round(float(am), 3),
-                    "type_b_mean": round(float(bm), 3),
-                    "delta_abs": round(abs(float(bm) - float(am)), 3),
-                    "direction": "higher_in_B" if bm > am else "lower_in_B",
-                })
-        separators.sort(key=lambda x: x["delta_abs"], reverse=True)
-
-    prob_table = _type_b_probability_table(work)
-    entry_analysis = _type_b_entry_rule_analysis(work)
-    predictor_rules = entry_analysis.get("predictor_rules") or []
-    payload = {
-        "schema": "type_b_predictor_v3",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "classification": "TYPE_A: MFE<10% | TYPE_B: MFE>=15% | MIXED: between",
-        "cohorts": cohort_stats,
-        "separators_ranked": separators,
-        "top_separators": separators[:10],
-        "probability_table": prob_table,
-        "predictor_rules": predictor_rules,
-        "predictor_readiness": entry_analysis.get("predictor_readiness") or {},
-        "feature_coverage": entry_analysis.get("feature_coverage") or {},
-        "method": (
-            "Only entry-time fields are eligible. Candidates are selected on the older 70% "
-            "of outcome-labelled trades and evaluated on the newest 30% chronological holdout."
-        ),
-        "hypothesis": (
-            predictor_rules[0]["rule"]
-            if predictor_rules
-            else "No entry-time fingerprint has enough holdout evidence yet."
-        ),
-    }
-    if separators:
-        print(f"  Top separator: {separators[0]['feature']} Δ={separators[0]['delta_abs']} {PIPELINE_ENFORCEMENT_TAG}")
-    try:
-        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {TYPE_B_PREDICTOR_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {TYPE_B_PREDICTOR_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def type_b_research_v2_report():
-    """Build the independent-opportunity Type-B collection report."""
-    event_path = TYPE_B_RESEARCH_V2_EVENT_FILE
-    report_path = analyzer_report_path(TYPE_B_RESEARCH_V2_REPORT_FILE)
-    try:
-        events_all = load_type_b_research_v2_events(event_path)
-        invalid_ids = {
-            str(event.get("opportunity_id") or "")
-            for event in events_all
-            if event.get("opportunity_id")
-            and str(event.get("lane") or "").upper() == "OFFSET_029_ATR_TP_25"
-        }
-        events = [
-            event for event in events_all
-            if str(event.get("opportunity_id") or "") not in invalid_ids
-        ]
-        opportunities = materialize_type_b_research_v2(events)
-        payload = summarize_type_b_research_v2(opportunities)
-        payload.update({
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "expected_bot_version": EXPECTED_BOT_VERSION,
-            "events_total": len(events),
-            "policy_mismatch_events_excluded": len(events_all) - len(events),
-            "policy_mismatch_opportunities_excluded": len(invalid_ids),
-            "policy_mismatch_reason": "OFFSET029_PAPER_ONLY_FORBIDS_TYPE_B_SHADOW_EVENTS",
-            "quality_gate": {
-                "minimum_independent_opportunities": TYPE_B_GATE_MIN_TRADES,
-                "minimum_feature_coverage_pct": 90,
-                "rolling_holdouts_required": 3,
-                "auto_apply": False,
-            },
-            # Bound dashboard/API payload size; the JSONL remains the canonical audit stream.
-            "recent_opportunities": opportunities[-200:],
-        })
-    except Exception as exc:
-        payload = {
-            "schema": "type_b_research_v2_report_v1",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "expected_bot_version": EXPECTED_BOT_VERSION,
-            "independent_opportunities": 0,
-            "valid_holdout_opportunities": 0,
-            "completed_opportunities": 0,
-            "filled_opportunities": 0,
-            "type_b_outcomes": 0,
-            "readiness": "COLLECTING",
-            "execution_policy": "ADVISORY_ONLY_NEVER_AUTO_APPLY",
-            "error": f"{type(exc).__name__}: {exc}",
-            "recent_opportunities": [],
-        }
-    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-    print(
-        "  Type B Research V2: "
-        f"opportunities={payload.get('independent_opportunities', 0)} "
-        f"valid={payload.get('valid_holdout_opportunities', 0)} "
-        f"status={payload.get('readiness')} {PIPELINE_ENFORCEMENT_TAG}"
-    )
-    return payload
-
-
-def type_b_adx_v3_shadow_report(session=None):
-    """Evaluate the non-monotonic ADX Type B challenger without promoting it."""
-    if session is None:
-        session = load_research_session()
-    decisions = pd.DataFrame(_load_jsonl_rows(TYPE_B_ADX_V3_DECISION_FILE))
-    outcomes = pd.DataFrame(_load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE))
-    if not decisions.empty:
-        decisions = filter_df_since_session(decisions, session, ts_cols=("ts", "timestamp"))
-        if "study_id" in decisions.columns:
-            decisions = decisions.drop_duplicates(subset=["study_id"], keep="last")
-    if not outcomes.empty:
-        outcomes = filter_df_since_session(outcomes, session, ts_cols=("ts", "timestamp"))
-        if "research_lane" in outcomes.columns:
-            outcomes = outcomes[
-                outcomes["research_lane"].fillna("").astype(str).str.upper()
-                == "TYPE_B_HUNTER_ADX_V3_SHADOW"
-            ]
-        if "study_id" in outcomes.columns:
-            outcomes = outcomes.drop_duplicates(subset=["study_id"], keep="last")
-
-    def outcome_summary(work):
-        if work is None or work.empty:
-            return {
-                "closed": 0, "filled": 0, "wins": 0, "losses": 0,
-                "win_rate_pct": None, "net_pnl_usd": 0.0, "ev_per_fill_usd": None,
-            }
-        filled = work.copy()
-        if "filled" in filled.columns:
-            filled = filled[filled["filled"].apply(_truthy)]
-        pnl_source = (
-            filled["net_pnl_usd"]
-            if "net_pnl_usd" in filled.columns
-            else pd.Series(0.0, index=filled.index, dtype=float)
-        )
-        pnl = pd.to_numeric(pnl_source, errors="coerce").fillna(0.0)
-        wins = int((pnl > 0).sum())
-        losses = int((pnl < 0).sum())
-        decided = wins + losses
-        net = float(pnl.sum())
-        return {
-            "closed": int(len(work)),
-            "filled": int(len(filled)),
-            "wins": wins,
-            "losses": losses,
-            "win_rate_pct": round(wins / decided * 100, 1) if decided else None,
-            "net_pnl_usd": round(net, 4),
-            "ev_per_fill_usd": round(net / len(filled), 4) if len(filled) else None,
-        }
-
-    accepted_mask = pd.Series(False, index=decisions.index)
-    if not decisions.empty and "accepted" in decisions.columns:
-        accepted_mask = decisions["accepted"].apply(_truthy)
-    accepted_ids = set(
-        decisions.loc[accepted_mask, "study_id"].dropna().astype(str)
-        if not decisions.empty and "study_id" in decisions.columns else []
-    )
-    rejected_ids = set(
-        decisions.loc[~accepted_mask, "study_id"].dropna().astype(str)
-        if not decisions.empty and "study_id" in decisions.columns else []
-    )
-    outcome_ids = outcomes["study_id"].fillna("").astype(str) if not outcomes.empty and "study_id" in outcomes.columns else pd.Series([], dtype=str)
-    accepted_outcomes = outcomes[outcome_ids.isin(accepted_ids)] if not outcomes.empty else outcomes
-    rejected_outcomes = outcomes[outcome_ids.isin(rejected_ids)] if not outcomes.empty else outcomes
-
-    rejection_reasons = {}
-    if not decisions.empty and "block_reason" in decisions.columns:
-        rejected = decisions[~accepted_mask]
-        rejection_reasons = {
-            str(key or "UNKNOWN"): int(value)
-            for key, value in rejected["block_reason"].fillna("UNKNOWN").value_counts().items()
-        }
-    direction_balance = {}
-    if not decisions.empty and "direction" in decisions.columns:
-        direction_balance = {
-            str(key or "UNKNOWN"): int(value)
-            for key, value in decisions.loc[accepted_mask, "direction"].fillna("UNKNOWN").value_counts().items()
-        }
-
-    accepted_metrics = outcome_summary(accepted_outcomes)
-    min_each_direction = min(direction_balance.get("LONG", 0), direction_balance.get("SHORT", 0))
-    promotion_ready = bool(
-        accepted_metrics["closed"] >= 50
-        and min_each_direction >= 15
-        and (accepted_metrics["ev_per_fill_usd"] or 0) > 0
-    )
-    payload = {
-        "schema": "type_b_adx_v3_shadow_report_v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "session_scope": _shadow_scope_label(session),
-        "policy": "type_b_adx_nonmonotonic_shadow_v3_20260721",
-        "safety": "SHADOW_ONLY_NEVER_RELAY_ELIGIBLE",
-        "decisions": {
-            "total": int(len(decisions)),
-            "accepted": int(accepted_mask.sum()) if len(accepted_mask) else 0,
-            "rejected": int((~accepted_mask).sum()) if len(accepted_mask) else 0,
-            "accepted_direction_balance": direction_balance,
-            "rejection_reasons": rejection_reasons,
-        },
-        "accepted_policy_outcomes": accepted_metrics,
-        "rejected_counterfactual_outcomes": outcome_summary(rejected_outcomes),
-        "promotion_gate": {
-            "status": "ELIGIBLE_FOR_MANUAL_REVIEW" if promotion_ready else "COLLECT_MORE",
-            "automatic_promotion": False,
-            "requirements": "at least 50 closed accepted replays, >=15 LONG and >=15 SHORT accepts, positive EV, then walk-forward review",
-        },
-    }
-    with open(analyzer_report_path(TYPE_B_ADX_V3_SHADOW_REPORT_FILE), "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-    print(
-        f"  Type B ADX v3 shadow: decisions={len(decisions)} "
-        f"accepted={payload['decisions']['accepted']} closed={accepted_metrics['closed']} "
-        f"EV={accepted_metrics['ev_per_fill_usd']} status={payload['promotion_gate']['status']} "
-        f"{PIPELINE_ENFORCEMENT_TAG}"
-    )
-    return payload
-
-
-def lane_retirement_report(trades=None, session=None, benchmark_report=None):
-    """Automatic KEEP / RETIRE / COLLECT MORE recommendations per pathway lane."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE RETIREMENT REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        benchmark_report = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    lanes = (benchmark_report or {}).get("lanes") or {}
-    bench = lanes.get("CONTINUOUS") or {}
-    bench_ev = float(bench.get("per_approve_ev") or 0)
-    bench_pnl = float(bench.get("net_pnl_real") or 0)
-
-    recommendations = []
-    for lane_key in BENCHMARK_LANES:
-        if lane_key == "CONTINUOUS":
-            continue
-        pathway_status = _pathway_lane_status(lane_key)
-        m = lanes.get(lane_key) or {}
-        all_time = m.get("all_time") or {}
-        fills = int(m.get("real_fills") or m.get("fills") or 0)
-        approves = int(m.get("approves") or 0)
-        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or 0)
-        ev = float(m.get("per_approve_ev") or 0)
-        at_fills = int(all_time.get("real_fills") or 0)
-        at_pnl = float(all_time.get("net_pnl_real") or 0)
-        hist_note = ""
-        if at_fills and (fills != at_fills or abs(pnl - at_pnl) > 0.01):
-            hist_note = f" · all-time: {at_fills} fills ${at_pnl:+.2f}"
-        if pathway_status == "RETIRED":
-            recommendations.append({
-                "lane": lane_key,
-                "trades": fills,
-                "approves": approves,
-                "pnl_usd": round(pnl, 2),
-                "ev_per_approve": round(ev, 2),
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": at_fills,
-                "all_time_pnl_usd": round(at_pnl, 2),
-                "recommendation": "RETIRED",
-                "reason": f"Paused — no new orders{hist_note}" if at_fills else "Frozen — no active research budget; historical analytics only",
-            })
-            continue
-        if pathway_status == PATHWAY_STATUS_SHADOW_COLLECTING:
-            recommendations.append({
-                "lane": lane_key,
-                "trades": fills,
-                "approves": approves,
-                "pnl_usd": round(pnl, 2),
-                "ev_per_approve": round(ev, 2),
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": at_fills,
-                "all_time_pnl_usd": round(at_pnl, 2),
-                "recommendation": "COLLECTING",
-                "reason": f"Shadow-only off-dashboard lane — simulated PnL, no live orders{hist_note}",
-            })
-            continue
-        if fills == 0 and approves == 0 and at_fills == 0:
-            recommendations.append({
-                "lane": lane_key,
-                "trades": 0,
-                "approves": 0,
-                "pnl_usd": 0.0,
-                "ev_per_approve": 0.0,
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": 0,
-                "all_time_pnl_usd": 0.0,
-                "recommendation": "NO_DATA",
-                "reason": "No session or historical fills in CSV for this lane",
-            })
-            continue
-        if fills == 0 and approves == 0 and at_fills > 0:
-            recommendations.append({
-                "lane": lane_key,
-                "trades": 0,
-                "approves": 0,
-                "pnl_usd": 0.0,
-                "ev_per_approve": 0.0,
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": at_fills,
-                "all_time_pnl_usd": round(at_pnl, 2),
-                "recommendation": "HISTORICAL_ONLY",
-                "reason": f"No session activity — all-time: {at_fills} fills ${at_pnl:+.2f}",
-            })
-            continue
-        if pathway_status == "PROBATION":
-            rec = "PROBATION"
-            reason = "Collect unique trades/PnL/EV — retire if overlap with CONTINUOUS remains insignificant"
-        elif fills < MIN_LANE_FILLS_FOR_RETIREMENT and approves < MIN_LANE_APPROVES_FOR_RETIREMENT:
-            rec = "INSUFFICIENT_SAMPLE"
-            reason = f"only {fills} fills / {approves} approves — need ≥{MIN_LANE_FILLS_FOR_RETIREMENT} fills"
-        elif fills >= MIN_LANE_FILLS_FOR_RETIREMENT and (pnl <= -10 or (ev < 0 and fills >= 20)):
-            rec = "RETIRE"
-            reason = f"negative PnL ${pnl:+.2f} with {fills} fills or EV ${ev:+.2f}/approve"
-        elif fills >= MIN_LANE_FILLS_FOR_RETIREMENT and bench_ev > 0 and ev < bench_ev * 0.45 and pnl < bench_pnl * 0.05:
-            rec = "RETIRE"
-            reason = f"dominated by CONTINUOUS — EV ${ev:+.2f} vs benchmark ${bench_ev:+.2f}"
-        elif pnl > 0 and ev >= bench_ev * 0.85:
-            rec = "KEEP"
-            reason = f"beats benchmark EV (${ev:+.2f} vs ${bench_ev:+.2f})"
-        elif pnl > 0 and (ev < bench_ev * 0.85 or fills < MIN_LANE_FILLS_FOR_RETIREMENT):
-            rec = "WATCH"
-            reason = f"profitable but below benchmark EV (${ev:+.2f} vs ${bench_ev:+.2f}) — collect more or demote"
-        elif pnl <= 0 and fills >= MIN_LANE_FILLS_FOR_RETIREMENT:
-            rec = "WATCH"
-            reason = f"enough sample ({fills}) but weak PnL ${pnl:+.2f} — monitor"
-        elif pnl > 0:
-            rec = "WATCH"
-            reason = "positive PnL but thin sample"
-        else:
-            rec = "WATCH"
-            reason = "mixed signals — manual review"
-        recommendations.append({
-            "lane": lane_key,
-            "trades": fills,
-            "approves": approves,
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve": round(ev, 2),
-            "benchmark_ev": round(bench_ev, 2),
-            "pathway_status": pathway_status,
-            "all_time_fills": at_fills,
-            "all_time_pnl_usd": round(at_pnl, 2),
-            "recommendation": rec,
-            "reason": reason + hist_note if hist_note and hist_note not in reason else reason,
-        })
-
-    cont_fills = int(bench.get("real_fills") or bench.get("fills") or 0)
-    recommendations.insert(0, {
-        "lane": "CONTINUOUS",
-        "trades": cont_fills,
-        "approves": int(bench.get("approves") or 0),
-        "pnl_usd": round(bench_pnl, 2),
-        "ev_per_approve": round(bench_ev, 2),
-        "benchmark_ev": round(bench_ev, 2),
-        "recommendation": "KEEP (BENCHMARK)",
-        "reason": "baseline lane — do not retire",
-    })
-    retire = [r for r in recommendations if r["recommendation"] == "RETIRE"]
-    for r in recommendations:
-        print(
-            f"  {r['lane']}: {r['recommendation']} n={r['trades']} "
-            f"PnL=${r['pnl_usd']:+.2f} EV=${r['ev_per_approve']:+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-
-    payload = {
-        "schema": "lane_retirement_v2",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "benchmark_lane": "CONTINUOUS",
-        "active_roster": list(ACTIVE_PATHWAY_LANES),
-        "retired_lanes": sorted(RETIRED_PATHWAY_LANES),
-        "min_fills_for_decision": MIN_LANE_FILLS_FOR_RETIREMENT,
-        "retire_candidates": [r["lane"] for r in retire],
-        "lanes": recommendations,
-    }
-    try:
-        with open(LANE_RETIREMENT_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_RETIREMENT_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_RETIREMENT_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
 def _adx_bucket_val(v) -> str:
     try:
         from research.research_trade_accumulator import _adx_bucket as _ab
@@ -17913,7 +16035,7 @@ def lane_overlap_report(trades=None, session=None, benchmark_report=None):
                 continuous_keys.add(k)
 
     lanes_out = []
-    for lane_key in EXPERIMENT_LANES:
+    for lane_key in ACTIVE_ANALYSIS_LANES:
         if lane_key in LEGACY_LANES:
             continue
         lane_snaps = [(tid, s) for tid, s in snapshots.items() if str(s.get("research_lane") or "") == lane_key]
@@ -18139,22 +16261,15 @@ def pre_test_analytics_reports(
     qualified_chase_policy_report()
     chase_threshold_report(trades=trades, session=session, chase_payload=chase_payload)
     chase_profit_report(trades=trades, session=session, chase_payload=chase_payload)
-    urgent_chase_report(
-        trades=trades, session=session, benchmark_report=benchmark_report, chase_payload=chase_payload,
-    )
     chase_delay_report(
         trades=trades, session=session, benchmark_report=benchmark_report, chase_payload=chase_payload,
     )
-    lane_chase_isolation_report(trades=trades, session=session, chase_payload=chase_payload)
     top_combinations_report(trades=trades, session=session)
     exit_combinations_report(trades=trades, session=session)
     exit_leakage_by_reason_report(trades=trades, session=session)
     exit_ladder_simulator_report(trades=trades, session=session)
     correlated_price_cluster_report(session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
-    type_b_predictor_report(trades=trades, session=session)
-    type_b_research_v2_report()
-    type_b_adx_v3_shadow_report(session=session)
     first_15m_outcome_report(trades=trades, session=session)
     scenario_c_leakage_report(trades=trades, session=session)
     ai_direction_bias_report(trades=trades, decisions=decisions, session=session)
@@ -18166,39 +16281,6 @@ def pre_test_analytics_reports(
     fast_cut_survivor_report(trades=trades, session=session)
     pathway_survival_report(trades=trades, session=session)
     top_leakage_report(trades=trades, session=session)
-    try:
-        from pathway_lab_validation import (
-            audit_type_b_not_in_execution,
-            run_ai_scan_independence_self_test,
-            run_ai_scan_role_validation,
-            run_tile_independence_self_test,
-            validate_exit_reports_populated,
-            verify_repo_version_sync,
-        )
-        audit_type_b_not_in_execution()
-        run_tile_independence_self_test(retired_status=dict(PATHWAY_LANE_STATUS))
-        run_ai_scan_independence_self_test(retired_status=dict(PATHWAY_LANE_STATUS))
-        run_ai_scan_role_validation()
-        verify_repo_version_sync()
-        if trades is None or trades.empty:
-            trade_n = 0
-        elif "trade_id" in trades.columns:
-            trade_n = len(trades.drop_duplicates(subset=["trade_id"]))
-        else:
-            trade_n = len(trades)
-        exit_val = validate_exit_reports_populated(trade_count=int(trade_n))
-        if exit_val.get("verdict") == "INSUFFICIENT_DATA":
-            print(
-                f"  ⚠️ Exit report validation {exit_val.get('verdict')}: "
-                f"{'; '.join(exit_val.get('errors') or [])} — reports still written; finalize continues "
-                f"{PIPELINE_ENFORCEMENT_TAG}"
-            )
-    except SystemExit as exc:
-        print(f"  ⚠️ Pathway validation halted: {exc} — continuing to finalize {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as exc:
-        print(f"  ⚠️ Pathway validation skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-    lane_definition_report(trades=trades, session=session, benchmark_report=benchmark_report)
-    lane_retirement_report(trades=trades, session=session, benchmark_report=benchmark_report)
     regime_payload = regime_leaderboard_report(trades=trades, session=session)
     roster_policy_report(trades=trades, session=session, regime_payload=regime_payload, benchmark_report=benchmark_report)
     feature_importance_report(trades=trades, session=session)
@@ -18224,116 +16306,6 @@ def pre_test_analytics_reports(
         chase_payload=chase_payload_final,
         benchmark_report=benchmark_report,
     )
-
-
-def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, shadow_report=None):
-    """Write pathway_lane_specs.json — static lane params + session stats for Pathway Lab tiles."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== PATHWAY LANE SPECS — {scope.lower()} {PIPELINE_ENFORCEMENT_TAG} ===")
-
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        try:
-            with open(BENCHMARK_VS_LANES_REPORT_FILE, encoding="utf-8") as f:
-                benchmark_report = json.load(f)
-        except Exception:
-            benchmark_report = None
-    if benchmark_report is None:
-        benchmark_report = benchmark_vs_lanes_report(trades=trades, session=session, shadow_report=shadow_report)
-
-    lane_metrics = (benchmark_report or {}).get("lanes") or {}
-    shadow_by_lane = (shadow_report or {}).get("by_lane") or {}
-    if not shadow_by_lane and os.path.isfile(SHADOW_FILL_OUTCOME_REPORT_FILE):
-        try:
-            with open(SHADOW_FILL_OUTCOME_REPORT_FILE, encoding="utf-8") as f:
-                shadow_by_lane = json.load(f).get("by_lane") or {}
-        except Exception:
-            pass
-
-    static = _static_pathway_lane_specs()
-    tiles = []
-    for lane_key in BENCHMARK_LANES:
-        base = dict(static.get(lane_key) or {})
-        if not base:
-            continue
-        metrics = lane_metrics.get(lane_key) or {}
-        shadow = shadow_by_lane.get(lane_key) or {}
-        ttl = int((shadow.get("counts") or {}).get("Shadow fill + TTL expired") or 0)
-        gate_blocks = int((shadow.get("counts") or {}).get("Shadow fill + blocked (gates)") or 0)
-        session_line = (
-            f"n={metrics.get('approves', 0)} approves · "
-            f"{metrics.get('real_fills', 0)} trades · "
-            f"{metrics.get('approve_to_fill_pct', 0):.0f}% fill · "
-            f"${metrics.get('net_pnl_real', 0):.2f} real · "
-            f"EV ${metrics.get('per_approve_ev', 0):.2f}/approve"
-        )
-        if ttl:
-            session_line += f" · {ttl} TTL expired"
-        if gate_blocks:
-            session_line += f" · {gate_blocks} gate blocks"
-        base["session_stats"] = {
-            "approves": metrics.get("approves", 0),
-            "real_fills": metrics.get("real_fills", 0),
-            "approve_to_fill_pct": metrics.get("approve_to_fill_pct", 0),
-            "shadow_fill_pct": metrics.get("shadow_fill_pct", 0),
-            "net_pnl_real": metrics.get("net_pnl_real", 0),
-            "per_approve_ev": metrics.get("per_approve_ev", 0),
-            "wins": metrics.get("wins", 0),
-            "losses": metrics.get("losses", 0),
-            "win_rate_pct": metrics.get("win_rate_pct", 0),
-            "lab_mode": metrics.get("lab_mode", False),
-            "lab_closes": metrics.get("lab_closes", 0),
-            "lab_net_pnl": metrics.get("lab_net_pnl", 0),
-            "lab_wins": metrics.get("lab_wins", 0),
-            "lab_losses": metrics.get("lab_losses", 0),
-            "lab_win_rate": metrics.get("lab_win_rate", 0),
-            "lab_per_close_ev": metrics.get("lab_per_close_ev", 0),
-            "lab_pnl_source": metrics.get("lab_pnl_source"),
-            "approval_source": metrics.get("approval_source"),
-            "lane_gate_evaluated": metrics.get("lane_gate_evaluated", 0),
-            "lane_gate_rejected": metrics.get("lane_gate_rejected", 0),
-            "verdict": metrics.get("verdict"),
-            "summary_line": session_line,
-        }
-        if lane_key != BENCHMARK_LANE:
-            base["delta_vs_benchmark"] = {
-                "delta_approve_to_fill_pct": metrics.get("delta_approve_to_fill_pct", 0),
-                "delta_net_pnl_real": metrics.get("delta_net_pnl_real", 0),
-                "delta_per_approve_ev": metrics.get("delta_per_approve_ev", 0),
-                "verdict": metrics.get("verdict"),
-            }
-        tiles.append(base)
-
-    payload = {
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": ANALYZER_VERSION,
-        "bot_version": EXPECTED_BOT_VERSION,
-        "benchmark_lane": BENCHMARK_LANE,
-        "benchmark_profile_id": "PRIMARY_PRODUCTION_v1",
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "lanes": tiles,
-    }
-    try:
-        candidate = f"{PATHWAY_LANE_SPECS_FILE}.{os.getpid()}.tmp"
-        try:
-            with open(candidate, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(candidate, PATHWAY_LANE_SPECS_FILE)
-        finally:
-            try:
-                if os.path.exists(candidate):
-                    os.remove(candidate)
-            except OSError:
-                pass
-        print(f"  ✅ Wrote {PATHWAY_LANE_SPECS_FILE} ({len(tiles)} lane tiles) {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {PATHWAY_LANE_SPECS_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
 
 
 def fill_distance_report():
@@ -18964,13 +16936,12 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
 
 
 def write_report_manifest(payload=None):
-    manifest_generated_at = datetime.now(timezone.utc)
-    current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
+    manifest_started_at = datetime.now(timezone.utc)
+    current_run_cutoff = manifest_started_at.timestamp() - (15 * 60)
     """Manifest for research dashboard — no hardcoded report list in UI."""
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
         from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
-        from research.partial_reduction_reconciliation import build_partial_reduction_reconciliation_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
@@ -18987,10 +16958,6 @@ def write_report_manifest(payload=None):
         # pinned cycle snapshot. Rebuilding it here duplicated every replay and
         # bootstrap calculation, delaying manifest publication by many minutes
         # and allowing the dashboard to look stale while collection advanced.
-        build_partial_reduction_reconciliation_report(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
-        )
     except Exception as exc:
         # A missing/corrupt v2.2 input must degrade to no report, never interrupt
         # the established analyzer cycle or leak a stale policy candidate.
@@ -19053,11 +17020,17 @@ def write_report_manifest(payload=None):
                 ).isoformat(),
                 "analysis_provenance": analysis_provenance,
             })
+    # Publication time must describe the completed immutable generation, not
+    # the instant before the expensive policy builders ran.  The old timestamp
+    # could precede report files by several minutes and made API/file/dashboard
+    # parity look stale even when one analyzer generation had completed.
+    manifest_generated_at = datetime.now(timezone.utc)
     manifest = {
         "schema": "report_manifest_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": ANALYZER_VERSION,
         "generated_at": manifest_generated_at.isoformat(),
+        "generation_started_at": manifest_started_at.isoformat(),
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "analysis_provenance": analysis_provenance,
         "cohort_schema": analysis_provenance["cohort_schema"],
@@ -19242,9 +17215,7 @@ def build_executive_summary_payload(
     dir_rep = _load_json_report(DIRECTION_REPORT_FILE)
     chase_buckets = _load_json_report(CHASE_EFFECTIVENESS_REPORT_FILE)
     top_leak = _load_json_report(TOP_LEAKAGE_REPORT_FILE)
-    lane_ret = _load_json_report(LANE_RETIREMENT_REPORT_FILE)
     feat_imp = _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE)
-    paused_shadow = _load_json_report(PAUSED_SHADOW_REPORT_FILE)
 
     best_lane, worst_lane = _best_worst_lanes(bench)
     lane_rows = _lane_table_rows(bench)
@@ -19400,9 +17371,7 @@ def build_executive_summary_payload(
         "edge_verdict": edge_inc.get("verdict"),
         "edge_validation": edge_val,
         "top_leakage": top_leak,
-        "lane_retirement": lane_ret,
         "feature_importance": feat_imp,
-        "paused_shadow_research": paused_shadow,
         "recovery_summary": horizon.get("recovery_summary") or [],
         "blocked_opportunity_usd": blocked_opp,
         "json_reports_written": _count_json_reports_written(),
@@ -19947,7 +17916,7 @@ def write_analysis_dashboard_html(payload):
 
 
 def generate_all_data_companion_reports(dataset_counts=None, session_trade_count=0):
-    """Always write reports/all_data/ from full CSV — dashboard uses this for paused/retired lanes."""
+    """Write generic historical reports without promoting archived lanes."""
     dataset_counts = dataset_counts or {}
     csv_n = int(dataset_counts.get("csv_trades") or 0)
     if csv_n <= 0:
@@ -19972,8 +17941,6 @@ def generate_all_data_companion_reports(dataset_counts=None, session_trade_count
         chase_threshold_report(trades=trades, session=no_filter_session)
         top_combinations_report(trades=trades, session=no_filter_session)
         exit_combinations_report(trades=trades, session=no_filter_session)
-        lane_definition_report(trades=trades, session=no_filter_session, benchmark_report=benchmark_report)
-        lane_retirement_report(trades=trades, session=no_filter_session, benchmark_report=benchmark_report)
         print(f"  ✅ ALL-DATA companion reports → {sub}/ {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as exc:
         print(f"  ⚠️ ALL-DATA companion failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")

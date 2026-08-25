@@ -39,9 +39,7 @@ test('POSITION_REDUCED accepts only reconciled reduce-only evidence', () => {
     ts: new Date().toISOString(), prior_qty: 0.03, reduced_qty: 0.01,
     remaining_qty: 0.02, fill_price: 64_250,
   }), undefined);
-  assert.equal(isReductionEvidenceIdentity('o29ps-a', 'OFFSET_029_ATR_PROTECTED'), true);
-  assert.equal(isReductionEvidenceIdentity('o29rd-a', 'OFFSET_029_ATR_REGIME'), true);
-  assert.equal(isReductionEvidenceIdentity('o29ps-a', 'OFFSET_029_ATR_REGIME'), false);
+  assert.equal(isReductionEvidenceIdentity('retired-a', 'RETIRED'), false);
   assert.equal(isReductionEvidenceIdentity('cont-a', 'CONTINUOUS'), false);
   assert.equal(reductionAuditMatches({
     tradeId: 'o29ps-a', eventSeq: 4, priorQty: 0.03, reducedQty: 0.01,

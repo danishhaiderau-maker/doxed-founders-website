@@ -3,7 +3,6 @@ from pathlib import Path
 
 from combo_pathway_config import COMBO_EXECUTION_LANES, COMBO_LANE_SPECS
 from experimental_tile_contract import effective_route, relay_event_blockers
-from paper_policy_offset029_regime import account_risk_quantity, transition
 
 
 def test_tile_and_relay_are_independent_gates():
@@ -13,21 +12,6 @@ def test_tile_and_relay_are_independent_gates():
     copied = effective_route(tile_enabled=True, relay_armed=True, relay_eligible=True)
     assert copied["paper_order_eligible"] and copied["bitfinex_copy_eligible"]
     assert not copied["direct_exchange_submit"]
-
-
-def test_regime_transition_never_widens_stop():
-    result = transition(previous_regime="SIDEWAYS", observed_regime="STRONG_TREND",
-                        current_stop_distance_atr=.75)
-    assert result["applied_stop_atr"] == .75
-    assert result["risk_widened"] is False
-
-
-def test_position_size_obeys_margin_and_account_risk_caps():
-    result = account_risk_quantity(equity_usd=500, account_risk_pct=.5,
-                                   entry_price=75000, atr_abs=500,
-                                   leverage=100, margin_cap_usd=2)
-    assert result["quantity"] <= 200 / 75000
-    assert result["quantity"] * 500 <= 2.5
 
 
 def test_relay_event_requires_full_identity_and_supported_operation():
@@ -59,12 +43,9 @@ def test_v31_all_active_tiles_use_approved_quarter_dollar_margin_cap():
     assert fixed_margin == 0.25
 
 
-def test_protected_tile_subtitles_do_not_claim_unproven_live_copy():
-    for lane in ("OFFSET_029_ATR_PROTECTED", "OFFSET_029_ATR_REGIME"):
-        spec = COMBO_LANE_SPECS[lane]
-        assert spec["relay_copy_readiness"] == "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED"
-        assert "live copy blocked" in spec["subtitle"].lower()
-        assert "relay-copy eligible" not in spec["subtitle"].lower()
+def test_only_patient_chase_is_registered_as_candidate():
+    assert tuple(COMBO_EXECUTION_LANES) == ("OFFSET_029_ATR_TP_25",)
+    assert set(COMBO_LANE_SPECS) == {"OFFSET_029_ATR_TP_25"}
 
 
 def test_dashboard_margin_display_preserves_quarter_dollar_precision():

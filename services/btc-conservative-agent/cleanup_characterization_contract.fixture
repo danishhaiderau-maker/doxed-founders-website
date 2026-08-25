@@ -28,9 +28,6 @@
     ["POST", "/api/reconcile/phantom-cancel", "api_reconcile_phantom_cancel"],
     ["POST", "/api/toggle_early_fail", "toggle_early_fail"],
     ["POST", "/api/toggle_invert_signal", "toggle_invert_signal"],
-    ["POST", "/api/toggle_profit_gates", "toggle_profit_gates"],
-    ["POST", "/api/tile2/reset_counters", "api_tile2_reset_counters"],
-    ["GET", "/api/tile2/metrics", "api_tile2_metrics"],
     ["POST", "/api/toggle_duplicate_limit_block", "toggle_duplicate_limit_block"],
     ["POST", "/api/toggle_continuous_ai_research", "toggle_continuous_ai_research"],
     ["POST", "/api/toggle_research_lane", "toggle_research_lane"],
@@ -70,7 +67,8 @@
     ["POST", "/api/fresh_epoch_reset", "api_fresh_epoch_reset"],
     ["GET", "/api/export_debug", "export_debug"],
     ["GET", "/api/export_csv", "export_csv"],
-    ["GET", "/api/export.csv", "export_csv"]
+    ["GET", "/api/export.csv", "export_csv"],
+    ["GET", "/api/exchange_exposure_audit", "api_exchange_exposure_audit"]
   ],
   "main_workers": [
     "run_flask",
@@ -174,9 +172,5 @@
     ["refresh_bbo_state", "_bbo_refresh_lock", "state_lock"],
     ["refresh_order_book_state", "_book_refresh_lock", "state_lock"]
   ],
-  "historical_ui_tile_candidates": [
-    {"name": "Edge Acceleration", "status": "legacy-disabled-no-pathway-tile", "action": "inventory-only"},
-    {"name": "Profit Gates", "status": "legacy-spawn-disabled-no-pathway-tile", "action": "inventory-only"},
-    {"name": "Tile 2 / SR Micro historical metrics", "status": "retired-data-still-readable", "action": "preserve-evidence"}
-  ]
+  "historical_ui_tile_candidates": []
 }

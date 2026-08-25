@@ -337,11 +337,24 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     })
     candidate_screen = None
     if candidates is None:
-        candidate_screen = evaluate_protection_screen(load_candidate_inputs(
-            data_dir,
-            epoch_id=selected_epoch,
-            minimum_signal_ts=cutoff,
-        ))
+        def emit_candidate_progress(receipt):
+            print(
+                "  V3.1 protection replay: "
+                f"{receipt.get('input_events_completed', 0)}/"
+                f"{receipt.get('input_events_total', 0)} events; "
+                f"{receipt.get('protection_variants', 0)} protection variants; "
+                f"{receipt.get('policies_materialized', 0)} policies",
+                flush=True,
+            )
+
+        candidate_screen = evaluate_protection_screen(
+            load_candidate_inputs(
+                data_dir,
+                epoch_id=selected_epoch,
+                minimum_signal_ts=cutoff,
+            ),
+            progress_callback=emit_candidate_progress,
+        )
         candidates = candidate_screen["candidates"]
     ranking = rank_safe_policies(candidates or [])
     if not entry_resolution_integrity["passed"]:

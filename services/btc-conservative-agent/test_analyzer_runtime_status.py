@@ -107,14 +107,6 @@ checks = {
         and 'research\\analyzer_research_engine_v62.py' not in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in local_analyzer
     ),
-    "benchmark lane is not labeled retired": (
-        'pathway_status in ("RETIRED", "DATA_RETIRED")' in source
-        and 'pathway_status in ("RETIRED", "DATA_RETIRED", "BENCHMARK")' not in source
-    ),
-    "retired tile 2 is excluded from the primary analyzer roster": (
-        "RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,  # retired 2026-07-30" in lane_roster
-        and "SR_MICRO_TILE_V2_STATIC) -- toggle Show all lanes" not in source
-    ),
     "dashboard refreshes only the active tab": (
         "const SECTION_LOADERS" in source
         and "refreshActiveSection" in source
@@ -177,9 +169,6 @@ checks = {
         in supervisor_watchdog
         and "-BridgePort $bridgePort -Quiet" not in supervisor_watchdog
     ),
-    "empty chase isolation is collecting": (
-        '"verdict": rep.get("verdict") if has_evidence else "COLLECTING"' in source
-    ),
     "executive summary retains expected-vs-actual calibration": (
         'eva = ai_cal.get("expected_vs_actual") or {}' in analyzer_engine
         and '"expected_vs_actual": eva' in analyzer_engine
@@ -197,10 +186,6 @@ checks = {
         and '.home-analyzer-crash-monitor.pid' in (
             Path(__file__).parents[2] / "scripts" / "home-stack-cmd-worker.ps1"
         ).read_text(encoding="utf-8")
-    ),
-    "MFE cohort cannot be confused with the Type B tile": (
-        "MFE Type-B outcome cohort" in source
-        and '"Type B Discovery"' not in source
     ),
 }
 

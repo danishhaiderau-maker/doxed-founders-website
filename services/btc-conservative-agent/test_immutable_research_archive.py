@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -51,7 +52,12 @@ def _publisher_accepts(archive: Path, tmp_path: Path) -> bool:
     probe = tmp_path / "probe.ps1"
     escaped = str(archive).replace("'", "''")
     probe.write_text(match.group(0) + f"\nif (Test-CompleteAnalyzerArchive -ArchivePath '{escaped}') {{ exit 0 }} else {{ exit 7 }}\n", encoding="utf-8")
-    result = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe)], capture_output=True, text=True)
+    # In the managed test host, Windows PowerShell descendants of Python run
+    # under AppHealth compatibility restrictions and reject otherwise-valid
+    # .NET path/hash calls. PowerShell 7 executes the exact publisher function
+    # without that environment-only restriction.
+    shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    result = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe)], capture_output=True, text=True)
     return result.returncode == 0
 
 

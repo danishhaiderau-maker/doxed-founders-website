@@ -126,8 +126,9 @@ export function positionReducedEvidence(
 }
 
 export function isReductionEvidenceIdentity(tradeId: string, lane: string): boolean {
-  return (tradeId.startsWith('o29ps-') && lane === 'OFFSET_029_ATR_PROTECTED')
-    || (tradeId.startsWith('o29rd-') && lane === 'OFFSET_029_ATR_REGIME');
+  void tradeId;
+  void lane;
+  return false;
 }
 
 export function reductionAuditMatches(

@@ -35,8 +35,6 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
         "_position_protection_view",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
-            "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED": "OFFSET_029_ATR_PROTECTED",
-            "RESEARCH_LANE_OFFSET_029_ATR_REGIME": "OFFSET_029_ATR_REGIME",
             "_buf_float": lambda value, default=0.0: float(value or default),
             "offset029_policy": offset_policy,
         },
@@ -95,11 +93,6 @@ def test_patient_chase_pause_blocks_orders_but_tile_off_collects_policy_shadow()
     assert "start_replay_buffer" not in cancel_pending
 
 
-def test_offset_never_writes_type_b_ledger():
-    child = _function_source(BOT, "_record_type_b_research_v2_child")
-    assert LANE in child and child.index("return") < child.index("append_type_b_research_v2_event")
-
-
 def test_offset_outcome_cannot_use_scenario_c_profit_lock():
     begin = _function_source(BOT, "begin_approve_research")
     exits = _function_source(BOT, "_apply_position_exits")
@@ -113,14 +106,12 @@ def test_offset_outcome_cannot_use_scenario_c_profit_lock():
 
 def test_analyzer_excludes_preserved_policy_mismatch_rows():
     shadow_loader = _function_source(ANALYZER, "_load_shadow_lane_outcome_df")
-    type_b_report = _function_source(ANALYZER, "type_b_research_v2_report")
 
     assert "OFFSET_029_ATR_TP_25" in shadow_loader
-    assert '"OFFSET_029_ATR_PROTECTED"' in shadow_loader
+    assert '"OFFSET_029_ATR_PROTECTED"' not in shadow_loader
+    assert '"OFFSET_029_ATR_REGIME"' not in shadow_loader
     assert "policy_mismatch_rows_excluded" in shadow_loader
     assert "PATIENT_CHASE_SHADOW_POLICY_IDENTITY_MISSING" in shadow_loader
-    assert "policy_mismatch_events_excluded" in type_b_report
-    assert "OFFSET029_PAPER_ONLY_FORBIDS_TYPE_B_SHADOW_EVENTS" in type_b_report
 
 
 def test_shadow_loader_keeps_signed_patient_shadow_and_excludes_legacy_mismatch():
@@ -219,9 +210,10 @@ def test_offset_post_approve_path_bypasses_legacy_strategy_gates():
         "evaluate_evidence_entry_filter",
         "resolve_entry_margin_usdt",
     ):
-        call = process.index(legacy_gate)
-        preceding = process[max(0, call - 180):call]
-        assert "registered_offset_policy" in preceding, legacy_gate
+        if legacy_gate in process:
+            call = process.index(legacy_gate)
+            preceding = process[max(0, call - 180):call]
+            assert "registered_offset_policy" in preceding, legacy_gate
     assert "if not registered_offset_policy:\n                log_golden_stack_rejection" in process
     assert "if is_combo_execution_lane(research_lane) and not registered_offset_policy" in process
 
@@ -232,7 +224,7 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
         "_attach_patient_chase_routes",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
@@ -240,7 +232,7 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
     history = [{
         "shared_ai_call_id": "scan-1",
         "type_b_verdict": {"accepted": True},
-        "lane_verdicts": {"TYPE_B_HUNTER_V1": {"accepted": True}},
+        "lane_verdicts": {"RETIRED_TEST_LANE": {"accepted": True}},
     }]
     pending = [{
         "shared_ai_call_id": "scan-1",
@@ -277,7 +269,7 @@ def test_api_recovers_live_patient_child_identity_from_signal_snapshot():
         "_attach_patient_chase_routes",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
@@ -309,7 +301,7 @@ def test_api_counts_patient_order_even_when_parent_ai_identity_is_missing():
         "_attach_patient_chase_routes",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
@@ -336,7 +328,7 @@ def test_api_lifecycle_totals_do_not_double_count_same_trade_across_sources():
         "_attach_patient_chase_routes",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
@@ -456,7 +448,7 @@ def test_api_distinguishes_legacy_approved_no_order_from_pending():
         "_attach_patient_chase_routes",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
@@ -482,7 +474,7 @@ def test_sanitized_overlay_preserves_verified_patient_route():
         {
             "copy": __import__("copy"),
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_TYPE_B_HUNTER_V1": "TYPE_B_HUNTER_V1",
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
@@ -522,15 +514,13 @@ def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     assert "<th>AI explanation / block reason</th>" in source
     assert "formatPatientRoute(patientRoute)" in source
     assert "Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate" in source
-    assert "Baseline Patient Chase now:" in source
-    assert "Protected Tile 3/4 lifecycle totals are shown on their tiles" in source
+    assert "Patient Chase now:" in source
     assert "lifecycle row(s) are missing parent AI identity" in source
     assert "statRow('Pending', laneNow.pending || 0)" in source
     assert "statRow('Open', laneNow.open || 0)" in source
     assert "statRow('Closed', stats.real_fills" in source
     assert "statRow('Executed'" not in source
-    legacy_block = source.split("LEGACY_PATHWAY_LANES = (", 1)[1].split(")", 1)[0]
     order_block = source.split("PATHWAY_LANE_ORDER = (", 1)[1].split(")", 1)[0]
-    assert LANE not in legacy_block
+    assert "LEGACY_PATHWAY_LANES" not in source
     assert LANE in order_block
     assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in order_block

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
 from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
@@ -57,6 +57,18 @@ def protection_screen() -> list[dict[str, Any]]:
         add(f"ATR_TP_2.5_ATR_SL_{stop:g}", atr_sl=stop)
     add("ATR_TP_2.5_THESIS_12_HARD_30", thesis=-12, thesis_sec=300)
     add("ATR_TP_2.5_SCENARIO_C", thesis=-12, thesis_sec=300, ladder="scenario_c")
+    # Cross the Scenario C profit-lock ladder with volatility-sized initial
+    # stops.  Previously these dimensions were screened independently, which
+    # could not answer the user's profit-versus-drawdown question.  Keep the
+    # legacy Scenario C row above as the no-ATR-stop control.
+    for stop in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0):
+        add(
+            f"ATR_TP_2.5_SCENARIO_C_ATR_SL_{stop:g}",
+            atr_sl=stop,
+            thesis=-12,
+            thesis_sec=300,
+            ladder="scenario_c",
+        )
     for minutes in (30, 60, 90, 120):
         add(f"ATR_TP_2.5_TIME_{minutes}", time_stop=minutes)
     for arm in (2, 4, 6):
@@ -321,12 +333,18 @@ def _conservative_ohlc_prices(rows: Iterable[Mapping[str, Any]], *, direction: s
     return sorted(result, key=lambda row: row["ts"])
 
 
-def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: bool = False) -> dict[str, Any]:
+def evaluate_protection_screen(
+    inputs: list[dict[str, Any]],
+    *,
+    sealed_holdout: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     """Evaluate exact policies; return descriptive rows and gated candidates."""
     episodes_by_policy: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     policy_specs: dict[str, dict[str, Any]] = {}
     protections = protection_screen()
-    for source in inputs:
+    input_total = len(inputs)
+    for source_index, source in enumerate(inputs, start=1):
         episode_id = str(source.get("episode_id") or "")
         if not episode_id:
             continue
@@ -397,6 +415,17 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
                         "replay_path_basis": replay_path_basis,
                         "policy_outcomes": {policy_id: outcome},
                     }
+
+        if progress_callback is not None and (
+            source_index == 1 or source_index == input_total or source_index % 5 == 0
+        ):
+            progress_callback({
+                "phase": "PROTECTION_REPLAY",
+                "input_events_completed": source_index,
+                "input_events_total": input_total,
+                "protection_variants": len(protections),
+                "policies_materialized": len(episodes_by_policy),
+            })
 
     assessed = []
     policies_tested = max(1, len(episodes_by_policy))
@@ -476,6 +505,44 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
             eligible,
             key=lambda row: (-float(row["regime_breakdown"][regime].get("net_pnl_usd") or 0), abs(float(row.get("max_drawdown_usd") or 0)), str(row["policy_id"])),
         )[:10]
+    scenario_c_rows = [
+        row for row in assessed
+        if "|ATR_TP_2.5_SCENARIO_C" in str(row.get("policy_id") or "")
+    ]
+    scenario_c_by_stop: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in scenario_c_rows:
+        protection_id = str(row.get("policy_id") or "").split("|", 1)[-1]
+        stop_label = (
+            protection_id.rsplit("_ATR_SL_", 1)[-1]
+            if "_ATR_SL_" in protection_id
+            else "CONTROL_NO_ATR_STOP"
+        )
+        scenario_c_by_stop[stop_label].append(row)
+    scenario_c_sort_key = lambda row: (
+        -float(row.get("sealed_oos_net_usd") or 0),
+        abs(float(row.get("max_drawdown_usd") or 0)),
+        -float(row.get("expectancy_lcb_usd") or float("-inf")),
+        str(row.get("policy_id") or ""),
+    )
+    scenario_c_atr_stop_sweep = {
+        "qualification": "DESCRIPTIVE_ONLY",
+        "warning": (
+            "Ideal-touch replay comparison only; no stop or entry combination "
+            "is qualified without conservative execution and sealed OOS gates."
+        ),
+        "policies_tested": len(scenario_c_rows),
+        "leaders_by_stop": {
+            stop: sorted(rows, key=scenario_c_sort_key)[:5]
+            for stop, rows in sorted(
+                scenario_c_by_stop.items(),
+                key=lambda item: (
+                    item[0] == "CONTROL_NO_ATR_STOP",
+                    float(item[0]) if item[0] != "CONTROL_NO_ATR_STOP" else float("inf"),
+                ),
+            )
+        },
+        "overall_leaders": sorted(scenario_c_rows, key=scenario_c_sort_key)[:25],
+    }
     return {
         "schema": "safe_policy_candidate_screen_v3",
         "stage": "STAGE_1_PROTECTION_SCREEN",
@@ -487,5 +554,6 @@ def evaluate_protection_screen(inputs: list[dict[str, Any]], *, sealed_holdout: 
         "profit_capture_leaders": family_leaders,
         "drawdown_control_leaders": sorted(assessed, key=lambda row: (abs(float(row.get("max_drawdown_usd") or 0)), -float(row.get("sealed_oos_net_usd") or 0)))[:25],
         "dynamic_regime_leaders": dynamic_regime_leaders,
+        "scenario_c_atr_stop_sweep": scenario_c_atr_stop_sweep,
         "warning": "Descriptive rows use ideal-touch entry receipts and cannot qualify conservative execution or authorize live trading.",
     }

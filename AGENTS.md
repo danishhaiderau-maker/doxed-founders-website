@@ -31,13 +31,14 @@
 - If Bitfinex cannot accept this size or enforce its protection, fail closed; never silently round up or increase allocation, leverage, concurrent exposure, or risk limits.
 - Automatic restart or deploy is allowed only when its documented safety gates pass. Never force-close real exchange exposure.
 
-## Four-tile contract
+## Two-tile contract
 
 - Tile 1: Patient Chase baseline (`OFFSET_0.29_CHASE... | atr_tp_k2.5`).
 - Tile 2: Continuous benchmark.
-- Tile 3: protected static Patient Chase candidate with account-risk sizing, initial ATR stop, partial profit-taking, break-even, trailing runner, final ATR target, and time cap.
-- Tile 4: protected regime-adaptive Patient Chase candidate. Regime may change during a trade, but protection, risk, and position size must never widen after entry; every transition must be recorded.
-- Tiles 3 and 4 must remain fail-closed for live copy until the Bitfinex relay supports and proves idempotent reduce-only partial exits and reconciliation.
+- No rejected or retired experiment may remain registered with the live runtime,
+  relay, dashboard, analyzer current cohort, or monitoring allowlists. Historical
+  evidence remains immutable and quarantined as opaque archive data.
+- Create a new tile only after a policy has qualified evidence and explicit user approval.
 
 ## Cross-layer change rule
 

@@ -28,7 +28,7 @@ def test_v3_lane_policy_material_uses_executable_relay_allowlist():
     assert value.comparators[0].id == "PLATFORM_RELAY_ELIGIBLE_LANES"
 
 
-def test_configured_but_blocked_lanes_are_not_in_executable_allowlist():
+def test_relay_registry_contains_only_two_active_lanes():
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
     assignments = {
         target.id: node.value
@@ -40,7 +40,9 @@ def test_configured_but_blocked_lanes_are_not_in_executable_allowlist():
     }
     eligible = ast.unparse(assignments["PLATFORM_RELAY_ELIGIBLE_LANES"])
     configured = ast.unparse(assignments["PLATFORM_RELAY_CONFIGURED_LANES"])
+    assert "RESEARCH_LANE_CONTINUOUS" in eligible
+    assert "RESEARCH_LANE_OFFSET_029_ATR_TP_25" in eligible
     assert "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED" not in eligible
     assert "RESEARCH_LANE_OFFSET_029_ATR_REGIME" not in eligible
-    assert "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED" in configured
-    assert "RESEARCH_LANE_OFFSET_029_ATR_REGIME" in configured
+    assert "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED" not in configured
+    assert "RESEARCH_LANE_OFFSET_029_ATR_REGIME" not in configured

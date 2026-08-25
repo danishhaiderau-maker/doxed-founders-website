@@ -89,6 +89,46 @@ def test_preorder_ttl_is_no_order_but_submitted_expiry_is_not():
     assert len(writes) == 1
 
 
+def test_combo_execution_enqueue_freezes_shared_call_snapshot():
+    submitted = []
+
+    class Worker:
+        def submit(self, key, payload, source_ts=None):
+            submitted.append((key, payload, source_ts))
+            return True
+
+    namespace = {
+        "copy": copy,
+        "time": type("Clock", (), {"time": staticmethod(lambda: 123.0)}),
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: (ai_result or ctx)["shared_ai_call_id"],
+        "_get_combo_lane_execution_worker": lambda _lane: Worker(),
+        "logger": QuietLogger(),
+    }
+    enqueue = load_function("_enqueue_combo_lane_execution", namespace)
+    ctx = {"shared_ai_call_id": "scan-old", "nested": {"value": 1}}
+    ai = {"shared_ai_call_id": "scan-old", "direction": "LONG"}
+    assert enqueue(ctx, ai, 2.5, {"adx": 30}, "OFFSET_029_ATR_TP_25", "TEST")
+    ctx["shared_ai_call_id"] = "scan-new"
+    ctx["nested"]["value"] = 2
+    ai["shared_ai_call_id"] = "scan-new"
+
+    key, payload, source_ts = submitted[0]
+    assert key == "OFFSET_029_ATR_TP_25:scan-old"
+    assert payload["ctx"]["shared_ai_call_id"] == "scan-old"
+    assert payload["ctx"]["nested"]["value"] == 1
+    assert payload["ai"]["shared_ai_call_id"] == "scan-old"
+    assert source_ts == 123.0
+
+
+def test_ai_fanout_queues_lane_execution_instead_of_blocking_scheduler():
+    fanout = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "spawn_combo_lanes_from_ai_scan"),
+    )
+    assert "_enqueue_combo_lane_execution(" in fanout
+    assert "_spawn_combo_lane(" not in fanout
+
+
 def test_verdict_and_resolution_share_one_policy_material_builder():
     decision = ast.get_source_segment(
         SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)

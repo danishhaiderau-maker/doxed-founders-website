@@ -211,31 +211,21 @@ def test_nested_lock_order_has_no_new_inversions():
     assert visitor.pairs == expected
 
 
-def test_historical_ui_candidates_are_inventory_only():
+def test_retired_ui_candidates_are_not_registered():
     candidates = _manifest()["historical_ui_tile_candidates"]
-    assert candidates
-    assert all(row["action"] in {"inventory-only", "preserve-evidence"} for row in candidates)
+    assert candidates == []
     source = SOURCE.read_text(encoding="utf-8")
-    for label in ("Edge Acceleration", "Profit Gates", "tile2_counters"):
-        assert label in source
+    for label in ("Profit Gates", "tile2_counters"):
+        assert label not in source
 
 
-def test_retired_research_controls_are_read_only_and_truthfully_labelled():
+def test_retired_research_controls_are_physically_removed():
     functions = {
         node.name: node
         for node in _tree().body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    profit_toggle = ast.unparse(functions["toggle_profit_gates"])
-    tile_reset = ast.unparse(functions["api_tile2_reset_counters"])
-    tile_metrics = ast.unparse(functions["api_tile2_metrics"])
-    assert "RETIRED_RESEARCH_CONTROL" in profit_toggle
-    assert "save_persistent_config" not in profit_toggle
-    assert "state[" not in profit_toggle
-    assert "RETIRED_RESEARCH_CONTROL" in tile_reset
-    assert "reset_tile2_counters_for_fresh_holdout" not in tile_reset
-    assert "RETIRED_HISTORICAL" in tile_metrics
-    assert "mutable" in tile_metrics
+    assert {"toggle_profit_gates", "api_tile2_reset_counters", "api_tile2_metrics"}.isdisjoint(functions)
     source = SOURCE.read_text(encoding="utf-8")
     assert "safeText('tile2Metrics'" not in source
     assert "safeText('tile2DecisionSummary'" not in source

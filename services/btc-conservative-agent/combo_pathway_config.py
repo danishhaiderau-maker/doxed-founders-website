@@ -1,52 +1,15 @@
-"""
-Trading Genome Architecture v1 — frozen execution tiles.
-
-CONTINUOUS: permanent benchmark / scientific control group.
-
-Retired 2026-08-21:
-  TYPE_B_HUNTER_V1 — active tile and execution fan-out removed. Historical
-  specs and evidence remain readable for archive/analyzer compatibility.
-
-Retired 2026-07-30:
-  SR_MICRO_TILE_V2_STATIC — negative shadow expectancy; code/spec/history retained.
-
-Retired 2026-07-16 (v12 overhaul):
-  SR_MICRO_TILE_V1 — failed experiment (47% WR, negative PnL). Code preserved for reference.
-  SR_MICRO_TILE_V2 (full chase) — superseded by V2_STATIC; CSV preserved.
-
-Retired 2026-07-11:
-  SL_AVOIDANCE_V1 — 47% WR LAB, -$2.03, EV -$0.14/close (UNDERPERFORMING)
-  SIZED_CONTINUOUS_V1 — 31% WR LAB, -$81.08, EV -$0.84/close (UNDERPERFORMING)
-
-Retired 2026-07-08:
-  AI60_SP3_VIRTUAL_CHASE — TIES vs CONTINUOUS (no edge). CSV preserved.
-  A160_CONTEXT_CHASE_EXIT_V2 — 0 approves in shadow. CSV preserved.
-
-Earlier retired: COMBO_604_SP4_CHASE_3PLUS, COMBO_65_SP5 — historical data preserved.
-"""
+"""Two-lane paper architecture: Patient Chase plus Continuous benchmark."""
 from __future__ import annotations
 
-# Active experimental tiles share one frozen execution contract. CONTINUOUS is
-# configured separately as the benchmark; retired specs remain decode-only.
-from scenario_c_config import (
-    SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
-    SCENARIO_C_LEGACY_10_6_PROFILE_ID,
-    TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
-)
-
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
-
-# Historical research lane identifiers. They remain stable so immutable rows
-# and archived reports continue to decode after a lane is retired.
-RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
-RESEARCH_LANE_OFFSET_029_ATR_PROTECTED = "OFFSET_029_ATR_PROTECTED"
-RESEARCH_LANE_OFFSET_029_ATR_REGIME = "OFFSET_029_ATR_REGIME"
+
+# Temporary decode-only aliases for immutable legacy rows. They are deliberately
+# absent from COMBO_LANE_SPECS, COMBO_EXECUTION_LANES and tile display order.
+RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
 RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
 RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
-
-# Legacy constants — preserved for CSV/historical data references. No live execution.
 RESEARCH_LANE_COMBO_65_SP5_CHASE = "COMBO_65_SP5_CHASE_3PLUS"
 RESEARCH_LANE_COMBO_65_SP5_DIRECT = "COMBO_65_SP5_DIRECT"
 RESEARCH_LANE_COMBO_604_SP4_CHASE = "COMBO_604_SP4_CHASE_3PLUS"
@@ -59,15 +22,10 @@ RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
-# Retired lanes must never reappear as active tiles through stale persisted config.
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 COMBO_LANE_SPECS = {
@@ -119,192 +77,6 @@ COMBO_LANE_SPECS = {
             "Does OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5 retain positive "
             "out-of-sample EV under conservative paper execution?"
         ),
-    },
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
-        "label": "Protected Patient Chase · Static ATR risk",
-        "subtitle": "PAPER when ON; live copy blocked until partial-close relay support is verified",
-        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
-        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
-        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
-        "entry_mode": "IMMEDIATE", "is_benchmark": False,
-        "is_research_candidate": True, "is_legacy": False,
-        "is_independent_ai": False, "uses_shared_ai_direction": True,
-        "paper_only": False, "platform_relay_eligible": True,
-        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
-        "id_prefix": "o29ps", "entry_offset_pct": 0.29,
-        "initial_rest_sec": 600, "chase_windows": (2, 3, 4),
-        "chase_age_sec": (600, 1500), "chase_interval_sec": 60,
-        "chase_remaining_gap_step_pct": 25.0, "entry_ttl_sec": 1800,
-        "margin_usd": 0.25, "account_risk_pct": 0.5,
-        "initial_stop_atr_k": 1.0, "partial_targets_atr": (1.0, 1.5),
-        "partial_fractions": (0.25, 0.25), "break_even_arm_atr_k": 1.25,
-        "trailing_stop_atr_k": 1.0, "atr_tp_multiple": 2.5,
-        "path_end_sec": 7200, "exit_profile_id": "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5_120M_V1",
-        "hypothesis": "The Patient Chase entry can retain its edge while a complete ATR protection stack reduces drawdown.",
-        "research_question": "Does the static protected Patient Chase improve OOS return-to-drawdown under conservative fills?",
-    },
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
-        "label": "Protected Patient Chase · Dynamic regime",
-        "subtitle": "PAPER when ON; live copy blocked until partial-close relay support is verified; regime transitions may only tighten risk",
-        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
-        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
-        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
-        "entry_mode": "IMMEDIATE", "is_benchmark": False,
-        "is_research_candidate": True, "is_legacy": False,
-        "is_independent_ai": False, "uses_shared_ai_direction": True,
-        "paper_only": False, "platform_relay_eligible": True,
-        "relay_copy_readiness": "BLOCKED_PARTIAL_CLOSE_UNSUPPORTED",
-        "id_prefix": "o29rd", "entry_offset_pct": 0.29,
-        "initial_rest_sec": 600, "chase_windows": (2, 3, 4),
-        "chase_age_sec": (600, 1500), "chase_interval_sec": 60,
-        "chase_remaining_gap_step_pct": 25.0, "entry_ttl_sec": 1800,
-        "margin_usd": 0.25, "account_risk_pct": 0.5,
-        "regime_profiles": ("SIDEWAYS", "ORDINARY_TREND", "STRONG_ALIGNED_TREND"),
-        "regime_transition_rule": "continuous; stop/size/risk may only tighten, never widen",
-        "atr_tp_multiple": 2.5, "path_end_sec": 7200,
-        "exit_profile_id": "REGIME_ATR_PROTECTION_V1",
-        "hypothesis": "Pre-registered regime-aware protection improves capture without increasing initial account risk.",
-        "research_question": "Does dynamic protection beat the static protected control on chronological OOS risk-adjusted return?",
-    },
-    # =====================================================================
-    # Retired paper-research candidate: TYPE_B_HUNTER_V1.
-    # This entry is retained only for historical CSV/outcome decoding.
-    # =====================================================================
-    RESEARCH_LANE_TYPE_B_HUNTER_V1: {
-        "label": "Type B Hunter — shared direction / fixed policy",
-        "subtitle": (
-            "RESEARCH_CANDIDATE — one shared 3-minute direction call; "
-            "independent deterministic gate, orders, chase, and outcome ledger"
-        ),
-        "combo_key": "TYPE_B_HUNTER++PRE_ENTRY_SCORING_V2",
-        "ai_min": 0,
-        "ai_max": 101,
-        "spread_min": 2,
-        "spread_max": 99,
-        "entry_mode": "IMMEDIATE",
-        "is_benchmark": False,
-        "is_research_candidate": False,
-        "is_legacy": True,
-        "is_independent_ai": False,
-        "uses_shared_ai_direction": True,
-        "id_prefix": "tbhv1",
-        "module": "type_b_hunter_v1.py",
-        "ai_cadence_offset_sec": 0,
-        # Compatibility names remain, but TYPE_B uses the exact operator-approved
-        # eight-rung Scenario C policy. A distinct treatment requires its own
-        # explicit treatment signature and qualification evidence.
-        "ladder": TRAIL_LADDER_SCENARIO_C_LEGACY_10_6,
-        "ladder_label": SCENARIO_C_LEGACY_10_6_LADDER_LABEL,
-        "ladder_profile_id": SCENARIO_C_LEGACY_10_6_PROFILE_ID,
-        "promotion_criteria": (
-            "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
-            "(95pct CI) P(TYPE_B) >= 40pct WR >= 75pct"
-        ),
-        "kill_criteria": (
-            "ANY after >=75 closes: negative EV P(TYPE_B) < 35pct WR < 65pct "
-            "filter selectivity > 40pct"
-        ),
-        "hypothesis": (
-            "A pre-registered direction-aware feature gate may identify TYPE_B "
-            "outcomes prospectively; legacy LAB data is retained only as an archived baseline."
-        ),
-        "research_question": (
-            "Does the fixed pre-entry Type B policy beat CONTINUOUS on a walk-forward "
-            "holdout without using its own outcome labels for tuning?"
-        ),
-    },
-    RESEARCH_LANE_SR_MICRO_TILE_V1: {
-        # [RETIRED 2026-07-16 v12 overhaul] Failed experiment — 47% WR, negative PnL.
-        # Code file (sr_micro_tile_v1.py) preserved for reference. CSV/historical data
-        # decoding still works because the spec entry remains in COMBO_LANE_SPECS.
-        "label": "S/R Micro Tile V1 (RETIRED 2026-07-16)",
-        "subtitle": "RETIRED 2026-07-16 v12 overhaul -- 47pct WR, negative PnL. Code preserved.",
-        "combo_key": "SR_MICRO_TILE++MEAN_REVERSION_V1",
-        "is_legacy": True,
-    },
-    RESEARCH_LANE_SR_MICRO_TILE_V2: {
-        "label": "S/R Micro Tile V2 -- deterministic bracket (no AI)",
-        "subtitle": (
-            "RESEARCH_CANDIDATE SHADOW ONLY toggle ON = live bracket limits "
-            "LONG@micro_support + SHORT@micro_resistance midpoint envelope guard"
-        ),
-        "combo_key": "SR_MICRO_TILE++DETERMINISTIC_BRACKET_V2",
-        "ai_min": 0,
-        "ai_max": 101,
-        "spread_min": 0,
-        "spread_max": 99,
-        "entry_mode": "BRACKET_LIMIT",
-        "is_benchmark": False,
-        "is_research_candidate": True,
-        "is_independent_ai": False,
-        "is_deterministic_bracket": True,
-        "id_prefix": "srmv2",
-        "module": "sr_micro_tile_v2.py",
-        "bracket_tick_min_sec": 10,
-        "bracket_tick_max_sec": 30,
-        "extra_filters": {"adx_max": 40},
-        "promotion_criteria": (
-            "ALL required: >=150 shadow closes positive EV beats CONTINUOUS "
-            "(95pct CI) dual-leg bracket fill rate stable across 2+ regimes"
-        ),
-        "kill_criteria": (
-            "ANY after >=75 closes: negative EV fill rate < 40pct "
-            ">25pct trades blocked by midpoint envelope"
-        ),
-        "hypothesis": (
-            "Deterministic micro S/R bracket (no AI latency/cost) captures "
-            "range-bound mean-reversion with simultaneous long+short LAB replay."
-        ),
-    },
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: {
-        "label": "S/R Micro Tile V2 Static (retired)",
-        "subtitle": (
-            "RETIRED 2026-07-30 — negative shadow expectancy; historical audit only"
-        ),
-        "combo_key": "SR_MICRO_TILE++STATIC_LIMIT_BRACKET_V2",
-        "ai_min": 0,
-        "ai_max": 101,
-        "spread_min": 0,
-        "spread_max": 99,
-        "entry_mode": "BRACKET_LIMIT_STATIC",
-        "is_benchmark": False,
-        "is_research_candidate": True,
-        "is_independent_ai": False,
-        "is_deterministic_bracket": True,
-        "chase_mode": "STATIC",
-        "max_chases": 0,
-        "id_prefix": "srmv2s",
-        "module": "sr_micro_tile_v2.py",
-        "bracket_tick_min_sec": 10,
-        "bracket_tick_max_sec": 30,
-        "extra_filters": {"adx_max": 40},
-        "promotion_criteria": (
-            "Dual-leg paper cohort requires >=75 reconciled filled closes, positive "
-            "holdout EV, and no material degradation versus CONTINUOUS"
-        ),
-        "kill_criteria": (
-            "ANY after >=50 reconciled filled closes: negative holdout EV or fill rate <25pct"
-        ),
-        "hypothesis": (
-            "Resting limits at exact support/resistance may preserve entry quality "
-            "for range-bound micro S/R mean reversion without chasing price."
-        ),
-        "research_question": (
-            "Does STATIC resting limit deliver positive out-of-sample EV while staying paper-only?"
-        ),
-    },
-    # [RETIRED 2026-07-11] Stub entries for CSV/historical data compatibility only
-    RESEARCH_LANE_SL_AVOIDANCE_V1: {
-        "label": "SL Avoidance V1 (RETIRED)",
-        "subtitle": "RETIRED 2026-07-11 -- LAB: 47pct WR, -$2.03, EV -$0.14/close",
-        "combo_key": "SL_AVOIDANCE++DATA_GROUNDED_V1",
-        "is_legacy": True,
-    },
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1: {
-        "label": "SIZED_CONTINUOUS V1 (RETIRED)",
-        "subtitle": "RETIRED 2026-07-11 -- LAB: 31pct WR, -$81.08, EV -$0.84/close",
-        "combo_key": "SIZED_CONTINUOUS++SESSION_SIZE_V1",
-        "is_legacy": True,
     },
 }
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"

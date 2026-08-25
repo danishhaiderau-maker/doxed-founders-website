@@ -117,4 +117,45 @@ def test_private_read_audit_remains_available_in_forced_paper_mode():
     assert audit["open_position_count"] == 0
     assert audit["error"] is None
     assert private_read.call_count == 3
-    assert all(call.kwargs["max_attempts"] == 1 for call in private_read.call_args_list)
+    assert all(call.kwargs["max_attempts"] == 4 for call in private_read.call_args_list)
+
+
+def test_exchange_retry_recovers_from_transient_nonce_race():
+    attempts = iter(
+        [
+            bot.ccxt.ExchangeError("bitfinex nonce: small"),
+            bot.ccxt.ExchangeError("bitfinex nonce: small"),
+            {"ok": True},
+        ]
+    )
+
+    def request():
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    with mock.patch.object(bot.time, "sleep") as sleep:
+        result = bot._exchange_call_with_retry(
+            request,
+            label="NONCE_RACE_TEST",
+            max_attempts=4,
+        )
+
+    assert result == {"ok": True}
+    assert sleep.call_count == 2
+
+
+def test_exchange_retry_does_not_mask_non_transient_exchange_error():
+    def request():
+        raise bot.ccxt.ExchangeError("bitfinex insufficient balance")
+
+    with mock.patch.object(bot.time, "sleep") as sleep:
+        try:
+            bot._exchange_call_with_retry(request, max_attempts=4)
+        except bot.ccxt.ExchangeError as exc:
+            assert "insufficient balance" in str(exc)
+        else:  # pragma: no cover - protects the fail-closed contract.
+            raise AssertionError("non-transient exchange error was swallowed")
+
+    sleep.assert_not_called()
