@@ -1057,9 +1057,13 @@ def _lane_rows():
                 }
         lab = lab_ledger.get(lane) or {}
         opp = opp_stats.get(lane) or {}
+        # Executed paper closes and lab/counterfactual terminals are different
+        # evidence classes.  Never use the lab ledger as an executed-fill
+        # fallback: doing so made an OFF benchmark appear to have paper fills.
         fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or 0)
-        if not fills and lab.get("closes"):
-            fills = int(lab.get("closes") or 0)
+        counterfactual_closes = int(
+            m.get("lab_closes") or m.get("lab_rows") or lab.get("closes") or 0
+        )
         approves = int(m.get("approves") or 0)
         opp_appr = int(opp.get("approves") or 0)
         orders_submitted = int(opp.get("orders_submitted") or 0)
@@ -1078,8 +1082,11 @@ def _lane_rows():
         costly_blocks = float(m.get("costly_blocks_usd") or 0)
         good_blocks_saved = float(m.get("good_blocks_saved_usd") or 0)
         pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or 0)
-        if abs(pnl) < 1e-9 and lab.get("net_pnl_usd") is not None and fills:
-            pnl = float(lab.get("net_pnl_usd") or 0)
+        counterfactual_pnl = float(
+            m.get("lab_net_pnl")
+            if m.get("lab_net_pnl") is not None
+            else lab.get("net_pnl_usd") or 0
+        )
         ev = float(m.get("per_approve_ev") or 0)
         at_fills = int(all_time.get("real_fills") or 0)
         at_pnl = float(all_time.get("net_pnl_real") or 0)
@@ -1125,6 +1132,12 @@ def _lane_rows():
         rows.append({
             "lane": lane,
             "trades": fills,
+            "executed_closes": fills,
+            "counterfactual_closes": counterfactual_closes,
+            "counterfactual_pnl": round(counterfactual_pnl, 2),
+            "counterfactual_ev_per_close": round(
+                counterfactual_pnl / counterfactual_closes, 2
+            ) if counterfactual_closes else 0.0,
             "v2_checker_pass_sims": int(m.get("v2_checker_pass_sims") or 0),
             "v2_reject_counterfactual_sims": int(m.get("v2_reject_counterfactual_sims") or 0),
             "v2_metrics_note": m.get("v2_metrics_note") or "",
@@ -3872,7 +3885,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <section id="sec-lanes">
     <h2>Current Lane Analysis</h2>
     <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
-    <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Fills</th><th>Net PnL</th><th>EV / approval</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual results never count as fills, executed PnL, or strategy qualification.</p>
+    <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-regime">
     <h2>Regime Leaderboard</h2>
@@ -4336,9 +4350,10 @@ async function loadLanes() {
   if (noteCurrent) noteCurrent.textContent = current.lane_filter_note || noteCurrent.textContent;
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
     `<tr><td>${row.lane || row.research_lane || ''}</td><td>${row.status || row.pathway_status || 'COLLECTING'}</td>`
-    + `<td>${row.approves || 0}</td><td>${row.trades || row.fills || 0}</td>`
-    + `<td>$${fmtUsd(row.pnl || 0)}</td><td>$${fmtUsd(row.ev || 0)}</td></tr>`
-  ).join('') || '<tr><td colspan="6">No current-lane evidence yet.</td></tr>';
+    + `<td>${row.approves || 0}</td><td>${row.executed_closes || 0}</td>`
+    + `<td>$${fmtUsd(row.pnl || 0)}</td><td>$${fmtUsd(row.ev || 0)}</td>`
+    + `<td>${row.counterfactual_closes || 0}</td><td>$${fmtUsd(row.counterfactual_pnl || 0)}</td></tr>`
+  ).join('') || '<tr><td colspan="8">No current-lane evidence yet.</td></tr>';
   return;
 }async function loadChase() {
   const r = await fetch('/api/chase' + chaseLaneQuery());

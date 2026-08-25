@@ -4,6 +4,7 @@ import pandas as pd
 
 import analyzer_research_engine_v62 as analyzer
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
+from research import research_dashboard as dashboard
 
 
 ROOT = Path(__file__).resolve().parent
@@ -47,6 +48,52 @@ def test_dashboard_has_only_current_lane_routes_and_loaders():
     assert '"/partial-reduction"' in DASHBOARD
     assert '"/api/partial-reduction"' in DASHBOARD
     assert "def api_partial_reduction()" in DASHBOARD
+
+
+def test_current_lane_table_separates_executed_and_counterfactual_evidence():
+    assert '"executed_closes": fills' in DASHBOARD
+    assert '"counterfactual_closes": counterfactual_closes' in DASHBOARD
+    assert "if not fills and lab.get(\"closes\")" not in DASHBOARD
+    assert "lab.get(\"net_pnl_usd\") is not None and fills" not in DASHBOARD
+    assert "<th>Executed closes</th>" in DASHBOARD
+    assert "<th>Counterfactual terminals</th>" in DASHBOARD
+    assert "Counterfactual results never count as fills" in DASHBOARD
+
+
+def test_lab_ledger_cannot_be_promoted_to_executed_lane_results(monkeypatch, tmp_path):
+    reports = {
+        "benchmark_vs_lanes_report.json": {
+            "benchmark_lane": "CONTINUOUS",
+            "lanes": {
+                "CONTINUOUS": {
+                    "approves": 4,
+                    "real_fills": 0,
+                    "net_pnl_real": 0.0,
+                    "per_approve_ev": 0.0,
+                }
+            },
+        },
+        "lane_pnl_ledger.json": {"lanes": {}},
+        "lane_lab_pnl_ledger.json": {
+            "lanes": {
+                "CONTINUOUS": {
+                    "closes": 9,
+                    "net_pnl_usd": 3.75,
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_read_json", lambda name: reports.get(name, {}))
+    monkeypatch.setattr(dashboard, "_opportunity_lane_stats", lambda: {})
+
+    rows, _ = dashboard._lane_rows()
+    continuous = next(row for row in rows if row["lane"] == "CONTINUOUS")
+
+    assert continuous["executed_closes"] == 0
+    assert continuous["pnl"] == 0.0
+    assert continuous["counterfactual_closes"] == 9
+    assert continuous["counterfactual_pnl"] == 3.75
 
 
 def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():
