@@ -56,6 +56,9 @@ const ownerFetchAttempts = Math.max(
 const botUrls = requireCanonicalFlyOwner
   ? [CANONICAL_FLY_OWNER_URL]
   : [
+      // The deployed Fly owner is authoritative and must be attempted before
+      // any workstation-era URL retained in an old vault.
+      CANONICAL_FLY_OWNER_URL,
       process.env.SHOWCASE_OWNER_URL?.trim(),
       process.env.TRADING_AGENT_BOT_URL?.trim(),
       resolveHomeBotPublicUrl(),
