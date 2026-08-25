@@ -31,14 +31,33 @@
 - If Bitfinex cannot accept this size or enforce its protection, fail closed; never silently round up or increase allocation, leverage, concurrent exposure, or risk limits.
 - Automatic restart or deploy is allowed only when its documented safety gates pass. Never force-close real exchange exposure.
 
-## Two-tile contract
+## Registry-driven tile lifecycle
 
-- Tile 1: Patient Chase baseline (`OFFSET_0.29_CHASE... | atr_tp_k2.5`).
-- Tile 2: Continuous benchmark.
-- No rejected or retired experiment may remain registered with the live runtime,
-  relay, dashboard, analyzer current cohort, or monitoring allowlists. Historical
-  evidence remains immutable and quarantined as opaque archive data.
-- Create a new tile only after a policy has qualified evidence and explicit user approval.
+- `services/btc-conservative-agent/combo_pathway_config.py` is the sole canonical
+  active-tile registry. Runtime, API, production dashboard, collector, mirror,
+  analyzer, monitoring, and tests must derive their roster from it; do not add a
+  second hard-coded tile list.
+- Current registered tiles are Patient Chase baseline, Continuous benchmark, and
+  Protected W234 paper research. The number of tiles is not an architecture
+  constant; the frozen toggle/paper/relay/identity rules above are.
+- Adding a tile requires one registry specification with a unique lane, policy
+  signature, ID prefix, toggle key, default state, relay eligibility, and complete
+  entry/exit/risk metadata, followed by registry validation, cross-layer tests,
+  signal-engine parity, analyzer parity, and rendered visual QA.
+- Retiring a tile requires removing it from the active registry and display order,
+  adding its lane token to `RETIRED_TILE_LANES` for at least one release, deleting
+  its runtime/API/UI/analyzer/monitoring implementation and dedicated tests, and
+  proving no executable or current-cohort reference remains. Merely hiding its
+  card or disabling its toggle is not retirement.
+- Generic platform stability, lifecycle, reconciliation, evidence, and safety
+  primitives must be retained when a policy tile is retired. Policy-specific dead
+  paths must be deleted so obsolete experiments cannot accumulate.
+- Historical evidence is immutable, quarantined, and readable only as opaque
+  archive data; it must never keep retired execution code or current analyzer
+  cohorts alive.
+- Create or promote a new relay-capable tile only after explicit user approval and
+  the applicable qualification and technical-readiness gates pass. New research
+  tiles default to paper-only and relay-ineligible.
 
 ## Cross-layer change rule
 
