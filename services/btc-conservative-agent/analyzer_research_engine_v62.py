@@ -3168,8 +3168,6 @@ def _shadow_block_prefix(br) -> str:
         return "WOULD_BLOCK"
     if s.startswith("WOULD_FAIL"):
         return "WOULD_FAIL"
-    if s.startswith("PROFIT_GATE"):
-        return "PROFIT_GATE"
     if s.startswith("CLUSTER"):
         return "CLUSTER"
     if s.startswith("SOFT_REJECT"):
@@ -3183,7 +3181,6 @@ def _is_blocked_approve_lane(br) -> bool:
     return (
         s.startswith("WOULD_BLOCK")
         or s.startswith("WOULD_FAIL")
-        or s.startswith("PROFIT_GATE")
         or s.startswith("CLUSTER")
     )
 
@@ -3198,14 +3195,14 @@ def _assign_shadow_lane(block_reason_series: pd.Series) -> pd.Series:
 
 
 def _print_block_prefix_subtotals(df: pd.DataFrame, pnl_col: str = "net_pnl_usd", label: str = "Blocked APPROVE"):
-    """Subtotals by WOULD_BLOCK / WOULD_FAIL / CLUSTER / PROFIT_GATE for REAL EDGE reporting."""
+    """Subtotals by active generic block prefixes for REAL EDGE reporting."""
     if df is None or df.empty or "block_reason" not in df.columns:
         return
     work = df.copy()
     work["_prefix"] = work["block_reason"].map(_shadow_block_prefix)
     work[pnl_col] = pd.to_numeric(work.get(pnl_col), errors="coerce")
     rows = []
-    for prefix in ("WOULD_BLOCK", "WOULD_FAIL", "CLUSTER", "PROFIT_GATE", "other"):
+    for prefix in ("WOULD_BLOCK", "WOULD_FAIL", "CLUSTER", "other"):
         sub = work[work["_prefix"] == prefix]
         if sub.empty:
             continue
@@ -3314,7 +3311,7 @@ def shadow_approve_pnl_analysis(decisions, trades, blocked, session: dict = None
     soft_shadow = blocked_shadow[blocked_shadow["shadow_lane"] == "soft_reject"]
     other_shadow = blocked_shadow[blocked_shadow["shadow_lane"] == "other"]
     print(
-        f"  Split: blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER/PROFIT_GATE): {len(gate_shadow)} | "
+        f"  Split: blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER): {len(gate_shadow)} | "
         f"soft rejects (SOFT_REJECT:*): {len(soft_shadow)} | other: {len(other_shadow)} {PIPELINE_ENFORCEMENT_TAG}"
     )
     if len(soft_shadow) > 0:
@@ -3322,7 +3319,7 @@ def shadow_approve_pnl_analysis(decisions, trades, blocked, session: dict = None
             f"  ℹ️ SOFT_REJECT shadows simulate AI-rejected signals — not blocked APPROVEs. "
             f"Use WOULD_BLOCK_* rows for gate-cost analysis. {PIPELINE_ENFORCEMENT_TAG}"
         )
-    _print_shadow_pnl_summary(gate_shadow, "Blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER/PROFIT_GATE)")
+    _print_shadow_pnl_summary(gate_shadow, "Blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER)")
     if not soft_shadow.empty:
         _print_shadow_pnl_summary(soft_shadow, "Soft rejects (SOFT_REJECT:*)")
     if not other_shadow.empty:
@@ -8900,7 +8897,7 @@ def _shadow_fill_capacity_hit(funnel_rec, block_reason) -> bool:
 
 def _shadow_fill_gate_hit(block_reason) -> bool:
     br = str(block_reason or "")
-    if br.startswith(("WOULD_FAIL", "WOULD_BLOCK", "PROFIT_GATE", "LONG_BLOCKED")):
+    if br.startswith(("WOULD_FAIL", "WOULD_BLOCK", "LONG_BLOCKED")):
         return True
     u = br.upper()
     return any(tok in u for tok in ("CHOP", "MOMENTUM", "SPREAD", "GOLDEN_STACK", "ADX", "STRUCTURE"))

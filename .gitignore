@@ -257,7 +257,7 @@ tmp/
 # Local walkthrough videos (not committed)
 docs/*.mp4
 
-# V2 research prompt drafts (source constants live in a160_v2_research.py)
+# Local BTC research drafts and generated reports
 services/btc-conservative-agent/tmp_*.md
 services/btc-conservative-agent/tmp_research_*.json
 services/btc-conservative-agent/research/*.json
@@ -308,8 +308,6 @@ services/btc-conservative-agent/past_analysis/
 /decisions_3factor.csv
 /execution_funnel.jsonl*
 /lane_opportunity_capture.jsonl*
-/type_b_adx_v3_shadow_decisions.jsonl*
-/type_b_research_v2.jsonl*
 *.log.*
 *.jsonl.tmp
 *.jsonl.*.tmp
@@ -338,7 +336,6 @@ services/btc-conservative-agent/past_analysis/
 /runtime_pathway_integrity.json
 /shadow_vs_live_entry_report.json
 /tile_independence_report.json
-/type_b_execution_audit.json
 /*_report.json
 /*_validation.json
 /trend_health.csv
