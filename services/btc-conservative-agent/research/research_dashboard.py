@@ -67,6 +67,7 @@ try:
         COMPARISON_BENCHMARK_LANE,
         EXECUTION_FIX_VERSION as EXPECTED_BOT_VERSION,
         RESEARCH_DASHBOARD_VERSION,
+        active_tile_registry_signature,
     )
     from pathway_lane_roster import (
         ANALYZER_COMPARE_LANES,
@@ -84,6 +85,9 @@ except ImportError:
     ALL_PATHWAY_LANES = tuple(sorted(CURRENT_RESEARCH_LANES))
     DASHBOARD_PATHWAY_LANES = ALL_PATHWAY_LANES
     DASHBOARD_PRIMARY_LANES = ALL_PATHWAY_LANES
+
+    def active_tile_registry_signature() -> str:
+        return "unknown"
 
     def is_ai_focused_lane(lane: str) -> bool:
         u = str(lane or "").upper().strip()
@@ -1709,6 +1713,27 @@ def _pathway_audit_payload():
     exit_val = receipts["exit_reports_validation.json"][0]
     sync = _read_report("repo_version_sync.json")
     bot_sync = _read_report("bot_analyzer_sync.json")
+    manifest = _read_json(REPORT_MANIFEST_FILE) or {}
+    manifest_sync = manifest.get("analyzer_sync_id")
+    manifest_registry = manifest.get("tile_registry_signature")
+    expected_registry = active_tile_registry_signature()
+    current_sync = {
+        "status": "CURRENT_MATCH" if (
+            manifest_sync == EXPECTED_ANALYZER_SYNC_ID
+            and manifest_registry == expected_registry
+        ) else "CURRENT_MISMATCH",
+        "matches": bool(
+            manifest_sync == EXPECTED_ANALYZER_SYNC_ID
+            and manifest_registry == expected_registry
+        ),
+        "generated_at": manifest.get("generated_at"),
+        "generation_revision": manifest.get("generation_revision"),
+        "epoch_id": (manifest.get("fresh_epoch") or {}).get("epoch_id"),
+        "analyzer_sync_id": manifest_sync,
+        "expected_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
+        "tile_registry_signature": manifest_registry,
+        "expected_tile_registry_signature": expected_registry,
+    }
     return {
         "tile_independence": tiles,
         "ai_scan_independence": ai_scan,
@@ -1719,6 +1744,7 @@ def _pathway_audit_payload():
         "exit_reports_validation": exit_val,
         "version_sync": sync,
         "bot_analyzer_sync": bot_sync,
+        "current_sync": current_sync,
         "analyzer_integrity": receipts[ANALYZER_INTEGRITY_FILE][0],
         "receipt_status": {name: meta for name, (_payload, meta) in receipts.items()},
         "expected_bot_version": EXPECTED_BOT_VERSION,
@@ -2438,10 +2464,11 @@ def _research_page(title: str, endpoint: str, mode: str):
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title }}</title><style>
-body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}
-.wrap{max-width:1500px;margin:auto}.note{padding:14px;border:1px solid #8b6f19;background:#2d260f;border-radius:8px}
-.kpis{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}.kpi{background:#161b22;border:1px solid #30363d;padding:12px;border-radius:8px;min-width:170px}
-table{width:100%;border-collapse:collapse;background:#161b22}th,td{padding:9px;border:1px solid #30363d;text-align:left;font-size:13px}th{background:#21262d}.bad{color:#f2cc60}.good{color:#3fb950}
+*{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden}body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}
+.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;overflow:hidden}.note{max-width:100%;overflow-wrap:anywhere;padding:14px;border:1px solid #8b6f19;background:#2d260f;border-radius:8px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr));gap:12px;margin:16px 0}.kpi{min-width:0;overflow-wrap:anywhere;background:#161b22;border:1px solid #30363d;padding:12px;border-radius:8px}
+table{display:block;width:100%;max-width:100%;overflow-x:auto;border-collapse:collapse;background:#161b22}th,td{padding:9px;border:1px solid #30363d;text-align:left;font-size:13px;white-space:nowrap}th{background:#21262d}.bad{color:#f2cc60}.good{color:#3fb950}
+@media(max-width:600px){body{padding:12px}.kpis{grid-template-columns:minmax(0,1fr)}h1{font-size:1.45rem}}
 </style></head><body><div class="wrap"><p><a href="/">← Research Dashboard</a></p><h1>{{ title }}</h1>
 <div id="note" class="note">Loading current-epoch evidence…</div><div id="kpis" class="kpis"></div><table><thead id="head"></thead><tbody id="body"></tbody></table></div>
 <script>
@@ -2486,6 +2513,92 @@ def dynamic_policy_page():
 @app.route("/shadow-research")
 def shadow_policy_page():
     return _research_page("Shadow and Rejected-Opportunity Research", "/api/shadow-policy-research", "shadow")
+
+
+def _v31_evidence_payload(kind: str) -> dict:
+    report = dict(_read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {})
+    screen = report.get("candidate_screen") or {}
+    collection = report.get("collection") or {}
+    base = {
+        "schema": f"v31_{kind}_dashboard_v1",
+        "status": "DESCRIPTIVE_ONLY",
+        "qualification": report.get("qualification") or "NO_SAFE_QUALIFIED_POLICY",
+        "live_policy_change_allowed": False,
+        "epoch_id": report.get("epoch_id") or (report.get("epoch_scope") or {}).get("selected_epoch_id"),
+        "generated_at": report.get("generated_at"),
+        "blockers": report.get("blockers") or ["CURRENT_V3_1_EVIDENCE_IMMATURE"],
+    }
+    if kind == "risk_drawdown":
+        rows = screen.get("drawdown_control_leaders") or screen.get("descriptive_top_100") or []
+        return {**base, "rows": rows[:100], "warning": "Risk metrics are descriptive current-epoch evidence; no row authorizes live trading."}
+    if kind == "chronological_oos":
+        return {
+            **base,
+            "rows": (screen.get("descriptive_top_100") or [])[:100],
+            "warning": "Chronological train/OOS rows remain blocked until sealed holdout, regime coverage, independence and minimum-episode gates pass.",
+        }
+    if kind == "maturity":
+        return {
+            **base,
+            "collection": collection,
+            "unique_policies_evaluated": screen.get("unique_policies_evaluated") or 0,
+            "qualified_policies": len(report.get("qualified_policies") or []),
+            "warning": "Opportunity counts, execution rows and terminal lifecycles are separate denominators; they must not be presented as interchangeable trades.",
+        }
+    _old_exit, old_meta = _read_contract_receipt("exit_reports_validation.json")
+    return {
+        **base,
+        "status": "NOT_PROVEN",
+        "relay_eligible": False,
+        "tiles": {
+            "OFFSET_029_ATR_PROTECTED": "FAIL_CLOSED",
+            "OFFSET_029_ATR_REGIME": "FAIL_CLOSED",
+        },
+        "gates": {
+            "idempotent_reduce_only_partial_exits": False,
+            "correct_remaining_quantity": False,
+            "retry_duplicate_prevention": False,
+            "exchange_reconciliation": False,
+            "restart_recovery": False,
+            "terminal_pnl_reconciliation": False,
+        },
+        "legacy_receipt": old_meta,
+        "warning": "No current signed V3.1 partial-reduction lifecycle proves relay safety. Historical receipts are retained only as stale contract evidence.",
+    }
+
+
+def _v31_evidence_page(title: str, endpoint: str, kind: str):
+    return render_template_string("""
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }}</title>
+<style>*{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden}body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;overflow:hidden}.banner,.card{min-width:0;max-width:100%;overflow-wrap:anywhere;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.banner{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}.scroll{display:block;width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px;border:1px solid #30363d;text-align:left;white-space:nowrap;font-size:13px}th{background:#21262d}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:minmax(0,1fr)}h1{font-size:1.45rem}}</style></head>
+<body><div class="wrap"><p><a href="/">← Research Dashboard</a></p><h1>{{ title }}</h1><div id="banner" class="banner">Loading current signed V3.1 evidence…</div><div id="grid" class="grid"></div><div class="card"><div class="scroll"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div><pre id="detail"></pre></div></div>
+<script>const kind={{ kind|tojson }};fetch({{ endpoint|tojson }}).then(r=>r.json()).then(d=>{document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · '+(d.warning||'');const c=d.collection||{};let cards=[['Epoch',d.epoch_id||'—'],['Generated',d.generated_at||'—'],['Live policy changes',d.live_policy_change_allowed?'YES':'NO']];let rows=[];if(kind==='maturity'){cards=cards.concat([['Independent opportunities',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Execution rows',c.execution_rows||0],['Provisional lifecycles',c.provisional_lifecycles||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Policies evaluated',d.unique_policies_evaluated||0],['Qualified policies',d.qualified_policies||0]]);document.getElementById('head').innerHTML='<tr><th>Evidence blocker</th></tr>';rows=(d.blockers||[]).map(x=>'<tr><td>'+x+'</td></tr>');}else if(kind==='partial_reduction'){cards=cards.concat([['Relay eligible',d.relay_eligible?'YES':'NO']]);document.getElementById('head').innerHTML='<tr><th>Safety gate</th><th>Passed</th></tr>';rows=Object.entries(d.gates||{}).map(([k,v])=>'<tr><td>'+k+'</td><td>'+ (v?'PASS':'NOT PROVEN')+'</td></tr>');}else{document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Family</th><th>Total episodes</th><th>OOS episodes</th><th>OOS net</th><th>Max drawdown</th><th>CVaR95</th><th>Failed gates</th></tr>';rows=(d.rows||[]).map(x=>'<tr><td>'+String(x.policy_id||'—')+'</td><td>'+String(x.policy_family||'—')+'</td><td>'+String(x.episodes_total??'—')+'</td><td>'+String(x.oos_episodes??'—')+'</td><td>'+String(x.sealed_oos_net_usd??'—')+'</td><td>'+String(x.max_drawdown_usd??'—')+'</td><td>'+String(x.cvar95_usd??'—')+'</td><td>'+Object.entries(x.gates||{}).filter(y=>y[1]!==true).map(y=>y[0]).join(', ')+'</td></tr>');}document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div>'+x[1]+'</div></div>').join('');document.getElementById('rows').innerHTML=rows.join('')||'<tr><td colspan="8">No current qualified evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,legacy_receipt:d.legacy_receipt,tiles:d.tiles},null,2);}).catch(e=>{document.getElementById('banner').textContent='LOAD FAILED · '+e;});</script></body></html>
+""", title=title, endpoint=endpoint, kind=kind)
+
+
+@app.route("/api/risk-drawdown")
+def api_risk_drawdown(): return jsonify(_v31_evidence_payload("risk_drawdown"))
+
+@app.route("/risk-drawdown")
+def risk_drawdown_page(): return _v31_evidence_page("V3.1 Risk and Drawdown", "/api/risk-drawdown", "risk_drawdown")
+
+@app.route("/api/chronological-oos")
+def api_chronological_oos(): return jsonify(_v31_evidence_payload("chronological_oos"))
+
+@app.route("/chronological-oos")
+def chronological_oos_page(): return _v31_evidence_page("V3.1 Chronological OOS", "/api/chronological-oos", "chronological_oos")
+
+@app.route("/api/evidence-maturity")
+def api_evidence_maturity(): return jsonify(_v31_evidence_payload("maturity"))
+
+@app.route("/evidence-maturity")
+def evidence_maturity_page(): return _v31_evidence_page("V3.1 Evidence Maturity", "/api/evidence-maturity", "maturity")
+
+@app.route("/api/partial-reduction")
+def api_partial_reduction(): return jsonify(_v31_evidence_payload("partial_reduction"))
+
+@app.route("/partial-reduction")
+def partial_reduction_page(): return _v31_evidence_page("V3.1 Partial-Reduction Reconciliation", "/api/partial-reduction", "partial_reduction")
 
 
 @app.route("/api/summary")
@@ -3714,7 +3827,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="cohort-note"></p>
     <h2>Best Policy Research</h2>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
-    <p class="note"><a href="/safe-policy-genome-v3.1">Safe Policy Genome V3.1</a> · <a href="/static-policies">Static profitable-policy research</a> · <a href="/dynamic-policies">Dynamic market-regime research</a> · <a href="/shadow-research">Shadow and rejected-opportunity research</a></p>
+    <p class="note"><strong>V3.1 evidence:</strong> <a href="/safe-policy-genome-v3.1">Safe Policy Genome</a> · <a href="/static-policies">Static policies</a> · <a href="/dynamic-policies">Dynamic/regime</a> · <a href="/shadow-research">Shadow paths</a> · <a href="/risk-drawdown">Risk/drawdown</a> · <a href="/chronological-oos">Chronological OOS</a> · <a href="/evidence-maturity">Evidence maturity</a> · <a href="/partial-reduction">Partial-reduction reconciliation</a></p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
@@ -4387,6 +4500,7 @@ async function loadPathwayAudit() {
   const ev = d.exit_reports_validation || {};
   const vs = d.version_sync || {};
   const bas = d.bot_analyzer_sync || {};
+  const currentSync = d.current_sync || {};
   const ais = d.analyzer_integrity || {};
   const receiptStatus = d.receipt_status || {};
   const receiptLabel = (name, payload) => {
@@ -4403,7 +4517,9 @@ async function loadPathwayAudit() {
     ['Bot expected', d.expected_bot_version || 'n/a'],
     ['Analyzer expected', d.expected_analyzer_sync_id || 'n/a'],
     ['Exchange', d.expected_exchange || 'bitfinex'],
-    ['Bot↔Analyzer', bas.verdict || 'n/a'],
+    ['Current analyzer↔registry', currentSync.status || 'CURRENT STATUS UNAVAILABLE'],
+    ['Current revision', currentSync.generation_revision || 'n/a'],
+    ['Current epoch', currentSync.epoch_id || 'n/a'],
     ['Analyzer integrity', ais.report_status || (ais.valid === true ? 'VALID' : 'n/a')],
     ['Tile independence', receiptLabel('tile_independence_report.json', ti)],
     ['AI scan path', receiptLabel('ai_scan_independence_report.json', ai)],

@@ -24,6 +24,10 @@ def test_primary_analyzer_routes_and_links_render_without_dead_ends():
         "/static-policies": b"Static Profitable Policy Research",
         "/dynamic-policies": b"Dynamic Market-Regime Policy Research",
         "/shadow-research": b"Shadow and Rejected-Opportunity Research",
+        "/risk-drawdown": b"V3.1 Risk and Drawdown",
+        "/chronological-oos": b"V3.1 Chronological OOS",
+        "/evidence-maturity": b"V3.1 Evidence Maturity",
+        "/partial-reduction": b"V3.1 Partial-Reduction Reconciliation",
     }
     for route, marker in routes.items():
         response = client.get(route)
@@ -62,6 +66,43 @@ def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     assert ".kpis { grid-template-columns: minmax(0, 1fr); }" in source
     page = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)
     assert 'name="viewport"' in page
+    for route in ("/static-policies", "/dynamic-policies", "/shadow-research", "/risk-drawdown", "/chronological-oos", "/evidence-maturity", "/partial-reduction"):
+        page = dashboard.app.test_client().get(route).get_data(as_text=True)
+        assert 'name="viewport"' in page
+        assert "overflow-x:hidden" in page
+        assert "overflow-x:auto" in page
+
+
+def test_partial_reduction_is_fail_closed_until_current_signed_receipts_exist(monkeypatch):
+    monkeypatch.setattr(dashboard, "_read_json", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dashboard, "_read_contract_receipt", lambda *args, **kwargs: ({}, {"status": "NOT_PUBLISHED"}))
+
+    payload = dashboard.app.test_client().get("/api/partial-reduction").get_json()
+
+    assert payload["status"] == "NOT_PROVEN"
+    assert payload["relay_eligible"] is False
+    assert payload["live_policy_change_allowed"] is False
+    assert payload["gates"]
+    assert not any(payload["gates"].values())
+
+
+def test_pathway_audit_exposes_current_manifest_registry_sync(tmp_path, monkeypatch):
+    (tmp_path / "report_manifest.json").write_text(
+        '{"analyzer_sync_id":"sync-current","tile_registry_signature":"registry-current","generation_revision":"abc123","fresh_epoch":{"epoch_id":"epoch-current"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "REPORT_MANIFEST_FILE", tmp_path / "report_manifest.json")
+    monkeypatch.setattr(dashboard, "EXPECTED_ANALYZER_SYNC_ID", "sync-current")
+    monkeypatch.setattr(dashboard, "active_tile_registry_signature", lambda: "registry-current")
+    monkeypatch.setattr(dashboard, "_read_contract_receipt", lambda *args, **kwargs: ({}, {"status": "NOT_PUBLISHED"}))
+    monkeypatch.setattr(dashboard, "_read_report", lambda *args, **kwargs: {})
+
+    payload = dashboard._pathway_audit_payload()
+
+    assert payload["current_sync"]["status"] == "CURRENT_MATCH"
+    assert payload["current_sync"]["generation_revision"] == "abc123"
+    assert payload["current_sync"]["epoch_id"] == "epoch-current"
 
 
 def test_chase_tables_label_every_rendered_metric_column():
