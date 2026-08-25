@@ -3628,14 +3628,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --muted: #8b9aab; --accent: #5eb8ff; --green: #3dd68c; --red: #ff6b6b; --amber: #f0b429;
   }
   * { box-sizing: border-box; }
+  html, body { width: 100%; max-width: 100%; overflow-x: hidden; }
   body { margin: 0; font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  header { width: 100%; max-width: 100%; overflow: hidden; padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  header > div { min-width: 0; max-width: 100%; }
+  header > div:last-child { display: flex; flex-wrap: wrap; gap: 6px; }
   header h1 { margin: 0; font-size: 1.25rem; }
   .meta { color: var(--muted); font-size: 0.85rem; }
-  .badge { background: var(--panel); border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; }
+  .badge { display: inline-block; flex: 0 1 auto; min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; font-size: 0.75rem; }
   .badge.ok { border-color: var(--green); color: var(--green); }
   nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 24px; border-bottom: 1px solid var(--border); background: #0e1319; }
-  nav button { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }
+  nav button { flex: 0 0 auto; max-width: 100%; white-space: normal; overflow-wrap: anywhere; background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; }
   nav button.active { border-color: var(--accent); color: var(--accent); }
   nav.subnav { padding-top: 0; border-bottom-color: #1a2430; background: #0b1016; }
   nav.subnav button { font-size: 0.8rem; padding: 6px 12px; opacity: 0.9; }
@@ -3646,7 +3649,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   section { display: none; min-width: 0; max-width: 100%; }
   section.active { display: block; }
   .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .kpi { min-width: 0; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
   .kpi .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
   .kpi .val { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
   table { display: block; width: 100%; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.9rem; margin-top: 12px; }
@@ -3666,14 +3669,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .kpis { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
     pre { max-width: 100%; }
   }
+  @media (max-width: 600px) {
+    header > div:last-child { width: 100%; }
+    .kpis { grid-template-columns: minmax(0, 1fr); }
+  }
   ul.findings li { margin-bottom: 8px; line-height: 1.4; }
   .explorer-list { list-style: none; padding: 0; margin: 0; max-height: 70vh; overflow: auto; }
   .explorer-list li { padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.85rem; }
   .explorer-list li:hover { background: var(--panel); }
   .explorer-list li.sel { background: #1a2838; color: var(--accent); }
   h2 { font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
-  .note { color: var(--muted); font-size: 0.8rem; }
-  .empty-state { border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
+  .note { max-width: 100%; overflow-wrap: anywhere; color: var(--muted); font-size: 0.8rem; }
+  .empty-state { min-width: 0; max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
   .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; }
 </style></head><body>
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
