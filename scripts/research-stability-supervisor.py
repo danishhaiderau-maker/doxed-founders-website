@@ -1164,7 +1164,11 @@ class Supervisor:
                 pending = (
                     age <= REPORT_MAX_AGE_SECONDS
                     and all(delta >= 0 for delta in deltas.values())
-                    and sum(deltas.values()) <= MAX_PENDING_EVENT_DELTA
+                    # Each ledger counts a different projection of the same
+                    # newly collected opportunities. Summing the deltas
+                    # double-counts one collection interval and falsely marks
+                    # a healthy 30-minute analyzer cadence as mismatched.
+                    and all(delta <= MAX_PENDING_EVENT_DELTA for delta in deltas.values())
                 )
                 add("v3_report_fresh_and_count_parity", age <= REPORT_MAX_AGE_SECONDS and (exact or pending), {
                     "status": "EXACT" if exact else "PENDING_NEXT_ANALYZER_CYCLE" if pending else "MISMATCH",

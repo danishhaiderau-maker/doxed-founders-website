@@ -408,6 +408,48 @@ def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
     assert not any(x["name"] == "report_epoch_policy_signature_parity" for x in result["checks"])
 
 
+def test_v3_report_pending_window_bounds_each_ledger_without_double_counting(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+
+    def write_rows(name, rows):
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+
+    def base(ledger, index):
+        return {
+            "schema": "research_evidence_v3", "ledger": ledger,
+            "epoch_id": "epoch-v3", "record_id": f"{ledger}-{index}",
+            "episode_id": f"episode-{index}",
+            "shared_ai_call_id": f"scan-{index}",
+            "signal_ts": 1000 + index,
+            "symbol": "TBTCF0:USTF0",
+            "raw_direction": "LONG",
+        }
+
+    write_rows("opportunity", [base("opportunity", i) for i in range(40)])
+    write_rows("decision", [base("decision", i) for i in range(40)])
+    write_rows("lifecycle", [dict(base("lifecycle", i), terminal=True) for i in range(40)])
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_COLLECTING",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "real_bitfinex_trading_allowed": False, "number_one_strategy": None,
+        "collection": {"independent_opportunities": 0, "decision_branches": 0,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes,
+    ).check()
+    parity = next(x for x in result["checks"] if x["name"] == "v3_report_fresh_and_count_parity")
+    assert parity["ok"] is True
+    assert parity["detail"]["status"] == "PENDING_NEXT_ANALYZER_CYCLE"
+    assert sum(parity["detail"]["deltas"].values()) > module.MAX_PENDING_EVENT_DELTA
+
+
 def test_v3_progress_wins_over_frozen_compatibility_writer(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     ledgers = mirror / "v3" / "ledgers"
