@@ -3150,14 +3150,6 @@ def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
     if work.empty:
         return empty
 
-    elif lane_u == "SR_MICRO_TILE_V2_STATIC":
-        try:
-            from sr_micro_tile_v2 import POLICY_ID as active_policy
-            policy_col = "policy_id" if "policy_id" in work.columns else "policy_version"
-            if policy_col in work.columns:
-                work = work[work[policy_col].astype(str) == str(active_policy)]
-        except Exception:
-            pass
     if work.empty:
         return empty
 

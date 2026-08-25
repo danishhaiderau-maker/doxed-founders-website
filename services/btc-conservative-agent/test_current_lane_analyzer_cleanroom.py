@@ -48,3 +48,4 @@ def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():
 
 def test_benchmark_report_has_no_dangling_retired_lane_status_helper():
     assert "_pathway_lane_status(" not in ANALYZER
+    assert "SR_MICRO_TILE_V2_STATIC" not in ANALYZER
