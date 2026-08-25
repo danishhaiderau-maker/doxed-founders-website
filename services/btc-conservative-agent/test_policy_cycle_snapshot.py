@@ -187,6 +187,18 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
         "policy_epoch_id": "policy-epoch-v31",
         "policy_signature": "policy-signature-v31",
         "policy_id": "OFFSET_V31",
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT",
+        "executed_direction": "LONG",
+        "execution_basis": {
+            "requested_qty": 1,
+            "requested_qty_provenance": "SOURCE_TICKET_QTY",
+            "exchange_qty_claim": True,
+            "market_microstructure_symbol": "tBTCF0:USTF0",
+        },
+        "chase_schedule": {
+            "authoritative": True,
+            "intervals": [{"bucket_id": "step-0", "start_ts": 100, "end_ts": 103, "limit_price": 100}],
+        },
     }
     lifecycle = {
         "schema": "research_evidence_v3",
@@ -210,6 +222,15 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
         )
     # The retired file may exist but is no longer authoritative once V3.1 is present.
     (tmp_path / RESEARCH_EVENTS_FILE).write_text("", encoding="utf-8")
+    (tmp_path / "market_microstructure_1s.jsonl").write_text("".join(
+        json.dumps({
+            "schema": "market_microstructure_1s_v1", "symbol": "tBTCF0:USTF0",
+            "bucket_ts": ts, "fresh": True, "valid_bbo": True,
+            "ask": 100 if ts == 102 else 101, "bid": 99,
+            "ask_qty": 2, "bid_qty": 2, "sell_qty": 0, "buy_qty": 0,
+            "sell_vwap": None, "buy_vwap": None, "trade_count": 0,
+        }) + "\n" for ts in range(100, 103)
+    ), encoding="utf-8")
 
     from research import v3_policy_report_adapter
     actual_build = v3_policy_report_adapter.load_or_build_genome
@@ -233,3 +254,5 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
     assert reports["best"]["evidence"]["current_epoch_events"] == 1
     assert "NO_CURRENT_V22_EPOCH" not in reports["best"]["blockers"]
     assert reports["best"]["status"] == "NO QUALIFIED POLICY"
+    assert reports["conservative_fill"]["counts"]["events"] == 1
+    assert reports["conservative_fill"]["counts"]["fill"] == 1

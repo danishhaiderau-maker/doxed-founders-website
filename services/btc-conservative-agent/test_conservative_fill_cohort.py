@@ -7,7 +7,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "research"))
 
 from collector_v22 import build_research_event
-from conservative_fill_cohort import build_conservative_fill_cohort
+from conservative_fill_cohort import build_conservative_fill_cohort, build_v3_conservative_fill_cohort
 
 
 def tape_row(ts, *, ask=101, bid=99, ask_qty=2, bid_qty=2,
@@ -128,3 +128,74 @@ def test_strategy_symbol_alias_maps_to_exact_bitfinex_tape_instrument():
     receipt = build_conservative_fill_cohort([e], rows)["receipts"][0]
     assert receipt["outcome"] == "FILL"
     assert receipt["market_microstructure_symbol"] == "tBTCF0:USTF0"
+
+
+def test_v31_finalized_intent_produces_identity_preserving_partial_fill():
+    submit = {
+        "schema": "research_evidence_v3", "ledger": "order_intent",
+        "record_id": "order-intent:evt-v31:submit", "event_id": "evt-v31",
+        "episode_id": "episode-v31", "epoch_id": "epoch-v31",
+        "policy_epoch_id": "policy-epoch-v31", "policy_id": "POLICY_V31",
+        "policy_signature": "signature-v31", "research_lane": "LANE_V31",
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT",
+        "executed_direction": "LONG", "requested_qty": 1,
+        "chase_schedule": {"authoritative": True, "intervals": [
+            {"bucket_id": "step-0", "start_ts": 100, "end_ts": None, "limit_price": 100},
+        ]},
+    }
+    finalized = {
+        **submit,
+        "record_id": "order-intent:evt-v31:final",
+        "execution_basis": {
+            "requested_qty": 1, "requested_qty_provenance": "SOURCE_TICKET_QTY",
+            "exchange_qty_claim": True, "market_microstructure_symbol": "tBTCF0:USTF0",
+        },
+        "chase_schedule": {"authoritative": True, "direction": "LONG", "intervals": [
+            {"bucket_id": "step-0", "start_ts": 100, "end_ts": 103, "limit_price": 100},
+        ]},
+    }
+    tape = [
+        tape_row(100, symbol="tBTCF0:USTF0"),
+        tape_row(101, symbol="tBTCF0:USTF0"),
+        tape_row(102, ask=100, ask_qty=.2, symbol="tBTCF0:USTF0"),
+    ]
+    result = build_v3_conservative_fill_cohort([submit, finalized], tape)
+    assert result["schema"] == "conservative_fill_descriptive_cohort_v3_1"
+    assert result["counts"] == {"events": 1, "fill": 0, "partial_fill": 1, "no_fill": 0, "unsupported": 0}
+    receipt = result["receipts"][0]
+    assert receipt["filled_qty"] == .2
+    assert receipt["policy_signature"] == "signature-v31"
+    assert receipt["source_record_id"] == "order-intent:evt-v31:final"
+
+
+def test_v31_terminal_fractional_second_is_included_without_generation_overlap():
+    row = {
+        "schema": "research_evidence_v3", "ledger": "order_intent",
+        "record_id": "order-intent:evt-boundary:final", "event_id": "evt-boundary",
+        "episode_id": "episode-boundary", "epoch_id": "epoch-v31",
+        "policy_epoch_id": "policy-epoch-v31", "policy_id": "POLICY_V31",
+        "policy_signature": "signature-v31", "executed_direction": "SHORT",
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT",
+        "execution_basis": {
+            "requested_qty": .1, "requested_qty_provenance": "SOURCE_TICKET_QTY",
+            "exchange_qty_claim": True, "market_microstructure_symbol": "tBTCF0:USTF0",
+        },
+        "chase_schedule": {"authoritative": True, "direction": "SHORT", "intervals": [
+            {"bucket_id": "step-0", "start_ts": 97, "start_ts_exact": 97.2,
+             "end_ts": 99, "end_ts_exact": 99.4, "limit_price": 102},
+            {"bucket_id": "step-1", "start_ts": 99, "start_ts_exact": 99.4,
+             "end_ts": 102, "end_ts_exact": 102.7, "limit_price": 100},
+        ]},
+    }
+    tape = [
+        tape_row(97, bid=99, symbol="tBTCF0:USTF0"),
+        tape_row(98, bid=99, symbol="tBTCF0:USTF0"),
+        tape_row(99, bid=99, symbol="tBTCF0:USTF0"),
+        tape_row(100, bid=99, symbol="tBTCF0:USTF0"),
+        tape_row(101, bid=99, symbol="tBTCF0:USTF0"),
+        tape_row(102, bid=101, bid_qty=2, symbol="tBTCF0:USTF0"),
+    ]
+    receipt = build_v3_conservative_fill_cohort([row], tape)["receipts"][0]
+    assert receipt["outcome"] == "FILL"
+    assert receipt["trigger_bucket_ts"] == 102
+    assert receipt["chase_bucket_id"] == "step-1"

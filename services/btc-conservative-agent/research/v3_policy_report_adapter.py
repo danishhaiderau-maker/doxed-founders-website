@@ -69,6 +69,14 @@ def load_v3_cycle_snapshot(data_dir=".") -> dict:
     }
 
 
+def load_v3_order_intents(data_dir=".", *, epoch_id: str | None = None) -> tuple[dict, ...]:
+    """Return immutable V3.1 order-intent rows for one signed epoch."""
+    rows = _jsonl(Path(data_dir) / "v3" / "ledgers" / "order_intent.jsonl")
+    if epoch_id:
+        rows = [row for row in rows if str(row.get("epoch_id") or "") == str(epoch_id)]
+    return tuple(json.loads(json.dumps(row, sort_keys=True, separators=(",", ":"))) for row in rows)
+
+
 def load_or_build_genome(data_dir=".", report_dir=".") -> dict:
     from research.research_v3_report import build_safe_policy_genome_v3_report
 

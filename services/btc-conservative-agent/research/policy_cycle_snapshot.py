@@ -103,9 +103,11 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
 
     if has_v3_evidence(data_dir):
         receipt = load_v3_cycle_snapshot(data_dir)
+        from research.v3_policy_report_adapter import load_v3_order_intents
         tape_snapshot = _load_microstructure_snapshot(data_dir)
         return {
             "events": tuple(),
+            "v3_order_intents": load_v3_order_intents(data_dir, epoch_id=receipt.get("epoch_id")),
             "receipt": receipt,
             "microstructure": _microstructure_evidence([], tape_snapshot),
             "microstructure_snapshot": tape_snapshot,
@@ -155,7 +157,10 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
     """Generate candidate then best from one pinned event tuple."""
     from research.policy_candidate_oos import build_policy_candidate_oos_report
     from research.best_policy_research import build_best_policy_research_report
-    from research.conservative_fill_cohort import build_conservative_fill_cohort
+    from research.conservative_fill_cohort import (
+        build_conservative_fill_cohort,
+        build_v3_conservative_fill_cohort,
+    )
 
     snapshot = load_policy_cycle_snapshot(data_dir)
     genome = None
@@ -176,9 +181,15 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         microstructure_evidence=snapshot["microstructure"],
         genome=genome,
     )
-    conservative_fill = build_conservative_fill_cohort(
-        snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
-    )
+    if snapshot["receipt"].get("schema") == "policy_cycle_snapshot_v3_1":
+        conservative_fill = build_v3_conservative_fill_cohort(
+            snapshot.get("v3_order_intents") or (),
+            snapshot["microstructure_snapshot"]["rows"],
+        )
+    else:
+        conservative_fill = build_conservative_fill_cohort(
+            snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
+        )
     conservative_fill.update({
         "cycle_snapshot": snapshot["receipt"],
         "microstructure_snapshot": snapshot["microstructure_snapshot"]["receipt"],
