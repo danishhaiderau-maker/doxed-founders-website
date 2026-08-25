@@ -37,9 +37,10 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Current registered tiles are Patient Chase baseline, Continuous benchmark, and
-  Protected W234 paper research. The number of tiles is not an architecture
-  constant; the frozen toggle/paper/relay/identity rules above are.
+- Current registered tiles are Patient Chase baseline, Continuous benchmark,
+  Protected Static Patient Chase, and Protected Regime-Adaptive Patient Chase.
+  The number of tiles is not an architecture constant; the frozen
+  toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy
   signature, ID prefix, toggle key, default state, relay eligibility, and complete
   entry/exit/risk metadata, followed by registry validation, cross-layer tests,
@@ -55,6 +56,13 @@
 - Historical evidence is immutable, quarantined, and readable only as opaque
   archive data; it must never keep retired execution code or current analyzer
   cohorts alive.
+- A tile roster change is one atomic registry transaction. It is incomplete
+  until the signed registry receipt, runtime/API/dashboard roster, mirror,
+  analyzer, monitoring, tests, and rendered visual-QA receipt all agree on the
+  same ordered tile set and exact deployed revision.
+- Do not preserve dormant policy branches "for later". Reusable generic
+  execution and evidence primitives stay; tile-specific policy code, routes,
+  labels, reports, tests, flags, and monitor checks leave with the retired tile.
 - Every `paper_policy_*.py` module must have exactly one owner in the registry's
   `implementation_modules`. Orphan modules fail the tile-registry contract and
   must be registered or physically deleted. Follow `TILE_LIFECYCLE.md` for the
