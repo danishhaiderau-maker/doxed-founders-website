@@ -15219,20 +15219,30 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         "pre_ai": spawn_ai,
         "pre_ctx": spawn_ctx,
     })
+    resolution_source = {
+        **spawn_ctx,
+        "shared_ai_call_id": call_id,
+        "raw_direction": spawn_ai.get("raw_direction") or spawn_ai.get("direction"),
+        "executed_direction": spawn_ai.get("direction"),
+        "research_lane": target_lane,
+    }
     if isinstance(result, dict):
         resolution = str(result.get("entry_resolution") or "").upper()
         if resolution in {"AWAITING", "NO_ORDER"}:
-            resolution_source = {
-                **spawn_ctx,
-                "shared_ai_call_id": call_id,
-                "raw_direction": spawn_ai.get("raw_direction") or spawn_ai.get("direction"),
-                "executed_direction": spawn_ai.get("direction"),
-                "research_lane": target_lane,
-            }
             _append_v3_lane_entry_resolution(
                 resolution_source, target_lane, resolution,
                 str(result.get("exact_reason") or "UNSPECIFIED"),
             )
+        elif not resolution:
+            _append_v3_lane_entry_resolution(
+                resolution_source, target_lane, "NO_ORDER",
+                "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION",
+            )
+    else:
+        _append_v3_lane_entry_resolution(
+            resolution_source, target_lane, "NO_ORDER",
+            "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION",
+        )
 
 
 def _spawn_lab_combo_shadow(

@@ -15278,20 +15278,39 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         "pre_ai": spawn_ai,
         "pre_ctx": spawn_ctx,
     })
+    resolution_source = {
+        **spawn_ctx,
+        "shared_ai_call_id": call_id,
+        "raw_direction": spawn_ai.get("raw_direction") or spawn_ai.get("direction"),
+        "executed_direction": spawn_ai.get("direction"),
+        "research_lane": target_lane,
+    }
     if isinstance(result, dict):
         resolution = str(result.get("entry_resolution") or "").upper()
         if resolution in {"AWAITING", "NO_ORDER"}:
-            resolution_source = {
-                **spawn_ctx,
-                "shared_ai_call_id": call_id,
-                "raw_direction": spawn_ai.get("raw_direction") or spawn_ai.get("direction"),
-                "executed_direction": spawn_ai.get("direction"),
-                "research_lane": target_lane,
-            }
             _append_v3_lane_entry_resolution(
                 resolution_source, target_lane, resolution,
                 str(result.get("exact_reason") or "UNSPECIFIED"),
             )
+        elif not resolution:
+            # An accepted verdict must always receive an explicit causal entry
+            # resolution.  A number of old early-return branches predate that
+            # contract and return an empty dict after declining the order.
+            # Record the truthful no-order condition instead of leaving an
+            # indefinitely AWAITING order expectation in the V3 ledger.
+            _append_v3_lane_entry_resolution(
+                resolution_source, target_lane, "NO_ORDER",
+                "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION",
+            )
+    else:
+        # process_signal's successful submit path returns ORDER_SUBMITTED and
+        # writes its own order-intent/resolution atomically.  Therefore a bare
+        # return from this synchronous call is an early no-order exit, not an
+        # order whose existence may be inferred later.
+        _append_v3_lane_entry_resolution(
+            resolution_source, target_lane, "NO_ORDER",
+            "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION",
+        )
 
 
 def _spawn_lab_combo_shadow(

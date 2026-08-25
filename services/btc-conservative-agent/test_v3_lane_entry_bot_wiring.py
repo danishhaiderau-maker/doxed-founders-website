@@ -38,6 +38,8 @@ class QuietLogger:
          ("NO_ORDER", "DUPLICATE_LIMIT_PRICE")),
         ({"entry_resolution": "AWAITING", "exact_reason": "AWAITING_DASHBOARD_CHASE"},
          ("AWAITING", "AWAITING_DASHBOARD_CHASE")),
+        (None, ("NO_ORDER", "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION")),
+        ({}, ("NO_ORDER", "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION")),
     ],
 )
 def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expected):
