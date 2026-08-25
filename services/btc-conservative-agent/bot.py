@@ -15492,7 +15492,7 @@ def _cancel_open_bracket_lab_shadows(
 #
 # The fix routes Tile 2 explicitly via execution_mode_for_lane():
 #   LAB_SHADOW  -> _spawn_lab_bracket_shadow (LAB shadow + counterfactual, no order)
-#   PAPER       -> _submit_tile2_paper_resting_limit (local paper pending order)
+#   PAPER       -> registry-driven dashboard chase promotion (local paper pending order)
 #   LIVE        -> BLOCKED while PROBATION; never submit Bitfinex orders
 #                  until the operator explicitly promotes the lane.
 #   EXIT_ONLY   -> no new entries; existing filled positions still managed

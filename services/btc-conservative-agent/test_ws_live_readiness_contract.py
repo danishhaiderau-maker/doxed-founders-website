@@ -992,7 +992,6 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
     def test_all_new_entry_progression_uses_central_guard(self):
         for name in (
             "process_awaiting_dashboard_virtual_chase_entries",
-            "_submit_tile2_paper_resting_limit",
             "_place_simulated_limit_order",
             "_apply_limit_chase",
             "process_limit_chase",
@@ -1003,6 +1002,13 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
             "periodic_pipeline_loop",
         ):
             self.assertIn("can_progress_new_entry", function_source(name), name)
+        # Active research tiles now share the registry-driven dashboard chase
+        # submit path.  A retired tile-specific submitter must not be required
+        # (or quietly reintroduced) by this readiness contract.
+        dashboard_submit = function_source("process_awaiting_dashboard_virtual_chase_entries")
+        self.assertIn("lane_orders_allowed", dashboard_submit)
+        self.assertIn("is_research_lane_enabled", function_source("lane_orders_allowed"))
+        self.assertNotIn("_submit_tile2_paper_resting_limit", SOURCE)
         for name in (
             "_maybe_bitfinex_limit_entry_locked",
             "_maybe_bitfinex_market_entry_locked",
