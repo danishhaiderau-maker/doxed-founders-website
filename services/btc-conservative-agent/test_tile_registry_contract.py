@@ -90,3 +90,5 @@ def test_analyzer_dashboard_does_not_override_the_registry_roster():
     assert 'ANALYZER_COMPARE_LANES = (\n    "CONTINUOUS"' not in source
     assert "tile_lanes=tuple(DASHBOARD_PRIMARY_LANES)" in source
     assert "{% for lane in tile_lanes %}" in source
+    assert "CURRENT TWO-LANE EVIDENCE" not in source
+    assert "CURRENT FOUR-TILE EVIDENCE" in source

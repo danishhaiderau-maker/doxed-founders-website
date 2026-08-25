@@ -9226,7 +9226,7 @@ def _research_execute_log_only(research_lane=None) -> bool:
 
 
 def _sole_ai_research_mode() -> bool:
-    """The two current lanes use independent capacity and lifecycle state."""
+    """Every registered tile uses independent capacity and lifecycle state."""
     return RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection()
 
 
