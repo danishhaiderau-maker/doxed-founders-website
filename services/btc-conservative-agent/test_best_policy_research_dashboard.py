@@ -230,8 +230,8 @@ def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monke
         "oos_fills": 0,
         "oos_wins": 0,
         "oos_losses": 0,
-        "sealed_oos_net_usd": 0.0,
-        "expectancy_lcb_usd": None,
+        "sealed_oos_net_usd": 12.5,
+        "expectancy_lcb_usd": 0.75,
         "max_drawdown_usd": 0.0,
         "gates": {},
     } for index in range(100)]
@@ -270,6 +270,24 @@ def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monke
     assert stats["policy_specs_enumerated"] == 100
     assert stats["terminal_oos_policies_tested"] == 0
     assert stats["profitable_terminal_oos_policies"] == 0
+    first = grid["rows"][0]
+    assert first["oos_net_pnl_usd"] is None
+    assert first["oos_expectancy_usd"] is None
+    assert first["oos_max_drawdown_usd"] is None
+    assert first["oos_wins"] is None
+    assert first["oos_losses"] is None
+    assert first["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert first["diagnostic_replay_net_pnl_usd"] == 12.5
+    assert first["diagnostic_replay_expectancy_lcb_usd"] == 0.75
+    assert first["diagnostic_replay_max_drawdown_usd"] == 0.0
+
+    public = dashboard._public_policy_evidence_row(rows[0])
+    assert public["sealed_oos_net_usd"] is None
+    assert public["expectancy_lcb_usd"] is None
+    assert public["max_drawdown_usd"] is None
+    assert public["cvar95_usd"] is None
+    assert public["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert public["diagnostic_replay_net_pnl_usd"] == 12.5
 
 
 def test_current_policy_grid_projects_nested_v31_parameters(monkeypatch):

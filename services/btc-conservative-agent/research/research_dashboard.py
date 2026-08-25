@@ -684,6 +684,25 @@ def _data_file_candidates(name: str) -> list[Path]:
     return out
 
 
+def _public_policy_evidence_row(row: dict) -> dict:
+    """Separate ideal-touch hypothesis metrics from terminal-fill evidence."""
+    public = dict(row or {})
+    fills = int(public.get("oos_fills") or 0)
+    public["diagnostic_replay_net_pnl_usd"] = public.get("sealed_oos_net_usd")
+    public["diagnostic_replay_expectancy_lcb_usd"] = public.get("expectancy_lcb_usd")
+    public["diagnostic_replay_max_drawdown_usd"] = public.get("max_drawdown_usd")
+    public["diagnostic_replay_cvar95_usd"] = public.get("cvar95_usd")
+    public["metric_evidence"] = "TERMINAL_OOS_FILLS" if fills > 0 else "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    if fills <= 0:
+        public["sealed_oos_net_usd"] = None
+        public["expectancy_lcb_usd"] = None
+        public["max_drawdown_usd"] = None
+        public["cvar95_usd"] = None
+        public["oos_wins"] = None
+        public["oos_losses"] = None
+    return public
+
+
 def _bounded_safe_policy_payload(report: dict) -> dict:
     """Public Safe/Top APIs expose summaries; full artifact stays downloadable."""
     if not report:
@@ -708,14 +727,16 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
             for key, value in screen.items()
             if not isinstance(value, (list, dict))
         }
-        out["candidate_screen"]["descriptive_top_100"] = list(
-            screen.get("descriptive_top_100") or []
-        )[:100]
-        out["candidate_screen"]["drawdown_control_leaders"] = list(
-            screen.get("drawdown_control_leaders") or []
-        )[:100]
+        out["candidate_screen"]["descriptive_top_100"] = [
+            _public_policy_evidence_row(row)
+            for row in list(screen.get("descriptive_top_100") or [])[:100]
+        ]
+        out["candidate_screen"]["drawdown_control_leaders"] = [
+            _public_policy_evidence_row(row)
+            for row in list(screen.get("drawdown_control_leaders") or [])[:100]
+        ]
         out["candidate_screen"]["profit_capture_leaders"] = {
-            str(family): list(rows or [])[:10]
+            str(family): [_public_policy_evidence_row(row) for row in list(rows or [])[:10]]
             for family, rows in (screen.get("profit_capture_leaders") or {}).items()
         }
         sweep = screen.get("scenario_c_atr_stop_sweep") or {}
@@ -723,12 +744,18 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
             "qualification": sweep.get("qualification"),
             "warning": sweep.get("warning"),
             "policies_tested": sweep.get("policies_tested", 0),
-            "overall_leaders": list(sweep.get("overall_leaders") or [])[:25],
+            "overall_leaders": [_public_policy_evidence_row(row) for row in list(sweep.get("overall_leaders") or [])[:25]],
             "leaders_by_stop": {
-                str(stop): list(rows or [])[:5]
+                str(stop): [_public_policy_evidence_row(row) for row in list(rows or [])[:5]]
                 for stop, rows in (sweep.get("leaders_by_stop") or {}).items()
             },
-            "best_by_chase_and_stop": sweep.get("best_by_chase_and_stop") or {},
+            "best_by_chase_and_stop": {
+                str(chase): {
+                    str(stop): _public_policy_evidence_row(row)
+                    for stop, row in (stops or {}).items()
+                }
+                for chase, stops in (sweep.get("best_by_chase_and_stop") or {}).items()
+            },
         }
     if "safe_policy_ranking" in report:
         ranking = report.get("safe_policy_ranking") or {}
@@ -1390,6 +1417,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     for rank, item in enumerate(candidates, start=1):
         policy_spec = item.get("policy_spec") or {}
         episodes = int(item.get("oos_episodes") or 0)
+        fills = int(item.get("oos_fills") or 0)
         wins = item.get("oos_wins")
         losses = item.get("oos_losses")
         low, high = (None, None)
@@ -1406,15 +1434,22 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "policy_spec": policy_spec,
             "train_episodes": max(0, int(item.get("episodes_total") or 0) - episodes),
             "oos_episodes": episodes,
-            "oos_fills": int(item.get("oos_fills") or 0),
-            "oos_wins": wins,
-            "oos_losses": losses,
+            "oos_fills": fills,
+            "oos_wins": wins if fills > 0 else None,
+            "oos_losses": losses if fills > 0 else None,
             "oos_win_probability_pct": round((int(wins) / episodes * 100.0), 2) if episodes and wins is not None else None,
             "oos_win_probability_ci95_low_pct": low,
             "oos_win_probability_ci95_high_pct": high,
-            "oos_net_pnl_usd": item.get("sealed_oos_net_usd"),
-            "oos_expectancy_usd": item.get("expectancy_lcb_usd"),
-            "oos_max_drawdown_usd": item.get("max_drawdown_usd"),
+            # Ideal-touch replay values rank hypotheses; they are not executed
+            # OOS evidence. Never expose them as execution metrics without a
+            # terminal OOS fill.
+            "oos_net_pnl_usd": item.get("sealed_oos_net_usd") if fills > 0 else None,
+            "oos_expectancy_usd": item.get("expectancy_lcb_usd") if fills > 0 else None,
+            "oos_max_drawdown_usd": item.get("max_drawdown_usd") if fills > 0 else None,
+            "diagnostic_replay_net_pnl_usd": item.get("sealed_oos_net_usd"),
+            "diagnostic_replay_expectancy_lcb_usd": item.get("expectancy_lcb_usd"),
+            "diagnostic_replay_max_drawdown_usd": item.get("max_drawdown_usd"),
+            "metric_evidence": "TERMINAL_OOS_FILLS" if fills > 0 else "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
             "gates": item.get("gates") or {},
             "qualification": "QUALIFIED" if item.get("ranking_eligible") else "DESCRIPTIVE_ONLY",
         })
@@ -1484,9 +1519,10 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "blockers": source["blockers"],
         "live_policy_change_allowed": source["qualified"],
         "warning": (
-            "Canonical signed V3.1 complete-policy replay, family-balanced to at most two rows per protection family. "
-            "The exhaustive search remains unchanged. Empty rows mean no terminal paths have matured; "
-            "descriptive rows cannot authorize live trading until every safety and OOS gate passes."
+            "Family-balanced V3.1 diagnostic replay hypotheses, capped at two rows per protection family. "
+            "The exhaustive search remains unchanged. When terminal OOS fills are zero, execution PnL, "
+            "expectancy, win rate and drawdown are unavailable and display as dashes; ideal-touch replay "
+            "values remain diagnostic only. No row can authorize live trading until every safety and OOS gate passes."
         ),
     }
 
@@ -4179,6 +4215,7 @@ if (showAllEl) {
   });
 }
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
+function fmtExecutionUsd(v) { return v == null ? '—' : '$' + fmtUsd(v); }
 function fmtAdxBucket(v) {
   const key = String(v || '').toLowerCase();
   if (['adx_low', 'adx<18', 'adx_lt_18'].includes(key)) return 'ADX <18';
@@ -4419,9 +4456,9 @@ async function loadCombos() {
       `${p.oos_win_probability_pct}% (${p.oos_win_probability_ci95_low_pct}–${p.oos_win_probability_ci95_high_pct}%)`;
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td><td>${p.family_rank||'—'}</td><td><strong>${p.policy_id||'—'}</strong><br><small>global rank ${p.global_rank||'—'} · ${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>${p.oos_wins||0} / ${p.oos_losses||0}</td>`
-      + `<td>${ci}</td><td>$${fmtUsd(p.oos_net_pnl_usd)}</td><td>$${fmtUsd(p.oos_expectancy_usd)}</td>`
-      + `<td>$${fmtUsd(p.oos_max_drawdown_usd)}</td><td class="bad">${p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
+      + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>${p.oos_wins == null ? '—' : `${p.oos_wins} / ${p.oos_losses}`}</td>`
+      + `<td>${ci}</td><td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_expectancy_usd)}</td>`
+      + `<td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td><td class="bad">${p.metric_evidence||p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
   }).join('') || '<tr><td colspan="12">No current-epoch OOS policy grid is available yet.</td></tr>';
 }
 
