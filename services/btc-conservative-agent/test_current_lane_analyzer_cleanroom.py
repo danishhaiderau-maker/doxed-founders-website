@@ -48,4 +48,15 @@ def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():
 
 def test_benchmark_report_has_no_dangling_retired_lane_status_helper():
     assert "_pathway_lane_status(" not in ANALYZER
-    assert "SR_MICRO_TILE_V2_STATIC" not in ANALYZER
+    for retired_token in (
+        "TYPE_B",
+        "SR_MICRO",
+        "A160",
+        "AI60_SP3",
+        "COMBO_65",
+        "COMBO_604",
+        "AI_DISAGREEMENT_REPLAY",
+        "partial_reduction",
+    ):
+        assert retired_token not in ANALYZER
+        assert retired_token not in DASHBOARD

@@ -4,21 +4,6 @@ from __future__ import annotations
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
 
-# Temporary decode-only aliases for immutable legacy rows. They are deliberately
-# absent from COMBO_LANE_SPECS, COMBO_EXECUTION_LANES and tile display order.
-RESEARCH_LANE_TYPE_B_HUNTER_V1 = "TYPE_B_HUNTER_V1"
-RESEARCH_LANE_SR_MICRO_TILE_V1 = "SR_MICRO_TILE_V1"
-RESEARCH_LANE_SR_MICRO_TILE_V2 = "SR_MICRO_TILE_V2"
-RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC = "SR_MICRO_TILE_V2_STATIC"
-RESEARCH_LANE_COMBO_65_SP5_CHASE = "COMBO_65_SP5_CHASE_3PLUS"
-RESEARCH_LANE_COMBO_65_SP5_DIRECT = "COMBO_65_SP5_DIRECT"
-RESEARCH_LANE_COMBO_604_SP4_CHASE = "COMBO_604_SP4_CHASE_3PLUS"
-RESEARCH_LANE_COMBO_604_SP4_DIRECT = "COMBO_604_SP4_DIRECT"
-RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE = "AI60_SP3_VIRTUAL_CHASE"
-RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 = "A160_CONTEXT_CHASE_EXIT_V2"
-RESEARCH_LANE_SL_AVOIDANCE_V1 = "SL_AVOIDANCE_V1"
-RESEARCH_LANE_SIZED_CONTINUOUS_V1 = "SIZED_CONTINUOUS_V1"
-
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
@@ -111,33 +96,13 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
-COMBO_LANE_LABELS[RESEARCH_LANE_TYPE_B_HUNTER_V1] = "Type B Hunter — shared direction / fixed policy"
-COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V1] = "S/R Micro Tile V1 (retired)"
-COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2] = "S/R Micro Tile V2 Full Chase (retired)"
-COMBO_LANE_LABELS[RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = "S/R Micro Tile V2 Static (retired)"
 
 _COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
-# Retired compatibility keys remain explicitly false. They are not allowlisted
-# by COMBO_EXECUTION_LANES and therefore cannot become executable.
-_COMBO_TOGGLE_DEFAULTS.update({
-    RESEARCH_LANE_TYPE_B_HUNTER_V1: False,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
-})
-# Legacy lanes (retired) — permanently OFF
-for _legacy in (
-    RESEARCH_LANE_SL_AVOIDANCE_V1,
-    RESEARCH_LANE_SIZED_CONTINUOUS_V1,
-    RESEARCH_LANE_SR_MICRO_TILE_V1,        # retired 2026-07-16 v12 overhaul (47% WR, negative PnL)
-    RESEARCH_LANE_SR_MICRO_TILE_V2,        # full-chase variant superseded by V2_STATIC
-):
-    _COMBO_TOGGLE_DEFAULTS[_legacy] = False
 
 
 def is_deterministic_bracket_lane(lane: str) -> bool:
     """Bracket tiles — own tick loop, never AI_SCAN fan-out or independent AI."""
     lane_u = str(lane or "").upper()
-    if lane_u in (RESEARCH_LANE_SR_MICRO_TILE_V2, RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC):
-        return True
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
     return bool(spec.get("is_deterministic_bracket"))
 
@@ -145,8 +110,6 @@ def is_deterministic_bracket_lane(lane: str) -> bool:
 def is_static_bracket_lane(lane: str) -> bool:
     """Resting-limit bracket variant — never chase/reprice after submission."""
     lane_u = str(lane or "").upper()
-    if lane_u == RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC:
-        return True
     spec = COMBO_LANE_SPECS.get(lane_u) or {}
     return str(spec.get("chase_mode") or "").upper() == "STATIC"
 

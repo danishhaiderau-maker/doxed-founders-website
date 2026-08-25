@@ -23,7 +23,6 @@ const SOURCE_FILE = process.env.BTC_RESEARCH_FILE ?? 'bybit_bot.py';
 /** Extra modules the research bot imports — must ship with Railway service. */
 const EXTRA_SOURCE_FILES = [
   'combo_pathway_config.py',
-  'legacy_pathway_config.py',
   'scenario_c_config.py',
   'pathway_lane_roster.py',
   'pathway_lab_validation.py',

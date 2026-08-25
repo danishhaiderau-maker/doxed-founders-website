@@ -376,9 +376,6 @@ AI_FUNNEL_REPORT_FILE = "ai_funnel_report.json"
 BINANCE_USDT_M_TAKER_FEE = 0.0005   # 0.05% per side
 BINANCE_USDT_M_MAKER_FEE = 0.0002   # 0.02% per side
 BENCHMARK_PROFILE_ID = COMBO_BENCHMARK_PROFILE_ID
-PROFIT_GATES_LANE_DEFAULT_ENABLED = False
-PROFIT_GATES_ENFORCED_DEFAULT = PROFIT_GATES_LANE_DEFAULT_ENABLED  # legacy config key alias
-# Profit gates follow dashboard edge/AI thresholds (not hard-coded floors).
 PROFIT_MIN_ENTRY_EDGE = 3.0  # legacy fallback only when dashboard unset
 PROFIT_MIN_AI_PROB = 50
 PROFIT_MIN_LONG_EDGE = 3.0
@@ -1328,15 +1325,6 @@ def _ai_probability_bucket(prob: float) -> str:
     return "65+"
 
 
-def _trade_mfe_type_label(mfe_pct: float) -> str:
-    m = float(mfe_pct or 0)
-    if m < 10:
-        return "TYPE_A"
-    if m >= 15:
-        return "TYPE_B"
-    return "MIXED"
-
-
 def _compute_quality_components(
     edge: float, spread: int, structure_score, sr_state: str, adx: float, ai_prob: float,
 ) -> dict:
@@ -1685,12 +1673,8 @@ def get_profit_lock_floor(peak_pct: float, trail_ladder=None, peak_never_loser_m
         return None
     min_peak = PEAK_NEVER_LOSER_MIN_PEAK if peak_never_loser_min_peak is None else peak_never_loser_min_peak
     floor_val = PEAK_NEVER_LOSER_FLOOR if peak_never_loser_floor is None else peak_never_loser_floor
-    # v12: peak-never-loser can fire BELOW the first ladder rung when the caller
-    # passes a per-lane min_peak lower than ladder[0][0] (e.g. TYPE_B_HUNTER_V1's
-    # 3.0 vs its 10% first rung). Without this, the ladder guard would swallow
-    # the floor for the very 3%-MFE-then-reverse trades the floor is meant to
-    # catch. CONTINUOUS / SR_MICRO keep min_peak=40 (>> ladder[0][0]) so the
-    # legacy "only matters above the ladder" semantics are preserved there.
+    # A registered policy may arm peak-never-loser below its first ladder rung.
+    # Without this branch the ladder guard would swallow the early protection.
     pnl_only = peak_pct < ladder[0][0]
     if pnl_only and peak_pct < min_peak:
         return None
@@ -1704,8 +1688,7 @@ def get_profit_lock_floor(peak_pct: float, trail_ladder=None, peak_never_loser_m
     return floor
 
 # Per-lane peak-never-loser resolver. Lane-aware callers should use these instead
-# of the bare module constants so TYPE_B_HUNTER_V1 gets the v12 3/0 floor while
-# CONTINUOUS / SR_MICRO keep the legacy 40/10 conservative defaults.
+# of bare module constants so each registered lane keeps its own exit profile.
 def peak_never_loser_min_peak_for_lane(research_lane: str) -> float:
     lane = str(research_lane or "").upper()
     return PEAK_NEVER_LOSER_MIN_PEAK_BY_LANE.get(lane, PEAK_NEVER_LOSER_MIN_PEAK)
@@ -1804,7 +1787,7 @@ def _position_trail_ladder(pos: dict):
 def _effective_profit_lock_floor(pos: dict, peak_pct: float):
     exit_cfg = pos.get("exit_config") or {}
     # Use the per-lane peak_never_loser values baked into the position's exit_config
-    # at entry time so TYPE_B_HUNTER_V1 (3/0) and CONTINUOUS (40/10) coexist.
+    # at entry time so Patient Chase and Continuous can coexist safely.
     min_peak = _buf_float(exit_cfg.get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
     floor_val = _buf_float(exit_cfg.get("peak_never_loser_floor"), PEAK_NEVER_LOSER_FLOOR)
     floor = get_profit_lock_floor(
@@ -2028,7 +2011,7 @@ def check_thesis_invalidation(pos: dict, price: float) -> bool:
     unreal_pct = unrealized_margin_pct(pos, price)
     age_sec = time.time() - pos.get("entry_ts", 0)
     peak = pos.get("max_pnl_pct", 0.0)
-    # Per-lane peak_never_loser from the position's exit_config (TYPE_B=3/0, others=40/10).
+    # Per-lane peak-never-loser comes from the position's registered exit_config.
     pos_exit_cfg = pos.get("exit_config") or {}
     lock_floor = get_profit_lock_floor(
         peak,
@@ -4398,10 +4381,8 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
             "research_lane": pos.get("research_lane"),
         })
     _log_ladder_exit_audit(pos, price, unreal_pct, peak, lock_floor)
-    # v12: peak-never-loser can fire a PROFIT_LOCK_LADDER exit BELOW the first
-    # ladder rung for TYPE_B_HUNTER_V1 (its 3% min_peak is below the 10% first
-    # rung). For CONTINUOUS / SR_MICRO the 40% min_peak sits above the first
-    # rung so the legacy "peak >= ladder[0][0]" gate remains the operative one.
+    # Peak-never-loser may fire below the first ladder rung when the registered
+    # policy explicitly arms a lower minimum peak.
     pnl_min_peak = _buf_float((pos.get("exit_config") or {}).get("peak_never_loser_min_peak"), PEAK_NEVER_LOSER_MIN_PEAK)
     peak_above_ladder = peak >= ladder[0][0]
     peak_in_pnl_zone = peak >= pnl_min_peak and pnl_min_peak < ladder[0][0]
@@ -7349,7 +7330,7 @@ MOMENTUM_CHOP_BLOCK_ABOVE = 0.5  # strict reference for analyzer sweeps; golden 
 RESEARCH_FREE_RUN_DISABLE_MTF_GATE = True
 RESEARCH_FREE_RUN_DISABLE_CHOP_GATE = True
 RESEARCH_FREE_RUN_DISABLE_MOMENTUM_ALIGN = True
-RESEARCH_AI_SOLE_AUTHORITY = True  # v81: AI decides all; post-AI gates log-only except PROFIT_GATES spawn
+RESEARCH_AI_SOLE_AUTHORITY = True  # shared AI direction; registered policies decide execution
 RESEARCH_ISOLATION_MODE = True  # v1.1.35: lane-scoped cooldown/rearm/duplicates — capacity is GLOBAL pool
 CONTINUOUS_BENCHMARK_AI_COOLDOWN_SEC = 180  # frozen yardstick cadence — never override on CONTINUOUS
 LANE_OPPORTUNITY_CAPTURE_FILE = "lane_opportunity_capture.jsonl"
@@ -7978,8 +7959,6 @@ state = {
     # /api/wipe_fly_only deliberately leaves this untouched so the local
     # mirror is retained when only the Fly volume needs clearing.
     "fresh_collection_signal_ts": 0.0,
-    "profit_gates_lane_enabled": PROFIT_GATES_LANE_DEFAULT_ENABLED,
-    "profit_gates_enforced": PROFIT_GATES_ENFORCED_DEFAULT,
     "continuous_ai_direct_entry_enabled": CONTINUOUS_AI_DIRECT_DEFAULT_ENABLED,
     "golden_stack_last_eval": None,
     "golden_stack_last_block_reason": None,
@@ -8027,7 +8006,7 @@ state = {
     "ai_history": [],
     "shared_ai_lane_counters": {
         "CONTINUOUS": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
-        "TYPE_B_HUNTER_V1": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+        "OFFSET_029_ATR_TP_25": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
     },
     "engine_reason": "",
     "ai_reason": "",
@@ -9084,17 +9063,6 @@ def _research_execute_log_only(research_lane=None) -> bool:
     return not state.get("live_armed")
 
 
-def evaluate_profitability_entry_gates(
-    signal: dict, ai: dict, edge_score: float, research_lane=None
-) -> tuple:
-    """Non-Edge profitability gates; Edge is descriptive evidence only."""
-    prob = float(ai.get("win_prob") or signal.get("ai_win_prob") or 0)
-    if dashboard_ai_band_blocks(prob):
-        reason = "PROFIT_GATE_AI_BAND"
-        if is_research_data_collection():
-            return False, reason
-        return True, reason
-    return False, None
 
 
 
@@ -11989,9 +11957,6 @@ def _collector_feature_snapshot(source, *, signal_ts):
         value = src.get(key)
         if value is not None:
             selected[key] = value
-    nested = src.get("_type_b_research_v2_entry_context")
-    if isinstance(nested, dict):
-        selected["type_b_entry_context"] = nested
     return {
         "schema": "research_feature_snapshot_v1",
         "captured_for_signal_ts": float(signal_ts),
@@ -12982,7 +12947,7 @@ def derive_candidate_direction(long_score: int, short_score: int, raw_direction:
     if raw in ("LONG", "SHORT"):
         return raw
     # Stable tie-break only supplies a candidate for lane evaluation. Continuous
-    # still rejects a zero score gap, while Type B applies its own feature policy.
+    # still rejects a zero score gap; each current lane applies its registered policy.
     return "LONG"
 
 
@@ -14093,9 +14058,7 @@ def _v3_lane_policy_material(lane: str) -> dict:
             float(spec.get("entry_offset_pct")) / 100.0
             if spec.get("entry_offset_pct") is not None else None
         )
-    # The signed paper identity must use the executable relay allow-list, not
-    # the older static tile declaration.  Tile 3/4 may be relay-configured for
-    # future use while still fail-closed behind a partial-reduction blocker.
+    # The signed paper identity must use the executable relay allow-list.
     # Hashing the configured flag at decision time and the executable flag at
     # order time minted two policy signatures for one causal episode.
     relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES
@@ -15089,8 +15052,8 @@ def _lane_sized_margin_usdt(lane: str, features: dict = None) -> tuple:
 
 # Executable Patient lanes must never consume the shared 180-second AI
 # scheduler.  Each lane owns one bounded serial worker so a slow order path in
-# Tile 3 cannot prevent Tile 4 from receiving the same causal scan, and neither
-# can delay the next AI opportunity.  The immutable payload retains the exact
+# One current lane cannot prevent the other from receiving the same causal scan
+# or delay the next AI opportunity. The immutable payload retains the exact
 # shared call identity used by the pre-written lane verdict.
 _combo_lane_execution_workers = {}
 _combo_lane_execution_workers_lock = threading.Lock()
@@ -15316,9 +15279,7 @@ def _spawn_lab_combo_shadow(
     # Belt-and-braces no-real-order guard: LAB mode must NEVER place a real order.
     # This branch only starts a replay buffer; the real order path (process_signal →
     # submit_limit/submit_stop) is never entered for OFF tiles. Assert defensively.
-    # Rejected Type B controls are replay buffers only and must continue while
-    # the tile is ON; they never call an order API. The old blanket toggle
-    # guard aborted every calibration counterfactual whenever Type B was ON.
+    # Explicitly tagged counterfactual replay buffers never call an order API.
     # Keep the fail-closed guard for ordinary OFF-tile LAB studies and allow
     # only this explicitly tagged counterfactual path through.
     safe_counterfactual = (
@@ -15443,160 +15404,6 @@ def _cancel_open_bracket_lab_shadows(
             logger.error(f"[{lane_u}] cancel shadow failed study_id={tid}: {e}")
 
 
-def _retired_lab_bracket_shadow_removed(
-    ctx,
-    side: str,
-    limit_price: float,
-    edge_score: float,
-    target_lane: str,
-    features: dict = None,
-    bracket_eval: dict = None,
-    chase_mode: str = None,
-    id_prefix: str = None,
-    max_chases: int = None,
-    fill_at_limit: bool = None,
-    force_paused_shadow: bool = False,
-):
-    """LAB shadow at a bracket limit (micro S/R level) — real tick replay fill + Scenario C exit.
-
-    chase_mode:
-      FULL_CHASE (default / V2) — unchanged fill-on-cross at market price.
-      STATIC — resting limit at exact S/R; never reprice; fill AT limit or TTL_EXPIRED.
-    """
-    raise RuntimeError("retired bracket lane removed")
-    if not is_combo_execution_lane(target_lane):
-        return
-    try:
-        from sr_micro_tile_v2 import (
-            bracket_limit_pullback,
-            chase_mode_for_lane,
-            max_chases_for_mode,
-            trade_id_prefix_for_lane,
-            CHASE_MODE_STATIC,
-        )
-    except Exception:
-        bracket_limit_pullback = None
-        chase_mode_for_lane = None
-        max_chases_for_mode = None
-        trade_id_prefix_for_lane = None
-        CHASE_MODE_STATIC = "STATIC"
-
-    direction = str(side or "LONG").upper()
-    if direction not in ("LONG", "SHORT"):
-        return
-    if state.get("invert_signal", False):
-        direction = "SHORT" if direction == "LONG" else "LONG"
-
-    market_price = float(nz(state.get("price")) or 0)
-    limit_price = float(limit_price or 0)
-    if market_price <= 0 or limit_price <= 0:
-        return
-
-    mode = str(chase_mode or "").upper()
-    if not mode and chase_mode_for_lane:
-        mode = chase_mode_for_lane(target_lane)
-    if not mode:
-        mode = "FULL_CHASE"
-    is_static = mode == CHASE_MODE_STATIC or bool(fill_at_limit) or is_static_bracket_lane(target_lane)
-    if max_chases is None and max_chases_for_mode:
-        max_chases = max_chases_for_mode(mode)
-    if max_chases is None and is_static:
-        max_chases = 0
-
-    prefix = id_prefix or (trade_id_prefix_for_lane(target_lane) if trade_id_prefix_for_lane else "srmv2")
-
-    if is_static:
-        # Resting-order model: keep one working limit per side.
-        # Same limit → leave open (do not cancel/respawn). Changed limit → cancel + replace.
-        existing = _open_bracket_lab_shadow_for_side(target_lane, direction)
-        if existing:
-            _tid, _buf = existing
-            cur_lim = float(_buf.get("limit_price") or _buf.get("original_limit_price") or 0)
-            if cur_lim > 0 and abs(cur_lim - limit_price) < 0.01:
-                logger.info(
-                    f"[{target_lane}] STATIC resting limit already working "
-                    f"study_id={_tid} dir={direction} limit={cur_lim:.2f} — skip respawn "
-                    f"[PIPELINE ENFORCEMENT]"
-                )
-                return "RESTING"
-            _cancel_open_bracket_lab_shadows(target_lane, direction, reason="CANCELLED")
-
-    if bracket_limit_pullback:
-        start_price, pullback_pct = bracket_limit_pullback(direction, market_price, limit_price)
-    else:
-        start_price = market_price
-        if direction == "LONG" and limit_price < market_price:
-            pullback_pct = (market_price - limit_price) / market_price
-        elif direction == "SHORT" and limit_price > market_price:
-            pullback_pct = (limit_price - market_price) / market_price
-        else:
-            pullback_pct = 0.0
-
-    if start_price <= 0:
-        return
-
-    study_id = f"{prefix}-{direction.lower()}-{uuid.uuid4().hex[:12]}"
-    exit_cfg = get_exit_config_for_lane(target_lane)
-    if lane_orders_allowed(target_lane) and not force_paused_shadow:
-        logger.error(
-            f"[LAB_GUARD] lane={target_lane} unexpectedly orders-allowed in bracket LAB spawn "
-            f"— aborting to avoid real orders [PIPELINE ENFORCEMENT]"
-        )
-        return
-
-    enriched = _enrich_combo_lane_features(features, ctx)
-    margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
-    # Section 8: carry the policy/episode identifiers into the buffer so the
-    # finalized outcome row can stamp them on every record. For non-Tile 2
-    # lanes these are None and the schema fields are skipped on finalize.
-    start_replay_buffer(
-        study_id,
-        start_price,
-        lane=f"shadow_collect_{target_lane}",
-        direction=direction,
-        leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
-        margin_usdt=float(margin_usdt),
-        pullback_pct=float(pullback_pct),
-        early_fail_enabled=bool(state.get("early_fail_enabled", True)),
-        exit_config=exit_cfg,
-        edge_score=round(float(edge_score), 1),
-        research_lane=target_lane,
-        source_trade_id=(ctx or {}).get("trade_id"),
-        collection_mode="ADMIN_PAUSED_SHADOW" if force_paused_shadow else "LAB",
-        paused_shadow=bool(force_paused_shadow),
-        size_mult=size_mult,
-        session_bucket=enriched.get("session_bucket"),
-        entry_features=copy.deepcopy(enriched),
-        limit_price=float(limit_price),
-        original_limit_price=float(limit_price),
-        chase_mode=mode,
-        max_chases=0 if is_static else max_chases,
-        fill_at_limit=bool(is_static),
-        limit_chase_count=0,
-        policy_version=None,
-        prompt_id=(ctx or {}).get("prompt_id"),
-        adx_at_signal=(features or {}).get("adx_normalized") or (features or {}).get("adx"),
-        sr_episode_id=None,
-        exit_profile_id=None,
-    )
-    append_replay_tick(study_id, market_price, None)
-    log_lane_opportunity_event(
-        target_lane,
-        "SPAWN_LAB",
-        study_id,
-        direction,
-        None,
-        edge_score,
-        block_reason="BRACKET_LEG_STATIC" if is_static else "BRACKET_LEG",
-    )
-    logger.info(
-        f"[{target_lane}] LAB bracket shadow study_id={study_id} dir={direction} "
-        f"limit={limit_price:.2f} market={market_price:.2f} pullback={pullback_pct:.6f} "
-        f"chase_mode={mode} fill_at_limit={is_static} "
-        f"zone={(bracket_eval or {}).get('zone')} armed={(bracket_eval or {}).get('armed')} "
-        f"— limit replay + Scenario C, no real orders [PIPELINE ENFORCEMENT]"
-    )
-    return "SPAWNED"
 
 
 # ---------------------------------------------------------------------------
@@ -15636,9 +15443,8 @@ TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
-    Independent-AI lanes, shared-direction policy lanes, and deterministic bracket
-    lanes are excluded. Shared Type B is routed explicitly from the same completed
-    AI result so it keeps a separate policy and order book without a duplicate call.
+    Independent-AI lanes and deterministic bracket lanes are excluded. Patient
+    Chase is routed from the completed shared AI result without a duplicate call.
     """
     if not is_ai_scan_lane(source_lane) or not ai:
         return
@@ -15906,7 +15712,7 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     )
 
 
-_lane_last_ts = {}  # {'CONTINUOUS': ts, 'TYPE_B_HUNTER_V1': ts, 'SR_MICRO_TILE_V1': ts}
+_lane_last_ts = {}  # {'CONTINUOUS': ts, 'OFFSET_029_ATR_TP_25': ts}
 
 
 
@@ -16288,9 +16094,8 @@ def ai_win_prob_in_execution_bands(prob) -> bool:
     raw value is still logged to ``ai_input_log.jsonl`` for future analysis, but
     the gate itself is a permanent pass-through.
 
-    Per-tile deterministic gates (TYPE_B_HUNTER_V1 scorer, SR_MICRO_TILE_V2_STATIC
-    ADX cap, CONTINUOUS spread/chase) decide entry; the AI is asked only for
-    direction (LONG / SHORT / NO_TRADE).
+    Patient Chase and Continuous deterministic gates decide entry; the AI is
+    asked only for direction (LONG / SHORT / NO_TRADE).
     """
     return True
 
@@ -21735,8 +21540,8 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
     )
     if committed is None:
         return False
-    # Chase preserves the immutable lane allow-list. Repricing a protected
-    # Tile 3/4 paper order must never promote it into a live-copy intent.
+    # Chase preserves the immutable lane allow-list. Repricing a paper order
+    # must never promote it into a live-copy intent.
     lane = _normalize_lane_key(signal or order or {})
     relay_eligible = lane in PLATFORM_RELAY_ELIGIBLE_LANES
     order["relay_eligible"] = relay_eligible
@@ -22457,8 +22262,7 @@ def state_monitor_loop():
                             _lane_last_ts['CONTINUOUS'] = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
-            # Type B consumes the same three-minute AI_SCAN result as Continuous.
-            # The retired S/R study remains archived and is not ticked here.
+            # Patient Chase consumes the same three-minute AI_SCAN result as Continuous.
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -23894,211 +23698,6 @@ def close_position(pos: dict, exit_reason: str):
     clear_pending_trade()
     pipeline_state_sync()
 
-# Archived Type B prompt retained for historical replay only. The active lane
-# consumes AI_PROMPT_TEMPLATE from the same AI_SCAN call as Continuous.
-
-LEGACY_TYPE_B_HUNTER_PROMPT_TEMPLATE = """
-You are a TYPE_B trade prediction engine for BTC perpetual trades (v12 policy).
-TYPE_B trades are defined as setups that achieve >=15% MFE (maximum favorable excursion).
-Your job is to surface market facts and propose a direction. The deterministic v12 policy
-in type_b_hunter_v1.py is the ACTUAL entry gate — your numeric confidence is vestigial
-(97% of historical outputs were the constant value 62 and have ZERO correlation with win rate).
-You should still emit direction + reason, but DO NOT treat your own confidence as a predictor.
-
-Given the following market data:
-
-{context}
-
-=== v12 EVIDENCE-BACKED TYPE_B IDENTIFICATION RULES ===
-(Pre-registered for prospective paper evaluation. Numbers below are from a fresh 305-trade cohort.)
-
-CRITICAL: Feature ranking reflects actual predictive power, not intuition.
-Several commonly assumed relationships are INVERTED in real data.
-
----
-
-TIER 1 — Strongest Predictors (determine REJECT vs APPROVE)
-
-1. ADX — THE SINGLE STRONGEST FEATURE SEPARATOR (v12: FLIPPED from earlier beliefs)
-   On the fresh 305-trade cohort the high-ADX buckets are the profitable ones:
-   - ADX 30-35: OPTIMAL ZONE. 41.9% of these trades convert to TYPE_B,
-     75.7% win rate. This is the BEST bucket — strongest directional follow-through.
-   - ADX 25-30: STRONG. Solid directional conviction, good conversion.
-   - ADX > 35: VALID but watch exhaustion. Still profitable, but extended —
-     require clean alignment with regime and structure.
-   - ADX 20-25: WEAK. Only 28.9% TYPE_B conversion. Marginal edge — pass unless
-     every other factor is strongly favorable.
-   - ADX < 20: HARD REJECT. Only 17.1% TYPE_B conversion, 61% WR. Flat/dead
-     market — no directional conviction is possible here. The bot bleeds money.
-
-2. VOLUME RATIO — RELATIONSHIP IS INVERTED vs intuition
-   - Type A (loser) trades mean volume ratio = 1.04 (high volume = CHASE/PANIC)
-   - Type B (winner) trades mean volume ratio = 0.60 (low volume = ACCUMULATION)
-   - Low ratio (< 0.80): STRONG Type B signal. Quiet accumulation before breakout.
-     These are the setups where smart positioning happens before the crowd.
-   - Normal ratio (0.80-1.20): NEUTRAL. Neither helps nor hurts.
-   - High ratio (1.20-1.50): DANGER ZONE. Chase/panic entry behavior.
-     Retail FOMO destroys edge here.
-   - Extreme ratio (> 1.50): HEAVY REJECT. Abnormal volume = capitulation or fakeout.
-     The bot should NEVER enter when volume spikes this high.
-
----
-
-TIER 2 — Important Contextual Separators
-
-3. REGIME — Determines baseline Type B probability
-   - BEAR regime: Historically BEST for Type B. Sustained directional moves
-     create more reliable follow-through. Default to favorable.
-   - RANGE regime: Solid. Requires clean feature alignment.
-   - BULL regime: LOWER Type B WR — choppier market with more false breakouts.
-     BULL requires ADX >= 28 to clear the gate (BULL_NEEDS_ADX_28_PLUS).
-     Default to conservative sizing and higher thresholds.
-   - CHOPPY / EXPANSION / UNKNOWN: HARD REJECT. The policy blocks these outright
-     (REGIME_BLOCK) — do not waste confidence on them.
-
-4. STRUCTURE SCORE — Directional conviction from market context
-   Value is in the market_context.market_structure.structure_score field
-   (or trend_health.structure_score in the context).
-   - Structure <= -3 (bearish bias): Favorable for SHORT Type B setups.
-     Clean bearish market structure supports sustained downside.
-   - Structure >= 3 (bullish bias): Supports LONG. Exercise extra caution
-     in BULL regime where bull structure is less reliable.
-   - Structure between -3 and 3: No structural edge — requires other factors.
-   - LONG while structure <= -3 = COUNTER_STRUCTURE_LONG (HARD REJECT)
-   - SHORT while structure >= 3 = COUNTER_STRUCTURE_SHORT (HARD REJECT)
-
-5. DELTA (order-flow imbalance) — Directional confirmation
-   - Positive delta: Buy pressure supports LONG thesis.
-   - Negative delta: Sell pressure supports SHORT thesis.
-   - USAGE: Delta confirms direction, but must be read WITH volume ratio.
-     Direction-aligned delta (>= 18 long / <= -18 short) earns credit.
-     High delta + Low volume ratio = quiet accumulation (BEST).
-     High delta + High volume ratio = chase behavior (WORST).
-
-6. SPREAD (conviction spread) — Signal quality indicator
-   - Spread 3-5: BEST historical range. Good conviction without overcommitment.
-   - Spread 2-3: Moderate quality. Valid with other strong factors.
-   - Spread < 2: HARD REJECT (SPREAD_FLOOR) — insufficient conviction.
-
----
-
-TIER 3 — Supplementary Signals
-
-7. EDGE SCORE — Paradoxically, high edge != high win rate
-   - Edge 3-5: GOLDILOCKS ZONE. Best historical Type B conversion.
-   - Edge > 5: COUNTERINTUITIVE — LOWER win rate at scale.
-     The bot's highest confidence zones are historically worse.
-     Overconfidence kills edge — base decisions on features, not self-calibration.
-     Do NOT inflate your confidence just because you see high edge numbers.
-   - Edge > 5 + Volume ratio > 1.20: HARD REJECT (EDGE_VOLUME_DANGER).
-
-8. EMA SLOPE — Trend alignment (weakest Tier-3 signal)
-   - UP slope + LONG direction: confirms bias.
-   - DOWN slope + SHORT direction: confirms bias.
-   - Conflicting slope vs direction: minor negative.
-
----
-
-=== DECISION FRAMEWORK ===
-
-STRONG_APPROVE (features strongly align; do not use the numeric confidence as a gate):
-- ADX 30-35 (OPTIMAL ZONE — flipped from earlier belief)
-- Volume ratio < 1.20 (NOT in chase/panic zone)
-- Direction aligned with BOTH regime and structure
-- At least 3 TIER 1+2 factors favorable
-- Edge 3-5 (goldilocks, not overconfidence zone)
-- Spread 3-5
-- No "SIT OUT" conditions triggered
-
-APPROVE (features align; do not use the numeric confidence as a gate):
-- ADX 25-35
-- Volume ratio < 1.50
-- Direction aligned with regime or structure (at least one)
-- At least 2 TIER 1+2 factors favorable
-- No "SIT OUT" conditions triggered
-
-SOFT_APPROVE (some features are weak or missing; do not use the numeric confidence as a gate):
-- Most factors align but one key signal is weak or missing
-- OR in BULL regime with only partial alignment
-- OR normal feature set but no standout signal
-- Directionally correct but conviction is low
-
-REJECT:
-- Any "SIT OUT" condition triggered (see below)
-- ADX < 20 (flat market — no edge possible)
-- Volume ratio > 1.50 (abnormal/panic volume)
-- Direction conflicts with BOTH regime AND structure
-- Three or more Tier 1+2 signals in warning/danger zones
-
----
-
-=== WHEN TO SIT OUT (HARD REJECT — no exceptions, no override) ===
-
-These are the seven pre-registered v12 risk hypotheses. The deterministic gate enforces
-every one of them — your confidence does NOT override them.
-
-1. ADX < 20 = FLAT/DEAD MARKET (ADX_FLOOR)
-   No directional edge possible. 17.1% TYPE_B conversion, 61% WR on fresh data.
-
-2. Volume ratio > 2.0 = EXTREME ANOMALY (VOLUME_DANGER)
-   High probability of fakeout or reversal. Not a sustainable Type B setup.
-
-3. BULL regime + ADX < 28 (BULL_NEEDS_ADX_28_PLUS)
-   BULL is historically choppy — require a strongly trending ADX to clear the gate.
-
-4. Structure <= -3 + LONG direction (COUNTER_STRUCTURE_LONG)
-   Trading against established bearish structure. Very low probability.
-
-5. Structure >= 3 + SHORT direction (COUNTER_STRUCTURE_SHORT)
-   Trading against established bullish structure. Very low probability.
-
-6. Edge > 5 + Volume ratio > 1.20 (EDGE_VOLUME_DANGER)
-   Overconfidence combined with chase behavior. Historically awful combo.
-   The AI's self-calibration fails here — trust the data, not the number.
-
-7. ADX > 35 + Edge > 5 + Volume ratio > 1.50 (TRIPLE_DANGER)
-   Extended trend + overconfidence + panic volume. Triple danger zone.
-   Near-zero historical win rate.
-
----
-
-=== CRITICAL INSTRUCTIONS ===
-
-- Your numeric confidence output is AUDIT-ONLY. 97% of historical outputs were
-  the constant value 62 and have ZERO correlation with actual win rate.
-  The deterministic gate in type_b_hunter_v1.py decides entry — not your confidence.
-- Base your DIRECTION on the FEATURES in the context data, not on self-calibration.
-- When in doubt between APPROVE and REJECT, prefer REJECT.
-  False positives destroy more value than missed opportunities.
-- The context data contains market_context.trend_health, market_context.market_structure,
-  market_structure_shift, reversal_risk_score, and quality_score_components.
-  Use ALL of these — they contain more signal than any single number.
-
-Respond ONLY with a JSON object in this format:
-
-{{
-  "direction": "LONG / SHORT / NO_TRADE",
-  "confidence": 0-100,
-  "long_score": 0-100,
-  "short_score": 0-100,
-  "bull_score": 0-10,
-  "bear_score": 0-10,
-  "decision": "STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT",
-  "reason": "Brief one-line explanation",
-  "type_b_score": 0.0-5.0,
-  "type_b_factors": ["adx", "volume_ratio", "regime", ...]
-}}
-
-Direction: LONG / SHORT / NO_TRADE
-Win probability: 0-100
-Long score: 0-100
-Short score: 0-100
-Bull score: 0-10
-Bear score: 0-10
-Decision: STRONG_APPROVE / APPROVE / SOFT_APPROVE / REJECT
-Reason: ...
-"""
-
 SHARED_DIRECTION_PROMPT_ID = "shared_direction_adx_evidence_v3_20260721"
 
 AI_PROMPT_TEMPLATE = """
@@ -24146,7 +23745,7 @@ RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
 - This is the one shared call made on the three-minute AI_SCAN cadence.
-- CONTINUOUS and TYPE_B_HUNTER_V1 independently accept or reject the candidate afterward.
+- Patient Chase and CONTINUOUS independently accept or reject the candidate afterward.
 - Do not decide either tile's verdict and do not return any field beyond direction,
   long_score, short_score, and one short reason.
 - exhaustion_3m / exhaustion_3m_line is the cycle-aligned oscillator block
@@ -24749,7 +24348,6 @@ def _pathway_validation_artifact_paths() -> list:
     """Startup validation JSON — stale after fresh collection; regenerated on next bot start."""
     return [
         "tile_independence_report.json",
-        "type_b_execution_audit.json",
         "ai_scan_independence_report.json",
         "ai_scan_role_validation.json",
         "independent_v1_post_ai_spawn_validation.json",
@@ -27005,10 +26603,6 @@ __ADMIN_ACCESS_CONTROLS__
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
   <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
-  <details id="pathwayResearchArchive" style="margin-top:8px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
-    <summary style="cursor:pointer;color:#8b949e;font-weight:600;">Research Archive — retired lanes (analytics only, no orders)</summary>
-    <div id="pathwayArchiveList" style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;font-size:0.82em;"></div>
-  </details>
 </div>
 
 <details id="tradingParamsPanel" open style="margin:12px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -27332,18 +26926,12 @@ DASHBOARD_JS = """(function () {
       const m = model || lane || '-';
       const colors = {
         'CONTINUOUS': '#58a6ff',
-        'TYPE_B_HUNTER_V1': '#bc8cff',
-        'SR_MICRO_TILE_V1': '#3fb950',
-        'SR_MICRO_TILE_V2': '#2ea043',
-        'SR_MICRO_TILE_V2_STATIC': '#7ee787',
+        'OFFSET_029_ATR_TP_25': '#3fb950',
         'AI_SCAN': '#6e7681',
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
-        'TYPE_B_HUNTER_V1': 'Type B Hunter V1',
-        'SR_MICRO_TILE_V1': 'S/R Micro Tile V1',
-        'SR_MICRO_TILE_V2': 'S/R Micro Tile V2',
-        'SR_MICRO_TILE_V2_STATIC': 'S/R Micro V2 Static',
+        'OFFSET_029_ATR_TP_25': '0.29% Patient Chase · ATR 2.5×',
         'AI_SCAN': 'AI Scan',
       };
       const c = colors[lane] || '#8b949e';
@@ -27718,33 +27306,6 @@ DASHBOARD_JS = """(function () {
       if (spec.planned) return '#6e7681';
       return '#58a6ff';
     }
-    function renderPathwayArchive(d) {
-      const el = document.getElementById('pathwayArchiveList');
-      if (!el) return;
-      const archive = d.retired_lane_archive || [];
-      const labels = d.research_lane_labels || {};
-      const statusMap = d.pathway_lane_status || {};
-      const retiredLanes = (d.pathway_lane_specs && d.pathway_lane_specs.legacy_lanes_retired) || [];
-      const byLane = {};
-      archive.forEach(function (row) { byLane[row.lane] = row; });
-      const lanes = retiredLanes.length ? retiredLanes : archive.map(function (r) { return r.lane; });
-      el.innerHTML = lanes.map(function (lane) {
-        const row = byLane[lane] || {};
-        const st = row.pathway_status || statusMap[lane] || 'DATA_RETIRED';
-        const pnl = row.net_pnl_usd != null ? row.net_pnl_usd : 0;
-        const col = pnl >= 0 ? '#3fb950' : '#f85149';
-        const trades = row.closes != null ? row.closes : 0;
-        const ev = row.per_approve_ev != null ? row.per_approve_ev : 0;
-        return '<div style="padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:8px;">'
-          + '<strong style="color:#8b949e;">' + (row.label || labels[lane] || lane) + '</strong>'
-          + '<div style="color:#484f58;margin-top:4px;font-size:0.78em;">' + st + ' · Research only · no new orders</div>'
-          + '<div style="margin-top:8px;font-size:0.85em;">Trades <strong>' + trades + '</strong>'
-          + ' · Approves <strong>' + (row.approves || 0) + '</strong>'
-          + ' · PnL <strong style="color:' + col + ';">$' + Number(pnl).toFixed(2) + '</strong>'
-          + ' · EV/appr <strong>$' + Number(ev).toFixed(2) + '</strong></div>'
-          + '</div>';
-      }).join('') || '<span style="color:#6e7681;">No retired lane data yet.</span>';
-    }
     function renderPathwayLab(d) {
       const specsPayload = d.pathway_lane_specs || {};
       const specs = specsPayload.lanes || [];
@@ -27856,12 +27417,6 @@ DASHBOARD_JS = """(function () {
             } else {
               orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">SHADOW ONLY — NO ORDERS · still collecting decisions &amp; simulated PnL</div>';
             }
-          } else if (spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2') {
-            if (on) {
-              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — independent tile (paper limits; Live Copy may mirror)</div>';
-            } else {
-              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">SHADOW SIM ONLY — no limit orders (safe for live money) · still collecting decisions &amp; simulated PnL</div>';
-            }
           } else if (spec.lane === 'CONTINUOUS') {
             if (on) {
               orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — benchmark lane places limits</div>';
@@ -27908,13 +27463,9 @@ DASHBOARD_JS = """(function () {
               if (!parts.length) return '';
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
-            + (spec.lane === 'TYPE_B_HUNTER_V1'
-              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">One shared direction call feeds both tiles; Type B keeps its own gates, limit orders, chase history, exits, and ledger.</div>'
-              : (spec.is_independent_ai && spec.lane === 'A160_CONTEXT_CHASE_EXIT_V2'
-              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS benchmark unaffected — V2 uses own prompt, trade IDs, and AI clock</div>'
-              : (spec.is_independent_ai
-                ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">CONTINUOUS and Type B share one direction call; policies, orders, chase, and P&amp;L remain independent. OFF = LAB shadow.</div>'
-                : '')))
+            + (spec.is_independent_ai
+              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">Patient Chase and Continuous share one direction call while keeping independent policies, orders, chase, and P&amp;L.</div>'
+              : '')
             + (function () {
               const prom = spec.promotion_criteria;
               const kill = spec.kill_criteria;
@@ -28402,8 +27953,7 @@ DASHBOARD_JS = """(function () {
           'EDGE_ACCELERATION': 'Edge Acceleration',
           'EDGE_PLUS_STACK': 'Edge Plus Stack',
           'SHADOW_RUNNER': 'Shadow Runner',
-          'EDGE_ALPHA_4': 'Edge Alpha 4',
-          'TYPE_B_HUNTER': 'Type B Hunter'
+          'EDGE_ALPHA_4': 'Edge Alpha 4'
         };
         safeText('aiResearchModel', dai.research_model || d.last_ai?.research_model || laneLabels[d.last_ai?.research_lane] || d.last_ai?.research_lane || '-');
         const aiGapEl = document.getElementById('aiGap');
@@ -28980,7 +28530,6 @@ DASHBOARD_JS = """(function () {
           </tr>
         `).join(''));
         renderPathwayLab(d);
-        renderPathwayArchive(d);
         renderPathwayScorecard(d);
         safeText('wsLatency', d.diag?.ws_latency_ms ?? '-');
         safeText('engineLoop', d.diag?.engine_loop_ms ?? '-');
@@ -32081,7 +31630,6 @@ def _attach_patient_chase_routes(
     enriched = []
     for original in ai_history or ():
         row = dict(original)
-        row.pop("type_b_verdict", None)
         verdicts = {
             lane: verdict
             for lane, verdict in dict(row.get("lane_verdicts") or {}).items()
@@ -33679,7 +33227,7 @@ def api_reconcile_phantom_cancel():
     )
 
     # Emit a POSITION_CLOSED relay event so any downstream subscriber that
-    # mirrors Fly's paper state (the dashboard, type-b research) learns the
+    # mirrors Fly's paper state so the dashboard and current research learn the
     # trade is no longer open. Use the same channel as close_position.
     _push_showcase_relay_event(
         "POSITION_CLOSED",
@@ -35883,7 +35431,7 @@ def export_csv():
         # Include both legacy 3-factor files and the authoritative per-lane
         # research lifecycle. The old export omitted these newer files, so a
         # downloaded ZIP could show replay buffers but could not prove whether
-        # Tile 2 / Type B filled, expired, closed, or remained counterfactual.
+        # Current lane filled, expired, closed, or remained counterfactual.
         for file in dict.fromkeys(research_export_files()):
             if os.path.exists(file):
                 zip_file.write(file, arcname=os.path.basename(file))
@@ -37634,7 +37182,6 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             "net_pnl_usd": trade_row.get("net_pnl_usd"),
             "dur_min": trade_row.get("dur_min"),
             "entry_type": trade_row.get("entry_type"),
-            "trade_mfe_type": _trade_mfe_type_label(mfe),
             "first_3_candles": pos.get("first_3_candles") or {},
             "research_buckets": buckets,
             "entry_features": {
@@ -39226,8 +38773,6 @@ def _persistent_config_keys():
         "spread_gate",
         "edge_threshold", "edge_threshold_max",
         "edge_range_preset", "fresh_collection_mode",
-        "profit_gates_lane_enabled",
-        "profit_gates_enforced",
         "continuous_ai_direct_entry_enabled",
         "continuous_ai_research_enabled",
         "research_lane_enabled",
@@ -39309,11 +38854,6 @@ def load_persistent_config():
                 for key in allowed_keys:
                     if key in config:
                         state[key] = config[key]
-                if "profit_gates_lane_enabled" not in config and "profit_gates_enforced" in config:
-                    state["profit_gates_lane_enabled"] = bool(config["profit_gates_enforced"])
-                elif "profit_gates_lane_enabled" not in state:
-                    state["profit_gates_lane_enabled"] = PROFIT_GATES_LANE_DEFAULT_ENABLED
-                state["profit_gates_enforced"] = bool(state.get("profit_gates_lane_enabled", PROFIT_GATES_LANE_DEFAULT_ENABLED))
                 merged_lanes = dict(_RESEARCH_LANE_TOGGLE_DEFAULTS)
                 if isinstance(config.get("research_lane_enabled"), dict):
                     for lane, val in config["research_lane_enabled"].items():
@@ -39443,13 +38983,10 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "COUNTERFACTUAL_FILE",
     "SOURCE_ORDER_MARKET_EVIDENCE_FILE",
     "MICROSTRUCTURE_TAPE_FILE",
-    "TYPE_B_RESEARCH_V2_EVENT_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
     "execution_funnel.jsonl",
-    "retired_lane_violations.jsonl",
     "shadow_runner_study.jsonl",
-    "type_b_adx_v3_shadow_decisions.jsonl",
 )
 
 
@@ -40451,10 +39988,9 @@ def main():
         )
         capture_pathway_startup_snapshot()
         logger.info(
-            f"[PATHWAY VALIDATION] {v['verdict']} type_b={v['type_b_audit']} "
-            f"tiles={v['tile_independence']} ai_scan={v.get('ai_scan_independence')} "
-            f"ai_scan_role={v.get('ai_scan_role')} srmv2={v.get('sr_micro_tile_v2_bracket')} "
-            f"srmv2s={v.get('sr_micro_tile_v2_static')} sync={v.get('bot_analyzer_sync')} "
+            f"[PATHWAY VALIDATION] {v['verdict']} "
+            f"tiles={v.get('tile_independence')} ai_scan={v.get('ai_scan_independence')} "
+            f"ai_scan_role={v.get('ai_scan_role')} sync={v.get('bot_analyzer_sync')} "
             f"[PIPELINE ENFORCEMENT]"
         )
     except SystemExit:

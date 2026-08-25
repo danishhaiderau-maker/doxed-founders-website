@@ -354,6 +354,7 @@ SIGNAL_PERSIST_FILE = "signal_persist.log"
 NEAR_EDGE_FILE = "near_edge.log"
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
+CURRENT_RESEARCH_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
 # Single source: combo_pathway_config (bot + dashboard import the same contract).
 try:
     from combo_pathway_config import (
@@ -373,7 +374,6 @@ try:
         EXPECTED_EXCHANGE,
         PRIMARY_PRODUCTION_LANE,
         RESEARCH_STACK_VERSION,
-        RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     )
     from scenario_c_config import SCENARIO_C_LADDER_LABEL, TRAIL_LADDER_SCENARIO_C
     PATHWAY_STATUS_SHADOW_COLLECTING = "SHADOW_COLLECTING"
@@ -396,40 +396,28 @@ except ImportError:
     SHADOW_COLLECTING_LANES = ()
     BENCHMARK_LANE = "CONTINUOUS"
     COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-    CONTINUOUS_PROXY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-    )
-    PRIMARY_PRODUCTION_LANE = "COMBO_65_SP5_CHASE_3PLUS"
-    COMBO_CHASE_DELAY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-    )
-    COMBO_CHASE_ISOLATION_PAIRS = (
-        ("COMBO_604_SP4_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"),
-        ("COMBO_65_SP5_DIRECT", "COMBO_65_SP5_CHASE_3PLUS"),
-    )
-    ACTIVE_CHASE_ISOLATION_PAIRS = (
-        ("CONTINUOUS", "AI60_SP3_VIRTUAL_CHASE"),
-    )
-    ACTIVE_CHASE_ISOLATION_LANES = (
-        "CONTINUOUS",
-        "AI60_SP3_VIRTUAL_CHASE",
-        "A160_CONTEXT_CHASE_EXIT_V2",
-    )
+    CONTINUOUS_PROXY_LANES = ()
+    PRIMARY_PRODUCTION_LANE = "CONTINUOUS"
+    COMBO_CHASE_DELAY_LANES = CURRENT_RESEARCH_LANES
+    COMBO_CHASE_ISOLATION_PAIRS = ()
+    ACTIVE_CHASE_ISOLATION_PAIRS = ()
+    ACTIVE_CHASE_ISOLATION_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
     COMBO_LANE_SPECS = {}
-    COMBO_CHASE_DIRECT_REFERENCE = "COMBO_604_SP4_DIRECT"
-    ACTIVE_PATHWAY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "AI_DISAGREEMENT_REPLAY",
-    )
+    COMBO_CHASE_DIRECT_REFERENCE = "CONTINUOUS"
+    ACTIVE_PATHWAY_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
     _COMBO_LANE_LABELS = {}
     ANALYZER_COMPARE_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
     RETIRED_PATHWAY_LANES = frozenset()
-CURRENT_RESEARCH_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
 ANALYZER_COMPARE_LANES = CURRENT_RESEARCH_LANES
 ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
+CONTINUOUS_PROXY_LANES = ()
+PRIMARY_PRODUCTION_LANE = "CONTINUOUS"
+COMBO_CHASE_DELAY_LANES = CURRENT_RESEARCH_LANES
+COMBO_CHASE_ISOLATION_PAIRS = ()
+ACTIVE_CHASE_ISOLATION_PAIRS = ()
+ACTIVE_CHASE_ISOLATION_LANES = CURRENT_RESEARCH_LANES
+COMBO_LANE_SPECS = {}
+COMBO_CHASE_DIRECT_REFERENCE = "CONTINUOUS"
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
 EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
 BOT_VERSION = EXPECTED_BOT_VERSION
@@ -512,7 +500,7 @@ AI_MATRIX_EDGE_BUCKETS = ["2-3", "3-4", "4+"]
 HORIZON_30M_SEC = 1800
 ACTIVE_ANALYSIS_LANES = CURRENT_RESEARCH_LANES
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
-LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "PROFIT_GATES", "STABILITY", "EXEC_5M"})
+LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
 ANALYZER_JSON_REPORT_FILES = (
     AI_CALIBRATION_REPORT_FILE,
@@ -719,8 +707,6 @@ SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
 SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
 SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
-V2_SHADOW_OUTCOME_FILE = "v2_shadow_outcome.jsonl"
-V2_CHECKER_LOG_FILE = "v2_checker_log.jsonl"
 
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
@@ -3002,93 +2988,6 @@ def paused_shadow_research_report(session: dict = None):
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
     return payload
-
-
-def _load_v2_shadow_outcome_df(session: dict = None):
-    """A160 V2 tile-OFF simulated fills/exits (v2_shadow_outcome.jsonl)."""
-    rows = _load_jsonl_rows(V2_SHADOW_OUTCOME_FILE)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if session and _session_start_ts(session) is not None:
-        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
-    return df
-
-
-def _load_v2_checker_approves_df(session: dict = None):
-    """V2 checker accepts — independent of AI_SCAN signal_snapshot approves."""
-    rows = _load_jsonl_rows(V2_CHECKER_LOG_FILE)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if "accepted" in df.columns:
-        df = df[df["accepted"].apply(_truthy)]
-    if session and _session_start_ts(session) is not None:
-        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
-    return df
-
-
-def _v2_outcome_is_reject_counterfactual(row) -> bool:
-    """Reject-path counterfactual sims must not count as checker-pass paper fills."""
-    if hasattr(row, "get"):
-        mode = str(row.get("collection_mode") or "").upper()
-        checker_accepted = row.get("checker_accepted", True)
-    else:
-        mode = str((row or {}).get("collection_mode") or "").upper()
-        checker_accepted = (row or {}).get("checker_accepted", True)
-    if mode == "V2_CHECKER_REJECT":
-        return True
-    if mode == "V2_SHADOW":
-        return False
-    return not _truthy(checker_accepted)
-
-
-def _v2_lane_metrics_from_logs(session: dict = None) -> dict:
-    """Aggregate V2 checker approves + shadow outcomes for benchmark_vs_lanes."""
-    checker = _load_v2_checker_approves_df(session)
-    outcomes = _load_v2_shadow_outcome_df(session)
-    approves = len(checker) if checker is not None and not checker.empty else 0
-    checker_pass_sims = 0
-    checker_pass_pnl = 0.0
-    wins = 0
-    reject_counterfactual_sims = 0
-    reject_counterfactual_pnl = 0.0
-    if outcomes is not None and not outcomes.empty:
-        work = outcomes.copy()
-        if "filled" in work.columns:
-            work["filled"] = work["filled"].apply(_truthy)
-        else:
-            work["filled"] = True
-        reject_mask = work.apply(_v2_outcome_is_reject_counterfactual, axis=1)
-        reject_work = work[reject_mask]
-        work = work[~reject_mask]
-        filled = work[work["filled"]]
-        checker_pass_sims = len(filled)
-        checker_pass_pnl = round(
-            float(pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
-        )
-        pnl_series = pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0)
-        wins = int((pnl_series >= 0).sum())
-        reject_filled = reject_work[reject_work["filled"]] if not reject_work.empty else reject_work
-        reject_counterfactual_sims = len(reject_filled)
-        reject_counterfactual_pnl = round(
-            float(pd.to_numeric(reject_filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
-        ) if reject_counterfactual_sims else 0.0
-    per_ev = round(checker_pass_pnl / approves, 2) if approves else 0.0
-    win_rate = round(100.0 * wins / checker_pass_sims, 1) if checker_pass_sims else 0.0
-    return {
-        "approves": approves,
-        "checker_pass_sims": checker_pass_sims,
-        "checker_pass_pnl": checker_pass_pnl,
-        "sim_fills": checker_pass_sims,
-        "sim_pnl": checker_pass_pnl,
-        "per_approve_ev": per_ev,
-        "win_rate_pct": win_rate,
-        "reject_counterfactual_sims": reject_counterfactual_sims,
-        "reject_counterfactual_pnl": reject_counterfactual_pnl,
-        "reject_sim_fills": reject_counterfactual_sims,
-        "reject_sim_pnl": reject_counterfactual_pnl,
-    }
 
 
 def _load_shadow_lane_outcome_df(session: dict = None):
@@ -9386,12 +9285,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         shadow_by_lane = shadow_report["by_lane"]
 
     shadow_lane_df = _load_shadow_lane_outcome_df(session)
-    v2_log_metrics = _v2_lane_metrics_from_logs(session)
-    if v2_log_metrics.get("approves"):
-        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
-        lanes_with_approves_seed.add(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
-    else:
-        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+    lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
     lanes_with_approves_seed.update(shared_verdict_lanes.keys())
 
     lane_metrics = {}
@@ -9432,31 +9326,10 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             shadow_lane_df, lane
         )
 
-        v2_lane_extra = {}
-        if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
-            v2_approves = int(v2_log_metrics.get("approves") or 0)
-            if v2_approves:
-                approves_n = max(approves_n, v2_approves)
-            v2_lane_extra = {
-                "v2_checker_approves": v2_approves,
-                "v2_checker_pass_sims": int(v2_log_metrics.get("checker_pass_sims") or v2_log_metrics.get("sim_fills") or 0),
-                "v2_reject_counterfactual_sims": int(
-                    v2_log_metrics.get("reject_counterfactual_sims") or v2_log_metrics.get("reject_sim_fills") or 0
-                ),
-                "v2_checker_pass_pnl": float(v2_log_metrics.get("checker_pass_pnl") or v2_log_metrics.get("sim_pnl") or 0.0),
-                "v2_reject_counterfactual_pnl": float(
-                    v2_log_metrics.get("reject_counterfactual_pnl") or v2_log_metrics.get("reject_sim_pnl") or 0.0
-                ),
-                "v2_metrics_note": (
-                    "Tile-OFF lane: Approves=checker pass; Checker-pass sims=paper shadow fills; "
-                    "Reject sims=checker-reject counterfactuals (not session fills)."
-                ),
-            }
-            if real_fills == 0 and v2_lane_extra["v2_checker_pass_sims"] > 0:
-                net_pnl_real = float(v2_lane_extra["v2_checker_pass_pnl"])
-        elif lane == "AI_SCAN":
+        lane_extra = {}
+        if lane == "AI_SCAN":
             coord = _ai_scan_coordinator_stats(decisions, ai_log)
-            v2_lane_extra = {
+            lane_extra = {
                 "coordinator_note": "Coordinator — 0 fills by design",
                 "ai_scan_coordinator": coord,
                 "coordinator_rejects": coord.get("rejects", 0),
@@ -9581,7 +9454,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "lane_gate_rejected": int(shared_verdict_metrics.get("rejected") or 0),
             "approval_source": "lane_verdict" if has_shared_verdict_truth else "signal_snapshot",
             **lane_research_metrics,
-            **v2_lane_extra,
+            **lane_extra,
         }
         if all_trade_df is not None:
             lane_metrics[lane]["all_time"] = _all_time_lane_metrics(all_trade_df, lane)
@@ -16933,15 +16806,10 @@ def write_report_manifest(payload=None):
     """Manifest for research dashboard — no hardcoded report list in UI."""
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
-        from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
         build_policy_cycle_reports(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
-        )
-        build_shadow_lane_comprehensive_report(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
         )

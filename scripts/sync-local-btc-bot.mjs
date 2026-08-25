@@ -42,7 +42,6 @@ if (!force) {
 
 const LOCAL_MIRROR_FILES = [
   ['combo_pathway_config.py', join(AGENT, 'combo_pathway_config.py')],
-  ['legacy_pathway_config.py', join(AGENT, 'legacy_pathway_config.py')],
   ['scenario_c_config.py', join(AGENT, 'scenario_c_config.py')],
   ['pathway_lane_roster.py', join(AGENT, 'pathway_lane_roster.py')],
   ['pathway_lab_validation.py', join(AGENT, 'pathway_lab_validation.py')],

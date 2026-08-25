@@ -172,7 +172,6 @@ GOOGLE_AI_KEY=
 
 # === Bot (CONSTRAINT: do not change without explicit approval) ===
 FORCE_PAPER_MODE=1
-TYPE_B_FIXED_POLICY_HASH=
 BITFINEX_API_KEY=
 BITFINEX_API_SECRET=
 "@

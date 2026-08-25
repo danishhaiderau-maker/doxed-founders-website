@@ -7,41 +7,41 @@ from research.genome.quality_score import summarize_trades
 
 
 def generate_hypotheses(
-    combo_604_trades: List[Dict[str, Any]],
+    patient_chase_trades: List[Dict[str, Any]],
     continuous_trades: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    c604 = summarize_trades(combo_604_trades)
+    patient = summarize_trades(patient_chase_trades)
     bench = summarize_trades(continuous_trades)
     supported: List[Dict[str, Any]] = []
     invalidated: List[Dict[str, Any]] = []
 
-    if c604["sample_size"] >= 30 and c604["ev"] > 0:
+    if patient["sample_size"] >= 30 and patient["ev"] > 0:
         supported.append({
-            "hypothesis": "COMBO_604 shows positive EV in current sample",
-            "evidence": f"n={c604['sample_size']} EV={c604['ev']}",
-            "dna_quality": c604["dna_quality"],
-            "confidence": c604["research_confidence"],
+            "hypothesis": "OFFSET_029_ATR_TP_25 shows positive EV in current sample",
+            "evidence": f"n={patient['sample_size']} EV={patient['ev']}",
+            "dna_quality": patient["dna_quality"],
+            "confidence": patient["research_confidence"],
             "recommended_action": "Continue collection — advisory only",
         })
-    elif c604["sample_size"] >= 30:
+    elif patient["sample_size"] >= 30:
         invalidated.append({
-            "hypothesis": "COMBO_604 shows positive EV",
-            "evidence": f"n={c604['sample_size']} EV={c604['ev']}",
+            "hypothesis": "OFFSET_029_ATR_TP_25 shows positive EV",
+            "evidence": f"n={patient['sample_size']} EV={patient['ev']}",
             "recommended_action": "Monitor kill criteria",
         })
 
-    if c604["sample_size"] >= 50 and bench["sample_size"] >= 50:
-        if c604["ev"] > bench["ev"]:
+    if patient["sample_size"] >= 50 and bench["sample_size"] >= 50:
+        if patient["ev"] > bench["ev"]:
             supported.append({
-                "hypothesis": "COMBO_604 beats CONTINUOUS benchmark",
-                "evidence": f"604 EV={c604['ev']} vs CONT={bench['ev']}",
-                "confidence": c604["research_confidence"],
+                "hypothesis": "OFFSET_029_ATR_TP_25 beats CONTINUOUS benchmark",
+                "evidence": f"PATIENT EV={patient['ev']} vs CONT={bench['ev']}",
+                "confidence": patient["research_confidence"],
                 "recommended_action": "Continue collection — not promotion-ready until all criteria met",
             })
         else:
             invalidated.append({
-                "hypothesis": "COMBO_604 beats CONTINUOUS benchmark",
-                "evidence": f"604 EV={c604['ev']} vs CONT={bench['ev']}",
+                "hypothesis": "OFFSET_029_ATR_TP_25 beats CONTINUOUS benchmark",
+                "evidence": f"PATIENT EV={patient['ev']} vs CONT={bench['ev']}",
                 "recommended_action": "Review kill criteria",
             })
 

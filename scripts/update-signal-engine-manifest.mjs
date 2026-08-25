@@ -18,7 +18,7 @@ const manifest = {
   engine_version: version,
   combo_version: new Date().toISOString().slice(0, 10),
   exit_version: 'scenario-c-v4',
-  benchmark_lane: 'COMBO_65_SP5_CHASE_3PLUS',
+  benchmark_lane: 'CONTINUOUS',
   signal_hash: hash,
   source: 'bybit-15m-research-bot/bybit_bot.py',
   updated_at: new Date().toISOString(),

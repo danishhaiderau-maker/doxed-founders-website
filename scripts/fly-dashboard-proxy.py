@@ -39,7 +39,6 @@ MIRROR_MUTATION_ALLOWLIST = {
     "/api/toggle_fresh_collection",
     "/api/fresh_epoch_reset",
     "/api/toggle_invert_signal",
-    "/api/toggle_profit_gates",
     "/api/toggle_research_lane",
 }
 FORWARDED_REQUEST_HEADERS = {

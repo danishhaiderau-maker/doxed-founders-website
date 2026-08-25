@@ -377,7 +377,7 @@ SHOWCASE_HTML = """<!DOCTYPE html>
         const entry = laneSpec && laneSpec.entry ? laneSpec.entry : {};
         const exit = laneSpec && laneSpec.exit ? laneSpec.exit : {};
         document.getElementById('strategyCard').innerHTML = rows({
-          'Lane': esc(laneSpec ? laneSpec.lane : (s.pathway_lane_specs && s.pathway_lane_specs.benchmark_lane) || 'COMBO_65_SP5_CHASE_3PLUS'),
+          'Lane': esc(laneSpec ? laneSpec.lane : (s.pathway_lane_specs && s.pathway_lane_specs.benchmark_lane) || 'CONTINUOUS'),
           'AI threshold': entry.filters ? entry.filters.ai_probability_bucket || '65+' : '65+',
           'Spread threshold': entry.filters ? entry.filters.directional_spread_bucket || '5+' : '5+',
           'Entry mode': laneSpec ? (laneSpec.entry_mode_label || 'Chase 3+') : 'Chase 3+',

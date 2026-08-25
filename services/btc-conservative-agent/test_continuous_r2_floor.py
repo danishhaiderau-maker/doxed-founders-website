@@ -1,7 +1,7 @@
 """Regression tests for the R2 spread floor on the CONTINUOUS lane.
 
 The previous R2 fix (commit 0f980ab4) raised MIN_SPREAD_FLOOR in
-type_b_hunter_v1, but live cont-* trades fire from the CONTINUOUS lane spawn
+an unrelated retired experiment, but live cont-* trades fire from the CONTINUOUS lane spawn
 path (bot.spawn_continuous_lane_from_ai_scan) which had NO spread floor of its
 own. The R2 floor gates AI signals before they reach the chase lifecycle.
 

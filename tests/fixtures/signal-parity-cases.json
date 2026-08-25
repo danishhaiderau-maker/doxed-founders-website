@@ -1,65 +1,21 @@
 {
-  "description": "Frozen parity cases for the V3.1 four-tile stack. Retired Type B and legacy deterministic lanes never re-enter combo fan-out, regardless of directional spread or legacy confidence.",
+  "description": "Frozen parity cases for the exact two-lane stack: Patient Chase execution plus Continuous benchmark.",
   "cases": [
     {
-      "id": "type-b-long-shared-direction",
+      "id": "patient-chase-long-shared-direction",
       "ai": { "win_prob": 0, "bull_score": 8, "bear_score": 4 },
       "direction": "LONG",
       "spread": 4,
-      "expect_lanes": [],
-      "reject_lanes": [
-        "TYPE_B_HUNTER_V1",
-        "AI60_SP3_VIRTUAL_CHASE",
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "SR_MICRO_TILE_V2_STATIC"
-      ]
+      "expect_lanes": ["OFFSET_029_ATR_TP_25"],
+      "reject_lanes": ["UNKNOWN_RETIRED_LANE"]
     },
     {
-      "id": "type-b-short-computed-spread",
+      "id": "patient-chase-short-shared-direction",
       "ai": { "win_prob": 0, "bull_score": 3, "bear_score": 8 },
       "direction": "SHORT",
-      "spread": null,
-      "expect_lanes": [],
-      "reject_lanes": [
-        "TYPE_B_HUNTER_V1",
-        "AI60_SP3_VIRTUAL_CHASE",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "SR_MICRO_TILE_V2_STATIC"
-      ]
-    },
-    {
-      "id": "type-b-spread-floor",
-      "ai": { "win_prob": 0, "bull_score": 6, "bear_score": 5 },
-      "direction": "LONG",
-      "spread": 2,
-      "expect_lanes": [],
-      "reject_lanes": ["TYPE_B_HUNTER_V1", "AI60_SP3_VIRTUAL_CHASE", "COMBO_65_SP5_DIRECT"]
-    },
-    {
-      "id": "type-b-spread-too-low",
-      "ai": { "win_prob": 0, "bull_score": 6, "bear_score": 5 },
-      "direction": "LONG",
-      "spread": 1,
-      "expect_lanes": [],
-      "reject_lanes": [
-        "TYPE_B_HUNTER_V1",
-        "AI60_SP3_VIRTUAL_CHASE",
-        "COMBO_65_SP5_CHASE_3PLUS"
-      ]
-    },
-    {
-      "id": "legacy-confidence-cannot-revive-retired-lanes",
-      "ai": { "win_prob": 99, "bull_score": 10, "bear_score": 0 },
-      "direction": "LONG",
-      "spread": 10,
-      "expect_lanes": [],
-      "reject_lanes": [
-        "TYPE_B_HUNTER_V1",
-        "AI60_SP3_VIRTUAL_CHASE",
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "COMBO_604_SP4_DIRECT"
-      ]
+      "spread": 5,
+      "expect_lanes": ["OFFSET_029_ATR_TP_25"],
+      "reject_lanes": ["UNKNOWN_RETIRED_LANE"]
     },
     {
       "id": "benchmark-flag-continuous",
@@ -67,13 +23,8 @@
       "expect_benchmark": true
     },
     {
-      "id": "type-b-not-benchmark",
-      "lane": "TYPE_B_HUNTER_V1",
-      "expect_benchmark": false
-    },
-    {
-      "id": "tile2-not-benchmark",
-      "lane": "SR_MICRO_TILE_V2_STATIC",
+      "id": "patient-chase-not-benchmark",
+      "lane": "OFFSET_029_ATR_TP_25",
       "expect_benchmark": false
     }
   ]

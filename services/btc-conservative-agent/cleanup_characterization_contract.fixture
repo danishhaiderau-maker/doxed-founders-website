@@ -140,12 +140,12 @@
     "signal.signal"
   ],
   "state_schema": {
-    "key_count": 178,
+    "key_count": 176,
     "ordered_key_digest_chunks": [
-      "afa5caae7e6fd531",
-      "c87ef64c6ad3f961",
-      "56123e9ee25a3875",
-      "cb21a5391a300475"
+      "95ec24238e6cefe2",
+      "bb75fae913b5f970",
+      "3e6bfb4b6c094519",
+      "b83debcad3c8a6d3"
     ],
     "duplicate_keys": ["edge_threshold"]
   },

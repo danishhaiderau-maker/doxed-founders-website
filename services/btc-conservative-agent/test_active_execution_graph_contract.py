@@ -12,7 +12,6 @@ import ast
 from pathlib import Path
 
 import combo_pathway_config as config
-import legacy_pathway_config as legacy
 import pathway_lane_roster as roster
 
 
@@ -61,7 +60,9 @@ def test_historical_lanes_are_not_executable_or_primary() -> None:
         assert config.is_combo_execution_lane(lane) is False
 
     assert roster.PATHWAY_SHADOW_COLLECTING_ENABLED is False
-    assert set(legacy.SHADOW_COLLECTING_LANES).isdisjoint(ACTIVE_PAPER_LANES)
+    assert config.combo_toggle_defaults() == {
+        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25: False,
+    }
 
 
 def test_only_process_signal_can_invoke_the_shared_ai_evaluator() -> None:

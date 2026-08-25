@@ -63,9 +63,7 @@ try:
         ANALYZER_SYNC_ID as EXPECTED_ANALYZER_SYNC_ID,
         BENCHMARK_LANE,
         COMPARISON_BENCHMARK_LANE,
-        CONTINUOUS_PROXY_LANES,
         EXECUTION_FIX_VERSION as EXPECTED_BOT_VERSION,
-        PRIMARY_PRODUCTION_LANE,
         RESEARCH_DASHBOARD_VERSION,
     )
     from pathway_lane_roster import (
@@ -78,8 +76,6 @@ try:
 except ImportError:
     BENCHMARK_LANE = "CONTINUOUS"
     COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-    CONTINUOUS_PROXY_LANES = ("COMBO_65_SP5_CHASE_3PLUS", "COMBO_604_SP4_CHASE_3PLUS")
-    PRIMARY_PRODUCTION_LANE = "COMBO_65_SP5_CHASE_3PLUS"
     EXPECTED_BOT_VERSION = "unknown"
     EXPECTED_ANALYZER_SYNC_ID = "unknown"
     RESEARCH_DASHBOARD_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"
@@ -92,6 +88,15 @@ except ImportError:
         if not u:
             return False
         return u in CURRENT_RESEARCH_LANES
+
+ANALYZER_COMPARE_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
+ALL_PATHWAY_LANES = ANALYZER_COMPARE_LANES
+DASHBOARD_PATHWAY_LANES = ANALYZER_COMPARE_LANES
+DASHBOARD_PRIMARY_LANES = ANALYZER_COMPARE_LANES
+
+
+def is_ai_focused_lane(lane: str) -> bool:
+    return str(lane or "").upper().strip() in CURRENT_RESEARCH_LANES
 
 # ---------------------------------------------------------------------------
 # Config
@@ -1095,16 +1100,8 @@ def _lane_rows():
     return rows, benchmark_pnl
 
 
-CHASE_LANE_ALIASES = {
-    "AI60": "AI60_SP3_VIRTUAL_CHASE",
-    "A160": "A160_CONTEXT_CHASE_EXIT_V2",
-    "A160 V2": "A160_CONTEXT_CHASE_EXIT_V2",
-}
-
-
 def _normalize_chase_lane(lane: str) -> str:
-    u = str(lane or "").strip().upper()
-    return CHASE_LANE_ALIASES.get(u, u)
+    return str(lane or "").strip().upper()
 
 
 def _filter_chase_attributions(rows, lane: str):
@@ -2268,12 +2265,11 @@ def api_shadow_policy_research():
     collection = report.get("collection") or {}
     paused = _read_json("paused_shadow_research_report.json")
     real_edge = _read_json("real_edge_summary.json")
-    comprehensive = _read_json("shadow_lane_comprehensive_report.json")
     legacy_detail = _read_json("policy_candidate_oos_report.json")
     legacy_shadow = legacy_detail.get("shadow_research") or {}
     return jsonify({
         "schema": "shadow_policy_dashboard_v3_1",
-        "evidence_source": "safe_policy_genome_v3_report.json + shadow_lane_comprehensive_report.json",
+        "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": "DESCRIPTIVE_ONLY",
         "live_policy_change_allowed": False,
@@ -2281,7 +2277,6 @@ def api_shadow_policy_research():
         "current_epoch_rejected": int((collection.get("decision_outcomes") or {}).get("REJECTED") or 0),
         "current_v3_1_collection": collection,
         "v22_shadow": {},
-        "comprehensive_shadow_lanes": comprehensive,
         "paused_shadow": paused,
         "real_edge": real_edge,
         "legacy_v22_excluded": {

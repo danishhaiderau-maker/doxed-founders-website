@@ -231,7 +231,6 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
     )
     history = [{
         "shared_ai_call_id": "scan-1",
-        "type_b_verdict": {"accepted": True},
         "lane_verdicts": {"RETIRED_TEST_LANE": {"accepted": True}},
     }]
     pending = [{
@@ -258,7 +257,6 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
         "unlinked_lifecycle_rows": 0,
         "selected_calls": 1,
     }
-    assert "type_b_verdict" not in enriched[0]
     assert "TYPE_B_HUNTER_V1" not in enriched[0]["lane_verdicts"]
 
 

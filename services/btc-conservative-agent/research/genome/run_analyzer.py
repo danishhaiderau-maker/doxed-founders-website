@@ -251,7 +251,7 @@ def _recommendation_engine(
     if conf == "LOW" or n < 30:
         return {
             "action": "COLLECT_MORE_DATA",
-            "detail": "Insufficient sample — continue CONTINUOUS + COMBO_604 research candidate.",
+            "detail": "Insufficient sample — continue CONTINUOUS + OFFSET_029_ATR_TP_25 research candidate.",
             "research_confidence": conf,
             "explanation": {
                 "why": f"Only {n} trades — need ≥30 for MODERATE confidence.",
@@ -359,7 +359,7 @@ def run_genome_analyzer(
         "hypotheses": generate_hypotheses(combo_trades, cont_trades),
         "outcome_fingerprints_sample": outcome_fps[:25],
         "benchmark_reference": {
-            "combo_604": summarize_trades(combo_trades),
+            "patient_chase": summarize_trades(combo_trades),
             "continuous": summarize_trades(cont_trades),
         },
         "migration_note": "v62 CSV reports still run in parallel until Genome reproduces all required metrics (Priority 13).",

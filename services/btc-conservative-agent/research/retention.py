@@ -35,13 +35,12 @@ COMPACT_EVIDENCE_FILES = (
     "research_findings.txt",
     "research_coverage.txt",
     "paused_shadow_research_report.json",
-    "type_b_adx_v3_shadow_report.json",
     "historical_trade_cohort_report.json",
     "research_session_index.json",
 )
 
 # Authoritative/live inputs are deliberately inventory-only.  They remain
-# available for ADX, Type B, replay, and audit research until an explicit fresh
+# available for replay and audit research until an explicit fresh
 # collection wipe or a future writer-owned rotation protocol handles them.
 LIVE_LEDGER_FILES = (
     "trades_3factor.csv",

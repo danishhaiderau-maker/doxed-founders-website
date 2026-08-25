@@ -60,7 +60,7 @@ def reset_state():
         bot.state["leverage"] = 100
         enabled = dict(bot.state.get("research_lane_enabled") or {})
         enabled[bot.RESEARCH_LANE_CONTINUOUS] = True
-        enabled[bot.RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = True
+        enabled[bot.RESEARCH_LANE_OFFSET_029_ATR_TP_25] = True
         bot.state["research_lane_enabled"] = enabled
 
 
@@ -173,23 +173,6 @@ limit_signal = {
 limit_result = bot.create_limit_order(limit_signal)
 check("limit entry refused", limit_result is None)
 check("limit route creates no pending order", not bot.pending_orders)
-
-tile2_ctx = {
-    "trade_id": "pause-tile2-1",
-    "research_lane": bot.RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
-}
-tile2_result = bot._submit_tile2_paper_resting_limit(
-    tile2_ctx,
-    "LONG",
-    63_900.0,
-    3.0,
-    {},
-    {},
-    "pause-episode",
-)
-check("Tile 2 resting limit refused", tile2_result == "REFUSED_ADMIN_PAUSE")
-check("Tile 2 route creates no pending order", not bot.pending_orders)
-
 
 print("\n[4] A fill racing with the pause is cancelled before exposure opens")
 reset_state()
@@ -373,7 +356,7 @@ with bot.replay_lock:
     bot.replay_buffers["pause-shadow-visible-1"] = {
         "closed": False,
         "start_ts": paused_shadow_start,
-        "research_lane": bot.RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        "research_lane": bot.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
         "direction": "SHORT",
         "paused_shadow": True,
         "collection_mode": "ADMIN_PAUSED_SHADOW",
