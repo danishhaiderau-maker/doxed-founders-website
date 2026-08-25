@@ -104,7 +104,7 @@ def test_mirror_partial_artifacts_detects_atomic_sync_leftovers(tmp_path):
     (mirror / "valid.jsonl").write_text("{}\n", encoding="utf-8")
     orphan = mirror / "valid.jsonl.123.0123456789abcdef0123456789abcdef.download"
     orphan.write_bytes(b"partial")
-    os.utime(orphan, (NOW.timestamp() - 181, NOW.timestamp() - 181))
+    os.utime(orphan, (NOW.timestamp() - 601, NOW.timestamp() - 601))
 
     assert module.mirror_partial_artifacts(mirror, now_ts=NOW.timestamp()) == [orphan.name]
 
@@ -119,11 +119,21 @@ def test_mirror_partial_artifacts_ignores_active_atomic_transfer(tmp_path):
     assert module.mirror_partial_artifacts(mirror, now_ts=NOW.timestamp()) == []
 
 
+def test_mirror_partial_artifacts_allows_large_transfer_within_sync_stale_window(tmp_path):
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    active = mirror / "large.jsonl.123.0123456789abcdef0123456789abcdef.download"
+    active.write_bytes(b"large transfer still in progress")
+    os.utime(active, (NOW.timestamp() - 300, NOW.timestamp() - 300))
+
+    assert module.mirror_partial_artifacts(mirror, now_ts=NOW.timestamp()) == []
+
+
 def test_supervisor_fails_closed_when_partial_download_is_present(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     orphan = mirror / "evidence.jsonl.123.0123456789abcdef0123456789abcdef.download"
     orphan.write_bytes(b"partial")
-    os.utime(orphan, (NOW.timestamp() - 181, NOW.timestamp() - 181))
+    os.utime(orphan, (NOW.timestamp() - 601, NOW.timestamp() - 601))
     result = module.Supervisor(
         repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
         fetcher=fetcher, process_reader=processes,
