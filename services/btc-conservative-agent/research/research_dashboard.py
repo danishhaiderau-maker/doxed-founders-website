@@ -1274,6 +1274,55 @@ def _decode_counterfactual_policy_id(policy_id: str) -> dict:
     return decoded
 
 
+def _project_v31_policy_spec(policy_spec: dict) -> dict:
+    """Flatten the signed V3.1 policy genome for the compact Top-100 table.
+
+    The genome deliberately stores entry, fill, loss protection and profit
+    protection as nested immutable components.  The dashboard's compact table
+    predates that schema, so project only fields that are explicitly present;
+    never infer a missing chase window, stop, or fill model.
+    """
+    spec = policy_spec if isinstance(policy_spec, dict) else {}
+    entry = spec.get("entry") if isinstance(spec.get("entry"), dict) else {}
+    fill = spec.get("fill") if isinstance(spec.get("fill"), dict) else {}
+    loss = spec.get("loss_protection") if isinstance(spec.get("loss_protection"), dict) else {}
+    profit = spec.get("profit_protection") if isinstance(spec.get("profit_protection"), dict) else {}
+
+    chase_policy = entry.get("chase_id") or entry.get("entry_policy_id")
+    fill_model = fill.get("execution_world") or fill.get("source_fill_model")
+    profit_mode = profit.get("mode")
+    exit_parts = []
+    if profit_mode:
+        exit_parts.append(str(profit_mode))
+    if profit.get("atr_tp_k") is not None:
+        exit_parts.append(f"TP {float(profit['atr_tp_k']):g}x ATR")
+    if profit.get("atr_trail_k") is not None:
+        exit_parts.append(f"trail {float(profit['atr_trail_k']):g}x ATR")
+    if profit.get("chandelier_atr_k") is not None:
+        exit_parts.append(f"chandelier {float(profit['chandelier_atr_k']):g}x ATR")
+    if profit.get("break_even_arm_atr_k") is not None:
+        exit_parts.append(f"BE at {float(profit['break_even_arm_atr_k']):g}x ATR")
+
+    protection_parts = []
+    if loss.get("atr_stop_k") is not None:
+        protection_parts.append(f"ATR stop {float(loss['atr_stop_k']):g}x")
+    if loss.get("thesis_cut_margin_pct") is not None:
+        protection_parts.append(f"thesis {float(loss['thesis_cut_margin_pct']):g}%")
+    if loss.get("hard_stop_margin_pct") is not None:
+        protection_parts.append(f"hard {float(loss['hard_stop_margin_pct']):g}%")
+    if loss.get("time_stop_min") is not None:
+        protection_parts.append(f"time {float(loss['time_stop_min']):g}m")
+
+    projected = {
+        "entry_offset_pct": entry.get("offset_pct"),
+        "chase_policy": chase_policy,
+        "fill_model": fill_model,
+        "exit_behavior": " + ".join(exit_parts) or None,
+        "protection_model": " + ".join(protection_parts) or None,
+    }
+    return {key: value for key, value in projected.items() if value is not None}
+
+
 def _current_policy_grid_rows(limit: int = 100) -> dict:
     """Expose canonical signed V3.1 candidates, never retired V2.2 leaders."""
     source = _safe_policy_v3_dashboard_source()
@@ -1281,6 +1330,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     rows = []
     candidates = screen.get("descriptive_top_100") or []
     for rank, item in enumerate(candidates, start=1):
+        policy_spec = item.get("policy_spec") or {}
         episodes = int(item.get("oos_episodes") or 0)
         wins = item.get("oos_wins")
         losses = item.get("oos_losses")
@@ -1291,8 +1341,9 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "rank": rank,
             "policy_id": item.get("policy_id"),
             **_decode_counterfactual_policy_id(item.get("policy_id")),
+            **_project_v31_policy_spec(policy_spec),
             "policy_family": item.get("policy_family"),
-            "policy_spec": item.get("policy_spec") or {},
+            "policy_spec": policy_spec,
             "train_episodes": max(0, int(item.get("episodes_total") or 0) - episodes),
             "oos_episodes": episodes,
             "oos_fills": int(item.get("oos_fills") or 0),

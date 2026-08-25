@@ -270,6 +270,50 @@ def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monke
     assert stats["profitable_terminal_oos_policies"] == 0
 
 
+def test_current_policy_grid_projects_nested_v31_parameters(monkeypatch):
+    candidate = {
+        "policy_id": "deterministic_0.1pct_offset_v1|ATR_TP_2.5_SCENARIO_C_ATR_SL_1",
+        "policy_family": "FIXED_TARGET",
+        "episodes_total": 1,
+        "oos_episodes": 1,
+        "policy_spec": {
+            "entry": {
+                "entry_policy_id": "deterministic_0.1pct_offset_v1",
+                "chase_id": "deterministic_0.1pct_offset_v1",
+                "offset_pct": 0.1,
+            },
+            "fill": {"execution_world": "IDEAL_TOUCH_DIAGNOSTIC"},
+            "loss_protection": {
+                "atr_stop_k": 1.0,
+                "hard_stop_margin_pct": 30,
+                "thesis_cut_margin_pct": -12,
+                "time_stop_min": 120,
+            },
+            "profit_protection": {"mode": "ATR_TARGET", "atr_tp_k": 2.5},
+        },
+    }
+    report = {
+        "collection": {"independent_opportunities": 1},
+        "candidate_screen": {"descriptive_top_100": [candidate]},
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": {},
+        "epoch_id": "epoch-v31",
+        "qualified": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    })
+
+    row = dashboard._current_policy_grid_rows()["rows"][0]
+
+    assert row["entry_offset_pct"] == 0.1
+    assert row["chase_policy"] == "deterministic_0.1pct_offset_v1"
+    assert row["fill_model"] == "IDEAL_TOUCH_DIAGNOSTIC"
+    assert row["exit_behavior"] == "ATR_TARGET + TP 2.5x ATR"
+    assert row["protection_model"] == "ATR stop 1x + thesis -12% + hard 30% + time 120m"
+
+
 def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monkeypatch):
     def fake_read(name):
         text = str(name).replace("\\", "/")
