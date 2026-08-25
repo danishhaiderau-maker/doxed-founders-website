@@ -14047,6 +14047,36 @@ def _normalize_research_lane(val):
     return lane
 
 
+def _dedupe_funnel_stage_rows(rows):
+    """Return one logical stage per trade plus transparent duplicate metrics."""
+    logical = []
+    seen = set()
+    duplicates_by_stage = Counter()
+    raw_stage_rows = 0
+    for index, row in enumerate(rows):
+        stage = str(row.get("stage") or "").strip().upper()
+        tid = str(row.get("trade_id") or "").strip()
+        if not stage:
+            logical.append(row)
+            continue
+        raw_stage_rows += 1
+        # Missing identities cannot safely be merged; retain them so the
+        # integrity layer can report them independently.
+        key = (tid, stage) if tid else (f"__missing_trade_id__:{index}", stage)
+        if key in seen:
+            duplicates_by_stage[stage] += 1
+            continue
+        seen.add(key)
+        logical.append(row)
+    duplicate_count = int(sum(duplicates_by_stage.values()))
+    return logical, {
+        "raw_stage_rows": int(raw_stage_rows),
+        "logical_stage_rows": int(raw_stage_rows - duplicate_count),
+        "duplicate_stage_rows_excluded": duplicate_count,
+        "duplicates_by_stage": dict(sorted(duplicates_by_stage.items())),
+    }
+
+
 def pathway_survival_report(trades=None, session=None):
     """Full funnel per pathway: approve → order → fill → closed → wins → PnL."""
     if session is None:
@@ -14066,7 +14096,8 @@ def pathway_survival_report(trades=None, session=None):
             lane = _normalize_research_lane(t.get("research_lane"))
             if tid and lane:
                 trade_lane[tid] = lane
-    rows = _filter_jsonl_rows_by_session(all_rows, session)
+    filtered_rows = _filter_jsonl_rows_by_session(all_rows, session)
+    rows, stage_integrity = _dedupe_funnel_stage_rows(filtered_rows)
     lanes = list(BENCHMARK_LANES)
     survival = {}
     for lane in lanes:
@@ -14160,6 +14191,7 @@ def pathway_survival_report(trades=None, session=None):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "benchmark_lane": BENCHMARK_LANE,
         "benchmark_ev_per_fill_usd": bench_ev,
+        "stage_integrity": stage_integrity,
         "lanes": survival,
     }
     try:
