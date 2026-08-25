@@ -762,10 +762,10 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     assert static["evidence_source"] == "safe_policy_genome_v3_report.json"
     assert static["live_policy_change_allowed"] is False
     assert dynamic["winner_kind"] == "NONE"
-    assert dynamic["winner_status"] == "NO_PROFITABLE_OOS_WINNER"
+    assert dynamic["winner_status"] == "NO_QUALIFIED_OOS_WINNER"
     assert dynamic["relative_leader_kind"] == "NONE"
     assert dynamic["regimes"] == []
-    assert "No profitable OOS winner" in dynamic["warning"]
+    assert "No qualified dynamic OOS winner" in dynamic["warning"]
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
     assert shadow["v22_shadow"] == {}
     assert shadow["legacy_v22_excluded"]["shadow_research"]["independent_episodes"] == 1
@@ -783,7 +783,7 @@ def test_main_dashboard_links_to_all_policy_research_pages():
     assert 'href="/dynamic-policies"' in source
     assert 'href="/shadow-research"' in source
     assert "Profitable OOS winner" in source
-    assert "NONE — both candidates unprofitable" in source
+    assert "NONE — both candidates unprofitable" not in source
     assert "Relative leader only" in source
     assert "Descriptive winner" not in source
 

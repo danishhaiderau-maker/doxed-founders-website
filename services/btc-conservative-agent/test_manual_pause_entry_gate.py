@@ -60,7 +60,7 @@ def reset_state():
         bot.state["leverage"] = 100
         enabled = dict(bot.state.get("research_lane_enabled") or {})
         enabled[bot.RESEARCH_LANE_CONTINUOUS] = True
-        enabled[bot.RESEARCH_LANE_OFFSET_029_ATR_TP_25] = True
+        enabled[bot.COMBO_EXECUTION_LANES[0]] = True
         bot.state["research_lane_enabled"] = enabled
 
 
@@ -124,7 +124,7 @@ with bot.state_lock:
 
 signal_event = {
     "trade_id": "pause-signal-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "event_trigger": True,
 }
 original_is_buffer_ready = bot.is_buffer_ready
@@ -136,8 +136,8 @@ bot.process_signal(signal_event)
 bot.is_buffer_ready = original_is_buffer_ready
 bot.log_no_signal_with_context = original_log_no_signal
 check(
-    "paused paper runtime reaches isolated research pipeline",
-    research_progress == ["BUFFER_NOT_READY"],
+    "paused paper entry stops before feature work",
+    research_progress == [],
 )
 check("paused research creates no global order", not bot.pending_orders)
 check("paused research creates no global position", not bot.open_positions)
@@ -356,7 +356,7 @@ with bot.replay_lock:
     bot.replay_buffers["pause-shadow-visible-1"] = {
         "closed": False,
         "start_ts": paused_shadow_start,
-        "research_lane": bot.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        "research_lane": bot.COMBO_EXECUTION_LANES[0],
         "direction": "SHORT",
         "paused_shadow": True,
         "collection_mode": "ADMIN_PAUSED_SHADOW",

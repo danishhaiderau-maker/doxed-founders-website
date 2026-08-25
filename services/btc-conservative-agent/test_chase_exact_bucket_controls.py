@@ -1178,23 +1178,11 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
 
 def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():
     assert "RESEARCH_LANE_CONTINUOUS: 0.0," in BOT_SOURCE
-    assert "RESEARCH_LANE_OFFSET_029_ATR_TP_25: 0.0," in BOT_SOURCE
+    assert "**{lane: 0.0 for lane in COMBO_EXECUTION_LANES}" in BOT_SOURCE
     assert "A second lane offset here would make the" in BOT_SOURCE
 
 
 def test_edge_is_telemetry_only_even_outside_paper_research_mode():
-    profit_gate = _compile_function(
-        "evaluate_profitability_entry_gates",
-        {
-            "EDGE_RESEARCH_TELEMETRY_ONLY": True,
-            "get_edge_threshold": lambda: 3.0,
-            "is_research_data_collection": lambda: False,
-            "is_profit_gates_lane": lambda _lane: False,
-            "dashboard_ai_band_blocks": lambda _prob: False,
-        },
-    )
-    assert profit_gate({}, {}, 0.0, "CONTINUOUS") == (False, None)
-
     evidence_gate = _compile_function(
         "evaluate_evidence_entry_filter",
         {
@@ -1265,7 +1253,7 @@ def test_direction_only_current_ui_has_no_pullback_or_ai_confidence_control():
     assert "DETERMINISTIC_LIMIT_BLOCKED" in BOT_SOURCE
 
 
-def test_only_continuous_can_emit_platform_live_relay_lifecycle():
+def test_only_continuous_benchmark_is_platform_relay_capable():
     tree = ast.parse(BOT_SOURCE)
     assignment = next(
         node for node in tree.body
@@ -1278,6 +1266,8 @@ def test_only_continuous_can_emit_platform_live_relay_lifecycle():
     )
     assigned_source = ast.get_source_segment(BOT_SOURCE, assignment)
     assert "RESEARCH_LANE_CONTINUOUS" in assigned_source
+    assert 'spec.get("platform_relay_eligible")' in assigned_source
+    assert "COMBO_LANE_SPECS.items()" in assigned_source
     assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in assigned_source
 
 

@@ -367,8 +367,11 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()
 #
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset(
-    lane for lane, spec in COMBO_LANE_SPECS.items()
-    if spec.get("platform_relay_eligible")
+    {
+        RESEARCH_LANE_CONTINUOUS,
+        *(lane for lane, spec in COMBO_LANE_SPECS.items()
+          if spec.get("platform_relay_eligible")),
+    }
 )
 PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
@@ -2646,12 +2649,18 @@ def get_pathway_lane_status(lane: str) -> str:
 
 def is_research_lane_retired(lane: str) -> bool:
     lane = str(lane or "").upper()
-    return lane not in {RESEARCH_LANE_AI_SCAN, *COMBO_EXECUTION_LANES}
+    return lane not in {
+        RESEARCH_LANE_AI_SCAN,
+        RESEARCH_LANE_CONTINUOUS,
+        *COMBO_EXECUTION_LANES,
+    }
 
 
 def lane_blocks_live_orders(lane: str) -> bool:
     """Hard block retired, benchmark, shadow and relay-ineligible lanes."""
     lane = str(lane or "").upper()
+    if lane == RESEARCH_LANE_CONTINUOUS:
+        return False
     if is_shadow_only_lane(lane):
         return True
     status = get_pathway_lane_status(lane)
@@ -25175,8 +25184,85 @@ def _shared_lane_gate_runtime_summary(lane: str) -> str:
     )
 
 
+def _continuous_benchmark_dashboard_spec(shared: dict, tile_number: int = 6) -> dict:
+    """Keep the established Continuous benchmark beside registry-owned families."""
+    ai_cadence = shared["ai_scan_cadence_label"]
+    chase_detail = shared["limit_chase_label"]
+    exit_spec = _scenario_c_exit_spec(RESEARCH_LANE_CONTINUOUS)
+    policy_id = "continuous_shared_direction_gap_structural_v2"
+    entry = {
+        "spawn": "Evaluate every shared direction result",
+        "trigger": "Higher LONG/SHORT score + raw score gap >=5",
+        "entry_path": "LOCAL_SR_DIRECT",
+        "fill_path": "AI_DIRECT_CHASE",
+        "ai_path": "One shared direction-only AI call",
+        "ai_cadence": ai_cadence,
+        "chase_detail": chase_detail,
+        "post_ai_gates": "Continuous raw-score-gap tiers only",
+        "margin_usd": shared["margin_usd"],
+        "execution": "Immediate deterministic 0.1% limit + bounded 25% chase",
+        "orders": "Toggle ON creates paper orders; OFF records evaluation only",
+        "filters": {
+            "entry_mode": "SHARED_DIRECTION_IMMEDIATE_LIMIT",
+            "policy_version": policy_id,
+            "raw_score_gap_min": 5,
+            "confidence_weight": 0.0,
+            "shared_call_consumers": [RESEARCH_LANE_CONTINUOUS, *COMBO_EXECUTION_LANES],
+        },
+    }
+    return {
+        "lane": RESEARCH_LANE_CONTINUOUS,
+        "label": "Continuous Benchmark - Paper Orders",
+        "subtitle": "BENCHMARK - shared direction call, independent verdict and orders",
+        "role": "continuous_direct_benchmark",
+        "status": "BENCHMARK",
+        "is_benchmark": True,
+        "is_primary_production": False,
+        "is_research_candidate": False,
+        "is_shadow_only": False,
+        "is_independent_ai": False,
+        "is_deterministic_bracket": False,
+        "badge": "BENCHMARK",
+        "tile_number": tile_number,
+        "entry_mode_label": "Continuous",
+        "filter_chips": [
+            f"One AI call ~{shared['ai_scan_cadence_sec']}s",
+            "Higher LONG/SHORT score picks side",
+            "Raw score gap >=5/100",
+            "Gap 5-9 SOFT APPROVE",
+            "Gap 10-14 APPROVE",
+            "Gap >=15 STRONG APPROVE",
+            "AI confidence not requested",
+            f"Ladder {get_lane_ladder(RESEARCH_LANE_CONTINUOUS)[1]}",
+            "25% chase",
+            policy_id,
+        ],
+        "toggle_key": "continuous_ai_research_enabled",
+        "hypothesis": "Yardstick lane - every candidate must beat Continuous on qualified OOS evidence.",
+        "research_question": "Does a complete family policy beat the Continuous benchmark?",
+        "entry": entry,
+        "exit": exit_spec,
+        "exit_path": "Scenario C frozen - ladder, thesis and MFE protection",
+        "promotion_criteria": "N/A - benchmark",
+        "kill_criteria": "N/A - benchmark",
+        "expected_advantage": "Continuous shared-AI baseline",
+        "expected_risk": "Benchmark execution and drawdown remain fully reported",
+        "benchmark_comparison": "BENCHMARK",
+        "diff_vs_benchmark": [],
+        "strategy_detail": _strategy_detail_lines(
+            entry,
+            exit_spec,
+            [f"Policy: {policy_id}", f"Independence: {shared['independence']}"],
+        ),
+        "raw_policy_id": policy_id,
+        "policy_signature": "continuous-benchmark-v2",
+        "policy_epoch": "continuous-benchmark-v2",
+        "relay_eligible": True,
+    }
+
+
 def build_static_pathway_lane_specs() -> dict:
-    """Return the authoritative registry-owned five-tile research contract."""
+    """Return five registry families plus the established Continuous benchmark."""
     shared = _pathway_shared_execution_spec()
     ai_cadence = shared["ai_scan_cadence_label"]
     chase_detail = shared["limit_chase_label"]
@@ -25223,9 +25309,10 @@ def build_static_pathway_lane_specs() -> dict:
             "policy_epoch": lane_spec["policy_epoch"],
             "relay_eligible": False,
         })
+    lanes.append(_continuous_benchmark_dashboard_spec(shared, tile_number=6))
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Registry-owned five-family roster; add/remove only through the atomic lifecycle contract",
+        "architecture_freeze_note": "Five registry-owned families plus one separate Continuous benchmark; add/remove only through the atomic lifecycle contract",
         "architecture_doc": "TILE_LIFECYCLE.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
@@ -36210,6 +36297,11 @@ def load_positions():
 
 def _paper_lifecycle_row_valid(row: dict, kind: str) -> bool:
     if not isinstance(row, dict) or not row.get("trade_id"):
+        return False
+    if str(row.get("research_lane") or "").upper() not in {
+        *COMBO_EXECUTION_LANES,
+        RESEARCH_LANE_CONTINUOUS,
+    }:
         return False
     status = str(row.get("status") or "").upper()
     if kind == "position":

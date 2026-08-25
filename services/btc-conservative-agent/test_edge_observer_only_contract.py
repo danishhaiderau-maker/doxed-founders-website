@@ -64,12 +64,10 @@ def test_edge_controls_and_mutation_routes_are_removed() -> None:
 def test_current_registry_roster_survives_edge_retirement() -> None:
     payload = bot.build_static_pathway_lane_specs()
     lanes = {row["lane"] for row in payload["lanes"]}
-    assert lanes == {
-        config.COMPARISON_BENCHMARK_LANE,
-        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        config.RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-        config.RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-    }
+    assert lanes == {*config.ACTIVE_TILE_ORDER, bot.RESEARCH_LANE_CONTINUOUS}
+    assert len(payload["lanes"]) == 6
+    assert bot.RESEARCH_LANE_CONTINUOUS not in config.RETIRED_TILE_LANES
+    assert bot.is_research_lane_retired(bot.RESEARCH_LANE_CONTINUOUS) is False
     assert payload["benchmark_lane"] == config.COMPARISON_BENCHMARK_LANE
 
 

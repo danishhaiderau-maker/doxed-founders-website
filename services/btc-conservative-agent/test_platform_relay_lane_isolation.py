@@ -143,10 +143,10 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert '"ts": utc_iso()' in chase_commit_source
 
 
-def test_protected_lane_chase_cannot_promote_relay_eligibility() -> None:
+def test_family_lane_chase_cannot_promote_relay_eligibility() -> None:
     chase_source = ast.get_source_segment(
         BOT_SOURCE,
-        _function("_apply_offset_029_policy_chase"),
+        _function("_apply_family_policy_chase"),
     )
 
     assert "lane in PLATFORM_RELAY_ELIGIBLE_LANES" in chase_source

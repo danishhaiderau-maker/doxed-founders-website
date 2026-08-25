@@ -165,7 +165,7 @@ ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
 # token remains on any active execution/UI/analyzer surface. Historical data is
 # quarantined separately and never keeps runtime code alive.
 RETIRED_TILE_LANES = frozenset({
-    "CONTINUOUS", "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED",
+    "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED",
     "OFFSET_029_ATR_REGIME", "PROTECTED_W234_SCENARIO_C",
 })
 
