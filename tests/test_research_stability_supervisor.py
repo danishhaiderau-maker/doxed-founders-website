@@ -46,7 +46,7 @@ def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
 
     ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
         mirror,
-        disk_usage=lambda _path: (1000, 700, 300),
+        disk_usage=lambda _path: (1024**4, 700 * 1024**3, 324 * 1024**3),
     )
 
     assert ok is True
@@ -54,7 +54,8 @@ def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
     assert detail["mirror_bytes"] == 6
     assert detail["quarantine_files"] == 1
     assert detail["quarantine_bytes"] == 10
-    assert detail["disk_free_percent"] == 30.0
+    assert detail["disk_free_percent"] == pytest.approx(31.64, abs=0.01)
+    assert detail["minimum_free_bytes"] == 50 * 1024**3
     assert detail["maximum_mirror_bytes"] == 25 * 1024**3
     assert detail["maximum_quarantine_bytes"] == 25 * 1024**3
     assert detail["retention_action"] == "QUARANTINE_AND_REVIEW; NEVER_SILENTLY_DELETE"
@@ -67,11 +68,25 @@ def test_local_storage_snapshot_fails_before_disk_pressure(tmp_path):
 
     ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
         mirror,
-        disk_usage=lambda _path: (1000, 900, 100),
+        disk_usage=lambda _path: (1024**4, 984 * 1024**3, 40 * 1024**3),
     )
 
     assert ok is False
-    assert detail["disk_free_percent"] == 10.0
+    assert detail["disk_free_percent"] == pytest.approx(3.91, abs=0.01)
+
+
+def test_local_storage_snapshot_requires_absolute_reserve_on_large_disk(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    mirror.mkdir()
+
+    ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
+        mirror,
+        disk_usage=lambda _path: (500 * 1024**3, 455 * 1024**3, 45 * 1024**3),
+    )
+
+    assert detail["disk_free_percent"] == 9.0
+    assert detail["disk_free_bytes"] == 45 * 1024**3
+    assert ok is False
 
 
 def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap(tmp_path):

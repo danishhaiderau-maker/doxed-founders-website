@@ -31,7 +31,8 @@ PARTIAL_ARTIFACT_STALE_SECONDS = SYNC_MAX_AGE_SECONDS
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
 OPPORTUNITY_STALL_THRESHOLD_SECONDS = 12 * 60
-LOCAL_MIN_FREE_PERCENT = 15.0
+LOCAL_MIN_FREE_PERCENT = 5.0
+LOCAL_MIN_FREE_BYTES = 50 * 1024**3
 LOCAL_QUARANTINE_MAX_PERCENT = 10.0
 LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
 LOCAL_QUARANTINE_MAX_BYTES = 25 * 1024**3
@@ -92,6 +93,7 @@ def local_storage_snapshot(
     quarantine_pct = (float(quarantine_bytes) / float(total) * 100.0) if total else 100.0
     ok = (
         free_pct >= LOCAL_MIN_FREE_PERCENT
+        and free >= LOCAL_MIN_FREE_BYTES
         and mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
         and quarantine_bytes <= LOCAL_QUARANTINE_MAX_BYTES
         and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
@@ -106,6 +108,7 @@ def local_storage_snapshot(
         "disk_free_percent": round(free_pct, 2),
         "quarantine_disk_percent": round(quarantine_pct, 3),
         "minimum_free_percent": LOCAL_MIN_FREE_PERCENT,
+        "minimum_free_bytes": LOCAL_MIN_FREE_BYTES,
         "maximum_mirror_bytes": LOCAL_MIRROR_MAX_BYTES,
         "maximum_quarantine_bytes": LOCAL_QUARANTINE_MAX_BYTES,
         "maximum_quarantine_percent": LOCAL_QUARANTINE_MAX_PERCENT,
