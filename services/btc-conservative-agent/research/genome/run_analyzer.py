@@ -251,7 +251,7 @@ def _recommendation_engine(
     if conf == "LOW" or n < 30:
         return {
             "action": "COLLECT_MORE_DATA",
-            "detail": "Insufficient sample — continue CONTINUOUS + OFFSET_029_ATR_TP_25 research candidate.",
+            "detail": "Insufficient sample — continue CONTINUOUS + OFFSET_029_ATR_TP_25 + PROTECTED_W234_SCENARIO_C research.",
             "research_confidence": conf,
             "explanation": {
                 "why": f"Only {n} trades — need ≥30 for MODERATE confidence.",

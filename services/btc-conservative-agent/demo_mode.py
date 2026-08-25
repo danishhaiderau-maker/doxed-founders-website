@@ -6,9 +6,10 @@ Single source of truth for demo-mode bot configuration. Used by the
 end-to-end demo harness (`scripts/demo-harness.mjs`) to start the bot
 on :7002 in a safe simulation state.
 
-Current two-lane research stack:
+Current three-tile research stack:
   - CONTINUOUS benchmark
   - OFFSET_029_ATR_TP_25 Patient Chase
+  - PROTECTED_W234_SCENARIO_C protected Patient Chase candidate
 
 It:
   - Forces LIVE_TRADING_ENABLED=False (refuses to launch if the outer
@@ -65,7 +66,7 @@ def configure_demo_env() -> None:
     os.environ["DEMO_CASSETTE_MODE"] = "capture" if capture else "replay"
 
     os.environ.setdefault("DASHBOARD_PORT", "7002")
-    # The demo observes the same shared AI cadence as the two-lane runtime.
+    # The demo observes the same shared AI cadence as the three-tile runtime.
     # Per-lane order toggles remain controlled by the normal persisted state.
     os.environ.setdefault("CONTINUOUS_AI_RESEARCH_ENABLED", "1")
 

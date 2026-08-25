@@ -1,7 +1,7 @@
 """Fail-closed contract for the production paper-research execution graph.
 
 Historical evidence may remain readable as opaque archive data, but only the
-two-tile stack may produce new paper orders. Both active strategies consume the
+three-tile stack may produce new paper orders. All active strategies consume the
 single shared AI_SCAN result; an alternate prompt/call path is a
 release-blocking regression.
 """
@@ -20,6 +20,7 @@ BOT_PATH = SERVICE_DIR / "bot.py"
 ACTIVE_PAPER_LANES = {
     "CONTINUOUS",
     "OFFSET_029_ATR_TP_25",
+    "PROTECTED_W234_SCENARIO_C",
 }
 
 
@@ -36,9 +37,12 @@ def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str |
     return None
 
 
-def test_exactly_two_active_order_producing_lanes() -> None:
+def test_exactly_three_active_order_producing_lanes() -> None:
     configured = set(config.COMBO_EXECUTION_LANES)
-    assert configured == {config.RESEARCH_LANE_OFFSET_029_ATR_TP_25}
+    assert configured == {
+        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        config.RESEARCH_LANE_PROTECTED_W234,
+    }
 
     active = {config.COMPARISON_BENCHMARK_LANE, *configured}
     assert active == ACTIVE_PAPER_LANES
@@ -62,6 +66,7 @@ def test_historical_lanes_are_not_executable_or_primary() -> None:
     assert roster.PATHWAY_SHADOW_COLLECTING_ENABLED is False
     assert config.combo_toggle_defaults() == {
         config.RESEARCH_LANE_OFFSET_029_ATR_TP_25: False,
+        config.RESEARCH_LANE_PROTECTED_W234: False,
     }
 
 

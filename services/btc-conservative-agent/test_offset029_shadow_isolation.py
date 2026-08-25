@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 import paper_policy_offset029 as offset_policy
+import paper_policy_protected_w234 as protected_policy
 
 
 ROOT = Path(__file__).parent
@@ -35,8 +36,10 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
         "_position_protection_view",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
+            "RESEARCH_LANE_PROTECTED_W234": protected_policy.LANE,
             "_buf_float": lambda value, default=0.0: float(value or default),
             "offset029_policy": offset_policy,
+            "protected_w234_policy": protected_policy,
         },
     )
 
@@ -169,7 +172,10 @@ def test_offset_resolver_preserves_exact_anchor_without_smart_reanchor():
         "_resolve_submit_limit_price",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
+            "RESEARCH_LANE_PROTECTED_W234": protected_policy.LANE,
+            "is_patient_chase_lane": lambda lane: lane in {offset_policy.LANE, protected_policy.LANE},
             "offset029_policy": offset_policy,
+            "protected_w234_policy": protected_policy,
             "resolve_entry_limit_price": lambda signal: (signal["planned_limit_price"], "AI_DIRECT"),
             "smart_submit_enabled": lambda: (_ for _ in ()).throw(AssertionError("smart submit leaked")),
         },
@@ -195,7 +201,7 @@ def test_offset_order_path_disables_generic_chase_and_direct_exchange_submit():
     assert "FIXED_MARGIN_USDT if raw_margin_usdt is None else raw_margin_usdt" in place
     assert "if margin_usdt <= 0 or margin_usdt > SIGNED_SHOWCASE_MAX_MARGIN_USDT:" in place
     assert "qty = margin_usdt * lev / limit_price" in place
-    assert LANE in touch_grid and touch_grid.index("return") < touch_grid.index("arm_touch_grid_rows")
+    assert "is_patient_chase_lane" in touch_grid and touch_grid.index("return") < touch_grid.index("arm_touch_grid_rows")
 
 
 def test_offset_post_approve_path_bypasses_legacy_strategy_gates():
@@ -226,6 +232,7 @@ def test_api_matches_patient_chase_lifecycle_by_shared_call_identity():
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
             "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "DASHBOARD_PRIMARY_LANES": ("CONTINUOUS", offset_policy.LANE, protected_policy.LANE),
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
     )
@@ -269,6 +276,7 @@ def test_api_recovers_live_patient_child_identity_from_signal_snapshot():
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
             "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "DASHBOARD_PRIMARY_LANES": ("CONTINUOUS", offset_policy.LANE, protected_policy.LANE),
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
     )
@@ -301,6 +309,7 @@ def test_api_counts_patient_order_even_when_parent_ai_identity_is_missing():
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
             "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "DASHBOARD_PRIMARY_LANES": ("CONTINUOUS", offset_policy.LANE, protected_policy.LANE),
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
     )
@@ -328,6 +337,7 @@ def test_api_lifecycle_totals_do_not_double_count_same_trade_across_sources():
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
             "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "DASHBOARD_PRIMARY_LANES": ("CONTINUOUS", offset_policy.LANE, protected_policy.LANE),
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
     )
@@ -448,6 +458,7 @@ def test_api_distinguishes_legacy_approved_no_order_from_pending():
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
             "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "DASHBOARD_PRIMARY_LANES": ("CONTINUOUS", offset_policy.LANE, protected_policy.LANE),
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
     )
@@ -474,6 +485,7 @@ def test_sanitized_overlay_preserves_verified_patient_route():
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
             "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
             "VIRTUAL_CHASE_AWAITING_STATUSES": {"AWAITING_DASHBOARD_CHASE"},
+            "DASHBOARD_PRIMARY_LANES": ("CONTINUOUS", offset_policy.LANE, protected_policy.LANE),
             "_normalize_lane_key": lambda row: str(row.get("research_lane") or "").upper(),
         },
     )
@@ -508,7 +520,9 @@ def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     assert "<th>Type B research verdict</th>" not in source
     assert "<th>Raw AI verdict</th>" in source
     assert "<th>Continuous benchmark evaluation</th>" in source
-    assert "<th>Patient Chase execution route / outcome</th>" in source
+    assert "<th>Patient Chase route / outcome</th>" in source
+    assert "<th>Protected W234 evaluation</th>" in source
+    assert "<th>Protected W234 route / outcome</th>" in source
     assert "<th>AI explanation / block reason</th>" in source
     assert "formatPatientRoute(patientRoute)" in source
     assert "Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate" in source

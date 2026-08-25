@@ -54,3 +54,10 @@ def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     assert "table { display: block; width: 100%; max-width: 100%; overflow-x: auto;" in source
     page = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)
     assert 'name="viewport"' in page
+
+
+def test_genome_overview_keeps_large_policy_grid_out_of_rendered_debug_text():
+    source = dashboard.DASHBOARD_HTML
+    assert "candidate_screen:cs" not in source
+    assert "chase_families_materialized" in source
+    assert "detailed_route: '/safe-policy-genome-v3.1'" in source

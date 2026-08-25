@@ -70,6 +70,7 @@ from combo_pathway_config import (
     RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
     any_combo_execution_enabled,
     combo_entry_mode,
     combo_lane_match_detail,
@@ -109,6 +110,7 @@ from path_replay_v1 import (
     build_path_sample,
 )
 import paper_policy_offset029 as offset029_policy
+import paper_policy_protected_w234 as protected_w234_policy
 from microstructure_tape import (
     FILE_NAME as MICROSTRUCTURE_TAPE_FILE,
     SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
@@ -307,6 +309,7 @@ FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
 PATIENT_CHASE_LANES = frozenset({
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
 })
 
 
@@ -314,6 +317,7 @@ def is_patient_chase_lane(lane: str) -> bool:
     return str(lane or "").upper() in PATIENT_CHASE_LANES
 PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_PROTECTED_W234: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
     RESEARCH_LANE_CONTINUOUS: "BENCHMARK",
 }
@@ -326,6 +330,7 @@ RESEARCH_SPAWN_LANES = ()
 # remain readable, but a stale config flag cannot revive a retired lane.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: True,
+    RESEARCH_LANE_PROTECTED_W234: False,
 }
 
 # The showcase tile toggle and the platform relay switch are deliberately
@@ -341,9 +346,12 @@ PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
 })
 PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
     *PLATFORM_RELAY_ELIGIBLE_LANES,
+    RESEARCH_LANE_PROTECTED_W234,
 })
-PLATFORM_RELAY_BLOCKERS = {}
-PAPER_ONLY_RESEARCH_LANES = frozenset()
+PLATFORM_RELAY_BLOCKERS = {
+    RESEARCH_LANE_PROTECTED_W234: "PAPER_RESEARCH_UNQUALIFIED",
+}
+PAPER_ONLY_RESEARCH_LANES = frozenset({RESEARCH_LANE_PROTECTED_W234})
 # A relay event must prove both its declared lane and its trade-id namespace.
 # Keep this deliberately smaller than the research lane prefix registry: adding a
 # paper lane must never silently make it eligible for real-money mirroring.
@@ -364,6 +372,7 @@ _lane_locks = {
     RESEARCH_LANE_AI_SCAN: threading.Lock(),
     RESEARCH_LANE_CONTINUOUS: threading.Lock(),
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: threading.Lock(),
+    RESEARCH_LANE_PROTECTED_W234: threading.Lock(),
 }
 PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES
 LANE_TRACKING_LANES = tuple(dict.fromkeys(PATHWAY_LAB_LANES + (RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_AI_SCAN)))
@@ -1107,8 +1116,9 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         ),
         "research_collection_mode": (
             "PAPER"
-            if str(signal.get("research_lane") or order.get("research_lane") or "").upper()
-            == RESEARCH_LANE_OFFSET_029_ATR_TP_25
+            if is_patient_chase_lane(
+                signal.get("research_lane") or order.get("research_lane")
+            )
             else "BENCHMARK_PAPER"
         ),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
@@ -1625,6 +1635,8 @@ def get_exit_config_snapshot(research_lane: str = None) -> dict:
     lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
     if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
         return offset029_policy.exit_config(ANALYZER_SYNC_ID)
+    if lane == RESEARCH_LANE_PROTECTED_W234:
+        return protected_w234_policy.exit_config(ANALYZER_SYNC_ID)
     thesis_pct = THESIS_FAST_EXIT_UNREAL_PCT
     mfe_protect = THESIS_MFE_PROTECT_PCT
     ladder, _lane_ladder_label, profile_id = get_lane_ladder(lane)
@@ -2606,7 +2618,12 @@ def get_pathway_lane_status(lane: str) -> str:
 
 def is_research_lane_retired(lane: str) -> bool:
     lane = str(lane or "").upper()
-    return lane not in {RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_OFFSET_029_ATR_TP_25, RESEARCH_LANE_AI_SCAN}
+    return lane not in {
+        RESEARCH_LANE_CONTINUOUS,
+        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        RESEARCH_LANE_PROTECTED_W234,
+        RESEARCH_LANE_AI_SCAN,
+    }
 
 
 def lane_blocks_live_orders(lane: str) -> bool:
@@ -4289,6 +4306,35 @@ def _apply_offset_029_atr_exit(pos: dict, price: float, now: float) -> bool:
     return False
 
 
+def _apply_protected_w234_atr_stop(pos: dict, price: float, now: float) -> bool:
+    """Apply the frozen 2.5 ATR stop/target before Scenario C protection."""
+    if str(pos.get("research_lane") or "").upper() != RESEARCH_LANE_PROTECTED_W234:
+        return False
+    entry = float(pos.get("entry") or 0)
+    direction = str(pos.get("dir") or "").upper()
+    atr_abs = _buf_float(pos.get("atr14_3m"), 0.0)
+    atr_pct = _buf_float(pos.get("atr14_pct_3m"), 0.0)
+    stop = protected_w234_policy.stop_price(entry, direction, atr_abs, atr_pct)
+    target = protected_w234_policy.tp_price(entry, direction, atr_abs, atr_pct)
+    pos["atr_stop_price"] = round(stop, 2) if stop else None
+    pos["atr_tp_price"] = round(target, 2) if target else None
+    entry_ts = _buf_float(pos.get("entry_ts"), 0.0)
+    if entry_ts > 0 and float(now) - entry_ts >= protected_w234_policy.PATH_END_SEC:
+        pos["exit_policy_id"] = protected_w234_policy.POLICY_ID
+        pos["path_end_mark_price"] = float(price)
+        close_position(pos, "PATH_END_120M")
+        return True
+    if protected_w234_policy.stop_hit(price, stop, direction):
+        pos["exit_policy_id"] = protected_w234_policy.POLICY_ID
+        close_position(pos, "ATR_SL_2_5X")
+        return True
+    if target and ((direction == "LONG" and price >= target) or (direction == "SHORT" and price <= target)):
+        pos["exit_policy_id"] = protected_w234_policy.POLICY_ID
+        close_position(pos, "ATR_TP_2_5X")
+        return True
+    return False
+
+
 
 
 def _apply_position_exits(pos: dict, price: float, now: float = None):
@@ -4345,6 +4391,8 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
 
     if str(pos.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
         return _apply_offset_029_atr_exit(pos, price, now)
+    if _apply_protected_w234_atr_stop(pos, price, now):
+        return True
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
         return True
@@ -6629,11 +6677,12 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
 
 
 def compute_offset_029_atr_entry(signal: dict) -> dict:
-    """Thin lifecycle adapter over the immutable policy module."""
+    """Thin lifecycle adapter over the frozen Patient Chase policy module."""
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     lane = str(signal.get("research_lane") or "").upper()
-    signal.update(offset029_policy.entry_fields(direction, price))
+    policy = protected_w234_policy if lane == RESEARCH_LANE_PROTECTED_W234 else offset029_policy
+    signal.update(policy.entry_fields(direction, price))
     # This remains the canonical local-paper lifecycle even when a separate
     # platform relay is capable of copying a newly signed intent.
     signal["paper_only"] = True
@@ -7123,6 +7172,7 @@ CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC = 5.0
 _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_CONTINUOUS: 15.0,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: 15.0,
+    RESEARCH_LANE_PROTECTED_W234: 15.0,
 }
 _LANE_LIMIT_OFFSET_USD = {
     # Active shared-direction lanes already include the structural $15 buffer
@@ -7131,6 +7181,7 @@ _LANE_LIMIT_OFFSET_USD = {
     # the selected chase bucket.
     RESEARCH_LANE_CONTINUOUS: 0.0,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25: 0.0,
+    RESEARCH_LANE_PROTECTED_W234: 0.0,
 }
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
@@ -8007,6 +8058,7 @@ state = {
     "shared_ai_lane_counters": {
         "CONTINUOUS": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
         "OFFSET_029_ATR_TP_25": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+        "PROTECTED_W234_SCENARIO_C": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
     },
     "engine_reason": "",
     "ai_reason": "",
@@ -9304,13 +9356,15 @@ def _apply_smart_submit_limit(
 
 def _resolve_submit_limit_price(signal: dict) -> tuple:
     """Refresh market, resolve entry limit, apply smart-submit re-anchor when needed."""
-    if str(signal.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    lane = str(signal.get("research_lane") or "").upper()
+    if is_patient_chase_lane(lane):
+        policy = protected_w234_policy if lane == RESEARCH_LANE_PROTECTED_W234 else offset029_policy
         planned, entry_mode = resolve_entry_limit_price(signal)
         return planned, entry_mode, {
             "reanchored": False,
             "immediate_chase": False,
             "original_planned": planned,
-            "policy_id": offset029_policy.POLICY_ID,
+            "policy_id": policy.POLICY_ID,
         }, planned
     if smart_submit_enabled():
         _refresh_signal_price_for_submit(signal)
@@ -12083,7 +12137,7 @@ def _arm_chase_offset_touch_grid(signal: dict):
     """Paper path-touch grid at 0.01–0.30%. Does not change live 0.1% orig."""
     if not isinstance(signal, dict):
         return
-    if str(signal.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if is_patient_chase_lane(signal.get("research_lane")):
         # This generic 0.01–0.30% research grid labels one 0.10% anchor as the
         # live/original order. OFFSET_029 has its own exact 0.29% paper anchor
         # and lifecycle, so mixing the schemas would falsify its evidence.
@@ -14262,6 +14316,8 @@ def _stamp_shared_ai_lane_verdict(
                     row["continuous_verdict"] = verdict
                 elif lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
                     row["patient_chase_verdict"] = verdict
+                elif lane == RESEARCH_LANE_PROTECTED_W234:
+                    row["protected_w234_verdict"] = verdict
                 state["ai_history_updated"] = time.time()
                 break
 
@@ -14673,7 +14729,7 @@ def _restore_session_ai_history_from_csv(limit: int = 50) -> list:
 
 
 def _restore_shared_ai_lane_verdicts_from_journal() -> dict:
-    """Current two-lane verdicts are rebuilt by new AI cycles after restart."""
+    """Current three-tile verdicts are rebuilt by new AI cycles after restart."""
     return {"restored_rows": 0, "unique_verdicts": 0, "lanes": {}}
 
 
@@ -14908,7 +14964,10 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
     except Exception as e:
         logger.error(f"[AI TRANCHE] {e}")
 
-_SPAWN_LANE_ID_PREFIX = {RESEARCH_LANE_OFFSET_029_ATR_TP_25: "o29atr"}
+_SPAWN_LANE_ID_PREFIX = {
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: "o29atr",
+    RESEARCH_LANE_PROTECTED_W234: "pwch",
+}
 
 
 def allocate_lane_trade_id(research_lane: str) -> str:
@@ -16380,7 +16439,11 @@ def _settings_period_breakdown() -> dict:
             "settings_recorded": True,
         })
 
-    lanes = (RESEARCH_LANE_OFFSET_029_ATR_TP_25, RESEARCH_LANE_CONTINUOUS)
+    lanes = (
+        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        RESEARCH_LANE_PROTECTED_W234,
+        RESEARCH_LANE_CONTINUOUS,
+    )
     output = {lane: [] for lane in lanes}
     trades = []
     try:
@@ -21477,14 +21540,16 @@ def _process_ws_ticker_update(payload) -> bool:
 
 
 def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
-    """Reprice 25% of the remaining gap each minute from age 10m through 25m."""
+    """Apply the frozen lane-specific Patient Chase schedule."""
     if not is_patient_chase_lane(order.get("research_lane")):
         return False
+    lane = _normalize_lane_key(order)
+    policy = protected_w234_policy if lane == RESEARCH_LANE_PROTECTED_W234 else offset029_policy
     if order.get("status") != "PENDING" or price <= 0:
         return False
     created = float(order.get("created_ts") or 0)
     last_chase = float(order.get("last_chase_ts") or created or 0)
-    if not offset029_policy.chase_due(
+    if not policy.chase_due(
         created_ts=created, last_chase_ts=last_chase, now=now,
     ):
         return False
@@ -21502,7 +21567,7 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
     with state_lock:
         chase_bid = float(state.get("bid") or 0)
         chase_ask = float(state.get("ask") or 0)
-    if offset029_policy.marketable_quote_at_limit(
+    if policy.marketable_quote_at_limit(
         direction=direction,
         limit_price=old_limit,
         bid=chase_bid,
@@ -21511,7 +21576,7 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
         return False
     new_limit, reason = _compute_limit_chase_target(
         direction, old_limit, float(price), original,
-        step_pct=offset029_policy.CHASE_STEP,
+        step_pct=policy.CHASE_STEP,
     )
     if reason != "LIMIT_CHASE" or abs(new_limit - old_limit) < 0.01:
         return False
@@ -21555,7 +21620,7 @@ def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now:
     logger.info(
         f"[OFFSET029 PAPER] LIMIT_CHASE trade_id={order.get('trade_id')} "
         f"age_min={age_sec / 60.0:.2f} old={fmt(old_limit)} new={fmt(new_limit)} "
-        f"step=25pct_remaining generation={chase_count} [PIPELINE ENFORCEMENT]"
+        f"step={policy.CHASE_STEP:g}pct_remaining generation={chase_count} [PIPELINE ENFORCEMENT]"
     )
     return True
 
@@ -24827,6 +24892,7 @@ PATHWAY_LANE_SPECS_FILE = "pathway_lane_specs.json"
 PATHWAY_LANE_ORDER = (
     RESEARCH_LANE_CONTINUOUS,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
 )
 
 
@@ -24994,7 +25060,7 @@ def _shared_lane_gate_runtime_summary(lane: str) -> str:
 
 
 def build_static_pathway_lane_specs() -> dict:
-    """Return the authoritative two-tile research contract."""
+    """Return the authoritative three-tile research contract."""
     shared = _pathway_shared_execution_spec()
     ai_cadence = shared["ai_scan_cadence_label"]
     chase_detail = shared["limit_chase_label"]
@@ -25090,7 +25156,11 @@ def build_static_pathway_lane_specs() -> dict:
                 "policy_version": continuous_policy_id,
                 "raw_score_gap_min": 5,
                 "confidence_weight": 0.0,
-                "shared_call_consumers": [RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_OFFSET_029_ATR_TP_25],
+                "shared_call_consumers": [
+                    RESEARCH_LANE_CONTINUOUS,
+                    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+                    RESEARCH_LANE_PROTECTED_W234,
+                ],
             },
         },
         "exit": continuous_exit,
@@ -25111,15 +25181,57 @@ def build_static_pathway_lane_specs() -> dict:
             "post_ai_gates": "gap <5 reject; 5-9 soft; 10-14 approve; >=15 strong",
         }, continuous_exit, [f"Policy: {continuous_policy_id}", f"Independence: {shared['independence']}"]),
     }
-    lanes = [patient_lane, continuous_lane]
+    protected_spec = COMBO_LANE_SPECS[RESEARCH_LANE_PROTECTED_W234]
+    protected_view = protected_w234_policy.dashboard_policy()
+    protected_lane = {
+        "lane": RESEARCH_LANE_PROTECTED_W234,
+        "label": protected_spec["label"],
+        "subtitle": protected_spec["subtitle"],
+        "role": RESEARCH_CANDIDATE_ROLE,
+        "status": RESEARCH_CANDIDATE_ROLE,
+        "is_benchmark": False,
+        "is_primary_production": False,
+        "is_research_candidate": True,
+        "is_shadow_only": False,
+        "is_independent_ai": False,
+        "is_deterministic_bracket": False,
+        "badge": "PAPER_ONLY_CANDIDATE",
+        "tile_number": 3,
+        "entry_mode_label": "Protected W234 Chase",
+        "filter_chips": protected_view["filter_chips"],
+        "toggle_key": "research_lane_enabled",
+        "hypothesis": protected_spec["hypothesis"],
+        "research_question": protected_spec["research_question"],
+        "entry": {
+            **protected_view["entry"],
+            "ai_cadence": ai_cadence,
+            "margin_usd": float(protected_spec["margin_usd"]),
+            "notional_usd_at_100x": round(float(protected_spec["margin_usd"]) * 100.0, 2),
+            "filters": protected_spec,
+        },
+        "exit": protected_view["exit"],
+        "exit_path": "Frozen ATR TP/SL 2.5×, Scenario C protection, 120m path end",
+        "promotion_criteria": protected_spec["promotion_criteria"],
+        "kill_criteria": protected_spec["kill_criteria"],
+        "expected_advantage": "Tests chased fillability with explicit adverse ATR protection",
+        "expected_risk": "Unqualified descriptive candidate; paper-only and relay-blocked",
+        "benchmark_comparison": "Compare with Patient Chase and Continuous on the same AI call",
+        "diff_vs_benchmark": [
+            "Entry: 0.28% anchor; W234 chase moves 10% of remaining gap every 180s",
+            "Risk: frozen 2.5× ATR stop plus Scenario C thesis/hard-stop protection",
+            "Exit: frozen 2.5× ATR target, Scenario C ladder, and 120m path end",
+        ],
+        "strategy_detail": protected_view["strategy_detail"],
+    }
+    lanes = [patient_lane, continuous_lane, protected_lane]
     return {
         "architecture_frozen": True,
-        "architecture_freeze_note": "Exact two-tile roster: Patient Chase and Continuous only",
+        "architecture_freeze_note": "Exact three-tile roster: Patient Chase, Continuous, and Protected W234",
         "architecture_doc": "docs/research-genome-schema-v1.md",
         "genome_schema_version": "1.0.0",
         "shared_execution": shared,
         "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": "v3.1-two-lane",
+        "analyzer_version": "v3.1-three-tile-protected-w234",
         "bot_version": EXECUTION_FIX_VERSION,
         "benchmark_lane": RESEARCH_LANE_CONTINUOUS,
         "primary_production_lane": RESEARCH_LANE_CONTINUOUS,
@@ -26797,14 +26909,14 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL %</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution route are independent facts. Executable orders are only in Pending Orders.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Raw AI verdict and each tile's evaluation/lifecycle are independent facts. Executable orders are only in Pending Orders.</p>
 <table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous benchmark evaluation</th><th>Patient Chase execution route / outcome</th><th>AI explanation / block reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous benchmark evaluation</th><th>Patient Chase route / outcome</th><th>Protected W234 evaluation</th><th>Protected W234 route / outcome</th><th>AI explanation / block reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -26915,11 +27027,13 @@ DASHBOARD_JS = """(function () {
       const colors = {
         'CONTINUOUS': '#58a6ff',
         'OFFSET_029_ATR_TP_25': '#3fb950',
+        'PROTECTED_W234_SCENARIO_C': '#d29922',
         'AI_SCAN': '#6e7681',
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
         'OFFSET_029_ATR_TP_25': '0.29% Patient Chase · ATR 2.5×',
+        'PROTECTED_W234_SCENARIO_C': 'Protected W234 · Scenario C + ATR stop',
         'AI_SCAN': 'AI Scan',
       };
       const c = colors[lane] || '#8b949e';
@@ -28392,6 +28506,9 @@ DASHBOARD_JS = """(function () {
             ? (bf.classification || 'AUTHENTICATED')
             : '-';
           const relLabel = rel.shadow_label || rel.divergence_classification || '-';
+          const margin = Number(t.margin_usdt ?? t.margin_usd ?? 0);
+          const leverage = Number(t.leverage ?? 0);
+          const notional = Number(t.requested_notional_usd ?? t.accepted_notional_usd ?? (margin > 0 && leverage > 0 ? margin * leverage : 0));
           return `
           <tr>
             <td>${t.ts_melbourne || t.close_ts_melbourne || formatMelbourneDateTime(t.ts || t.close_ts)}</td>
@@ -28402,7 +28519,9 @@ DASHBOARD_JS = """(function () {
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
             <td>${t.dur_min != null ? t.dur_min.toFixed(1) : '-'}</td>
             <td>${displayExitCause(t.exit_reason)}</td>
-            <td>${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
+            <td title="Percentage return on the displayed margin, not on account equity">${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
+            <td>${margin > 0 ? '$' + margin.toFixed(2) : '-'}</td>
+            <td>${notional > 0 ? '$' + notional.toFixed(2) : '-'}</td>
             <td>$${t.net_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${(t.trading_fees_usd != null ? t.trading_fees_usd : t.fees_usd)?.toFixed(2)||'-'}</td>
@@ -28434,6 +28553,7 @@ DASHBOARD_JS = """(function () {
           aiHint.innerText = historyCount
             + 'Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate. Continuous ACCEPT is not proof of an order. Patient Chase shows the matched paper lifecycle. '
             + `Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. `
+            + `Protected W234 now: ${d.protected_w234_counts?.pending || 0} pending, ${d.protected_w234_counts?.open || 0} open, ${d.protected_w234_counts?.closed || 0} closed. `
             + ((d.patient_chase_counts?.unlinked_lifecycle_rows || 0) > 0
               ? `${d.patient_chase_counts.unlinked_lifecycle_rows} lifecycle row(s) are missing parent AI identity; totals include them but per-call routing is incomplete. `
               : '')
@@ -28487,6 +28607,8 @@ DASHBOARD_JS = """(function () {
           const verdicts = a.lane_verdicts || {};
           const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
           const patientRoute = a.patient_chase_route;
+          const protectedVerdict = a.protected_w234_verdict || verdicts.PROTECTED_W234_SCENARIO_C;
+          const protectedRoute = a.protected_w234_route;
           const rawGap = a.score_gap != null
             ? Number(a.score_gap)
             : (a.long_score != null && a.short_score != null
@@ -28508,9 +28630,11 @@ DASHBOARD_JS = """(function () {
             <td>${gapBucket}</td>
             <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict, a)}</td>
             <td style="font-size:0.85em">${formatPatientRoute(patientRoute)}</td>
+            <td style="font-size:0.85em">${formatLaneVerdict(protectedVerdict, a)}</td>
+            <td style="font-size:0.85em">${formatPatientRoute(protectedRoute)}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="12" style="color:#8b949e">No AI calls yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="14" style="color:#8b949e">No AI calls yet this session</td></tr>');
         safeHTML('exitReasonsAnalytics', Object.entries(d.analytics?.exit_reasons || {}).map(([k,v])=>`
           <tr>
             <td>${k}</td>
@@ -30484,6 +30608,24 @@ def _position_protection_view(row: dict) -> dict:
             "tp": round(float(target), 2) if target else None,
             "tp_policy": "FROZEN_3M_ATR_TP_2_5X",
         }
+    if lane == RESEARCH_LANE_PROTECTED_W234:
+        entry = _buf_float(row.get("entry"), 0.0)
+        direction = row.get("dir") or row.get("side")
+        atr_abs = _buf_float(row.get("atr14_3m"), 0.0)
+        atr_pct = _buf_float(row.get("atr14_pct_3m"), 0.0)
+        target = _buf_float(row.get("atr_tp_price"), 0.0) or protected_w234_policy.tp_price(
+            entry, direction, atr_abs, atr_pct
+        )
+        stop = _buf_float(row.get("atr_stop_price"), 0.0) or protected_w234_policy.stop_price(
+            entry, direction, atr_abs, atr_pct
+        )
+        return {
+            "sl": round(float(stop), 2) if stop else None,
+            "sl_enforced": bool(stop),
+            "stop_policy": "FROZEN_3M_ATR_SL_2_5X_PLUS_SCENARIO_C",
+            "tp": round(float(target), 2) if target else None,
+            "tp_policy": "FROZEN_3M_ATR_TP_2_5X_PLUS_SCENARIO_C",
+        }
     return {
         "sl": row.get("sl"),
         "sl_enforced": bool(_buf_float(row.get("sl"), 0.0) > 0),
@@ -31503,14 +31645,16 @@ def _snapshot_trades_for_api(session_start: float):
 def _attach_patient_chase_routes(
     ai_history: list,
     *,
+    lane=RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    route_key="patient_chase_route",
     signals=(),
     pending=(),
     positions=(),
     closed=(),
     expired=(),
 ) -> tuple[list, dict]:
-    """Attach genuine Patient Chase lifecycle state to each shared AI call."""
-    lane = RESEARCH_LANE_OFFSET_029_ATR_TP_25
+    """Attach one genuine Patient-family lifecycle to each shared AI call."""
+    lane = str(lane or RESEARCH_LANE_OFFSET_029_ATR_TP_25).upper()
     priority = {"APPROVED_NO_ORDER": 0, "EXPIRED": 1, "CLOSED": 2, "PENDING": 3, "OPEN": 4}
     by_call = {}
     counts = {
@@ -31532,7 +31676,7 @@ def _attach_patient_chase_routes(
         if not isinstance(existing, dict):
             continue
         call_id = str(existing.get("shared_ai_call_id") or existing.get("trade_id") or "")
-        route = existing.get("patient_chase_route")
+        route = existing.get(route_key)
         status = str((route or {}).get("status") or "").upper()
         if call_id and isinstance(route, dict) and status in priority:
             by_call[call_id] = copy.deepcopy(route)
@@ -31621,7 +31765,7 @@ def _attach_patient_chase_routes(
         verdicts = {
             lane: verdict
             for lane, verdict in dict(row.get("lane_verdicts") or {}).items()
-            if lane in {RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_OFFSET_029_ATR_TP_25}
+            if lane in DASHBOARD_PRIMARY_LANES
         }
         row["lane_verdicts"] = verdicts
         call_id = str(row.get("shared_ai_call_id") or row.get("trade_id") or "")
@@ -31635,7 +31779,7 @@ def _attach_patient_chase_routes(
                 "entry_price": None,
                 "exit_reason": None,
             }
-        row["patient_chase_route"] = route
+        row[route_key] = route
         enriched.append(row)
     counts["selected_calls"] = len(by_call)
     return enriched, counts
@@ -31772,9 +31916,20 @@ def _build_api_state_snapshot():
             closed=trades_copy,
             expired=expired_orders_copy,
         )
+        ai_history_copy, protected_w234_counts = _attach_patient_chase_routes(
+            ai_history_copy,
+            lane=RESEARCH_LANE_PROTECTED_W234,
+            route_key="protected_w234_route",
+            signals=list(bounded_trades_map.values()),
+            pending=pending_orders_copy,
+            positions=positions_copy,
+            closed=trades_copy,
+            expired=expired_orders_copy,
+        )
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
         snapshot["patient_chase_counts"] = patient_chase_counts
+        snapshot["protected_w234_counts"] = protected_w234_counts
         snapshot["expired_orders_total"] = expired_orders_total
         snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
@@ -32235,6 +32390,20 @@ def _api_state_cache_refresher_loop():
                 overlay_signals = snap.get("trades_map") or {}
                 snap["ai_history"], snap["patient_chase_counts"] = _attach_patient_chase_routes(
                     snap.get("ai_history") or [],
+                    signals=(
+                        list(overlay_signals.values())
+                        if isinstance(overlay_signals, dict)
+                        else overlay_signals
+                    ),
+                    pending=snap.get("orders") or [],
+                    positions=snap.get("positions") or [],
+                    closed=snap.get("trades") or [],
+                    expired=snap.get("expired_orders") or [],
+                )
+                snap["ai_history"], snap["protected_w234_counts"] = _attach_patient_chase_routes(
+                    snap.get("ai_history") or [],
+                    lane=RESEARCH_LANE_PROTECTED_W234,
+                    route_key="protected_w234_route",
                     signals=(
                         list(overlay_signals.values())
                         if isinstance(overlay_signals, dict)
@@ -35853,7 +36022,7 @@ def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     """
     snapshot = copy.deepcopy(row) if isinstance(row, dict) else {}
     lane = str(snapshot.get("research_lane") or "").upper()
-    if lane != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if not is_patient_chase_lane(lane):
         return snapshot
     protection = _position_protection_view(snapshot)
     snapshot["tp"] = protection["tp"]
@@ -36451,7 +36620,7 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
         margin_usdt=margin_usdt,
         pullback_pct=float(signal.get("pullback_pct", state.get("pullback_threshold", 0.001))),
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
-        exit_config=get_exit_config_snapshot(),
+        exit_config=get_exit_config_snapshot(signal.get("research_lane")),
         ai_win_prob=ai.get("win_prob"),
         edge_score=signal.get("edge_score_at_entry"),
         research_lane=signal.get("research_lane"),

@@ -61,12 +61,13 @@ def test_edge_controls_and_mutation_routes_are_removed() -> None:
         assert token not in source
 
 
-def test_current_two_tile_roster_survives_edge_retirement() -> None:
+def test_current_three_tile_roster_survives_edge_retirement() -> None:
     payload = bot.build_static_pathway_lane_specs()
     lanes = {row["lane"] for row in payload["lanes"]}
     assert lanes == {
         config.COMPARISON_BENCHMARK_LANE,
         config.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        config.RESEARCH_LANE_PROTECTED_W234,
     }
     assert payload["benchmark_lane"] == config.COMPARISON_BENCHMARK_LANE
 

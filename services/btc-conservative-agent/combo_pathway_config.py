@@ -1,16 +1,19 @@
-"""Two-lane paper architecture: Patient Chase plus Continuous benchmark."""
+"""Three-tile paper architecture: two candidates plus Continuous benchmark."""
 from __future__ import annotations
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
+RESEARCH_LANE_PROTECTED_W234 = "PROTECTED_W234_SCENARIO_C"
 
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
 )
 
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
 )
 
 COMBO_LANE_SPECS = {
@@ -63,6 +66,42 @@ COMBO_LANE_SPECS = {
             "out-of-sample EV under conservative paper execution?"
         ),
     },
+    RESEARCH_LANE_PROTECTED_W234: {
+        "label": "Protected W234 Chase · Scenario C + ATR stop",
+        "subtitle": (
+            "PAPER RESEARCH when ON — shared AI direction, independent order/position/ledger; "
+            "not live-copy eligible until explicitly qualified"
+        ),
+        "combo_key": "OFFSET_0.28_CHASE_w234_s10_i180|ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5",
+        "raw_policy_id": "OFFSET_0.28_CHASE_w234_s10_i180|ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE",
+        "is_benchmark": False, "is_research_candidate": True,
+        "is_legacy": False, "is_independent_ai": False,
+        "uses_shared_ai_direction": True,
+        "paper_only": True, "platform_relay_eligible": False,
+        "id_prefix": "pwch",
+        "entry_offset_pct": 0.28,
+        "initial_rest_sec": 600,
+        "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500),
+        "chase_interval_sec": 180,
+        "chase_remaining_gap_step_pct": 10.0,
+        "entry_ttl_sec": 1800,
+        "margin_usd": 0.25,
+        "atr_tp_multiple": 2.5,
+        "atr_stop_multiple": 2.5,
+        "atr_source": "frozen fill-time 3m ATR(14)",
+        "path_end_sec": 7200,
+        "ladder": ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120)),
+        "ladder_label": "Scenario C",
+        "ladder_profile_id": "SCENARIO_C_RUNNER_8_v8_20260820",
+        "exit_profile_id": "ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5_V1",
+        "promotion_criteria": "PAPER ONLY until independent multi-regime OOS evidence has positive LCB and bounded drawdown",
+        "kill_criteria": "Stop new entries on any identity, lifecycle, stop, or evidence mismatch",
+        "hypothesis": "The descriptive W234 chased cell retains fillability while Scenario C and a frozen 2.5 ATR stop bound losses.",
+        "research_question": "Does the protected W234 chase remain positive under conservative paper execution across regimes?",
+    },
 }
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
 CONTINUOUS_PROXY_LANES = ()
@@ -74,11 +113,11 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-two-lane-safe-policy"
+RESEARCH_STACK_VERSION = "v31-three-tile-protected-w234"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 share one direction-only 3-minute AI call; "
-    "two-lane paper-research roster; all retired lanes are analyzer-only; "
-    "registered 0.29% Patient Chase paper lifecycle; "
+    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 + PROTECTED_W234_SCENARIO_C share one "
+    "direction-only 3-minute AI call; three-tile paper-research roster; all retired lanes "
+    "are analyzer-only; registered Patient Chase paper lifecycles; "
     "independent lane capacity, orders, positions and ledgers; "
     "fail-closed relay executor watchdog"
 )

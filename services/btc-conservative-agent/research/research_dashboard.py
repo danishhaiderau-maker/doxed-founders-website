@@ -20,7 +20,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
-CURRENT_RESEARCH_LANES = frozenset(("CONTINUOUS", "OFFSET_029_ATR_TP_25"))
+CURRENT_RESEARCH_LANES = frozenset((
+    "CONTINUOUS",
+    "OFFSET_029_ATR_TP_25",
+    "PROTECTED_W234_SCENARIO_C",
+))
 
 
 def format_melbourne_dt(value) -> str:
@@ -89,7 +93,11 @@ except ImportError:
             return False
         return u in CURRENT_RESEARCH_LANES
 
-ANALYZER_COMPARE_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
+ANALYZER_COMPARE_LANES = (
+    "CONTINUOUS",
+    "OFFSET_029_ATR_TP_25",
+    "PROTECTED_W234_SCENARIO_C",
+)
 ALL_PATHWAY_LANES = ANALYZER_COMPARE_LANES
 DASHBOARD_PATHWAY_LANES = ANALYZER_COMPARE_LANES
 DASHBOARD_PRIMARY_LANES = ANALYZER_COMPARE_LANES
@@ -2460,7 +2468,7 @@ def api_lanes():
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
-            else "Current active research stack: CONTINUOUS + OFFSET_029_ATR_TP_25"
+            else "Current active research stack: CONTINUOUS + OFFSET_029_ATR_TP_25 + PROTECTED_W234_SCENARIO_C"
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
     })
@@ -3579,7 +3587,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
     <section id="sec-lanes">
     <h2>Current Lane Analysis</h2>
-    <p class="note" id="lanes-filter-note">Only CONTINUOUS and OFFSET_029_ATR_TP_25 are current lanes. Archived lane names remain available only in quarantine artifacts.</p>
+    <p class="note" id="lanes-filter-note">Current lanes: CONTINUOUS, OFFSET_029_ATR_TP_25, and PROTECTED_W234_SCENARIO_C. Archived lane names remain available only in quarantine artifacts.</p>
     <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Fills</th><th>Net PnL</th><th>EV / approval</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-regime">
@@ -3592,18 +3600,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
-    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option></select></label>
+    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option><option value="PROTECTED_W234_SCENARIO_C">PROTECTED_W234_SCENARIO_C</option></select></label>
     <div class="kpis" id="chase-kpis"></div>
     <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option><option value="PROTECTED_W234_SCENARIO_C">PROTECTED_W234_SCENARIO_C</option></select></label>
     <h2>Chase Threshold Analysis</h2>
     <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option><option value="PROTECTED_W234_SCENARIO_C">PROTECTED_W234_SCENARIO_C</option></select></label>
     <h2>Chase Delay (Pathway Lab)</h2>
     <p class="note" id="chase-delay-note">COMBO Direct vs Chase 3+ — delayed virtual-chase entry within each AI/spread tier.</p>
     <div class="kpis" id="chase-delay-kpis"></div>
@@ -4377,7 +4385,26 @@ async function loadGenome() {
     document.getElementById('genome-cluster').textContent = JSON.stringify({epoch_id:d.epoch_id, collection:c, integrity:d.integrity}, null, 2);
     document.getElementById('genome-decision').textContent = JSON.stringify({search_progress:s, qualification:d.qualification}, null, 2);
     document.getElementById('genome-lifecycle').textContent = JSON.stringify({collection:c, blockers:d.blockers}, null, 2);
-    document.getElementById('genome-hypotheses').textContent = JSON.stringify({candidate_screen:cs, number_one_strategy:d.number_one_strategy}, null, 2);
+    // Do not stringify the complete candidate screen into the overview DOM.
+    // The V3.1 screen contains thousands of nested policy/stop cells and made
+    // the navigation button block the rendered page while duplicating the
+    // entire API payload as text.  Keep this panel useful and bounded; the
+    // dedicated Safe Policy Genome route exposes the detailed tables.
+    const scenarioSweep = cs.scenario_c_atr_stop_sweep || {};
+    document.getElementById('genome-hypotheses').textContent = JSON.stringify({
+      number_one_strategy: d.number_one_strategy,
+      candidate_warning: cs.warning,
+      unique_policies_evaluated: cs.unique_policies_evaluated,
+      descriptive_rows_available: rows.length,
+      scenario_c_atr_stop_sweep: {
+        qualification: scenarioSweep.qualification,
+        warning: scenarioSweep.warning,
+        policies_tested: scenarioSweep.policies_tested,
+        chase_families_materialized: Object.keys(scenarioSweep.best_by_chase_and_stop || {}).length,
+        stop_settings_materialized: Object.keys(scenarioSweep.leaders_by_stop || {}).length,
+      },
+      detailed_route: '/safe-policy-genome-v3.1',
+    }, null, 2);
     document.getElementById('genome-replay').textContent = JSON.stringify({integrity:d.integrity, safe_policy_ranking:d.safe_policy_ranking}, null, 2);
     document.getElementById('genome-discoveries').innerHTML = rows.length ? rows.slice(0, 20).map(row =>
       `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 0} · OOS=${row.oos_episodes ?? 0} · OOS net $${fmtUsd(row.sealed_oos_net_usd)} · max DD $${fmtUsd(row.max_drawdown_usd)}</div></div>`
