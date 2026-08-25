@@ -9,6 +9,17 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 import bot
 
 
+def test_terminal_close_derives_entry_execution_type_from_frozen_position_fee_type():
+    import inspect
+
+    source = inspect.getsource(bot.close_position)
+    assignment = 'entry_is_maker = pos.get("entry_fee_type") == "MAKER"'
+    receipt = '"execution_entry_type": "MAKER" if entry_is_maker else "TAKER"'
+    assert assignment in source
+    assert receipt in source
+    assert source.index(assignment) < source.index(receipt)
+
+
 def test_terminal_pnl_adds_partials_and_values_only_remaining_runner():
     pos = {
         "dir": "LONG",

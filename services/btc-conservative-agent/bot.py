@@ -23508,6 +23508,11 @@ def close_position(pos: dict, exit_reason: str):
         or exit_reason in ("TAKE_PROFIT", "TP_HIT")
         or ("POSTONLY" in exit_reason)
     )
+    # The entry fee type is frozen when the paper position is opened.  Keep a
+    # local boolean for the terminal execution receipt; referring to an
+    # uninitialised name here used to crash the position manager exactly when a
+    # natural ATR/path exit attempted to close a position.
+    entry_is_maker = pos.get("entry_fee_type") == "MAKER"
     price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
         pos["exit_fill_sim"] = exit_sim
