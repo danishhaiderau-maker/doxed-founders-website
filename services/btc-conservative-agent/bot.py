@@ -307,10 +307,7 @@ FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
 #   CONTINUOUS / AI_DIRECT — frozen Scenario C benchmark
 #   spawn lanes from CONTINUOUS APPROVE — AI_DIRECT + AI_DIRECT_CHASE fill
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
-PATIENT_CHASE_LANES = frozenset({
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_PROTECTED_W234,
-})
+PATIENT_CHASE_LANES = frozenset(COMBO_EXECUTION_LANES)
 
 
 def is_patient_chase_lane(lane: str) -> bool:
@@ -328,10 +325,7 @@ RESEARCH_LANE_LABELS = {
 RESEARCH_SPAWN_LANES = ()
 # v11.8: the persisted toggle map is deliberately an allowlist.  Historical rows
 # remain readable, but a stale config flag cannot revive a retired lane.
-_RESEARCH_LANE_TOGGLE_DEFAULTS = {
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: True,
-    RESEARCH_LANE_PROTECTED_W234: False,
-}
+_RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()
 
 # The showcase tile toggle and the platform relay switch are deliberately
 # separate protections:
@@ -342,22 +336,28 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    *(lane for lane, spec in COMBO_LANE_SPECS.items() if spec.get("platform_relay_eligible")),
 })
 PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
-    *PLATFORM_RELAY_ELIGIBLE_LANES,
-    RESEARCH_LANE_PROTECTED_W234,
+    RESEARCH_LANE_CONTINUOUS,
+    *COMBO_EXECUTION_LANES,
 })
+PAPER_ONLY_RESEARCH_LANES = frozenset(
+    lane for lane, spec in COMBO_LANE_SPECS.items() if spec.get("paper_only")
+)
 PLATFORM_RELAY_BLOCKERS = {
-    RESEARCH_LANE_PROTECTED_W234: "PAPER_RESEARCH_UNQUALIFIED",
+    lane: "PAPER_RESEARCH_UNQUALIFIED" for lane in PAPER_ONLY_RESEARCH_LANES
 }
-PAPER_ONLY_RESEARCH_LANES = frozenset({RESEARCH_LANE_PROTECTED_W234})
 # A relay event must prove both its declared lane and its trade-id namespace.
 # Keep this deliberately smaller than the research lane prefix registry: adding a
 # paper lane must never silently make it eligible for real-money mirroring.
 PLATFORM_RELAY_TRADE_PREFIX_LANES = {
     "cont": RESEARCH_LANE_CONTINUOUS,
-    "o29atr": RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    **{
+        str(spec["id_prefix"]): lane
+        for lane, spec in COMBO_LANE_SPECS.items()
+        if spec.get("platform_relay_eligible")
+    },
 }
 PLATFORM_RELAY_EVIDENCE_PREFIX_LANES = {
     **PLATFORM_RELAY_TRADE_PREFIX_LANES,
@@ -369,10 +369,8 @@ PATHWAY_SPAWN_LANE_POLICY_VERSION = 2
 # Production execution routing only — legacy alpha lanes excluded (DATA_RETIRED).
 AI_DIRECT_RESEARCH_LANES = frozenset(COMBO_EXECUTION_LANES + (RESEARCH_LANE_CONTINUOUS,))
 _lane_locks = {
-    RESEARCH_LANE_AI_SCAN: threading.Lock(),
-    RESEARCH_LANE_CONTINUOUS: threading.Lock(),
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: threading.Lock(),
-    RESEARCH_LANE_PROTECTED_W234: threading.Lock(),
+    lane: threading.Lock()
+    for lane in (RESEARCH_LANE_AI_SCAN, RESEARCH_LANE_CONTINUOUS, *COMBO_EXECUTION_LANES)
 }
 PATHWAY_LAB_LANES = COMBO_EXECUTION_LANES
 LANE_TRACKING_LANES = tuple(dict.fromkeys(PATHWAY_LAB_LANES + (RESEARCH_LANE_CONTINUOUS, RESEARCH_LANE_AI_SCAN)))
