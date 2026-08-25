@@ -52,7 +52,9 @@ def normalize_lifecycle_outcome(outcome_state: Any, *, net_pnl_usd: Any = None) 
 
 EXECUTION_WORLDS = (
     "IDEAL_TOUCH_DIAGNOSTIC",
+    "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
     "CONSERVATIVE_BBO_DEPTH_TAPE",
+    "CONSERVATIVE_BBO_DEPTH_V1",
     "AUTHENTICATED_ACTUAL",
 )
 

@@ -8,6 +8,7 @@ until conservative execution and a sealed holdout exist.
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -15,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
 from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
 from research_v3_validation import validate_policy
+from research.conservative_limit_fill import evaluate_limit_fill
 
 
 def protection_screen() -> list[dict[str, Any]]:
@@ -199,6 +201,91 @@ def _normalized_entry_children(
     }]
 
 
+def _conservative_child_schedule(
+    child: Mapping[str, Any], *, event_id: str,
+) -> list[dict[str, Any]]:
+    """Convert one counterfactual exact schedule to public-tape buckets.
+
+    The simulator records fractional active boundaries.  The public evidence is
+    one-second BBO/depth, so intermediate boundaries are assigned to the next
+    generation and the final fractional second is retained by rounding its
+    exclusive end upward.  This is the same causal convention used for actual
+    finalized V3 paper schedules.
+    """
+    raw = [dict(row) for row in (child.get("chase_schedule") or []) if isinstance(row, Mapping)]
+    normalized: list[dict[str, Any]] = []
+    for index, row in enumerate(raw):
+        try:
+            start_exact = float(row["active_from_ts"])
+            end_exact = float(row["active_until_ts"])
+            limit_price = float(row["limit_price"])
+        except (KeyError, TypeError, ValueError):
+            return []
+        start_ts = math.floor(start_exact)
+        end_ts = math.ceil(end_exact) if index == len(raw) - 1 else math.floor(end_exact)
+        if end_ts <= start_ts or limit_price <= 0:
+            return []
+        normalized.append({
+            "bucket_id": f"{event_id}:{child.get('entry_policy_id')}:{index}",
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "limit_price": limit_price,
+            "generation": row.get("chase_step_index", index),
+        })
+    return normalized
+
+
+def _conservative_child_receipt(
+    source: Mapping[str, Any], child: Mapping[str, Any],
+    *, microstructure_by_ts: Mapping[int, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    schedule = _conservative_child_schedule(
+        child, event_id=str(source.get("event_id") or "event"),
+    )
+    qty = _number(source.get("requested_qty"))
+    if not schedule:
+        return {
+            "schema": "conservative_limit_fill_receipt_v1",
+            "outcome": "UNSUPPORTED", "supported": False,
+            "negative_reasons": ["COUNTERFACTUAL_CHASE_SCHEDULE_MISSING_OR_INVALID"],
+        }
+    if qty is None or qty <= 0:
+        return {
+            "schema": "conservative_limit_fill_receipt_v1",
+            "outcome": "UNSUPPORTED", "supported": False,
+            "negative_reasons": ["REQUESTED_QTY_MISSING_OR_INVALID"],
+        }
+    tape_rows: Iterable[Mapping[str, Any]] = source.get("ordered_1s_prices") or ()
+    if microstructure_by_ts is not None:
+        start = min(int(row["start_ts"]) for row in schedule) - 2
+        end = max(int(row["end_ts"]) for row in schedule)
+        tape_rows = (
+            microstructure_by_ts[ts]
+            for ts in range(start, end)
+            if ts in microstructure_by_ts
+        )
+    receipt = evaluate_limit_fill(
+        tape_rows,
+        direction=str(source.get("direction") or "UNKNOWN"),
+        requested_qty=qty,
+        chase_schedule=schedule,
+        symbol=str(source.get("market_microstructure_symbol") or "tBTCF0:USTF0"),
+    )
+    receipt.update({
+        "event_id": source.get("event_id"),
+        "episode_id": source.get("episode_id"),
+        "entry_policy_id": child.get("entry_policy_id"),
+        "chase_id": child.get("chase_id"),
+        "evidence_world": "CONSERVATIVE_BBO_DEPTH_V1",
+        "ideal_touch_reference": {
+            "fill_ts": child.get("fill_ts"),
+            "fill_price": child.get("fill_price"),
+            "fill_model": child.get("fill_model"),
+        },
+    })
+    return receipt
+
+
 def load_candidate_inputs(
     data_dir: str | Path,
     *,
@@ -290,6 +377,14 @@ def load_candidate_inputs(
             ),
             "leverage": intent.get("leverage") or 100.0,
             "margin_usd": intent.get("margin_usd") or 0.25,
+            "requested_qty": (
+                (intent.get("execution_basis") or {}).get("requested_qty")
+                or intent.get("requested_qty")
+            ),
+            "market_microstructure_symbol": (
+                (intent.get("execution_basis") or {}).get("market_microstructure_symbol")
+                or "tBTCF0:USTF0"
+            ),
             "entry_children": _normalized_entry_children(intent, executions),
             "ordered_1s_prices": one_second_rows,
             "canonical_1m_ohlc": one_minute_rows,
@@ -356,51 +451,138 @@ def evaluate_protection_screen(
                 direction=str(source.get("direction") or "UNKNOWN"),
             )
             replay_path_basis = "CANONICAL_1M_ADVERSE_FIRST_OHLC"
+        microstructure_by_ts = {}
+        for row in source.get("ordered_1s_prices") or []:
+            try:
+                bucket_ts = int(float(row.get("bucket_ts")))
+            except (TypeError, ValueError):
+                continue
+            microstructure_by_ts[bucket_ts] = row
         for child in source.get("entry_children") or []:
             entry_id = str(child.get("entry_policy_id") or "")
             if not entry_id:
                 continue
+            conservative_receipt = _conservative_child_receipt(
+                source, child, microstructure_by_ts=microstructure_by_ts,
+            )
+            conservative_outcome = str(conservative_receipt.get("outcome") or "UNSUPPORTED")
+            conservative_fill_ts = conservative_receipt.get("trigger_bucket_ts")
+            conservative_fill_price = conservative_receipt.get("fill_price")
+            requested_qty = _number(conservative_receipt.get("requested_qty"))
+            filled_qty = _number(conservative_receipt.get("filled_qty"))
+            fill_fraction = (
+                min(1.0, filled_qty / requested_qty)
+                if requested_qty and filled_qty is not None else 0.0
+            )
             prepared_price_path = None
-            if child.get("fill_ts") is not None and prices and source.get("atr14_pct") is not None:
+            if conservative_fill_ts is not None and prices and source.get("atr14_pct") is not None:
                 prepared_price_path = prepare_replay_price_path(
+                    prices, fill_ts=float(conservative_fill_ts),
+                )
+            ideal_prepared_price_path = None
+            if child.get("fill_ts") is not None and prices and source.get("atr14_pct") is not None:
+                ideal_prepared_price_path = prepare_replay_price_path(
                     prices, fill_ts=float(child["fill_ts"]),
                 )
             for protection in protections:
                 policy_id = f"{entry_id}|{protection['protection_id']}"
                 spec = {
                     "entry": {"entry_policy_id": entry_id, "offset_pct": child.get("offset_pct"), "chase_id": child.get("chase_id")},
-                    "fill": {"execution_world": "IDEAL_TOUCH_DIAGNOSTIC", "source_fill_model": child.get("fill_model")},
+                    "fill": {
+                        "execution_world": "CONSERVATIVE_BBO_DEPTH_V1",
+                        "source_fill_model": conservative_receipt.get("evaluator_version"),
+                        "requested_qty": requested_qty,
+                    },
                     "loss_protection": protection["loss_protection"],
                     "profit_protection": protection["profit_protection"],
                     "portfolio": {"concurrency_cap": 1, "size_scale": 1.0, "daily_loss_kill_pct": 3},
                 }
                 policy_specs[policy_id] = spec
                 outcome: dict[str, Any]
-                if child.get("fill_ts") is None:
-                    outcome = {"outcome_state": "NO_FILL", "net_pnl_usd": None}
+                if conservative_outcome == "NO_FILL":
+                    outcome = {
+                        "outcome_state": "NO_FILL", "net_pnl_usd": None,
+                        "fill_receipt": conservative_receipt,
+                    }
+                elif conservative_outcome == "UNSUPPORTED":
+                    outcome = {
+                        "outcome_state": "UNSUPPORTED",
+                        "reason": "CONSERVATIVE_FILL_EVIDENCE_UNSUPPORTED",
+                        "fill_receipt": conservative_receipt,
+                    }
+                elif conservative_outcome not in {"FILL", "PARTIAL_FILL"}:
+                    outcome = {
+                        "outcome_state": "UNSUPPORTED",
+                        "reason": "UNKNOWN_CONSERVATIVE_FILL_OUTCOME",
+                        "fill_receipt": conservative_receipt,
+                    }
                 elif not prices or source.get("atr14_pct") is None:
                     outcome = {"outcome_state": "UNSUPPORTED", "reason": "ORDERED_1S_PATH_OR_ATR_MISSING"}
                 else:
                     replay = replay_protected_policy(
                         prices,
                         direction=str(source.get("direction") or "UNKNOWN"),
-                        entry_price=float(child.get("fill_price") or 0),
-                        fill_ts=float(child["fill_ts"]),
+                        entry_price=float(conservative_fill_price or 0),
+                        fill_ts=float(conservative_fill_ts),
                         atr_pct_at_fill=float(source["atr14_pct"]),
                         leverage=float(source.get("leverage") or 100),
-                        margin_usd=float(source.get("margin_usd") or 20),
+                        margin_usd=float(source.get("margin_usd") or 0.25) * fill_fraction,
                         policy_spec=spec,
                         prepared_price_path=prepared_price_path,
                         collect_trace=False,
                     )
                     outcome = {
-                        "outcome_state": "FULL_FILL" if replay.get("status") == "COMPLETE" else str(replay.get("status") or "UNSUPPORTED"),
+                        "outcome_state": (
+                            "PARTIAL_FILL" if replay.get("status") == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
+                            else "FULL_FILL" if replay.get("status") == "COMPLETE"
+                            else str(replay.get("status") or "UNSUPPORTED")
+                        ),
                         "net_pnl_usd": replay.get("net_pnl_usd"),
                         "exit_reason": replay.get("exit_reason"),
                         "profit_retention_ratio": replay.get("profit_retention_ratio"),
                         "profit_giveback_pct": replay.get("profit_giveback_pct"),
                         "underwater_observation_ratio": replay.get("underwater_observation_ratio"),
                         "replay_path_basis": replay_path_basis,
+                        "fill_receipt": conservative_receipt,
+                    }
+                diagnostic_outcome: dict[str, Any]
+                if child.get("fill_ts") is None:
+                    diagnostic_outcome = {"outcome_state": "NO_FILL", "net_pnl_usd": None}
+                elif not prices or source.get("atr14_pct") is None:
+                    diagnostic_outcome = {
+                        "outcome_state": "UNSUPPORTED",
+                        "reason": "ORDERED_1S_PATH_OR_ATR_MISSING",
+                    }
+                else:
+                    diagnostic_spec = {
+                        **spec,
+                        "fill": {
+                            "execution_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+                            "source_fill_model": child.get("fill_model"),
+                            "qualification_eligible": False,
+                        },
+                    }
+                    diagnostic_replay = replay_protected_policy(
+                        prices,
+                        direction=str(source.get("direction") or "UNKNOWN"),
+                        entry_price=float(child.get("fill_price") or 0),
+                        fill_ts=float(child["fill_ts"]),
+                        atr_pct_at_fill=float(source["atr14_pct"]),
+                        leverage=float(source.get("leverage") or 100),
+                        margin_usd=float(source.get("margin_usd") or 0.25),
+                        policy_spec=diagnostic_spec,
+                        prepared_price_path=ideal_prepared_price_path,
+                        collect_trace=False,
+                    )
+                    diagnostic_outcome = {
+                        "outcome_state": (
+                            "FULL_FILL" if diagnostic_replay.get("status") == "COMPLETE"
+                            else str(diagnostic_replay.get("status") or "UNSUPPORTED")
+                        ),
+                        "net_pnl_usd": diagnostic_replay.get("net_pnl_usd"),
+                        "exit_reason": diagnostic_replay.get("exit_reason"),
+                        "evidence_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+                        "qualification_eligible": False,
                     }
                 # Multiple lane events from one AI call are correlated. A
                 # deterministic event-id tie-break keeps one sample per episode.
@@ -414,6 +596,7 @@ def evaluate_protection_screen(
                         "regime": source.get("regime"),
                         "replay_path_basis": replay_path_basis,
                         "policy_outcomes": {policy_id: outcome},
+                        "ideal_touch_policy_outcomes": {policy_id: diagnostic_outcome},
                     }
 
         if progress_callback is not None and (
@@ -433,6 +616,17 @@ def evaluate_protection_screen(
         rows = sorted(by_episode.values(), key=lambda row: float(row.get("signal_ts") or 0))
         holdout_start = int(len(rows) * 0.7)
         oos = rows[holdout_start:]
+        prevalidation_outcomes = [
+            (row.get("policy_outcomes") or {}).get(policy_id) or {}
+            for row in oos
+        ]
+        prevalidation_states = {
+            str(outcome.get("outcome_state") or "UNSUPPORTED")
+            for outcome in prevalidation_outcomes
+        }
+        conservative_execution_ready = bool(oos) and bool(
+            prevalidation_states & {"FULL_FILL", "PARTIAL_FILL"}
+        ) and prevalidation_states <= {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}
         validation = validate_policy(
             oos,
             policy_id=policy_id,
@@ -441,12 +635,32 @@ def evaluate_protection_screen(
             max_drawdown_pct=5,
             min_cvar95_usd=-10,
             policies_tested=policies_tested,
-            conservative_execution=False,
+            conservative_execution=conservative_execution_ready,
             neighborhood_stable=False,
             sealed_holdout=sealed_holdout,
             liquidation_buffer_verified=False,
         )
         risk = validation["risk"]
+        diagnostic_rows = [
+            {
+                **row,
+                "policy_outcomes": row.get("ideal_touch_policy_outcomes") or {},
+            }
+            for row in oos
+        ]
+        diagnostic_validation = validate_policy(
+            diagnostic_rows,
+            policy_id=policy_id,
+            starting_equity_usd=1000,
+            max_drawdown_usd=50,
+            max_drawdown_pct=5,
+            min_cvar95_usd=-10,
+            policies_tested=policies_tested,
+            conservative_execution=False,
+            neighborhood_stable=False,
+            sealed_holdout=False,
+            liquidation_buffer_verified=False,
+        )
         replay_outcomes = [
             (row.get("policy_outcomes") or {}).get(policy_id) or {}
             for row in oos
@@ -454,6 +668,14 @@ def evaluate_protection_screen(
         retentions = [float(row["profit_retention_ratio"]) for row in replay_outcomes if row.get("profit_retention_ratio") is not None]
         givebacks = [float(row["profit_giveback_pct"]) for row in replay_outcomes if row.get("profit_giveback_pct") is not None]
         underwater = [float(row["underwater_observation_ratio"]) for row in replay_outcomes if row.get("underwater_observation_ratio") is not None]
+        outcome_states = validation.get("outcome_states") or {}
+        full_fills = int(outcome_states.get("FULL_FILL", 0))
+        partial_fills = int(outcome_states.get("PARTIAL_FILL", 0))
+        no_fills = int(outcome_states.get("NO_FILL", 0))
+        unsupported = sum(
+            int(count) for state, count in outcome_states.items()
+            if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
+        )
         regime_breakdown = {}
         for regime in sorted({str(row.get("regime") or "UNKNOWN") for row in oos}):
             regime_rows = [row for row in oos if str(row.get("regime") or "UNKNOWN") == regime]
@@ -475,6 +697,24 @@ def evaluate_protection_screen(
             "policy_family": next((p["policy_family"] for p in protections if policy_id.endswith("|" + p["protection_id"])), "UNKNOWN"),
             "episodes_total": len(rows),
             "oos_episodes": len(oos),
+            "supported_conservative_episodes": full_fills + partial_fills + no_fills,
+            "full_fills": full_fills,
+            "partial_fills": partial_fills,
+            "no_fills": no_fills,
+            "unsupported_episodes": unsupported,
+            "conservative_fill_rate": (
+                round((full_fills + partial_fills) / (full_fills + partial_fills + no_fills), 8)
+                if full_fills + partial_fills + no_fills else None
+            ),
+            "evidence_world": "CONSERVATIVE_BBO_DEPTH_V1",
+            "ideal_touch_diagnostic": {
+                "evidence_world": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+                "qualification_eligible": False,
+                "oos_net_usd": diagnostic_validation["risk"].get("net_pnl_usd"),
+                "max_drawdown_usd": diagnostic_validation["risk"].get("max_drawdown_usd"),
+                "expectancy_lcb_usd": diagnostic_validation["bootstrap"].get("mean_lcb95"),
+                "outcome_states": diagnostic_validation.get("outcome_states"),
+            },
             "sealed_oos_net_usd": risk.get("net_pnl_usd"),
             "max_drawdown_usd": risk.get("max_drawdown_usd"),
             "cvar95_usd": risk.get("cvar95_usd"),
@@ -554,8 +794,8 @@ def evaluate_protection_screen(
     scenario_c_atr_stop_sweep = {
         "qualification": "DESCRIPTIVE_ONLY",
         "warning": (
-            "Ideal-touch replay comparison only; no stop or entry combination "
-            "is qualified without conservative execution and sealed OOS gates."
+            "Conservative BBO/depth replay comparison; no stop or entry combination "
+            "is qualified without sufficient supported execution and sealed OOS gates."
         ),
         "policies_tested": len(scenario_c_rows),
         "leaders_by_stop": {
@@ -610,5 +850,5 @@ def evaluate_protection_screen(
         "drawdown_control_leaders": sorted(assessed, key=lambda row: (abs(float(row.get("max_drawdown_usd") or 0)), -float(row.get("sealed_oos_net_usd") or 0)))[:25],
         "dynamic_regime_leaders": dynamic_regime_leaders,
         "scenario_c_atr_stop_sweep": scenario_c_atr_stop_sweep,
-        "warning": "Descriptive rows use ideal-touch entry receipts and cannot qualify conservative execution or authorize live trading.",
+        "warning": "Descriptive rows use conservative BBO/depth entry receipts but remain unqualified until all OOS and safety gates pass. Ideal-touch references are diagnostic only.",
     }

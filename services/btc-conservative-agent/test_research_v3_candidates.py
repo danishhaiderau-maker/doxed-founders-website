@@ -37,6 +37,38 @@ def source(event_id="event-1", episode_id="episode-1"):
     }
 
 
+def conservative_source(*, visible_qty=2.0, crossed=True):
+    row = source()
+    row["requested_qty"] = 1.0
+    row["market_microstructure_symbol"] = "tBTCF0:USTF0"
+    row["entry_children"][0]["chase_schedule"] = [{
+        "active_from_ts": 1000.2,
+        "active_until_ts": 1004.2,
+        "chase_step_index": 0,
+        "limit_price": 100.0,
+    }]
+    row["ordered_1s_prices"] = [
+        {
+            "schema": "market_microstructure_1s_v1",
+            "symbol": "tBTCF0:USTF0",
+            "bucket_ts": ts,
+            "ts": float(ts),
+            "price": 100.0 + (ts - 1000) * 0.1,
+            "fresh": True,
+            "valid_bbo": True,
+            "bid": 99.9,
+            "ask": 99.95 if crossed else 100.5,
+            "bid_qty": 2.0,
+            "ask_qty": visible_qty,
+            "trade_count": 0,
+            "buy_qty": 0.0,
+            "sell_qty": 0.0,
+        }
+        for ts in range(998, 1005)
+    ]
+    return row
+
+
 class V3CandidateTests(unittest.TestCase):
     def test_current_actual_paper_schema_materializes_complete_policy_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -223,6 +255,35 @@ class V3CandidateTests(unittest.TestCase):
         first = report["candidates"][0]["validation"]
         self.assertEqual(first["episodes_scored"], 0)
         self.assertIn("episode-1", first["missing_or_unsupported_episode_ids"])
+
+    def test_conservative_full_fill_drives_execution_metrics(self):
+        report = evaluate_protection_screen([conservative_source()])
+        first = report["candidates"][0]
+        self.assertEqual(first["full_fills"], 1)
+        self.assertEqual(first["partial_fills"], 0)
+        self.assertEqual(first["unsupported_episodes"], 0)
+        self.assertEqual(first["evidence_world"], "CONSERVATIVE_BBO_DEPTH_V1")
+        self.assertEqual(
+            first["ideal_touch_diagnostic"]["evidence_world"],
+            "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        )
+        self.assertFalse(first["ideal_touch_diagnostic"]["qualification_eligible"])
+
+    def test_conservative_partial_fill_scales_execution_and_is_not_full(self):
+        report = evaluate_protection_screen([conservative_source(visible_qty=0.25)])
+        first = report["candidates"][0]
+        self.assertEqual(first["full_fills"], 0)
+        self.assertEqual(first["partial_fills"], 1)
+        self.assertEqual(first["conservative_fill_rate"], 1.0)
+
+    def test_conservative_no_fill_contributes_no_execution_pnl(self):
+        report = evaluate_protection_screen([conservative_source(crossed=False)])
+        first = report["candidates"][0]
+        self.assertEqual(first["full_fills"], 0)
+        self.assertEqual(first["partial_fills"], 0)
+        self.assertEqual(first["no_fills"], 1)
+        self.assertEqual(first["validation"]["risk"]["non_execution_zero_contributions"], 1)
+        self.assertFalse(first["gates"]["conservative_execution_pass"])
 
 
 if __name__ == "__main__":
