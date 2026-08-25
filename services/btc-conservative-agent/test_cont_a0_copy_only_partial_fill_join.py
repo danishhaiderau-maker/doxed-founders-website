@@ -255,10 +255,10 @@ def _source_snapshot():
         "filled": False,
         "exit_reason": "NO_FILL",
         "policy_snapshot_complete": True,
-        "policy_version": "v15-typeb-opportunity-v2",
+        "policy_version": "v31-two-lane-safe-policy",
         "policy_snapshot": {
             "policy_snapshot_schema": "exit_policy_v1",
-            "policy_version": "v15-typeb-opportunity-v2",
+            "policy_version": "v31-two-lane-safe-policy",
             "hard_stop_margin_pct": -13.0,
             "thesis_fast_exit_unreal_pct": -12.0,
             "thesis_mfe_protect_pct": 5.0,

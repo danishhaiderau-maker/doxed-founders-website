@@ -15719,18 +15719,6 @@ _lane_last_ts = {}  # {'CONTINUOUS': ts, 'OFFSET_029_ATR_TP_25': ts}
 
 
 
-_srmv2_last_tick_ts = 0.0
-_srmv2_last_pivot_sig = None
-SRMV2_TICK_INTERVAL_SEC = int(os.getenv("SRMV2_TICK_INTERVAL_SEC", "20"))
-
-
-_srmv2s_last_tick_ts = 0.0
-_srmv2s_last_pivot_sig = None
-SRMV2S_TICK_INTERVAL_SEC = int(os.getenv("SRMV2S_TICK_INTERVAL_SEC", os.getenv("SRMV2_TICK_INTERVAL_SEC", "20")))
-
-
-
-
 def evaluate_signal_with_ai(
     raw_context: dict,
     research_lane: str = RESEARCH_LANE_CONTINUOUS,

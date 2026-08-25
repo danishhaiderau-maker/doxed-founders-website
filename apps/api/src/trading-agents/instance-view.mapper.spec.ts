@@ -45,7 +45,7 @@ test('fresh collection preserves an explicit ACTIVE live arm but never invents o
     realTradingConfirmedAt: armedAt,
     liveDeskSessionStartedAt: '2026-08-13T23:00:00.000Z',
     relayEntryPolicy: 'NEXT_FRESH_ONLY',
-    relayPolicyVersion: 'continuous_only_v5',
+    relayPolicyVersion: 'two_lane_explicit_v6',
     relayLastTransition: { action: 'STARTED' },
   });
   assert.equal(preserved.relayExecutionMode, 'LIVE');

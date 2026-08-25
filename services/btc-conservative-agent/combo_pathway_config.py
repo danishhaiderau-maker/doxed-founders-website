@@ -74,7 +74,7 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v15-typeb-opportunity-v2"
+RESEARCH_STACK_VERSION = "v31-two-lane-safe-policy"
 RESEARCH_STACK_FEATURES = (
     "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 share one direction-only 3-minute AI call; "
     "two-lane paper-research roster; all retired lanes are analyzer-only; "
@@ -309,7 +309,7 @@ def _normalized_directional_spread(ai: dict, final_direction: str) -> int:
     """Return the legacy 0-10 spread from either shared or legacy scores.
 
     The direction-only shared prompt emits LONG/SHORT scores on 0-100. The
-    older combo matcher only inspected bull/bear, so a Type B candidate could
+    older combo matcher only inspected bull/bear, so a research candidate could
     pass its authoritative >=2 policy gate and then be contradicted here as
     SPREAD_UNDER_MIN (0 < 2). Keep one normalization contract at this boundary.
     """

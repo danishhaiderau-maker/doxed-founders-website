@@ -607,7 +607,7 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
   const createdAt = new Date(now);
   const dashboardState = {
     relayExecutionMode: 'LIVE',
-    relayPolicyVersion: 'continuous_only_v5',
+    relayPolicyVersion: 'two_lane_explicit_v6',
     realTradingConfirmedAt: new Date(now - 2_000).toISOString(),
     relayArmedAt: new Date(now - 1_000).toISOString(),
   };
@@ -2411,7 +2411,7 @@ test('signed LIMIT_UPDATED fast wake reprices only its exact owned pending order
     status: TradingAgentInstanceStatus.ACTIVE,
     dashboardState: {
       relayExecutionMode: 'LIVE',
-      relayPolicyVersion: 'continuous_only_v5',
+      relayPolicyVersion: 'two_lane_explicit_v6',
       realTradingConfirmedAt: new Date().toISOString(),
     },
   };

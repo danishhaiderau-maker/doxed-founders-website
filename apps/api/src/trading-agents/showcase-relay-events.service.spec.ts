@@ -558,15 +558,15 @@ test('accepts a correctly signed intent-bearing payload', async () => {
   assert.equal(result.intentCreated, false);
 });
 
-test('rejects a signed Type B lifecycle before persistence or execution wake', async () => {
+test('rejects an unknown signed lifecycle before persistence or execution wake', async () => {
   const secret = 'test-webhook-secret';
   const trace: string[] = [];
   const service = createService('dashboard-active', secret, { trace });
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'ORDER_PLACED' as const,
-    trade_id: 'tbhv1-paper-only',
-    research_lane: 'TYPE_B_HUNTER_V1',
+    trade_id: 'retired-paper-only',
+    research_lane: 'RETIRED_EXPERIMENT',
     direction: 'SHORT',
     limit_price: 64_100,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
@@ -591,7 +591,7 @@ test('rejects a signed Type B lifecycle before persistence or execution wake', a
   assert.deepEqual(trace, []);
 });
 
-test('rejects signed Type B chase and close events before persistence or execution wake', async () => {
+test('rejects unknown signed chase and close events before persistence or execution wake', async () => {
   const secret = 'test-webhook-secret';
   for (const lifecycle of [
     {
@@ -610,8 +610,8 @@ test('rejects signed Type B chase and close events before persistence or executi
     const service = createService('dashboard-active', secret, { trace });
     const body = {
       schema: 'dcf-showcase-intent-v1',
-      trade_id: 'tbhv1-paper-lifecycle',
-      research_lane: 'TYPE_B_HUNTER_V1',
+      trade_id: 'retired-paper-lifecycle',
+      research_lane: 'RETIRED_EXPERIMENT',
       direction: 'SHORT',
       dashboard_owner: true,
       bot_instance_id: 'dashboard-active',

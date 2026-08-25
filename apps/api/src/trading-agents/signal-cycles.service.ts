@@ -238,15 +238,9 @@ export class SignalCyclesService implements OnModuleInit {
     if (lao.status !== 'EXECUTED' && lao.status !== 'PENDING') return false;
 
     const intentTradeId = resolveRelayIntentTradeId(bot, lao.trade_id);
-    // F7 (2026-07-08 real-money hotfix) — whitelist-only mirroring. Only the
-    // Continuous (`cont-`) is the only lane that may create live-copy intents.
-    // Type B (`tbhv1-`) and all other
-    // research lanes (vc603-, szdc1-, slav1-, a160v2-, scan-, etc.) are skipped
-    // — they have no real Bitfinex counterpart and would put real money on a
-    // trade that exists only in the showcase bot's paper book. Replaces the
-    // legacy F6 blocklist (`isPaperLaneTradeId`) which silently failed-open
-    // for every newly-added research lane. Skip silently — research data
-    // still flows to the analyzer.
+    // Whitelist-only mirroring. Any identifier outside the canonical two-lane
+    // relay allowlist is fail-closed. This avoids a deny-list that would
+    // silently fail open whenever a new research identifier appears.
     if (!isMirrorableLaneTradeId(intentTradeId)) {
       this.logger.warn(
         `Skipping non-mirrorable lane trade_id=${intentTradeId} (F7: explicit showcase relay allowlist)`,

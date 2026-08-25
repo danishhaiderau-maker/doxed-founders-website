@@ -5,7 +5,7 @@ export type TradeIdMatchKind = 'exact' | 'prefix' | 'normalized' | 'contains' | 
 /**
  * F5 (2026-07-07 incident hardening) — Extract the lane prefix from a trade_id.
  * Trade IDs are `<lane-prefix>-<12-hex>` per services/btc-conservative-agent/bot.py
- * allocate_lane_trade_id. Active mirror prefixes are cont- and tbhv1-.
+ * allocate_lane_trade_id. Active mirror prefixes are cont- and o29atr-.
  * Returns the lowercase prefix (including trailing `-`) or '' when no prefix.
  */
 function extractLanePrefix(tradeId: string): string {
@@ -18,7 +18,7 @@ function extractLanePrefix(tradeId: string): string {
 /**
  * F5 — Two trade_ids from DIFFERENT lanes must NEVER match, even if their hex
  * suffixes substring-collide. The legacy `tradeIdsMatch` `includes` rule would
- * otherwise pair a `vc603-deadbeef1234` cycle with a `cont-deadbeef1234`
+ * otherwise pair an unknown-lane cycle with a `cont-deadbeef1234`
  * showcase position if the suffixes happened to overlap by ≥8 chars. Lane
  * cross-matching is the exact condition that produces orphans on the wrong
  * side of a mirror, so we reject it explicitly here.
@@ -65,20 +65,15 @@ export function classifyTradeIdMatch(a: string, b: string): TradeIdMatchKind {
 /**
  * F6 (2026-07-07 incident hardening) — Paper-lane trade IDs that must NEVER be
  * mirrored by the live copy relay. The showcase bot's research lanes
- * (services/btc-conservative-agent/bot.py) maintain a separate `paper_book`
- * for shadow-sim trades (`a160v2-*` and any future paper lane) — these are
- * paper P&L only and have no real Bitfinex fill. bot.py:10745 docstring
- * explicitly warns "Live Copy may mirror" them; this function enforces the
- * opposite so a Tile 2 toggle can never spill paper trades into a real money
- * account.
+ * (services/btc-conservative-agent/bot.py) maintain a separate `paper_book`.
+ * Explicit paper/sim/shadow identifiers are paper P&L only and have no real
+ * Bitfinex fill, so they must never spill into a real-money account.
  *
  * Returns true when the trade_id belongs to a paper/research-only lane.
  */
 export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean {
   if (!tradeId) return false;
   const lc = tradeId.toLowerCase();
-  // a160v2-* — Tile 2 independent paper lane (SHADOW SIM ONLY per dashboard).
-  if (lc.startsWith('a160v2-')) return true;
   // Future-proof: any explicit paper-* / sim-* / shadow-* prefix.
   if (lc.startsWith('paper-') || lc.startsWith('sim-') || lc.startsWith('shadow-')) return true;
   return false;
@@ -87,8 +82,8 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
 /**
  * F7 (2026-07-08 real-money hotfix) — Lane prefixes explicitly approved for
  * live-copy mirroring. Continuous is the only currently approved showcase
- * lane. Type B remains paper research and retired studies remain fail-closed
- * even when old trade IDs survive in historical data.
+ * lane. Unknown and retired identifiers remain fail-closed even when old
+ * trade IDs survive in historical data.
  *
  * Fail-closed: any prefix not in this set is treated as research/paper and
  * never mirrored to real money. This inverts the legacy {@link isPaperLaneTradeId}
@@ -96,16 +91,12 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
  * remembered to add it to the deny list (the exact bug that caused the
  * 2026-07-08 vc603-/szdc1-/slav1- live-mirror incident).
  */
-// Tiles 3/4 are architecturally relay-configured, but their partial reductions
-// are not yet supported by the subscriber.  Keep them fail-closed here until
-// an end-to-end partial-close receipt test exists.
 const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'o29atr']);
 
 /**
  * F7 — Returns true ONLY when the trade_id belongs to an explicitly
- * allow-listed production mirror lane (`cont-`). Everything
- * else (research lanes like vc603-/szdc1-/slav1-, paper lanes a160v2-,
- * bare-uuids, unknown prefixes) returns false.
+ * allow-listed production mirror lane. Everything else, including bare UUIDs
+ * and unknown prefixes, returns false.
  *
  * Use this as the gating predicate at every live-copy entry path:
  *   if (!isMirrorableLaneTradeId(tradeId)) { skip; }

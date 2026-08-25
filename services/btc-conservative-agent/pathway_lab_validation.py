@@ -75,7 +75,7 @@ def run_startup_pathway_validation(
     return {
         "schema": "pathway_startup_validation_v5", "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION, "verdict": verdict,
-        "type_b_audit": "REMOVED", "tile_independence": verdict,
+        "lane_roster_audit": verdict, "tile_independence": verdict,
         "ai_scan_independence": verdict, "ai_scan_role": verdict,
         "independent_v1_post_ai_spawn": "REMOVED", "version_sync": verdict,
         "bot_analyzer_sync": verdict,

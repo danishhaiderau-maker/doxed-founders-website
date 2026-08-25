@@ -7586,8 +7586,6 @@ def _bot_version_era(bot_version) -> str:
         return "LEGACY_LAST_PRICE"
     if "data-collection" in bv or "v1.1.20" in bv:
         return "DEPTH_REALISM"
-    if "profit-gates" in bv or "v1.1.19" in bv:
-        return "DEPTH_REALISM"
     if "realism-complete" in bv or "v1.1.18" in bv:
         return "DEPTH_REALISM"
     if "book-depth" in bv or "v1.1.17" in bv:
@@ -15263,12 +15261,6 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
 
     overall = {k: v for k, v in matrix.items() if "|" not in k}
     by_lane = {k: v for k, v in matrix.items() if k.split("|")[0] in ("0", "1", "2", "3", "4", "5+") and "|lane=" in k and "|ai=" not in k}
-    golden = sorted(
-        [v for k, v in matrix.items() if "|ai=60-65|spread=4|lane=" in k],
-        key=lambda x: x.get("ev_usd", 0),
-        reverse=True,
-    )[:10]
-
     payload = {
         "schema": "chase_efficiency_matrix_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -15277,7 +15269,6 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "overall_by_chase_count": overall,
         "by_lane_and_chase_count": by_lane,
-        "golden_ai60_spread4": golden,
         "full_matrix": dict(matrix),
     }
     for key in ("0", "1", "2", "3", "4", "5+"):

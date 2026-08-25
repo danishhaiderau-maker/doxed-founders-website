@@ -1,7 +1,7 @@
 """Shim — load agent-root pathway_lane_roster (single source of truth).
 
-research/ used to ship a stale copy that shadowed V2 / AI60 when research/ was
-first on sys.path. Do not maintain a second roster here.
+research/ used to ship a stale copy that shadowed the canonical roster when
+research/ was first on sys.path. Do not maintain a second roster here.
 """
 from __future__ import annotations
 
