@@ -136,6 +136,23 @@ def test_pathway_audit_reads_contract_receipts_without_treating_them_as_current_
     assert status["age_seconds"] >= 7200
 
 
+def test_pathway_audit_hides_stale_contract_bodies(tmp_path, monkeypatch):
+    old_generated = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    (tmp_path / "tile_independence_report.json").write_text(
+        '{"generated_at": "' + old_generated + '", "verdict": "PASS", '
+        '"tests": [{"test": "retired lane must not leak into UI", "passed": true}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_AGENT_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+
+    payload = dashboard._pathway_audit_payload()
+
+    assert payload["tile_independence"] == {}
+    assert payload["receipt_status"]["tile_independence_report.json"]["status"] == "STALE_CONTRACT_RECEIPT"
+
+
 def test_pathway_audit_reports_missing_receipt_truthfully(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "ROOT", tmp_path)
     monkeypatch.setattr(dashboard, "_AGENT_ROOT", tmp_path)

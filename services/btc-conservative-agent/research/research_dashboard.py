@@ -1704,13 +1704,21 @@ def _pathway_audit_payload():
         "exit_reports_validation.json",
     )
     receipts = {name: _read_contract_receipt(name) for name in receipt_names}
-    tiles = receipts["tile_independence_report.json"][0]
-    ai_scan = receipts["ai_scan_independence_report.json"][0]
-    ai_scan_role = receipts["ai_scan_role_validation.json"][0]
-    lane_mem = receipts["lane_memory_validation.json"][0]
-    lane_mem_violation = receipts["lane_memory_violation.json"][0]
-    runtime_integrity = receipts["runtime_pathway_integrity.json"][0]
-    exit_val = receipts["exit_reports_validation.json"][0]
+    # Contract receipts are diagnostic artifacts, not current runtime state.
+    # Do not render stale receipt bodies: retired lane names in an old receipt
+    # previously made the clean registry look as though obsolete pathways were
+    # still active. Keep the metadata so the UI can say exactly why it is hidden.
+    def current_receipt(name):
+        payload, meta = receipts[name]
+        return payload if meta.get("status") != "STALE_CONTRACT_RECEIPT" else {}
+
+    tiles = current_receipt("tile_independence_report.json")
+    ai_scan = current_receipt("ai_scan_independence_report.json")
+    ai_scan_role = current_receipt("ai_scan_role_validation.json")
+    lane_mem = current_receipt("lane_memory_validation.json")
+    lane_mem_violation = current_receipt("lane_memory_violation.json")
+    runtime_integrity = current_receipt("runtime_pathway_integrity.json")
+    exit_val = current_receipt("exit_reports_validation.json")
     sync = _read_report("repo_version_sync.json")
     bot_sync = _read_report("bot_analyzer_sync.json")
     manifest = _read_json(REPORT_MANIFEST_FILE) or {}
@@ -4505,7 +4513,7 @@ async function loadPathwayAudit() {
   const receiptStatus = d.receipt_status || {};
   const receiptLabel = (name, payload) => {
     const meta = receiptStatus[name] || {};
-    if (meta.status === 'STALE_CONTRACT_RECEIPT') return `${payload.verdict || 'recorded'} (STALE)`;
+    if (meta.status === 'STALE_CONTRACT_RECEIPT') return 'STALE — BODY HIDDEN';
     if (meta.status === 'NOT_PUBLISHED') return 'NOT PUBLISHED';
     return payload.verdict || meta.status || 'n/a';
   };
