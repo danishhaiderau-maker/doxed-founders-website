@@ -36,14 +36,17 @@ def test_dashboard_has_only_current_lane_routes_and_loaders():
         "loadChaseIso",
         "loadLaneDefs",
         "loadRetirement",
-        "partial-reduction",
-        "loadPartialReductions",
     )
     for token in retired:
         assert token not in DASHBOARD
     assert "from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES" in DASHBOARD
     assert "CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)" in DASHBOARD
-    assert "partial_reduction_reconciliation" not in ANALYZER
+    # Partial-reduction is a generic evidence/reconciliation view, not an
+    # executable research lane.  It must survive tile retirement while its
+    # policy rows remain registry-filtered and fail closed when unproven.
+    assert '"/partial-reduction"' in DASHBOARD
+    assert '"/api/partial-reduction"' in DASHBOARD
+    assert "def api_partial_reduction()" in DASHBOARD
 
 
 def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():
@@ -62,7 +65,6 @@ def test_benchmark_report_has_no_dangling_retired_lane_status_helper():
         "COMBO_65",
         "COMBO_604",
         "AI_DISAGREEMENT_REPLAY",
-        "partial_reduction",
     ):
         assert retired_token not in ANALYZER
         assert retired_token not in DASHBOARD
