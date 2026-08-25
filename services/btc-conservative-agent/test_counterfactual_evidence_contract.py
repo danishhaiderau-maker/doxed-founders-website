@@ -563,6 +563,52 @@ def test_policy_key_changes_with_execution_cost_or_ladder():
     assert key_one != key_three
 
 
+def test_policy_key_uses_explicit_durable_replay_identity_after_snapshot_join_loss():
+    """A rotated/reloaded replay must remain comparable without current-state inference."""
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    for key in (
+        "fee_model", "execution_profile", "source_git_rev", "executor_revision",
+        "epoch_id", "fill_gate_rev",
+    ):
+        snapshot.pop(key, None)
+    replay.update({
+        "fee_model": "bitfinex-fees-v1",
+        "execution_profile": "bitfinex-live-limit-v1",
+        "chase": {"enabled": True, "mode": "BOUNDED", "max_chases": 4},
+        "source_git_rev": "b99aceffb91a",
+        "executor_revision": "af5b912f3de5",
+        "collection_epoch_id": "epoch-d93cddc91653a5c7bba07162",
+        "fill_gate_rev": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V2",
+        "correlated_cluster_boundary_pct": 0.0025,
+    })
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    assert fields["policy_comparability_key"].startswith("policy_comparability_v1:")
+    assert "POLICY_COMPARABILITY_KEY_MISSING" not in fields["analysis_exclusion_reasons"]
+
+
+def test_legacy_replay_without_explicit_identity_remains_excluded():
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    for key in (
+        "fee_model", "execution_profile", "source_git_rev", "executor_revision",
+        "epoch_id", "fill_gate_rev",
+    ):
+        snapshot.pop(key, None)
+    replay.pop("chase", None)
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    assert fields["policy_comparability_key"] is None
+    assert "POLICY_COMPARABILITY_KEY_MISSING" in fields["analysis_exclusion_reasons"]
+
+
 def test_semantic_profiles_are_stable_and_sensitive_to_execution_facts():
     one = pure_counterfactual.canonical_profile(
         "execution_cost_profile_v1", venue="bitfinex", maker_fee_rate=0.0,
