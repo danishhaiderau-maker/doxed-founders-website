@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
+PARTIAL_ARTIFACT_STALE_SECONDS = 3 * 60
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
 OPPORTUNITY_STALL_THRESHOLD_SECONDS = 12 * 60
@@ -740,10 +741,20 @@ def runtime_counts(payload: dict[str, Any]) -> dict[str, int | None]:
     }
 
 
-def mirror_partial_artifacts(mirror: Path) -> list[str]:
-    """Return atomic-sync candidates that must never enter analyzer evidence."""
+def mirror_partial_artifacts(
+    mirror: Path, *, now_ts: float | None = None,
+    stale_after_seconds: float = PARTIAL_ARTIFACT_STALE_SECONDS,
+) -> list[str]:
+    """Return abandoned atomic-sync candidates, not active transfer staging.
+
+    The sync worker downloads into a unique ``.download`` path before one
+    atomic replace.  Observing that fresh staging file mid-transfer is normal;
+    only a candidate surviving beyond a full sync window is an integrity
+    failure.  Analyzer discovery never includes either form.
+    """
     if not mirror.is_dir():
         return []
+    observed_now = float(now_ts if now_ts is not None else time.time())
     artifacts: list[str] = []
     for candidate in mirror.rglob("*"):
         try:
@@ -753,7 +764,12 @@ def mirror_partial_artifacts(mirror: Path) -> list[str]:
             continue
         name = candidate.name.lower()
         if name.endswith(".download") or name.endswith(".download.replace-backup"):
-            artifacts.append(candidate.relative_to(mirror).as_posix())
+            try:
+                age = max(0.0, observed_now - candidate.stat().st_mtime)
+            except OSError:
+                continue
+            if age >= stale_after_seconds:
+                artifacts.append(candidate.relative_to(mirror).as_posix())
     return sorted(artifacts)
 
 
@@ -979,15 +995,13 @@ class Supervisor:
         v3_ledger_dir = self.mirror / "v3" / "ledgers"
         v3_ledger_paths = list(v3_ledger_dir.glob("*.jsonl")) if v3_ledger_dir.is_dir() else []
         try:
-            if events_path.is_file():
-                event_summary = read_current_events(events_path)
-                mirror_age = self.now().timestamp() - events_path.stat().st_mtime
-                public_summary = {
-                    key: value for key, value in event_summary.items()
-                    if not key.startswith("_")
-                }
-                schema_source = "research_event_v2.2"
-            elif v3_ledger_paths:
+            # V3.1 is the canonical collector whenever normalized ledgers are
+            # present.  The compatibility v2.2 writer can remain on disk for
+            # old consumers, but it is intentionally append-frozen and must
+            # never drive current progress or report-parity health.  Preferring
+            # it here produced false OPPORTUNITY_PROGRESS_STALLED and stale
+            # legacy identity alarms while the V3 ledgers were advancing.
+            if v3_ledger_paths:
                 v3_summary = read_v3_evidence(self.mirror)
                 row_count = sum(v3_summary["ledger_counts"].values())
                 if row_count <= 0 or not v3_summary["epoch_ids"]:
@@ -997,6 +1011,14 @@ class Supervisor:
                 )
                 public_summary = v3_summary
                 schema_source = "research_evidence_v3"
+            elif events_path.is_file():
+                event_summary = read_current_events(events_path)
+                mirror_age = self.now().timestamp() - events_path.stat().st_mtime
+                public_summary = {
+                    key: value for key, value in event_summary.items()
+                    if not key.startswith("_")
+                }
+                schema_source = "research_event_v2.2"
             else:
                 raise FileNotFoundError(
                     "neither research_events_v22.jsonl nor V3 normalized ledgers exist"

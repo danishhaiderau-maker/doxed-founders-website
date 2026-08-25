@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import pytest
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -14,9 +15,20 @@ assert SPEC and SPEC.loader
 import sys
 sys.modules[SPEC.name] = module
 SPEC.loader.exec_module(module)
+REAL_LOCAL_STORAGE_SNAPSHOT = module.local_storage_snapshot
 
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def deterministic_supervisor_storage(monkeypatch):
+    """Unit tests must not inherit the workstation's current free-space state."""
+    monkeypatch.setattr(
+        module,
+        "local_storage_snapshot",
+        lambda _mirror: (True, {"disk_free_percent": 30.0, "test_fixture": True}),
+    )
 
 
 def write_json(path, value):
@@ -32,7 +44,7 @@ def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
     (mirror / "active.jsonl").write_bytes(b"active")
     (quarantine / "old.jsonl").write_bytes(b"quarantine")
 
-    ok, detail = module.local_storage_snapshot(
+    ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
         mirror,
         disk_usage=lambda _path: (1000, 700, 300),
     )
@@ -53,7 +65,7 @@ def test_local_storage_snapshot_fails_before_disk_pressure(tmp_path):
     mirror = tmp_path / "fly-data-mirror"
     mirror.mkdir()
 
-    ok, detail = module.local_storage_snapshot(
+    ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
         mirror,
         disk_usage=lambda _path: (1000, 900, 100),
     )
@@ -75,7 +87,7 @@ def test_local_storage_snapshot_fails_when_stale_quarantine_exceeds_absolute_cap
         else (1, 1024)
     )
     try:
-        ok, detail = module.local_storage_snapshot(
+        ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
             mirror,
             disk_usage=lambda _path: (1024**4, 700 * 1024**3, 324 * 1024**3),
         )
@@ -92,13 +104,26 @@ def test_mirror_partial_artifacts_detects_atomic_sync_leftovers(tmp_path):
     (mirror / "valid.jsonl").write_text("{}\n", encoding="utf-8")
     orphan = mirror / "valid.jsonl.123.0123456789abcdef0123456789abcdef.download"
     orphan.write_bytes(b"partial")
+    os.utime(orphan, (NOW.timestamp() - 181, NOW.timestamp() - 181))
 
-    assert module.mirror_partial_artifacts(mirror) == [orphan.name]
+    assert module.mirror_partial_artifacts(mirror, now_ts=NOW.timestamp()) == [orphan.name]
+
+
+def test_mirror_partial_artifacts_ignores_active_atomic_transfer(tmp_path):
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    active = mirror / "active.jsonl.123.0123456789abcdef0123456789abcdef.download"
+    active.write_bytes(b"still downloading")
+    os.utime(active, (NOW.timestamp() - 30, NOW.timestamp() - 30))
+
+    assert module.mirror_partial_artifacts(mirror, now_ts=NOW.timestamp()) == []
 
 
 def test_supervisor_fails_closed_when_partial_download_is_present(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
-    (mirror / "evidence.jsonl.123.0123456789abcdef0123456789abcdef.download").write_bytes(b"partial")
+    orphan = mirror / "evidence.jsonl.123.0123456789abcdef0123456789abcdef.download"
+    orphan.write_bytes(b"partial")
+    os.utime(orphan, (NOW.timestamp() - 181, NOW.timestamp() - 181))
     result = module.Supervisor(
         repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
         fetcher=fetcher, process_reader=processes,
@@ -365,10 +390,54 @@ def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
     assert money["ok"] is True
     revision_parity = next(x for x in result["checks"] if x["name"] == "fly_sync_revision_parity")
     assert revision_parity["ok"] is True
-    parity = next(x for x in result["checks"] if x["name"] == "report_count_parity")
-    assert parity["detail"]["expected"]["policy_candidate_oos_report.json"] == {
-        "current_events": 3, "eligible_events": 3, "eligible_independent_episodes": 2,
-    }
+    schema = next(x for x in result["checks"] if x["name"] == "mirror_schema_and_freshness")
+    assert schema["detail"]["schema_source"] == "research_evidence_v3"
+    # A compatibility v2.2 file may coexist with V3.1, but its frozen counts
+    # and single-policy identity are no longer current health gates.
+    assert not any(x["name"] == "report_count_parity" for x in result["checks"])
+    assert not any(x["name"] == "report_epoch_policy_signature_parity" for x in result["checks"])
+
+
+def test_v3_progress_wins_over_frozen_compatibility_writer(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    ledgers = mirror / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    rows = [
+        {
+            "schema": "research_evidence_v3", "ledger": "opportunity",
+            "epoch_id": "epoch-v3", "record_id": f"o-{index}",
+            "episode_id": f"e-{index}", "shared_ai_call_id": f"scan-{index}",
+            "grouping_basis": "SHARED_AI_CALL", "signal_ts": 1000 + index,
+            "symbol": "TBTCF0:USTF0", "raw_direction": "LONG",
+        }
+        for index in range(4)
+    ]
+    (ledgers / "opportunity.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    write_json(reports / "safe_policy_genome_v3_report.json", {
+        "generated_at": NOW.isoformat(), "status": "V3_COLLECTING",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "real_bitfinex_trading_allowed": False, "number_one_strategy": None,
+        "collection": {"independent_opportunities": 4, "decision_branches": 0,
+                       "terminal_lifecycles": 0, "provisional_lifecycles": 0,
+                       "market_segments": 0},
+    })
+    progress = repo / ".research-opportunity-progress-state.json"
+    write_json(progress, {
+        "epoch_key": "epoch-v3", "source_revision": "a" * 40,
+        "independent_opportunities": 3, "observed_at": NOW.isoformat(),
+    })
+    result = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
+        fetcher=fetcher, process_reader=processes, progress_state_file=progress,
+    ).check()
+    schema = next(x for x in result["checks"] if x["name"] == "mirror_schema_and_freshness")
+    progress_check = next(x for x in result["checks"] if x["name"] == "independent_opportunity_progress")
+    assert schema["detail"]["schema_source"] == "research_evidence_v3"
+    assert progress_check["ok"] is True
+    assert progress_check["detail"]["independent_opportunities"] == 4
+    assert progress_check["detail"]["state"] == "ADVANCING"
 
 
 def test_v3_supervisor_fails_overdue_expected_order_and_accepts_terminal_no_order(tmp_path):
