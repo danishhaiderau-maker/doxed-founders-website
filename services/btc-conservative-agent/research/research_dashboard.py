@@ -2789,6 +2789,28 @@ def _genome_payload():
     # surface. The older research.db DNA engine is a legacy fallback only.
     safe_v31 = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
     if safe_v31.get("schema"):
+        # The dashboard overview needs a bounded summary, not the complete
+        # chase x stop grid. Shipping the full candidate screen made a simple
+        # tab click parse/render more than a megabyte of nested policy cells.
+        # The dedicated Safe Policy Genome API/page and downloadable artifact
+        # remain the detailed evidence surfaces.
+        bounded = _bounded_safe_policy_payload(safe_v31)
+        candidate_screen = dict(bounded.get("candidate_screen") or {})
+        overview_fields = (
+            "policy_id", "policy_family", "episodes_total", "oos_episodes",
+            "sealed_oos_net_usd", "max_drawdown_usd",
+        )
+        candidate_screen["descriptive_top_100"] = [
+            {key: row.get(key) for key in overview_fields}
+            for row in list(candidate_screen.get("descriptive_top_100") or [])[:20]
+        ]
+        candidate_screen.pop("drawdown_control_leaders", None)
+        candidate_screen.pop("profit_capture_leaders", None)
+        scenario_sweep = dict(candidate_screen.get("scenario_c_atr_stop_sweep") or {})
+        scenario_sweep.pop("best_by_chase_and_stop", None)
+        scenario_sweep.pop("overall_leaders", None)
+        scenario_sweep.pop("leaders_by_stop", None)
+        candidate_screen["scenario_c_atr_stop_sweep"] = scenario_sweep
         return {
             "schema": "genome_dashboard_v3_1_compat_v1",
             "available": True,
@@ -2803,8 +2825,8 @@ def _genome_payload():
             or (safe_v31.get("epoch_scope") or {}).get("policy_signature"),
             "collection": safe_v31.get("collection") or {},
             "search_progress": safe_v31.get("search_progress") or {},
-            "candidate_screen": safe_v31.get("candidate_screen") or {},
-            "safe_policy_ranking": safe_v31.get("safe_policy_ranking") or {},
+            "candidate_screen": candidate_screen,
+            "safe_policy_ranking": bounded.get("safe_policy_ranking") or {},
             "integrity": safe_v31.get("integrity") or {},
             "blockers": list(safe_v31.get("blockers") or []),
             "number_one_strategy": safe_v31.get("number_one_strategy"),

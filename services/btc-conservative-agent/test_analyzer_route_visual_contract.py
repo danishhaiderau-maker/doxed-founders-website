@@ -119,6 +119,16 @@ def test_genome_overview_keeps_large_policy_grid_out_of_rendered_debug_text():
     assert "detailed_route: '/safe-policy-genome-v3.1'" in source
 
 
+def test_genome_overview_api_omits_complete_chase_stop_grid():
+    source = inspect.getsource(dashboard._genome_payload)
+    assert "_bounded_safe_policy_payload" in source
+    assert 'candidate_screen.pop("drawdown_control_leaders", None)' in source
+    assert 'candidate_screen.pop("profit_capture_leaders", None)' in source
+    assert "[:20]" in source
+    assert 'scenario_sweep.pop("best_by_chase_and_stop", None)' in source
+    assert "dedicated Safe Policy Genome API/page" in source
+
+
 def test_pathway_audit_reads_contract_receipts_without_treating_them_as_current_analyzer_evidence(tmp_path, monkeypatch):
     old_generated = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     receipt = tmp_path / "tile_independence_report.json"
