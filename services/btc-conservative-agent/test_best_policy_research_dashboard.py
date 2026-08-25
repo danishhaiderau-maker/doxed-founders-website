@@ -156,7 +156,9 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED" in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
-    assert "Descriptive Policy Screen (up to 100 rows)" in html
+    assert "Family-balanced Policy Screen (up to 100 rows)" in html
+    assert "Families represented" in html
+    assert "Maximum per family" in html
     assert "Top 100 Policy Combos" in html
     assert "Entry configurations" in html
     assert "Policy specs enumerated" in html

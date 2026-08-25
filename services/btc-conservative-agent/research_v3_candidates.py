@@ -488,11 +488,28 @@ def evaluate_protection_screen(
             "gates": validation["gates"],
             "validation": validation,
         })
-    descriptive = sorted(assessed, key=lambda row: (
+    globally_ranked = sorted(assessed, key=lambda row: (
         -float(row.get("sealed_oos_net_usd") or 0),
         abs(float(row.get("max_drawdown_usd") or 0)),
         str(row["policy_id"]),
-    ))[:100]
+    ))
+    # Keep the exhaustive assessed grid intact, but prevent small entry
+    # variations of one protection family from saturating the public list.
+    descriptive_family_cap = 2
+    family_counts: dict[str, int] = defaultdict(int)
+    descriptive = []
+    for global_rank, row in enumerate(globally_ranked, start=1):
+        family = str(row.get("policy_family") or "UNKNOWN")
+        if family_counts[family] >= descriptive_family_cap:
+            continue
+        family_counts[family] += 1
+        descriptive.append({
+            **row,
+            "global_rank": global_rank,
+            "family_rank": family_counts[family],
+        })
+        if len(descriptive) >= 100:
+            break
     family_leaders = {}
     for family in sorted({row["policy_family"] for row in assessed}):
         family_rows = [row for row in assessed if row["policy_family"] == family]
@@ -581,6 +598,14 @@ def evaluate_protection_screen(
         "protection_variants": len(protections),
         "candidates": assessed,
         "descriptive_top_100": descriptive,
+        "descriptive_selection": {
+            "method": "GLOBAL_RANK_THEN_FAMILY_CAP",
+            "per_family_cap": descriptive_family_cap,
+            "families_represented": len(family_counts),
+            "rows_displayed": len(descriptive),
+            "globally_ranked_policies": len(globally_ranked),
+            "note": "The exhaustive policy grid is unchanged; only the public shortlist is family-balanced.",
+        },
         "profit_capture_leaders": family_leaders,
         "drawdown_control_leaders": sorted(assessed, key=lambda row: (abs(float(row.get("max_drawdown_usd") or 0)), -float(row.get("sealed_oos_net_usd") or 0)))[:25],
         "dynamic_regime_leaders": dynamic_regime_leaders,

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from collections import Counter
 
 from research_v3_candidates import (
     _conservative_ohlc_prices,
@@ -172,6 +173,17 @@ class V3CandidateTests(unittest.TestCase):
         report = evaluate_protection_screen([source()], progress_callback=progress.append)
         self.assertEqual(report["unique_policies_evaluated"], len(protection_screen()))
         self.assertTrue(report["descriptive_top_100"])
+        selection = report["descriptive_selection"]
+        self.assertEqual(selection["method"], "GLOBAL_RANK_THEN_FAMILY_CAP")
+        self.assertEqual(selection["per_family_cap"], 2)
+        family_counts = Counter(
+            row["policy_family"] for row in report["descriptive_top_100"]
+        )
+        self.assertTrue(family_counts)
+        self.assertLessEqual(max(family_counts.values()), 2)
+        self.assertEqual(selection["families_represented"], len(family_counts))
+        self.assertEqual(selection["globally_ranked_policies"], len(report["candidates"]))
+        self.assertTrue(all(row["family_rank"] in {1, 2} for row in report["descriptive_top_100"]))
         self.assertEqual(progress[-1]["phase"], "PROTECTION_REPLAY")
         self.assertEqual(progress[-1]["input_events_completed"], 1)
         self.assertEqual(progress[-1]["input_events_total"], 1)

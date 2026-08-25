@@ -1397,6 +1397,8 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             low, high = _wilson_interval_95(int(wins), max(episodes, int(wins) + int(losses)))
         rows.append({
             "rank": rank,
+            "global_rank": item.get("global_rank"),
+            "family_rank": item.get("family_rank"),
             "policy_id": item.get("policy_id"),
             **_decode_counterfactual_policy_id(item.get("policy_id")),
             **_project_v31_policy_spec(policy_spec),
@@ -1471,6 +1473,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "evidence": collection,
         "search_counts": search_counts,
         "rows_available": len(candidates),
+        "descriptive_selection": screen.get("descriptive_selection") or {},
         "policy_search_statistics": policy_search_statistics,
         "policy_episode_split": {
             "training_episodes": training_episodes,
@@ -1481,7 +1484,8 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "blockers": source["blockers"],
         "live_policy_change_allowed": source["qualified"],
         "warning": (
-            "Canonical signed V3.1 complete-policy replay only. Empty rows mean no terminal paths have matured; "
+            "Canonical signed V3.1 complete-policy replay, family-balanced to at most two rows per protection family. "
+            "The exhaustive search remains unchanged. Empty rows mean no terminal paths have matured; "
             "descriptive rows cannot authorize live trading until every safety and OOS gate passes."
         ),
     }
@@ -3916,10 +3920,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
   </section>
   <section id="sec-combos">
-    <h2>Descriptive Policy Screen (up to 100 rows)</h2>
+    <h2>Family-balanced Policy Screen (up to 100 rows)</h2>
     <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid. Displayed rows are enumerated policy specifications, not profitable or empirically tested policies unless terminal OOS fills are shown. Descriptive only until every qualification gate passes.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
-    <table><thead><tr><th>#</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
     <p class="note" id="combos-note">Separate legacy direction-only cohort: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
     <div class="kpis" id="combos-kpis"></div>
@@ -4025,6 +4029,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-explorer">
     <h2>Report Explorer</h2>
+    <p class="note">Reports are loaded on demand. Select one report to inspect it; opening this tab never renders a large report automatically.</p>
     <div class="grid2">
       <ul class="explorer-list" id="report-list"></ul>
       <pre id="report-json">Select a report…</pre>
@@ -4393,10 +4398,13 @@ async function loadCombos() {
   const policyStats = pg.policy_search_statistics || {};
   const policySplit = pg.policy_episode_split || {};
   const policyRows = pg.policy_rows || pg.rows || [];
+  const selection = pg.descriptive_selection || {};
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
     ['Descriptive rows displayed', Number(policyStats.descriptive_rows_displayed ?? policyRows.length).toLocaleString()],
+    ['Families represented', Number(selection.families_represented ?? 0).toLocaleString()],
+    ['Maximum per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
     ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
     ['Policies with terminal OOS fills', Number(policyStats.terminal_oos_policies_tested || 0).toLocaleString()],
     ['Profitable terminal OOS policies', Number(policyStats.profitable_terminal_oos_policies || 0).toLocaleString()],
@@ -4410,11 +4418,11 @@ async function loadCombos() {
     const ci = p.oos_win_probability_ci95_low_pct == null ? 'n/a' :
       `${p.oos_win_probability_pct}% (${p.oos_win_probability_ci95_low_pct}–${p.oos_win_probability_ci95_high_pct}%)`;
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
-    return `<tr><td>${p.rank}</td><td><strong>${p.policy_id||'—'}</strong><br><small>${params}</small></td>`
+    return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td><td>${p.family_rank||'—'}</td><td><strong>${p.policy_id||'—'}</strong><br><small>global rank ${p.global_rank||'—'} · ${params}</small></td>`
       + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>${p.oos_wins||0} / ${p.oos_losses||0}</td>`
       + `<td>${ci}</td><td>$${fmtUsd(p.oos_net_pnl_usd)}</td><td>$${fmtUsd(p.oos_expectancy_usd)}</td>`
       + `<td>$${fmtUsd(p.oos_max_drawdown_usd)}</td><td class="bad">${p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
-  }).join('') || '<tr><td colspan="10">No current-epoch OOS policy grid is available yet.</td></tr>';
+  }).join('') || '<tr><td colspan="12">No current-epoch OOS policy grid is available yet.</td></tr>';
 }
 
 async function loadSpreadPerf() {
@@ -4830,11 +4838,17 @@ async function loadExplorer() {
     li.onclick = async () => {
       list.querySelectorAll('li').forEach(x => x.classList.remove('sel'));
       li.classList.add('sel');
-      const rr = await fetch('/api/report/' + encodeURIComponent(file));
-      const j = await rr.json();
-      document.getElementById('report-json').textContent = JSON.stringify(j, null, 2);
+      const output = document.getElementById('report-json');
+      output.textContent = `Loading ${title}…`;
+      try {
+        const rr = await fetch('/api/report/' + encodeURIComponent(file));
+        if (!rr.ok) throw new Error(`HTTP ${rr.status}`);
+        const j = await rr.json();
+        output.textContent = JSON.stringify(j, null, 2);
+      } catch (error) {
+        output.textContent = `Unable to load ${title}: ${error.message || error}`;
+      }
     };
-    if (i === 0) li.click();
     list.appendChild(li);
   });
 }
