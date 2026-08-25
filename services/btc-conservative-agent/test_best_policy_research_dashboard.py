@@ -153,7 +153,7 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     html = response.get_data(as_text=True)
     assert "Current-epoch counterfactual policy grid" in html
     assert "Win probability (95% CI)" in html
-    assert "MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED" in html
+    assert "MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED" in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
     assert "Descriptive Policy Screen (up to 100 rows)" in html

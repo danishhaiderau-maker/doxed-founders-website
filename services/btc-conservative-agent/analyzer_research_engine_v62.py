@@ -569,7 +569,7 @@ ANALYZER_JSON_REPORT_FILES = (
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
-    ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
+    ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current signed V3.1 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),

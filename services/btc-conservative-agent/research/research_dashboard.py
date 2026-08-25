@@ -1848,7 +1848,7 @@ def _read_research_events_v22() -> list[dict]:
 
 
 def _best_policy_research_payload():
-    """One fail-closed answer based only on the newest qualified v2.2 epoch."""
+    """One fail-closed answer based only on the newest qualified V3.1 epoch."""
     manifest = _read_json(REPORT_MANIFEST_FILE)
     policy_report = _read_json(BEST_POLICY_RESEARCH_REPORT_FILE)
     events = _read_research_events_v22()
@@ -3756,18 +3756,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
 const EVIDENCE_SCOPES = {
   summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
-  findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current v2.2 counterfactual policy grid.'],
+  findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
   lanes: ['CURRENT TWO-LANE EVIDENCE', 'One causal opportunity is counted once; child modes remain separated and do not imply live execution.'],
   ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
   chase: ['LEGACY EXECUTED', 'Historical executed-lane chase attribution.'],
   'chase-threshold': ['LEGACY EXECUTED', 'Historical executed-lane chase thresholds.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
-  combos: ['MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED', 'The first table is pinned current-epoch counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
+  combos: ['MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
   'exit-combos': ['LEGACY EXECUTED', 'Historical executed-lane exit combinations.'],
   'exit-reason-leak': ['LEGACY HINDSIGHT', 'Peak-to-close hindsight gap; not directly capturable profit or a policy recommendation.'],
-  'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current 12,601-policy v2.2 grid.'],
+  'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current signed V3.1 Safe Policy Genome.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
