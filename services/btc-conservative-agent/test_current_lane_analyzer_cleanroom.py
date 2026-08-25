@@ -44,3 +44,7 @@ def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():
     assert '"trade_mfe_type"' not in ANALYZER
     assert "TYPE_B excluded" not in ANALYZER
     assert "TYPE_B excluded" not in DASHBOARD
+
+
+def test_benchmark_report_has_no_dangling_retired_lane_status_helper():
+    assert "_pathway_lane_status(" not in ANALYZER

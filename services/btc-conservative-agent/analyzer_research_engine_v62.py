@@ -9472,7 +9472,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 "coordinator_timeouts": coord.get("timeouts", 0),
             }
 
-        if _pathway_lane_status(lane) == PATHWAY_STATUS_SHADOW_COLLECTING:
+        if lane in SHADOW_COLLECTING_LANES:
             if shadow_lane_df is not None and not shadow_lane_df.empty and "research_lane" in shadow_lane_df.columns:
                 lane_sl = shadow_lane_df[shadow_lane_df["research_lane"].astype(str) == lane]
                 sim_n = len(lane_sl)
