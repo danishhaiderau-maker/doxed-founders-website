@@ -9,6 +9,12 @@
 # 2. Re-include Python source at the repo root (bot, analyzer, pathways, executors).
 !*.py
 
+# Test and local QA modules are not runtime dependencies. Keep them in Git and
+# CI, but do not ship 100+ harness files in the production trading image.
+test_*.py
+*_test.py
+conftest.py
+
 # 3. Re-include the research_genome package (imported by the bot at runtime).
 !research_genome/
 !research_genome/**
