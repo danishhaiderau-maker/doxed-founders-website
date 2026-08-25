@@ -185,6 +185,16 @@ class V3CandidateTests(unittest.TestCase):
             list(sweep["leaders_by_stop"]),
             ["0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"],
         )
+        chase_grid = sweep["best_by_chase_and_stop"]
+        self.assertEqual(list(chase_grid), ["patient"])
+        self.assertEqual(
+            list(chase_grid["patient"]),
+            ["0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"],
+        )
+        self.assertEqual(
+            chase_grid["patient"]["1"]["policy_spec"]["entry"]["chase_id"],
+            "patient",
+        )
         ranking = rank_safe_policies(report["candidates"])
         self.assertIsNone(ranking["number_one"])
         self.assertTrue(all("conservative_execution_pass" in row["ranking_blockers"] for row in ranking["blocked"]))

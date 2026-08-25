@@ -510,6 +510,9 @@ def evaluate_protection_screen(
         if "|ATR_TP_2.5_SCENARIO_C" in str(row.get("policy_id") or "")
     ]
     scenario_c_by_stop: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    scenario_c_by_chase_stop: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for row in scenario_c_rows:
         protection_id = str(row.get("policy_id") or "").split("|", 1)[-1]
         stop_label = (
@@ -518,6 +521,13 @@ def evaluate_protection_screen(
             else "CONTROL_NO_ATR_STOP"
         )
         scenario_c_by_stop[stop_label].append(row)
+        entry_spec = (row.get("policy_spec") or {}).get("entry") or {}
+        chase_label = str(
+            entry_spec.get("chase_id")
+            or entry_spec.get("entry_policy_id")
+            or "UNKNOWN"
+        )
+        scenario_c_by_chase_stop[chase_label][stop_label].append(row)
     scenario_c_sort_key = lambda row: (
         -float(row.get("sealed_oos_net_usd") or 0),
         abs(float(row.get("max_drawdown_usd") or 0)),
@@ -540,6 +550,26 @@ def evaluate_protection_screen(
                     float(item[0]) if item[0] != "CONTROL_NO_ATR_STOP" else float("inf"),
                 ),
             )
+        },
+        # Persist one best row for every observed chase/stop cell.  The global
+        # leaders are often saturated by no-chase variants; without this grid a
+        # weaker (or negative) chased candidate is invisible and the dashboard
+        # cannot answer whether chase + Scenario C + a stop actually worked.
+        "best_by_chase_and_stop": {
+            chase: {
+                stop: sorted(rows, key=scenario_c_sort_key)[0]
+                for stop, rows in sorted(
+                    stop_rows.items(),
+                    key=lambda item: (
+                        item[0] == "CONTROL_NO_ATR_STOP",
+                        float(item[0])
+                        if item[0] != "CONTROL_NO_ATR_STOP"
+                        else float("inf"),
+                    ),
+                )
+                if rows
+            }
+            for chase, stop_rows in sorted(scenario_c_by_chase_stop.items())
         },
         "overall_leaders": sorted(scenario_c_rows, key=scenario_c_sort_key)[:25],
     }

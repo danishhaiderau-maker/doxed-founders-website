@@ -80,11 +80,28 @@ def test_safe_and_combo_public_payloads_are_bounded(monkeypatch):
         "schema": "safe_policy_genome_v3_1_report_v1",
         "status": "V3_COLLECTING",
         "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "generation_revision": "generation-revision-123",
+        "source_data_revision": "source-revision-456",
+        "cohort_schema": "analysis_cohorts_v1",
+        "policy_comparability_key": "epoch:policy:fill-world",
+        "analysis_provenance": {
+            "data_root_kind": "CANONICAL_LOCAL_FLY_MIRROR",
+            "source_data_revision": "source-revision-456",
+        },
+        "cohorts": {"SAFE_POLICY": {"included_row_count": 9}},
+        "report_eligibility": {"eligible": False, "reasons": ["IMMATURE"]},
         "candidate_screen": {
             "unique_policies_evaluated": 500,
             "descriptive_top_100": rows,
             "drawdown_control_leaders": rows,
             "profit_capture_leaders": {"atr": rows},
+            "scenario_c_atr_stop_sweep": {
+                "qualification": "DESCRIPTIVE_ONLY",
+                "leaders_by_stop": {"1": rows},
+                "best_by_chase_and_stop": {
+                    "patient": {"1": {"policy_id": "scenario-c-patient-stop-1"}}
+                },
+            },
             "full_grid": rows,
         },
         "safe_policy_ranking": {
@@ -101,8 +118,18 @@ def test_safe_and_combo_public_payloads_are_bounded(monkeypatch):
     client = dashboard.app.test_client()
 
     safe = client.get("/api/safe-policy-genome-v3.1").get_json()
+    assert safe["generation_revision"] == "generation-revision-123"
+    assert safe["source_data_revision"] == "source-revision-456"
+    assert safe["cohort_schema"] == "analysis_cohorts_v1"
+    assert safe["policy_comparability_key"] == "epoch:policy:fill-world"
+    assert safe["analysis_provenance"]["data_root_kind"] == "CANONICAL_LOCAL_FLY_MIRROR"
+    assert safe["cohorts"]["SAFE_POLICY"]["included_row_count"] == 9
+    assert safe["report_eligibility"]["reasons"] == ["IMMATURE"]
     assert len(safe["candidate_screen"]["descriptive_top_100"]) == 100
     assert len(safe["candidate_screen"]["profit_capture_leaders"]["atr"]) == 10
+    assert safe["candidate_screen"]["scenario_c_atr_stop_sweep"][
+        "best_by_chase_and_stop"
+    ]["patient"]["1"]["policy_id"] == "scenario-c-patient-stop-1"
     assert "full_grid" not in safe["candidate_screen"]
     assert "blocked_policies" not in safe["safe_policy_ranking"]
     assert safe["full_artifact"].endswith("safe_policy_genome_v3_report.json")
