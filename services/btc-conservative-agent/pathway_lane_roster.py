@@ -20,11 +20,11 @@ RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 DATA_RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v31-three-tile-protected-w234"
+ROSTER_PHASE = "v31-four-tile-protected-patient-chase"
 ROSTER_NOTES = (
-    "Active stack: CONTINUOUS benchmark, OFFSET_029_ATR_TP_25 Patient Chase, and "
-    "PROTECTED_W234_SCENARIO_C; one shared direction call, three independent paper "
-    "lifecycles, no retired lanes."
+    "Active stack is derived from ACTIVE_TILE_REGISTRY: Continuous, Patient Chase, "
+    "Protected Static, and Protected Regime-Adaptive; one shared direction call and "
+    "four independent paper lifecycles."
 )
 
 ANALYZER_COMPARE_LANES = DASHBOARD_PRIMARY_LANES

@@ -1,4 +1,4 @@
-"""Small fail-closed validation surface for the three-tile runtime."""
+"""Small fail-closed validation surface for the registry-owned runtime."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -7,8 +7,7 @@ from combo_pathway_config import (
     COMBO_EXECUTION_LANES,
     EXECUTION_FIX_VERSION,
     RESEARCH_LANE_AI_SCAN,
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_PROTECTED_W234,
+    ACTIVE_TILE_ORDER,
 )
 
 
@@ -30,11 +29,7 @@ def validate_lane_memory_runtime(
     lane_pending_counts: dict, lane_open_counts: dict, retired_lanes: tuple,
     max_bucket: int = 1000,
 ) -> dict:
-    allowed = {
-        "CONTINUOUS",
-        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        RESEARCH_LANE_PROTECTED_W234,
-    }
+    allowed = set(ACTIVE_TILE_ORDER)
     critical = []
     warnings = []
     for lane, count in {**lane_pending_counts, **lane_open_counts}.items():
@@ -56,10 +51,7 @@ def validate_runtime_pathway_integrity(
     research_spawn_lanes: tuple, ai_scan_orders_allowed: bool,
 ) -> dict:
     critical = []
-    expected = (
-        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        RESEARCH_LANE_PROTECTED_W234,
-    )
+    expected = tuple(lane for lane in ACTIVE_TILE_ORDER if lane != "CONTINUOUS")
     if tuple(current_combo_execution_lanes) != expected:
         critical.append(f"EXECUTION_LANE_DRIFT:{current_combo_execution_lanes}")
     if ai_scan_orders_allowed or RESEARCH_LANE_AI_SCAN in current_combo_execution_lanes:
@@ -77,9 +69,8 @@ def run_startup_pathway_validation(
     retired_status: dict = None, live_armed: bool = False,
     strategy_mode: str = "RESEARCH", live_trading_enabled: bool = False,
 ) -> dict:
-    exact = tuple(COMBO_EXECUTION_LANES) == (
-        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        RESEARCH_LANE_PROTECTED_W234,
+    exact = tuple(COMBO_EXECUTION_LANES) == tuple(
+        lane for lane in ACTIVE_TILE_ORDER if lane != "CONTINUOUS"
     )
     safe = not live_armed and not live_trading_enabled
     verdict = "PASS" if exact and safe else "FAIL"

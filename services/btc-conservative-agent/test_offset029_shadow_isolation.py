@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 import paper_policy_offset029 as offset_policy
-import paper_policy_protected_w234 as protected_policy
+import paper_policy_offset029_protected as protected_policy
+import paper_policy_offset029_regime as regime_policy
 
 
 ROOT = Path(__file__).parent
@@ -36,10 +37,12 @@ def test_patient_chase_never_advertises_internal_sl_reference_as_protection():
         "_position_protection_view",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "OFFSET_029_ATR_TP_25",
-            "RESEARCH_LANE_PROTECTED_W234": protected_policy.LANE,
+            "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED": protected_policy.LANE,
+            "RESEARCH_LANE_OFFSET_029_ATR_REGIME": regime_policy.LANE,
             "_buf_float": lambda value, default=0.0: float(value or default),
             "offset029_policy": offset_policy,
-            "protected_w234_policy": protected_policy,
+            "offset029_protected_policy": protected_policy,
+            "offset029_regime_policy": regime_policy,
         },
     )
 
@@ -172,10 +175,11 @@ def test_offset_resolver_preserves_exact_anchor_without_smart_reanchor():
         "_resolve_submit_limit_price",
         {
             "RESEARCH_LANE_OFFSET_029_ATR_TP_25": offset_policy.LANE,
-            "RESEARCH_LANE_PROTECTED_W234": protected_policy.LANE,
+            "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED": protected_policy.LANE,
+            "RESEARCH_LANE_OFFSET_029_ATR_REGIME": regime_policy.LANE,
             "is_patient_chase_lane": lambda lane: lane in {offset_policy.LANE, protected_policy.LANE},
             "offset029_policy": offset_policy,
-            "protected_w234_policy": protected_policy,
+            "_patient_chase_policy": lambda lane: protected_policy if lane == protected_policy.LANE else offset_policy,
             "resolve_entry_limit_price": lambda signal: (signal["planned_limit_price"], "AI_DIRECT"),
             "smart_submit_enabled": lambda: (_ for _ in ()).throw(AssertionError("smart submit leaked")),
         },
@@ -519,10 +523,12 @@ def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     source = BOT.read_text(encoding="utf-8")
     assert "<th>Type B research verdict</th>" not in source
     assert "<th>Raw AI verdict</th>" in source
-    assert "<th>Continuous benchmark evaluation</th>" in source
-    assert "<th>Patient Chase route / outcome</th>" in source
-    assert "<th>Protected W234 evaluation</th>" in source
-    assert "<th>Protected W234 route / outcome</th>" in source
+    assert "<th>Continuous evaluation</th>" in source
+    assert "<th>Patient Chase route</th>" in source
+    assert "<th>Static evaluation</th>" in source
+    assert "<th>Static route</th>" in source
+    assert "<th>Regime evaluation</th>" in source
+    assert "<th>Regime route</th>" in source
     assert "<th>AI explanation / block reason</th>" in source
     assert "formatPatientRoute(patientRoute)" in source
     assert "Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate" in source
@@ -532,7 +538,6 @@ def test_dashboard_replaces_retired_type_b_column_with_patient_route():
     assert "statRow('Open', laneNow.open || 0)" in source
     assert "statRow('Closed', stats.real_fills" in source
     assert "statRow('Executed'" not in source
-    order_block = source.split("PATHWAY_LANE_ORDER = (", 1)[1].split(")", 1)[0]
+    assert "PATHWAY_LANE_ORDER = tuple(ACTIVE_TILE_ORDER)" in source
     assert "LEGACY_PATHWAY_LANES" not in source
-    assert LANE in order_block
-    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in order_block
+    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in source

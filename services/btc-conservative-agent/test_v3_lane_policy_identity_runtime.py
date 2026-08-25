@@ -1,6 +1,8 @@
 import ast
 from pathlib import Path
 
+import combo_pathway_config as config
+
 
 BOT_PATH = Path(__file__).with_name("bot.py")
 
@@ -28,7 +30,7 @@ def test_v3_lane_policy_material_uses_executable_relay_allowlist():
     assert value.comparators[0].id == "PLATFORM_RELAY_ELIGIBLE_LANES"
 
 
-def test_relay_registry_contains_only_two_active_lanes():
+def test_relay_registry_is_derived_and_protected_tiles_fail_closed():
     module = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
     assignments = {
         target.id: node.value
@@ -41,8 +43,8 @@ def test_relay_registry_contains_only_two_active_lanes():
     eligible = ast.unparse(assignments["PLATFORM_RELAY_ELIGIBLE_LANES"])
     configured = ast.unparse(assignments["PLATFORM_RELAY_CONFIGURED_LANES"])
     assert "RESEARCH_LANE_CONTINUOUS" in eligible
-    assert "RESEARCH_LANE_OFFSET_029_ATR_TP_25" in eligible
-    assert "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED" not in eligible
-    assert "RESEARCH_LANE_OFFSET_029_ATR_REGIME" not in eligible
-    assert "RESEARCH_LANE_OFFSET_029_ATR_PROTECTED" not in configured
-    assert "RESEARCH_LANE_OFFSET_029_ATR_REGIME" not in configured
+    assert "COMBO_LANE_SPECS.items()" in eligible
+    assert "COMBO_EXECUTION_LANES" in configured
+    assert config.COMBO_LANE_SPECS[config.RESEARCH_LANE_OFFSET_029_ATR_TP_25]["platform_relay_eligible"] is True
+    assert config.COMBO_LANE_SPECS[config.RESEARCH_LANE_OFFSET_029_ATR_PROTECTED]["platform_relay_eligible"] is False
+    assert config.COMBO_LANE_SPECS[config.RESEARCH_LANE_OFFSET_029_ATR_REGIME]["platform_relay_eligible"] is False

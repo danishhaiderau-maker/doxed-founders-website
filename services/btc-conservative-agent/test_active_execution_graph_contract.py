@@ -1,7 +1,7 @@
 """Fail-closed contract for the production paper-research execution graph.
 
 Historical evidence may remain readable as opaque archive data, but only the
-three-tile stack may produce new paper orders. All active strategies consume the
+registry-owned active stack may produce new paper orders. All active strategies consume the
 single shared AI_SCAN result; an alternate prompt/call path is a
 release-blocking regression.
 """

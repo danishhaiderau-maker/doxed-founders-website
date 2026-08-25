@@ -2507,7 +2507,7 @@ def api_lanes():
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
-            else "Current active research stack: CONTINUOUS + OFFSET_029_ATR_TP_25 + PROTECTED_W234_SCENARIO_C"
+            else "Current active research stack is derived from the canonical tile registry."
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
     })
