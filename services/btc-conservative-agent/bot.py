@@ -23442,6 +23442,61 @@ def _record_bitfinex_close_failure(trade_id: str, exit_reason: str) -> None:
         }
 
 
+def _paper_terminal_pnl_components(
+    pos: dict,
+    *,
+    entry: float,
+    exit_price: float,
+    exit_is_maker: bool,
+    maker_fee: float,
+    taker_fee: float,
+    funding_total: float,
+) -> dict:
+    """Reconcile partial reductions and the terminal runner exactly once.
+
+    Protected policies reduce ``pos['qty']`` after each partial.  Terminal PnL
+    therefore has to use the remaining quantity, then add the immutable partial
+    receipts.  Reusing the original margin for the runner makes a half-sized
+    runner look full-sized and corrupts policy ranking.
+    """
+    direction_factor = 1.0 if pos.get("dir") == "LONG" else -1.0
+    remaining_qty = max(0.0, _buf_float(pos.get("qty"), 0.0))
+    original_qty = max(
+        remaining_qty,
+        _buf_float(pos.get("policy_original_qty"), remaining_qty),
+    )
+    partial_receipts = list(pos.get("partial_exit_receipts") or [])
+    partial_gross = 0.0
+    partial_exit_fees = 0.0
+    for receipt in partial_receipts:
+        closed_qty = max(0.0, _buf_float(receipt.get("closed_qty"), 0.0))
+        partial_price = _buf_float(receipt.get("price"), 0.0)
+        recorded_gross = receipt.get("realized_gross_usd")
+        if recorded_gross is None:
+            recorded_gross = (partial_price - entry) * direction_factor * closed_qty
+        partial_gross += _buf_float(recorded_gross, 0.0)
+        if closed_qty > 0 and partial_price > 0:
+            partial_exit_fees += partial_price * closed_qty * taker_fee
+
+    runner_gross = (exit_price - entry) * direction_factor * remaining_qty
+    entry_fee_rate = maker_fee if pos.get("entry_fee_type") == "MAKER" else taker_fee
+    terminal_exit_fee_rate = maker_fee if exit_is_maker else taker_fee
+    entry_fee = entry * original_qty * entry_fee_rate
+    terminal_exit_fee = exit_price * remaining_qty * terminal_exit_fee_rate
+    trading_fees = entry_fee + partial_exit_fees + terminal_exit_fee
+    gross_pnl = partial_gross + runner_gross
+    net_pnl = gross_pnl - trading_fees - funding_total
+    return {
+        "gross_pnl": gross_pnl,
+        "net_pnl": net_pnl,
+        "trading_fees": trading_fees,
+        "partial_gross_pnl": partial_gross,
+        "runner_gross_pnl": runner_gross,
+        "original_qty": original_qty,
+        "remaining_qty": remaining_qty,
+    }
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     if not validate_state():
@@ -23485,22 +23540,23 @@ def close_position(pos: dict, exit_reason: str):
         assert entry > 0, f"[EXIT VALIDATION FAIL] entry={entry} <=0"
         assert price > 0, f"[EXIT VALIDATION FAIL] exit_price={price} <=0"
         assert pos.get("sl", 0) > 0, f"[EXIT VALIDATION FAIL] sl={pos.get('sl')} <=0"
-        dir_factor = 1 if pos.get("dir") == "LONG" else -1
-        price_move = ((price - entry) / entry) * dir_factor if entry > 0 else 0
         margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
-        gross_pnl = price_move * pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE) * margin_usdt
-
-        position_value_entry = entry * qty
-        position_value_exit = price * qty
-        entry_is_maker = pos.get("entry_fee_type") == "MAKER"
         maker_fee, taker_fee = get_trading_fee_rates()
-        entry_fee = position_value_entry * (maker_fee if entry_is_maker else taker_fee)
-        exit_fee = position_value_exit * (maker_fee if exit_is_maker else taker_fee)
-        trading_fees = entry_fee + exit_fee
         accrue_position_funding(pos, time.time())
         funding_total = round(float(pos.get("funding_fees", 0.0) or 0.0), 4)
+        pnl_components = _paper_terminal_pnl_components(
+            pos,
+            entry=float(entry),
+            exit_price=float(price),
+            exit_is_maker=exit_is_maker,
+            maker_fee=maker_fee,
+            taker_fee=taker_fee,
+            funding_total=funding_total,
+        )
+        gross_pnl = pnl_components["gross_pnl"]
+        net_pnl = pnl_components["net_pnl"]
+        trading_fees = pnl_components["trading_fees"]
         total_fees = trading_fees
-        net_pnl = gross_pnl - trading_fees - funding_total
 
         if should_skip_unprofitable_profit_exit(exit_reason, net_pnl):
             logger.warning(f"[FEE FILTER] Skipping unprofitable exit trade_id={trade_id} net={fmt(net_pnl)}")
