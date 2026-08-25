@@ -1,3 +1,4 @@
+import inspect
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -151,6 +152,15 @@ def test_pathway_audit_hides_stale_contract_bodies(tmp_path, monkeypatch):
 
     assert payload["tile_independence"] == {}
     assert payload["receipt_status"]["tile_independence_report.json"]["status"] == "STALE_CONTRACT_RECEIPT"
+
+
+def test_dynamic_policy_page_does_not_call_descriptive_positive_rows_unprofitable():
+    source = inspect.getsource(dashboard._research_page)
+
+    assert "NONE — both candidates unprofitable" not in source
+    assert "NONE — qualification incomplete" in source
+    assert "Qualified OOS winner" in source
+    assert "Descriptive regime leader" in source
 
 
 def test_pathway_audit_reports_missing_receipt_truthfully(tmp_path, monkeypatch):

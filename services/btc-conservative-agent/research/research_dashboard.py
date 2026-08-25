@@ -2415,7 +2415,7 @@ def api_dynamic_policy_research():
         "epoch_id": source["epoch_id"],
         "policy_epoch_id": None,
         "winner_kind": "DYNAMIC" if source["qualified"] and rows else "NONE",
-        "winner_status": "QUALIFIED" if source["qualified"] and rows else "NO_PROFITABLE_OOS_WINNER",
+        "winner_status": "QUALIFIED" if source["qualified"] and rows else "NO_QUALIFIED_OOS_WINNER",
         "relative_leader_kind": "DYNAMIC" if rows else "NONE",
         "comparison_delta": {},
         "static_oos": None,
@@ -2424,7 +2424,8 @@ def api_dynamic_policy_research():
         "required_market_families": ["BULL", "BEAR", "SIDEWAYS"],
         "fallback": "CONTROL_OR_NO_TRADE",
         "warning": (
-            "No profitable OOS winner. A relative leader may only be less negative; it is not a winning strategy. "
+            "No qualified dynamic OOS winner. Positive descriptive regime rows may exist, but they are not a "
+            "qualified strategy or a completed static-versus-dynamic comparison. "
             + (screen.get("warning") or
                "Dynamic selection remains unavailable until causal V3.1 regimes have later sealed OOS evidence.")
         ) if not source["qualified"] else (
@@ -2490,7 +2491,7 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
   document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
   rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>—</td><td>${x.oos_episodes??0}</td><td>—</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>${money(x.max_drawdown_usd)}</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`);
  } else if(mode==='dynamic'){
-  cards=[['Epoch',d.epoch_id],['Profitable OOS winner',d.winner_kind==='NONE'?'NONE — both candidates unprofitable':(d.winner_kind||'NONE')],['Relative leader only',d.relative_leader_kind||'NONE'],['Static OOS EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic OOS EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
+  cards=[['Epoch',d.epoch_id],['Qualified OOS winner',d.winner_kind==='NONE'?'NONE — qualification incomplete':(d.winner_kind||'NONE')],['Descriptive regime leader',d.relative_leader_kind||'NONE'],['Static comparison EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic comparison EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
   rows=(d.regimes||[]).flatMap(group=>(group.policies||[]).map(x=>`<tr><td>${group.regime}</td><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>${x.oos_episodes??0}</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>NO</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`));
  } else {
