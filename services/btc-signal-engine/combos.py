@@ -13,11 +13,13 @@ import hashlib
 import json
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
-RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
-RESEARCH_LANE_OFFSET_029_ATR_PROTECTED = "OFFSET_029_ATR_PROTECTED"
-RESEARCH_LANE_OFFSET_029_ATR_REGIME = "OFFSET_029_ATR_REGIME"
+RESEARCH_LANE_FAMILY_CHANDELIER = "FAMILY_CHANDELIER_3"
+RESEARCH_LANE_FAMILY_ATR_TARGET = "FAMILY_ATR_TARGET_2_5"
+RESEARCH_LANE_FAMILY_ATR_TRAIL = "FAMILY_ATR_TRAIL"
+RESEARCH_LANE_FAMILY_HYBRID_RUNNER = "FAMILY_HYBRID_RUNNER"
+RESEARCH_LANE_FAMILY_MFE_GIVEBACK = "FAMILY_MFE_GIVEBACK"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
-TILE_ARCHITECTURE_VERSION = 1
+TILE_ARCHITECTURE_VERSION = 2
 TILE_COMPONENT_SURFACES = (
     "runtime",
     "authenticated_api",
@@ -31,159 +33,123 @@ TILE_COMPONENT_SURFACES = (
     "monitoring",
     "regression_tests",
 )
-TILE_LIFECYCLE_STATES = frozenset({"ACTIVE", "PAPER_ONLY", "BENCHMARK"})
+TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
-# Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+    RESEARCH_LANE_FAMILY_CHANDELIER,
+    RESEARCH_LANE_FAMILY_ATR_TARGET,
+    RESEARCH_LANE_FAMILY_ATR_TRAIL,
+    RESEARCH_LANE_FAMILY_HYBRID_RUNNER,
+    RESEARCH_LANE_FAMILY_MFE_GIVEBACK,
 )
+COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
-COMBO_TILE_DISPLAY_ORDER = (
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-)
 
-COMBO_LANE_SPECS = {
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: {
-        "label": "0.29% Patient Chase · ATR 2.5×",
-        "subtitle": (
-            "PAPER when ON — independent order, position, capacity and ledger; "
-            "relay-copy eligible only while the separate operator relay is armed"
-        ),
-        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
-        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
-        "ai_min": 0,
-        "ai_max": 101,
-        "spread_min": -99,
-        "spread_max": 99,
-        "entry_mode": "IMMEDIATE",
-        "is_benchmark": False,
-        "is_research_candidate": True,
-        "is_legacy": False,
-        "is_independent_ai": False,
-        "uses_shared_ai_direction": True,
-        "paper_only": False,
-        "platform_relay_eligible": True,
-        "default_enabled": True,
-        "id_prefix": "o29atr",
-        "lifecycle_state": "ACTIVE",
-        "implementation_modules": ("paper_policy_offset029.py",),
-        "dedicated_test_modules": ("test_paper_policy_offset029.py",),
-        "entry_offset_pct": 0.29,
-        "initial_rest_sec": 600,
-        "chase_windows": (2, 3, 4),
-        "chase_age_sec": (600, 1500),
-        "chase_interval_sec": 60,
-        "chase_remaining_gap_step_pct": 25.0,
-        "entry_ttl_sec": 1800,
-        "margin_usd": 0.25,
-        "atr_tp_multiple": 2.5,
-        "atr_source": "frozen fill-time 3m ATR(14)",
-        "path_end_sec": 7200,
-        "exit_profile_id": "ATR_TP_2.5X_PATH_END_120M_V1",
-        "promotion_criteria": (
-            "PAPER RESEARCH: independent OOS evidence across multiple regimes, "
-            "conservative execution parity and explicit operator authorization"
-        ),
-        "kill_criteria": (
-            "Stop new entries on integrity, lifecycle, or evidence mismatch"
-        ),
-        "hypothesis": (
-            "A patient 0.29% maker anchor followed by 25% remaining-gap reprices may "
-            "retain entry quality while a frozen 3m ATR 2.5x target captures movement."
-        ),
-        "research_question": (
-            "Does OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5 retain positive "
-            "out-of-sample EV under conservative paper execution?"
-        ),
-    },
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
-        "label": "Protected Patient Chase · Static ATR risk",
-        "subtitle": "PAPER ONLY — static stop, partials, break-even and trailing runner",
-        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
-        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
-        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
-        "entry_mode": "IMMEDIATE",
-        "is_benchmark": False, "is_research_candidate": True,
-        "is_legacy": False, "is_independent_ai": False,
-        "uses_shared_ai_direction": True,
-        "paper_only": True, "platform_relay_eligible": False,
-        "default_enabled": False,
-        "id_prefix": "o29ps",
-        "lifecycle_state": "PAPER_ONLY",
-        "implementation_modules": ("paper_policy_offset029_protected.py",),
-        "dedicated_test_modules": ("test_paper_policy_offset029_protected.py",),
-        "entry_offset_pct": 0.29,
-        "initial_rest_sec": 600,
-        "chase_windows": (2, 3, 4),
-        "chase_age_sec": (600, 1500),
-        "chase_interval_sec": 60,
-        "chase_remaining_gap_step_pct": 25.0,
-        "entry_ttl_sec": 1800,
-        "margin_usd": 0.25,
-        "account_risk_pct": 0.5,
-        "atr_tp_multiple": 2.5,
-        "initial_stop_atr_k": 1.0,
-        "partial_targets_atr": (1.0, 1.5),
-        "partial_fractions": (0.25, 0.25),
-        "break_even_arm_atr_k": 1.25,
-        "trailing_stop_atr_k": 1.0,
-        "atr_source": "frozen fill-time 3m ATR(14)",
-        "path_end_sec": 7200,
-        "exit_profile_id": "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5_120M_V1",
-        "promotion_criteria": "PAPER ONLY until reduce-only partial reconciliation and qualified OOS evidence pass",
-        "kill_criteria": "Stop new entries on identity, lifecycle, partial-close, stop, or evidence mismatch",
-        "hypothesis": "Static ATR protection improves Patient Chase return-to-drawdown without changing its entry.",
-        "research_question": "Does static protected Patient Chase beat the baseline on chronological OOS risk-adjusted return?",
-    },
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
-        "label": "Protected Patient Chase · Dynamic regime",
-        "subtitle": "PAPER ONLY — causal regime protection may tighten but never widen risk",
-        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
-        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+def _signature(raw_policy_id: str) -> str:
+    return hashlib.sha256(raw_policy_id.encode("utf-8")).hexdigest()
+
+
+def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
+          module: str, test_module: str, entry: dict, exit_policy: dict,
+          relay_capability: str = "BLOCKED_UNQUALIFIED") -> dict:
+    return {
+        "tile_id": lane,
+        "label": label,
+        "subtitle": "PAPER ONLY — shared AI direction, independent signed lifecycle",
+        "combo_key": raw_policy_id,
+        "raw_policy_id": raw_policy_id,
+        "policy_signature": _signature(raw_policy_id),
+        "policy_epoch": "v31-five-family-atomic-v1",
+        "research_lane": lane,
+        "execution_scope": "PAPER_ONLY",
+        "paper_eligible": True,
+        "live_copy_eligible": False,
+        "relay_capability": relay_capability,
+        "requested_margin_usd": 0.25,
+        "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": 30.0},
+        "analyzer_cohort": raw_policy_id,
+        "presentation": {"family": exit_policy["family"], "evidence": "CONSERVATIVE_BBO_DEPTH_REQUIRED"},
+        "retirement_status": "ACTIVE_RESEARCH",
+        "entry_policy": entry,
+        "exit_policy": exit_policy,
         "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
         "entry_mode": "IMMEDIATE", "is_benchmark": False,
         "is_research_candidate": True, "is_legacy": False,
         "is_independent_ai": False, "uses_shared_ai_direction": True,
         "paper_only": True, "platform_relay_eligible": False,
-        "default_enabled": False, "id_prefix": "o29rd",
-        "lifecycle_state": "PAPER_ONLY",
-        "implementation_modules": ("paper_policy_offset029_regime.py",),
-        "dedicated_test_modules": ("test_paper_policy_offset029_regime.py",),
-        "entry_offset_pct": 0.29, "initial_rest_sec": 600,
-        "chase_windows": (2, 3, 4), "chase_age_sec": (600, 1500),
-        "chase_interval_sec": 60, "chase_remaining_gap_step_pct": 25.0,
-        "entry_ttl_sec": 1800, "margin_usd": 0.25, "account_risk_pct": 0.5,
-        "regime_profiles": ("SIDEWAYS", "ORDINARY_TREND", "STRONG_ALIGNED_TREND"),
-        "regime_transition_rule": "causal; stop distance, size and risk may never widen",
-        "atr_tp_multiple": 2.5, "atr_source": "frozen fill-time 3m ATR(14)",
-        "path_end_sec": 7200, "exit_profile_id": "REGIME_ATR_PROTECTION_V1",
-        "promotion_criteria": "PAPER ONLY until reduce-only partial reconciliation and qualified OOS evidence pass",
-        "kill_criteria": "Stop new entries on identity, lifecycle, transition, partial-close, or evidence mismatch",
-        "hypothesis": "Causal regime protection improves capture while never expanding initial risk.",
-        "research_question": "Does regime-adaptive protection beat the static protected control on chronological OOS evidence?",
-    },
+        "default_enabled": False, "id_prefix": id_prefix,
+        "toggle_key": "research_lane_enabled", "lifecycle_state": "PAPER_ONLY",
+        "implementation_modules": (module,), "dedicated_test_modules": (test_module,),
+        "entry_offset_pct": entry["offset_pct"],
+        "initial_rest_sec": min(entry["chase_windows"]) * 300,
+        "chase_windows": tuple(entry["chase_windows"]),
+        "chase_age_sec": (min(entry["chase_windows"]) * 300, (max(entry["chase_windows"]) + 1) * 300),
+        "chase_interval_sec": entry["reprice_sec"],
+        "chase_remaining_gap_step_pct": entry["remaining_gap_step_pct"],
+        "entry_ttl_sec": 1800, "margin_usd": 0.25,
+        "account_risk_pct": 0.5, "path_end_sec": 7200,
+        "exit_profile_id": raw_policy_id.split("|", 1)[1],
+        "promotion_criteria": "Conservative chronological OOS, bounded drawdown, cross-world parity and every live gate GREEN",
+        "kill_criteria": "Stop new entries on identity, fill, lifecycle, protection, mirror, analyzer or dashboard contradiction",
+        "research_question": f"Does {raw_policy_id} retain positive conservative OOS EV with bounded drawdown?",
+    }
+
+
+COMBO_LANE_SPECS = {
+    RESEARCH_LANE_FAMILY_CHANDELIER: _tile(
+        lane=RESEARCH_LANE_FAMILY_CHANDELIER, label="Chandelier Family · 3 ATR",
+        raw_policy_id="OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3", id_prefix="fc3",
+        module="paper_policy_family_chandelier.py", test_module="test_paper_policy_family_chandelier.py",
+        entry={"offset_pct": 0.03, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
+        exit_policy={"family": "CHANDELIER", "initial_stop_atr_k": 2.0, "chandelier_atr_k": 3.0, "trail_activation_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+    ),
+    RESEARCH_LANE_FAMILY_ATR_TARGET: _tile(
+        lane=RESEARCH_LANE_FAMILY_ATR_TARGET, label="Fixed ATR Target · 2.5 / 1.5",
+        raw_policy_id="OFFSET_0.02_CHASE_w234_s25_i180|ATR_TP_2.5_ATR_SL_1.5", id_prefix="fat",
+        module="paper_policy_family_atr_target.py", test_module="test_paper_policy_family_atr_target.py",
+        entry={"offset_pct": 0.02, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
+        exit_policy={"family": "ATR_TARGET", "atr_tp_k": 2.5, "initial_stop_atr_k": 1.5, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+    ),
+    RESEARCH_LANE_FAMILY_ATR_TRAIL: _tile(
+        lane=RESEARCH_LANE_FAMILY_ATR_TRAIL, label="ATR Trail · arm 1.25 / trail 1",
+        raw_policy_id="OFFSET_0.04_CHASE_all_on_s50_i60|ATR_TRAIL_SL_2_ARM_1.25_TRAIL_1", id_prefix="ftr",
+        module="paper_policy_family_atr_trail.py", test_module="test_paper_policy_family_atr_trail.py",
+        entry={"offset_pct": 0.04, "chase_windows": (0, 1, 2, 3, 4, 5), "remaining_gap_step_pct": 50.0, "reprice_sec": 60},
+        exit_policy={"family": "ATR_TRAIL", "initial_stop_atr_k": 2.0, "trail_activation_atr_k": 1.25, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+    ),
+    RESEARCH_LANE_FAMILY_HYBRID_RUNNER: _tile(
+        lane=RESEARCH_LANE_FAMILY_HYBRID_RUNNER, label="Hybrid Runner · secure 33%",
+        raw_policy_id="OFFSET_0.03_CHASE_w234_s25_i180|HYBRID_secure_33_runner_TRAIL_1", id_prefix="fhy",
+        module="paper_policy_family_hybrid_runner.py", test_module="test_paper_policy_family_hybrid_runner.py",
+        entry={"offset_pct": 0.03, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
+        exit_policy={"family": "HYBRID_RUNNER", "initial_stop_atr_k": 1.5, "partial_take_profits": ((1.0, 0.33),), "trail_activation_atr_k": 1.0, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        relay_capability="BLOCKED_PARTIAL_REDUCTION_UNPROVEN",
+    ),
+    RESEARCH_LANE_FAMILY_MFE_GIVEBACK: _tile(
+        lane=RESEARCH_LANE_FAMILY_MFE_GIVEBACK, label="MFE Giveback · retain 80%",
+        raw_policy_id="OFFSET_0.03_CHASE_w234_s25_i180|ATR_TP_2.5_GIVEBACK_20PCT", id_prefix="fmg",
+        module="paper_policy_family_mfe_giveback.py", test_module="test_paper_policy_family_mfe_giveback.py",
+        entry={"offset_pct": 0.03, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
+        exit_policy={"family": "MFE_GIVEBACK", "initial_stop_atr_k": None, "mfe_giveback_fraction": 0.20, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        relay_capability="BLOCKED_INITIAL_STOP_SWEEP_REQUIRED",
+    ),
 }
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
 CONTINUOUS_PROXY_LANES = ()
-PRIMARY_PRODUCTION_LANE = COMPARISON_BENCHMARK_LANE
+PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_CHANDELIER
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
+RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_CHANDELIER
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-four-tile-protected-patient-chase"
+RESEARCH_STACK_VERSION = "v31-five-family-atomic-paper"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + baseline + static-protected + regime-protected Patient Chase share one "
-    "direction-only 3-minute AI call; four-tile paper-research roster; all retired lanes "
-    "are analyzer-only; registered Patient Chase paper lifecycles; "
-    "independent lane capacity, orders, positions and ledgers; "
-    "fail-closed relay executor watchdog"
+    "Five exit-family tiles share one direction-only three-minute AI call while retaining "
+    "independent paper decisions, locks, capacity, orders, positions, ledgers and policy identities; "
+    "all five are default-OFF, paper-only and relay-ineligible; ideal touch is diagnostic only; "
+    "conservative BBO/depth receipts control execution evidence"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -191,53 +157,17 @@ RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
 EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
-# The benchmark is a first-class tile even though its execution policy is
-# intentionally implemented outside COMBO_LANE_SPECS. This merged registry is
-# the sole UI/analyzer roster contract.
-BENCHMARK_TILE_SPEC = {
-    "label": "Continuous Benchmark — Paper Orders",
-    "subtitle": "Shared-AI benchmark with an independent paper lifecycle",
-    "combo_key": "CONTINUOUS",
-    "raw_policy_id": "CONTINUOUS",
-    "is_benchmark": True,
-    "is_research_candidate": False,
-    "uses_shared_ai_direction": True,
-    "paper_only": False,
-    "platform_relay_eligible": True,
-    "id_prefix": "cont",
-    "toggle_key": "continuous_ai_research_enabled",
-    "lifecycle_state": "BENCHMARK",
-    "implementation_modules": (),
-    "dedicated_test_modules": (),
-}
-
-ACTIVE_TILE_REGISTRY = {
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: {
-        **COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25],
-        "toggle_key": "research_lane_enabled",
-    },
-    COMPARISON_BENCHMARK_LANE: dict(BENCHMARK_TILE_SPEC),
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
-        **COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_PROTECTED],
-        "toggle_key": "research_lane_enabled",
-    },
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
-        **COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_REGIME],
-        "toggle_key": "research_lane_enabled",
-    },
-}
-ACTIVE_TILE_ORDER = (
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-)
+ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
+ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
 
 # Retiring a tile means removing it from ACTIVE_TILE_REGISTRY and recording its
 # lane token here for one release. The registry audit then fails while that
 # token remains on any active execution/UI/analyzer surface. Historical data is
 # quarantined separately and never keeps runtime code alive.
-RETIRED_TILE_LANES = frozenset({"PROTECTED_W234_SCENARIO_C"})
+RETIRED_TILE_LANES = frozenset({
+    "CONTINUOUS", "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED",
+    "OFFSET_029_ATR_REGIME", "PROTECTED_W234_SCENARIO_C",
+})
 
 
 def validate_tile_registry() -> tuple[str, ...]:
@@ -249,8 +179,12 @@ def validate_tile_registry() -> tuple[str, ...]:
     if set(ACTIVE_TILE_ORDER) != set(lanes):
         defects.append("DISPLAY_ORDER_REGISTRY_MISMATCH")
     required = {
-        "label", "raw_policy_id", "id_prefix", "toggle_key",
-        "lifecycle_state", "implementation_modules", "dedicated_test_modules",
+        "tile_id", "label", "raw_policy_id", "policy_signature", "policy_epoch",
+        "research_lane", "execution_scope", "paper_eligible", "live_copy_eligible",
+        "relay_capability", "requested_margin_usd", "risk_limits", "analyzer_cohort",
+        "presentation", "retirement_status", "entry_policy", "exit_policy",
+        "id_prefix", "toggle_key", "lifecycle_state", "implementation_modules",
+        "dedicated_test_modules",
     }
     prefixes = {}
     for lane, spec in ACTIVE_TILE_REGISTRY.items():
@@ -263,6 +197,12 @@ def validate_tile_registry() -> tuple[str, ...]:
         prefixes[prefix] = lane
         if spec.get("paper_only") and spec.get("platform_relay_eligible"):
             defects.append(f"{lane}:PAPER_ONLY_RELAY_CONTRADICTION")
+        if not spec.get("paper_only") or spec.get("execution_scope") != "PAPER_ONLY":
+            defects.append(f"{lane}:NOT_STRICTLY_PAPER_ONLY")
+        if spec.get("live_copy_eligible") or spec.get("platform_relay_eligible"):
+            defects.append(f"{lane}:LIVE_COPY_MUST_FAIL_CLOSED")
+        if spec.get("tile_id") != lane or spec.get("research_lane") != lane:
+            defects.append(f"{lane}:TILE_IDENTITY_MISMATCH")
         state = str(spec.get("lifecycle_state") or "")
         if state not in TILE_LIFECYCLE_STATES:
             defects.append(f"{lane}:INVALID_LIFECYCLE_STATE:{state}")
@@ -284,11 +224,19 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
             "display_order": index,
             "label": ACTIVE_TILE_REGISTRY[lane]["label"],
             "raw_policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
+            "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
+            "policy_epoch": ACTIVE_TILE_REGISTRY[lane]["policy_epoch"],
             "id_prefix": ACTIVE_TILE_REGISTRY[lane]["id_prefix"],
             "toggle_key": ACTIVE_TILE_REGISTRY[lane]["toggle_key"],
             "lifecycle_state": ACTIVE_TILE_REGISTRY[lane]["lifecycle_state"],
             "paper_only": bool(ACTIVE_TILE_REGISTRY[lane].get("paper_only", False)),
             "relay_eligible": bool(ACTIVE_TILE_REGISTRY[lane].get("platform_relay_eligible", False)),
+            "relay_capability": ACTIVE_TILE_REGISTRY[lane]["relay_capability"],
+            "requested_margin_usd": ACTIVE_TILE_REGISTRY[lane]["requested_margin_usd"],
+            "risk_limits": ACTIVE_TILE_REGISTRY[lane]["risk_limits"],
+            "analyzer_cohort": ACTIVE_TILE_REGISTRY[lane]["analyzer_cohort"],
+            "entry_policy": ACTIVE_TILE_REGISTRY[lane]["entry_policy"],
+            "exit_policy": ACTIVE_TILE_REGISTRY[lane]["exit_policy"],
             "implementation_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["implementation_modules"]),
             "dedicated_test_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["dedicated_test_modules"]),
         }
@@ -758,7 +706,4 @@ def any_combo_execution_enabled(enabled_map: dict = None, continuous_enabled: bo
         for lane, val in enabled_map.items():
             if lane in merged:
                 merged[lane] = bool(val)
-    if any(merged.values()):
-        return True
-    # experimental_pathway_config purged 2026-07-11 — no experimental lanes remain
-    return bool(continuous_enabled)
+    return any(merged.values())

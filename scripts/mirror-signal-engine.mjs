@@ -4,7 +4,7 @@
  * Safe direction: services/btc-conservative-agent/* → services/btc-signal-engine/*
  * Does NOT pull from external bybit_bot.py (use sync-btc-research-bot for that).
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +17,8 @@ const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
 const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
+const agentDir = join(root, 'services/btc-conservative-agent');
+const engineDir = join(root, 'services/btc-signal-engine');
 
 function sha256(text) {
   const normalized = text.replace(/\r\n/g, '\n');
@@ -54,8 +56,8 @@ if (existsSync(combosAgent)) {
   const manifest = {
     engine_version: extractEngineVersion(comboSrc),
     combo_version: new Date().toISOString().slice(0, 10),
-    exit_version: 'scenario-c-v4',
-    benchmark_lane: 'CONTINUOUS',
+    exit_version: 'five-family-exits-v1',
+    benchmark_lane: 'CONTINUOUS_ANALYTICAL_ONLY',
     signal_hash: botHash,
     source: 'services/btc-conservative-agent/bot.py',
     updated_at: new Date().toISOString(),
@@ -63,5 +65,28 @@ if (existsSync(combosAgent)) {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   console.log(`Updated manifest (engine=${manifest.engine_version} hash=${botHash})`);
 }
+
+// Registry-owned policy dependencies are part of the executable mirror. Copy
+// only the active family modules plus their common implementation and remove
+// retired policy files so parity cannot pass with an orphan execution path.
+const activePolicyFiles = [
+  'family_policy_common.py',
+  'paper_policy_family_atr_target.py',
+  'paper_policy_family_atr_trail.py',
+  'paper_policy_family_chandelier.py',
+  'paper_policy_family_hybrid_runner.py',
+  'paper_policy_family_mfe_giveback.py',
+];
+for (const name of activePolicyFiles) {
+  const source = join(agentDir, name);
+  if (!existsSync(source)) throw new Error(`Missing registry dependency: ${name}`);
+  copyFileSync(source, join(engineDir, name));
+}
+for (const name of readdirSync(engineDir)) {
+  if (name.startsWith('paper_policy_') && !activePolicyFiles.includes(name)) {
+    rmSync(join(engineDir, name));
+  }
+}
+console.log(`Mirrored ${activePolicyFiles.length} registry policy dependencies`);
 
 console.log('Done — run npm run verify:signal-parity to confirm.');

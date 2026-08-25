@@ -67,6 +67,7 @@ try:
         COMPARISON_BENCHMARK_LANE,
         EXECUTION_FIX_VERSION as EXPECTED_BOT_VERSION,
         RESEARCH_DASHBOARD_VERSION,
+        ACTIVE_TILE_REGISTRY,
         active_tile_registry_signature,
     )
     from pathway_lane_roster import (
@@ -85,6 +86,7 @@ except ImportError:
     ALL_PATHWAY_LANES = tuple(sorted(CURRENT_RESEARCH_LANES))
     DASHBOARD_PATHWAY_LANES = ALL_PATHWAY_LANES
     DASHBOARD_PRIMARY_LANES = ALL_PATHWAY_LANES
+    ACTIVE_TILE_REGISTRY = {}
 
     def active_tile_registry_signature() -> str:
         return "unknown"
@@ -2613,8 +2615,8 @@ def _v31_evidence_payload(kind: str) -> dict:
         "status": "NOT_PROVEN",
         "relay_eligible": False,
         "tiles": {
-            "OFFSET_029_ATR_PROTECTED": "FAIL_CLOSED",
-            "OFFSET_029_ATR_REGIME": "FAIL_CLOSED",
+            lane: (spec.get("relay_capability") or "FAIL_CLOSED")
+            for lane, spec in ACTIVE_TILE_REGISTRY.items()
         },
         "gates": {
             "idempotent_reduce_only_partial_exits": False,

@@ -354,12 +354,7 @@ SIGNAL_PERSIST_FILE = "signal_persist.log"
 NEAR_EDGE_FILE = "near_edge.log"
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
-CURRENT_RESEARCH_LANES = (
-    "CONTINUOUS",
-    "OFFSET_029_ATR_TP_25",
-    "OFFSET_029_ATR_PROTECTED",
-    "OFFSET_029_ATR_REGIME",
-)
+CURRENT_RESEARCH_LANES = ()
 # Single source: combo_pathway_config (bot + dashboard import the same contract).
 try:
     from combo_pathway_config import (
@@ -454,10 +449,7 @@ REALISM_ERA_LABELS = {
     "DEPTH_REALISM": "v1.1.18+ — BBO + order-book VWAP fills",
     "UNKNOWN": "Unknown sim era",
 }
-RESEARCH_LANE_LABELS = {
-    "CONTINUOUS": "Continuous Benchmark",
-    "OFFSET_029_ATR_TP_25": "0.29% Patient Chase · ATR 2.5x",
-}
+RESEARCH_LANE_LABELS = {}
 if _COMBO_LANE_LABELS:
     RESEARCH_LANE_LABELS.update(_COMBO_LANE_LABELS)
 try:

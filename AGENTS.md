@@ -37,8 +37,10 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Current registered tiles are Patient Chase baseline, Continuous benchmark,
-  Protected Static Patient Chase, and Protected Regime-Adaptive Patient Chase.
+- Current registered tiles are Chandelier 3 ATR, Fixed ATR Target 2.5/1.5,
+  ATR Trail, Hybrid Runner, and MFE Giveback. All five default OFF, are
+  paper-only, and are relay-ineligible; Continuous remains an analytical
+  comparison label only and cannot create an order.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy

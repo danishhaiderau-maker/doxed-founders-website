@@ -22,6 +22,7 @@ import itertools
 import re
 import copy
 import functools
+import importlib
 import shutil
 import sys
 import subprocess
@@ -73,9 +74,6 @@ from combo_pathway_config import (
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
     RETIRED_TILE_LANES,
     any_combo_execution_enabled,
     active_tile_lifecycle_manifest,
@@ -117,9 +115,6 @@ from path_replay_v1 import (
     REPLAY_VERSION,
     build_path_sample,
 )
-import paper_policy_offset029 as offset029_policy
-import paper_policy_offset029_protected as offset029_protected_policy
-import paper_policy_offset029_regime as offset029_regime_policy
 from microstructure_tape import (
     FILE_NAME as MICROSTRUCTURE_TAPE_FILE,
     SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
@@ -311,10 +306,7 @@ MOMENTUM_FLAT_MAX = 0.01
 FLAT_MOMENTUM_EDGE_FLOOR = 4.8
 FLAT_MOMENTUM_FLOOR_LOW_EDGE = 2.0
 FLAT_MOMENTUM_FLOOR_HIGH_EDGE = 4.0
-# v87+ multi-lane research — early define (default args on helpers below are evaluated at import)
-# Pathway matrix (research_lane × entry_path):
-#   CONTINUOUS / AI_DIRECT — frozen Scenario C benchmark
-#   spawn lanes from CONTINUOUS APPROVE — AI_DIRECT + AI_DIRECT_CHASE fill
+# Registry-owned multi-lane research (default args below evaluate at import).
 RESEARCH_LANE_CONTINUOUS = "CONTINUOUS"
 PATIENT_CHASE_LANES = frozenset(COMBO_EXECUTION_LANES)
 
@@ -323,14 +315,32 @@ def is_patient_chase_lane(lane: str) -> bool:
     return str(lane or "").upper() in PATIENT_CHASE_LANES
 
 
+def _load_tile_policy_modules() -> dict[str, Any]:
+    """Load exactly one immutable implementation owned by every active tile."""
+    modules: dict[str, Any] = {}
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        owned = tuple(spec.get("implementation_modules") or ())
+        if len(owned) != 1:
+            raise RuntimeError(f"{lane}: expected exactly one policy implementation")
+        module = importlib.import_module(Path(owned[0]).stem)
+        if str(getattr(module, "LANE", "")) != lane:
+            raise RuntimeError(f"{lane}: policy module lane mismatch")
+        if str(getattr(module, "POLICY_ID", "")) != str(spec.get("raw_policy_id") or ""):
+            raise RuntimeError(f"{lane}: policy module identity mismatch")
+        modules[lane] = module
+    return modules
+
+
+TILE_POLICY_MODULES = _load_tile_policy_modules()
+
+
 def _patient_chase_policy(lane: str):
-    """Resolve an active Patient Chase implementation from the frozen registry."""
+    """Return the immutable implementation owned by an active family tile."""
     lane = str(lane or "").upper()
-    if lane == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED:
-        return offset029_protected_policy
-    if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
-        return offset029_regime_policy
-    return offset029_policy
+    try:
+        return TILE_POLICY_MODULES[lane]
+    except KeyError as exc:
+        raise ValueError(f"inactive or unknown tile lane: {lane}") from exc
 
 
 PATHWAY_LANE_STATUS = {
@@ -356,10 +366,10 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()
 #   relay ON -> the platform may copy only these explicitly allow-listed lanes
 #
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
-PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
-    RESEARCH_LANE_CONTINUOUS,
-    *(lane for lane, spec in COMBO_LANE_SPECS.items() if spec.get("platform_relay_eligible")),
-})
+PLATFORM_RELAY_ELIGIBLE_LANES = frozenset(
+    lane for lane, spec in COMBO_LANE_SPECS.items()
+    if spec.get("platform_relay_eligible")
+)
 PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
     *COMBO_EXECUTION_LANES,
@@ -1653,9 +1663,7 @@ def get_lane_ladder(research_lane: str = None):
 def get_exit_config_snapshot(research_lane: str = None) -> dict:
     """Active exit/thesis/ladder params — logged per trade for analyzer sweeps."""
     lane = str(research_lane or RESEARCH_LANE_CONTINUOUS).upper()
-    if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
-        return offset029_policy.exit_config(ANALYZER_SYNC_ID)
-    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+    if lane in COMBO_EXECUTION_LANES:
         return _patient_chase_policy(lane).exit_config(ANALYZER_SYNC_ID)
     thesis_pct = THESIS_FAST_EXIT_UNREAL_PCT
     mfe_protect = THESIS_MFE_PROTECT_PCT
@@ -2638,20 +2646,12 @@ def get_pathway_lane_status(lane: str) -> str:
 
 def is_research_lane_retired(lane: str) -> bool:
     lane = str(lane or "").upper()
-    return lane not in {
-        RESEARCH_LANE_CONTINUOUS,
-        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-        RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-        RESEARCH_LANE_AI_SCAN,
-    }
+    return lane not in {RESEARCH_LANE_AI_SCAN, *COMBO_EXECUTION_LANES}
 
 
 def lane_blocks_live_orders(lane: str) -> bool:
-    """Hard block retired/shadow lanes. CONTINUOUS limit orders gated by continuous_ai toggle."""
+    """Hard block retired, benchmark, shadow and relay-ineligible lanes."""
     lane = str(lane or "").upper()
-    if lane == RESEARCH_LANE_CONTINUOUS:
-        return False
     if is_shadow_only_lane(lane):
         return True
     status = get_pathway_lane_status(lane)
@@ -4301,37 +4301,12 @@ def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: flo
         f"unreal={unreal_pct:.2f}% crossed={crossed} [PIPELINE ENFORCEMENT]"
     )
 
-def _apply_offset_029_atr_exit(pos: dict, price: float, now: float) -> bool:
-    """Exact paper exit for the selected replay policy, without Scenario C."""
-    if str(pos.get("research_lane") or "").upper() != RESEARCH_LANE_OFFSET_029_ATR_TP_25:
-        return False
-    entry = float(pos.get("entry") or 0)
-    direction = str(pos.get("dir") or "").upper()
-    entry_ts = float(pos.get("entry_ts") or 0)
-    atr_abs = _buf_float(pos.get("atr14_3m"), 0.0)
-    atr_pct = _buf_float(pos.get("atr14_pct_3m"), 0.0)
-    reason, target = offset029_policy.exit_decision(
-        entry=entry, direction=direction, price=price, atr_abs=atr_abs,
-        atr_pct=atr_pct, age_sec=(now - entry_ts if entry_ts else 0),
-    )
-    if target is not None:
-        pos["atr_tp_price"] = round(target, 2)
-    if reason:
-        pos["exit_policy_id"] = offset029_policy.POLICY_ID
-        if reason == "PATH_END_120M":
-            pos["path_end_mark_price"] = float(price)
-        close_position(pos, reason)
-        return True
-    if target is None:
-        pos["atr_tp_unavailable"] = True
-    return False
-
-
-def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> bool:
-    """Apply a frozen protected policy and persist partial/transition receipts."""
+def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
+    """Apply the active registry-owned tile policy and persist partial receipts."""
     lane = str(pos.get("research_lane") or "").upper()
-    if lane not in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+    if lane not in COMBO_EXECUTION_LANES:
         return False
+    policy = _patient_chase_policy(lane)
     entry = float(pos.get("entry") or 0)
     direction = str(pos.get("dir") or "").upper()
     atr_abs = _buf_float(pos.get("atr14_3m"), 0.0)
@@ -4339,56 +4314,23 @@ def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> 
         atr_abs = entry * _buf_float(pos.get("atr14_pct_3m"), 0.0) / 100.0
     age = now - float(pos.get("entry_ts") or now)
     remaining = float(pos.get("policy_remaining_fraction", 1.0))
-    if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
-        health = state.get("trend_health") or {}
-        market_context = state.get("market_context") or {}
-        observed = offset029_regime_policy.classify_regime(
-            direction=direction,
-            market_regime=state.get("regime"),
-            trend_state=health.get("trend_state"),
-            base_state=health.get("base_state"),
-            adx=(market_context.get("trend_strength") or {}).get("adx"),
-        )
-        prior = str(pos.get("policy_regime") or observed)
-        prior_stop = float(pos.get("policy_stop_distance_atr") or offset029_regime_policy.PROFILES[offset029_regime_policy.normalize_regime(prior)]["stop"])
-        change = offset029_regime_policy.transition(
-            previous_regime=prior, observed_regime=observed, current_stop_distance_atr=prior_stop
-        )
-        if change["changed"]:
-            receipt = {"ts": utc_iso(), **change}
-            pos.setdefault("regime_transition_receipts", []).append(receipt)
-            _emit_genome_execution_event("REGIME_PROTECTION_UPDATED", {"trade_id": pos.get("trade_id"), **receipt})
-        pos["policy_regime"] = change["to"]
-        pos["policy_stop_distance_atr"] = change["applied_stop_atr"]
-        action = offset029_regime_policy.exit_action(
-            entry=entry, direction=direction, price=price, atr_abs=atr_abs, age_sec=age,
-            regime=change["to"], current_stop_distance_atr=change["applied_stop_atr"],
-            remaining_fraction=remaining, completed_partials=pos.get("policy_completed_partials") or (),
-            peak_price=pos.get("policy_peak_price"),
-        )
-        if action:
-            pos["policy_peak_price"] = action["peak_price"]
-            if action.get("partial_key") is not None:
-                pos.setdefault("policy_completed_partials", []).append(action["partial_key"])
-    else:
-        action = offset029_protected_policy.exit_action(
-            entry=entry, direction=direction, price=price, atr_abs=atr_abs, age_sec=age,
-            leverage=float(pos.get("leverage") or 100), remaining_fraction=remaining,
-            first_partial_done=bool(pos.get("policy_first_partial_done")),
-            second_partial_done=bool(pos.get("policy_second_partial_done")),
-            break_even_armed=bool(pos.get("policy_break_even_armed")),
-            peak_price=pos.get("policy_peak_price"),
-        )
-        if action:
-            pos["policy_first_partial_done"] = action.first_partial_done
-            pos["policy_second_partial_done"] = action.second_partial_done
-            pos["policy_break_even_armed"] = action.break_even_armed
-            pos["policy_peak_price"] = action.peak_price
+    action = policy.exit_action(
+        entry=entry, direction=direction, price=price, atr_abs=atr_abs,
+        atr_pct=_buf_float(pos.get("atr14_pct_3m"), 0.0), age_sec=age,
+        leverage=float(pos.get("leverage") or 100), remaining_fraction=remaining,
+        completed_partials=pos.get("policy_completed_partials") or (),
+        peak_price=pos.get("policy_peak_price"),
+    )
     if not action:
         return False
-    close_fraction = float(action.get("close_fraction") if isinstance(action, dict) else action.close_fraction)
-    remaining_after = float(action.get("remaining_fraction") if isinstance(action, dict) else action.remaining_fraction)
-    reason = str(action.get("reason") if isinstance(action, dict) else action.reason)
+    pos["policy_peak_price"] = action.peak_price
+    if action.partial_key is not None:
+        pos.setdefault("policy_completed_partials", []).append(action.partial_key)
+    close_fraction = float(action.close_fraction)
+    remaining_after = float(action.remaining_fraction)
+    reason = str(action.reason)
+    pos["policy_stop_price"] = action.stop_price
+    pos["exit_policy_id"] = policy.POLICY_ID
     original_qty = float(pos.get("policy_original_qty") or pos.get("qty") or 0)
     pos.setdefault("policy_original_qty", original_qty)
     close_qty = max(0.0, original_qty * close_fraction) if remaining_after > 0 else 0.0
@@ -4408,6 +4350,8 @@ def _apply_protected_patient_chase_exit(pos: dict, price: float, now: float) -> 
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
     if remaining_after <= 0:
+        if reason == "PATH_END_120M":
+            pos["path_end_mark_price"] = float(price)
         close_position(pos, reason)
         return True
     pos["qty"] = original_qty * remaining_after
@@ -4470,13 +4414,8 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     # later book-walk VWAP that can make a stop look like a much better fill.
     pos["_exit_eval_price"] = float(price or 0)
 
-    if str(pos.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
-        return _apply_offset_029_atr_exit(pos, price, now)
-    if str(pos.get("research_lane") or "").upper() in {
-        RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-        RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-    }:
-        return _apply_protected_patient_chase_exit(pos, price, now)
+    if str(pos.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
+        return _apply_family_tile_exit(pos, price, now)
     age_sec = (now - entry_ts) if entry_ts > 0 else 0.0
     if _check_phase_margin_stop(pos, unreal_pct, age_sec):
         return True
@@ -6760,8 +6699,8 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
     }
 
 
-def compute_offset_029_atr_entry(signal: dict) -> dict:
-    """Thin lifecycle adapter over the frozen Patient Chase policy module."""
+def compute_family_tile_entry(signal: dict) -> dict:
+    """Thin lifecycle adapter over the registry-selected family policy."""
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     lane = str(signal.get("research_lane") or "").upper()
@@ -6771,7 +6710,7 @@ def compute_offset_029_atr_entry(signal: dict) -> dict:
     # platform relay is capable of copying a newly signed intent.
     signal["paper_only"] = True
     signal["relay_eligible"] = lane in PLATFORM_RELAY_ELIGIBLE_LANES
-    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+    if lane in COMBO_EXECUTION_LANES:
         features = signal.get("features") or {}
         atr_abs = _buf_float(signal.get("atr14_3m") or features.get("atr14_3m"), 0.0)
         if atr_abs <= 0:
@@ -7274,9 +7213,7 @@ CLUSTER_MIN_DIST_PCT = 0.0025
 CANONICAL_DUPLICATE_LIFECYCLE_WINDOW_SEC = 5.0
 _LANE_DUPLICATE_TOL_USD = {
     RESEARCH_LANE_CONTINUOUS: 15.0,
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: 15.0,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: 15.0,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME: 15.0,
+    **{lane: 15.0 for lane in COMBO_EXECUTION_LANES},
 }
 _LANE_LIMIT_OFFSET_USD = {
     # Active shared-direction lanes already include the structural $15 buffer
@@ -7284,9 +7221,7 @@ _LANE_LIMIT_OFFSET_USD = {
     # eventual resting/relay price differ from the virtual price that qualified
     # the selected chase bucket.
     RESEARCH_LANE_CONTINUOUS: 0.0,
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: 0.0,
-    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: 0.0,
-    RESEARCH_LANE_OFFSET_029_ATR_REGIME: 0.0,
+    **{lane: 0.0 for lane in COMBO_EXECUTION_LANES},
 }
 LONG_NEAR_SUPPORT_MAX_DIST = 0.004
 LONG_NEAR_SUPPORT_MIN_BULL_SPREAD = 4
@@ -8162,9 +8097,10 @@ state = {
     "ai_history": [],
     "shared_ai_lane_counters": {
         "CONTINUOUS": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
-        "OFFSET_029_ATR_TP_25": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
-        "OFFSET_029_ATR_PROTECTED": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
-        "OFFSET_029_ATR_REGIME": {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}},
+        **{
+            lane: {"evaluated": 0, "accepted": 0, "rejected": 0, "reasons": {}}
+            for lane in COMBO_EXECUTION_LANES
+        },
     },
     "engine_reason": "",
     "ai_reason": "",
@@ -9226,7 +9162,7 @@ def _research_execute_log_only(research_lane=None) -> bool:
 
 
 def _sole_ai_research_mode() -> bool:
-    """The two current lanes use independent capacity and lifecycle state."""
+    """Every registered tile uses independent capacity and lifecycle state."""
     return RESEARCH_AI_SOLE_AUTHORITY and is_research_data_collection()
 
 
@@ -14420,12 +14356,6 @@ def _stamp_shared_ai_lane_verdict(
                 row.setdefault("lane_verdicts", {})[lane] = verdict
                 if lane == RESEARCH_LANE_CONTINUOUS:
                     row["continuous_verdict"] = verdict
-                elif lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
-                    row["patient_chase_verdict"] = verdict
-                elif lane == RESEARCH_LANE_OFFSET_029_ATR_PROTECTED:
-                    row["protected_static_verdict"] = verdict
-                elif lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
-                    row["protected_regime_verdict"] = verdict
                 state["ai_history_updated"] = time.time()
                 break
 
@@ -15495,7 +15425,10 @@ def _spawn_lab_combo_shadow(
         direction=direction,
         leverage=int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)),
         margin_usdt=float(margin_usdt),
-        pullback_pct=offset029_policy.ENTRY_OFFSET if patient_shadow else 0.0,
+        pullback_pct=(
+            float(COMBO_LANE_SPECS[target_lane]["entry_offset_pct"]) / 100.0
+            if patient_shadow else 0.0
+        ),
         virtual_entry=None if patient_shadow else price,
         virtual_fill_t=None if patient_shadow else 0.0,
         early_fail_enabled=bool(state.get("early_fail_enabled", True)),
@@ -15899,7 +15832,7 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     )
 
 
-_lane_last_ts = {}  # {'CONTINUOUS': ts, 'OFFSET_029_ATR_TP_25': ts}
+_lane_last_ts = {}  # {research_lane: last_emitted_epoch}
 
 
 
@@ -16567,12 +16500,7 @@ def _settings_period_breakdown() -> dict:
             "settings_recorded": True,
         })
 
-    lanes = (
-        RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-        RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-        RESEARCH_LANE_CONTINUOUS,
-    )
+    lanes = (*COMBO_EXECUTION_LANES, RESEARCH_LANE_CONTINUOUS)
     output = {lane: [] for lane in lanes}
     trades = []
     try:
@@ -19709,7 +19637,7 @@ def process_limit_chase(price: float):
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref", {}) if tid else {}
         if is_patient_chase_lane(order.get("research_lane")):
-            if _apply_offset_029_policy_chase(order, signal, price, now):
+            if _apply_family_policy_chase(order, signal, price, now):
                 chased += 1
             continue
         if is_virtual_chase_entry_lane(order.get("research_lane")):
@@ -20712,17 +20640,9 @@ def process_signal(event: dict):
                         "exact_reason": "AI_RECOVERY_OBSERVATION_ONLY",
                     }
                 if is_ai_scan_lane(research_lane) and ai:
-                    # Fan out the independent Patient Chase paper order directly
-                    # from the completed shared-AI result.  Continuous processing
-                    # can synchronously persist a blocked/shadow path for many
-                    # seconds, so running it first moved Patient's nominal
-                    # signal-time entry to a materially later market snapshot.
-                    # Each child still owns its own order/exit lifecycle; this
-                    # only removes cross-lane scheduling latency.
+                    # Fan out five independent paper-only family lifecycles
+                    # directly from the completed shared-AI result.
                     spawn_combo_lanes_from_ai_scan(
-                        ctx, ai, edge_score, features, research_lane,
-                    )
-                    spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
 
@@ -20913,7 +20833,7 @@ def process_signal(event: dict):
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
             if is_patient_chase_lane(research_lane):
-                compute_offset_029_atr_entry(signal)
+                compute_family_tile_entry(signal)
             elif research_lane in AI_DIRECT_RESEARCH_LANES and continuous_ai_direct_entry_enabled():
                 compute_continuous_ai_direct_entry(signal)
             else:
@@ -21650,6 +21570,16 @@ def _process_ws_ticker_update(payload) -> bool:
         state["ask"] = ask
         state["bid_qty"] = bid_qty
         state["ask_qty"] = ask_qty
+        # Keep the dashboard's canonical BBO projection current on every
+        # exact-symbol ticker update.  The presentation overlay consumes the
+        # standardized size/spread fields; previously only the legacy
+        # bid_qty/ask_qty names moved, so a healthy WS stream could still render
+        # Bid/Ask sizes and spread as "-" until a separate REST book refresh.
+        state["bid_size_btc"] = bid_qty
+        state["ask_size_btc"] = ask_qty
+        state["spread_usd"] = round(ask - bid, 2)
+        state["spread_pct"] = round((ask - bid) / bid * 100.0, 5)
+        state["bbo_ts"] = tick_now
         state["price"] = last
         state["price_ts"] = tick_now
         state["ws_last_tick"] = tick_now
@@ -21668,8 +21598,8 @@ def _process_ws_ticker_update(payload) -> bool:
     return True
 
 
-def _apply_offset_029_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
-    """Apply the frozen lane-specific Patient Chase schedule."""
+def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
+    """Apply the registry-selected family tile chase schedule."""
     if not is_patient_chase_lane(order.get("research_lane")):
         return False
     lane = _normalize_lane_key(order)
@@ -22444,7 +22374,7 @@ def state_monitor_loop():
                             _lane_last_ts['CONTINUOUS'] = time.time()
                 # Throttle analyzer/AI probe — independent of 1s order/position loop below.
                 last_pipeline_run = time.time()
-            # Patient Chase consumes the same three-minute AI_SCAN result as Continuous.
+            # Every active family consumes the same three-minute AI_SCAN result.
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
         set_execution_paused("THREAD_CRASH")
@@ -23508,6 +23438,11 @@ def close_position(pos: dict, exit_reason: str):
         or exit_reason in ("TAKE_PROFIT", "TP_HIT")
         or ("POSTONLY" in exit_reason)
     )
+    # The entry fee type is frozen when the paper position is opened.  Keep a
+    # local boolean for the terminal execution receipt; referring to an
+    # uninitialised name here used to crash the position manager exactly when a
+    # natural ATR/path exit attempted to close a position.
+    entry_is_maker = pos.get("entry_fee_type") == "MAKER"
     price, exit_sim = resolve_sim_exit_price(pos, exit_is_maker, exit_reason)
     if exit_sim:
         pos["exit_fill_sim"] = exit_sim
@@ -25241,15 +25176,80 @@ def _shared_lane_gate_runtime_summary(lane: str) -> str:
 
 
 def build_static_pathway_lane_specs() -> dict:
-    """Return the authoritative registry-owned four-tile research contract."""
+    """Return the authoritative registry-owned five-tile research contract."""
     shared = _pathway_shared_execution_spec()
     ai_cadence = shared["ai_scan_cadence_label"]
     chase_detail = shared["limit_chase_label"]
-    patient_spec = COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25]
-    patient_view = offset029_policy.dashboard_policy()
+    lanes = []
+    for tile_number, lane_id in enumerate(ACTIVE_TILE_ORDER, start=1):
+        lane_spec = COMBO_LANE_SPECS[lane_id]
+        policy_view = _patient_chase_policy(lane_id).dashboard_policy()
+        lanes.append({
+            "lane": lane_id,
+            "label": lane_spec["label"],
+            "subtitle": lane_spec["subtitle"],
+            "role": RESEARCH_CANDIDATE_ROLE,
+            "status": "PAPER_ONLY",
+            "is_benchmark": False,
+            "is_primary_production": lane_id == PRIMARY_PRODUCTION_LANE,
+            "is_research_candidate": True,
+            "is_shadow_only": False,
+            "is_independent_ai": False,
+            "is_deterministic_bracket": False,
+            "badge": "PAPER_ONLY_FAMILY",
+            "tile_number": tile_number,
+            "entry_mode_label": lane_spec["raw_policy_id"].split("|", 1)[0],
+            "filter_chips": policy_view["filter_chips"],
+            "toggle_key": lane_spec["toggle_key"],
+            "hypothesis": lane_spec.get("hypothesis", ""),
+            "research_question": lane_spec["research_question"],
+            "entry": {
+                **policy_view["entry"], "ai_cadence": ai_cadence,
+                "chase_detail": chase_detail,
+                "margin_usd": float(lane_spec["margin_usd"]),
+                "filters": lane_spec,
+            },
+            "exit": policy_view["exit"],
+            "exit_path": policy_view["exit"]["profile"],
+            "promotion_criteria": lane_spec["promotion_criteria"],
+            "kill_criteria": lane_spec["kill_criteria"],
+            "expected_advantage": "Tests one complete exit family under the shared entry-direction call",
+            "expected_risk": lane_spec["relay_capability"],
+            "benchmark_comparison": "Compare family peers on conservative chronological OOS evidence",
+            "diff_vs_benchmark": list(policy_view["strategy_detail"]),
+            "strategy_detail": list(policy_view["strategy_detail"]),
+            "raw_policy_id": lane_spec["raw_policy_id"],
+            "policy_signature": lane_spec["policy_signature"],
+            "policy_epoch": lane_spec["policy_epoch"],
+            "relay_eligible": False,
+        })
+    return {
+        "architecture_frozen": True,
+        "architecture_freeze_note": "Registry-owned five-family roster; add/remove only through the atomic lifecycle contract",
+        "architecture_doc": "TILE_LIFECYCLE.md",
+        "genome_schema_version": "1.0.0",
+        "shared_execution": shared,
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "analyzer_version": COMBO_ANALYZER_SYNC_ID,
+        "bot_version": EXECUTION_FIX_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "tile_lifecycle_manifest": list(active_tile_lifecycle_manifest()),
+        "benchmark_lane": COMPARISON_BENCHMARK_LANE,
+        "primary_production_lane": PRIMARY_PRODUCTION_LANE,
+        "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
+        "legacy_lanes_retired": sorted(RETIRED_TILE_LANES),
+        "lanes": _annotate_lanes_with_exec_mode(lanes),
+    }
+
+    # Legacy construction below is intentionally unreachable during the
+    # registry migration and is removed by the retirement cleanup audit.
+    patient_spec = COMBO_LANE_SPECS[COMBO_EXECUTION_LANES[0]]
+    patient_view = _patient_chase_policy(COMBO_EXECUTION_LANES[0]).dashboard_policy()
     patient_exit = patient_view["exit"]
     patient_lane = {
-        "lane": RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        "lane": COMBO_EXECUTION_LANES[0],
         "label": patient_spec.get("label") or "0.29% Patient Chase - ATR 2.5x",
         "subtitle": patient_spec.get("subtitle", "RESEARCH_CANDIDATE"),
         "role": patient_spec.get("role", RESEARCH_CANDIDATE_ROLE),
@@ -25339,9 +25339,7 @@ def build_static_pathway_lane_specs() -> dict:
                 "confidence_weight": 0.0,
                 "shared_call_consumers": [
                     RESEARCH_LANE_CONTINUOUS,
-                    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-                    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-                    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
+                    *COMBO_EXECUTION_LANES,
                 ],
             },
         },
@@ -25365,8 +25363,8 @@ def build_static_pathway_lane_specs() -> dict:
     }
     protected_lanes = []
     for tile_number, lane_id, entry_label in (
-        (3, RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, "Protected Static Patient Chase"),
-        (4, RESEARCH_LANE_OFFSET_029_ATR_REGIME, "Protected Regime-Adaptive Patient Chase"),
+        (3, COMBO_EXECUTION_LANES[1], "Legacy unreachable family"),
+        (4, COMBO_EXECUTION_LANES[2], "Legacy unreachable family"),
     ):
         protected_spec = COMBO_LANE_SPECS[lane_id]
         protected_view = _patient_chase_policy(lane_id).dashboard_policy()
@@ -25420,7 +25418,7 @@ def build_static_pathway_lane_specs() -> dict:
         "primary_production_lane": RESEARCH_LANE_CONTINUOUS,
         "benchmark_role": COMBO_BENCHMARK_ROLE,
         "primary_production_role": COMBO_BENCHMARK_ROLE,
-        "research_candidate_lane": RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
         "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
         "legacy_lanes_retired": sorted(RETIRED_TILE_LANES),
         "lanes": _annotate_lanes_with_exec_mode(lanes),
@@ -27099,7 +27097,7 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>AI History (Session)</h2>
 <p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Raw AI verdict and each tile's evaluation/lifecycle are independent facts. Executable orders are only in Pending Orders.</p>
 <table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Continuous evaluation</th><th>Patient Chase route</th><th>Static evaluation</th><th>Static route</th><th>Regime evaluation</th><th>Regime route</th><th>AI explanation / block reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Five family tile evaluations / lifecycles</th><th>AI explanation / block reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table>
 
@@ -27209,16 +27207,20 @@ DASHBOARD_JS = """(function () {
       const m = model || lane || '-';
       const colors = {
         'CONTINUOUS': '#58a6ff',
-        'OFFSET_029_ATR_TP_25': '#3fb950',
-        'OFFSET_029_ATR_PROTECTED': '#d29922',
-        'OFFSET_029_ATR_REGIME': '#a371f7',
+        'FAMILY_CHANDELIER_3': '#3fb950',
+        'FAMILY_ATR_TARGET_2_5': '#d29922',
+        'FAMILY_ATR_TRAIL': '#a371f7',
+        'FAMILY_HYBRID_RUNNER': '#f0883e',
+        'FAMILY_MFE_GIVEBACK': '#db61a2',
         'AI_SCAN': '#6e7681',
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
-        'OFFSET_029_ATR_TP_25': '0.29% Patient Chase · ATR 2.5×',
-        'OFFSET_029_ATR_PROTECTED': 'Protected Static Patient Chase',
-        'OFFSET_029_ATR_REGIME': 'Protected Regime-Adaptive Patient Chase',
+        'FAMILY_CHANDELIER_3': 'Chandelier 3 ATR',
+        'FAMILY_ATR_TARGET_2_5': 'Fixed ATR 2.5 / 1.5',
+        'FAMILY_ATR_TRAIL': 'ATR Trail',
+        'FAMILY_HYBRID_RUNNER': 'Hybrid Runner',
+        'FAMILY_MFE_GIVEBACK': 'MFE Giveback',
         'AI_SCAN': 'AI Scan',
       };
       const c = colors[lane] || '#8b949e';
@@ -28736,13 +28738,11 @@ DASHBOARD_JS = """(function () {
             ? ('Showing last ' + shown + ' of ' + total + ' actual shared AI calls. ')
             : ('Last ' + shown + ' actual shared AI calls this session. ');
           aiHint.innerText = historyCount
-            + 'Raw AI verdict, Continuous benchmark evaluation, and Patient Chase execution are separate. Continuous ACCEPT is not proof of an order. Patient Chase shows the matched paper lifecycle. '
-            + `Patient Chase now: ${d.patient_chase_counts?.pending || 0} pending, ${d.patient_chase_counts?.open || 0} open, ${d.patient_chase_counts?.closed || 0} closed. `
-            + `Static protected now: ${d.protected_static_counts?.pending || 0} pending, ${d.protected_static_counts?.open || 0} open, ${d.protected_static_counts?.closed || 0} closed. `
-            + `Regime protected now: ${d.protected_regime_counts?.pending || 0} pending, ${d.protected_regime_counts?.open || 0} open, ${d.protected_regime_counts?.closed || 0} closed. `
-            + ((d.patient_chase_counts?.unlinked_lifecycle_rows || 0) > 0
-              ? `${d.patient_chase_counts.unlinked_lifecycle_rows} lifecycle row(s) are missing parent AI identity; totals include them but per-call routing is incomplete. `
-              : '')
+            + 'Raw AI output, each family verdict, and each paper lifecycle are separate facts. A family ACCEPT is not proof of an order or fill. '
+            + Object.entries(d.tile_route_counts || {}).map(([lane, counts]) =>
+                `${lane}: ${counts.pending || 0} pending, ${counts.open || 0} open, ${counts.closed || 0} closed.`
+              ).join(' ')
+            + ' '
             + 'Restored pre-restart calls may lack the newer per-lane verdict metadata. '
             + 'Older CSV-only calls show lane metadata unavailable only when no matching journal verdict exists.';
         }
@@ -28791,12 +28791,11 @@ DASHBOARD_JS = """(function () {
           }).join(' | ');
           const cShort = c.length > 100 ? c.substring(0, 100) + '...' : (c || '-');
           const verdicts = a.lane_verdicts || {};
-          const continuousVerdict = a.continuous_verdict || verdicts.CONTINUOUS;
-          const patientRoute = a.patient_chase_route;
-          const staticVerdict = a.protected_static_verdict || verdicts.OFFSET_029_ATR_PROTECTED;
-          const staticRoute = a.protected_static_route;
-          const regimeVerdict = a.protected_regime_verdict || verdicts.OFFSET_029_ATR_REGIME;
-          const regimeRoute = a.protected_regime_route;
+          const familyRows = Object.keys(verdicts)
+            .filter(lane => lane.startsWith('FAMILY_'))
+            .sort()
+            .map(lane => `<div>${laneBadge(lane, lane)}: ${formatLaneVerdict(verdicts[lane], a)} · ${formatPatientRoute(a['tile_route_' + lane.toLowerCase()])}</div>`)
+            .join('') || '<span style="color:#8b949e">not evaluated</span>';
           const rawGap = a.score_gap != null
             ? Number(a.score_gap)
             : (a.long_score != null && a.short_score != null
@@ -28816,15 +28815,10 @@ DASHBOARD_JS = """(function () {
             <td>${a.short_score != null ? a.short_score : '-'}</td>
             <td>${rawGap != null && !Number.isNaN(rawGap) ? rawGap : '-'}</td>
             <td>${gapBucket}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(continuousVerdict, a)}</td>
-            <td style="font-size:0.85em">${formatPatientRoute(patientRoute)}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(staticVerdict, a)}</td>
-            <td style="font-size:0.85em">${formatPatientRoute(staticRoute)}</td>
-            <td style="font-size:0.85em">${formatLaneVerdict(regimeVerdict, a)}</td>
-            <td style="font-size:0.85em">${formatPatientRoute(regimeRoute)}</td>
+            <td style="font-size:0.85em">${familyRows}</td>
             <td title="${c.replace(/"/g, '&quot;')}">${cShort}</td>
           </tr>`;
-        }).join('') : '<tr><td colspan="14" style="color:#8b949e">No AI calls yet this session</td></tr>');
+        }).join('') : '<tr><td colspan="11" style="color:#8b949e">No AI calls yet this session</td></tr>');
         safeHTML('exitReasonsAnalytics', Object.entries(d.analytics?.exit_reasons || {}).map(([k,v])=>`
           <tr>
             <td>${k}</td>
@@ -30779,26 +30773,7 @@ def _position_protection_view(row: dict) -> dict:
     """Expose the protection that the selected exit branch actually enforces."""
     row = row if isinstance(row, dict) else {}
     lane = str(row.get("research_lane") or "").upper()
-    if lane == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
-        # Patient Chase is deliberately a TP-only paper experiment. Its
-        # internal SL-shaped reference exists only for generic persistence and
-        # close validation; the Patient exit branch never consults it.
-        target = _buf_float(row.get("atr_tp_price"), 0.0)
-        if target <= 0:
-            target = offset029_policy.atr_target(
-                _buf_float(row.get("entry"), 0.0),
-                row.get("dir") or row.get("side"),
-                _buf_float(row.get("atr14_3m"), 0.0),
-                _buf_float(row.get("atr14_pct_3m"), 0.0),
-            )
-        return {
-            "sl": None,
-            "sl_enforced": False,
-            "stop_policy": "NONE_TP_ONLY_RESEARCH",
-            "tp": round(float(target), 2) if target else None,
-            "tp_policy": "FROZEN_3M_ATR_TP_2_5X",
-        }
-    if lane in {RESEARCH_LANE_OFFSET_029_ATR_PROTECTED, RESEARCH_LANE_OFFSET_029_ATR_REGIME}:
+    if lane in COMBO_EXECUTION_LANES:
         entry = _buf_float(row.get("entry"), 0.0)
         direction = row.get("dir") or row.get("side")
         atr_abs = _buf_float(row.get("atr14_3m"), 0.0)
@@ -30806,25 +30781,23 @@ def _position_protection_view(row: dict) -> dict:
         if atr_abs <= 0 and entry > 0:
             atr_abs = entry * atr_pct / 100.0
         sign = 1.0 if str(direction).upper() == "LONG" else -1.0
-        if lane == RESEARCH_LANE_OFFSET_029_ATR_REGIME:
-            regime = offset029_regime_policy.normalize_regime(row.get("policy_regime"))
-            stop_k = _buf_float(row.get("policy_stop_distance_atr"), offset029_regime_policy.PROFILES[regime]["stop"])
-            policy_label = "CAUSAL_REGIME_ATR_PROTECTION"
-        else:
-            stop_k = offset029_protected_policy.INITIAL_STOP_ATR
-            policy_label = "STATIC_ATR_PROTECTION"
+        exit_spec = COMBO_LANE_SPECS[lane]["exit_policy"]
+        stop_k = exit_spec.get("initial_stop_atr_k")
+        target_k = exit_spec.get("atr_tp_k")
         target = _buf_float(row.get("atr_tp_price"), 0.0) or (
-            entry + sign * atr_abs * 2.5 if entry > 0 and atr_abs > 0 else 0.0
+            entry + sign * atr_abs * float(target_k)
+            if target_k is not None and entry > 0 and atr_abs > 0 else 0.0
         )
         stop = _buf_float(row.get("atr_stop_price"), 0.0) or (
-            entry - sign * atr_abs * stop_k if entry > 0 and atr_abs > 0 else 0.0
+            entry - sign * atr_abs * float(stop_k)
+            if stop_k is not None and entry > 0 and atr_abs > 0 else 0.0
         )
         return {
             "sl": round(float(stop), 2) if stop else None,
             "sl_enforced": bool(stop),
-            "stop_policy": policy_label,
+            "stop_policy": str(exit_spec.get("family") or "FAMILY_POLICY"),
             "tp": round(float(target), 2) if target else None,
-            "tp_policy": "FROZEN_3M_ATR_TP_2_5X_WITH_PARTIALS",
+            "tp_policy": str(exit_spec.get("family") or "FAMILY_POLICY"),
         }
     return {
         "sl": row.get("sl"),
@@ -31247,6 +31220,26 @@ def _build_relay_execution_state_snapshot() -> dict:
             "price_source": state.get("price_source"),
             "data_source": state.get("data_source"),
             "data_quality": state.get("data_quality"),
+            # Presentation market fields must travel with the same bounded
+            # live receipt as price.  Omitting them caused /api/state to keep
+            # the boot-time nulls while execution was active even though the
+            # BBO/book refreshers were healthy.
+            "bid": state.get("bid"),
+            "ask": state.get("ask"),
+            "bid_qty": state.get("bid_qty"),
+            "ask_qty": state.get("ask_qty"),
+            "bid_size_btc": state.get("bid_size_btc"),
+            "ask_size_btc": state.get("ask_size_btc"),
+            "spread_usd": state.get("spread_usd"),
+            "spread_pct": state.get("spread_pct"),
+            "bbo_ts": state.get("bbo_ts"),
+            "book_ts": state.get("book_ts"),
+            "support_resistance": copy.deepcopy(
+                state.get("support_resistance") or {}
+            ),
+            "funding": copy.deepcopy(state.get("funding") or {}),
+            "daily_pnl_usd": state.get("daily_pnl_usd"),
+            "last_fetch_success": utc_iso(),
             "ws_ready": bool(state.get("ws_ready", False)),
             "ws_transport_connected": bool(state.get("ws_transport_connected", False)),
             "ws_age": (
@@ -31310,6 +31303,12 @@ def _build_relay_execution_state_snapshot() -> dict:
             ),
             "runtime_readiness": runtime,
             "server_ts": utc_iso(),
+            "source_git_rev": _runtime_git_rev(),
+            "fresh_epoch_id": _collector_v22_epoch_id(),
+            "tile_registry_signature": active_tile_registry_signature(),
+            "active_tiles": active_tile_lifecycle_manifest(),
+            "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+            "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         }
     finally:
         state_lock.release()
@@ -31845,7 +31844,7 @@ def _snapshot_trades_for_api(session_start: float):
 def _attach_patient_chase_routes(
     ai_history: list,
     *,
-    lane=RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    lane=RESEARCH_CANDIDATE_LANE,
     route_key="patient_chase_route",
     signals=(),
     pending=(),
@@ -31854,7 +31853,7 @@ def _attach_patient_chase_routes(
     expired=(),
 ) -> tuple[list, dict]:
     """Attach one genuine Patient-family lifecycle to each shared AI call."""
-    lane = str(lane or RESEARCH_LANE_OFFSET_029_ATR_TP_25).upper()
+    lane = str(lane or RESEARCH_CANDIDATE_LANE).upper()
     priority = {"APPROVED_NO_ORDER": 0, "EXPIRED": 1, "CLOSED": 2, "PENDING": 3, "OPEN": 4}
     by_call = {}
     counts = {
@@ -32108,36 +32107,16 @@ def _build_api_state_snapshot():
             _DASHBOARD_HISTORY_MAX,
         )
         ai_history_copy = _session_ai_history(ai_history_copy, _DASHBOARD_HISTORY_MAX)
-        ai_history_copy, patient_chase_counts = _attach_patient_chase_routes(
-            ai_history_copy,
-            signals=list(bounded_trades_map.values()),
-            pending=pending_orders_copy,
-            positions=positions_copy,
-            closed=trades_copy,
-            expired=expired_orders_copy,
-        )
-        ai_history_copy, protected_static_counts = _attach_patient_chase_routes(
-            ai_history_copy,
-            lane=RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-            route_key="protected_static_route",
-            signals=list(bounded_trades_map.values()),
-            pending=pending_orders_copy,
-            positions=positions_copy,
-            closed=trades_copy,
-            expired=expired_orders_copy,
-        )
-        ai_history_copy, protected_regime_counts = _attach_patient_chase_routes(
-            ai_history_copy,
-            lane=RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-            route_key="protected_regime_route",
-            signals=list(bounded_trades_map.values()), pending=pending_orders_copy,
-            positions=positions_copy, closed=trades_copy, expired=expired_orders_copy,
-        )
+        tile_route_counts = {}
+        for lane in COMBO_EXECUTION_LANES:
+            ai_history_copy, tile_route_counts[lane] = _attach_patient_chase_routes(
+                ai_history_copy, lane=lane, route_key=f"tile_route_{lane.lower()}",
+                signals=list(bounded_trades_map.values()), pending=pending_orders_copy,
+                positions=positions_copy, closed=trades_copy, expired=expired_orders_copy,
+            )
         snapshot["ai_history"] = ai_history_copy
         snapshot["ai_history_total"] = ai_history_total
-        snapshot["patient_chase_counts"] = patient_chase_counts
-        snapshot["protected_static_counts"] = protected_static_counts
-        snapshot["protected_regime_counts"] = protected_regime_counts
+        snapshot["tile_route_counts"] = tile_route_counts
         snapshot["expired_orders_total"] = expired_orders_total
         snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
@@ -32472,6 +32451,20 @@ def _api_state_cache_refresher_loop():
                     "price_source",
                     "data_source",
                     "data_quality",
+                    "bid",
+                    "ask",
+                    "bid_qty",
+                    "ask_qty",
+                    "bid_size_btc",
+                    "ask_size_btc",
+                    "spread_usd",
+                    "spread_pct",
+                    "bbo_ts",
+                    "book_ts",
+                    "support_resistance",
+                    "funding",
+                    "daily_pnl_usd",
+                    "last_fetch_success",
                     "ws_ready",
                     "ws_age",
                     "ws_last_tick",
@@ -32525,6 +32518,11 @@ def _api_state_cache_refresher_loop():
                     "account_balance",
                     "equity",
                     "source_git_rev",
+                    "fresh_epoch_id",
+                    "tile_registry_signature",
+                    "active_tiles",
+                    "tile_architecture_version",
+                    "tile_registry_schema",
                     "dashboard_pid",
                     "dashboard_port",
                     "dashboard_owner",
@@ -32596,40 +32594,18 @@ def _api_state_cache_refresher_loop():
                     else "-"
                 )
                 overlay_signals = snap.get("trades_map") or {}
-                snap["ai_history"], snap["patient_chase_counts"] = _attach_patient_chase_routes(
-                    snap.get("ai_history") or [],
-                    signals=(
-                        list(overlay_signals.values())
-                        if isinstance(overlay_signals, dict)
-                        else overlay_signals
-                    ),
-                    pending=snap.get("orders") or [],
-                    positions=snap.get("positions") or [],
-                    closed=snap.get("trades") or [],
-                    expired=snap.get("expired_orders") or [],
+                snap["tile_route_counts"] = {}
+                overlay_rows = (
+                    list(overlay_signals.values())
+                    if isinstance(overlay_signals, dict) else overlay_signals
                 )
-                snap["ai_history"], snap["protected_static_counts"] = _attach_patient_chase_routes(
-                    snap.get("ai_history") or [],
-                    lane=RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
-                    route_key="protected_static_route",
-                    signals=(
-                        list(overlay_signals.values())
-                        if isinstance(overlay_signals, dict)
-                        else overlay_signals
-                    ),
-                    pending=snap.get("orders") or [],
-                    positions=snap.get("positions") or [],
-                    closed=snap.get("trades") or [],
-                    expired=snap.get("expired_orders") or [],
-                )
-                snap["ai_history"], snap["protected_regime_counts"] = _attach_patient_chase_routes(
-                    snap.get("ai_history") or [],
-                    lane=RESEARCH_LANE_OFFSET_029_ATR_REGIME,
-                    route_key="protected_regime_route",
-                    signals=(list(overlay_signals.values()) if isinstance(overlay_signals, dict) else overlay_signals),
-                    pending=snap.get("orders") or [], positions=snap.get("positions") or [],
-                    closed=snap.get("trades") or [], expired=snap.get("expired_orders") or [],
-                )
+                for lane in COMBO_EXECUTION_LANES:
+                    snap["ai_history"], snap["tile_route_counts"][lane] = _attach_patient_chase_routes(
+                        snap.get("ai_history") or [], lane=lane,
+                        route_key=f"tile_route_{lane.lower()}", signals=overlay_rows,
+                        pending=snap.get("orders") or [], positions=snap.get("positions") or [],
+                        closed=snap.get("trades") or [], expired=snap.get("expired_orders") or [],
+                    )
                 snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
                     for_api=True
                 )
@@ -36832,7 +36808,7 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Start replay + snapshot at AI APPROVE (before post-AI execution gates)."""
     if ai.get("decision") != "APPROVE":
         return
-    if str(signal.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+    if str(signal.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
         # Offset outcomes are sourced exclusively from its genuine paper order
         # and position lifecycle. Generic replay uses Scenario C and is invalid.
         return
@@ -37201,7 +37177,7 @@ def log_shadow_outcome_jsonl(
     signal: dict = None, ai: dict = None, post_block_research: dict = None,
 ):
     try:
-        if str(buf.get("research_lane") or "").upper() == RESEARCH_LANE_OFFSET_029_ATR_TP_25:
+        if str(buf.get("research_lane") or "").upper() in COMBO_EXECUTION_LANES:
             logger.error(
                 "[OFFSET029_CONTRACT] refused forbidden shadow outcome write "
                 f"trade_id={trade_id} [PIPELINE ENFORCEMENT]"
