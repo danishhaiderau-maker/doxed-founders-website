@@ -27,6 +27,7 @@ TILE_COMPONENT_SURFACES = (
     "monitoring",
     "regression_tests",
 )
+TILE_LIFECYCLE_STATES = frozenset({"ACTIVE", "PAPER_ONLY", "BENCHMARK"})
 
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
@@ -62,6 +63,9 @@ COMBO_LANE_SPECS = {
         "platform_relay_eligible": True,
         "default_enabled": True,
         "id_prefix": "o29atr",
+        "lifecycle_state": "ACTIVE",
+        "implementation_modules": ("paper_policy_offset029.py",),
+        "dedicated_test_modules": ("test_paper_policy_offset029.py",),
         "entry_offset_pct": 0.29,
         "initial_rest_sec": 600,
         "chase_windows": (2, 3, 4),
@@ -106,6 +110,9 @@ COMBO_LANE_SPECS = {
         "paper_only": True, "platform_relay_eligible": False,
         "default_enabled": False,
         "id_prefix": "pwch",
+        "lifecycle_state": "PAPER_ONLY",
+        "implementation_modules": ("paper_policy_protected_w234.py",),
+        "dedicated_test_modules": ("test_protected_w234_policy.py",),
         "entry_offset_pct": 0.28,
         "initial_rest_sec": 600,
         "chase_windows": (2, 3, 4),
@@ -167,6 +174,9 @@ BENCHMARK_TILE_SPEC = {
     "platform_relay_eligible": True,
     "id_prefix": "cont",
     "toggle_key": "continuous_ai_research_enabled",
+    "lifecycle_state": "BENCHMARK",
+    "implementation_modules": (),
+    "dedicated_test_modules": (),
 }
 
 ACTIVE_TILE_REGISTRY = {
@@ -201,7 +211,10 @@ def validate_tile_registry() -> tuple[str, ...]:
         defects.append("DUPLICATE_TILE_IN_DISPLAY_ORDER")
     if set(ACTIVE_TILE_ORDER) != set(lanes):
         defects.append("DISPLAY_ORDER_REGISTRY_MISMATCH")
-    required = {"label", "raw_policy_id", "id_prefix", "toggle_key"}
+    required = {
+        "label", "raw_policy_id", "id_prefix", "toggle_key",
+        "lifecycle_state", "implementation_modules", "dedicated_test_modules",
+    }
     prefixes = {}
     for lane, spec in ACTIVE_TILE_REGISTRY.items():
         missing = sorted(required.difference(spec))
@@ -213,10 +226,37 @@ def validate_tile_registry() -> tuple[str, ...]:
         prefixes[prefix] = lane
         if spec.get("paper_only") and spec.get("platform_relay_eligible"):
             defects.append(f"{lane}:PAPER_ONLY_RELAY_CONTRADICTION")
+        state = str(spec.get("lifecycle_state") or "")
+        if state not in TILE_LIFECYCLE_STATES:
+            defects.append(f"{lane}:INVALID_LIFECYCLE_STATE:{state}")
+        if state == "PAPER_ONLY" and not spec.get("paper_only"):
+            defects.append(f"{lane}:PAPER_ONLY_STATE_WITHOUT_GATE")
+        if state == "BENCHMARK" and not spec.get("is_benchmark"):
+            defects.append(f"{lane}:BENCHMARK_STATE_WITHOUT_ROLE")
     overlap = set(lanes).intersection(RETIRED_TILE_LANES)
     if overlap:
         defects.append("ACTIVE_RETIRED_OVERLAP:" + ",".join(sorted(overlap)))
     return tuple(defects)
+
+
+def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
+    """Stable cross-layer roster used by audits, APIs, dashboards and analyzers."""
+    return tuple(
+        {
+            "lane": lane,
+            "display_order": index,
+            "label": ACTIVE_TILE_REGISTRY[lane]["label"],
+            "raw_policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
+            "id_prefix": ACTIVE_TILE_REGISTRY[lane]["id_prefix"],
+            "toggle_key": ACTIVE_TILE_REGISTRY[lane]["toggle_key"],
+            "lifecycle_state": ACTIVE_TILE_REGISTRY[lane]["lifecycle_state"],
+            "paper_only": bool(ACTIVE_TILE_REGISTRY[lane].get("paper_only", False)),
+            "relay_eligible": bool(ACTIVE_TILE_REGISTRY[lane].get("platform_relay_eligible", False)),
+            "implementation_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["implementation_modules"]),
+            "dedicated_test_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["dedicated_test_modules"]),
+        }
+        for index, lane in enumerate(ACTIVE_TILE_ORDER, start=1)
+    )
 
 COMBO_CHASE_DELAY_LANES = ()
 COMBO_CHASE_ISOLATION_PAIRS = ()

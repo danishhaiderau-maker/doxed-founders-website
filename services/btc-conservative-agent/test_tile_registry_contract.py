@@ -5,6 +5,7 @@ from combo_pathway_config import (
     COMBO_TILE_DISPLAY_ORDER,
     RETIRED_TILE_LANES,
     TILE_COMPONENT_SURFACES,
+    active_tile_lifecycle_manifest,
     validate_tile_registry,
 )
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES
@@ -41,3 +42,39 @@ def test_retirement_contract_covers_all_cross_layer_surfaces():
         "monitoring",
         "regression_tests",
     }
+
+
+def test_every_policy_module_is_owned_by_one_active_tile():
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    discovered = {path.name for path in service_dir.glob("paper_policy_*.py")}
+    manifest = active_tile_lifecycle_manifest()
+    declared = [
+        module
+        for tile in manifest
+        for module in tile["implementation_modules"]
+    ]
+    assert len(declared) == len(set(declared)), "policy module has multiple tile owners"
+    assert discovered == set(declared), (
+        "orphan or unregistered policy module; register it or physically delete it: "
+        f"discovered={sorted(discovered)} declared={sorted(declared)}"
+    )
+    for tile in manifest:
+        for module in (*tile["implementation_modules"], *tile["dedicated_test_modules"]):
+            assert (service_dir / module).is_file(), f"{tile['lane']} owns missing file {module}"
+
+
+def test_lifecycle_manifest_is_ordered_complete_and_serializable():
+    import json
+
+    manifest = active_tile_lifecycle_manifest()
+    assert tuple(tile["lane"] for tile in manifest) == tuple(ACTIVE_TILE_ORDER)
+    assert tuple(tile["display_order"] for tile in manifest) == tuple(range(1, len(manifest) + 1))
+    json.dumps(manifest)
+
+
+def test_analyzer_dashboard_does_not_override_the_registry_roster():
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    source = (service_dir / "research" / "research_dashboard.py").read_text(encoding="utf-8")
+    assert 'ANALYZER_COMPARE_LANES = (\n    "CONTINUOUS"' not in source
+    assert "tile_lanes=tuple(DASHBOARD_PRIMARY_LANES)" in source
+    assert "{% for lane in tile_lanes %}" in source

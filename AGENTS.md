@@ -55,6 +55,10 @@
 - Historical evidence is immutable, quarantined, and readable only as opaque
   archive data; it must never keep retired execution code or current analyzer
   cohorts alive.
+- Every `paper_policy_*.py` module must have exactly one owner in the registry's
+  `implementation_modules`. Orphan modules fail the tile-registry contract and
+  must be registered or physically deleted. Follow `TILE_LIFECYCLE.md` for the
+  bounded add/retire procedure.
 - Create or promote a new relay-capable tile only after explicit user approval and
   the applicable qualification and technical-readiness gates pass. New research
   tiles default to paper-only and relay-ineligible.

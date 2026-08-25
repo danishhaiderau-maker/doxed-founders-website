@@ -91,16 +91,6 @@ except ImportError:
             return False
         return u in CURRENT_RESEARCH_LANES
 
-ANALYZER_COMPARE_LANES = (
-    "CONTINUOUS",
-    "OFFSET_029_ATR_TP_25",
-    "PROTECTED_W234_SCENARIO_C",
-)
-ALL_PATHWAY_LANES = ANALYZER_COMPARE_LANES
-DASHBOARD_PATHWAY_LANES = ANALYZER_COMPARE_LANES
-DASHBOARD_PRIMARY_LANES = ANALYZER_COMPARE_LANES
-
-
 def is_ai_focused_lane(lane: str) -> bool:
     return str(lane or "").upper().strip() in CURRENT_RESEARCH_LANES
 
@@ -3636,7 +3626,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
     <section id="sec-lanes">
     <h2>Current Lane Analysis</h2>
-    <p class="note" id="lanes-filter-note">Current lanes: CONTINUOUS, OFFSET_029_ATR_TP_25, and PROTECTED_W234_SCENARIO_C. Archived lane names remain available only in quarantine artifacts.</p>
+    <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
     <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Fills</th><th>Net PnL</th><th>EV / approval</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-regime">
@@ -3649,18 +3639,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-chase">
     <h2>Chase Analytics</h2>
-    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option><option value="PROTECTED_W234_SCENARIO_C">PROTECTED_W234_SCENARIO_C</option></select></label>
+    <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <div class="kpis" id="chase-kpis"></div>
     <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option><option value="PROTECTED_W234_SCENARIO_C">PROTECTED_W234_SCENARIO_C</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <h2>Chase Threshold Analysis</h2>
     <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
-    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option><option value="CONTINUOUS">CONTINUOUS</option><option value="OFFSET_029_ATR_TP_25">OFFSET_029_ATR_TP_25</option><option value="PROTECTED_W234_SCENARIO_C">PROTECTED_W234_SCENARIO_C</option></select></label>
+    <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <h2>Chase Delay (Pathway Lab)</h2>
     <p class="note" id="chase-delay-note">COMBO Direct vs Chase 3+ — delayed virtual-chase entry within each AI/spread tier.</p>
     <div class="kpis" id="chase-delay-kpis"></div>
@@ -4669,6 +4659,8 @@ def index():
         nav_groups_json=nav_groups_json,
         benchmark_lane=BENCHMARK_LANE,
         dashboard_version=RESEARCH_DASHBOARD_VERSION,
+        tile_lanes=tuple(DASHBOARD_PRIMARY_LANES),
+        tile_lane_names=", ".join(DASHBOARD_PRIMARY_LANES),
     )
     resp = make_response(html)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
