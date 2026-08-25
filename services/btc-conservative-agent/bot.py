@@ -14107,7 +14107,7 @@ def _v3_lane_policy_material(lane: str) -> dict:
     else:
         entry_limit_policy = spec.get("combo_key")
         entry_offset_fraction = (
-            float(spec.get("entry_offset_pct")) / 100.0
+            round(float(spec.get("entry_offset_pct")) / 100.0, 10)
             if spec.get("entry_offset_pct") is not None else None
         )
     # The signed paper identity must use the executable relay allow-list.

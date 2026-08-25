@@ -6,6 +6,7 @@ from pathlib import Path
 import combo_pathway_config as config
 import bot
 import paper_policy_protected_w234 as policy
+from research_v3_bridge import paper_policy_identity_for_sources
 
 
 ROOT = Path(__file__).parent
@@ -19,6 +20,8 @@ def test_entry_is_independent_paper_only_and_uses_028_percent_anchor():
     assert long_entry["paper_only"] is True
     assert long_entry["relay_eligible"] is False
     assert long_entry["policy_id"] == policy.POLICY_ID
+    assert long_entry["raw_policy_id"] == policy.POLICY_ID
+    assert long_entry["entry_limit_policy"] == policy.POLICY_ID
 
 
 def test_chase_is_due_only_every_180_seconds_in_w234_window():
@@ -37,9 +40,29 @@ def test_atr_percent_fallback_uses_percentage_points_not_fraction():
 def test_config_and_policy_identity_match_and_live_copy_is_fail_closed():
     spec = config.COMBO_LANE_SPECS[config.RESEARCH_LANE_PROTECTED_W234]
     assert spec["raw_policy_id"] == policy.POLICY_ID
+    assert spec["combo_key"] == policy.entry_fields("LONG", 80_000)["entry_limit_policy"]
     assert math.isclose(spec["margin_usd"], 0.25)
     assert spec["platform_relay_eligible"] is False
     assert spec["paper_only"] is True
+
+
+def test_decision_and_async_order_material_mint_one_protected_policy_identity():
+    decision_material = bot._v3_lane_policy_material(policy.LANE)
+    decision_material["research_lane"] = policy.LANE
+    execution_material = {
+        **decision_material,
+        **policy.entry_fields("LONG", 80_000),
+        "research_lane": policy.LANE,
+    }
+    decision_identity = paper_policy_identity_for_sources(
+        "epoch-protected-identity", decision_material,
+    )
+    execution_identity = paper_policy_identity_for_sources(
+        "epoch-protected-identity", execution_material,
+    )
+    assert execution_identity["paper_policy_spec"] == decision_identity["paper_policy_spec"]
+    assert execution_identity["policy_signature"] == decision_identity["policy_signature"]
+    assert execution_identity["policy_epoch_id"] == decision_identity["policy_epoch_id"]
 
 
 def test_runtime_enforces_protected_path_end_before_shared_natural_cycle():

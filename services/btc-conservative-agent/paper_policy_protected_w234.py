@@ -21,7 +21,11 @@ def entry_fields(direction: str, signal_price: float) -> dict:
     valid = price > 0 and direction in ("LONG", "SHORT")
     return {
         "raw_policy_id": POLICY_ID, "policy_id": POLICY_ID,
-        "entry_limit_policy": "OFFSET_0.28_CHASE_w234_s10_i180",
+        # Identity material must be byte-for-byte identical at the immediate
+        # lane verdict and the later asynchronous order lifecycle.  Emitting
+        # only the entry-family prefix here minted a second policy signature
+        # when the order was submitted, leaving the original verdict orphaned.
+        "entry_limit_policy": POLICY_ID,
         "entry_path": "AI_DIRECT_CHASE", "entry_reason": "PROTECTED_W234_CHASE",
         "pullback_pct": ENTRY_OFFSET, "deterministic_entry_offset_pct": ENTRY_OFFSET,
         "ai_direct_limit": round(limit_price, 2) if valid else None,

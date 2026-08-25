@@ -14107,7 +14107,7 @@ def _v3_lane_policy_material(lane: str) -> dict:
     else:
         entry_limit_policy = spec.get("combo_key")
         entry_offset_fraction = (
-            float(spec.get("entry_offset_pct")) / 100.0
+            round(float(spec.get("entry_offset_pct")) / 100.0, 10)
             if spec.get("entry_offset_pct") is not None else None
         )
     # The signed paper identity must use the executable relay allow-list.
@@ -15492,7 +15492,7 @@ def _cancel_open_bracket_lab_shadows(
 #
 # The fix routes Tile 2 explicitly via execution_mode_for_lane():
 #   LAB_SHADOW  -> _spawn_lab_bracket_shadow (LAB shadow + counterfactual, no order)
-#   PAPER       -> _submit_tile2_paper_resting_limit (local paper pending order)
+#   PAPER       -> registry-driven dashboard chase promotion (local paper pending order)
 #   LIVE        -> BLOCKED while PROBATION; never submit Bitfinex orders
 #                  until the operator explicitly promotes the lane.
 #   EXIT_ONLY   -> no new entries; existing filled positions still managed
@@ -37179,6 +37179,17 @@ def start_replay_buffer(trade_id: str, start_price: float, **meta):
             "policy_identity": policy_identity,
             "fee_model": fee_model,
             "execution_profile": execution_profile,
+            # Immutable comparison identity.  These are captured when the
+            # market path begins so offline analysis never has to infer the
+            # policy/executor world from mutable current settings.
+            "source_git_rev": meta.get("source_git_rev") or _runtime_git_rev(),
+            "executor_revision": meta.get("executor_revision") or _runtime_git_rev(),
+            "fill_gate_rev": meta.get("fill_gate_rev") or "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V2",
+            "correlated_cluster_boundary_pct": (
+                meta.get("correlated_cluster_boundary_pct")
+                if meta.get("correlated_cluster_boundary_pct") is not None
+                else CLUSTER_MIN_DIST_PCT
+            ),
             "size_mult": meta.get("size_mult"),
             "session_bucket": meta.get("session_bucket"),
             "entry_features": copy.deepcopy(meta.get("entry_features") or {}),
@@ -37470,6 +37481,14 @@ def begin_post_exit_replay(trade_id: str, pos: dict, exit_price: float):
                 "bitfinex_evidence": copy.deepcopy(buf.get("bitfinex_evidence") or {}),
                 "fee_model": buf.get("fee_model"),
                 "execution_profile": buf.get("execution_profile"),
+                "chase_mode": buf.get("chase_mode"),
+                "max_chases": buf.get("max_chases"),
+                "fill_at_limit": bool(buf.get("fill_at_limit")),
+                "collection_epoch_id": buf.get("collection_epoch_id"),
+                "source_git_rev": buf.get("source_git_rev"),
+                "executor_revision": buf.get("executor_revision"),
+                "fill_gate_rev": buf.get("fill_gate_rev"),
+                "correlated_cluster_boundary_pct": buf.get("correlated_cluster_boundary_pct"),
             }, label="POST_EXIT_REPLAY_HEADER")
         except Exception as e:
             logger.error(f"[POST_EXIT_REPLAY] header persist failed tid={trade_id}: {e}")
@@ -37598,6 +37617,14 @@ def _load_post_exit_replays():
                 "bitfinex_evidence": copy.deepcopy(header.get("bitfinex_evidence") or {}),
                 "fee_model": header.get("fee_model"),
                 "execution_profile": header.get("execution_profile"),
+                "chase_mode": header.get("chase_mode"),
+                "max_chases": header.get("max_chases"),
+                "fill_at_limit": bool(header.get("fill_at_limit")),
+                "collection_epoch_id": header.get("collection_epoch_id"),
+                "source_git_rev": header.get("source_git_rev"),
+                "executor_revision": header.get("executor_revision"),
+                "fill_gate_rev": header.get("fill_gate_rev"),
+                "correlated_cluster_boundary_pct": header.get("correlated_cluster_boundary_pct"),
                 "post_exit": True,
                 "post_exit_started_ts": _buf_float(header.get("post_exit_started_ts"), now),
                 "post_exit_deadline_ts": deadline,
@@ -37861,6 +37888,20 @@ def dump_replay(trade_id: str):
                 "pullback_pct": buf.get("pullback_pct"),
                 "leverage": buf.get("leverage"),
                 "margin_usdt": buf.get("margin_usdt"),
+                "exit_config": copy.deepcopy(buf.get("exit_config") or {}),
+                "fee_model": buf.get("fee_model"),
+                "execution_profile": buf.get("execution_profile"),
+                "chase": {
+                    "enabled": bool(buf.get("chase_mode")) and str(buf.get("chase_mode")).upper() != "NONE",
+                    "mode": buf.get("chase_mode") or "NONE",
+                    "max_chases": buf.get("max_chases"),
+                    "fill_at_limit": bool(buf.get("fill_at_limit")),
+                },
+                "collection_epoch_id": buf.get("collection_epoch_id"),
+                "source_git_rev": buf.get("source_git_rev"),
+                "executor_revision": buf.get("executor_revision"),
+                "fill_gate_rev": buf.get("fill_gate_rev"),
+                "correlated_cluster_boundary_pct": buf.get("correlated_cluster_boundary_pct"),
                 "ticks": list(buf["ticks"]),
             }
             if _safe_append_jsonl(SIGNAL_REPLAY_FILE, replay, label="SIGNAL_REPLAY"):
@@ -38355,6 +38396,18 @@ def _counterfactual_bitfinex_evidence(buf: dict, snapshot: dict, replay: dict, o
 def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay: dict, outcome: dict) -> dict:
     """Immutable policy and conservative analysis-eligibility metadata."""
     policy_snapshot = copy.deepcopy(buf.get("exit_config") or {})
+    # Durable replay identity wins only when the signal snapshot did not
+    # already carry the field.  New rows therefore retain the exact facts
+    # captured at path start; legacy rows stay incomplete and excluded.
+    identity_snapshot = copy.deepcopy(snapshot or {})
+    for key in (
+        "fee_model", "execution_profile", "chase", "source_git_rev",
+        "executor_revision", "fill_gate_rev", "correlated_cluster_boundary_pct",
+    ):
+        if identity_snapshot.get(key) is None and replay.get(key) is not None:
+            identity_snapshot[key] = copy.deepcopy(replay.get(key))
+    if not identity_snapshot.get("epoch_id"):
+        identity_snapshot["epoch_id"] = replay.get("collection_epoch_id")
     missing_policy = [
         key for key in _COUNTERFACTUAL_REQUIRED_POLICY_KEYS
         if policy_snapshot.get(key) is None
@@ -38371,7 +38424,7 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         if snapshot.get("actual_bitfinex_realized_pnl_usd") is not None
         else replay.get("actual_bitfinex_realized_pnl_usd")
     )
-    policy_key = _counterfactual_policy_comparability_key(policy_snapshot, buf, snapshot)
+    policy_key = _counterfactual_policy_comparability_key(policy_snapshot, buf, identity_snapshot)
     bitfinex_evidence = _counterfactual_bitfinex_evidence(buf, snapshot, replay, outcome)
     post_exit_horizons = _counterfactual_post_exit_horizons(replay)
     entry_horizons = _counterfactual_entry_horizons(replay)
@@ -38590,11 +38643,22 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
             "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
             "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
-            "exit_config": {**get_exit_config_snapshot(), **{k: v for k, v in cfg.items() if k in (
-                "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
-            )}},
+            "exit_config": copy.deepcopy(replay.get("exit_config") or {
+                **get_exit_config_snapshot(),
+                **{k: v for k, v in cfg.items() if k in (
+                    "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
+                )},
+            }),
             "virtual_entry": replay.get("virtual_entry"),
             "virtual_fill_t": replay.get("virtual_fill_t"),
+            "fee_model": replay.get("fee_model"),
+            "execution_profile": replay.get("execution_profile"),
+            "chase": copy.deepcopy(replay.get("chase")),
+            "collection_epoch_id": replay.get("collection_epoch_id"),
+            "source_git_rev": replay.get("source_git_rev"),
+            "executor_revision": replay.get("executor_revision"),
+            "fill_gate_rev": replay.get("fill_gate_rev"),
+            "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
         }
         outcome = simulate_replay_outcome(buf)
         counterfactual = {
@@ -38766,11 +38830,22 @@ def _run_counterfactual_catchup():
                 "margin_usdt": cfg.get("margin_usdt", FIXED_MARGIN_USDT),
                 "pullback_pct": cfg.get("pullback_threshold", state.get("pullback_threshold", 0.001)),
                 "early_fail_enabled": snapshot.get("policy_effective", {}).get("early_fail", True),
-                "exit_config": {**get_exit_config_snapshot(), **{k: v for k, v in cfg.items() if k in (
-                    "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
-                )}},
+                "exit_config": copy.deepcopy(replay.get("exit_config") or {
+                    **get_exit_config_snapshot(),
+                    **{k: v for k, v in cfg.items() if k in (
+                        "trail_ladder", "thesis_fast_exit_unreal_pct", "thesis_exit_if_above_unreal_pct",
+                    )},
+                }),
                 "virtual_entry": replay.get("virtual_entry"),
                 "virtual_fill_t": replay.get("virtual_fill_t"),
+                "fee_model": replay.get("fee_model"),
+                "execution_profile": replay.get("execution_profile"),
+                "chase": copy.deepcopy(replay.get("chase")),
+                "collection_epoch_id": replay.get("collection_epoch_id"),
+                "source_git_rev": replay.get("source_git_rev"),
+                "executor_revision": replay.get("executor_revision"),
+                "fill_gate_rev": replay.get("fill_gate_rev"),
+                "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
             }
             outcome = simulate_replay_outcome(buf)
             counterfactual = {
