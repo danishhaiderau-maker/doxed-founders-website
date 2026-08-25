@@ -6,6 +6,7 @@ from combo_pathway_config import (
     RETIRED_TILE_LANES,
     TILE_COMPONENT_SURFACES,
     active_tile_lifecycle_manifest,
+    active_tile_registry_signature,
     validate_tile_registry,
 )
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES
@@ -70,6 +71,17 @@ def test_lifecycle_manifest_is_ordered_complete_and_serializable():
     assert tuple(tile["lane"] for tile in manifest) == tuple(ACTIVE_TILE_ORDER)
     assert tuple(tile["display_order"] for tile in manifest) == tuple(range(1, len(manifest) + 1))
     json.dumps(manifest)
+    signature = active_tile_registry_signature()
+    assert len(signature) == 64
+    assert signature == active_tile_registry_signature()
+
+
+def test_runtime_and_sync_surfaces_publish_registry_receipt():
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    source = (service_dir / "bot.py").read_text(encoding="utf-8")
+    assert source.count('"tile_registry_signature"') >= 3
+    assert source.count('"active_tiles"') >= 3
+    assert "active_tile_registry_signature()" in source
 
 
 def test_analyzer_dashboard_does_not_override_the_registry_roster():

@@ -9,9 +9,13 @@ hiding a card.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
-RESEARCH_LANE_PROTECTED_W234 = "PROTECTED_W234_SCENARIO_C"
+RESEARCH_LANE_OFFSET_029_ATR_PROTECTED = "OFFSET_029_ATR_PROTECTED"
+RESEARCH_LANE_OFFSET_029_ATR_REGIME = "OFFSET_029_ATR_REGIME"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 TILE_ARCHITECTURE_VERSION = 1
 TILE_COMPONENT_SURFACES = (
@@ -27,16 +31,19 @@ TILE_COMPONENT_SURFACES = (
     "monitoring",
     "regression_tests",
 )
+TILE_LIFECYCLE_STATES = frozenset({"ACTIVE", "PAPER_ONLY", "BENCHMARK"})
 
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_PROTECTED_W234,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-    RESEARCH_LANE_PROTECTED_W234,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 COMBO_LANE_SPECS = {
@@ -62,6 +69,9 @@ COMBO_LANE_SPECS = {
         "platform_relay_eligible": True,
         "default_enabled": True,
         "id_prefix": "o29atr",
+        "lifecycle_state": "ACTIVE",
+        "implementation_modules": ("paper_policy_offset029.py",),
+        "dedicated_test_modules": ("test_paper_policy_offset029.py",),
         "entry_offset_pct": 0.29,
         "initial_rest_sec": 600,
         "chase_windows": (2, 3, 4),
@@ -90,14 +100,11 @@ COMBO_LANE_SPECS = {
             "out-of-sample EV under conservative paper execution?"
         ),
     },
-    RESEARCH_LANE_PROTECTED_W234: {
-        "label": "Protected W234 Chase · Scenario C + ATR stop",
-        "subtitle": (
-            "PAPER RESEARCH when ON — shared AI direction, independent order/position/ledger; "
-            "not live-copy eligible until explicitly qualified"
-        ),
-        "combo_key": "OFFSET_0.28_CHASE_w234_s10_i180|ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5",
-        "raw_policy_id": "OFFSET_0.28_CHASE_w234_s10_i180|ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5",
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
+        "label": "Protected Patient Chase · Static ATR risk",
+        "subtitle": "PAPER ONLY — static stop, partials, break-even and trailing runner",
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5|HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5",
         "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
         "entry_mode": "IMMEDIATE",
         "is_benchmark": False, "is_research_candidate": True,
@@ -105,27 +112,59 @@ COMBO_LANE_SPECS = {
         "uses_shared_ai_direction": True,
         "paper_only": True, "platform_relay_eligible": False,
         "default_enabled": False,
-        "id_prefix": "pwch",
-        "entry_offset_pct": 0.28,
+        "id_prefix": "o29ps",
+        "lifecycle_state": "PAPER_ONLY",
+        "implementation_modules": ("paper_policy_offset029_protected.py",),
+        "dedicated_test_modules": ("test_paper_policy_offset029_protected.py",),
+        "entry_offset_pct": 0.29,
         "initial_rest_sec": 600,
         "chase_windows": (2, 3, 4),
         "chase_age_sec": (600, 1500),
-        "chase_interval_sec": 180,
-        "chase_remaining_gap_step_pct": 10.0,
+        "chase_interval_sec": 60,
+        "chase_remaining_gap_step_pct": 25.0,
         "entry_ttl_sec": 1800,
         "margin_usd": 0.25,
+        "account_risk_pct": 0.5,
         "atr_tp_multiple": 2.5,
-        "atr_stop_multiple": 2.5,
+        "initial_stop_atr_k": 1.0,
+        "partial_targets_atr": (1.0, 1.5),
+        "partial_fractions": (0.25, 0.25),
+        "break_even_arm_atr_k": 1.25,
+        "trailing_stop_atr_k": 1.0,
         "atr_source": "frozen fill-time 3m ATR(14)",
         "path_end_sec": 7200,
-        "ladder": ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120)),
-        "ladder_label": "Scenario C",
-        "ladder_profile_id": "SCENARIO_C_RUNNER_8_v8_20260820",
-        "exit_profile_id": "ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5_V1",
-        "promotion_criteria": "PAPER ONLY until independent multi-regime OOS evidence has positive LCB and bounded drawdown",
-        "kill_criteria": "Stop new entries on any identity, lifecycle, stop, or evidence mismatch",
-        "hypothesis": "The descriptive W234 chased cell retains fillability while Scenario C and a frozen 2.5 ATR stop bound losses.",
-        "research_question": "Does the protected W234 chase remain positive under conservative paper execution across regimes?",
+        "exit_profile_id": "HYBRID_SL1_PT25_25_BE1.25_TRAIL1_TP2.5_120M_V1",
+        "promotion_criteria": "PAPER ONLY until reduce-only partial reconciliation and qualified OOS evidence pass",
+        "kill_criteria": "Stop new entries on identity, lifecycle, partial-close, stop, or evidence mismatch",
+        "hypothesis": "Static ATR protection improves Patient Chase return-to-drawdown without changing its entry.",
+        "research_question": "Does static protected Patient Chase beat the baseline on chronological OOS risk-adjusted return?",
+    },
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
+        "label": "Protected Patient Chase · Dynamic regime",
+        "subtitle": "PAPER ONLY — causal regime protection may tighten but never widen risk",
+        "combo_key": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+        "raw_policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|REGIME_ATR_PROTECTION_V1",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE", "is_benchmark": False,
+        "is_research_candidate": True, "is_legacy": False,
+        "is_independent_ai": False, "uses_shared_ai_direction": True,
+        "paper_only": True, "platform_relay_eligible": False,
+        "default_enabled": False, "id_prefix": "o29rd",
+        "lifecycle_state": "PAPER_ONLY",
+        "implementation_modules": ("paper_policy_offset029_regime.py",),
+        "dedicated_test_modules": ("test_paper_policy_offset029_regime.py",),
+        "entry_offset_pct": 0.29, "initial_rest_sec": 600,
+        "chase_windows": (2, 3, 4), "chase_age_sec": (600, 1500),
+        "chase_interval_sec": 60, "chase_remaining_gap_step_pct": 25.0,
+        "entry_ttl_sec": 1800, "margin_usd": 0.25, "account_risk_pct": 0.5,
+        "regime_profiles": ("SIDEWAYS", "ORDINARY_TREND", "STRONG_ALIGNED_TREND"),
+        "regime_transition_rule": "causal; stop distance, size and risk may never widen",
+        "atr_tp_multiple": 2.5, "atr_source": "frozen fill-time 3m ATR(14)",
+        "path_end_sec": 7200, "exit_profile_id": "REGIME_ATR_PROTECTION_V1",
+        "promotion_criteria": "PAPER ONLY until reduce-only partial reconciliation and qualified OOS evidence pass",
+        "kill_criteria": "Stop new entries on identity, lifecycle, transition, partial-close, or evidence mismatch",
+        "hypothesis": "Causal regime protection improves capture while never expanding initial risk.",
+        "research_question": "Does regime-adaptive protection beat the static protected control on chronological OOS evidence?",
     },
 }
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
@@ -138,10 +177,10 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-three-tile-protected-w234"
+RESEARCH_STACK_VERSION = "v31-four-tile-protected-patient-chase"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 + PROTECTED_W234_SCENARIO_C share one "
-    "direction-only 3-minute AI call; three-tile paper-research roster; all retired lanes "
+    "CONTINUOUS benchmark + baseline + static-protected + regime-protected Patient Chase share one "
+    "direction-only 3-minute AI call; four-tile paper-research roster; all retired lanes "
     "are analyzer-only; registered Patient Chase paper lifecycles; "
     "independent lane capacity, orders, positions and ledgers; "
     "fail-closed relay executor watchdog"
@@ -167,6 +206,9 @@ BENCHMARK_TILE_SPEC = {
     "platform_relay_eligible": True,
     "id_prefix": "cont",
     "toggle_key": "continuous_ai_research_enabled",
+    "lifecycle_state": "BENCHMARK",
+    "implementation_modules": (),
+    "dedicated_test_modules": (),
 }
 
 ACTIVE_TILE_REGISTRY = {
@@ -175,22 +217,27 @@ ACTIVE_TILE_REGISTRY = {
         "toggle_key": "research_lane_enabled",
     },
     COMPARISON_BENCHMARK_LANE: dict(BENCHMARK_TILE_SPEC),
-    RESEARCH_LANE_PROTECTED_W234: {
-        **COMBO_LANE_SPECS[RESEARCH_LANE_PROTECTED_W234],
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED: {
+        **COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_PROTECTED],
+        "toggle_key": "research_lane_enabled",
+    },
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME: {
+        **COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_REGIME],
         "toggle_key": "research_lane_enabled",
     },
 }
 ACTIVE_TILE_ORDER = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     COMPARISON_BENCHMARK_LANE,
-    RESEARCH_LANE_PROTECTED_W234,
+    RESEARCH_LANE_OFFSET_029_ATR_PROTECTED,
+    RESEARCH_LANE_OFFSET_029_ATR_REGIME,
 )
 
 # Retiring a tile means removing it from ACTIVE_TILE_REGISTRY and recording its
 # lane token here for one release. The registry audit then fails while that
 # token remains on any active execution/UI/analyzer surface. Historical data is
 # quarantined separately and never keeps runtime code alive.
-RETIRED_TILE_LANES = frozenset()
+RETIRED_TILE_LANES = frozenset({"PROTECTED_W234_SCENARIO_C"})
 
 
 def validate_tile_registry() -> tuple[str, ...]:
@@ -201,7 +248,10 @@ def validate_tile_registry() -> tuple[str, ...]:
         defects.append("DUPLICATE_TILE_IN_DISPLAY_ORDER")
     if set(ACTIVE_TILE_ORDER) != set(lanes):
         defects.append("DISPLAY_ORDER_REGISTRY_MISMATCH")
-    required = {"label", "raw_policy_id", "id_prefix", "toggle_key"}
+    required = {
+        "label", "raw_policy_id", "id_prefix", "toggle_key",
+        "lifecycle_state", "implementation_modules", "dedicated_test_modules",
+    }
     prefixes = {}
     for lane, spec in ACTIVE_TILE_REGISTRY.items():
         missing = sorted(required.difference(spec))
@@ -213,10 +263,53 @@ def validate_tile_registry() -> tuple[str, ...]:
         prefixes[prefix] = lane
         if spec.get("paper_only") and spec.get("platform_relay_eligible"):
             defects.append(f"{lane}:PAPER_ONLY_RELAY_CONTRADICTION")
+        state = str(spec.get("lifecycle_state") or "")
+        if state not in TILE_LIFECYCLE_STATES:
+            defects.append(f"{lane}:INVALID_LIFECYCLE_STATE:{state}")
+        if state == "PAPER_ONLY" and not spec.get("paper_only"):
+            defects.append(f"{lane}:PAPER_ONLY_STATE_WITHOUT_GATE")
+        if state == "BENCHMARK" and not spec.get("is_benchmark"):
+            defects.append(f"{lane}:BENCHMARK_STATE_WITHOUT_ROLE")
     overlap = set(lanes).intersection(RETIRED_TILE_LANES)
     if overlap:
         defects.append("ACTIVE_RETIRED_OVERLAP:" + ",".join(sorted(overlap)))
     return tuple(defects)
+
+
+def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
+    """Stable cross-layer roster used by audits, APIs, dashboards and analyzers."""
+    return tuple(
+        {
+            "lane": lane,
+            "display_order": index,
+            "label": ACTIVE_TILE_REGISTRY[lane]["label"],
+            "raw_policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
+            "id_prefix": ACTIVE_TILE_REGISTRY[lane]["id_prefix"],
+            "toggle_key": ACTIVE_TILE_REGISTRY[lane]["toggle_key"],
+            "lifecycle_state": ACTIVE_TILE_REGISTRY[lane]["lifecycle_state"],
+            "paper_only": bool(ACTIVE_TILE_REGISTRY[lane].get("paper_only", False)),
+            "relay_eligible": bool(ACTIVE_TILE_REGISTRY[lane].get("platform_relay_eligible", False)),
+            "implementation_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["implementation_modules"]),
+            "dedicated_test_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["dedicated_test_modules"]),
+        }
+        for index, lane in enumerate(ACTIVE_TILE_ORDER, start=1)
+    )
+
+
+def active_tile_registry_signature() -> str:
+    """Deterministic identity shared by runtime, mirror, analyzer and monitors."""
+    payload = {
+        "schema": TILE_REGISTRY_SCHEMA,
+        "architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tiles": active_tile_lifecycle_manifest(),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 COMBO_CHASE_DELAY_LANES = ()
 COMBO_CHASE_ISOLATION_PAIRS = ()

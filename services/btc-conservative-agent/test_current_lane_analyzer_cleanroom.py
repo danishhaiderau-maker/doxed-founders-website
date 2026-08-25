@@ -1,5 +1,10 @@
 from pathlib import Path
 
+import pandas as pd
+
+import analyzer_research_engine_v62 as analyzer
+from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
+
 
 ROOT = Path(__file__).resolve().parent
 ANALYZER = (ROOT / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
@@ -61,3 +66,27 @@ def test_benchmark_report_has_no_dangling_retired_lane_status_helper():
     ):
         assert retired_token not in ANALYZER
         assert retired_token not in DASHBOARD
+
+
+def test_current_lane_catalog_cannot_re_admit_retired_data_rows():
+    trades = pd.DataFrame([
+        {"research_lane": "PROTECTED_W234_SCENARIO_C"},
+        {"research_lane": "TYPE_B"},
+    ])
+    assert analyzer._ordered_lane_catalog(
+        {"PROTECTED_W234_SCENARIO_C", "TYPE_B"}, trades
+    ) == list(ACTIVE_TILE_ORDER)
+
+
+def test_shadow_loader_requires_exact_registry_policy_identity(monkeypatch):
+    protected = "OFFSET_029_ATR_PROTECTED"
+    valid = ACTIVE_TILE_REGISTRY[protected]["raw_policy_id"]
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [
+        {"research_lane": protected, "policy_version": valid, "ts": 1},
+        {"research_lane": protected, "policy_version": "STALE_POLICY", "ts": 2},
+        {"research_lane": "OFFSET_029_ATR_REGIME", "policy_version": "", "ts": 3},
+    ])
+    frame = analyzer._load_shadow_lane_outcome_df()
+    assert len(frame) == 1
+    assert frame.iloc[0]["policy_version"] == valid
+    assert frame.attrs["policy_mismatch_rows_excluded"] == 2

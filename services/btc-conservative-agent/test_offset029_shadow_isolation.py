@@ -113,18 +113,16 @@ def test_offset_outcome_cannot_use_scenario_c_profit_lock():
 def test_analyzer_excludes_preserved_policy_mismatch_rows():
     shadow_loader = _function_source(ANALYZER, "_load_shadow_lane_outcome_df")
 
-    assert "OFFSET_029_ATR_TP_25" in shadow_loader
-    assert '"OFFSET_029_ATR_PROTECTED"' not in shadow_loader
-    assert '"OFFSET_029_ATR_REGIME"' not in shadow_loader
+    assert "ACTIVE_TILE_REGISTRY.items()" in shadow_loader
     assert "policy_mismatch_rows_excluded" in shadow_loader
-    assert "PATIENT_CHASE_SHADOW_POLICY_IDENTITY_MISSING" in shadow_loader
+    assert "ACTIVE_TILE_SHADOW_POLICY_IDENTITY_MISMATCH" in shadow_loader
 
 
 def test_shadow_loader_keeps_signed_patient_shadow_and_excludes_legacy_mismatch():
     rows = [
         {"research_lane": "OFFSET_029_ATR_TP_25", "policy_version": offset_policy.POLICY_ID, "net_pnl_usd": 2.0},
         {"research_lane": "OFFSET_029_ATR_TP_25", "net_pnl_usd": 99.0},
-        {"research_lane": "CONTINUOUS", "net_pnl_usd": 1.0},
+        {"research_lane": "CONTINUOUS", "policy_version": "CONTINUOUS", "net_pnl_usd": 1.0},
     ]
     fn = _load_function(
         ANALYZER,
@@ -135,6 +133,10 @@ def test_shadow_loader_keeps_signed_patient_shadow_and_excludes_legacy_mismatch(
             "_load_jsonl_rows": lambda _path: rows,
             "_session_start_ts": lambda _session: None,
             "filter_df_since_session": lambda df, *_args, **_kwargs: df,
+            "ACTIVE_TILE_REGISTRY": {
+                "OFFSET_029_ATR_TP_25": {"raw_policy_id": offset_policy.POLICY_ID},
+                "CONTINUOUS": {"raw_policy_id": "CONTINUOUS"},
+            },
         },
     )
     ranked = fn()

@@ -54,6 +54,8 @@ from combo_pathway_config import (
     ANALYZER_SYNC_ID as COMBO_ANALYZER_SYNC_ID,
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
+    TILE_ARCHITECTURE_VERSION,
+    TILE_REGISTRY_SCHEMA,
     BENCHMARK_LANE as COMBO_BENCHMARK_LANE,
     BENCHMARK_PROFILE_ID as COMBO_BENCHMARK_PROFILE_ID,
     BENCHMARK_ROLE as COMBO_BENCHMARK_ROLE,
@@ -76,6 +78,8 @@ from combo_pathway_config import (
     RESEARCH_LANE_OFFSET_029_ATR_REGIME,
     RETIRED_TILE_LANES,
     any_combo_execution_enabled,
+    active_tile_lifecycle_manifest,
+    active_tile_registry_signature,
     combo_entry_mode,
     combo_lane_match_detail,
     combo_lane_matches,
@@ -32902,6 +32906,8 @@ def health():
     status = "paused" if paused else (
         "alive" if process_alive and strategy_progress["ok"] else "degraded"
     )
+    tile_registry = active_tile_lifecycle_manifest()
+    tile_registry_signature = active_tile_registry_signature()
     return jsonify({
         "status": status,
         **_dashboard_owner_metadata(),
@@ -32933,6 +32939,10 @@ def health():
         "analyzer_sync_id": analyzer_sync_id,
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": tile_registry_signature,
+        "active_tiles": tile_registry,
         "git_rev": _runtime_git_rev(),
         "collection": {
             "path_replay": PATH_REPLAY_POLICY_TAG,
@@ -33000,6 +33010,7 @@ def ready():
     # canonical owner is alive, warmed and receiving genuine market data;
     # signal_generation_ready separately proves whether new entries may run.
     ready_ok = bool(process_ready and runtime["system_ready"])
+    tile_registry = active_tile_lifecycle_manifest()
     return jsonify({
         "ok": ready_ok,
         "process_ready": process_ready,
@@ -33008,6 +33019,10 @@ def ready():
         ),
         **_dashboard_owner_metadata(),
         "bot_version": EXECUTION_FIX_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "active_tiles": tile_registry,
         "heartbeat_age": heartbeat_age,
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
@@ -34903,11 +34918,16 @@ def api_data_sync_manifest():
             )
         except (TypeError, ValueError):
             fresh_collection_signal_ts = 0.0
+    tile_registry = active_tile_lifecycle_manifest()
     return jsonify({
         "schema": "fly_runtime_incremental_sync_v1",
         "generated_at": utc_iso(),
         "source_git_rev": _runtime_git_rev(),
         "bot_version": EXECUTION_FIX_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "active_tiles": tile_registry,
         "files": files,
         "file_count": len(files),
         "total_bytes": sum(row["size"] for row in files),

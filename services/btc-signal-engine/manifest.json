@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-three-tile-protected-w234",
+  "engine_version": "v31-four-tile-protected-patient-chase",
   "combo_version": "2026-08-25",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "e54dcfc40ee0",
+  "signal_hash": "1b6c3e3d5cb9",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-25T14:04:19.187Z"
+  "updated_at": "2026-08-25T15:14:04.684Z"
 }

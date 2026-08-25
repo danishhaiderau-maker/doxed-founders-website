@@ -12,12 +12,6 @@ on:
       - "scripts/check-relay-flat.mjs"
       - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
-    inputs:
-      recover_stalled_paper_boundary:
-        description: "Deploy the lock repair when the old runtime is provably paper-only, disarmed, and deadlocked"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -69,6 +63,7 @@ jobs:
           python test_platform_relay_lane_isolation.py
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
+          python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py -q
 
       - uses: actions/setup-node@v4
         with:
@@ -82,7 +77,6 @@ jobs:
           npx prisma generate
 
       - name: Prove the current Fly owner and every relay account are flat
-        if: ${{ !inputs.recover_stalled_paper_boundary }}
         working-directory: ${{ github.workspace }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -91,38 +85,6 @@ jobs:
           REQUIRE_CANONICAL_FLY_OWNER: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
         run: node scripts/check-relay-flat.mjs
-
-      - name: Prove emergency recovery is restricted to a stalled paper-only boundary
-        if: ${{ inputs.recover_stalled_paper_boundary }}
-        run: |
-          python - <<'PY'
-          import json
-          import urllib.request
-
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
-              health = json.load(response)
-          progress = health.get("strategy_progress") or {}
-          reasons = set(progress.get("reasons") or [])
-          incident = health.get("strategy_progress_incident") or {}
-          assert response.status == 200 and health.get("process_alive") is True, health
-          assert health.get("force_paper_mode") is True, health
-          assert health.get("live_armed") is False, health
-          assert health.get("bitfinex_live_enabled") is False, health
-          assert incident.get("new_entries_suppressed") is True, incident
-          assert progress.get("trade_lock_available") is False, progress
-          assert "TRADE_LOCK_UNAVAILABLE" in reasons, progress
-          assert int(progress.get("open_positions") or 0) > 0 or int(progress.get("pending_orders") or 0) > 0, progress
-          print(json.dumps({
-              "recovery": "stalled_paper_boundary",
-              "revision": health.get("source_git_rev"),
-              "paper_only": health.get("force_paper_mode"),
-              "live_armed": health.get("live_armed"),
-              "bitfinex_live_enabled": health.get("bitfinex_live_enabled"),
-              "positions": progress.get("open_positions"),
-              "pending": progress.get("pending_orders"),
-              "reasons": sorted(reasons),
-          }, sort_keys=True))
-          PY
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -140,19 +102,36 @@ jobs:
           import os
           import time
           import urllib.request
+          import combo_pathway_config as registry
 
           expected = os.environ["EXPECTED_REVISION"][:12]
-          url = "https://doxed-btc-bot.fly.dev/health"
+          base = "https://doxed-btc-bot.fly.dev"
+          expected_signature = registry.active_tile_registry_signature()
+          expected_lanes = list(registry.ACTIVE_TILE_ORDER)
           last = ""
           for _ in range(60):
               try:
-                  with urllib.request.urlopen(url, timeout=8) as response:
+                  with urllib.request.urlopen(base + "/health", timeout=8) as response:
                       payload = json.load(response)
+                  with urllib.request.urlopen(base + "/ready", timeout=8) as ready_response:
+                      ready = json.load(ready_response)
                   last = json.dumps(payload, sort_keys=True)
+                  progress = payload.get("strategy_progress") or {}
+                  runtime_lanes = [row.get("lane") for row in payload.get("active_tiles") or []]
                   if (
                       response.status == 200
+                      and ready_response.status == 200
+                      and ready.get("ok") is True
                       and payload.get("process_alive") is True
                       and str(payload.get("source_git_rev") or "").startswith(expected)
+                      and payload.get("bot_version") == registry.EXECUTION_FIX_VERSION
+                      and payload.get("tile_registry_signature") == expected_signature
+                      and ready.get("tile_registry_signature") == expected_signature
+                      and runtime_lanes == expected_lanes
+                      and progress.get("ok") is True
+                      and progress.get("trade_lock_available") is True
+                      and int(progress.get("open_positions") or 0) == 0
+                      and int(progress.get("pending_orders") or 0) == 0
                   ):
                       health = payload
                       if (

@@ -374,9 +374,12 @@ try {
           lastSyncedTotalBytes = $lastSyncedTotalBytes
           elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
           sourceRevision = $(if ($manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+          botVersion = $(if ($manifest.PSObject.Properties.Name -contains "bot_version") { [string]$manifest.bot_version } else { $null })
+          tileRegistrySignature = $(if ($manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
+          activeTiles = $(if ($manifest.PSObject.Properties.Name -contains "active_tiles") { @($manifest.active_tiles) } else { @() })
           relayEvidence = $relayEvidenceStatus
         }
-        $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
+        $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
         Add-Content -LiteralPath $logFile -Value (
           "$($heartbeat.syncedAt)`tSKIP`tgrowth=$([Math]::Round($growthBytes/1MB,2))MB < threshold=${thresholdMb}MB"
         )
@@ -428,6 +431,9 @@ try {
         files = $result.Files
         bytes = $result.Bytes
         sourceRevision = $(if ($result.SourceRevision) { $result.SourceRevision } elseif ($manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+        botVersion = $(if ($manifest.PSObject.Properties.Name -contains "bot_version") { [string]$manifest.bot_version } else { $null })
+        tileRegistrySignature = $(if ($manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
+        activeTiles = $(if ($manifest.PSObject.Properties.Name -contains "active_tiles") { @($manifest.active_tiles) } else { @() })
         analyzerPublished = $result.AnalyzerPublished
         relayEvidence = $relayEvidenceStatus
         prunedRotations = $result.PrunedRotations
@@ -452,7 +458,7 @@ try {
         "$($heartbeat.syncedAt)`tERROR`t$($heartbeat.error)"
       )
     }
-    $heartbeat | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
+    $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
     try {
       Write-SizeReport -MirrorPath $mirrorDir -ReportFile $sizeReportFile -FlyApiUrl $SourceUrl -IntervalSec ([Math]::Max(15, $IntervalSec))
     } catch {

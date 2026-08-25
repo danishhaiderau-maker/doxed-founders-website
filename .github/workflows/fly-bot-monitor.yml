@@ -48,8 +48,12 @@ jobs:
           import os
           import re
           import subprocess
+          import sys
           import urllib.error
           import urllib.request
+
+          sys.path.insert(0, "services/btc-conservative-agent")
+          import combo_pathway_config as registry
 
           required = os.environ["EXPECTED_REVISION"]
           with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
@@ -93,24 +97,31 @@ jobs:
               and health.get("bitfinex_live_enabled") is False
           ):
               raise SystemExit(f"Fly bot execution safety drift: {health}")
+          runtime_lanes = [row.get("lane") for row in health.get("active_tiles") or []]
+          if (
+              health.get("bot_version") != registry.EXECUTION_FIX_VERSION
+              or health.get("tile_registry_signature") != registry.active_tile_registry_signature()
+              or runtime_lanes != list(registry.ACTIVE_TILE_ORDER)
+          ):
+              raise SystemExit(
+                  "Fly tile registry drift: "
+                  f"version={health.get('bot_version')} lanes={runtime_lanes} "
+                  f"signature={health.get('tile_registry_signature')}"
+              )
           print(
               f"Fly process healthy, disarmed, and current: {actual} "
               f"(contains bot source {required[:12]})"
           )
 
-          # /ready is strict entry eligibility. A quiet derivatives tape may
-          # return 503 while the process and risk manager remain healthy.
-          try:
-              with urllib.request.urlopen(
-                  "https://doxed-btc-bot.fly.dev/ready", timeout=12
-              ) as response:
-                  ready = json.load(response)
-              print(f"Strict readiness sample: {json.dumps(ready, sort_keys=True)}")
-          except urllib.error.HTTPError as exc:
-              body = exc.read().decode("utf-8", "replace")
-              if exc.code != 503:
-                  raise
-              print(f"Strict readiness unavailable (non-liveness): {body}")
+          with urllib.request.urlopen(
+              "https://doxed-btc-bot.fly.dev/ready", timeout=12
+          ) as response:
+              ready = json.load(response)
+          if response.status != 200 or ready.get("ok") is not True:
+              raise SystemExit(f"Strict readiness failed: {ready}")
+          if ready.get("tile_registry_signature") != registry.active_tile_registry_signature():
+              raise SystemExit(f"Ready tile registry drift: {ready}")
+          print(f"Strict readiness sample: {json.dumps(ready, sort_keys=True)}")
           PY
   strategy-progress:
     runs-on: ubuntu-slim

@@ -365,6 +365,11 @@ try:
     from combo_pathway_config import (
         ANALYZER_SYNC_ID,
         ACTIVE_TILE_ORDER,
+        ACTIVE_TILE_REGISTRY,
+        TILE_ARCHITECTURE_VERSION,
+        TILE_REGISTRY_SCHEMA,
+        active_tile_lifecycle_manifest,
+        active_tile_registry_signature,
         BENCHMARK_LANE,
         COMPARISON_BENCHMARK_LANE,
         CONTINUOUS_PROXY_LANES,
@@ -390,31 +395,10 @@ try:
     ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
-except ImportError:
-    EXPECTED_BOT_VERSION = "v10.2-ai-chase-bands-desk-2026-06-23"
-    EXPECTED_EXCHANGE = "bitfinex"
-    ANALYZER_SYNC_ID = "v10.2-ai-chase-bands-desk-2026-06-23"
-    RESEARCH_STACK_VERSION = ANALYZER_SYNC_ID
-    SCENARIO_C_LADDER_LABEL = "12→8, 15→10, 25→18, 40→28, 60→45, 80→60, 100→75, 150→120"
-    TRAIL_LADDER_SCENARIO_C = [
-        (12, 8), (15, 10), (25, 18), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120),
-    ]
-    PATHWAY_STATUS_SHADOW_COLLECTING = "SHADOW_COLLECTING"
-    SHADOW_COLLECTING_LANES = ()
-    BENCHMARK_LANE = "CONTINUOUS"
-    COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-    CONTINUOUS_PROXY_LANES = ()
-    PRIMARY_PRODUCTION_LANE = "CONTINUOUS"
-    COMBO_CHASE_DELAY_LANES = CURRENT_RESEARCH_LANES
-    COMBO_CHASE_ISOLATION_PAIRS = ()
-    ACTIVE_CHASE_ISOLATION_PAIRS = ()
-    ACTIVE_CHASE_ISOLATION_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
-    COMBO_LANE_SPECS = {}
-    COMBO_CHASE_DIRECT_REFERENCE = "CONTINUOUS"
-    ACTIVE_PATHWAY_LANES = ("CONTINUOUS", "OFFSET_029_ATR_TP_25")
-    _COMBO_LANE_LABELS = {}
-    ANALYZER_COMPARE_LANES = CURRENT_RESEARCH_LANES
-    RETIRED_PATHWAY_LANES = frozenset()
+except ImportError as exc:
+    raise RuntimeError(
+        "authoritative tile registry unavailable; analyzer publication is fail-closed"
+    ) from exc
 ANALYZER_COMPARE_LANES = CURRENT_RESEARCH_LANES
 ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
@@ -2996,17 +2980,22 @@ def _load_shadow_lane_outcome_df(session: dict = None):
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     if "research_lane" in df.columns:
-        # Preserve valid frozen-policy Patient Chase shadows while excluding
-        # pre-contract generic Scenario-C rows that lacked policy identity.
-        patient = df["research_lane"].fillna("").astype(str).str.upper().isin({
-            "OFFSET_029_ATR_TP_25",
-        })
-        policy_series = df.get("policy_version", pd.Series(index=df.index, dtype=object)).fillna("").astype(str)
-        mismatch = patient & ~policy_series.str.startswith("OFFSET_0.29_CHASE_")
-        mismatch_count = int(mismatch.sum())
+        lanes = df["research_lane"].fillna("").astype(str).str.upper()
+        policies = df.get(
+            "policy_version", pd.Series(index=df.index, dtype=object)
+        ).fillna("").astype(str)
+        mismatch = pd.Series(False, index=df.index)
+        mismatch_by_lane = {}
+        for lane, spec in ACTIVE_TILE_REGISTRY.items():
+            expected = str(spec.get("raw_policy_id") or "")
+            lane_rows = lanes.eq(str(lane).upper())
+            lane_mismatch = lane_rows & policies.ne(expected)
+            mismatch_by_lane[lane] = int(lane_mismatch.sum())
+            mismatch |= lane_mismatch
         df = df[~mismatch].copy()
-        df.attrs["policy_mismatch_rows_excluded"] = mismatch_count
-        df.attrs["policy_mismatch_reason"] = "PATIENT_CHASE_SHADOW_POLICY_IDENTITY_MISSING"
+        df.attrs["policy_mismatch_rows_excluded"] = int(mismatch.sum())
+        df.attrs["policy_mismatch_rows_by_lane"] = mismatch_by_lane
+        df.attrs["policy_mismatch_reason"] = "ACTIVE_TILE_SHADOW_POLICY_IDENTITY_MISMATCH"
     if session and _session_start_ts(session) is not None:
         df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
     return df
@@ -9168,22 +9157,9 @@ def _all_time_lane_metrics(all_trades, lane: str) -> dict:
 
 
 def _ordered_lane_catalog(lanes_with_approves, trade_df=None) -> list:
-    """Every lane in ANALYZER_COMPARE_LANES plus any lane seen in data."""
-    lanes_from_trades = set()
-    if trade_df is not None and not trade_df.empty and "research_lane" in trade_df.columns:
-        lanes_from_trades = {
-            str(x).strip()
-            for x in trade_df["research_lane"].dropna().unique()
-            if str(x).strip() and str(x).strip() not in ("EXEC_5M", "UNKNOWN", "nan")
-        }
-    catalog = []
-    seen = set()
-    for ln in list(BENCHMARK_LANES) + sorted(lanes_with_approves or []) + sorted(lanes_from_trades):
-        if not ln or ln in seen or ln == "EXEC_5M":
-            continue
-        seen.add(ln)
-        catalog.append(ln)
-    return catalog
+    """Current qualified reports contain exactly the authoritative tile roster."""
+    del lanes_with_approves, trade_df
+    return list(ACTIVE_TILE_ORDER)
 
 
 def _benchmark_lane_verdict(lane: str, delta: dict, bench: dict) -> str:
@@ -16879,6 +16855,10 @@ def write_report_manifest(payload=None):
         "generated_at": manifest_generated_at.isoformat(),
         "generation_started_at": manifest_started_at.isoformat(),
         "expected_bot_version": EXPECTED_BOT_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "active_tiles": active_tile_lifecycle_manifest(),
         "analysis_provenance": analysis_provenance,
         "cohort_schema": analysis_provenance["cohort_schema"],
         "generation_revision": analysis_provenance["generation_revision"],
@@ -17107,10 +17087,9 @@ def build_executive_summary_payload(
     eva = ai_cal.get("expected_vs_actual") or {}
     ai_verdict = _ai_calibration_verdict(ai_cal)
 
-    pathway_specs = _load_json_report(PATHWAY_LANE_SPECS_FILE) or {}
     bench_profile = (
         bench.get("benchmark_profile_id")
-        or pathway_specs.get("benchmark_profile_id")
+        or ACTIVE_TILE_REGISTRY.get(BENCHMARK_LANE, {}).get("raw_policy_id")
         or "CONTINUOUS_SCENARIO_C_v2"
     )
 

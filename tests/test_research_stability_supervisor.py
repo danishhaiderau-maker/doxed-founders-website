@@ -19,6 +19,13 @@ REAL_LOCAL_STORAGE_SNAPSHOT = module.local_storage_snapshot
 
 
 NOW = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+TEST_TILE_LANES = [
+    "OFFSET_029_ATR_TP_25",
+    "CONTINUOUS",
+    "OFFSET_029_ATR_PROTECTED",
+    "OFFSET_029_ATR_REGIME",
+]
+TEST_TILE_SIGNATURE = "r" * 64
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +35,11 @@ def deterministic_supervisor_storage(monkeypatch):
         module,
         "local_storage_snapshot",
         lambda _mirror: (True, {"disk_free_percent": 30.0, "test_fixture": True}),
+    )
+    monkeypatch.setattr(
+        module,
+        "local_tile_registry_contract",
+        lambda _repo: (list(TEST_TILE_LANES), TEST_TILE_SIGNATURE),
     )
 
 
@@ -276,7 +288,12 @@ def make_fixture(tmp_path):
     mirror = tmp_path / "mirror"
     reports = tmp_path / "reports"
     repo.mkdir(); mirror.mkdir(); reports.mkdir()
-    heartbeat = {"ok": True, "syncedAt": NOW.isoformat(), "sourceRevision": "a" * 40}
+    heartbeat = {
+        "ok": True,
+        "syncedAt": NOW.isoformat(),
+        "sourceRevision": "a" * 40,
+        "tileRegistrySignature": TEST_TILE_SIGNATURE,
+    }
     write_json(repo / ".fly-data-sync-loop.heartbeat.json", heartbeat)
     events = []
     for index in range(3):
@@ -310,13 +327,21 @@ def make_fixture(tmp_path):
 
 def fetcher(url, token, timeout):
     if url.endswith("manifest"):
-        return {"files": [{"path": "research_events_v22.jsonl"}], "total_bytes": 100, "source_git_rev": "a" * 40}
+        return {
+            "files": [{"path": "research_events_v22.jsonl"}],
+            "total_bytes": 100,
+            "source_git_rev": "a" * 40,
+            "tile_registry_signature": TEST_TILE_SIGNATURE,
+            "active_tiles": [{"lane": lane} for lane in TEST_TILE_LANES],
+        }
     if url.endswith("/api/status"):
         return {
             "process_alive": True, "system_ready": True, "signal_generation_ready": True,
             "ws_ready": True, "git_rev": "a" * 40,
             "runtime_readiness": {"signal_generation_ready": True, "readiness_reasons": []},
             "virtual_count": 2, "pending_count": 1, "position_count": 0,
+            "tile_registry_signature": TEST_TILE_SIGNATURE,
+            "active_tiles": [{"lane": lane} for lane in TEST_TILE_LANES],
         }
     return {"volume_pct": 15.0, "cleanup_status": "ok"}
 

@@ -13,6 +13,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,16 @@ LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
 LOCAL_QUARANTINE_MAX_BYTES = 25 * 1024**3
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
+
+
+def local_tile_registry_contract(repo: Path) -> tuple[list[str], str]:
+    """Load the canonical registry without maintaining a monitor-side roster."""
+    values = runpy.run_path(
+        str(repo / "services" / "btc-conservative-agent" / "combo_pathway_config.py")
+    )
+    lanes = list(values["ACTIVE_TILE_ORDER"])
+    signature = str(values["active_tile_registry_signature"]())
+    return lanes, signature
 
 
 def utc_now() -> datetime:
@@ -904,13 +915,23 @@ class Supervisor:
             checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
         source_revision = None
+        manifest_registry_signature = None
+        manifest_tile_lanes: list[str] = []
         manifest: dict[str, Any] = {}
         try:
             manifest = self.fetcher(self.fly_url.rstrip("/") + "/api/data-sync/manifest", self.token, 20)
             source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
+            manifest_registry_signature = manifest.get("tile_registry_signature")
+            manifest_tile_lanes = [
+                str(row.get("lane") or "")
+                for row in (manifest.get("active_tiles") or [])
+                if isinstance(row, dict)
+            ]
             add("fly_collector_manifest", bool(manifest.get("files")) and int(manifest.get("total_bytes") or 0) > 0, {
                 "total_bytes": manifest.get("total_bytes"), "source_revision": source_revision,
-                "fresh_collection_signal_ts": manifest.get("fresh_collection_signal_ts")})
+                "fresh_collection_signal_ts": manifest.get("fresh_collection_signal_ts"),
+                "tile_registry_signature": manifest_registry_signature,
+                "active_tile_lanes": manifest_tile_lanes})
         except Exception as exc:
             add("fly_collector_manifest", False, type(exc).__name__)
         try:
@@ -960,13 +981,16 @@ class Supervisor:
 
         heartbeat_path = (self.runtime_repo or self.repo) / ".fly-data-sync-loop.heartbeat.json"
         sync_revision = None
+        sync_registry_signature = None
         try:
             heartbeat = read_json(heartbeat_path)
             stamp = parse_time(heartbeat.get("syncedAt"))
             age = (self.now() - stamp).total_seconds() if stamp else float("inf")
             sync_revision = heartbeat.get("sourceRevision") or heartbeat.get("source_revision")
+            sync_registry_signature = heartbeat.get("tileRegistrySignature") or heartbeat.get("tile_registry_signature")
             add("atomic_sync_heartbeat", heartbeat.get("ok") is True and age <= SYNC_MAX_AGE_SECONDS,
-                {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": sync_revision})
+                {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": sync_revision,
+                 "tileRegistrySignature": sync_registry_signature})
         except Exception as exc:
             add("atomic_sync_heartbeat", False, type(exc).__name__)
         revision_match = bool(source_revision and sync_revision and (
@@ -977,6 +1001,38 @@ class Supervisor:
         add("fly_sync_revision_parity", revision_match, {
             "fly_source_revision": source_revision,
             "sync_source_revision": sync_revision,
+        })
+        try:
+            expected_lanes, expected_registry_signature = local_tile_registry_contract(self.repo)
+        except Exception as exc:
+            expected_lanes, expected_registry_signature = [], ""
+            add("local_tile_registry_contract", False, f"{type(exc).__name__}: {exc}")
+        else:
+            add("local_tile_registry_contract", bool(expected_lanes and expected_registry_signature), {
+                "lanes": expected_lanes,
+                "signature": expected_registry_signature,
+            })
+        status_registry_signature = status.get("tile_registry_signature")
+        status_tile_lanes = [
+            str(row.get("lane") or "")
+            for row in (status.get("active_tiles") or [])
+            if isinstance(row, dict)
+        ]
+        registry_parity = bool(
+            manifest_registry_signature
+            and manifest_registry_signature == expected_registry_signature
+            and status_registry_signature == manifest_registry_signature
+            and sync_registry_signature == manifest_registry_signature
+            and manifest_tile_lanes == expected_lanes
+            and status_tile_lanes == expected_lanes
+        )
+        add("tile_registry_cross_layer_parity", registry_parity, {
+            "expected_lanes": expected_lanes,
+            "manifest_lanes": manifest_tile_lanes,
+            "status_lanes": status_tile_lanes,
+            "manifest_signature": manifest_registry_signature,
+            "status_signature": status_registry_signature,
+            "sync_signature": sync_registry_signature,
         })
 
         try:

@@ -38,6 +38,11 @@ try {
   $env:REQUIRE_BOT_ADMIN_TOKEN = $priorAdminProof
   $env:SHOWCASE_OWNER_URL = $priorOwnerUrl
 }
+$registryJson = & python -c "import json,sys;sys.path.insert(0,sys.argv[1]);import combo_pathway_config as c;print(json.dumps({'version':c.EXECUTION_FIX_VERSION,'signature':c.active_tile_registry_signature(),'lanes':list(c.ACTIVE_TILE_ORDER)}))" $serviceRoot
+if ($LASTEXITCODE -ne 0) {
+  throw "Unable to resolve the canonical tile registry contract."
+}
+$registry = $registryJson | ConvertFrom-Json
 
 $deployArgs = @(
   "deploy",
@@ -64,14 +69,30 @@ try {
 
 $expected = $revision.Substring(0, 12)
 $lastHealth = $null
+$lastReady = $null
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
   try {
     $lastHealth = Invoke-RestMethod `
       -Uri "https://doxed-btc-bot.fly.dev/health" `
       -TimeoutSec 8
+    $lastReady = Invoke-RestMethod `
+      -Uri "https://doxed-btc-bot.fly.dev/ready" `
+      -TimeoutSec 8
+    $runtimeLanes = @($lastHealth.active_tiles | ForEach-Object { [string]$_.lane })
+    $laneParity = ($runtimeLanes.Count -eq @($registry.lanes).Count) -and `
+      ((Compare-Object -ReferenceObject @($registry.lanes) -DifferenceObject $runtimeLanes -SyncWindow 0).Count -eq 0)
     if (
       $lastHealth.process_alive -eq $true -and
+      $lastReady.ok -eq $true -and
       [string]$lastHealth.source_git_rev -like "$expected*" -and
+      [string]$lastHealth.bot_version -eq [string]$registry.version -and
+      [string]$lastHealth.tile_registry_signature -eq [string]$registry.signature -and
+      [string]$lastReady.tile_registry_signature -eq [string]$registry.signature -and
+      $laneParity -and
+      $lastHealth.strategy_progress.ok -eq $true -and
+      $lastHealth.strategy_progress.trade_lock_available -eq $true -and
+      [int]$lastHealth.strategy_progress.open_positions -eq 0 -and
+      [int]$lastHealth.strategy_progress.pending_orders -eq 0 -and
       $lastHealth.live_armed -eq $false -and
       $lastHealth.bitfinex_live_enabled -eq $false -and
       $lastHealth.force_paper_mode -eq $true
@@ -80,6 +101,9 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
         ok = $true
         app = "doxed-btc-bot"
         sourceRevision = [string]$lastHealth.source_git_rev
+        botVersion = [string]$lastHealth.bot_version
+        tileRegistrySignature = [string]$lastHealth.tile_registry_signature
+        activeTileLanes = $runtimeLanes
         buildContext = $serviceRoot
         liveArmed = $lastHealth.live_armed
         forcePaperMode = $lastHealth.force_paper_mode

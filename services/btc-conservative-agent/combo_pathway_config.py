@@ -9,6 +9,9 @@ hiding a card.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
 RESEARCH_LANE_OFFSET_029_ATR_PROTECTED = "OFFSET_029_ATR_PROTECTED"
@@ -291,6 +294,22 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
         }
         for index, lane in enumerate(ACTIVE_TILE_ORDER, start=1)
     )
+
+
+def active_tile_registry_signature() -> str:
+    """Deterministic identity shared by runtime, mirror, analyzer and monitors."""
+    payload = {
+        "schema": TILE_REGISTRY_SCHEMA,
+        "architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tiles": active_tile_lifecycle_manifest(),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 COMBO_CHASE_DELAY_LANES = ()
 COMBO_CHASE_ISOLATION_PAIRS = ()

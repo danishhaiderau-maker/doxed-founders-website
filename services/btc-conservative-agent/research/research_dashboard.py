@@ -2480,7 +2480,7 @@ def _wants_all_lanes() -> bool:
 
 
 def _filter_lane_rows(rows, *, all_lanes: bool = False):
-    """Default to the two current lanes; historical rows remain opt-in."""
+    """Default to the canonical active tile roster; history remains opt-in."""
     if all_lanes:
         return list(rows or [])
     out = []
@@ -2503,7 +2503,7 @@ def api_lanes():
     return jsonify({
         "lanes": filtered,
         "benchmark_pnl": bench_pnl,
-        "lane_filter": "all" if all_lanes else "ai_continuous",
+        "lane_filter": "all" if all_lanes else "active_tile_registry",
         "lane_filter_note": (
             "Showing all historical lanes"
             if all_lanes
