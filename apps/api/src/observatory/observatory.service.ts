@@ -117,7 +117,7 @@ export class ObservatoryService {
       'founder-os.integrations': 'founder_os_integrations_health',
       'bot.ping': 'bot_ping',
       'bot.ai-verdicts': 'ai_verdicts_emitted',
-      'bot.lab-shadow': 'lab_shadow_tiles_running',
+      'bot.lab-shadow': 'two_lane_opportunity_coverage',
       'bot.lane-size-patch': 'lane_size_patch_active',
       'relay.cycle-completes': 'relay_cycle_completes',
       'analyzer.manifest': 'analyzer_manifest_present',
@@ -242,12 +242,12 @@ export class ObservatoryService {
           break;
         }
         case 'bot.lab-shadow': {
-          const soft = botArtifact('soft_reject_shadow.jsonl');
-          const rows = countJsonlLines(soft);
-          const hasSlAvoidance = fileContains(soft, 'SL_AVOIDANCE_V1');
-          const hasSized = fileContains(soft, 'SIZED_CONTINUOUS_V1');
-          status = rows > 0 && hasSlAvoidance && hasSized ? 'green' : 'yellow';
-          coverage = `soft_reject_shadow.jsonl rows=${rows} SL_AVOIDANCE=${hasSlAvoidance} SIZED_CONTINUOUS=${hasSized}`;
+          const opportunities = botArtifact('lane_opportunity_capture.jsonl');
+          const rows = countJsonlLines(opportunities);
+          const hasContinuous = fileContains(opportunities, 'CONTINUOUS');
+          const hasPatient = fileContains(opportunities, 'OFFSET_029_ATR_TP_25');
+          status = rows > 0 && hasContinuous && hasPatient ? 'green' : 'yellow';
+          coverage = `lane_opportunity_capture.jsonl rows=${rows} CONTINUOUS=${hasContinuous} OFFSET_029_ATR_TP_25=${hasPatient}`;
           break;
         }
         case 'bot.lane-size-patch': {
