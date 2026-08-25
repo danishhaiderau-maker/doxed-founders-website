@@ -17,13 +17,6 @@ import pathway_lane_roster as roster
 
 SERVICE_DIR = Path(__file__).resolve().parent
 BOT_PATH = SERVICE_DIR / "bot.py"
-ACTIVE_PAPER_LANES = {
-    "CONTINUOUS",
-    "OFFSET_029_ATR_TP_25",
-    "PROTECTED_W234_SCENARIO_C",
-}
-
-
 def _bot_tree() -> ast.Module:
     return ast.parse(BOT_PATH.read_text(encoding="utf-8"), filename=str(BOT_PATH))
 
@@ -37,16 +30,15 @@ def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str |
     return None
 
 
-def test_exactly_three_active_order_producing_lanes() -> None:
+def test_active_order_producing_lanes_derive_from_registry() -> None:
     configured = set(config.COMBO_EXECUTION_LANES)
+    active = set(config.ACTIVE_TILE_REGISTRY)
     assert configured == {
-        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-        config.RESEARCH_LANE_PROTECTED_W234,
+        lane for lane, spec in config.ACTIVE_TILE_REGISTRY.items()
+        if not spec.get("is_benchmark")
     }
-
-    active = {config.COMPARISON_BENCHMARK_LANE, *configured}
-    assert active == ACTIVE_PAPER_LANES
-    assert set(roster.DASHBOARD_PRIMARY_LANES) == ACTIVE_PAPER_LANES
+    assert set(roster.DASHBOARD_PRIMARY_LANES) == active
+    assert tuple(roster.DASHBOARD_PRIMARY_LANES) == tuple(config.ACTIVE_TILE_ORDER)
 
     for lane in configured:
         spec = config.COMBO_LANE_SPECS[lane]
@@ -65,8 +57,9 @@ def test_historical_lanes_are_not_executable_or_primary() -> None:
 
     assert roster.PATHWAY_SHADOW_COLLECTING_ENABLED is False
     assert config.combo_toggle_defaults() == {
-        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25: False,
-        config.RESEARCH_LANE_PROTECTED_W234: False,
+        lane: bool(spec.get("default_enabled", False))
+        for lane, spec in config.COMBO_LANE_SPECS.items()
+        if lane in config.COMBO_EXECUTION_LANES
     }
 
 

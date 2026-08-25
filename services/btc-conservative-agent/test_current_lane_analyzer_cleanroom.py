@@ -36,8 +36,8 @@ def test_dashboard_has_only_current_lane_routes_and_loaders():
     )
     for token in retired:
         assert token not in DASHBOARD
-    assert '"PROTECTED_W234_SCENARIO_C"' in DASHBOARD
-    assert 'CURRENT_RESEARCH_LANES = frozenset((' in DASHBOARD
+    assert "from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES" in DASHBOARD
+    assert "CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)" in DASHBOARD
     assert "partial_reduction_reconciliation" not in ANALYZER
 
 
