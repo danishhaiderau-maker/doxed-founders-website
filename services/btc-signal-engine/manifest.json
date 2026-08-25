@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-two-lane-safe-policy",
-  "combo_version": "2026-08-24",
+  "engine_version": "v31-three-tile-protected-w234",
+  "combo_version": "2026-08-25",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "a884b521a936",
+  "signal_hash": "4ae55c1b9b55",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-24T16:20:58.877Z"
+  "updated_at": "2026-08-25T09:45:57.645Z"
 }

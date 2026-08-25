@@ -1,7 +1,11 @@
 import ast
 from pathlib import Path
 
-from combo_pathway_config import COMBO_EXECUTION_LANES, COMBO_LANE_SPECS
+from combo_pathway_config import (
+    ACTIVE_TILE_REGISTRY,
+    COMBO_EXECUTION_LANES,
+    COMBO_LANE_SPECS,
+)
 from experimental_tile_contract import effective_route, relay_event_blockers
 
 
@@ -43,9 +47,14 @@ def test_v31_all_active_tiles_use_approved_quarter_dollar_margin_cap():
     assert fixed_margin == 0.25
 
 
-def test_only_patient_chase_is_registered_as_candidate():
-    assert tuple(COMBO_EXECUTION_LANES) == ("OFFSET_029_ATR_TP_25",)
-    assert set(COMBO_LANE_SPECS) == {"OFFSET_029_ATR_TP_25"}
+def test_only_registry_candidates_are_registered_for_execution():
+    expected = {
+        lane
+        for lane, spec in ACTIVE_TILE_REGISTRY.items()
+        if spec.get("is_research_candidate")
+    }
+    assert set(COMBO_EXECUTION_LANES) == expected
+    assert set(COMBO_LANE_SPECS) == expected
 
 
 def test_dashboard_margin_display_preserves_quarter_dollar_precision():

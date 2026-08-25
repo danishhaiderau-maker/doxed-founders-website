@@ -1,16 +1,42 @@
-"""Two-lane paper architecture: Patient Chase plus Continuous benchmark."""
+"""Canonical tile registry for the active paper-research architecture.
+
+Adding or retiring a tile starts here. Runtime, API, dashboards, analyzer and
+monitoring consume this registry (or the roster derived from it); they must not
+maintain an independent list of active tiles. Policy-specific implementation
+code may still live in its own module, but its lifecycle metadata and ownership
+surfaces are declared here so retirement can be audited instead of merely
+hiding a card.
+"""
 from __future__ import annotations
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_OFFSET_029_ATR_TP_25 = "OFFSET_029_ATR_TP_25"
+RESEARCH_LANE_PROTECTED_W234 = "PROTECTED_W234_SCENARIO_C"
+TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
+TILE_ARCHITECTURE_VERSION = 1
+TILE_COMPONENT_SURFACES = (
+    "runtime",
+    "authenticated_api",
+    "production_dashboard",
+    "collector",
+    "mirror_manifest",
+    "analyzer_loader",
+    "analyzer_reports",
+    "analyzer_api",
+    "analyzer_dashboard",
+    "monitoring",
+    "regression_tests",
+)
 
 # Active paper-research lanes (CONTINUOUS is configured separately as the benchmark).
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
 )
 
 COMBO_TILE_DISPLAY_ORDER = (
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_PROTECTED_W234,
 )
 
 COMBO_LANE_SPECS = {
@@ -34,6 +60,7 @@ COMBO_LANE_SPECS = {
         "uses_shared_ai_direction": True,
         "paper_only": False,
         "platform_relay_eligible": True,
+        "default_enabled": True,
         "id_prefix": "o29atr",
         "entry_offset_pct": 0.29,
         "initial_rest_sec": 600,
@@ -63,6 +90,43 @@ COMBO_LANE_SPECS = {
             "out-of-sample EV under conservative paper execution?"
         ),
     },
+    RESEARCH_LANE_PROTECTED_W234: {
+        "label": "Protected W234 Chase · Scenario C + ATR stop",
+        "subtitle": (
+            "PAPER RESEARCH when ON — shared AI direction, independent order/position/ledger; "
+            "not live-copy eligible until explicitly qualified"
+        ),
+        "combo_key": "OFFSET_0.28_CHASE_w234_s10_i180|ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5",
+        "raw_policy_id": "OFFSET_0.28_CHASE_w234_s10_i180|ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5",
+        "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
+        "entry_mode": "IMMEDIATE",
+        "is_benchmark": False, "is_research_candidate": True,
+        "is_legacy": False, "is_independent_ai": False,
+        "uses_shared_ai_direction": True,
+        "paper_only": True, "platform_relay_eligible": False,
+        "default_enabled": False,
+        "id_prefix": "pwch",
+        "entry_offset_pct": 0.28,
+        "initial_rest_sec": 600,
+        "chase_windows": (2, 3, 4),
+        "chase_age_sec": (600, 1500),
+        "chase_interval_sec": 180,
+        "chase_remaining_gap_step_pct": 10.0,
+        "entry_ttl_sec": 1800,
+        "margin_usd": 0.25,
+        "atr_tp_multiple": 2.5,
+        "atr_stop_multiple": 2.5,
+        "atr_source": "frozen fill-time 3m ATR(14)",
+        "path_end_sec": 7200,
+        "ladder": ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120)),
+        "ladder_label": "Scenario C",
+        "ladder_profile_id": "SCENARIO_C_RUNNER_8_v8_20260820",
+        "exit_profile_id": "ATR_TP_2.5_SCENARIO_C_ATR_SL_2.5_V1",
+        "promotion_criteria": "PAPER ONLY until independent multi-regime OOS evidence has positive LCB and bounded drawdown",
+        "kill_criteria": "Stop new entries on any identity, lifecycle, stop, or evidence mismatch",
+        "hypothesis": "The descriptive W234 chased cell retains fillability while Scenario C and a frozen 2.5 ATR stop bound losses.",
+        "research_question": "Does the protected W234 chase remain positive under conservative paper execution across regimes?",
+    },
 }
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
 CONTINUOUS_PROXY_LANES = ()
@@ -74,11 +138,11 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_OFFSET_029_ATR_TP_25
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-two-lane-safe-policy"
+RESEARCH_STACK_VERSION = "v31-three-tile-protected-w234"
 RESEARCH_STACK_FEATURES = (
-    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 share one direction-only 3-minute AI call; "
-    "two-lane paper-research roster; all retired lanes are analyzer-only; "
-    "registered 0.29% Patient Chase paper lifecycle; "
+    "CONTINUOUS benchmark + OFFSET_029_ATR_TP_25 + PROTECTED_W234_SCENARIO_C share one "
+    "direction-only 3-minute AI call; three-tile paper-research roster; all retired lanes "
+    "are analyzer-only; registered Patient Chase paper lifecycles; "
     "independent lane capacity, orders, positions and ledgers; "
     "fail-closed relay executor watchdog"
 )
@@ -87,6 +151,72 @@ ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
 RESEARCH_DASHBOARD_VERSION = RESEARCH_STACK_VERSION
 EXPECTED_EXCHANGE = "bitfinex"
 EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
+
+# The benchmark is a first-class tile even though its execution policy is
+# intentionally implemented outside COMBO_LANE_SPECS. This merged registry is
+# the sole UI/analyzer roster contract.
+BENCHMARK_TILE_SPEC = {
+    "label": "Continuous Benchmark — Paper Orders",
+    "subtitle": "Shared-AI benchmark with an independent paper lifecycle",
+    "combo_key": "CONTINUOUS",
+    "raw_policy_id": "CONTINUOUS",
+    "is_benchmark": True,
+    "is_research_candidate": False,
+    "uses_shared_ai_direction": True,
+    "paper_only": False,
+    "platform_relay_eligible": True,
+    "id_prefix": "cont",
+    "toggle_key": "continuous_ai_research_enabled",
+}
+
+ACTIVE_TILE_REGISTRY = {
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: {
+        **COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25],
+        "toggle_key": "research_lane_enabled",
+    },
+    COMPARISON_BENCHMARK_LANE: dict(BENCHMARK_TILE_SPEC),
+    RESEARCH_LANE_PROTECTED_W234: {
+        **COMBO_LANE_SPECS[RESEARCH_LANE_PROTECTED_W234],
+        "toggle_key": "research_lane_enabled",
+    },
+}
+ACTIVE_TILE_ORDER = (
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    COMPARISON_BENCHMARK_LANE,
+    RESEARCH_LANE_PROTECTED_W234,
+)
+
+# Retiring a tile means removing it from ACTIVE_TILE_REGISTRY and recording its
+# lane token here for one release. The registry audit then fails while that
+# token remains on any active execution/UI/analyzer surface. Historical data is
+# quarantined separately and never keeps runtime code alive.
+RETIRED_TILE_LANES = frozenset()
+
+
+def validate_tile_registry() -> tuple[str, ...]:
+    """Return registry defects; an empty tuple is the only deployable state."""
+    defects = []
+    lanes = tuple(ACTIVE_TILE_REGISTRY)
+    if tuple(ACTIVE_TILE_ORDER) != tuple(dict.fromkeys(ACTIVE_TILE_ORDER)):
+        defects.append("DUPLICATE_TILE_IN_DISPLAY_ORDER")
+    if set(ACTIVE_TILE_ORDER) != set(lanes):
+        defects.append("DISPLAY_ORDER_REGISTRY_MISMATCH")
+    required = {"label", "raw_policy_id", "id_prefix", "toggle_key"}
+    prefixes = {}
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        missing = sorted(required.difference(spec))
+        if missing:
+            defects.append(f"{lane}:MISSING:{','.join(missing)}")
+        prefix = str(spec.get("id_prefix") or "")
+        if prefix in prefixes:
+            defects.append(f"DUPLICATE_ID_PREFIX:{prefix}:{prefixes[prefix]}:{lane}")
+        prefixes[prefix] = lane
+        if spec.get("paper_only") and spec.get("platform_relay_eligible"):
+            defects.append(f"{lane}:PAPER_ONLY_RELAY_CONTRADICTION")
+    overlap = set(lanes).intersection(RETIRED_TILE_LANES)
+    if overlap:
+        defects.append("ACTIVE_RETIRED_OVERLAP:" + ",".join(sorted(overlap)))
+    return tuple(defects)
 
 COMBO_CHASE_DELAY_LANES = ()
 COMBO_CHASE_ISOLATION_PAIRS = ()
@@ -97,7 +227,10 @@ COMBO_CHASE_DIRECT_REFERENCE = None
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
 COMBO_LANE_LABELS[RESEARCH_LANE_AI_SCAN] = "AI Scan (no orders)"
 
-_COMBO_TOGGLE_DEFAULTS = {lane: False for lane in COMBO_EXECUTION_LANES}
+_COMBO_TOGGLE_DEFAULTS = {
+    lane: bool(COMBO_LANE_SPECS[lane].get("default_enabled", False))
+    for lane in COMBO_EXECUTION_LANES
+}
 
 
 def is_deterministic_bracket_lane(lane: str) -> bool:

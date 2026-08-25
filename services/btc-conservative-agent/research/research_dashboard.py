@@ -20,11 +20,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
-CURRENT_RESEARCH_LANES = frozenset((
-    "CONTINUOUS",
-    "OFFSET_029_ATR_TP_25",
-    "PROTECTED_W234_SCENARIO_C",
-))
+from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
+
+CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
 
 def format_melbourne_dt(value) -> str:
