@@ -125,6 +125,43 @@ def test_overlay_key_list_includes_pnl_and_counter_keys() -> None:
     )
 
 
+def test_relay_snapshot_emits_live_dashboard_truth_fields() -> None:
+    """Active execution must not freeze market/evidence identity at boot."""
+    body = ast.get_source_segment(
+        BOT_SOURCE, _function("_build_relay_execution_state_snapshot")
+    )
+    assert body is not None
+    expected = [
+        '"bid": state.get("bid")',
+        '"ask": state.get("ask")',
+        '"bid_size_btc": state.get("bid_size_btc")',
+        '"ask_size_btc": state.get("ask_size_btc")',
+        '"spread_usd": state.get("spread_usd")',
+        '"support_resistance": copy.deepcopy(',
+        '"funding": copy.deepcopy(',
+        '"last_fetch_success": utc_iso()',
+        '"fresh_epoch_id": _collector_v22_epoch_id()',
+        '"tile_registry_signature": active_tile_registry_signature()',
+        '"active_tiles": active_tile_lifecycle_manifest()',
+    ]
+    missing = [item for item in expected if item not in body]
+    assert not missing, f"relay snapshot is missing live truth fields: {missing}"
+
+
+def test_ws_ticker_updates_standard_dashboard_bbo_fields() -> None:
+    body = ast.get_source_segment(BOT_SOURCE, _function("_process_ws_ticker_update"))
+    assert body is not None
+    expected = [
+        'state["bid_size_btc"] = bid_qty',
+        'state["ask_size_btc"] = ask_qty',
+        'state["spread_usd"] = round(ask - bid, 2)',
+        'state["spread_pct"] = round((ask - bid) / bid * 100.0, 5)',
+        'state["bbo_ts"] = tick_now',
+    ]
+    missing = [item for item in expected if item not in body]
+    assert not missing, f"ticker callback would leave dashboard BBO stale: {missing}"
+
+
 def test_relay_snapshot_derives_lane_exposure_from_current_rows() -> None:
     """Patient Chase tile counts must not freeze at the first heavy build."""
     body = ast.get_source_segment(
@@ -169,6 +206,21 @@ def test_overlay_key_list_contains_core_money_keys() -> None:
         assert required in keys, (
             f"overlay key list lost core money-path key '{required}'"
         )
+
+
+def test_overlay_key_list_contains_live_dashboard_truth_fields() -> None:
+    keys = _overlay_key_list_literal()
+    required = {
+        "bid", "ask", "bid_size_btc", "ask_size_btc", "spread_usd",
+        "support_resistance", "funding", "daily_pnl_usd",
+        "last_fetch_success", "fresh_epoch_id", "tile_registry_signature",
+        "active_tiles", "tile_architecture_version", "tile_registry_schema",
+    }
+    missing = sorted(required.difference(keys))
+    assert not missing, (
+        "active dashboard overlay would freeze current runtime fields: "
+        f"{missing}"
+    )
 
 
 if __name__ == "__main__":

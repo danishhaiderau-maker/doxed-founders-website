@@ -1,4 +1,5 @@
 import re
+from datetime import datetime, timedelta, timezone
 
 from research import research_dashboard as dashboard
 
@@ -56,8 +57,43 @@ def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     assert 'name="viewport"' in page
 
 
+def test_chase_tables_label_every_rendered_metric_column():
+    source = dashboard.DASHBOARD_HTML
+    assert '<th>EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-body">' in source
+    assert '<th>EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-threshold-body">' in source
+
+
 def test_genome_overview_keeps_large_policy_grid_out_of_rendered_debug_text():
     source = dashboard.DASHBOARD_HTML
     assert "candidate_screen:cs" not in source
     assert "chase_families_materialized" in source
     assert "detailed_route: '/safe-policy-genome-v3.1'" in source
+
+
+def test_pathway_audit_reads_contract_receipts_without_treating_them_as_current_analyzer_evidence(tmp_path, monkeypatch):
+    old_generated = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    receipt = tmp_path / "tile_independence_report.json"
+    receipt.write_text(
+        '{"generated_at": "' + old_generated + '", "verdict": "PASS", "tests": []}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_AGENT_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+
+    payload, status = dashboard._read_contract_receipt("tile_independence_report.json")
+
+    assert payload["verdict"] == "PASS"
+    assert status["status"] == "STALE_CONTRACT_RECEIPT"
+    assert status["age_seconds"] >= 7200
+
+
+def test_pathway_audit_reports_missing_receipt_truthfully(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_AGENT_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+
+    payload, status = dashboard._read_contract_receipt("runtime_pathway_integrity.json")
+
+    assert payload == {}
+    assert status["status"] == "NOT_PUBLISHED"

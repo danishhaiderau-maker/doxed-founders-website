@@ -21650,6 +21650,16 @@ def _process_ws_ticker_update(payload) -> bool:
         state["ask"] = ask
         state["bid_qty"] = bid_qty
         state["ask_qty"] = ask_qty
+        # Keep the dashboard's canonical BBO projection current on every
+        # exact-symbol ticker update.  The presentation overlay consumes the
+        # standardized size/spread fields; previously only the legacy
+        # bid_qty/ask_qty names moved, so a healthy WS stream could still render
+        # Bid/Ask sizes and spread as "-" until a separate REST book refresh.
+        state["bid_size_btc"] = bid_qty
+        state["ask_size_btc"] = ask_qty
+        state["spread_usd"] = round(ask - bid, 2)
+        state["spread_pct"] = round((ask - bid) / bid * 100.0, 5)
+        state["bbo_ts"] = tick_now
         state["price"] = last
         state["price_ts"] = tick_now
         state["ws_last_tick"] = tick_now
@@ -31252,6 +31262,26 @@ def _build_relay_execution_state_snapshot() -> dict:
             "price_source": state.get("price_source"),
             "data_source": state.get("data_source"),
             "data_quality": state.get("data_quality"),
+            # Presentation market fields must travel with the same bounded
+            # live receipt as price.  Omitting them caused /api/state to keep
+            # the boot-time nulls while execution was active even though the
+            # BBO/book refreshers were healthy.
+            "bid": state.get("bid"),
+            "ask": state.get("ask"),
+            "bid_qty": state.get("bid_qty"),
+            "ask_qty": state.get("ask_qty"),
+            "bid_size_btc": state.get("bid_size_btc"),
+            "ask_size_btc": state.get("ask_size_btc"),
+            "spread_usd": state.get("spread_usd"),
+            "spread_pct": state.get("spread_pct"),
+            "bbo_ts": state.get("bbo_ts"),
+            "book_ts": state.get("book_ts"),
+            "support_resistance": copy.deepcopy(
+                state.get("support_resistance") or {}
+            ),
+            "funding": copy.deepcopy(state.get("funding") or {}),
+            "daily_pnl_usd": state.get("daily_pnl_usd"),
+            "last_fetch_success": utc_iso(),
             "ws_ready": bool(state.get("ws_ready", False)),
             "ws_transport_connected": bool(state.get("ws_transport_connected", False)),
             "ws_age": (
@@ -31315,6 +31345,12 @@ def _build_relay_execution_state_snapshot() -> dict:
             ),
             "runtime_readiness": runtime,
             "server_ts": utc_iso(),
+            "source_git_rev": _runtime_git_rev(),
+            "fresh_epoch_id": _collector_v22_epoch_id(),
+            "tile_registry_signature": active_tile_registry_signature(),
+            "active_tiles": active_tile_lifecycle_manifest(),
+            "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+            "tile_registry_schema": TILE_REGISTRY_SCHEMA,
         }
     finally:
         state_lock.release()
@@ -32477,6 +32513,20 @@ def _api_state_cache_refresher_loop():
                     "price_source",
                     "data_source",
                     "data_quality",
+                    "bid",
+                    "ask",
+                    "bid_qty",
+                    "ask_qty",
+                    "bid_size_btc",
+                    "ask_size_btc",
+                    "spread_usd",
+                    "spread_pct",
+                    "bbo_ts",
+                    "book_ts",
+                    "support_resistance",
+                    "funding",
+                    "daily_pnl_usd",
+                    "last_fetch_success",
                     "ws_ready",
                     "ws_age",
                     "ws_last_tick",
@@ -32530,6 +32580,11 @@ def _api_state_cache_refresher_loop():
                     "account_balance",
                     "equity",
                     "source_git_rev",
+                    "fresh_epoch_id",
+                    "tile_registry_signature",
+                    "active_tiles",
+                    "tile_architecture_version",
+                    "tile_registry_schema",
                     "dashboard_pid",
                     "dashboard_port",
                     "dashboard_owner",

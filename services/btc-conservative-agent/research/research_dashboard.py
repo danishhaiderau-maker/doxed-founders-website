@@ -547,6 +547,57 @@ def _read_report(name: str, default=None):
     return default
 
 
+def _read_contract_receipt(name: str) -> tuple[dict, dict]:
+    """Read a startup/runtime contract receipt without reviving it as analyzer evidence.
+
+    Contract receipts are intentionally outside the atomic analyzer manifest.  The
+    Pathway Audit page may display them, but must label their age and source so an
+    old PASS can never be mistaken for current runtime/analyzer readiness.
+    """
+    candidates = []
+    for base in (ROOT, _AGENT_ROOT, DATA_ROOT):
+        path = (base / name).resolve()
+        if path in candidates:
+            continue
+        candidates.append(path)
+    newest = None
+    newest_mtime = -1.0
+    payload = {}
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+            mtime = path.stat().st_mtime
+        except Exception:
+            continue
+        if isinstance(candidate, dict) and mtime > newest_mtime:
+            newest = path
+            newest_mtime = mtime
+            payload = candidate
+    if newest is None:
+        return {}, {
+            "status": "NOT_PUBLISHED",
+            "source": None,
+            "generated_at": None,
+            "age_seconds": None,
+        }
+    generated_at = payload.get("generated_at")
+    try:
+        generated_dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+        if generated_dt.tzinfo is None:
+            generated_dt = generated_dt.replace(tzinfo=timezone.utc)
+        age_seconds = max(0, int((datetime.now(timezone.utc) - generated_dt).total_seconds()))
+    except Exception:
+        age_seconds = max(0, int(time.time() - newest_mtime))
+    return payload, {
+        "status": "CURRENT" if age_seconds <= 3600 else "STALE_CONTRACT_RECEIPT",
+        "source": str(newest),
+        "generated_at": generated_at or datetime.fromtimestamp(newest_mtime, timezone.utc).isoformat(),
+        "age_seconds": age_seconds,
+    }
+
+
 def _best_report_path(name: str) -> Path | None:
     """Return the same scope-aware file that ``_read_report`` would expose."""
     for base in (ROOT, DATA_ROOT):
@@ -1638,13 +1689,24 @@ def _ladder_sim_payload():
 
 
 def _pathway_audit_payload():
-    tiles = _read_report("tile_independence_report.json")
-    ai_scan = _read_report("ai_scan_independence_report.json")
-    ai_scan_role = _read_report("ai_scan_role_validation.json")
-    lane_mem = _read_report("lane_memory_validation.json")
-    lane_mem_violation = _read_report("lane_memory_violation.json")
-    runtime_integrity = _read_report("runtime_pathway_integrity.json")
-    exit_val = _read_report("exit_reports_validation.json")
+    receipt_names = (
+        ANALYZER_INTEGRITY_FILE,
+        "tile_independence_report.json",
+        "ai_scan_independence_report.json",
+        "ai_scan_role_validation.json",
+        "lane_memory_validation.json",
+        "lane_memory_violation.json",
+        "runtime_pathway_integrity.json",
+        "exit_reports_validation.json",
+    )
+    receipts = {name: _read_contract_receipt(name) for name in receipt_names}
+    tiles = receipts["tile_independence_report.json"][0]
+    ai_scan = receipts["ai_scan_independence_report.json"][0]
+    ai_scan_role = receipts["ai_scan_role_validation.json"][0]
+    lane_mem = receipts["lane_memory_validation.json"][0]
+    lane_mem_violation = receipts["lane_memory_violation.json"][0]
+    runtime_integrity = receipts["runtime_pathway_integrity.json"][0]
+    exit_val = receipts["exit_reports_validation.json"][0]
     sync = _read_report("repo_version_sync.json")
     bot_sync = _read_report("bot_analyzer_sync.json")
     return {
@@ -1657,6 +1719,8 @@ def _pathway_audit_payload():
         "exit_reports_validation": exit_val,
         "version_sync": sync,
         "bot_analyzer_sync": bot_sync,
+        "analyzer_integrity": receipts[ANALYZER_INTEGRITY_FILE][0],
+        "receipt_status": {name: meta for name, (_payload, meta) in receipts.items()},
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "expected_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "expected_exchange": "bitfinex",
@@ -3641,13 +3705,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Chase Analytics</h2>
     <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <div class="kpis" id="chase-kpis"></div>
-    <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-body"></tbody></table>
+    <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
     <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <h2>Chase Threshold Analysis</h2>
     <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
-    <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
+    <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
     <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
@@ -4286,33 +4350,47 @@ async function loadPathwayAudit() {
   const ev = d.exit_reports_validation || {};
   const vs = d.version_sync || {};
   const bas = d.bot_analyzer_sync || {};
+  const ais = d.analyzer_integrity || {};
+  const receiptStatus = d.receipt_status || {};
+  const receiptLabel = (name, payload) => {
+    const meta = receiptStatus[name] || {};
+    if (meta.status === 'STALE_CONTRACT_RECEIPT') return `${payload.verdict || 'recorded'} (STALE)`;
+    if (meta.status === 'NOT_PUBLISHED') return 'NOT PUBLISHED';
+    return payload.verdict || meta.status || 'n/a';
+  };
+  const laneMemoryName = lmv.verdict ? 'lane_memory_violation.json' : 'lane_memory_validation.json';
+  const laneMemoryPayload = lmv.verdict ? lmv : lm;
+  const isStale = name => (receiptStatus[name] || {}).status === 'STALE_CONTRACT_RECEIPT';
   document.getElementById('audit-kpis').innerHTML = [
     ['Dashboard', d.dashboard_version || 'n/a'],
     ['Bot expected', d.expected_bot_version || 'n/a'],
     ['Analyzer expected', d.expected_analyzer_sync_id || 'n/a'],
     ['Exchange', d.expected_exchange || 'bitfinex'],
     ['Bot↔Analyzer', bas.verdict || 'n/a'],
-    ['Tile independence', ti.verdict || 'n/a'],
-    ['AI scan path', ai.verdict || 'n/a'],
-    ['AI scan role', air.verdict || 'n/a'],
-    ['Runtime integrity', rpi.verdict || 'n/a'],
-    ['Exit reports', ev.verdict || 'n/a'],
-    ['Lane memory', lmv.verdict || lm.verdict || 'n/a'],
+    ['Analyzer integrity', ais.report_status || (ais.valid === true ? 'VALID' : 'n/a')],
+    ['Tile independence', receiptLabel('tile_independence_report.json', ti)],
+    ['AI scan path', receiptLabel('ai_scan_independence_report.json', ai)],
+    ['AI scan role', receiptLabel('ai_scan_role_validation.json', air)],
+    ['Runtime integrity', receiptLabel('runtime_pathway_integrity.json', rpi)],
+    ['Exit reports', receiptLabel('exit_reports_validation.json', ev)],
+    ['Lane memory', receiptLabel(laneMemoryName, laneMemoryPayload)],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  const passCell = ok => ok ? '<span class="green">PASS</span>' : '<span class="red">FAIL</span>';
+  const passCell = (ok, stale=false) => stale
+    ? '<span class="amber">STALE RECEIPT</span>'
+    : (ok ? '<span class="green">PASS</span>' : '<span class="red">FAIL</span>');
   document.getElementById('audit-tile-body').innerHTML = (ti.tests||[]).map(t =>
-    `<tr><td>${t.test||''}</td><td>${passCell(t.passed)}</td><td>${t.detail||''}</td></tr>`
-  ).join('') || '<tr><td colspan="3">Run bot startup to generate tile_independence_report.json</td></tr>';
+    `<tr><td>${t.test||''}</td><td>${passCell(t.passed, isStale('tile_independence_report.json'))}</td><td>${t.detail||''}</td></tr>`
+  ).join('') || '<tr><td colspan="3">No current tile-independence receipt is published. Registry contract tests are required before deployment.</td></tr>';
   document.getElementById('audit-aiscan-body').innerHTML = (ai.tests||[]).map(t =>
-    `<tr><td>${t.test||''}</td><td>${passCell(t.passed)}</td><td>${t.detail||''}</td></tr>`
-  ).join('') || '<tr><td colspan="3">Run bot startup to generate ai_scan_independence_report.json</td></tr>';
+    `<tr><td>${t.test||''}</td><td>${passCell(t.passed, isStale('ai_scan_independence_report.json'))}</td><td>${t.detail||''}</td></tr>`
+  ).join('') || '<tr><td colspan="3">No current AI-scan independence receipt is published.</td></tr>';
   document.getElementById('audit-aiscan-role-body').innerHTML = (air.checks||[]).map(c =>
-    `<tr><td>${c.check||''}</td><td>${passCell(c.passed)}</td><td>${c.detail||''}</td></tr>`
-  ).join('') || '<tr><td colspan="3">Run bot startup to generate ai_scan_role_validation.json</td></tr>';
+    `<tr><td>${c.check||''}</td><td>${passCell(c.passed, isStale('ai_scan_role_validation.json'))}</td><td>${c.detail||''}</td></tr>`
+  ).join('') || '<tr><td colspan="3">No current AI-scan role receipt is published.</td></tr>';
   const runtimeRows = (rpi.critical_issues||[]).map(i => `<tr><td>${i}</td><td class="red">CRITICAL</td></tr>`)
     .concat((rpi.issues||[]).filter(i => !(rpi.critical_issues||[]).includes(i)).map(i => `<tr><td>${i}</td><td class="amber">WARN</td></tr>`));
   document.getElementById('audit-runtime-body').innerHTML = runtimeRows.join('')
-    || `<tr><td>${rpi.verdict ? 'Last check: '+rpi.verdict : 'No runtime checks yet — bot runs validate_runtime_pathway_integrity every 10m'}</td><td>—</td></tr>`;
+    || `<tr><td>${rpi.verdict ? 'Recorded check: '+rpi.verdict : 'Runtime pathway receipt is not published; use authenticated /ready and the stability supervisor for current runtime truth.'}</td><td>—</td></tr>`;
 }
 
 async function loadHorizon() {
