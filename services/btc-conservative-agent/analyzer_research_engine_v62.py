@@ -17901,6 +17901,26 @@ def finalize_analyzer_outputs(
 
 
 if __name__ == "__main__":
+    # The analyzer writes derived reports into the source/report directory.  A
+    # direct launch without the canonical mirror used to fall back to cwd and
+    # could therefore replace valid reports with an all-zero cohort.  Runtime
+    # evidence must always be explicit; fail closed instead of guessing.
+    _configured_data_root = os.getenv("BTC_AGENT_DATA_DIR", "").strip()
+    if not _configured_data_root:
+        print(
+            "ERROR: BTC_AGENT_DATA_DIR is required and must point to the "
+            "canonical Fly mirror; refusing to generate reports from cwd.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not os.path.isdir(_configured_data_root):
+        print(
+            f"ERROR: BTC_AGENT_DATA_DIR does not exist or is not a directory: "
+            f"{_configured_data_root}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     # Home-stack runs from agent/research/; pathway_lab_validation lives in agent root.
     if os.path.isfile(os.path.join(_script_dir, "pathway_lab_validation.py")):

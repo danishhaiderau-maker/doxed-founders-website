@@ -55,6 +55,11 @@ lane_roster = (
 ).read_text(encoding="utf-8")
 
 checks = {
+    "analyzer fails closed without canonical mirror": (
+        'BTC_AGENT_DATA_DIR is required and must point to the ' in analyzer_engine
+        and 'refusing to generate reports from cwd' in analyzer_engine
+        and 'if not os.path.isdir(_configured_data_root)' in analyzer_engine
+    ),
     "status exposes live analyzer identity": '"runtime_analyzer_sync_id"' in source,
     "status separates report identity": '"report_analyzer_sync_id"' in source,
     "status exposes current-pass grace": '"report_sync_pending"' in source,
