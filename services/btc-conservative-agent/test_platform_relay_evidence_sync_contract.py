@@ -47,6 +47,20 @@ def test_sync_never_accepts_or_outputs_token_on_command_line():
     assert "throw \"[RELAY_EVIDENCE_$Code]\"" in SCRIPT
 
 
+def test_forward_failures_are_sanitized_without_request_details():
+    assert "Get-RelayForwardFailureCode" in SCRIPT
+    assert 'return "FORWARD_HTTP_$([int]$cursor.Response.StatusCode)"' in SCRIPT
+    assert "return 'FORWARD_TIMEOUT'" in SCRIPT
+    assert "return 'FORWARD_NETWORK_FAILED'" in SCRIPT
+    assert "System.Threading.Tasks.TaskCanceledException" in SCRIPT
+    assert "System.Net.Http.HttpRequestException" in SCRIPT
+    assert "System.Net.Sockets.SocketException" in SCRIPT
+    forward_catch = SCRIPT.split("'/api/data-sync/platform-relay-evidence'", 1)[1]
+    forward_catch = forward_catch.split("if ($forward.ok", 1)[0]
+    assert "Get-RelayForwardFailureCode $_.Exception" in forward_catch
+    assert "$_.Exception.Message" not in forward_catch
+
+
 def test_continuous_fly_mirror_also_schedules_platform_evidence_join():
     assert 'sync-platform-relay-evidence.ps1' in LOOP
     assert 'relay_lifecycle_evidence_v1.json' in LOOP
@@ -58,11 +72,17 @@ def test_continuous_fly_mirror_also_schedules_platform_evidence_join():
     assert 'relayEvidence = $relayEvidenceStatus' in LOOP
     assert 'lastSuccessAt = $relayEvidenceLastSuccessAt' in LOOP
     assert 'relay-evidence=$safeCode' in LOOP
+    assert "[A-Z0-9_]+" in LOOP
     relay_log = LOOP.split('Add-Content -LiteralPath $logFile -Value (', 1)[1].split(')', 1)[0]
     assert '$_.Exception.Message' not in relay_log
 
 
-def _run_sync(tmp_path: Path, payload: dict, token: str = "secret-never-print"):
+def _run_sync(
+    tmp_path: Path,
+    payload: dict,
+    token: str = "secret-never-print",
+    post_status: int = 200,
+):
     body = json.dumps(payload).encode()
 
     class Handler(BaseHTTPRequestHandler):
@@ -79,6 +99,14 @@ def _run_sync(tmp_path: Path, payload: dict, token: str = "secret-never-print"):
             assert self.headers.get("X-Bot-Admin-Token") == token
             forwarded = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             assert forwarded == body
+            if post_status != 200:
+                error = b"upstream detail must not escape"
+                self.send_response(post_status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(error)))
+                self.end_headers()
+                self.wfile.write(error)
+                return
             ack = json.dumps({
                 "ok": True,
                 "schema": "relay_lifecycle_evidence_v1",
@@ -151,3 +179,15 @@ def test_mocked_authenticated_sync_is_atomic_and_preserves_old_on_scope_failure(
     assert "RELAY_EVIDENCE_SCOPE_MISMATCH" in combined
     assert "secret-never-print" not in combined
     assert "user-scope" not in combined
+
+
+def test_forward_http_status_is_classified_without_leaking_request_or_body(tmp_path):
+    result, destination = _run_sync(tmp_path, _valid_payload(), post_status=503)
+    assert result.returncode != 0
+    assert not destination.exists()
+    combined = result.stdout + result.stderr
+    assert "RELAY_EVIDENCE_FORWARD_HTTP_503" in combined
+    assert "upstream detail must not escape" not in combined
+    assert "secret-never-print" not in combined
+    assert "user-scope" not in combined
+    assert "/api/data-sync/platform-relay-evidence" not in combined

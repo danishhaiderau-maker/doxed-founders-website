@@ -1420,6 +1420,13 @@ def evaluate_protection_screen(
             "ranking_schema": "descriptive_multifactor_ranking_v1",
             "ranking_dimensions": list(_RANKING_WEIGHTS),
             "per_family_cap": descriptive_family_cap,
+            # Keep the search universe distinct from the supported-execution
+            # shortlist.  With no conservative receipts the shortlist can
+            # truthfully contain zero families even though all five policy
+            # families were evaluated (and diagnostic hypotheses may exist).
+            "families_evaluated": len({
+                str(row.get("policy_family") or "UNKNOWN") for row in assessed
+            }),
             "families_represented": len(family_counts),
             "rows_displayed": len(descriptive),
             "globally_ranked_policies": len(globally_ranked),

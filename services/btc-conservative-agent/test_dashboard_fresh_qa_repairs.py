@@ -56,6 +56,119 @@ def test_shadow_api_declares_executed_and_counterfactual_as_separate(monkeypatch
     assert payload["evidence_classes"]["executed_paper"]["merged_with_shadow"] is False
 
 
+def test_shadow_api_marks_stale_signed_report_unavailable_and_keeps_generic_counts(monkeypatch):
+    source = _source()
+    source["report"]["generation_revision"] = "revision-current"
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: source)
+
+    def fake_report(name, default=None):
+        if name == "shadow_lane_comprehensive_report.json":
+            return {
+                "generation_revision": "revision-old",
+                "epoch_scope": {"selected_epoch_id": "epoch-old"},
+                "coverage": {"independent_shared_ai_episodes": 8},
+                "cohorts": [{"research_lane": "CONTINUOUS"}],
+            }
+        if name == "chase_threshold_report.json":
+            return {"coverage": {
+                "shadow_terminal_outcomes": 14,
+                "generic_shadow_counterfactuals": 14,
+                "tile_lab_shadow_outcomes": 0,
+            }}
+        return default or {}
+
+    monkeypatch.setattr(dashboard, "_read_report", fake_report)
+    payload = dashboard.app.test_client().get("/api/shadow-policy-research").get_json()
+    signed = payload["comprehensive_shadow_lanes"]
+    assert signed["available"] is False
+    assert "EPOCH_MISMATCH" in signed["reason"]
+    assert "GENERATION_REVISION_MISMATCH" in signed["reason"]
+    assert signed["coverage"] == {}
+    assert signed["cohorts"] == []
+    assert payload["generic_shadow_terminals"] == {
+        "status": "SEPARATE_GENERIC_COUNTERFACTUAL_COHORT",
+        "terminal_outcomes": 14,
+        "generic_terminal_outcomes": 14,
+        "tile_lab_terminal_outcomes": 0,
+        "source": "chase_threshold_report.json",
+    }
+
+
+def test_shadow_api_exposes_matching_signed_report_without_merging_generic(monkeypatch):
+    source = _source()
+    source["report"]["generation_revision"] = "revision-current"
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: source)
+
+    def fake_report(name, default=None):
+        if name == "shadow_lane_comprehensive_report.json":
+            return {
+                "generation_revision": "revision-current",
+                "epoch_scope": {"selected_epoch_id": "epoch-clean"},
+                "coverage": {"independent_shared_ai_episodes": 8},
+                "cohorts": [{"research_lane": "CONTINUOUS"}],
+            }
+        if name == "chase_threshold_report.json":
+            return {"coverage": {"shadow_terminal_outcomes": 14}}
+        return default or {}
+
+    monkeypatch.setattr(dashboard, "_read_report", fake_report)
+    payload = dashboard.app.test_client().get("/api/shadow-policy-research").get_json()
+    assert payload["comprehensive_shadow_lanes"]["available"] is True
+    assert payload["comprehensive_shadow_lanes"]["coverage"]["independent_shared_ai_episodes"] == 8
+    assert payload["generic_shadow_terminals"]["terminal_outcomes"] == 14
+
+
+def test_unsupported_scenario_rows_are_diagnostics_not_execution_leaders():
+    raw = {
+        "policy_id": "ENTRY|ATR_TP_2.5_SCENARIO_C_ATR_SL_1",
+        "policy_family": "FIXED_TARGET",
+        "oos_episodes": 9,
+        "supported_conservative_episodes": 0,
+        "ideal_touch_diagnostic": {
+            "touches": 8,
+            "no_touches": 1,
+            "wins": 5,
+            "losses": 3,
+            "oos_net_usd": 0.25,
+            "max_drawdown_usd": -0.1,
+        },
+    }
+    payload = dashboard._bounded_safe_policy_payload({
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "candidate_screen": {"scenario_c_atr_stop_sweep": {
+            "qualification": "DESCRIPTIVE_ONLY",
+            "leaders_by_stop": {"1": [raw]},
+            "best_by_chase_and_stop": {"w345": {"1": raw}},
+            "overall_leaders": [raw],
+        }},
+    })
+    sweep = payload["candidate_screen"]["scenario_c_atr_stop_sweep"]
+    assert sweep["overall_leaders"] == []
+    assert sweep["leaders_by_stop"] == {}
+    assert sweep["best_by_chase_and_stop"] == {}
+    diagnostic = sweep["diagnostic_hypotheses_by_stop"]["1"][0]
+    assert diagnostic["supported_conservative_episodes"] == 0
+    assert diagnostic["diagnostic_net_pnl_usd"] == 0.25
+    assert diagnostic["evidence_status"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+
+
+def test_dashboard_labels_completion_units_and_family_cohorts_separately():
+    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    assert "Replay-eligible execution rows" in html
+    assert "Completed paths', `${" not in html
+    assert "Policy families evaluated" in html
+    assert "Conservative shortlist families" in html
+    assert "Diagnostic families represented" in html
+    assert "Policy families searched" not in html
+
+    safe_html = dashboard.app.test_client().get(
+        "/safe-policy-genome-v3.1"
+    ).get_data(as_text=True)
+    assert "Conservative execution leaders by stop" in safe_html
+    assert "Ideal-touch diagnostic hypotheses" in safe_html
+    assert "INSUFFICIENT EXECUTION EVIDENCE" in safe_html
+
+
 def test_status_labels_analyzer_and_mirror_revisions_separately(monkeypatch):
     manifest = {
         "generation_revision": "abc123full",

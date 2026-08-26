@@ -379,6 +379,7 @@ class V3CandidateTests(unittest.TestCase):
         )
         self.assertIn("expected_shortfall", selection["ranking_dimensions"])
         self.assertEqual(selection["per_family_cap"], 2)
+        self.assertEqual(selection["families_evaluated"], 5)
         self.assertEqual(selection["families_represented"], 0)
         self.assertEqual(selection["rows_displayed"], 0)
         self.assertEqual(selection["globally_ranked_policies"], len(report["candidates"]))

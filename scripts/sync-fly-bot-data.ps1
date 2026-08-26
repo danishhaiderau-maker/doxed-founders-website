@@ -4,7 +4,9 @@ param(
   [string]$TargetDir = "",
   [string]$PublishAnalyzerReport = "",
   [string[]]$IncludePath = @(),
-  [int]$MaxLocalMirrorGiB = 30
+  [int]$MaxLocalMirrorGiB = 30,
+  [string]$ProgressHeartbeatFile = "",
+  [string]$ProgressRelayEvidenceJson = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +15,21 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-atomic.ps1")
+# A loop that was already running before this diagnostics repair does not need
+# to be restarted.  The shared-process PID marker proves this script was
+# invoked by that canonical loop; standalone/manual syncs remain silent unless
+# the caller passes ProgressHeartbeatFile explicitly.
+if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
+  $loopPidFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
+  if (Test-Path -LiteralPath $loopPidFile -PathType Leaf) {
+    try {
+      $loopPid = [int]((Get-Content -LiteralPath $loopPidFile -Raw).Trim([char]0xFEFF).Trim())
+      if ($loopPid -eq $PID) {
+        $ProgressHeartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
+      }
+    } catch { }
+  }
+}
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
@@ -33,6 +50,71 @@ Add-Type -AssemblyName System.Net.Http
 $downloadClient = [System.Net.Http.HttpClient]::new()
 $downloadClient.Timeout = [TimeSpan]::FromSeconds(45)
 $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
+
+function Write-SyncProgressHeartbeat {
+  param(
+    [Parameter(Mandatory = $true)][string]$Phase,
+    [string]$RelativePath = "",
+    [int]$FileIndex = 0,
+    [int]$FileCount = 0,
+    [int64]$FileBytes = 0,
+    [int64]$RemoteBytes = 0
+  )
+  if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) { return }
+  $target = [System.IO.Path]::GetFullPath($ProgressHeartbeatFile)
+  $relayEvidence = $null
+  if (-not [string]::IsNullOrWhiteSpace($ProgressRelayEvidenceJson)) {
+    try { $relayEvidence = $ProgressRelayEvidenceJson | ConvertFrom-Json }
+    catch { $relayEvidence = $null }
+  } elseif (Test-Path -LiteralPath $target -PathType Leaf) {
+    try {
+      $previousHeartbeat = Get-Content -LiteralPath $target -Raw | ConvertFrom-Json
+      if ($previousHeartbeat.PSObject.Properties.Name -contains "relayEvidence") {
+        $relayEvidence = $previousHeartbeat.relayEvidence
+      }
+    } catch { $relayEvidence = $null }
+  }
+  $progress = [ordered]@{
+    ok = $true
+    inProgress = $true
+    phase = $Phase
+    updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    source = $SourceUrl
+    sourceRevision = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+    currentFile = $RelativePath
+    fileIndex = $FileIndex
+    fileCount = $FileCount
+    fileBytes = $FileBytes
+    remoteBytes = $RemoteBytes
+    relayEvidence = $relayEvidence
+  }
+  $temporary = "$target.progress-$PID-$([Guid]::NewGuid().ToString('N'))"
+  $backup = "$temporary.replace-backup"
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  try {
+    [System.IO.File]::WriteAllText(
+      $temporary,
+      (($progress | ConvertTo-Json -Depth 8) + [Environment]::NewLine),
+      $encoding
+    )
+    if (Test-Path -LiteralPath $target -PathType Leaf) {
+      Invoke-MirrorAtomicReplace `
+        -Candidate $temporary `
+        -Destination $target `
+        -Backup $backup `
+        -Attempts 12
+    } else {
+      [System.IO.File]::Move($temporary, $target)
+    }
+  } finally {
+    if (Test-Path -LiteralPath $temporary) {
+      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $backup) {
+      Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
 
 $syncState = @{}
 if (Test-Path -LiteralPath $statePath) {
@@ -149,7 +231,10 @@ if (($currentMirrorBytes + $incomingGrowth) -gt $capBytes) {
     "fingerprinted receipts and free eligible closed rotations before sync resumes."
   )
 }
+$selectedFileCount = @($selectedFiles).Count
+$selectedFileIndex = 0
 foreach ($row in $selectedFiles) {
+  $selectedFileIndex += 1
   $rel = [string]$row.path
   if (-not $rel -or $rel.StartsWith(".") -or $rel.Split("/") -contains "..") {
     throw "Unsafe relative path from Fly manifest: $rel"
@@ -192,6 +277,13 @@ foreach ($row in $selectedFiles) {
   $candidate = "$local.$PID.$([guid]::NewGuid().ToString('N')).download"
   $candidateBackup = "$candidate.replace-backup"
   try {
+    Write-SyncProgressHeartbeat `
+      -Phase "file_start" `
+      -RelativePath $rel `
+      -FileIndex $selectedFileIndex `
+      -FileCount $selectedFileCount `
+      -FileBytes $localSize `
+      -RemoteBytes $remoteSize
     $fullReplaceRetry = $false
     $generationRefreshCount = 0
     $atomicSnapshotFallback = $false
@@ -276,6 +368,13 @@ foreach ($row in $selectedFiles) {
           } finally { $input.Dispose() }
           $offset = [int64](Get-Item -LiteralPath $candidate).Length
           $chunkComplete = $true
+          Write-SyncProgressHeartbeat `
+            -Phase "chunk_complete" `
+            -RelativePath $rel `
+            -FileIndex $selectedFileIndex `
+            -FileCount $selectedFileCount `
+            -FileBytes $offset `
+            -RemoteBytes $remoteSize
         } catch {
           if (
             $_.Exception.Message -match '^Fly sync HTTP 409 ' -and

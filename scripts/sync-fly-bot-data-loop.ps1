@@ -292,7 +292,7 @@ try {
           }
         } catch {
           $safeCode = "SYNC_FAILED"
-          if ($_.Exception.Message -match '^\[RELAY_EVIDENCE_([A-Z_]+)\]$') { $safeCode = $matches[1] }
+          if ($_.Exception.Message -match '^\[RELAY_EVIDENCE_([A-Z0-9_]+)\]$') { $safeCode = $matches[1] }
           $relayEvidenceStatus.errorCode = $safeCode
           Add-Content -LiteralPath $logFile -Value (
             "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`trelay-evidence=$safeCode"
@@ -393,6 +393,8 @@ try {
       # downloads only new bytes for those files.
       $syncArgs = @{
         SourceUrl = $SourceUrl
+        ProgressHeartbeatFile = $heartbeatFile
+        ProgressRelayEvidenceJson = ($relayEvidenceStatus | ConvertTo-Json -Compress)
       }
       # Publish the latest deterministic analyzer HTML back to Fly so admins
       # have an anywhere-access /analysis route. The local :9001 dashboard

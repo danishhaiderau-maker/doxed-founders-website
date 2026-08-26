@@ -196,9 +196,11 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "SOURCE UNAVAILABLE" in html
     assert "Profitable conservative rows" in html
     assert "Positive ideal-touch hypotheses" in html
-    assert "Policy families searched" in html
+    assert "Policy families evaluated" in html
+    assert "Conservative shortlist families" in html
+    assert "Diagnostic families represented" in html
     assert "Maximum rows per family" in html
-    assert "Maximum shortlist capacity" in html
+    assert "Configured family-balanced capacity" in html
     assert "Top 100 Policy Combos" in html
     assert "Entry configurations" in html
     assert "Policy specs enumerated" in html

@@ -143,6 +143,9 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
                 "collection_epoch_events": int(evidence.get("current_events") or 0),
                 "collection_policy_epoch_count": len({row.get("policy_epoch_id") for row in identities if row.get("policy_epoch_id")}),
                 "completed_paths": int(evidence.get("eligible_events") or 0),
+                "replay_eligible_execution_rows": int(
+                    evidence.get("eligible_events") or 0
+                ),
                 "replay_eligible_events": int(evidence.get("eligible_events") or 0),
                 "replay_ineligible_events": int(evidence.get("excluded_events") or 0),
                 "independent_episode_count": int(evidence.get("independent_episodes") or 0),
@@ -262,6 +265,7 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
             "collection_epoch_events": len(collection_epoch_rows),
             "collection_policy_epoch_count": len(collection_policy_epochs - {""}),
             "completed_paths": eligible,
+            "replay_eligible_execution_rows": eligible,
             "replay_eligible_events": eligible,
             "replay_ineligible_events": len(current) - eligible,
             "independent_episode_count": len(episodes),

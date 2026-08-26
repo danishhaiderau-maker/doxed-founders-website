@@ -9,6 +9,36 @@ function Stop-RelayEvidenceSync([string]$Code) {
   throw "[RELAY_EVIDENCE_$Code]"
 }
 
+function Get-RelayForwardFailureCode([System.Exception]$Exception) {
+  # Preserve only a bounded diagnostic class.  WebException/HTTP exception
+  # messages can contain the request URI, scoped user id, or proxy details and
+  # must never be copied into the sync heartbeat or log.
+  $cursor = $Exception
+  while ($null -ne $cursor) {
+    try {
+      if ($null -ne $cursor.Response -and $null -ne $cursor.Response.StatusCode) {
+        return "FORWARD_HTTP_$([int]$cursor.Response.StatusCode)"
+      }
+    } catch { }
+    if ($cursor -is [System.TimeoutException] -or
+        $cursor -is [System.Threading.Tasks.TaskCanceledException]) {
+      return 'FORWARD_TIMEOUT'
+    }
+    if ($cursor -is [System.Net.WebException]) {
+      if ($cursor.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+        return 'FORWARD_TIMEOUT'
+      }
+      return 'FORWARD_NETWORK_FAILED'
+    }
+    if ($cursor -is [System.Net.Http.HttpRequestException] -or
+        $cursor -is [System.Net.Sockets.SocketException]) {
+      return 'FORWARD_NETWORK_FAILED'
+    }
+    $cursor = $cursor.InnerException
+  }
+  return 'FORWARD_FAILED'
+}
+
 $apiBaseUrl = [Environment]::GetEnvironmentVariable('PLATFORM_API_BASE_URL', 'Process')
 $agentSlug = [Environment]::GetEnvironmentVariable('PLATFORM_RELAY_AGENT_SLUG', 'Process')
 $userId = [Environment]::GetEnvironmentVariable('PLATFORM_RELAY_USER_ID', 'Process')
@@ -104,7 +134,7 @@ try {
     -Headers @{ 'X-Bot-Admin-Token' = $adminToken; 'Content-Type' = 'application/json' } `
     -Body ([Text.Encoding]::UTF8.GetBytes($raw)) -TimeoutSec 45
 } catch {
-  Stop-RelayEvidenceSync 'FORWARD_FAILED'
+  Stop-RelayEvidenceSync (Get-RelayForwardFailureCode $_.Exception)
 }
 if ($forward.ok -ne $true -or [string]$forward.schema -ne 'relay_lifecycle_evidence_v1' -or
     [string]$forward.sha256 -cne $digest -or [int]$forward.records -ne @($payload.records).Count) {

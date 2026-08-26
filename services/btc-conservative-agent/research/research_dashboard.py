@@ -759,6 +759,30 @@ def _has_public_policy_execution_evidence(row: dict) -> bool:
     return supported > 0
 
 
+def _public_scenario_diagnostic_row(row: dict) -> dict:
+    """Expose unsupported Scenario-C replay only as an explicit diagnostic."""
+    public = _public_policy_evidence_row(row)
+    diagnostic = dict((row or {}).get("ideal_touch_diagnostic") or {})
+    return {
+        "policy_id": public.get("policy_id"),
+        "policy_family": public.get("policy_family"),
+        "oos_episodes": int(public.get("oos_episodes") or 0),
+        "supported_conservative_episodes": int(
+            public.get("supported_conservative_episodes") or 0
+        ),
+        "diagnostic_touches": int(diagnostic.get("touches") or 0),
+        "diagnostic_no_touches": int(diagnostic.get("no_touches") or 0),
+        "diagnostic_wins": int(diagnostic.get("wins") or 0),
+        "diagnostic_losses": int(diagnostic.get("losses") or 0),
+        "diagnostic_net_pnl_usd": diagnostic.get("oos_net_usd"),
+        "diagnostic_max_drawdown_usd": diagnostic.get("max_drawdown_usd"),
+        "diagnostic_expectancy_lcb_usd": diagnostic.get("expectancy_lcb_usd"),
+        "evidence_status": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        "execution_metric_status": "UNAVAILABLE_NO_SUPPORTED_EXECUTION_EVIDENCE",
+        "qualification_eligibility": "NOT QUALIFICATION ELIGIBLE",
+    }
+
+
 def _gate_passed(value) -> bool:
     """Interpret report booleans without treating textual true as a failure."""
     if value is True:
@@ -835,21 +859,64 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
             if any(_has_public_policy_execution_evidence(row) for row in list(rows or []))
         }
         sweep = screen.get("scenario_c_atr_stop_sweep") or {}
+        conservative_by_stop = {
+            str(stop): [
+                _public_policy_evidence_row(row)
+                for row in list(rows or [])
+                if _has_public_policy_execution_evidence(row)
+            ][:5]
+            for stop, rows in (sweep.get("leaders_by_stop") or {}).items()
+        }
+        conservative_by_stop = {
+            stop: rows for stop, rows in conservative_by_stop.items() if rows
+        }
+        conservative_by_chase_stop = {
+            str(chase): {
+                str(stop): _public_policy_evidence_row(row)
+                for stop, row in (stops or {}).items()
+                if _has_public_policy_execution_evidence(row)
+            }
+            for chase, stops in (sweep.get("best_by_chase_and_stop") or {}).items()
+        }
+        conservative_by_chase_stop = {
+            chase: stops
+            for chase, stops in conservative_by_chase_stop.items()
+            if stops
+        }
         out["candidate_screen"]["scenario_c_atr_stop_sweep"] = {
             "qualification": sweep.get("qualification"),
             "warning": sweep.get("warning"),
             "policies_tested": sweep.get("policies_tested", 0),
-            "overall_leaders": [_public_policy_evidence_row(row) for row in list(sweep.get("overall_leaders") or [])[:25]],
-            "leaders_by_stop": {
-                str(stop): [_public_policy_evidence_row(row) for row in list(rows or [])[:5]]
+            "overall_leaders": [
+                _public_policy_evidence_row(row)
+                for row in list(sweep.get("overall_leaders") or [])
+                if _has_public_policy_execution_evidence(row)
+            ][:25],
+            "leaders_by_stop": conservative_by_stop,
+            "best_by_chase_and_stop": conservative_by_chase_stop,
+            "diagnostic_hypotheses_by_stop": {
+                str(stop): [
+                    _public_scenario_diagnostic_row(row)
+                    for row in list(rows or [])[:5]
+                    if not _has_public_policy_execution_evidence(row)
+                ]
                 for stop, rows in (sweep.get("leaders_by_stop") or {}).items()
+                if any(
+                    not _has_public_policy_execution_evidence(row)
+                    for row in list(rows or [])[:5]
+                )
             },
-            "best_by_chase_and_stop": {
+            "diagnostic_hypotheses_by_chase_and_stop": {
                 str(chase): {
-                    str(stop): _public_policy_evidence_row(row)
+                    str(stop): _public_scenario_diagnostic_row(row)
                     for stop, row in (stops or {}).items()
+                    if not _has_public_policy_execution_evidence(row)
                 }
                 for chase, stops in (sweep.get("best_by_chase_and_stop") or {}).items()
+                if any(
+                    not _has_public_policy_execution_evidence(row)
+                    for row in (stops or {}).values()
+                )
             },
         }
     if "safe_policy_ranking" in report:
@@ -2559,9 +2626,9 @@ def api_safe_policy_genome_v3():
 def safe_policy_genome_v3_page():
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Safe Policy Genome V3.1</title>
-<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div class="banner bad"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong><br><span class="muted">Any ideal-touch values below are diagnostic replay values, never conservative execution results.</span></div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Best entry policy</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div><h3>Best result in every chase × stop cell</h3><p class="muted">This table prevents global no-chase leaders from hiding weaker or losing chased combinations.</p><div class="scroll"><table><thead><tr><th>Chase policy</th><th>ATR stop</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>LCB/episode</th></tr></thead><tbody id="scenario-chase-stops"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div class="banner bad"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong><br><span class="muted">Any ideal-touch values below are diagnostic replay values, never conservative execution results.</span></div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><h3>Conservative execution leaders by stop</h3><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Policy</th><th>Supported OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div><h3>Conservative execution leaders by chase × stop</h3><div class="scroll"><table><thead><tr><th>Chase policy</th><th>ATR stop</th><th>Supported OOS</th><th>Net USD</th><th>Max DD</th><th>LCB/episode</th></tr></thead><tbody id="scenario-chase-stops"></tbody></table></div><h3>Ideal-touch diagnostic hypotheses</h3><p class="muted">Supplied OOS paths without supported execution are hypotheses only; their diagnostic PnL cannot qualify a policy.</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Policy</th><th>Supplied OOS</th><th>Supported execution</th><th>Touches</th><th>Diagnostic PnL</th><th>Diagnostic DD</th><th>Status</th></tr></thead><tbody id="scenario-diagnostics"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
 <script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Complete policies evaluated',cs.unique_policies_evaluated||s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ol>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+'</li>').join('')+'</ol>').join('')||'<p>Insufficient execution evidence for family leaders.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">Insufficient execution evidence for drawdown leaders.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.cvar95_usd??'—')+'</td><td>'+Object.entries(r.gates||{}).filter(x=>x[1]!==true).map(x=>x[0]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">Insufficient execution evidence; exhaustive zero-information hypotheses remain internal.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});</script>
-<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const sweep=((d.candidate_screen||{}).scenario_c_atr_stop_sweep)||{},byStop=sweep.leaders_by_stop||{},byChase=sweep.best_by_chase_and_stop||{},orderedStops=Object.entries(byStop).sort(([a],[b])=>{if(a==='CONTROL_NO_ATR_STOP')return 1;if(b==='CONTROL_NO_ATR_STOP')return -1;return Number(a)-Number(b)});document.getElementById('scenario-warning').textContent=(sweep.qualification||'INSUFFICIENT')+' · '+(sweep.warning||'No Scenario C stop evidence yet.');document.getElementById('scenario-stops').innerHTML=orderedStops.map(([stop,items])=>{const row=(items||[])[0]||{};return '<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.oos_episodes??'—')+'</td><td>'+String(row.sealed_oos_net_usd??'—')+'</td><td>'+String(row.max_drawdown_usd??'—')+'</td><td>'+String(row.cvar95_usd??'—')+'</td><td>'+String(row.expectancy_lcb_usd??'—')+'</td></tr>'}).join('')||'<tr><td colspan="7">No Scenario C × ATR stop evidence yet.</td></tr>';const chaseRows=[];Object.entries(byChase).forEach(([chase,stops])=>Object.entries(stops||{}).forEach(([stop,row])=>chaseRows.push({chase,stop,row:row||{}})));document.getElementById('scenario-chase-stops').innerHTML=chaseRows.map(x=>'<tr><td>'+x.chase+'</td><td>'+x.stop+'</td><td>'+String(x.row.oos_episodes??'—')+'</td><td>'+String(x.row.sealed_oos_net_usd??'—')+'</td><td>'+String(x.row.max_drawdown_usd??'—')+'</td><td>'+String(x.row.expectancy_lcb_usd??'—')+'</td></tr>').join('')||'<tr><td colspan="6">No chase × stop cells have been materialized yet.</td></tr>';});</script></body></html>
+<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const sweep=((d.candidate_screen||{}).scenario_c_atr_stop_sweep)||{},byStop=sweep.leaders_by_stop||{},byChase=sweep.best_by_chase_and_stop||{},diag=sweep.diagnostic_hypotheses_by_stop||{},sortStops=entries=>Object.entries(entries).sort(([a],[b])=>{if(a==='CONTROL_NO_ATR_STOP')return 1;if(b==='CONTROL_NO_ATR_STOP')return -1;return Number(a)-Number(b)});document.getElementById('scenario-warning').textContent=(sweep.qualification||'INSUFFICIENT')+' · '+(sweep.warning||'No Scenario C stop evidence yet.');document.getElementById('scenario-stops').innerHTML=sortStops(byStop).map(([stop,items])=>{const row=(items||[])[0]||{};return '<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.supported_conservative_episodes??'—')+'</td><td>'+String(row.sealed_oos_net_usd??'—')+'</td><td>'+String(row.max_drawdown_usd??'—')+'</td><td>'+String(row.cvar95_usd??'—')+'</td><td>'+String(row.expectancy_lcb_usd??'—')+'</td></tr>'}).join('')||'<tr><td colspan="7">INSUFFICIENT EXECUTION EVIDENCE — no supported conservative Scenario C leader.</td></tr>';const chaseRows=[];Object.entries(byChase).forEach(([chase,stops])=>Object.entries(stops||{}).forEach(([stop,row])=>chaseRows.push({chase,stop,row:row||{}})));document.getElementById('scenario-chase-stops').innerHTML=chaseRows.map(x=>'<tr><td>'+x.chase+'</td><td>'+x.stop+'</td><td>'+String(x.row.supported_conservative_episodes??'—')+'</td><td>'+String(x.row.sealed_oos_net_usd??'—')+'</td><td>'+String(x.row.max_drawdown_usd??'—')+'</td><td>'+String(x.row.expectancy_lcb_usd??'—')+'</td></tr>').join('')||'<tr><td colspan="6">INSUFFICIENT EXECUTION EVIDENCE — no supported chase × stop leader.</td></tr>';document.getElementById('scenario-diagnostics').innerHTML=sortStops(diag).flatMap(([stop,items])=>(items||[]).map(row=>'<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.oos_episodes??0)+'</td><td>'+String(row.supported_conservative_episodes??0)+'</td><td>'+String(row.diagnostic_touches??0)+'</td><td>'+String(row.diagnostic_net_pnl_usd??'—')+'</td><td>'+String(row.diagnostic_max_drawdown_usd??'—')+'</td><td>IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT QUALIFICATION ELIGIBLE</td></tr>')).join('')||'<tr><td colspan="8">No Scenario C ideal-touch diagnostic hypotheses.</td></tr>';});</script></body></html>
 """)
 
 
@@ -2682,6 +2749,10 @@ def _best_policy_research_v31_payload() -> dict:
     evidence.update({
         "current_epoch_events": int(collection.get("independent_opportunities") or 0),
         "completed_paths": completed_paths,
+        "replay_eligible_execution_rows": int(
+            compatibility_evidence.get("replay_eligible_execution_rows")
+            or completed_paths
+        ),
         "independent_episode_count": int(collection.get("independent_opportunities") or 0),
         "qualified_oos_episodes": int(
             (screen.get("split") or {}).get("oos") or 0
@@ -2844,6 +2915,53 @@ def api_shadow_policy_research():
     collection = report.get("collection") or {}
     paused = _read_report("paused_shadow_research_report.json", {})
     real_edge = _read_report("real_edge_summary.json", {})
+    comprehensive = _read_report("shadow_lane_comprehensive_report.json", {}) or {}
+    chase_threshold = _read_report("chase_threshold_report.json", {}) or {}
+    expected_epoch = str(source["epoch_id"] or "")
+    comprehensive_epoch = str(
+        (comprehensive.get("epoch_scope") or {}).get("selected_epoch_id")
+        or comprehensive.get("epoch_id")
+        or ""
+    )
+    expected_revision = str(report.get("generation_revision") or "")
+    comprehensive_revision = str(comprehensive.get("generation_revision") or "")
+    shadow_mismatch_reasons = []
+    if not comprehensive:
+        shadow_mismatch_reasons.append("REPORT_MISSING")
+    if comprehensive and comprehensive_epoch != expected_epoch:
+        shadow_mismatch_reasons.append("EPOCH_MISMATCH")
+    if (
+        comprehensive and expected_revision and comprehensive_revision
+        and comprehensive_revision != expected_revision
+    ):
+        shadow_mismatch_reasons.append("GENERATION_REVISION_MISMATCH")
+    comprehensive_envelope = {
+        "available": not shadow_mismatch_reasons,
+        "status": "CURRENT" if not shadow_mismatch_reasons else "UNAVAILABLE_STALE_OR_MISSING",
+        "reason": ",".join(shadow_mismatch_reasons) if shadow_mismatch_reasons else None,
+        "expected_epoch_id": expected_epoch or None,
+        "report_epoch_id": comprehensive_epoch or None,
+        "expected_generation_revision": expected_revision or None,
+        "report_generation_revision": comprehensive_revision or None,
+        "coverage": (comprehensive.get("coverage") or {}) if not shadow_mismatch_reasons else {},
+        "epoch_scope": (comprehensive.get("epoch_scope") or {}) if not shadow_mismatch_reasons else {},
+        "cohorts": list(comprehensive.get("cohorts") or []) if not shadow_mismatch_reasons else [],
+        "legacy_unscoped_cohorts": list(
+            comprehensive.get("legacy_unscoped_cohorts") or []
+        ) if not shadow_mismatch_reasons else [],
+    }
+    chase_coverage = chase_threshold.get("coverage") or {}
+    generic_shadow = {
+        "status": "SEPARATE_GENERIC_COUNTERFACTUAL_COHORT",
+        "terminal_outcomes": int(chase_coverage.get("shadow_terminal_outcomes") or 0),
+        "generic_terminal_outcomes": int(
+            chase_coverage.get("generic_shadow_counterfactuals") or 0
+        ),
+        "tile_lab_terminal_outcomes": int(
+            chase_coverage.get("tile_lab_shadow_outcomes") or 0
+        ),
+        "source": "chase_threshold_report.json",
+    }
     legacy_detail = _read_report("policy_candidate_oos_report.json", {})
     legacy_shadow = legacy_detail.get("shadow_research") or {}
     return jsonify({
@@ -2869,6 +2987,8 @@ def api_shadow_policy_research():
         },
         "v22_shadow": {},
         "paused_shadow": paused,
+        "comprehensive_shadow_lanes": comprehensive_envelope,
+        "generic_shadow_terminals": generic_shadow,
         "real_edge": real_edge,
         "legacy_v22_excluded": {
             "status": "RETIRED_V2_2_EXCLUDED_FROM_CURRENT_QUALIFICATION",
@@ -2908,10 +3028,10 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
   rows=(d.regimes||[]).flatMap(group=>(group.policies||[]).map(x=>`<tr><td>${group.regime}</td><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>${x.oos_episodes??0}</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>NO</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`));
  } else {
-  const s=d.v22_shadow||{}, c=d.comprehensive_shadow_lanes||{}, cov=c.coverage||{}, scope=c.epoch_scope||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{};
-  cards=[['Current rejected paths',d.current_epoch_rejected||0],['Current signed episodes',cov.independent_shared_ai_episodes||0],['Current signed lane records',cov.deduped_lane_records||0],['Preserved legacy/unscoped',scope.legacy_unscoped_rows||0],['Foreign / malformed',Number(scope.foreign_epoch_rows||0)+Number(scope.malformed_current_identity_rows||0)],['Paired episodes',cov.paired_multi_lane_episodes||0],['Provisional exclusions',(c.cohorts||[]).reduce((n,x)=>n+(x.provisional_excluded||0),0)],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
+  const s=d.v22_shadow||{}, c=d.comprehensive_shadow_lanes||{}, cov=c.coverage||{}, scope=c.epoch_scope||{}, g=d.generic_shadow_terminals||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{}, signedAvailable=c.available===true;
+  cards=[['Current rejected paths',d.current_epoch_rejected??'UNAVAILABLE'],['Signed per-lane shadow episodes',signedAvailable?(cov.independent_shared_ai_episodes??0):('UNAVAILABLE · '+(c.reason||'report missing'))],['Signed per-lane records',signedAvailable?(cov.deduped_lane_records??0):'UNAVAILABLE'],['Generic shadow terminal outcomes',g.terminal_outcomes??'UNAVAILABLE'],['Generic counterfactual terminals',g.generic_terminal_outcomes??'UNAVAILABLE'],['Tile LAB shadow terminals',g.tile_lab_terminal_outcomes??'UNAVAILABLE'],['Preserved legacy/unscoped',signedAvailable?(scope.legacy_unscoped_rows??0):'UNAVAILABLE'],['Foreign / malformed',signedAvailable?(Number(scope.foreign_epoch_rows||0)+Number(scope.malformed_current_identity_rows||0)):'UNAVAILABLE'],['Paired signed episodes',signedAvailable?(cov.paired_multi_lane_episodes??0):'UNAVAILABLE'],['Provisional exclusions',signedAvailable?(c.cohorts||[]).reduce((n,x)=>n+(x.provisional_excluded||0),0):'UNAVAILABLE'],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
   document.getElementById('head').innerHTML='<tr><th>Policy / lane</th><th>Episodes</th><th>Fills</th><th>Wins</th><th>Losses</th><th>Net PnL</th><th>EV</th><th>Status</th></tr>';
-  rows=(c.cohorts||[]).map(x=>`<tr><td>${x.research_lane}<br><small>${x.classification}</small></td><td>${x.independent_shared_ai_episodes}</td><td>${x.completed_terminal_fills}/${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_per_completed_fill_usd)}</td><td class="bad">${x.qualification}; provisional excluded ${x.provisional_excluded}</td></tr>`);
+  rows=signedAvailable?(c.cohorts||[]).map(x=>`<tr><td>${x.research_lane}<br><small>${x.classification}</small></td><td>${x.independent_shared_ai_episodes}</td><td>${x.completed_terminal_fills}/${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_per_completed_fill_usd)}</td><td class="bad">${x.qualification}; provisional excluded ${x.provisional_excluded}</td></tr>`):[`<tr><td colspan="8">Signed per-lane shadow cohort unavailable: ${c.reason||'report missing'}. Generic terminal counts remain separate above.</td></tr>`];
   rows=rows.concat((c.legacy_unscoped_cohorts||[]).map(x=>`<tr><td>${x.research_lane}<br><small>${x.classification}</small></td><td>${x.independent_shared_ai_episodes}</td><td>${x.completed_terminal_fills}/${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_per_completed_fill_usd)}</td><td class="bad">LEGACY UNSCOPED — preserved, excluded from current signed cohort</td></tr>`));
   rows=rows.concat((s.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}<br><small>REJECTED V2.2 POLICY REPLAY</small></td><td>${x.independent_episodes}</td><td>${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.expectancy_usd)}</td><td class="bad">${x.qualification}</td></tr>`));
  }
@@ -4736,8 +4856,8 @@ async function loadDecisionReadiness() {
     ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
     ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
     ['Policy design', dynamicSummary, ''],
-    ['Completed paths', `${e.completed_paths || 0} / ${e.current_epoch_events || 0}`, ''],
-    ['Independent episodes', e.independent_episode_count || 0, ''],
+    ['Independent opportunities', e.current_epoch_events || e.independent_episode_count || 0, ''],
+    ['Replay-eligible execution rows', e.replay_eligible_execution_rows ?? e.completed_paths ?? 0, ''],
     ['Filled / Unfilled / Rejected', `${coverage.ACCEPTED_FILLED || 0} / ${coverage.ACCEPTED_UNFILLED || 0} / ${coverage.REJECTED || 0}`, ''],
     ['Qualified OOS episodes', e.qualified_oos_episodes || 0, ''],
     ['Entry policies', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString(), ''],
@@ -4839,9 +4959,11 @@ async function loadCombos() {
   document.getElementById('policy-grid-kpis').innerHTML = [
     ['Profitable conservative rows', Number(policyStats.profitable_conservative_rows_displayed ?? policyRows.length).toLocaleString()],
     ['Positive ideal-touch hypotheses', Number(policyStats.positive_ideal_touch_hypotheses_displayed ?? diagnosticRows.length).toLocaleString()],
-    ['Policy families searched', Number(selection.families_represented ?? 0).toLocaleString()],
+    ['Policy families evaluated', Number(selection.families_evaluated ?? 0).toLocaleString()],
+    ['Conservative shortlist families', Number(selection.families_represented ?? 0).toLocaleString()],
+    ['Diagnostic families represented', new Set(diagnosticRows.map(row => row.policy_family || 'UNKNOWN')).size.toLocaleString()],
     ['Maximum rows per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
-    ['Maximum shortlist capacity', (Number(selection.families_represented ?? 0) * Number(selection.per_family_cap ?? 0)).toLocaleString()],
+    ['Configured family-balanced capacity', (Number(selection.families_evaluated ?? 0) * Number(selection.per_family_cap ?? 0)).toLocaleString()],
     ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
     ['Policies with terminal OOS fills', Number(policyStats.terminal_oos_policies_tested || 0).toLocaleString()],
     ['Profitable terminal OOS policies', Number(policyStats.profitable_terminal_oos_policies || 0).toLocaleString()],
