@@ -5149,7 +5149,7 @@ async function loadLadderSim() {
   const d = await r.json();
   const disc = document.getElementById('ladder-sim-disclaimer');
   const noSim = !((d.profiles||[]).some(p => (p.trades_simulated||0) > 0));
-  const noReplayEvidence = d.data_status === 'NO_REPLAYS';
+  const noReplayEvidence = ['NO_REPLAYS','NO_ELIGIBLE_REPLAYS'].includes(d.data_status);
   const overlapZero = d.data_status === 'NO_EXECUTED_REPLAY_OVERLAP' || ((d.replays_matched_executed ?? 0) === 0 && (d.actual_trades ?? 0) > 0);
   const noComparableProfiles = noReplayEvidence || overlapZero || noSim;
   if (disc) {

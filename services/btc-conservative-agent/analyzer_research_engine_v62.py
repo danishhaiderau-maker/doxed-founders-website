@@ -15391,9 +15391,11 @@ def exit_ladder_simulator_report(trades=None, session=None):
     print(f"\n=== EXIT LADDER SIMULATOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     trades = _filter_policy_analysis_df(trades, "exit ladder simulator")
+    raw_replays = _load_jsonl_replays()
     replays = _filter_policy_analysis_replays(
-        _load_jsonl_replays(), "exit ladder simulator"
+        raw_replays, "exit ladder simulator"
     )
+    raw_replays_available = len(raw_replays)
     executed_ids = set()
     actual_sum = 0.0
     actual_n = 0
@@ -15521,8 +15523,13 @@ def exit_ladder_simulator_report(trades=None, session=None):
         data_status = "OK"
         empty_reason = None
     elif not replays:
-        data_status = "NO_REPLAYS"
-        empty_reason = f"No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays."
+        data_status = "NO_ELIGIBLE_REPLAYS" if raw_replays_available else "NO_REPLAYS"
+        empty_reason = (
+            f"{raw_replays_available} replay path(s) exist, but none belongs to a current-epoch "
+            "eligible executed trade with the required causal identity."
+            if raw_replays_available
+            else f"No replay paths were found in {SIGNAL_REPLAY_FILE}."
+        )
         disclaimer += f" {empty_reason}"
     else:
         data_status = "OK"
@@ -15535,7 +15542,7 @@ def exit_ladder_simulator_report(trades=None, session=None):
             f"delta=${best.get('delta_vs_matched_actual_usd')}){flag} {PIPELINE_ENFORCEMENT_TAG}"
         )
     elif not replays:
-        print(f"  No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {empty_reason} {PIPELINE_ENFORCEMENT_TAG}")
 
     payload = {
         "schema": "exit_ladder_simulator_v3",
@@ -15550,6 +15557,8 @@ def exit_ladder_simulator_report(trades=None, session=None):
         "matched_actual_realized_usd": matched_actual_sum,
         "matched_actual_trades": len(matched_executed_ids),
         "comparison_scope": "matched_executed_trade_replay_cohort",
+        "raw_replays_available": raw_replays_available,
+        "eligible_replays_available": replays_considered,
         "replays_available": replays_considered,
         "replays_considered": replays_considered,
         "replays_matched_executed": replays_matched,

@@ -206,11 +206,34 @@ def test_exit_combo_heading_is_explicitly_descriptive_and_unqualified():
 
 
 def test_ladder_zero_sample_profiles_are_never_rendered_as_comparable():
-    assert "const noReplayEvidence = d.data_status === 'NO_REPLAYS';" in DASHBOARD
+    assert "const noReplayEvidence = ['NO_REPLAYS','NO_ELIGIBLE_REPLAYS'].includes(d.data_status);" in DASHBOARD
     assert "const noComparableProfiles = noReplayEvidence || overlapZero || noSim;" in DASHBOARD
     assert "['Best profile', noComparableProfiles ? 'n/a'" in DASHBOARD
     assert "if (noComparableProfiles)" in DASHBOARD
     assert "Profiles with zero simulated trades are not ranked or displayed as results." in DASHBOARD
+
+
+def test_ladder_distinguishes_missing_file_from_ineligible_current_epoch_replays(tmp_path, monkeypatch):
+    raw = {
+        "legacy-trade": {
+            "trade_id": "legacy-trade",
+            "ticks": [{"t": 0, "price": 100.0}],
+        }
+    }
+    monkeypatch.setattr(analyzer, "_load_jsonl_replays", lambda: raw)
+    monkeypatch.setattr(analyzer, "_filter_policy_analysis_replays", lambda rows, label: {})
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+
+    report = analyzer.exit_ladder_simulator_report(
+        trades=pd.DataFrame(),
+        session={"mode": "FRESH-COLLECTION"},
+    )
+
+    assert report["data_status"] == "NO_ELIGIBLE_REPLAYS"
+    assert report["raw_replays_available"] == 1
+    assert report["eligible_replays_available"] == 0
+    assert "none belongs to a current-epoch eligible executed trade" in report["empty_reason"]
+    assert "No signal_replay.jsonl" not in report["empty_reason"]
 
 
 def test_empty_exit_views_explain_insufficient_terminal_evidence_not_analyzer_failure():
