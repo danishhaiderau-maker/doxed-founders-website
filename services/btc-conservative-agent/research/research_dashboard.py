@@ -4491,7 +4491,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-body"></tbody></table>
     <h3>Shadow/lab stop-effectiveness matrix — separate descriptive evidence</h3>
     <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-shadow-body"></tbody></table>
-    <h3>Best exit combos (by EV)</h3>
+    <h3>Highest descriptive exit-combo EV — unqualified</h3>
+    <p class="note">Observed cohorts only. Small or unmatched samples are not evidence that an exit caused the result and cannot qualify a policy.</p>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
     <h3>Worst leakage cohorts</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Left on table</th><th>Avg left</th><th>EV</th></tr></thead><tbody id="exit-leak-body"></tbody></table>
@@ -5119,10 +5120,12 @@ async function loadLadderSim() {
   const d = await r.json();
   const disc = document.getElementById('ladder-sim-disclaimer');
   const noSim = !((d.profiles||[]).some(p => (p.trades_simulated||0) > 0));
+  const noReplayEvidence = d.data_status === 'NO_REPLAYS';
   const overlapZero = d.data_status === 'NO_EXECUTED_REPLAY_OVERLAP' || ((d.replays_matched_executed ?? 0) === 0 && (d.actual_trades ?? 0) > 0);
+  const noComparableProfiles = noReplayEvidence || overlapZero || noSim;
   if (disc) {
     disc.textContent = d.empty_reason || d.disclaimer || '';
-    disc.style.display = (overlapZero || d.disclaimer) ? '' : 'none';
+    disc.style.display = (noComparableProfiles || d.disclaimer) ? '' : 'none';
   }
   document.getElementById('ladder-sim-kpis').innerHTML = [
     ['Full-session actual', '$' + fmtUsd(d.actual_realized_usd)],
@@ -5130,11 +5133,12 @@ async function loadLadderSim() {
     ['Matched-cohort actual', '$' + fmtUsd(d.matched_actual_realized_usd)],
     ['Matched replays', d.replays_matched_executed ?? 0],
     ['Replays on disk', d.replays_available ?? 0],
-    ['Best profile', d.best_profile_id || 'n/a'],
+    ['Best profile', noComparableProfiles ? 'n/a' : (d.best_profile_id || 'n/a')],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  if (noSim && overlapZero) {
+  if (noComparableProfiles) {
+    const reason = d.empty_reason || 'No profile has a non-zero matched replay sample.';
     document.getElementById('ladder-sim-body').innerHTML =
-      `<tr class="amber"><td colspan="8">No executed-trade replay overlap — ladder sim requires bot v1.1.41+ post-exit tick collection on session cont-*/vc603-* fills. ${d.replays_available ?? 0} replays on disk are mostly prior-session shadow/scan paths.</td></tr>`;
+      `<tr class="amber"><td colspan="8">No comparable ladder profiles — ${reason} Profiles with zero simulated trades are not ranked or displayed as results.</td></tr>`;
     return;
   }
   document.getElementById('ladder-sim-body').innerHTML = (d.profiles||[]).map(p => {

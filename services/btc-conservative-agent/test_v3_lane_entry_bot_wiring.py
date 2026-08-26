@@ -91,6 +91,27 @@ def test_preorder_ttl_is_no_order_but_submitted_expiry_is_not():
     assert len(writes) == 1
 
 
+@pytest.mark.parametrize(
+    "reason",
+    ["VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY", "STALE_NO_EXPOSURE"],
+)
+def test_preorder_retirement_reasons_close_expected_order_lifecycle(reason):
+    writes = []
+    namespace = {
+        "_append_v3_lane_entry_resolution": lambda *args: writes.append(args),
+    }
+    resolve = load_function("_v3_record_preorder_terminal_if_needed", namespace)
+    row = {"research_lane": "FAMILY_ATR_TRAIL", "shared_ai_call_id": "scan-1"}
+
+    assert resolve({}, {}, row, reason) is True
+    assert writes == [(row, "FAMILY_ATR_TRAIL", "NO_ORDER", reason)]
+
+    # A submitted-order expiry belongs to the order lifecycle and must never be
+    # rewritten as a pre-order NO_ORDER terminal.
+    assert resolve({"submitted_order_trade_id": "paper-1"}, {}, row, reason) is False
+    assert len(writes) == 1
+
+
 def test_combo_execution_enqueue_freezes_shared_call_snapshot():
     submitted = []
 

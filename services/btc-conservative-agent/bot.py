@@ -14411,7 +14411,13 @@ def _v3_record_preorder_terminal_if_needed(
     )
     lane = str(row.get("research_lane") or "")
     if (
-        reason_upper not in {"SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "DUPLICATE_LIMIT_PRICE"}
+        reason_upper not in {
+            "SIGNAL_TTL_EXPIRED",
+            "TTL_EXPIRED",
+            "DUPLICATE_LIMIT_PRICE",
+            "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY",
+            "STALE_NO_EXPOSURE",
+        }
         or had_submitted_order or not lane
     ):
         return False

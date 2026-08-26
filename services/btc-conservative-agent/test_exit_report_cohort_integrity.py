@@ -199,3 +199,17 @@ def test_exit_dashboard_exposes_family_and_stop_tables_for_both_worlds():
         assert element_id in DASHBOARD
     assert "EV is divided by independent shared opportunities" in DASHBOARD
     assert "NOT QUALIFIED" in DASHBOARD
+
+
+def test_exit_combo_heading_is_explicitly_descriptive_and_unqualified():
+    assert "Highest descriptive exit-combo EV — unqualified" in DASHBOARD
+    assert "Small or unmatched samples" in DASHBOARD
+    assert "Best exit combos (by EV)" not in DASHBOARD
+
+
+def test_ladder_zero_sample_profiles_are_never_rendered_as_comparable():
+    assert "const noReplayEvidence = d.data_status === 'NO_REPLAYS';" in DASHBOARD
+    assert "const noComparableProfiles = noReplayEvidence || overlapZero || noSim;" in DASHBOARD
+    assert "['Best profile', noComparableProfiles ? 'n/a'" in DASHBOARD
+    assert "if (noComparableProfiles)" in DASHBOARD
+    assert "Profiles with zero simulated trades are not ranked or displayed as results." in DASHBOARD
