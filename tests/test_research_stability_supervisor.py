@@ -492,10 +492,26 @@ def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
     (ledgers / "opportunity.jsonl").write_text(json.dumps(row("opportunity", "o-1", episode_id="e-1")) + "\n", encoding="utf-8")
     (ledgers / "decision.jsonl").write_text(json.dumps(row("decision", "d-1", episode_id="e-1")) + "\n", encoding="utf-8")
     (ledgers / "lifecycle.jsonl").write_text(json.dumps(row("lifecycle", "l-1", episode_id="e-1", terminal=True)) + "\n", encoding="utf-8")
+    (ledgers / "market_segment.jsonl").write_text(
+        json.dumps(row("market_segment", "m-1", episode_id="e-1")) + "\n",
+        encoding="utf-8",
+    )
+    segment_dir = mirror / "v3" / "market_segments" / "aa"
+    segment_dir.mkdir(parents=True)
+    write_json(segment_dir / "aa-segment.json", {"schema": "market_segment_v3"})
     write_json(reports / "safe_policy_genome_v3_report.json", {
         "generated_at": NOW.isoformat(), "status": "V3_COLLECTING", "qualification": "NO_SAFE_QUALIFIED_POLICY",
         "real_bitfinex_trading_allowed": False, "number_one_strategy": None,
-        "collection": {"independent_opportunities": 1, "decision_branches": 1, "terminal_lifecycles": 1, "provisional_lifecycles": 0, "market_segments": 0},
+        "collection": {
+            "independent_opportunities": 1,
+            "decision_branches": 1,
+            "terminal_lifecycles": 1,
+            "provisional_lifecycles": 0,
+            "market_segment_ledger_rows": 1,
+            "pre_signal_context_segments": 1,
+            "terminal_path_market_segments": 0,
+            "market_segments": 0,
+        },
     })
     checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW, fetcher=fetcher, process_reader=processes)
     result = checker.check()

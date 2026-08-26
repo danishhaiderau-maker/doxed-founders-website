@@ -1278,6 +1278,15 @@ class Supervisor:
                     "market_segments": v3["market_segments"],
                 }
                 observed = {key: int(collection.get(key) or 0) for key in expected}
+                # ``market_segments`` is intentionally the terminal-path
+                # subset.  Compare the ledger total with the analyzer's
+                # explicit ledger-row total so pre-signal-only context is not
+                # misreported as a pending analyzer deficit.
+                observed["market_segments"] = int(
+                    collection.get("market_segment_ledger_rows")
+                    if collection.get("market_segment_ledger_rows") is not None
+                    else collection.get("market_segments") or 0
+                )
                 deltas = {key: expected[key] - observed[key] for key in expected}
                 exact = expected == observed
                 pending = (
