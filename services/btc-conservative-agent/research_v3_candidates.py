@@ -919,9 +919,15 @@ def evaluate_protection_screen(
                 continue
             microstructure_by_ts[bucket_ts] = row
         for child in source.get("entry_children") or []:
-            entry_id = str(child.get("entry_policy_id") or "")
-            if not entry_id:
+            source_policy_id = str(child.get("entry_policy_id") or "").strip()
+            if not source_policy_id:
                 continue
+            # Paper tile identities contain ``ENTRY|EXIT``.  The protection
+            # screen replaces the exit, so carrying the source exit forward
+            # produced invalid ``ENTRY|OLD_EXIT|CANDIDATE_EXIT`` identities
+            # and duplicate policies that differed only by an irrelevant
+            # source-tile exit.  Candidate identity is exactly ENTRY|EXIT.
+            entry_id = source_policy_id.split("|", 1)[0]
             conservative_receipt = _conservative_child_receipt(
                 source, child, microstructure_by_ts=microstructure_by_ts,
             )
@@ -947,7 +953,11 @@ def evaluate_protection_screen(
             for protection in protections:
                 policy_id = f"{entry_id}|{protection['protection_id']}"
                 spec = {
-                    "entry": {"entry_policy_id": entry_id, "offset_pct": child.get("offset_pct"), "chase_id": child.get("chase_id")},
+                    "entry": {
+                        "entry_policy_id": entry_id,
+                        "offset_pct": child.get("offset_pct"),
+                        "chase_id": child.get("chase_id"),
+                    },
                     "fill": {
                         "execution_world": "CONSERVATIVE_BBO_DEPTH_V1",
                         "source_fill_model": conservative_receipt.get("evaluator_version"),

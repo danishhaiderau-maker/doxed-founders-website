@@ -420,6 +420,21 @@ class V3CandidateTests(unittest.TestCase):
         self.assertTrue(report["candidates"])
         self.assertTrue(all(row["episodes_total"] == 1 for row in report["candidates"]))
 
+    def test_complete_source_tile_policy_replaces_exit_without_concatenating_it(self):
+        row = source()
+        row["entry_children"][0]["entry_policy_id"] = (
+            "OFFSET_0.02_CHASE_w234_s25_i180|ATR_TP_2.5_ATR_SL_1.5"
+        )
+        report = evaluate_protection_screen([row])
+
+        self.assertTrue(report["candidates"])
+        self.assertTrue(all(candidate["policy_id"].count("|") == 1 for candidate in report["candidates"]))
+        self.assertTrue(all(
+            candidate["policy_spec"]["entry"]["entry_policy_id"]
+            == "OFFSET_0.02_CHASE_w234_s25_i180"
+            for candidate in report["candidates"]
+        ))
+
     def test_missing_ordered_path_is_unsupported_not_zero_pnl(self):
         row = source()
         row["ordered_1s_prices"] = []
