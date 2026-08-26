@@ -326,6 +326,102 @@ def _load_json_report(path, default=None):
     return default if default is not None else {}
 
 
+def _auxiliary_report_generation_context(session=None):
+    """Identity required before an auxiliary report may enter a new summary."""
+    session = session or load_research_session()
+    revision = (
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    epoch = _fresh_epoch_provenance()
+    source = _report_source_evidence_provenance()
+    return {
+        "generation_revision": str(revision),
+        "session_scope": _shadow_scope_label(session),
+        "fresh_epoch_id": epoch.get("fresh_epoch_id"),
+        "source_data_revision": source.get("source_data_revision"),
+    }
+
+
+def _load_current_auxiliary_report(path, context):
+    """Load a report only when its revision, session, epoch and snapshot match.
+
+    Returning the exclusion receipt with the empty payload prevents an older
+    on-disk report from silently contributing KPIs to a newer compact summary.
+    """
+    payload = _load_json_report(path)
+    receipt = {
+        "file": os.path.basename(str(path)),
+        "included": False,
+        "exclusion_reasons": [],
+    }
+    if not isinstance(payload, dict) or not payload:
+        receipt["exclusion_reasons"] = ["MISSING_OR_INVALID_JSON"]
+        return {}, receipt
+
+    provenance = payload.get("analysis_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    observed = {
+        "generation_revision": payload.get("generation_revision") or provenance.get("generation_revision"),
+        "session_scope": payload.get("session_scope") or provenance.get("session_scope"),
+        "fresh_epoch_id": (
+            payload.get("epoch_id")
+            or payload.get("fresh_epoch_id")
+            or provenance.get("fresh_epoch_id")
+        ),
+        "source_data_revision": payload.get("source_data_revision") or provenance.get("source_data_revision"),
+    }
+    for field, expected in context.items():
+        found = observed.get(field)
+        if not expected or str(expected).upper() == "UNKNOWN":
+            receipt["exclusion_reasons"].append(f"EXPECTED_{field.upper()}_UNAVAILABLE")
+        elif found is None or str(found).strip() == "":
+            receipt["exclusion_reasons"].append(f"{field.upper()}_MISSING")
+        elif str(found) != str(expected):
+            receipt["exclusion_reasons"].append(f"{field.upper()}_MISMATCH")
+    receipt["observed_identity"] = observed
+    receipt["expected_identity"] = dict(context)
+    receipt["included"] = not receipt["exclusion_reasons"]
+    return (payload if receipt["included"] else {}), receipt
+
+
+def _stamp_current_iteration_auxiliary_report(path, context):
+    """Stamp only a file written during this in-memory analyzer iteration."""
+    started_at = globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
+    if started_at is None:
+        return False
+    candidates = [path]
+    if not os.path.dirname(str(path)):
+        alternate = analyzer_report_path(path)
+        if alternate != path:
+            candidates.append(alternate)
+    target = next((candidate for candidate in candidates if os.path.isfile(candidate)), None)
+    if target is None or os.path.getmtime(target) < float(started_at):
+        return False
+    payload = _load_json_report(target)
+    if not isinstance(payload, dict) or not payload:
+        return False
+    provenance = payload.get("analysis_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    payload["generation_revision"] = context["generation_revision"]
+    payload["session_scope"] = context["session_scope"]
+    payload["source_data_revision"] = context["source_data_revision"]
+    provenance.update({
+        "generation_revision": context["generation_revision"],
+        "session_scope": context["session_scope"],
+        "fresh_epoch_id": context["fresh_epoch_id"],
+        "source_data_revision": context["source_data_revision"],
+    })
+    payload["analysis_provenance"] = provenance
+    temporary = f"{target}.generation.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    os.replace(temporary, target)
+    return True
+
+
 def _fmt_pct(val, digits=1):
     if val is None:
         return "n/a"
@@ -8720,6 +8816,8 @@ def run(interval_min=30, session_only=True, max_iterations=None):
 
 
 def _run_analyzer_iteration(iteration, interval_min, session_only):
+        global _CURRENT_ANALYZER_GENERATION_STARTED_AT
+        _CURRENT_ANALYZER_GENERATION_STARTED_AT = time.time()
         session = load_research_session()
         print_data_provenance_banner(session)
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
@@ -14573,22 +14671,25 @@ def top_leakage_report(trades=None, session=None, top_n=50):
 
 def _combo_stats_from_df(sub: pd.DataFrame) -> dict:
     if sub is None or sub.empty:
-        return {"trades": 0, "wins": 0, "wr_pct": 0.0, "pnl_usd": 0.0, "ev_usd": 0.0}
+        return {"trades": 0, "wins": None, "losses": None, "wr_pct": None, "pnl_usd": None, "ev_usd": None, "pnl_available_rows": 0}
     pnl_col = "net_pnl_usd" if "net_pnl_usd" in sub.columns else "outcome_net_pnl_usd"
-    pnl_source = (
-        sub[pnl_col] if pnl_col in sub.columns
-        else pd.Series(0.0, index=sub.index)
-    )
-    pnl = pd.to_numeric(pnl_source, errors="coerce").fillna(0)
+    if pnl_col not in sub.columns:
+        return {"trades": len(sub), "wins": None, "losses": None, "wr_pct": None, "pnl_usd": None, "ev_usd": None, "pnl_available_rows": 0}
+    pnl = pd.to_numeric(sub[pnl_col], errors="coerce").dropna()
+    if pnl.empty:
+        return {"trades": len(sub), "wins": None, "losses": None, "wr_pct": None, "pnl_usd": None, "ev_usd": None, "pnl_available_rows": 0}
     wins = int((pnl > 0).sum())
-    n = len(sub)
+    losses = int((pnl <= 0).sum())
+    n = len(pnl)
     total = round(float(pnl.sum()), 2)
     return {
-        "trades": n,
+        "trades": len(sub),
         "wins": wins,
+        "losses": losses,
         "wr_pct": round(100.0 * wins / n, 1) if n else 0.0,
         "pnl_usd": total,
         "ev_usd": round(total / n, 2) if n else 0.0,
+        "pnl_available_rows": n,
     }
 
 
@@ -14709,6 +14810,7 @@ def _load_descriptive_shadow_exit_df(session: dict = None):
     """Raw shadow/lab rows for exit analysis, without live-copy eligibility."""
     rows = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
     rows.update(_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {})
+    rows.update(_load_jsonl_by_trade_id(SHADOW_LANE_OUTCOME_FILE) or {})
     if not rows:
         return None
     df = pd.DataFrame(list(rows.values()))
@@ -14717,6 +14819,47 @@ def _load_descriptive_shadow_exit_df(session: dict = None):
             "exit_ts", "closed_at", "close_ts", "terminal_ts", "ts", "timestamp",
         ))
     return df
+
+
+def _report_exit_rows(filename: str, *paths: str) -> pd.DataFrame:
+    """Load only explicit report row collections; never recursively guess rows."""
+    report = _load_json_report(filename) or {}
+    rows = _cross_world_list(report, *paths)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _load_exit_evidence_worlds(trades=None, session: dict = None) -> dict:
+    """Return exit evidence as non-additive worlds with explicit provenance."""
+    return {
+        "executed_paper": {
+            "evidence_class": "EXECUTED_PAPER_DESCRIPTIVE",
+            "source_files": [TRADES_FILE],
+            "frame": trades if trades is not None else pd.DataFrame(),
+            "pnl_semantics": "OBSERVED_PAPER_NET_PNL_USD",
+        },
+        "shadow_lab": {
+            "evidence_class": "SHADOW_LAB_DESCRIPTIVE",
+            "source_files": [COUNTERFACTUAL_FILE, SHADOW_OUTCOME_FILE, SHADOW_LANE_OUTCOME_FILE],
+            "frame": _load_descriptive_shadow_exit_df(session=session),
+            "pnl_semantics": "SIMULATED_SHADOW_PNL_USD",
+        },
+        "conservative_bbo_depth": {
+            "evidence_class": "CONSERVATIVE_BBO_DEPTH_DESCRIPTIVE",
+            "source_files": [CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE],
+            "frame": _report_exit_rows(CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "receipts"),
+            "pnl_semantics": "CONSERVATIVE_REPLAY_PNL_USD",
+        },
+        "ideal_touch_diagnostic": {
+            "evidence_class": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "source_files": [SAFE_POLICY_GENOME_V3_REPORT_FILE],
+            "frame": _report_exit_rows(
+                SAFE_POLICY_GENOME_V3_REPORT_FILE,
+                "ideal_touch_receipts",
+                "candidate_screen.ideal_touch_receipts",
+            ),
+            "pnl_semantics": "DIAGNOSTIC_TOUCH_PNL_USD",
+        },
+    }
 
 
 def _exit_identity_labels(sub):
@@ -14875,7 +15018,7 @@ def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> 
 
 
 def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100):
-    """Executed-paper and shadow exit cohorts, always kept as separate evidence."""
+    """Four exit evidence worlds, always separate and never PnL-additive."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
@@ -14888,11 +15031,20 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         "time_in_trade_bucket",
         "research_lane",
     ]
-    def build(source, evidence_class):
+    def build(source, evidence_class, source_files=None, pnl_semantics=None):
+        source_rows = int(len(source)) if isinstance(source, pd.DataFrame) else 0
         clean, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit combinations")
         work = _enrich_trades_with_buckets(clean.copy()) if not clean.empty else pd.DataFrame()
         if work.empty:
-            return {"evidence_class": evidence_class, "terminal_rows": 0, "contaminated_rows_excluded": contaminated_n, "top": [], "worst_leakage": [], "overall_left_on_table_usd": 0.0, "exit_family_scorecard": [], "stop_effectiveness_matrix": []}
+            return {
+                "evidence_class": evidence_class, "source_files": source_files or [],
+                "source_rows": source_rows, "terminal_rows": 0,
+                "contaminated_rows_excluded": contaminated_n,
+                "empty_reason": "NO_EXPLICIT_TERMINAL_EXIT_ROWS" if source_rows else "SOURCE_EMPTY_OR_UNAVAILABLE",
+                "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
+                "top": [], "worst_leakage": [], "overall_left_on_table_usd": None,
+                "exit_family_scorecard": [], "stop_effectiveness_matrix": [],
+            }
         if "exit_reason" not in work.columns:
             work["exit_reason"] = "UNKNOWN"
         work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
@@ -14917,14 +15069,14 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             peak_source = (
                 work["mfe_margin_pct"] if "mfe_margin_pct" in work.columns
                 else work["max_profit"] if "max_profit" in work.columns
-                else pd.Series(0.0, index=work.index)
+                else pd.Series(np.nan, index=work.index)
             )
             booked_source = (
                 work["net_pnl_usd"] if "net_pnl_usd" in work.columns
-                else pd.Series(0.0, index=work.index)
+                else pd.Series(np.nan, index=work.index)
             )
-            peak_margin_pct = pd.to_numeric(peak_source, errors="coerce").fillna(0)
-            booked = pd.to_numeric(booked_source, errors="coerce").fillna(0)
+            peak_margin_pct = pd.to_numeric(peak_source, errors="coerce")
+            booked = pd.to_numeric(booked_source, errors="coerce")
             margin_source = (
                 work["margin_usdt"] if "margin_usdt" in work.columns
                 else work["margin_usd"] if "margin_usd" in work.columns
@@ -14944,33 +15096,40 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
                 "exit_reason": ex, "ai_bucket": ai_b, "spread_bucket": sp_b,
                 "peak_mfe_bucket": mfe_b, "time_in_trade_bucket": time_b,
                 "lane": str(lane).upper(), "evidence_class": evidence_class,
-                "left_on_table_usd": round(float(sub["left_on_table_usd"].sum()), 2),
-                "avg_left_usd": round(float(sub["left_on_table_usd"].mean()), 2),
+                "left_on_table_usd": round(float(sub["left_on_table_usd"].dropna().sum()), 2) if sub["left_on_table_usd"].notna().any() else None,
+                "avg_left_usd": round(float(sub["left_on_table_usd"].dropna().mean()), 2) if sub["left_on_table_usd"].notna().any() else None,
                 "sample_status": "LOW_SAMPLE_N1" if stats["trades"] == 1 else "DESCRIPTIVE_SAMPLE",
                 "qualification_eligible": False,
                 **_exit_identity_labels(sub), **stats,
             })
-        by_ev = sorted(combos, key=lambda x: (x["ev_usd"], x["pnl_usd"]), reverse=True)
-        by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"], -x["ev_usd"]), reverse=True)
+        by_ev = sorted(combos, key=lambda x: (x["ev_usd"] is not None, x["ev_usd"] or 0, x["pnl_usd"] or 0), reverse=True)
+        by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"] is not None, x["left_on_table_usd"] or 0), reverse=True)
         return {
-            "evidence_class": evidence_class, "terminal_rows": int(len(work)),
+            "evidence_class": evidence_class, "source_files": source_files or [],
+            "source_rows": source_rows, "terminal_rows": int(len(work)),
             "contaminated_rows_excluded": contaminated_n, "total_combos": len(combos),
-            "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
+            "empty_reason": None, "pnl_semantics": pnl_semantics,
+            "pnl_aggregation_allowed": False,
+            "overall_left_on_table_usd": round(float(work["left_on_table_usd"].dropna().sum()), 2) if work["left_on_table_usd"].notna().any() else None,
             "top": by_ev[:top_n], "worst_leakage": by_leak[:top_n],
             **_exit_family_and_stop_summaries(work, evidence_class),
         }
 
-    executed = build(trades, "EXECUTED_PAPER_DESCRIPTIVE")
-    shadow_df = _load_descriptive_shadow_exit_df(session=session)
-    shadow = build(shadow_df, "SHADOW_LAB_DESCRIPTIVE")
+    sources = _load_exit_evidence_worlds(trades=trades, session=session)
+    worlds = {
+        name: build(spec.get("frame"), spec["evidence_class"], spec.get("source_files"), spec.get("pnl_semantics"))
+        for name, spec in sources.items()
+    }
+    executed = worlds["executed_paper"]
+    shadow = worlds["shadow_lab"]
     top, worst_leak = executed["top"], executed["worst_leakage"]
     for row in top[:6]:
         print(
-            f"  TOP {row['combo']}: n={row['trades']} EV=${row['ev_usd']:+.2f} "
-            f"left=${row['left_on_table_usd']:+.0f} {PIPELINE_ENFORCEMENT_TAG}"
+            f"  TOP {row['combo']}: n={row['trades']} EV={row['ev_usd']} "
+            f"left={row['left_on_table_usd']} {PIPELINE_ENFORCEMENT_TAG}"
         )
     payload = {
-        "schema": "exit_combinations_v3",
+        "schema": "exit_combinations_v4",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -14980,15 +15139,19 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         "dimensions": dims,
         "total_combos": executed.get("total_combos", 0),
         "overall_left_on_table_usd": executed["overall_left_on_table_usd"],
-        "filter_note": "Current executed-paper terminals and shadow/lab terminals are descriptive, separated, and never qualification eligible. N=1 rows are visibly low sample.",
+        "filter_note": "Paper, shadow/lab, conservative BBO/depth replay, and ideal-touch diagnostic terminals are descriptive, separated, and never PnL-additive. N=1 rows are visibly low sample.",
         "qualification_eligible": False,
-        "evidence_classes": {"executed_paper": executed, "shadow_lab": shadow},
+        "evidence_worlds": worlds,
+        "evidence_classes": worlds,
         "top": top,
         "worst_leakage": worst_leak,
     }
     try:
-        with open(analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        target = analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE)
+        temp = f"{target}.tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, allow_nan=False)
+        os.replace(temp, target)
         print(f"  ✅ Wrote {EXIT_COMBINATIONS_REPORT_FILE} ({executed.get('total_combos', 0)} executed exit combos) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_COMBINATIONS_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
@@ -15067,33 +15230,37 @@ def _exit_leak_recommendations(reasons: list) -> list:
 
 
 def exit_leakage_by_reason_report(trades=None, session=None):
-    """Aggregate exit gaps for executed-paper and shadow/lab separately."""
+    """Aggregate same-path exit gaps within four strictly separated worlds."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LEAKAGE BY REASON — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    def build(source, evidence_class):
+    def build(source, evidence_class, source_files=None, pnl_semantics=None):
+        source_rows = int(len(source)) if isinstance(source, pd.DataFrame) else 0
         work, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit leakage")
         if work.empty:
             return {
-                "evidence_class": evidence_class, "terminal_rows": 0,
-                "contaminated_rows_excluded": contaminated_n, "overall_left_usd": 0.0,
-                "overall_booked_usd": 0.0, "overall_peak_usd": 0.0,
+                "evidence_class": evidence_class, "source_files": source_files or [],
+                "source_rows": source_rows, "terminal_rows": 0,
+                "contaminated_rows_excluded": contaminated_n, "overall_left_usd": None,
+                "overall_booked_usd": None, "overall_peak_usd": None,
+                "empty_reason": "NO_EXPLICIT_TERMINAL_EXIT_ROWS" if source_rows else "SOURCE_EMPTY_OR_UNAVAILABLE",
+                "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
                 "reasons": [], "recommendations": [], "qualification_eligible": False,
             }
         pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
         if pnl_col not in work.columns:
-            work[pnl_col] = 0.0
-        work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0.0)
+            work[pnl_col] = np.nan
+        work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce")
         mfe_source = work["max_profit"] if "max_profit" in work.columns else work.get("mfe_margin_pct", pd.Series(np.nan, index=work.index))
         final_source = work["pnl"] if "pnl" in work.columns else work.get("final_pnl_margin_pct", pd.Series(np.nan, index=work.index))
         mfe = pd.to_numeric(mfe_source, errors="coerce")
         final_margin = pd.to_numeric(final_source, errors="coerce")
         margin_source = work.get("margin_usdt", pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index))
         margin_usd = pd.to_numeric(margin_source, errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
-        peak_usd = ((mfe / 100.0) * margin_usd).fillna(0.0)
+        peak_usd = (mfe / 100.0) * margin_usd
         booked_usd = work[pnl_col]
-        left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0).fillna(0.0)
+        left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
         capture = (booked_usd / peak_usd.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
         work = work.assign(_left=left_usd, _peak=peak_usd, _booked=booked_usd, _capture=capture)
         reason_col = "exit_reason" if "exit_reason" in work.columns else "close_reason"
@@ -15108,40 +15275,48 @@ def exit_leakage_by_reason_report(trades=None, session=None):
             sub_mfe, sub_final = mfe.loc[sub.index], final_margin.loc[sub.index]
             reasons.append({
                 "exit_reason": str(reason), "trades": n,
-                "left_on_table_usd": round(float(sub["_left"].sum()), 2),
-                "avg_left_usd": round(float(sub["_left"].mean()), 2),
+                "left_on_table_usd": round(float(sub["_left"].dropna().sum()), 2) if sub["_left"].notna().any() else None,
+                "avg_left_usd": round(float(sub["_left"].dropna().mean()), 2) if sub["_left"].notna().any() else None,
                 "avg_mfe_margin_pct": round(float(sub_mfe.mean()), 2) if sub_mfe.notna().any() else None,
                 "avg_realized_margin_pct": round(float(sub_final.mean()), 2) if sub_final.notna().any() else None,
                 "avg_leakage_margin_pct": round(float((sub_mfe - sub_final).mean()), 2) if sub_mfe.notna().any() else None,
-                "booked_profit_usd": round(float(sub["_booked"].sum()), 2),
-                "peak_profit_usd": round(float(sub["_peak"].sum()), 2),
+                "booked_profit_usd": round(float(sub["_booked"].dropna().sum()), 2) if sub["_booked"].notna().any() else None,
+                "peak_profit_usd": round(float(sub["_peak"].dropna().sum()), 2) if sub["_peak"].notna().any() else None,
                 "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1) if sub["_capture"].notna().any() else 0.0,
                 "evidence_class": evidence_class,
                 "sample_status": "LOW_SAMPLE_N1" if n == 1 else "DESCRIPTIVE_SAMPLE",
                 "qualification_eligible": False,
                 **_exit_identity_labels(sub),
             })
-        reasons.sort(key=lambda x: (-x["left_on_table_usd"], -x["trades"]))
+        reasons.sort(key=lambda x: (x["left_on_table_usd"] is not None, x["left_on_table_usd"] or 0, x["trades"]), reverse=True)
         return {
-            "evidence_class": evidence_class, "terminal_rows": int(len(work)),
+            "evidence_class": evidence_class, "source_files": source_files or [],
+            "source_rows": source_rows, "terminal_rows": int(len(work)),
             "contaminated_rows_excluded": contaminated_n,
-            "overall_left_usd": round(float(left_usd.sum()), 2),
-            "overall_booked_usd": round(float(booked_usd.sum()), 2),
-            "overall_peak_usd": round(float(peak_usd.sum()), 2),
+            "empty_reason": None, "pnl_semantics": pnl_semantics,
+            "pnl_aggregation_allowed": False,
+            "overall_left_usd": round(float(left_usd.dropna().sum()), 2) if left_usd.notna().any() else None,
+            "overall_booked_usd": round(float(booked_usd.dropna().sum()), 2) if booked_usd.notna().any() else None,
+            "overall_peak_usd": round(float(peak_usd.dropna().sum()), 2) if peak_usd.notna().any() else None,
             "reasons": reasons, "recommendations": _exit_leak_recommendations(reasons),
             "qualification_eligible": False,
         }
 
-    executed = build(trades, "EXECUTED_PAPER_DESCRIPTIVE")
-    shadow = build(_load_descriptive_shadow_exit_df(session=session), "SHADOW_LAB_DESCRIPTIVE")
+    sources = _load_exit_evidence_worlds(trades=trades, session=session)
+    worlds = {
+        name: build(spec.get("frame"), spec["evidence_class"], spec.get("source_files"), spec.get("pnl_semantics"))
+        for name, spec in sources.items()
+    }
+    executed = worlds["executed_paper"]
+    shadow = worlds["shadow_lab"]
     for row in executed["reasons"][:6]:
         print(
-            f"  {row['exit_reason']}: n={row['trades']} left=${row['left_on_table_usd']:.2f} "
+            f"  {row['exit_reason']}: n={row['trades']} left={row['left_on_table_usd']} "
             f"avg_leak={row['avg_leakage_margin_pct']}% {PIPELINE_ENFORCEMENT_TAG}"
         )
 
     payload = {
-        "schema": "exit_leakage_by_reason_v4",
+        "schema": "exit_leakage_by_reason_v5",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -15154,15 +15329,19 @@ def exit_leakage_by_reason_report(trades=None, session=None):
             "Peak MFE minus realized close is a hindsight excursion gap, not directly "
             "capturable profit and not evidence that a ladder change will improve PnL."
         ),
-        "filter_note": "Executed-paper and shadow/lab terminal cohorts are descriptive and separated; terminal-double-count contaminated rows are excluded.",
+        "filter_note": "Four terminal evidence worlds are descriptive, separated, and never PnL-additive; terminal-double-count contaminated rows are excluded.",
         "qualification_eligible": False,
-        "evidence_classes": {"executed_paper": executed, "shadow_lab": shadow},
+        "evidence_worlds": worlds,
+        "evidence_classes": worlds,
         "reasons": executed["reasons"],
         "recommendations": executed["recommendations"],
     }
     try:
-        with open(EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        target = analyzer_report_path(EXIT_LEAKAGE_BY_REASON_REPORT_FILE)
+        temp = f"{target}.tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, allow_nan=False)
+        os.replace(temp, target)
         print(f"  ✅ Wrote {EXIT_LEAKAGE_BY_REASON_REPORT_FILE} ({len(executed['reasons'])} executed reasons) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_LEAKAGE_BY_REASON_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
@@ -17766,22 +17945,31 @@ def build_executive_summary_payload(
         ev = float(net / n_trades) if n_trades else 0.0
         exit_mix = _exit_mix_from_df(analysis_df)
 
-    real_edge = _load_json_report(REAL_EDGE_SUMMARY_FILE)
-    bench = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    ai_cal = _load_json_report(AI_CALIBRATION_REPORT_FILE)
-    conf_band = _load_json_report(CONFIDENCE_BAND_REPORT_FILE)
-    chase = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
-    leakage = _load_json_report(SCENARIO_C_LEAKAGE_REPORT_FILE)
-    capture = _load_json_report(SCENARIO_C_CAPTURE_RATIO_REPORT_FILE)
-    missed = _load_json_report(MISSED_OPPORTUNITY_HEATMAP_FILE)
-    horizon = _load_json_report(HORIZON_PROFITABILITY_REPORT_FILE)
-    fast_cut = _load_json_report(FAST_CUT_SURVIVOR_REPORT_FILE)
-    edge_inc = _load_json_report(EDGE_INCREMENTAL_VALUE_REPORT_FILE)
-    edge_val = _load_json_report(EDGE_SCORE_DECILE_REPORT_FILE)
-    dir_rep = _load_json_report(DIRECTION_REPORT_FILE)
-    chase_buckets = _load_json_report(CHASE_EFFECTIVENESS_REPORT_FILE)
-    top_leak = _load_json_report(TOP_LEAKAGE_REPORT_FILE)
-    feat_imp = _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE)
+    auxiliary_context = _auxiliary_report_generation_context(session)
+    auxiliary_receipts = []
+
+    def current_auxiliary(path):
+        _stamp_current_iteration_auxiliary_report(path, auxiliary_context)
+        report, receipt = _load_current_auxiliary_report(path, auxiliary_context)
+        auxiliary_receipts.append(receipt)
+        return report
+
+    real_edge = current_auxiliary(REAL_EDGE_SUMMARY_FILE)
+    bench = current_auxiliary(BENCHMARK_VS_LANES_REPORT_FILE)
+    ai_cal = current_auxiliary(AI_CALIBRATION_REPORT_FILE)
+    conf_band = current_auxiliary(CONFIDENCE_BAND_REPORT_FILE)
+    chase = current_auxiliary(CHASE_ATTRIBUTION_REPORT_FILE)
+    leakage = current_auxiliary(SCENARIO_C_LEAKAGE_REPORT_FILE)
+    capture = current_auxiliary(SCENARIO_C_CAPTURE_RATIO_REPORT_FILE)
+    missed = current_auxiliary(MISSED_OPPORTUNITY_HEATMAP_FILE)
+    horizon = current_auxiliary(HORIZON_PROFITABILITY_REPORT_FILE)
+    fast_cut = current_auxiliary(FAST_CUT_SURVIVOR_REPORT_FILE)
+    edge_inc = current_auxiliary(EDGE_INCREMENTAL_VALUE_REPORT_FILE)
+    edge_val = current_auxiliary(EDGE_SCORE_DECILE_REPORT_FILE)
+    dir_rep = current_auxiliary(DIRECTION_REPORT_FILE)
+    chase_buckets = current_auxiliary(CHASE_EFFECTIVENESS_REPORT_FILE)
+    top_leak = current_auxiliary(TOP_LEAKAGE_REPORT_FILE)
+    feat_imp = current_auxiliary(FEATURE_IMPORTANCE_REPORT_FILE)
 
     best_lane, worst_lane = _best_worst_lanes(bench)
     lane_rows = _lane_table_rows(bench)
@@ -17940,6 +18128,13 @@ def build_executive_summary_payload(
         "recovery_summary": horizon.get("recovery_summary") or [],
         "blocked_opportunity_usd": blocked_opp,
         "json_reports_written": _count_json_reports_written(),
+        "auxiliary_report_ingestion": {
+            "schema": "auxiliary_report_ingestion_v1",
+            "required_identity": auxiliary_context,
+            "included_count": sum(bool(row.get("included")) for row in auxiliary_receipts),
+            "excluded_count": sum(not bool(row.get("included")) for row in auxiliary_receipts),
+            "reports": auxiliary_receipts,
+        },
         "artifacts": {
             "executive_summary_txt": os.path.abspath(EXECUTIVE_SUMMARY_FILE),
             "research_highlights_txt": os.path.abspath(RESEARCH_HIGHLIGHTS_FILE),

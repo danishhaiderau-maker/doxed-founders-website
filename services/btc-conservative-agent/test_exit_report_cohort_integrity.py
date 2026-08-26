@@ -43,12 +43,10 @@ def test_exit_reports_do_not_use_live_copy_qualification_filter():
     leakage = ANALYZER.split("def exit_leakage_by_reason_report", 1)[1].split("LADDER_SIM_PROFILES", 1)[0]
     assert "_filter_policy_analysis_df" not in combos
     assert "_filter_policy_analysis_df" not in leakage
-    assert '"EXECUTED_PAPER_DESCRIPTIVE"' in combos
-    assert '"SHADOW_LAB_DESCRIPTIVE"' in combos
+    assert "_load_exit_evidence_worlds" in combos
     assert '"LOW_SAMPLE_N1"' in combos
     assert '"qualification_eligible": False' in combos
-    assert '"EXECUTED_PAPER_DESCRIPTIVE"' in leakage
-    assert '"SHADOW_LAB_DESCRIPTIVE"' in leakage
+    assert "_load_exit_evidence_worlds" in leakage
 
 
 def test_exit_dashboard_renders_separated_shadow_terminal_evidence():
@@ -88,7 +86,7 @@ def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, m
     shadow_report = report["evidence_classes"]["shadow_lab"]
     assert shadow_report["terminal_rows"] == 6
     assert shadow_report["total_combos"] == 1
-    assert shadow_report["top"][0]["left_on_table_usd"] == 0.0
+    assert shadow_report["top"][0]["left_on_table_usd"] is None
     assert shadow_report["top"][0]["lane"] == "UNKNOWN"
 
     leakage = analyzer.exit_leakage_by_reason_report(
@@ -97,7 +95,7 @@ def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, m
     )
     shadow_leakage = leakage["evidence_classes"]["shadow_lab"]
     assert shadow_leakage["terminal_rows"] == 6
-    assert shadow_leakage["reasons"][0]["avg_left_usd"] == 0.0
+    assert shadow_leakage["reasons"][0]["avg_left_usd"] is None
     json.dumps(leakage, allow_nan=False)
 
 
@@ -160,7 +158,7 @@ def test_exit_family_and_stop_scorecards_keep_evidence_worlds_separate(tmp_path,
     paper = report["evidence_classes"]["executed_paper"]
     lab = report["evidence_classes"]["shadow_lab"]
 
-    assert report["schema"] == "exit_combinations_v3"
+    assert report["schema"] == "exit_combinations_v4"
     assert paper["exit_family_scorecard"][0]["exit_family"] == "ATR_TARGET"
     assert paper["exit_family_scorecard"][0]["terminal_rows"] == 2
     assert paper["exit_family_scorecard"][0]["independent_episodes"] == 2
@@ -222,3 +220,50 @@ def test_empty_exit_views_explain_insufficient_terminal_evidence_not_analyzer_fa
     assert "Analyzer completed: no current-epoch terminal exit paths exist yet" in DASHBOARD
     assert "Analyzer completed: no current-epoch terminal exits exist yet" in DASHBOARD
     assert "No current-epoch terminal exits exist yet; validation action items are unavailable." in DASHBOARD
+
+
+def test_exit_world_loader_includes_lane_shadow_and_four_non_additive_worlds(monkeypatch):
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: pd.DataFrame())
+    monkeypatch.setattr(analyzer, "_report_exit_rows", lambda *args: pd.DataFrame())
+    worlds = analyzer._load_exit_evidence_worlds(pd.DataFrame(), {})
+    assert set(worlds) == {
+        "executed_paper", "shadow_lab", "conservative_bbo_depth", "ideal_touch_diagnostic",
+    }
+    assert analyzer.SHADOW_LANE_OUTCOME_FILE in worlds["shadow_lab"]["source_files"]
+    assert all(world["pnl_semantics"] for world in worlds.values())
+
+
+def test_four_world_reports_keep_missing_metrics_unavailable(tmp_path, monkeypatch):
+    sparse = pd.DataFrame([{"trade_id": "terminal-1", "exit_reason": "TIME_EXIT"}])
+    worlds = {
+        "executed_paper": {"evidence_class": "EXECUTED_PAPER_DESCRIPTIVE", "source_files": ["paper"], "frame": sparse, "pnl_semantics": "OBSERVED"},
+        "shadow_lab": {"evidence_class": "SHADOW_LAB_DESCRIPTIVE", "source_files": ["shadow"], "frame": sparse, "pnl_semantics": "SIMULATED"},
+        "conservative_bbo_depth": {"evidence_class": "CONSERVATIVE_BBO_DEPTH_DESCRIPTIVE", "source_files": ["conservative"], "frame": sparse, "pnl_semantics": "CONSERVATIVE"},
+        "ideal_touch_diagnostic": {"evidence_class": "IDEAL_TOUCH_DIAGNOSTIC_ONLY", "source_files": ["ideal"], "frame": sparse, "pnl_semantics": "DIAGNOSTIC"},
+    }
+    monkeypatch.setattr(analyzer, "_load_exit_evidence_worlds", lambda trades=None, session=None: worlds)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    combos = analyzer.exit_combinations_report(pd.DataFrame(), {})
+    leakage = analyzer.exit_leakage_by_reason_report(pd.DataFrame(), {})
+    assert combos["schema"] == "exit_combinations_v4"
+    assert leakage["schema"] == "exit_leakage_by_reason_v5"
+    for world in worlds:
+        combo = combos["evidence_worlds"][world]
+        leak = leakage["evidence_worlds"][world]
+        assert combo["top"][0]["pnl_usd"] is None
+        assert combo["top"][0]["ev_usd"] is None
+        assert combo["pnl_aggregation_allowed"] is False
+        assert leak["reasons"][0]["booked_profit_usd"] is None
+        assert leak["reasons"][0]["left_on_table_usd"] is None
+    json.dumps(combos, allow_nan=False)
+    json.dumps(leakage, allow_nan=False)
+
+
+def test_dashboard_renders_all_four_exit_worlds_and_null_kpis_as_na():
+    for element_id in (
+        "exit-conservative-combos-body", "exit-ideal-touch-combos-body",
+        "exit-reason-conservative-body", "exit-reason-ideal-touch-body",
+    ):
+        assert element_id in DASHBOARD
+    assert "['Left on table', money(d.overall_left_on_table_usd)]" in DASHBOARD
+    assert "['Hindsight gap', money(d.overall_left_usd)]" in DASHBOARD

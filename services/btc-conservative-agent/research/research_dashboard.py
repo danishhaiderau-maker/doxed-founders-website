@@ -2030,7 +2030,7 @@ def _chase_delay_payload():
 
 def _exit_combos_payload():
     rep = _read_report("exit_combinations_report.json")
-    classes = rep.get("evidence_classes") or {}
+    classes = rep.get("evidence_worlds") or rep.get("evidence_classes") or {}
     executed = classes.get("executed_paper") or {"top": rep.get("top") or [], "worst_leakage": rep.get("worst_leakage") or []}
     shadow = classes.get("shadow_lab") or {"top": [], "worst_leakage": []}
     top = list(executed.get("top") or [])
@@ -2053,13 +2053,16 @@ def _exit_combos_payload():
         "evidence_classes": {
             "executed_paper": {**executed, "top": top[:100], "worst_leakage": worst[:100]},
             "shadow_lab": {**shadow, "top": list(shadow.get("top") or [])[:100], "worst_leakage": list(shadow.get("worst_leakage") or [])[:100]},
+            "conservative_bbo_depth": classes.get("conservative_bbo_depth") or {},
+            "ideal_touch_diagnostic": classes.get("ideal_touch_diagnostic") or {},
         },
+        "evidence_worlds": classes,
     }
 
 
 def _exit_reason_leak_payload():
     rep = _read_report("exit_leakage_by_reason_report.json")
-    classes = rep.get("evidence_classes") or {}
+    classes = rep.get("evidence_worlds") or rep.get("evidence_classes") or {}
     executed = classes.get("executed_paper") or {"reasons": rep.get("reasons") or [], "recommendations": rep.get("recommendations") or []}
     shadow = classes.get("shadow_lab") or {"reasons": [], "recommendations": []}
     return {
@@ -2076,7 +2079,13 @@ def _exit_reason_leak_payload():
         "qualification_eligible": False,
         "reasons": executed.get("reasons") or [],
         "recommendations": executed.get("recommendations") or [],
-        "evidence_classes": {"executed_paper": executed, "shadow_lab": shadow},
+        "evidence_classes": {
+            "executed_paper": executed,
+            "shadow_lab": shadow,
+            "conservative_bbo_depth": classes.get("conservative_bbo_depth") or {},
+            "ideal_touch_diagnostic": classes.get("ideal_touch_diagnostic") or {},
+        },
+        "evidence_worlds": classes,
     }
 
 
@@ -4498,6 +4507,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Left on table</th><th>Avg left</th><th>EV</th></tr></thead><tbody id="exit-leak-body"></tbody></table>
     <h3>Shadow/lab exit combos — separate descriptive evidence</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>PnL</th><th>EV</th></tr></thead><tbody id="exit-shadow-combos-body"></tbody></table>
+    <h3>Conservative BBO/depth replay exits — separate evidence</h3>
+    <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>Conservative PnL</th><th>EV</th></tr></thead><tbody id="exit-conservative-combos-body"></tbody></table>
+    <h3>Ideal-touch diagnostic exits — not fill evidence</h3>
+    <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>Diagnostic PnL</th><th>EV</th></tr></thead><tbody id="exit-ideal-touch-combos-body"></tbody></table>
   </section>
   <section id="sec-exit-reason-leak">
     <h2>Exit Peak-to-Close Gap (Combined Lanes)</h2>
@@ -4506,6 +4519,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Exit reason</th><th>N</th><th>Hindsight gap $</th><th>Avg gap $</th><th>Avg MFE%</th><th>Realized%</th><th>Peak-close gap%</th><th>Peak capture%</th></tr></thead><tbody id="exit-reason-body"></tbody></table>
     <h3>Shadow/lab peak-to-close gap — separate descriptive evidence</h3>
     <table><thead><tr><th>Exit reason</th><th>N</th><th>Sample</th><th>Hindsight gap $</th><th>Booked $</th><th>Peak $</th></tr></thead><tbody id="exit-reason-shadow-body"></tbody></table>
+    <h3>Conservative BBO/depth replay gap — separate evidence</h3>
+    <table><thead><tr><th>Exit reason</th><th>N</th><th>Sample</th><th>Gap $</th><th>Booked $</th><th>Peak $</th></tr></thead><tbody id="exit-reason-conservative-body"></tbody></table>
+    <h3>Ideal-touch diagnostic gap — not execution evidence</h3>
+    <table><thead><tr><th>Exit reason</th><th>N</th><th>Sample</th><th>Gap $</th><th>Diagnostic booked $</th><th>Peak $</th></tr></thead><tbody id="exit-reason-ideal-touch-body"></tbody></table>
     <h3>Validation required</h3>
     <ul id="exit-reason-recs"></ul>
   </section>
@@ -5064,14 +5081,16 @@ async function loadChaseDelay() {
 async function loadExitCombos() {
   const r = await fetch('/api/exit-combos');
   const d = await r.json();
+  const money = value => value == null ? 'n/a' : '$' + fmtUsd(value);
   document.getElementById('exit-combos-kpis').innerHTML = [
     ['Total combos', d.total_combos ?? 0],
-    ['Left on table', '$' + fmtUsd(d.overall_left_on_table_usd)],
+    ['Left on table', money(d.overall_left_on_table_usd)],
     ['Benchmark', d.benchmark_lane || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const executed = ((d.evidence_classes||{}).executed_paper||{});
   const shadow = ((d.evidence_classes||{}).shadow_lab||{});
-  const money = value => value == null ? 'n/a' : '$' + fmtUsd(value);
+  const conservative = ((d.evidence_classes||{}).conservative_bbo_depth||{});
+  const idealTouch = ((d.evidence_classes||{}).ideal_touch_diagnostic||{});
   const renderFamilies = rows => (rows||[]).map(row =>
     `<tr><td>${row.exit_family||'UNKNOWN'}</td><td>${row.terminal_rows??0}</td><td>${row.independent_episodes??0}</td><td>${row.wins??0} / ${row.losses??0}</td><td>${money(row.net_pnl_usd)}</td><td>${money(row.ev_per_independent_episode_usd)}</td><td>${money(row.max_drawdown_usd)}</td><td>${row.missing_identity_rows??0} / ${row.missing_pnl_rows??0} / ${row.missing_cost_rows??0} / ${row.missing_slippage_rows??0}</td><td>${row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
   ).join('') || '<tr><td colspan="9">No terminal evidence for this evidence world.</td></tr>';
@@ -5087,16 +5106,21 @@ async function loadExitCombos() {
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td><td>$${fmtUsd(c.avg_left_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No current-epoch terminal exits exist yet; peak-to-close leakage is unavailable.</td></tr>';
   document.getElementById('exit-shadow-combos-body').innerHTML = (shadow.top||[]).map(c =>
-    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No explicit shadow/lab terminal exit evidence in this epoch.</td></tr>';
+    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${money(c.pnl_usd)}</td><td>${money(c.ev_usd)}</td></tr>`).join('') || `<tr><td colspan="6">${shadow.empty_reason||'No explicit shadow/lab terminal exit evidence in this epoch.'}</td></tr>`;
+  const renderReplayCombos = (world, fallback) => (world.top||[]).map(c =>
+    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${money(c.pnl_usd)}</td><td>${money(c.ev_usd)}</td></tr>`).join('') || `<tr><td colspan="6">${world.empty_reason||fallback}</td></tr>`;
+  document.getElementById('exit-conservative-combos-body').innerHTML = renderReplayCombos(conservative, 'No conservative BBO/depth terminal exit evidence in this epoch.');
+  document.getElementById('exit-ideal-touch-combos-body').innerHTML = renderReplayCombos(idealTouch, 'No ideal-touch diagnostic terminal exit evidence in this epoch.');
 }
 
 async function loadExitReasonLeak() {
   const r = await fetch('/api/exit-reason-leak');
   const d = await r.json();
+  const money = value => value == null ? 'n/a' : '$' + fmtUsd(value);
   document.getElementById('exit-reason-kpis').innerHTML = [
-    ['Hindsight gap', '$' + fmtUsd(d.overall_left_usd)],
-    ['Booked', '$' + fmtUsd(d.overall_booked_usd)],
-    ['Peak', '$' + fmtUsd(d.overall_peak_usd)],
+    ['Hindsight gap', money(d.overall_left_usd)],
+    ['Booked', money(d.overall_booked_usd)],
+    ['Peak', money(d.overall_peak_usd)],
     ['Exit reasons', (d.reasons||[]).length],
     ['Replay reviews', (d.recommendations||[]).length],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
@@ -5104,9 +5128,14 @@ async function loadExitReasonLeak() {
     `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td class="red">$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.avg_left_usd)}</td><td>${r.avg_mfe_margin_pct??'n/a'}%</td><td>${r.avg_realized_margin_pct??'n/a'}%</td><td class="red">${r.avg_leakage_margin_pct??'n/a'}%</td><td>${r.capture_ratio_pct??'n/a'}%</td></tr>`
   ).join('') || '<tr><td colspan="8">Analyzer completed: no current-epoch terminal exits exist yet, so exit-reason leakage is unavailable.</td></tr>';
   const shadow = ((d.evidence_classes||{}).shadow_lab||{});
-  document.getElementById('exit-reason-shadow-body').innerHTML = (shadow.reasons||[]).map(r =>
-    `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td>${r.sample_status||'DESCRIPTIVE'}</td><td>$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.booked_profit_usd)}</td><td>$${fmtUsd(r.peak_profit_usd)}</td></tr>`
-  ).join('') || '<tr><td colspan="6">No explicit shadow/lab terminal leakage evidence in this epoch.</td></tr>';
+  const conservative = ((d.evidence_classes||{}).conservative_bbo_depth||{});
+  const idealTouch = ((d.evidence_classes||{}).ideal_touch_diagnostic||{});
+  const renderReasonWorld = (world, fallback) => (world.reasons||[]).map(r =>
+    `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td>${r.sample_status||'DESCRIPTIVE'}</td><td>${money(r.left_on_table_usd)}</td><td>${money(r.booked_profit_usd)}</td><td>${money(r.peak_profit_usd)}</td></tr>`
+  ).join('') || `<tr><td colspan="6">${world.empty_reason||fallback}</td></tr>`;
+  document.getElementById('exit-reason-shadow-body').innerHTML = renderReasonWorld(shadow, 'No explicit shadow/lab terminal leakage evidence in this epoch.');
+  document.getElementById('exit-reason-conservative-body').innerHTML = renderReasonWorld(conservative, 'No conservative BBO/depth terminal leakage evidence in this epoch.');
+  document.getElementById('exit-reason-ideal-touch-body').innerHTML = renderReasonWorld(idealTouch, 'No ideal-touch diagnostic terminal leakage evidence in this epoch.');
   const recEl = document.getElementById('exit-reason-recs');
   if (recEl) {
     recEl.innerHTML = (d.recommendations||[]).map(rec =>
