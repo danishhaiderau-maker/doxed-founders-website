@@ -100,6 +100,44 @@ def test_no_supported_terminal_fill_never_publishes_zero_execution_metrics():
     assert row["qualification"] == "INSUFFICIENT_EXECUTION_EVIDENCE"
 
 
+def test_public_leader_payload_excludes_zero_information_grid_rows():
+    empty = {
+        "policy_id": "exhaustive-zero-information",
+        "policy_family": "FIXED_TARGET",
+        "supported_conservative_episodes": 0,
+        "full_fills": 0,
+        "partial_fills": 0,
+        "no_fills": 0,
+        "sealed_oos_net_usd": None,
+        "max_drawdown_usd": None,
+        "ranking_score": 0,
+        "gates": {"execution": False, "oos": False},
+    }
+    supported_no_fill = {
+        **empty,
+        "policy_id": "supported-no-fill",
+        "supported_conservative_episodes": 1,
+        "no_fills": 1,
+    }
+    payload = dashboard._bounded_safe_policy_payload({
+        "candidate_screen": {
+            "descriptive_top_100": [empty, supported_no_fill],
+            "drawdown_control_leaders": [empty, supported_no_fill],
+            "profit_capture_leaders": {
+                "EMPTY": [empty],
+                "SUPPORTED": [supported_no_fill],
+            },
+        },
+        "safe_policy_ranking": {"ranked_policies": [empty, supported_no_fill]},
+    })
+
+    screen = payload["candidate_screen"]
+    assert [row["policy_id"] for row in screen["descriptive_top_100"]] == ["supported-no-fill"]
+    assert [row["policy_id"] for row in screen["drawdown_control_leaders"]] == ["supported-no-fill"]
+    assert set(screen["profit_capture_leaders"]) == {"SUPPORTED"}
+    assert [row["policy_id"] for row in payload["safe_policy_ranking"]["ranked_policies"]] == ["supported-no-fill"]
+
+
 def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
     html = dashboard.app.test_client().get("/").get_data(as_text=True)
     safe_html = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)

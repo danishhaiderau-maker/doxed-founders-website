@@ -17478,9 +17478,33 @@ def write_report_manifest(payload=None):
 
         policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
         policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
-        build_policy_cycle_reports(
+        policy_cycle_reports = build_policy_cycle_reports(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
+        )
+        # The ordinary analyzer integrity pass happens before the expensive
+        # policy replay. Reconcile its receipt against the just-built reports
+        # so lifecycle/order-resolution defects cannot leave /api/integrity
+        # falsely VALID for this generation.
+        from research.analyzer_integrity_reconciliation import (
+            reconcile_analyzer_integrity_with_policy_reports,
+        )
+
+        policy_reports = [
+            (BEST_POLICY_RESEARCH_REPORT_FILE, policy_cycle_reports.get("best") or {}),
+        ]
+        safe_policy_path = Path(policy_report_dir) / SAFE_POLICY_GENOME_V3_REPORT_FILE
+        if safe_policy_path.is_file():
+            policy_reports.append(
+                (SAFE_POLICY_GENOME_V3_REPORT_FILE, _load_json_report(str(safe_policy_path)))
+            )
+        reconciled_integrity = reconcile_analyzer_integrity_with_policy_reports(
+            analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE),
+            policy_reports,
+        )
+        print(
+            f"  Integrity after policy cycle: {reconciled_integrity['report_status']} "
+            f"({len(reconciled_integrity['failed_checks'])} failed) {PIPELINE_ENFORCEMENT_TAG}"
         )
         # The policy-cycle orchestrator already builds the V3.1 Safe Policy
         # Genome through the best-policy adapter from the same

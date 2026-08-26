@@ -1,7 +1,6 @@
 import tempfile
 import time
 import unittest
-from collections import Counter
 
 from research_v3_candidates import (
     _PolicyNeighborIndex,
@@ -365,11 +364,14 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(scenario_with_stop["profit_protection"]["atr_tp_k"], 2.5)
         self.assertTrue(scenario_with_stop["profit_protection"]["ladder"])
 
-    def test_descriptive_policies_are_visible_but_never_safe_qualified(self):
+    def test_zero_information_policies_stay_internal_and_unranked(self):
         progress = []
         report = evaluate_protection_screen([source()], progress_callback=progress.append)
         self.assertEqual(report["unique_policies_evaluated"], len(protection_screen()))
-        self.assertTrue(report["descriptive_top_100"])
+        self.assertTrue(report["candidates"])
+        self.assertEqual(report["descriptive_top_100"], [])
+        self.assertEqual(report["profit_capture_leaders"], {})
+        self.assertEqual(report["drawdown_control_leaders"], [])
         selection = report["descriptive_selection"]
         self.assertEqual(
             selection["method"],
@@ -377,17 +379,9 @@ class V3CandidateTests(unittest.TestCase):
         )
         self.assertIn("expected_shortfall", selection["ranking_dimensions"])
         self.assertEqual(selection["per_family_cap"], 2)
-        family_counts = Counter(
-            row["policy_family"] for row in report["descriptive_top_100"]
-        )
-        self.assertTrue(family_counts)
-        self.assertLessEqual(max(family_counts.values()), 2)
-        self.assertEqual(selection["families_represented"], len(family_counts))
+        self.assertEqual(selection["families_represented"], 0)
+        self.assertEqual(selection["rows_displayed"], 0)
         self.assertEqual(selection["globally_ranked_policies"], len(report["candidates"]))
-        self.assertTrue(all(row["family_rank"] in {1, 2} for row in report["descriptive_top_100"]))
-        self.assertTrue(all(
-            len(rows) <= 2 for rows in report["profit_capture_leaders"].values()
-        ))
         self.assertEqual(progress[-1]["phase"], "PROTECTION_REPLAY")
         self.assertEqual(progress[-1]["input_events_completed"], 1)
         self.assertEqual(progress[-1]["input_events_total"], 1)

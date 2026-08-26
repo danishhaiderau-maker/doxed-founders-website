@@ -1253,6 +1253,17 @@ def evaluate_protection_screen(
     assessed = _apply_multifactor_ranking(assessed)
     globally_ranked = list(assessed)
 
+    def _has_public_execution_evidence(row: dict[str, Any]) -> bool:
+        """Keep exhaustive hypotheses internal until execution classified them.
+
+        A supported NO_FILL is still useful execution evidence.  A policy with
+        no full fill, partial fill, or supported no-fill episode has no
+        execution information and must not be presented as a ranked leader.
+        """
+        return int(row.get("supported_conservative_episodes") or 0) > 0
+
+    public_ranked = [row for row in globally_ranked if _has_public_execution_evidence(row)]
+
     def _family_balanced(rows: list[dict[str, Any]], *, cap: int = 2) -> list[dict[str, Any]]:
         counts: dict[str, int] = defaultdict(int)
         selected = []
@@ -1291,7 +1302,7 @@ def evaluate_protection_screen(
     descriptive_family_cap = 2
     family_counts: dict[str, int] = defaultdict(int)
     descriptive = []
-    for global_rank, row in enumerate(globally_ranked, start=1):
+    for global_rank, row in enumerate(public_ranked, start=1):
         family = str(row.get("policy_family") or "UNKNOWN")
         if family_counts[family] >= descriptive_family_cap:
             continue
@@ -1304,8 +1315,8 @@ def evaluate_protection_screen(
         if len(descriptive) >= 100:
             break
     family_leaders = {}
-    for family in sorted({row["policy_family"] for row in assessed}):
-        family_rows = [row for row in assessed if row["policy_family"] == family]
+    for family in sorted({row["policy_family"] for row in public_ranked}):
+        family_rows = [row for row in public_ranked if row["policy_family"] == family]
         family_leaders[family] = sorted(family_rows, key=lambda row: (
             -float(row.get("ranking_score") or 0),
             len((row.get("ranking_evidence") or {}).get("missing_metrics") or []),
@@ -1415,12 +1426,17 @@ def evaluate_protection_screen(
             "note": "The exhaustive policy grid is unchanged; only the public shortlist is family-balanced.",
         },
         "profit_capture_leaders": family_leaders,
-        "drawdown_control_leaders": sorted(assessed, key=lambda row: (
+        "drawdown_control_leaders": sorted(public_ranked, key=lambda row: (
             _finite_number(row.get("max_drawdown_usd")) is None,
             abs(float(row["max_drawdown_usd"])) if _finite_number(row.get("max_drawdown_usd")) is not None else float("inf"),
             -float(row.get("ranking_score") or 0),
         ))[:25],
         "dynamic_regime_leaders": dynamic_regime_leaders,
         "scenario_c_atr_stop_sweep": scenario_c_atr_stop_sweep,
-        "warning": "Descriptive rows use conservative BBO/depth entry receipts but remain unqualified until all OOS and safety gates pass. Ideal-touch references are diagnostic only.",
+        "warning": (
+            "Public descriptive leaders require at least one supported conservative "
+            "execution episode and remain unqualified until all OOS and safety gates "
+            "pass. Exhaustive zero-information hypotheses remain internal. Ideal-touch "
+            "references are diagnostic only."
+        ),
     }
