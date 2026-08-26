@@ -85,11 +85,42 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
         dashboard._exit_reason_leak_payload(),
         dashboard._ladder_sim_payload(),
     ]
-    for payload in payloads:
+    assert payloads[0]["evidence_scope"] == "SEPARATED_EXECUTED_AND_SHADOW"
+    assert payloads[0]["ranking_eligible"] is False
+    for payload in payloads[1:]:
         assert payload["qualified_v3_1"] is False
         assert payload["ranking_eligible"] is False
         assert payload["evidence_scope"].startswith("LEGACY")
         assert payload["warning"]
+
+
+def test_chase_surfaces_publish_executed_and_shadow_separately(monkeypatch):
+    reports = {
+        "chase_threshold_report.json": {
+            "generated_at": "2026-08-26T00:00:00+00:00",
+            "executed_thresholds": {"2": {"trades": 1, "sum_pnl_usd": 0.11, "ev_usd": 0.11}},
+            "shadow_thresholds": {"0": {"trades": 12, "sum_pnl_usd": 0.42, "ev_usd": 0.035}},
+            "coverage": {
+                "executed_terminal_outcomes": 1,
+                "shadow_terminal_outcomes": 12,
+                "generic_shadow_counterfactuals": 7,
+                "tile_lab_shadow_outcomes": 5,
+            },
+        },
+        "chase_attribution_report.json": {"trades": [], "totals": {}},
+        "chase_effectiveness_report.json": {"buckets": {}},
+        "chase_delay_report.json": {},
+    }
+    monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
+
+    threshold = dashboard._chase_threshold_payload()
+    chase = dashboard._chase_payload()
+
+    assert threshold["executed_thresholds"][0]["trades"] == 1
+    assert threshold["shadow_thresholds"][0]["trades"] == 12
+    assert threshold["coverage"]["shadow_terminal_outcomes"] == 12
+    assert chase["shadow_buckets"][0]["bucket"] == "0"
+    assert chase["executed_buckets"] == []
 
 
 def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
@@ -115,11 +146,12 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
         "screen": {"descriptive_top_100": [{
             "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
             "episodes_total": 133, "oos_episodes": 40, "oos_fills": 40,
-            "oos_wins": 30, "oos_losses": 10,
-            "sealed_oos_net_usd": 101.7442,
-            "expectancy_lcb_usd": 2.543605,
-            "max_drawdown_usd": -100.5837,
-        }]},
+                "oos_wins": 30, "oos_losses": 10,
+                "sealed_oos_net_usd": 101.7442,
+                "expectancy_lcb_usd": 2.543605,
+                "max_drawdown_usd": -100.5837,
+                "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
+            }]},
     })
 
     payload = dashboard._combos_payload()
@@ -139,7 +171,7 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
     assert row["reprice_interval_sec"] == 60
     assert row["exit_policy"] == "atr_tp_k2.5"
     assert row["atr_take_profit_multiple"] == 2.5
-    assert row["fill_model"] == "IDEAL_TOUCH_REPLAY"
+    assert row["fill_model"] == "CONSERVATIVE_BBO_DEPTH_V1"
     assert row["protection_model"] == "NO_LADDER_NO_THESIS_NO_HARD_STOP"
     assert row["oos_win_probability_pct"] == 75.0
     assert row["oos_win_probability_ci95_low_pct"] < 75 < row["oos_win_probability_ci95_high_pct"]
@@ -151,12 +183,17 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     response = client.get("/")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Current-epoch counterfactual policy grid" in html
-    assert "Win probability (95% CI)" in html
+    assert "Top Profitable Conservative Policy Combos" in html
+    assert "Positive Ideal-Touch Diagnostic Hypotheses" in html
+    assert "Diagnostic touches" in html
+    assert "Diagnostic replay PnL" in html
+    assert "Execution fills" in html
+    assert "Execution OOS PnL" in html
     assert "MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED" in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
-    assert "Family-balanced Policy Screen (up to 100 rows)" in html
+    assert "Profitable conservative rows" in html
+    assert "Positive ideal-touch hypotheses" in html
     assert "Families represented" in html
     assert "Maximum per family" in html
     assert "Top 100 Policy Combos" in html
@@ -193,6 +230,7 @@ def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):
         "oos_episodes": 30, "oos_fills": 30, "oos_wins": 20,
         "oos_losses": 10, "sealed_oos_net_usd": 10.0,
         "expectancy_lcb_usd": 0.333333, "max_drawdown_usd": -5.0,
+        "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
     } for row in policies]
     monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
         "epoch_id": "epoch-clean", "qualified": False, "blockers": [],
@@ -233,6 +271,11 @@ def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monke
         "sealed_oos_net_usd": 12.5,
         "expectancy_lcb_usd": 0.75,
         "max_drawdown_usd": 0.0,
+        "policy_spec": {"fill": {"execution_world": "IDEAL_TOUCH_DIAGNOSTIC"}},
+        "validation": {
+            "outcome_states": {"FULL_FILL": 6, "NO_FILL": 18},
+            "risk": {"wins": 1, "losses": 5},
+        },
         "gates": {},
     } for index in range(100)]
     report = {
@@ -258,7 +301,8 @@ def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monke
 
     grid = dashboard._current_policy_grid_rows()
 
-    assert len(grid["rows"]) == 100
+    assert len(grid["rows"]) == 0
+    assert len(grid["diagnostic_rows"]) == 100
     assert grid["evidence"]["independent_opportunities"] == 11
     assert grid["policy_episode_split"] == {
         "training_episodes": 11,
@@ -266,20 +310,20 @@ def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monke
         "unit": "INDEPENDENT_MARKET_EPISODES_REUSED_ACROSS_POLICY_SPECS",
     }
     stats = grid["policy_search_statistics"]
-    assert stats["descriptive_rows_displayed"] == 100
+    assert stats["profitable_conservative_rows_displayed"] == 0
+    assert stats["positive_ideal_touch_hypotheses_displayed"] == 100
     assert stats["policy_specs_enumerated"] == 100
     assert stats["terminal_oos_policies_tested"] == 0
     assert stats["profitable_terminal_oos_policies"] == 0
-    first = grid["rows"][0]
-    assert first["oos_net_pnl_usd"] is None
-    assert first["oos_expectancy_usd"] is None
-    assert first["oos_max_drawdown_usd"] is None
-    assert first["oos_wins"] is None
-    assert first["oos_losses"] is None
+    first = grid["diagnostic_rows"][0]
     assert first["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
     assert first["diagnostic_replay_net_pnl_usd"] == 12.5
     assert first["diagnostic_replay_expectancy_lcb_usd"] == 0.75
     assert first["diagnostic_replay_max_drawdown_usd"] == 0.0
+    assert first["diagnostic_touch_episodes"] == 6
+    assert first["diagnostic_no_touch_episodes"] == 18
+    assert first["diagnostic_replay_wins"] == 1
+    assert first["diagnostic_replay_losses"] == 5
 
     public = dashboard._public_policy_evidence_row(rows[0])
     assert public["sealed_oos_net_usd"] is None
@@ -296,6 +340,8 @@ def test_current_policy_grid_projects_nested_v31_parameters(monkeypatch):
         "policy_family": "FIXED_TARGET",
         "episodes_total": 1,
         "oos_episodes": 1,
+        "sealed_oos_net_usd": 1.0,
+        "validation": {"outcome_states": {"FULL_FILL": 1}, "risk": {"wins": 1, "losses": 0}},
         "policy_spec": {
             "entry": {
                 "entry_policy_id": "deterministic_0.1pct_offset_v1",
@@ -325,7 +371,7 @@ def test_current_policy_grid_projects_nested_v31_parameters(monkeypatch):
         "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
     })
 
-    row = dashboard._current_policy_grid_rows()["rows"][0]
+    row = dashboard._current_policy_grid_rows()["diagnostic_rows"][0]
 
     assert row["entry_offset_pct"] == 0.1
     assert row["chase_policy"] == "deterministic_0.1pct_offset_v1"

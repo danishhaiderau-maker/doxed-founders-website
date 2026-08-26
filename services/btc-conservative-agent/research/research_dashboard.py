@@ -1246,13 +1246,26 @@ def _chase_payload(lane: str = ""):
     for key, b in (threshold.get("thresholds") or {}).items():
         if int((b or {}).get("trades") or 0):
             threshold_rows.append({"threshold": key, **(b or {})})
+    shadow_source = threshold.get("shadow_thresholds") or {}
+    if lane:
+        shadow_source = (threshold.get("shadow_thresholds_by_lane") or {}).get(str(lane).upper()) or {}
+    shadow_bucket_rows = [
+        {"bucket": key, **(block or {})}
+        for key, block in shadow_source.items()
+        if int((block or {}).get("trades") or 0)
+    ]
     return {
         **_nonqualifying_scope(
-            "LEGACY_EXECUTED",
-            "Historical executed-lane chase evidence; excluded from active V3.1 rankings.",
+            "SEPARATED_EXECUTED_AND_SHADOW",
+            threshold.get("warning") or (
+                "Executed paper and shadow/lab chase evidence are both analyzed, in separate evidence classes."
+            ),
         ),
         "totals": totals,
         "buckets": bucket_rows,
+        "executed_buckets": bucket_rows,
+        "shadow_buckets": shadow_bucket_rows,
+        "coverage": threshold.get("coverage") or {},
         "thresholds": threshold_rows,
         "threshold_question": threshold.get("question"),
         "delay_lanes": (delay.get("lanes") or {}),
@@ -1415,13 +1428,44 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     source = _safe_policy_v3_dashboard_source()
     report, screen = source["report"], source["screen"]
     rows = []
-    candidates = screen.get("descriptive_top_100") or []
+    all_candidates = list(screen.get("descriptive_top_100") or [])
+    if "profitable_conservative_top_100" in screen:
+        candidates = list(screen.get("profitable_conservative_top_100") or [])
+    else:
+        # Compatibility for an analyzer generation produced before the
+        # explicit profitable-world lists were added. Never promote an
+        # ideal-touch row into the conservative shortlist.
+        candidates = [
+            item for item in all_candidates
+            if str((((item.get("policy_spec") or {}).get("fill") or {}).get("execution_world") or "")).startswith("CONSERVATIVE_")
+            and int(item.get("oos_fills") or 0) > 0
+            and isinstance(item.get("sealed_oos_net_usd"), (int, float))
+            and float(item["sealed_oos_net_usd"]) > 0
+        ]
+    if "profitable_ideal_touch_diagnostic_top_100" in screen:
+        diagnostic_candidates = list(screen.get("profitable_ideal_touch_diagnostic_top_100") or [])
+    else:
+        diagnostic_candidates = [
+            item for item in all_candidates
+            if isinstance(item.get("sealed_oos_net_usd"), (int, float))
+            and float(item["sealed_oos_net_usd"]) > 0
+            and str((((item.get("policy_spec") or {}).get("fill") or {}).get("execution_world") or "")).startswith("IDEAL_TOUCH")
+        ]
     for rank, item in enumerate(candidates, start=1):
         policy_spec = item.get("policy_spec") or {}
+        validation = item.get("validation") or {}
+        ideal_touch = item.get("ideal_touch_diagnostic") or {}
+        diagnostic_outcomes = ideal_touch.get("outcome_states") or {}
+        diagnostic_risk = ideal_touch
         episodes = int(item.get("oos_episodes") or 0)
-        fills = int(item.get("oos_fills") or 0)
+        fills = int(item.get("full_fills") or 0) + int(item.get("partial_fills") or 0)
+        if not fills:
+            fills = int(item.get("oos_fills") or 0)
         wins = item.get("oos_wins")
         losses = item.get("oos_losses")
+        if fills > 0:
+            wins = wins if wins is not None else (validation.get("risk") or {}).get("wins")
+            losses = losses if losses is not None else (validation.get("risk") or {}).get("losses")
         low, high = (None, None)
         if wins is not None and losses is not None:
             low, high = _wilson_interval_95(int(wins), max(episodes, int(wins) + int(losses)))
@@ -1448,15 +1492,63 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "oos_net_pnl_usd": item.get("sealed_oos_net_usd") if fills > 0 else None,
             "oos_expectancy_usd": item.get("expectancy_lcb_usd") if fills > 0 else None,
             "oos_max_drawdown_usd": item.get("max_drawdown_usd") if fills > 0 else None,
-            "diagnostic_replay_net_pnl_usd": item.get("sealed_oos_net_usd"),
-            "diagnostic_replay_expectancy_lcb_usd": item.get("expectancy_lcb_usd"),
-            "diagnostic_replay_max_drawdown_usd": item.get("max_drawdown_usd"),
+            "diagnostic_replay_net_pnl_usd": ideal_touch.get("oos_net_usd"),
+            "diagnostic_replay_expectancy_lcb_usd": ideal_touch.get("expectancy_lcb_usd"),
+            "diagnostic_replay_max_drawdown_usd": ideal_touch.get("max_drawdown_usd"),
+            # The policy engine names ideal-touch outcomes FULL_FILL/NO_FILL
+            # internally because it shares the replay evaluator with executable
+            # worlds.  Publicly these are diagnostic touches, never execution
+            # receipts or fills.
+            "diagnostic_touch_episodes": int(diagnostic_outcomes.get("FULL_FILL") or 0)
+            + int(diagnostic_outcomes.get("PARTIAL_FILL") or 0),
+            "diagnostic_no_touch_episodes": int(diagnostic_outcomes.get("NO_FILL") or 0),
+            "diagnostic_replay_wins": int(diagnostic_risk.get("wins") or 0),
+            "diagnostic_replay_losses": int(diagnostic_risk.get("losses") or 0),
             "metric_evidence": "TERMINAL_OOS_FILLS" if fills > 0 else "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
             "gates": item.get("gates") or {},
             "qualification": "QUALIFIED" if item.get("ranking_eligible") else "DESCRIPTIVE_ONLY",
         })
         if len(rows) >= max(1, limit):
             break
+    diagnostic_rows = []
+    for rank, item in enumerate(diagnostic_candidates[:max(1, limit)], start=1):
+        policy_spec = item.get("policy_spec") or {}
+        ideal_touch = item.get("ideal_touch_diagnostic") or {}
+        # Older immutable generations stored the diagnostic result at the row
+        # root. Current generations keep it in an explicitly named world.
+        if not ideal_touch:
+            validation = item.get("validation") or {}
+            ideal_touch = {
+                "oos_net_usd": item.get("sealed_oos_net_usd"),
+                "max_drawdown_usd": item.get("max_drawdown_usd"),
+                "expectancy_lcb_usd": item.get("expectancy_lcb_usd"),
+                "outcome_states": validation.get("outcome_states") or {},
+                "wins": (validation.get("risk") or {}).get("wins"),
+                "losses": (validation.get("risk") or {}).get("losses"),
+            }
+        outcomes = ideal_touch.get("outcome_states") or {}
+        diagnostic_rows.append({
+            "rank": rank,
+            "global_rank": item.get("global_rank"),
+            "family_rank": item.get("family_rank"),
+            "policy_id": item.get("policy_id"),
+            "policy_family": item.get("policy_family"),
+            **_decode_counterfactual_policy_id(item.get("policy_id")),
+            **_project_v31_policy_spec(policy_spec),
+            "oos_episodes": int(item.get("oos_episodes") or 0),
+            "diagnostic_touch_episodes": (
+                int(ideal_touch["touches"])
+                if ideal_touch.get("touches") is not None
+                else int(outcomes.get("FULL_FILL") or 0) + int(outcomes.get("PARTIAL_FILL") or 0)
+            ),
+            "diagnostic_no_touch_episodes": int(ideal_touch.get("no_touches") or outcomes.get("NO_FILL") or 0),
+            "diagnostic_replay_wins": int(ideal_touch.get("wins") or 0),
+            "diagnostic_replay_losses": int(ideal_touch.get("losses") or 0),
+            "diagnostic_replay_net_pnl_usd": ideal_touch.get("oos_net_usd"),
+            "diagnostic_replay_expectancy_lcb_usd": ideal_touch.get("expectancy_lcb_usd"),
+            "diagnostic_replay_max_drawdown_usd": ideal_touch.get("max_drawdown_usd"),
+            "metric_evidence": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        })
     collection = report.get("collection") or {}
     search = report.get("search") or {}
     search_counts = {
@@ -1477,18 +1569,25 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     training_episodes = int(
         split.get("training")
         or screen.get("training_episodes")
-        or max((row.get("train_episodes") or 0 for row in rows), default=0)
+        or max(
+            (
+                max(0, int(item.get("episodes_total") or 0) - int(item.get("oos_episodes") or 0))
+                for item in all_candidates
+            ),
+            default=0,
+        )
     )
     oos_episodes = int(
         split.get("oos")
         or screen.get("oos_episodes")
-        or max((row.get("oos_episodes") or 0 for row in rows), default=0)
+        or max((int(item.get("oos_episodes") or 0) for item in all_candidates), default=0)
     )
     policy_search_statistics = {
-        "descriptive_rows_available": len(candidates),
-        "descriptive_rows_displayed": len(rows),
+        "descriptive_rows_available": len(all_candidates),
+        "profitable_conservative_rows_displayed": len(rows),
+        "positive_ideal_touch_hypotheses_displayed": len(diagnostic_rows),
         "policy_specs_enumerated": int(
-            screen.get("unique_policies_evaluated") or len(candidates)
+            screen.get("unique_policies_evaluated") or len(all_candidates)
         ),
         "terminal_oos_policies_tested": len(terminal_oos_rows),
         "profitable_terminal_oos_policies": len(profitable_terminal_oos_rows),
@@ -1501,15 +1600,16 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "schema": "current_policy_grid_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
-        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_MATURE_V3_1_PATHS",
+        "status": "PROFITABLE_CONSERVATIVE_POLICIES_AVAILABLE" if rows else "NO_PROFITABLE_CONSERVATIVE_POLICIES",
         "rows": rows,
+        "diagnostic_rows": diagnostic_rows,
         "epoch_id": source["epoch_id"],
         "policy_epoch_id": None,
         "policy_signature": None,
         "cycle_snapshot": report.get("cycle_snapshot"),
         "evidence": collection,
         "search_counts": search_counts,
-        "rows_available": len(candidates),
+        "rows_available": len(all_candidates),
         "descriptive_selection": screen.get("descriptive_selection") or {},
         "policy_search_statistics": policy_search_statistics,
         "policy_episode_split": {
@@ -1521,10 +1621,10 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "blockers": source["blockers"],
         "live_policy_change_allowed": source["qualified"],
         "warning": (
-            "Family-balanced V3.1 diagnostic replay hypotheses, capped at two rows per protection family. "
-            "The exhaustive search remains unchanged. When terminal OOS fills are zero, execution PnL, "
-            "expectancy, win rate and drawdown are unavailable and display as dashes; ideal-touch replay "
-            "values remain diagnostic only. No row can authorize live trading until every safety and OOS gate passes."
+            "The Top Profitable table contains only positive conservative BBO/depth policies with supported fills. "
+            "Negative policies are excluded rather than presented as leaders. Positive ideal-touch hypotheses are "
+            "shown separately and remain diagnostic only. The chronological 70/30 view is rolling, not a sealed "
+            "holdout; no row can authorize live trading until a fixed holdout and every safety gate pass."
         ),
     }
 
@@ -1640,17 +1740,31 @@ def _chase_threshold_payload(lane: str = ""):
             if int((block or {}).get("trades") or 0):
                 rows.append({"threshold": key, **(block or {})})
     else:
-        for key, block in (rep.get("thresholds") or {}).items():
+        for key, block in (rep.get("executed_thresholds") or rep.get("thresholds") or {}).items():
             if int((block or {}).get("trades") or 0):
                 rows.append({"threshold": key, **(block or {})})
+    shadow_source = rep.get("shadow_thresholds") or {}
+    if lane:
+        shadow_source = (rep.get("shadow_thresholds_by_lane") or {}).get(str(lane).upper()) or {}
+    shadow_rows = [
+        {"threshold": key, **(block or {})}
+        for key, block in shadow_source.items()
+        if int((block or {}).get("trades") or 0)
+    ]
     return {
         **_nonqualifying_scope(
-            "LEGACY_EXECUTED",
-            "Historical executed-lane chase thresholds; excluded from active V3.1 rankings.",
+            "SEPARATED_EXECUTED_AND_SHADOW",
+            rep.get("warning") or (
+                "Executed paper and shadow/lab outcomes are both included but remain separate evidence classes."
+            ),
         ),
         "generated_at": rep.get("generated_at"),
         "question": rep.get("question") or "Per exact limit_chase_count bucket (0, 1, 2, 3, 4, 5+)",
         "thresholds": rows,
+        "executed_thresholds": rows,
+        "shadow_thresholds": shadow_rows,
+        "coverage": rep.get("coverage") or {},
+        "evidence_contract": rep.get("evidence_contract"),
         "lane_filter": lane or "combined",
         "integrity": _integrity_payload(),
     }
@@ -3942,13 +4056,22 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Chase Analytics</h2>
     <label class="lane-toggle">Lane: <select id="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <div class="kpis" id="chase-kpis"></div>
+    <h3>Executed paper outcomes</h3>
     <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-body"></tbody></table>
+    <h3>Shadow and counterfactual outcomes</h3>
+    <p class="note">All current generic shadow and per-tile LAB terminal outcomes, kept separate from executed fills.</p>
+    <table><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>Shadow PnL</th><th>Shadow EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-shadow-body"></tbody></table>
   </section>
   <section id="sec-chase-threshold">
     <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <h2>Chase Threshold Analysis</h2>
-    <p class="note" id="chase-threshold-note">Cumulative limit_chase_count thresholds — when does EV turn positive?</p>
+    <p class="note" id="chase-threshold-note">Executed paper and shadow/lab outcomes are analyzed separately by exact chase count.</p>
+    <div class="kpis" id="chase-threshold-kpis"></div>
+    <h3>Executed paper outcomes</h3>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-threshold-body"></tbody></table>
+    <h3>Shadow and counterfactual outcomes</h3>
+    <p class="note">Includes generic shadows and per-tile LAB paths. These are simulated outcomes, not fills or realized profit.</p>
+    <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>Shadow PnL</th><th>Shadow EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-threshold-shadow-body"></tbody></table>
   </section>
   <section id="sec-chase-delay">
     <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
@@ -3958,10 +4081,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Lane</th><th>Approves</th><th>Fills</th><th>Fill%</th><th>WR%</th><th>PnL</th><th>EV/appr</th><th>EV/trade</th><th>Avg age(s)</th></tr></thead><tbody id="chase-delay-body"></tbody></table>
   </section>
   <section id="sec-combos">
-    <h2>Family-balanced Policy Screen (up to 100 rows)</h2>
-    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid. Displayed rows are enumerated policy specifications, not profitable or empirically tested policies unless terminal OOS fills are shown. Descriptive only until every qualification gate passes.</p>
+    <h2>Top Profitable Conservative Policy Combos</h2>
+    <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
-    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS episodes</th><th>Diagnostic touches</th><th>Diagnostic wins / losses</th><th>Diagnostic replay PnL</th><th>Execution fills</th><th>Execution wins / losses</th><th>Execution OOS PnL</th><th>Execution max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <h2>Positive Ideal-Touch Diagnostic Hypotheses</h2>
+    <p class="note">Separate research screen: price-path touches only. These rows can prioritize further testing but are not execution-verified and cannot qualify a strategy.</p>
+    <table><thead><tr><th>#</th><th>Family</th><th>Policy / parameters</th><th>Rolling OOS episodes</th><th>Touches</th><th>No touches</th><th>Wins / losses after touch</th><th>Diagnostic PnL</th><th>Diagnostic drawdown</th><th>Evidence status</th></tr></thead><tbody id="diagnostic-policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
     <p class="note" id="combos-note">Separate legacy direction-only cohort: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
     <div class="kpis" id="combos-kpis"></div>
@@ -4103,8 +4229,8 @@ const EVIDENCE_SCOPES = {
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
   lanes: ['CURRENT FOUR-TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
   ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
-  chase: ['LEGACY EXECUTED', 'Historical executed-lane chase attribution.'],
-  'chase-threshold': ['LEGACY EXECUTED', 'Historical executed-lane chase thresholds.'],
+  chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
+  'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
   combos: ['MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
@@ -4407,11 +4533,15 @@ async function loadLanes() {
     ['Assisted', (t.chase_assisted_fills||0) + '/' + (t.total_fills||0)],
     ['Saved', t.saved_fills_heuristic||0],
     ['TTL expired', t.ttl_expired||0],
+    ['Executed terminal', (d.coverage||{}).executed_terminal_outcomes ?? 0],
+    ['Shadow terminal', (d.coverage||{}).shadow_terminal_outcomes ?? 0],
   ];
   document.getElementById('chase-kpis').innerHTML = ck.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('chase-body').innerHTML = (d.buckets||[]).map(b =>
-    `<tr><td>${b.bucket||b.threshold||''}</td><td>${b.trades||0}</td><td>${b.win_rate_pct??'n/a'}%</td><td>$${fmtUsd(b.sum_pnl_usd??b.pnl_usd??0)}</td><td>$${fmtUsd(b.ev_usd??b.ev??0)}</td><td>${b.avg_hold_min??'—'}</td></tr>`).join('') || '<tr><td colspan="6">No chase bucket data</td></tr>';
+  const renderChaseBuckets = rows => (rows||[]).map(b =>
+    `<tr><td>${b.bucket||b.threshold||''}</td><td>${b.trades||0}</td><td>${b.win_rate_pct??'n/a'}%</td><td>$${fmtUsd(b.sum_pnl_usd??b.pnl_usd??0)}</td><td>$${fmtUsd(b.ev_usd??b.ev??0)}</td><td>${b.avg_hold_min??'—'}</td></tr>`).join('') || '<tr><td colspan="6">No terminal outcomes in this evidence class.</td></tr>';
+  document.getElementById('chase-body').innerHTML = renderChaseBuckets(d.executed_buckets || d.buckets || []);
+  document.getElementById('chase-shadow-body').innerHTML = renderChaseBuckets(d.shadow_buckets || []);
 }
 
 async function loadCombos() {
@@ -4437,11 +4567,13 @@ async function loadCombos() {
   const policyStats = pg.policy_search_statistics || {};
   const policySplit = pg.policy_episode_split || {};
   const policyRows = pg.policy_rows || pg.rows || [];
+  const diagnosticRows = pg.diagnostic_rows || [];
   const selection = pg.descriptive_selection || {};
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
-    ['Descriptive rows displayed', Number(policyStats.descriptive_rows_displayed ?? policyRows.length).toLocaleString()],
+    ['Profitable conservative rows', Number(policyStats.profitable_conservative_rows_displayed ?? policyRows.length).toLocaleString()],
+    ['Positive ideal-touch hypotheses', Number(policyStats.positive_ideal_touch_hypotheses_displayed ?? diagnosticRows.length).toLocaleString()],
     ['Families represented', Number(selection.families_represented ?? 0).toLocaleString()],
     ['Maximum per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
     ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
@@ -4454,14 +4586,24 @@ async function loadCombos() {
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {
-    const ci = p.oos_win_probability_ci95_low_pct == null ? 'n/a' :
-      `${p.oos_win_probability_pct}% (${p.oos_win_probability_ci95_low_pct}–${p.oos_win_probability_ci95_high_pct}%)`;
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td><td>${p.family_rank||'—'}</td><td><strong>${p.policy_id||'—'}</strong><br><small>global rank ${p.global_rank||'—'} · ${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>${p.oos_wins == null ? '—' : `${p.oos_wins} / ${p.oos_losses}`}</td>`
-      + `<td>${ci}</td><td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_expectancy_usd)}</td>`
-      + `<td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td><td class="bad">${p.metric_evidence||p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
-  }).join('') || '<tr><td colspan="12">No current-epoch OOS policy grid is available yet.</td></tr>';
+      + `<td>${p.oos_episodes||0}</td><td>${p.diagnostic_touch_episodes ?? 0}</td>`
+      + `<td>${p.diagnostic_replay_wins ?? 0} / ${p.diagnostic_replay_losses ?? 0}</td>`
+      + `<td>${fmtExecutionUsd(p.diagnostic_replay_net_pnl_usd)}</td><td>${p.oos_fills||0}</td>`
+      + `<td>${p.oos_wins == null ? '—' : `${p.oos_wins} / ${p.oos_losses}`}</td>`
+      + `<td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td>`
+      + `<td class="bad">${p.metric_evidence||p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
+  }).join('') || '<tr><td colspan="13">No current-epoch OOS policy grid is available yet.</td></tr>';
+  document.getElementById('diagnostic-policy-grid-body').innerHTML = diagnosticRows.map(p => {
+    const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · protection ${p.protection_model ?? '—'}`;
+    return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td>`
+      + `<td><strong>${p.policy_id||'—'}</strong><br><small>${params}</small></td>`
+      + `<td>${p.oos_episodes||0}</td><td>${p.diagnostic_touch_episodes||0}</td><td>${p.diagnostic_no_touch_episodes||0}</td>`
+      + `<td>${p.diagnostic_replay_wins||0} / ${p.diagnostic_replay_losses||0}</td>`
+      + `<td>${fmtExecutionUsd(p.diagnostic_replay_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.diagnostic_replay_max_drawdown_usd)}</td>`
+      + `<td class="bad">IDEAL_TOUCH_DIAGNOSTIC_ONLY</td></tr>`;
+  }).join('') || '<tr><td colspan="10">No positive ideal-touch diagnostic policy exists in the current rolling generation.</td></tr>';
 }
 
 async function loadSpreadPerf() {
@@ -4485,14 +4627,23 @@ async function loadChaseThreshold() {
   const r = await fetch('/api/chase-threshold' + chaseLaneQuery());
   const d = await r.json();
   const note = document.getElementById('chase-threshold-note');
-  if (note) note.textContent = [d.warning, d.question].filter(Boolean).join(' · ') || 'Cumulative limit_chase_count thresholds.';
-  document.getElementById('chase-threshold-body').innerHTML = (d.thresholds||[]).map(t => {
+  if (note) note.textContent = [d.warning, d.question, d.evidence_contract].filter(Boolean).join(' · ') || 'Executed and shadow chase evidence.';
+  const coverage = d.coverage || {};
+  document.getElementById('chase-threshold-kpis').innerHTML = [
+    ['Executed terminal outcomes', coverage.executed_terminal_outcomes ?? 0],
+    ['Shadow terminal outcomes', coverage.shadow_terminal_outcomes ?? 0],
+    ['Generic shadows', coverage.generic_shadow_counterfactuals ?? 0],
+    ['Tile LAB shadows', coverage.tile_lab_shadow_outcomes ?? 0],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const renderThresholdRows = rows => (rows||[]).map(t => {
     const wr = t.wr_pct ?? t.wr ?? 'n/a';
     const ev = t.ev_usd ?? t.ev ?? 'n/a';
     const pnl = t.pnl_usd ?? t.pnl ?? 0;
     const cls = (Number(ev) >= 0.8) ? 'green' : '';
     return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${wr}%</td><td>$${fmtUsd(pnl)}</td><td>$${fmtUsd(ev)}</td><td>${t.avg_hold_min??'—'}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">No threshold data.</td></tr>';
+  }).join('') || '<tr><td colspan="6">No terminal evidence in this evidence class for the selected lane.</td></tr>';
+  document.getElementById('chase-threshold-body').innerHTML = renderThresholdRows(d.executed_thresholds || d.thresholds || []);
+  document.getElementById('chase-threshold-shadow-body').innerHTML = renderThresholdRows(d.shadow_thresholds || []);
 }
 
 async function loadChaseDelay() {

@@ -714,6 +714,11 @@ def evaluate_protection_screen(
                 "max_drawdown_usd": diagnostic_validation["risk"].get("max_drawdown_usd"),
                 "expectancy_lcb_usd": diagnostic_validation["bootstrap"].get("mean_lcb95"),
                 "outcome_states": diagnostic_validation.get("outcome_states"),
+                "touches": int((diagnostic_validation.get("outcome_states") or {}).get("FULL_FILL", 0))
+                + int((diagnostic_validation.get("outcome_states") or {}).get("PARTIAL_FILL", 0)),
+                "no_touches": int((diagnostic_validation.get("outcome_states") or {}).get("NO_FILL", 0)),
+                "wins": int(diagnostic_validation["risk"].get("wins") or 0),
+                "losses": int(diagnostic_validation["risk"].get("losses") or 0),
             },
             "sealed_oos_net_usd": risk.get("net_pnl_usd"),
             "max_drawdown_usd": risk.get("max_drawdown_usd"),
@@ -733,6 +738,40 @@ def evaluate_protection_screen(
         abs(float(row.get("max_drawdown_usd") or 0)),
         str(row["policy_id"]),
     ))
+
+    def _family_balanced(rows: list[dict[str, Any]], *, cap: int = 2) -> list[dict[str, Any]]:
+        counts: dict[str, int] = defaultdict(int)
+        selected = []
+        for global_rank, row in enumerate(rows, start=1):
+            family = str(row.get("policy_family") or "UNKNOWN")
+            if counts[family] >= cap:
+                continue
+            counts[family] += 1
+            selected.append({**row, "global_rank": global_rank, "family_rank": counts[family]})
+            if len(selected) >= 100:
+                break
+        return selected
+
+    profitable_conservative = _family_balanced([
+        row for row in globally_ranked
+        if int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0) > 0
+        and isinstance(row.get("sealed_oos_net_usd"), (int, float))
+        and float(row["sealed_oos_net_usd"]) > 0
+    ])
+    diagnostic_ranked = sorted(
+        [
+            row for row in assessed
+            if int((row.get("ideal_touch_diagnostic") or {}).get("touches") or 0) > 0
+            and isinstance((row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd"), (int, float))
+            and float((row.get("ideal_touch_diagnostic") or {})["oos_net_usd"]) > 0
+        ],
+        key=lambda row: (
+            -float((row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd") or 0),
+            abs(float((row.get("ideal_touch_diagnostic") or {}).get("max_drawdown_usd") or 0)),
+            str(row["policy_id"]),
+        ),
+    )
+    profitable_ideal_touch_diagnostic = _family_balanced(diagnostic_ranked)
     # Keep the exhaustive assessed grid intact, but prevent small entry
     # variations of one protection family from saturating the public list.
     descriptive_family_cap = 2
@@ -838,6 +877,8 @@ def evaluate_protection_screen(
         "protection_variants": len(protections),
         "candidates": assessed,
         "descriptive_top_100": descriptive,
+        "profitable_conservative_top_100": profitable_conservative,
+        "profitable_ideal_touch_diagnostic_top_100": profitable_ideal_touch_diagnostic,
         "descriptive_selection": {
             "method": "GLOBAL_RANK_THEN_FAMILY_CAP",
             "per_family_cap": descriptive_family_cap,

@@ -12284,6 +12284,63 @@ def _exact_chase_bucket_stats(attributions):
     return _chase_bucket_stats(attributions)
 
 
+def _shadow_chase_attributions(session=None):
+    """Return terminal shadow/lab outcomes with an explicit evidence class.
+
+    Generic shadows/counterfactuals and per-tile LAB outcomes are intentionally
+    kept as separate records.  They broaden research coverage, but they never
+    become paper fills or exchange executions merely because they appear in a
+    chase table.
+    """
+    generic = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
+    # The richer shadow receipt wins on an overlapping trade id.
+    generic.update(_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {})
+    generic_df = pd.DataFrame(list(generic.values())) if generic else pd.DataFrame()
+    if session and not generic_df.empty and _session_start_ts(session) is not None:
+        generic_df = filter_df_since_session(generic_df, session, ts_cols=("ts", "timestamp"))
+
+    lane_df = _load_shadow_lane_outcome_df(session)
+    rows = []
+
+    def append_frame(frame, evidence_class):
+        if frame is None or frame.empty:
+            return
+        id_col = "trade_id" if "trade_id" in frame.columns else (
+            "study_id" if "study_id" in frame.columns else None
+        )
+        work = frame.copy()
+        if id_col:
+            work = work.drop_duplicates(subset=[id_col], keep="last")
+        for index, record in work.iterrows():
+            pnl = pd.to_numeric(record.get("net_pnl_usd"), errors="coerce")
+            if pd.isna(pnl):
+                continue
+            chase = record.get("limit_chase_count")
+            if chase is None or pd.isna(chase):
+                chase = record.get("chase_count")
+            if chase is None or pd.isna(chase):
+                ref = record.get("market_path_ref")
+                chase = ref.get("chase_count") if isinstance(ref, dict) else 0
+            hold = record.get("duration_min")
+            if hold is None or pd.isna(hold):
+                hold = record.get("dur_min")
+            rows.append({
+                "trade_id": str(record.get(id_col) if id_col else index),
+                "source_trade_id": record.get("source_trade_id"),
+                "lane": _normalize_lane_label(record.get("research_lane") or record.get("lane")),
+                "chase_count": int(pd.to_numeric(chase, errors="coerce") or 0),
+                "net_pnl_usd": float(pnl),
+                "win": float(pnl) > 0,
+                "avg_hold_min": None if hold is None or pd.isna(hold) else float(hold),
+                "evidence_class": evidence_class,
+                "executed": False,
+            })
+
+    append_frame(generic_df, "GENERIC_SHADOW_COUNTERFACTUAL")
+    append_frame(lane_df, "TILE_LAB_SHADOW")
+    return rows
+
+
 def chase_threshold_report(trades=None, session=None, chase_payload=None):
     """Exact chase-count buckets — EV/WR/PnL at each limit_chase_count (0, 1, 2, 3, 4, 5+)."""
     if session is None:
@@ -12300,6 +12357,14 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
         chase_payload = chase_attribution_report(trades=trades, session=session)
     attributions = (chase_payload or {}).get("trades") or []
     thresholds = _exact_chase_bucket_stats(attributions)
+    shadow_attributions = _shadow_chase_attributions(session)
+    shadow_thresholds = _exact_chase_bucket_stats(shadow_attributions)
+    shadow_thresholds_by_lane = {
+        lane: _exact_chase_bucket_stats([
+            row for row in shadow_attributions if row.get("lane") == lane
+        ])
+        for lane in sorted({row.get("lane") for row in shadow_attributions if row.get("lane")})
+    }
     for key, block in thresholds.items():
         if block["trades"]:
             print(
@@ -12307,13 +12372,14 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
                 f"PnL=${block['sum_pnl_usd']:.2f} EV=${block['ev_usd']:.2f} {PIPELINE_ENFORCEMENT_TAG}"
             )
     payload = {
-        "schema": "chase_threshold_v2",
-        "evidence_scope": "LEGACY_EXECUTED",
+        "schema": "chase_threshold_v3",
+        "evidence_scope": "SEPARATED_EXECUTED_AND_SHADOW",
         "qualified_v3_1": False,
         "ranking_eligible": False,
         "warning": (
-            "Historical executed-lane cohort only; excluded from the active "
-            "V3.1 safe-policy rankings."
+            "All available terminal chase evidence is included, but executed "
+            "paper outcomes and shadow/lab counterfactuals remain separate. "
+            "Shadow PnL is not a fill or realized profit."
         ),
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
@@ -12322,6 +12388,25 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
         "question": "Per exact limit_chase_count bucket (0, 1, 2, 3, 4, 5+) — EV/WR/PnL.",
         "chase_count_source": "trades_3factor.limit_chase_count when execution_funnel lacks LIMIT_CHASE rows",
         "thresholds": thresholds,
+        "executed_thresholds": thresholds,
+        "shadow_thresholds": shadow_thresholds,
+        "shadow_thresholds_by_lane": shadow_thresholds_by_lane,
+        "coverage": {
+            "executed_terminal_outcomes": sum(int(b.get("trades") or 0) for b in thresholds.values()),
+            "shadow_terminal_outcomes": len(shadow_attributions),
+            "generic_shadow_counterfactuals": sum(
+                1 for row in shadow_attributions
+                if row.get("evidence_class") == "GENERIC_SHADOW_COUNTERFACTUAL"
+            ),
+            "tile_lab_shadow_outcomes": sum(
+                1 for row in shadow_attributions
+                if row.get("evidence_class") == "TILE_LAB_SHADOW"
+            ),
+        },
+        "evidence_contract": (
+            "Compare the cohorts side by side. Do not add executed and shadow PnL "
+            "or use shadow rows as execution qualification evidence."
+        ),
     }
     try:
         with open(analyzer_report_path(CHASE_THRESHOLD_REPORT_FILE), "w", encoding="utf-8") as f:
