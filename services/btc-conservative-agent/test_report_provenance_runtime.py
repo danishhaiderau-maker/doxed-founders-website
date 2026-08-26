@@ -188,18 +188,19 @@ def test_chase_attribution_without_trade_rows_keeps_unknown_hold_fail_closed(tmp
 
 
 def test_chase_attribution_keeps_v31_lane_without_legacy_chase_column(tmp_path, monkeypatch):
-    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [
-        {
-            "trade_id": "fc3-current",
-            "stage": "APPROVE",
-            "research_lane": "FAMILY_CHANDELIER_3",
-        },
-        {
+    def load_rows(path):
+        if "duplicate_intent_audit" in str(path):
+            return [{
+                "trade_id": "fc3-current",
+                "research_lane": "FAMILY_CHANDELIER_3",
+            }]
+        return [{
             "trade_id": "fc3-current",
             "stage": "ORDER_SUBMITTED",
             "limit_price": 63_000,
-        },
-    ])
+        }]
+
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", load_rows)
     monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)
     monkeypatch.setattr(analyzer, "analyzer_report_path", lambda _name: str(tmp_path / "chase.json"))
     trades = pd.DataFrame([{

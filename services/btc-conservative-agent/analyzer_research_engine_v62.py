@@ -11750,6 +11750,15 @@ def chase_attribution_report(trades=None, session=None):
     print(f"\n=== CHASE ATTRIBUTION REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     rows = _filter_jsonl_rows_by_session(_load_jsonl_rows(EXECUTION_FUNNEL_FILE), session)
+    intent_rows = _filter_jsonl_rows_by_session(
+        _load_jsonl_rows("duplicate_intent_audit.jsonl"), session
+    )
+    intent_lane = {}
+    for intent in intent_rows:
+        intent_tid = str(intent.get("trade_id") or "")
+        intent_research_lane = _normalize_lane_label(intent.get("research_lane"))
+        if intent_tid and intent_research_lane != "UNKNOWN":
+            intent_lane[intent_tid] = intent_research_lane
     trade_pnl = {}
     trade_wr = {}
     trade_chase = {}
@@ -11866,6 +11875,7 @@ def chase_attribution_report(trades=None, session=None):
                 ),
                 None,
             )
+            or intent_lane.get(tid)
             or trade_lane.get(tid)
             or "UNKNOWN"
         )
