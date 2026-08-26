@@ -3,6 +3,8 @@ import unittest
 from collections import Counter
 
 from research_v3_candidates import (
+    _bind_candidate_receipt_identity,
+    _conservative_child_receipt,
     _conservative_ohlc_prices,
     evaluate_protection_screen,
     load_candidate_inputs,
@@ -14,8 +16,13 @@ from research_v3_ranking import rank_safe_policies
 
 def source(event_id="event-1", episode_id="episode-1"):
     return {
+        "epoch_id": "epoch-test",
         "event_id": event_id,
         "episode_id": episode_id,
+        "opportunity_id": f"opportunity:{episode_id}",
+        "source_policy_signature": "paper-policy-source",
+        "source_fill_ids": [f"execution:{event_id}:fill"],
+        "tape_ids": ["tape-sha-1"],
         "signal_ts": 1000,
         "regime": "BULL",
         "direction": "LONG",
@@ -115,6 +122,10 @@ class V3CandidateTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["atr14_pct"], 0.1)
+            self.assertEqual(rows[0]["epoch_id"], "epoch-clean")
+            self.assertEqual(rows[0]["opportunity_id"], "opportunity:episode-1")
+            self.assertEqual(rows[0]["tape_ids"], [segment["sha256"]])
+            self.assertEqual(rows[0]["source_fill_ids"], ["execution:event-1:primary-fill"])
             self.assertEqual(rows[0]["entry_children"][0]["fill_price"], 100)
             self.assertEqual(rows[0]["entry_children"][0]["offset_pct"], 0.29)
             self.assertEqual(report["unique_policies_evaluated"], len(protection_screen()))
@@ -134,6 +145,26 @@ class V3CandidateTests(unittest.TestCase):
             store.append("lifecycle", {
                 "record_id": "lifecycle:event-1:terminal", "episode_id": "episode-good",
                 "event_id": "event-1", "terminal": True,
+            })
+            self.assertEqual(load_candidate_inputs(tmp, epoch_id="epoch-clean"), [])
+
+    def test_source_policy_signature_contamination_is_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-clean")
+            store.append("opportunity", {
+                "record_id": "opportunity:episode-1", "episode_id": "episode-1",
+                "signal_ts": 1000,
+            })
+            store.append("order_intent", {
+                "record_id": "order-intent:event-1", "episode_id": "episode-1",
+                "event_id": "event-1", "executed_direction": "LONG",
+                "policy_id": "OFFSET_0.29_CHASE_patient",
+                "policy_signature": "paper-policy-a",
+            })
+            store.append("lifecycle", {
+                "record_id": "lifecycle:event-1:terminal", "episode_id": "episode-1",
+                "event_id": "event-1", "terminal": True,
+                "policy_signature": "paper-policy-b",
             })
             self.assertEqual(load_candidate_inputs(tmp, epoch_id="epoch-clean"), [])
 
@@ -284,6 +315,62 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(first["no_fills"], 1)
         self.assertEqual(first["validation"]["risk"]["non_execution_zero_contributions"], 1)
         self.assertFalse(first["gates"]["conservative_execution_pass"])
+
+    def test_candidate_receipts_preserve_complete_causal_identity_for_all_outcomes(self):
+        cases = (
+            (conservative_source(), "FILL"),
+            (conservative_source(visible_qty=0.25), "PARTIAL_FILL"),
+            (conservative_source(crossed=False), "NO_FILL"),
+        )
+        for row, expected_outcome in cases:
+            with self.subTest(expected_outcome=expected_outcome):
+                raw = _conservative_child_receipt(row, row["entry_children"][0])
+                receipt = _bind_candidate_receipt_identity(
+                    raw, row, candidate_policy_signature="v3-policy-test",
+                )
+                identity = receipt["identity"]
+                self.assertEqual(receipt["outcome"], expected_outcome)
+                self.assertTrue(identity["complete"])
+                self.assertEqual(identity["epoch_id"], "epoch-test")
+                self.assertEqual(identity["event_id"], "event-1")
+                self.assertEqual(identity["opportunity_id"], "opportunity:episode-1")
+                self.assertEqual(identity["candidate_policy_signature"], "v3-policy-test")
+                self.assertTrue(identity["schedule_sha256"])
+                self.assertEqual(identity["tape_ids"], ["tape-sha-1"])
+                if expected_outcome in {"FILL", "PARTIAL_FILL"}:
+                    self.assertTrue(identity["fill_receipt_id"])
+                else:
+                    self.assertIsNone(identity["fill_receipt_id"])
+
+    def test_missing_required_receipt_identity_fails_closed_without_fabrication(self):
+        row = conservative_source()
+        row["tape_ids"] = []
+        raw = _conservative_child_receipt(row, row["entry_children"][0])
+        receipt = _bind_candidate_receipt_identity(
+            raw, row, candidate_policy_signature="v3-policy-test",
+        )
+        self.assertEqual(receipt["outcome"], "UNSUPPORTED")
+        self.assertFalse(receipt["supported"])
+        self.assertIsNone(receipt["identity"]["fill_receipt_id"])
+        self.assertIn("tape_ids", receipt["identity"]["missing_required_identities"])
+        self.assertIn("MISSING_REQUIRED_IDENTITY:tape_ids", receipt["negative_reasons"])
+
+    def test_intrinsically_unsupported_receipt_still_preserves_available_identity(self):
+        row = conservative_source()
+        row["entry_children"][0]["chase_schedule"] = []
+        raw = _conservative_child_receipt(row, row["entry_children"][0])
+        receipt = _bind_candidate_receipt_identity(
+            raw, row, candidate_policy_signature="v3-policy-test",
+        )
+        identity = receipt["identity"]
+        self.assertEqual(receipt["outcome"], "UNSUPPORTED")
+        self.assertEqual(identity["epoch_id"], "epoch-test")
+        self.assertEqual(identity["event_id"], "event-1")
+        self.assertEqual(identity["opportunity_id"], "opportunity:episode-1")
+        self.assertEqual(identity["candidate_policy_signature"], "v3-policy-test")
+        self.assertIsNone(identity["schedule_sha256"])
+        self.assertIsNone(identity["fill_receipt_id"])
+        self.assertIn("schedule_sha256", identity["missing_required_identities"])
 
 
 if __name__ == "__main__":

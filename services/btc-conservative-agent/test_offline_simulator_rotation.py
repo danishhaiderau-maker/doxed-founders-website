@@ -1,4 +1,5 @@
 import ast
+import copy
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ def _load_functions(*names):
     ]
     namespace = {
         "Path": Path,
+        "copy": copy,
         "json": json,
         "os": os,
         "hashlib": __import__("hashlib"),

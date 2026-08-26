@@ -187,19 +187,31 @@ class V3ReportTests(unittest.TestCase):
             self.assertFalse(report["real_bitfinex_trading_allowed"])
 
     def test_dashboard_api_and_page_are_fail_closed(self):
-        original = dashboard._read_json
+        original = dashboard._current_generation_report
         try:
-            dashboard._read_json = lambda name, default=None: {} if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else original(name, default)
+            dashboard._current_generation_report = lambda name: {
+                "schema": "current_generation_report_unavailable_v1",
+                "status": "REPORT_NOT_IN_CURRENT_GENERATION",
+                "qualification": "NO_SAFE_QUALIFIED_POLICY",
+                "live_policy_change_allowed": False,
+                "real_bitfinex_trading_allowed": False,
+                "blockers": ["REPORT_NOT_IN_CURRENT_GENERATION", name],
+                "report_unavailable": True,
+                "collection": {},
+                "candidate_screen": {},
+                "safe_policy_ranking": {},
+            }
             dashboard._API_RESPONSE_CACHE.clear()
             client = dashboard.app.test_client()
             payload = client.get("/api/safe-policy-genome-v3").get_json()
-            self.assertEqual(payload["status"], "V3_REPORT_NOT_GENERATED")
+            self.assertEqual(payload["status"], "REPORT_NOT_IN_CURRENT_GENERATION")
+            self.assertIn("REPORT_NOT_IN_CURRENT_GENERATION", payload["blockers"])
             self.assertFalse(payload["real_bitfinex_trading_allowed"])
             page = client.get("/safe-policy-genome-v3")
             self.assertEqual(page.status_code, 200)
             self.assertIn(b"Safe Policy Genome", page.data)
         finally:
-            dashboard._read_json = original
+            dashboard._current_generation_report = original
 
     def test_report_excludes_foreign_epoch_and_pre_reset_rows(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:

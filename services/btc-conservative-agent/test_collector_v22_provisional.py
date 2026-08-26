@@ -40,7 +40,10 @@ class ProvisionalStoreTests(unittest.TestCase):
             self.assertEqual(loaded["created_ts_ts"], 1000.0)
             self.assertEqual(loaded["research_feature_snapshot"], {"rsi": 42})
             self.assertEqual(loaded["status"], "FILLED")
-            self.assertEqual(receipt["episode_id"], "episode-" + __import__("hashlib").sha256(b"shared:BTCUSD:UNKNOWN:scan-1").hexdigest()[:20])
+            # A shared AI call is the causal episode.  Symbol and direction are
+            # child-policy attributes and must not split one correlated scan
+            # into several apparently independent episodes.
+            self.assertEqual(receipt["episode_id"], "episode-" + __import__("hashlib").sha256(b"shared:scan-1").hexdigest()[:20])
 
     def test_remove_is_explicit_and_idempotent(self):
         with tempfile.TemporaryDirectory() as root:

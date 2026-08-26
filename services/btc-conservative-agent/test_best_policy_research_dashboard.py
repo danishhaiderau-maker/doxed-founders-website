@@ -814,7 +814,10 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     assert "No qualified dynamic OOS winner" in dynamic["warning"]
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
     assert shadow["v22_shadow"] == {}
-    assert shadow["legacy_v22_excluded"]["shadow_research"]["independent_episodes"] == 1
+    # A root-level legacy artifact that is absent from the current manifest is
+    # not revived even as an excluded detail; its explicit empty envelope keeps
+    # the current signed cohort fail-closed.
+    assert shadow["legacy_v22_excluded"]["shadow_research"] == {}
     assert shadow["paused_shadow"]["overall"]["closed"] == 3
     assert shadow["live_policy_change_allowed"] is False
     assert client.get("/static-policies").status_code == 200
@@ -843,12 +846,14 @@ def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
         "qualification": "NO_SAFE_QUALIFIED_POLICY",
         "collection": {"independent_opportunities": 12},
     }
-    monkeypatch.setattr(dashboard, "_read_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: payload)
+    dashboard._API_RESPONSE_CACHE.clear()
     client = dashboard.app.test_client()
 
     assert client.get("/safe-policy-genome-v3.1").status_code == 200
     assert client.get("/api/safe-policy-genome-v3.1").get_json() == payload
     assert client.get("/safe-policy-genome-v3").status_code == 200
+    dashboard._API_RESPONSE_CACHE.clear()
     assert client.get("/api/safe-policy-genome-v3").get_json() == payload
 
 
@@ -867,14 +872,13 @@ def test_safe_policy_dashboard_surfaces_exact_v31_maturity_blockers(monkeypatch)
         ],
     }
 
-    def fake_read(name, default=None):
-        if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE:
-            return safe
+    def fake_report(name, default=None):
         if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE:
             return compatibility
         return default or {}
 
-    monkeypatch.setattr(dashboard, "_read_json", fake_read)
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: safe)
+    monkeypatch.setattr(dashboard, "_read_report", fake_report)
     source = dashboard._safe_policy_v3_dashboard_source()
 
     assert source["epoch_id"] == "epoch-clean"

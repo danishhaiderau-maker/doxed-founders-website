@@ -142,6 +142,102 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _identity_text(value: Any) -> str | None:
+    """Preserve an upstream identity only when it is explicitly present."""
+    text = str(value or "").strip()
+    return text or None
+
+
+def _candidate_receipt_identity(
+    receipt: Mapping[str, Any],
+    source: Mapping[str, Any],
+    *,
+    candidate_policy_signature: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Bind a replay receipt to its causal evidence without inventing IDs."""
+    outcome = str(receipt.get("outcome") or "UNSUPPORTED")
+    tape_ids = [
+        value for value in (
+            _identity_text(item) for item in (source.get("tape_ids") or [])
+        ) if value is not None
+    ]
+    fill_receipt_id = None
+    if outcome in {"FILL", "PARTIAL_FILL"}:
+        fill_material = {
+            "epoch_id": _identity_text(source.get("epoch_id")),
+            "event_id": _identity_text(source.get("event_id")),
+            "episode_id": _identity_text(source.get("episode_id")),
+            "policy_signature": candidate_policy_signature,
+            "schedule_sha256": _identity_text(receipt.get("schedule_sha256")),
+            "tape_ids": tape_ids,
+            "chase_bucket_id": _identity_text(receipt.get("chase_bucket_id")),
+            "evidence_bucket_ids": list(receipt.get("evidence_bucket_ids") or []),
+            "trigger_bucket_ts": receipt.get("trigger_bucket_ts"),
+            "filled_qty": receipt.get("filled_qty"),
+            "fill_price": receipt.get("fill_price"),
+        }
+        fill_receipt_id = canonical_hash("candidate-fill", fill_material)
+
+    identity = {
+        "schema": "candidate_episode_receipt_identity_v1",
+        "epoch_id": _identity_text(source.get("epoch_id")),
+        "event_id": _identity_text(source.get("event_id")),
+        "episode_id": _identity_text(source.get("episode_id")),
+        "opportunity_id": _identity_text(source.get("opportunity_id")),
+        "source_policy_signature": _identity_text(source.get("source_policy_signature")),
+        "candidate_policy_signature": _identity_text(candidate_policy_signature),
+        "schedule_sha256": _identity_text(receipt.get("schedule_sha256")),
+        "tape_ids": tape_ids,
+        "fill_receipt_id": fill_receipt_id,
+        "source_fill_ids": [
+            value for value in (
+                _identity_text(item) for item in (source.get("source_fill_ids") or [])
+            ) if value is not None
+        ],
+    }
+    required = {
+        "epoch_id": identity["epoch_id"],
+        "event_id": identity["event_id"],
+        "episode_id": identity["episode_id"],
+        "opportunity_id": identity["opportunity_id"],
+        "candidate_policy_signature": identity["candidate_policy_signature"],
+        "schedule_sha256": identity["schedule_sha256"],
+        "tape_ids": identity["tape_ids"],
+    }
+    if outcome in {"FILL", "PARTIAL_FILL"}:
+        required["fill_receipt_id"] = identity["fill_receipt_id"]
+    missing = [name for name, value in required.items() if not value]
+    # A content-addressed fill identity is meaningful only when the complete
+    # causal chain is present. Do not retain a seemingly valid fill ID when an
+    # upstream epoch/opportunity/schedule/tape identity is absent.
+    if missing and fill_receipt_id is not None:
+        identity["fill_receipt_id"] = None
+    identity["complete"] = not missing
+    identity["missing_required_identities"] = missing
+    return identity, missing
+
+
+def _bind_candidate_receipt_identity(
+    receipt: Mapping[str, Any],
+    source: Mapping[str, Any],
+    *,
+    candidate_policy_signature: str,
+) -> dict[str, Any]:
+    bound = dict(receipt)
+    identity, missing = _candidate_receipt_identity(
+        bound, source, candidate_policy_signature=candidate_policy_signature,
+    )
+    bound["identity"] = identity
+    if missing:
+        bound["outcome"] = "UNSUPPORTED"
+        bound["supported"] = False
+        bound["negative_reasons"] = list(dict.fromkeys([
+            *(bound.get("negative_reasons") or []),
+            *(f"MISSING_REQUIRED_IDENTITY:{name}" for name in missing),
+        ]))
+    return bound
+
+
 def _cycle_atr_by_event(root: Path) -> dict[str, float]:
     """Index the immutable 3-minute receipt used by pre-normalized V3.1 rows."""
     result: dict[str, float] = {}
@@ -338,6 +434,23 @@ def load_candidate_inputs(
         executions = executions_by_event.get(event_id, [])
         if any(str(row.get("episode_id") or "") != episode_id for row in executions):
             continue
+        opportunity = opportunities.get(episode_id) or {}
+        epoch_values = {
+            _identity_text(row.get("epoch_id"))
+            for row in (opportunity, intent, lifecycle, *executions)
+            if row
+        }
+        if None in epoch_values or len(epoch_values) != 1:
+            continue
+        source_policy_signatures = {
+            value for value in (
+                _identity_text(row.get("policy_signature"))
+                for row in (intent, lifecycle, *executions)
+                if row
+            ) if value is not None
+        }
+        if len(source_policy_signatures) > 1:
+            continue
         one_second_rows = []
         one_minute_rows = []
         for ref in lifecycle.get("market_segment_refs") or []:
@@ -345,7 +458,7 @@ def load_candidate_inputs(
                 one_second_rows.extend(_load_segment(root, ref))
             elif str(ref.get("timeframe")) == "1m":
                 one_minute_rows.extend(_load_segment(root, ref))
-        feature = (opportunities.get(episode_id) or {}).get("feature_snapshot_at_signal") or {}
+        feature = opportunity.get("feature_snapshot_at_signal") or {}
         market_context = feature.get("market_context") if isinstance(feature.get("market_context"), Mapping) else {}
         fill_execution = next((
             row for row in executions
@@ -359,9 +472,27 @@ def load_candidate_inputs(
             cycle_atr.get(event_id),
         ) if value is not None and value > 0), None)
         result.append({
+            "epoch_id": next(iter(epoch_values)),
             "event_id": event_id,
             "episode_id": episode_id,
-            "signal_ts": (opportunities.get(episode_id) or {}).get("signal_ts"),
+            "opportunity_id": opportunity.get("record_id"),
+            "order_intent_id": intent.get("record_id"),
+            "lifecycle_id": lifecycle.get("record_id"),
+            "source_policy_signature": (
+                next(iter(source_policy_signatures))
+                if source_policy_signatures else None
+            ),
+            "source_fill_ids": [
+                row.get("record_id") or row.get("fill_id")
+                for row in executions
+                if row.get("record_id") or row.get("fill_id")
+            ],
+            "tape_ids": [
+                ref.get("sha256")
+                for ref in (lifecycle.get("market_segment_refs") or [])
+                if isinstance(ref, Mapping) and ref.get("sha256")
+            ],
+            "signal_ts": opportunity.get("signal_ts"),
             "regime": (
                 feature.get("regime")
                 or feature.get("market_regime")
@@ -498,26 +629,45 @@ def evaluate_protection_screen(
                     "portfolio": {"concurrency_cap": 1, "size_scale": 1.0, "daily_loss_kill_pct": 3},
                 }
                 policy_specs[policy_id] = spec
+                candidate_policy_signature = canonical_hash("v3-policy", spec)
+                policy_receipt = _bind_candidate_receipt_identity(
+                    conservative_receipt,
+                    source,
+                    candidate_policy_signature=candidate_policy_signature,
+                )
+                conservative_outcome = str(policy_receipt.get("outcome") or "UNSUPPORTED")
+                conservative_fill_ts = policy_receipt.get("trigger_bucket_ts")
+                conservative_fill_price = policy_receipt.get("fill_price")
+                requested_qty = _number(policy_receipt.get("requested_qty"))
+                filled_qty = _number(policy_receipt.get("filled_qty"))
+                fill_fraction = (
+                    min(1.0, filled_qty / requested_qty)
+                    if requested_qty and filled_qty is not None else 0.0
+                )
                 outcome: dict[str, Any]
                 if conservative_outcome == "NO_FILL":
                     outcome = {
                         "outcome_state": "NO_FILL", "net_pnl_usd": None,
-                        "fill_receipt": conservative_receipt,
+                        "fill_receipt": policy_receipt,
                     }
                 elif conservative_outcome == "UNSUPPORTED":
                     outcome = {
                         "outcome_state": "UNSUPPORTED",
                         "reason": "CONSERVATIVE_FILL_EVIDENCE_UNSUPPORTED",
-                        "fill_receipt": conservative_receipt,
+                        "fill_receipt": policy_receipt,
                     }
                 elif conservative_outcome not in {"FILL", "PARTIAL_FILL"}:
                     outcome = {
                         "outcome_state": "UNSUPPORTED",
                         "reason": "UNKNOWN_CONSERVATIVE_FILL_OUTCOME",
-                        "fill_receipt": conservative_receipt,
+                        "fill_receipt": policy_receipt,
                     }
                 elif not prices or source.get("atr14_pct") is None:
-                    outcome = {"outcome_state": "UNSUPPORTED", "reason": "ORDERED_1S_PATH_OR_ATR_MISSING"}
+                    outcome = {
+                        "outcome_state": "UNSUPPORTED",
+                        "reason": "ORDERED_1S_PATH_OR_ATR_MISSING",
+                        "fill_receipt": policy_receipt,
+                    }
                 else:
                     replay = replay_protected_policy(
                         prices,
@@ -543,7 +693,7 @@ def evaluate_protection_screen(
                         "profit_giveback_pct": replay.get("profit_giveback_pct"),
                         "underwater_observation_ratio": replay.get("underwater_observation_ratio"),
                         "replay_path_basis": replay_path_basis,
-                        "fill_receipt": conservative_receipt,
+                        "fill_receipt": policy_receipt,
                     }
                 diagnostic_outcome: dict[str, Any]
                 if child.get("fill_ts") is None:
@@ -595,6 +745,7 @@ def evaluate_protection_screen(
                         "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
                         "regime": source.get("regime"),
                         "replay_path_basis": replay_path_basis,
+                        "receipt_identity": policy_receipt.get("identity"),
                         "policy_outcomes": {policy_id: outcome},
                         "ideal_touch_policy_outcomes": {policy_id: diagnostic_outcome},
                     }
@@ -702,6 +853,24 @@ def evaluate_protection_screen(
             "partial_fills": partial_fills,
             "no_fills": no_fills,
             "unsupported_episodes": unsupported,
+            "receipt_identity": {
+                "schema": "candidate_episode_receipt_identity_summary_v1",
+                "complete_episodes": sum(
+                    1 for row in rows
+                    if ((row.get("receipt_identity") or {}).get("complete") is True)
+                ),
+                "incomplete_episodes": sum(
+                    1 for row in rows
+                    if ((row.get("receipt_identity") or {}).get("complete") is not True)
+                ),
+                "missing_required_identities": sorted({
+                    missing
+                    for row in rows
+                    for missing in (
+                        (row.get("receipt_identity") or {}).get("missing_required_identities") or []
+                    )
+                }),
+            },
             "conservative_fill_rate": (
                 round((full_fills + partial_fills) / (full_fills + partial_fills + no_fills), 8)
                 if full_fills + partial_fills + no_fills else None

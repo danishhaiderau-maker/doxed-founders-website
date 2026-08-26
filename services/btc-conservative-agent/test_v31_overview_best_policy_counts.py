@@ -37,10 +37,9 @@ def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypat
         "epoch_id": "epoch-clean-808",
         "evidence": {"completed_paths": 1},
     }
-    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: (
-        report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
-        else compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE
-        else (default or {})
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: report)
+    monkeypatch.setattr(dashboard, "_read_report", lambda name, default=None: (
+        compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE else (default or {})
     ))
 
     # Exercise the adapter directly so this focused test cannot seed the
@@ -78,10 +77,9 @@ def test_best_policy_overview_does_not_count_no_order_terminals_as_paths(monkeyp
         "epoch_id": "epoch-clean-no-orders",
         "evidence": {"completed_paths": 0},
     }
-    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: (
-        report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
-        else compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE
-        else (default or {})
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: report)
+    monkeypatch.setattr(dashboard, "_read_report", lambda name, default=None: (
+        compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE else (default or {})
     ))
 
     payload = dashboard._best_policy_research_v31_payload()

@@ -32,8 +32,9 @@ PARTIAL_ARTIFACT_STALE_SECONDS = SYNC_MAX_AGE_SECONDS
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
 OPPORTUNITY_STALL_THRESHOLD_SECONDS = 12 * 60
-LOCAL_MIN_FREE_PERCENT = 5.0
-LOCAL_MIN_FREE_BYTES = 50 * 1024**3
+LOCAL_STORAGE_GREEN_FREE_BYTES = 150 * 1024**3
+LOCAL_STORAGE_AMBER_FREE_BYTES = 100 * 1024**3
+LOCAL_TEMP_ABNORMAL_GROWTH_BYTES = 1024**3
 LOCAL_QUARANTINE_MAX_PERCENT = 10.0
 LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
 LOCAL_QUARANTINE_MAX_BYTES = 25 * 1024**3
@@ -93,33 +94,78 @@ def directory_size(path: Path) -> tuple[int, int]:
 def local_storage_snapshot(
     mirror: Path,
     *,
+    report_dir: Path | None = None,
+    temp_dir: Path | None = None,
+    previous_snapshot: dict[str, Any] | None = None,
     disk_usage: Callable[[str | os.PathLike[str]], Any] = shutil.disk_usage,
 ) -> tuple[bool, dict[str, Any]]:
-    """Measure active/quarantined evidence and fail before the workstation fills."""
+    """Measure known generated-data roots without deleting or modifying them.
+
+    The boolean is deliberately GREEN-only because storage health participates
+    in technical readiness.  AMBER remains usable for bounded repair and
+    collection, but it must be visible to the operator rather than passing as
+    fully healthy.
+    """
     quarantine = mirror.parent / "fly-data-quarantine"
+    reports = report_dir or mirror.parent / "analyzer-reports"
+    processing_temp = temp_dir or mirror.parent / "temp"
+    sync_staging = mirror.parent / "fly-data-staging"
     mirror_files, mirror_bytes = directory_size(mirror)
     quarantine_files, quarantine_bytes = directory_size(quarantine)
+    report_files, report_bytes = directory_size(reports)
+    temp_files, temp_bytes = directory_size(processing_temp)
+    staging_files, staging_bytes = directory_size(sync_staging)
     total, _used, free = disk_usage(mirror.parent)
     free_pct = (float(free) / float(total) * 100.0) if total else 0.0
     quarantine_pct = (float(quarantine_bytes) / float(total) * 100.0) if total else 100.0
-    ok = (
-        free_pct >= LOCAL_MIN_FREE_PERCENT
-        and free >= LOCAL_MIN_FREE_BYTES
-        and mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
+    if free >= LOCAL_STORAGE_GREEN_FREE_BYTES:
+        rag = "GREEN"
+    elif free >= LOCAL_STORAGE_AMBER_FREE_BYTES:
+        rag = "AMBER"
+    else:
+        rag = "RED"
+
+    previous_temp_bytes = int((previous_snapshot or {}).get("temporary_bytes") or 0)
+    temp_growth_bytes = temp_bytes - previous_temp_bytes if previous_snapshot else 0
+    abnormal_temp_growth = bool(previous_snapshot) and temp_growth_bytes >= LOCAL_TEMP_ABNORMAL_GROWTH_BYTES
+    consumers = [
+        {"name": "active_fly_mirror", "path": str(mirror), "files": mirror_files, "bytes": mirror_bytes},
+        {"name": "fly_data_quarantine", "path": str(quarantine), "files": quarantine_files, "bytes": quarantine_bytes},
+        {"name": "analyzer_reports", "path": str(reports), "files": report_files, "bytes": report_bytes},
+        {"name": "temporary_processing", "path": str(processing_temp), "files": temp_files, "bytes": temp_bytes},
+        {"name": "mirror_sync_staging", "path": str(sync_staging), "files": staging_files, "bytes": staging_bytes},
+    ]
+    consumers.sort(key=lambda row: (-int(row["bytes"]), str(row["name"])))
+    generated_roots_within_caps = (
+        mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
         and quarantine_bytes <= LOCAL_QUARANTINE_MAX_BYTES
         and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
     )
+    ok = rag == "GREEN" and generated_roots_within_caps and not abnormal_temp_growth
     return ok, {
+        "rag": rag,
         "mirror_files": mirror_files,
         "mirror_bytes": mirror_bytes,
         "quarantine_files": quarantine_files,
         "quarantine_bytes": quarantine_bytes,
+        "analyzer_report_files": report_files,
+        "analyzer_report_bytes": report_bytes,
+        "temporary_files": temp_files,
+        "temporary_bytes": temp_bytes,
+        "temporary_growth_bytes": temp_growth_bytes,
+        "temporary_growth_rag": "AMBER" if abnormal_temp_growth else "GREEN",
+        "temporary_growth_alert": abnormal_temp_growth,
+        "temporary_growth_alert_bytes": LOCAL_TEMP_ABNORMAL_GROWTH_BYTES,
+        "five_largest_known_generated_data_consumers": consumers[:5],
         "disk_total_bytes": int(total),
         "disk_free_bytes": int(free),
+        "disk_free_gib": round(float(free) / 1024**3, 2),
         "disk_free_percent": round(free_pct, 2),
         "quarantine_disk_percent": round(quarantine_pct, 3),
-        "minimum_free_percent": LOCAL_MIN_FREE_PERCENT,
-        "minimum_free_bytes": LOCAL_MIN_FREE_BYTES,
+        "green_minimum_free_bytes": LOCAL_STORAGE_GREEN_FREE_BYTES,
+        "amber_minimum_free_bytes": LOCAL_STORAGE_AMBER_FREE_BYTES,
+        "rag_rule": "GREEN >=150 GiB; AMBER 100-149 GiB; RED <100 GiB",
+        "generated_roots_within_caps": generated_roots_within_caps,
         "maximum_mirror_bytes": LOCAL_MIRROR_MAX_BYTES,
         "maximum_quarantine_bytes": LOCAL_QUARANTINE_MAX_BYTES,
         "maximum_quarantine_percent": LOCAL_QUARANTINE_MAX_PERCENT,
@@ -893,6 +939,7 @@ class Supervisor:
     runtime_repo: Path | None = None
     readiness_state_file: Path | None = None
     progress_state_file: Path | None = None
+    storage_state_file: Path | None = None
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -941,7 +988,16 @@ class Supervisor:
         except Exception as exc:
             add("fly_storage", False, type(exc).__name__)
         try:
-            local_ok, local_detail = local_storage_snapshot(self.mirror)
+            storage_path = self.storage_state_file or self.repo / ".research-storage-state.json"
+            previous_storage: dict[str, Any] = {}
+            if storage_path.is_file():
+                previous_storage = read_json(storage_path)
+            local_ok, local_detail = local_storage_snapshot(
+                self.mirror,
+                report_dir=self.report_dir,
+                previous_snapshot=previous_storage,
+            )
+            atomic_json(storage_path, local_detail)
             add("local_storage", local_ok, local_detail)
         except Exception as exc:
             add("local_storage", False, f"{type(exc).__name__}: {exc}")

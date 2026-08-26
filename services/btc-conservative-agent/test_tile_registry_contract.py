@@ -30,19 +30,25 @@ def test_tile_registry_is_fail_closed_for_relay_and_retirement():
 
 
 def test_retirement_contract_covers_all_cross_layer_surfaces():
-    assert set(TILE_COMPONENT_SURFACES) == {
-        "runtime",
-        "authenticated_api",
+    assert TILE_COMPONENT_SURFACES == (
+        "runtime_evaluation",
+        "paper_routing",
+        "relay_allowlist",
+        "policy_identity_signatures",
+        "api_payloads",
         "production_dashboard",
-        "collector",
-        "mirror_manifest",
-        "analyzer_loader",
+        "mirror_manifests",
+        "analyzer_loaders",
         "analyzer_reports",
         "analyzer_api",
         "analyzer_dashboard",
         "monitoring",
         "regression_tests",
-    }
+        "documentation",
+    )
+    assert len(TILE_COMPONENT_SURFACES) == 14
+    for spec in ACTIVE_TILE_REGISTRY.values():
+        assert tuple(spec["component_surfaces"]) == TILE_COMPONENT_SURFACES
 
 
 def test_every_policy_module_is_owned_by_one_active_tile():
@@ -70,6 +76,7 @@ def test_lifecycle_manifest_is_ordered_complete_and_serializable():
     manifest = active_tile_lifecycle_manifest()
     assert tuple(tile["lane"] for tile in manifest) == tuple(ACTIVE_TILE_ORDER)
     assert tuple(tile["display_order"] for tile in manifest) == tuple(range(1, len(manifest) + 1))
+    assert all(tuple(tile["component_surfaces"]) == TILE_COMPONENT_SURFACES for tile in manifest)
     json.dumps(manifest)
     signature = active_tile_registry_signature()
     assert len(signature) == 64

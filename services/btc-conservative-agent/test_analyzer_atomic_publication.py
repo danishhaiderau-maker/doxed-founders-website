@@ -73,6 +73,58 @@ def test_dashboard_reads_declared_artifacts_only_from_completed_generation(tmp_p
     assert dashboard._best_report_path("not_published_report.json") is None
 
 
+def test_five_family_routes_do_not_revive_an_undeclared_stale_safe_report(
+    tmp_path, monkeypatch
+):
+    dashboard = _load("manifest_strict_dashboard", AGENT / "research" / "research_dashboard.py")
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    published = tmp_path / dashboard.PUBLISHED_REPORTS_DIR
+    published.mkdir()
+    manifest = {
+        "generation_id": "current-generation",
+        "generated_at": "2026-08-26T03:38:22+00:00",
+        "generation_revision": "current-revision",
+        "source_data_revision": "current-source",
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "reports": [{"file": dashboard.REPORT_MANIFEST_FILE}],
+        "text_artifacts": [],
+    }
+    (published / dashboard.REPORT_MANIFEST_FILE).write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    (tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE).write_text(
+        json.dumps({
+            "generated_at": "2026-08-26T01:11:00+00:00",
+            "epoch_id": "epoch-stale",
+            "candidate_screen": {
+                "descriptive_top_100": [{"policy_id": "stale-winner"}]
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    dashboard._API_RESPONSE_CACHE.clear()
+    client = dashboard.app.test_client()
+    for route in (
+        "/api/safe-policy-genome-v3.1",
+        "/api/best-policy-research",
+        "/api/static-policy-research",
+        "/api/dynamic-policy-research",
+        "/api/shadow-policy-research",
+        "/api/risk-drawdown",
+        "/api/chronological-oos",
+        "/api/evidence-maturity",
+        "/api/partial-reduction",
+    ):
+        response = client.get(route)
+        assert response.status_code == 200, route
+        payload = response.get_json()
+        assert payload.get("epoch_id") == "epoch-current", route
+        assert "REPORT_NOT_IN_CURRENT_GENERATION" in (payload.get("blockers") or []), route
+        assert "stale-winner" not in response.get_data(as_text=True), route
+
+
 def test_safe_and_combo_public_payloads_are_bounded(monkeypatch):
     dashboard = _load("bounded_dashboard", AGENT / "research" / "research_dashboard.py")
     rows = [{"policy_id": f"p-{idx}", "ranking_eligible": False} for idx in range(500)]

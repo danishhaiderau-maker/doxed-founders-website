@@ -122,7 +122,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
                 os.chdir(root)
                 retired = (
                     Path("type_b_adx_v3_shadow_decisions.jsonl"),
-                    Path(bot.TYPE_B_RESEARCH_V2_EVENT_FILE),
+                    Path("type_b_research_v2.jsonl"),
                 )
                 archive = Path("research_archive/session_001/archive_meta.json")
                 archive.parent.mkdir(parents=True)
@@ -135,8 +135,12 @@ class FreshCollectionSignalTests(unittest.TestCase):
                 self.assertTrue(all(str(path) in deleted for path in retired))
                 self.assertTrue(archive.exists())
 
-                bot._record_type_b_research_v2_opportunity({}, "2026-01-01T00:00:00Z")
-                bot._record_type_b_research_v2_child("OUTCOME", "legacy")
+                # Cleanup-only path literals must remain after the retired
+                # writers and constants are physically removed.  The active
+                # runtime must have no callable route that can recreate them.
+                self.assertFalse(hasattr(bot, "TYPE_B_RESEARCH_V2_EVENT_FILE"))
+                self.assertFalse(hasattr(bot, "_record_type_b_research_v2_opportunity"))
+                self.assertFalse(hasattr(bot, "_record_type_b_research_v2_child"))
                 self.assertTrue(all(not path.exists() for path in retired))
                 os.chdir(old_cwd)
         finally:

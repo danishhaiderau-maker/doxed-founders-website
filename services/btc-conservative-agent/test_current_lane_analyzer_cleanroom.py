@@ -128,12 +128,16 @@ def test_current_lane_catalog_cannot_re_admit_retired_data_rows():
 
 
 def test_shadow_loader_requires_exact_registry_policy_identity(monkeypatch):
-    protected = "OFFSET_029_ATR_PROTECTED"
-    valid = ACTIVE_TILE_REGISTRY[protected]["raw_policy_id"]
+    lane = ACTIVE_TILE_ORDER[0]
+    valid = ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"]
     monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [
-        {"research_lane": protected, "policy_version": valid, "ts": 1},
-        {"research_lane": protected, "policy_version": "STALE_POLICY", "ts": 2},
-        {"research_lane": "OFFSET_029_ATR_REGIME", "policy_version": "", "ts": 3},
+        {"research_lane": lane, "policy_version": valid, "ts": 1},
+        {"research_lane": lane, "policy_version": "STALE_POLICY", "ts": 2},
+        {
+            "research_lane": ACTIVE_TILE_ORDER[1],
+            "policy_version": "",
+            "ts": 3,
+        },
     ])
     frame = analyzer._load_shadow_lane_outcome_df()
     assert len(frame) == 1

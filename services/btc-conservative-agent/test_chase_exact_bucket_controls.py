@@ -576,7 +576,7 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
     )
     assert long_fill["fill_price"] == 63167.0
     assert long_fill["fill_price"] <= 63167.0
-    assert market_walk_calls == []
+    assert market_walk_calls == [("sell", 0.03163), ("buy", 0.03163)]
 
     market_fill = resolve(
         {
@@ -587,8 +587,27 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
         }
     )
     assert market_fill["fill_price"] == 63154.44
-    assert market_walk_calls == [("sell", 0.03163)]
+    assert market_walk_calls == [("sell", 0.03163), ("buy", 0.03163), ("sell", 0.03163)]
 
+
+def test_marketable_limit_fill_receives_bbo_depth_price_improvement():
+    namespace = {
+        "refresh_bbo_state": lambda: None,
+        "refresh_order_book_state": lambda: None,
+        "state_lock": threading.RLock(),
+        "state": {"bid": 63200.0, "ask": 63210.0, "price": 63205.0},
+        "simulate_market_fill": lambda side, qty: {
+            "avg_price": 63200.0 if side == "sell" else 63210.0,
+            "filled_qty": qty,
+            "fully_filled": True,
+            "partial_fill": False,
+        },
+    }
+    resolve = _compile_function("resolve_sim_fill_with_depth", namespace)
+    short_fill = resolve({"side": "sell", "qty": 0.01, "limit_price": 63150.0, "entry_type": "SIM_LIMIT"})
+    assert short_fill["fill_price"] == 63200.0
+    long_fill = resolve({"side": "buy", "qty": 0.01, "limit_price": 63250.0, "entry_type": "SIM_LIMIT"})
+    assert long_fill["fill_price"] == 63210.0
 
 def test_marketable_fallback_requires_full_visible_depth_at_hard_limit():
     depth = _compile_function(

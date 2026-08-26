@@ -689,7 +689,27 @@ def _data_file_candidates(name: str) -> list[Path]:
 def _public_policy_evidence_row(row: dict) -> dict:
     """Separate ideal-touch hypothesis metrics from terminal-fill evidence."""
     public = dict(row or {})
-    fills = int(public.get("oos_fills") or 0)
+    full_fills = int(public.get("full_fills") or 0)
+    partial_fills = int(public.get("partial_fills") or 0)
+    # Older pinned generations only exposed ``oos_fills``.  Prefer the
+    # explicit execution classifications when present, but retain that field
+    # as a compatibility fallback rather than turning old supported receipts
+    # into false zeroes.
+    explicit_fill_counts = "full_fills" in public or "partial_fills" in public
+    fills = full_fills + partial_fills if explicit_fill_counts else int(public.get("oos_fills") or 0)
+    supported = int(public.get("supported_conservative_episodes") or 0)
+    no_fills = int(public.get("no_fills") or 0)
+    if not supported and (fills or no_fills):
+        supported = fills + no_fills
+    public["supported_conservative_episodes"] = supported
+    public["full_fills"] = full_fills if explicit_fill_counts else fills
+    public["partial_fills"] = partial_fills
+    public["no_fills"] = no_fills
+    public["unsupported_episodes"] = int(public.get("unsupported_episodes") or 0)
+    public["conservative_fill_rate"] = public.get("conservative_fill_rate")
+    if public["conservative_fill_rate"] is None and supported > 0:
+        public["conservative_fill_rate"] = round(fills / supported, 8)
+    public["supported_terminal_fills"] = fills
     public["diagnostic_replay_net_pnl_usd"] = public.get("sealed_oos_net_usd")
     public["diagnostic_replay_expectancy_lcb_usd"] = public.get("expectancy_lcb_usd")
     public["diagnostic_replay_max_drawdown_usd"] = public.get("max_drawdown_usd")
@@ -702,6 +722,12 @@ def _public_policy_evidence_row(row: dict) -> dict:
         public["cvar95_usd"] = None
         public["oos_wins"] = None
         public["oos_losses"] = None
+        public["execution_metric_status"] = "UNAVAILABLE_NO_SUPPORTED_TERMINAL_FILLS"
+        public["qualification"] = "INSUFFICIENT_EXECUTION_EVIDENCE"
+        public["execution_verification"] = "NOT EXECUTION VERIFIED"
+        public["qualification_eligibility"] = "NOT QUALIFICATION ELIGIBLE"
+    else:
+        public["execution_metric_status"] = "SUPPORTED_TERMINAL_FILLS"
     return public
 
 
@@ -779,6 +805,32 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
 
 def _read_json(name: str, default=None):
     return _pick_best_payload(name, default)
+
+
+def _current_generation_report(name: str) -> dict:
+    """Read a manifest-owned report without reviving undeclared stale files."""
+    payload = _read_report(name, {}) or {}
+    if payload:
+        return payload
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    fresh_epoch = manifest.get("fresh_epoch") or {}
+    return {
+        "schema": "current_generation_report_unavailable_v1",
+        "generated_at": manifest.get("generated_at"),
+        "generation_revision": manifest.get("generation_revision"),
+        "source_data_revision": manifest.get("source_data_revision"),
+        "epoch_id": fresh_epoch.get("epoch_id"),
+        "status": "REPORT_NOT_IN_CURRENT_GENERATION",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "live_policy_change_allowed": False,
+        "real_bitfinex_trading_allowed": False,
+        "blockers": ["REPORT_NOT_IN_CURRENT_GENERATION", name],
+        "report_unavailable": True,
+        "missing_report": name,
+        "collection": {},
+        "candidate_screen": {},
+        "safe_policy_ranking": {},
+    }
 
 
 def _read_text(name: str) -> str:
@@ -1458,9 +1510,18 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         diagnostic_outcomes = ideal_touch.get("outcome_states") or {}
         diagnostic_risk = ideal_touch
         episodes = int(item.get("oos_episodes") or 0)
-        fills = int(item.get("full_fills") or 0) + int(item.get("partial_fills") or 0)
+        full_fills = int(item.get("full_fills") or 0)
+        partial_fills = int(item.get("partial_fills") or 0)
+        no_fills = int(item.get("no_fills") or 0)
+        unsupported_episodes = int(item.get("unsupported_episodes") or 0)
+        supported_episodes = int(item.get("supported_conservative_episodes") or 0)
+        fills = full_fills + partial_fills
         if not fills:
             fills = int(item.get("oos_fills") or 0)
+            if "full_fills" not in item and "partial_fills" not in item:
+                full_fills = fills
+        if not supported_episodes and (fills or no_fills):
+            supported_episodes = fills + no_fills
         wins = item.get("oos_wins")
         losses = item.get("oos_losses")
         if fills > 0:
@@ -1481,6 +1542,16 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "train_episodes": max(0, int(item.get("episodes_total") or 0) - episodes),
             "oos_episodes": episodes,
             "oos_fills": fills,
+            "supported_conservative_episodes": supported_episodes,
+            "full_fills": full_fills,
+            "partial_fills": partial_fills,
+            "no_fills": no_fills,
+            "unsupported_episodes": unsupported_episodes,
+            "conservative_fill_rate": (
+                item.get("conservative_fill_rate")
+                if item.get("conservative_fill_rate") is not None
+                else round(fills / supported_episodes, 8) if supported_episodes else None
+            ),
             "oos_wins": wins if fills > 0 else None,
             "oos_losses": losses if fills > 0 else None,
             "oos_win_probability_pct": round((int(wins) / episodes * 100.0), 2) if episodes and wins is not None else None,
@@ -1490,7 +1561,12 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             # OOS evidence. Never expose them as execution metrics without a
             # terminal OOS fill.
             "oos_net_pnl_usd": item.get("sealed_oos_net_usd") if fills > 0 else None,
-            "oos_expectancy_usd": item.get("expectancy_lcb_usd") if fills > 0 else None,
+            "oos_expectancy_usd": (
+                round(float(item.get("sealed_oos_net_usd")) / episodes, 8)
+                if fills > 0 and episodes > 0 and isinstance(item.get("sealed_oos_net_usd"), (int, float))
+                else None
+            ),
+            "oos_expectancy_lcb_usd": item.get("expectancy_lcb_usd") if fills > 0 else None,
             "oos_max_drawdown_usd": item.get("max_drawdown_usd") if fills > 0 else None,
             "diagnostic_replay_net_pnl_usd": ideal_touch.get("oos_net_usd"),
             "diagnostic_replay_expectancy_lcb_usd": ideal_touch.get("expectancy_lcb_usd"),
@@ -1505,8 +1581,17 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "diagnostic_replay_wins": int(diagnostic_risk.get("wins") or 0),
             "diagnostic_replay_losses": int(diagnostic_risk.get("losses") or 0),
             "metric_evidence": "TERMINAL_OOS_FILLS" if fills > 0 else "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "execution_metric_status": (
+                "SUPPORTED_TERMINAL_FILLS"
+                if fills > 0
+                else "UNAVAILABLE_NO_SUPPORTED_TERMINAL_FILLS"
+            ),
             "gates": item.get("gates") or {},
-            "qualification": "QUALIFIED" if item.get("ranking_eligible") else "DESCRIPTIVE_ONLY",
+            "qualification": (
+                "QUALIFIED" if item.get("ranking_eligible")
+                else "DESCRIPTIVE_ONLY" if fills > 0
+                else "INSUFFICIENT_EXECUTION_EVIDENCE"
+            ),
         })
         if len(rows) >= max(1, limit):
             break
@@ -1548,6 +1633,8 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "diagnostic_replay_expectancy_lcb_usd": ideal_touch.get("expectancy_lcb_usd"),
             "diagnostic_replay_max_drawdown_usd": ideal_touch.get("max_drawdown_usd"),
             "metric_evidence": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "execution_verification": "NOT EXECUTION VERIFIED",
+            "qualification_eligibility": "NOT QUALIFICATION ELIGIBLE",
         })
     collection = report.get("collection") or {}
     search = report.get("search") or {}
@@ -1603,6 +1690,11 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "status": "PROFITABLE_CONSERVATIVE_POLICIES_AVAILABLE" if rows else "NO_PROFITABLE_CONSERVATIVE_POLICIES",
         "rows": rows,
         "diagnostic_rows": diagnostic_rows,
+        "diagnostic_evidence_warnings": [
+            "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "NOT EXECUTION VERIFIED",
+            "NOT QUALIFICATION ELIGIBLE",
+        ],
         "epoch_id": source["epoch_id"],
         "policy_epoch_id": None,
         "policy_signature": None,
@@ -2086,7 +2178,7 @@ def api_health():
 def api_status():
     manifest = _read_json(REPORT_MANIFEST_FILE)
     compact = _read_json(COMPACT_SUMMARY_FILE)
-    safe_genome = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE)
+    safe_genome = _current_generation_report(SAFE_POLICY_GENOME_V3_REPORT_FILE)
     manifest_sync = manifest.get("analyzer_sync_id") or compact.get("analyzer_sync_id")
     report_sync_ok = manifest_sync == EXPECTED_ANALYZER_SYNC_ID if manifest_sync else None
     run_state = _analyzer_run_state()
@@ -2365,7 +2457,7 @@ def api_safe_policy_genome_v3():
 def safe_policy_genome_v3_page():
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Safe Policy Genome V3.1</title>
-<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Best entry policy</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div><h3>Best result in every chase × stop cell</h3><p class="muted">This table prevents global no-chase leaders from hiding weaker or losing chased combinations.</p><div class="scroll"><table><thead><tr><th>Chase policy</th><th>ATR stop</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>LCB/episode</th></tr></thead><tbody id="scenario-chase-stops"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;box-sizing:border-box}.banner,.card{min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre,li{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{display:block;width:100%;max-width:100%;min-width:0;overflow-x:auto}.muted{color:#8b949e}@media(max-width:600px){body{padding:12px}.banner,.card{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div class="banner bad"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong><br><span class="muted">Any ideal-touch values below are diagnostic replay values, never conservative execution results.</span></div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Scenario C × ATR initial-stop sweep</h2><p id="scenario-warning" class="muted">Loading stop comparison…</p><div class="scroll"><table><thead><tr><th>ATR stop</th><th>Best entry policy</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>CVaR95</th><th>LCB/episode</th></tr></thead><tbody id="scenario-stops"></tbody></table></div><h3>Best result in every chase × stop cell</h3><p class="muted">This table prevents global no-chase leaders from hiding weaker or losing chased combinations.</p><div class="scroll"><table><thead><tr><th>Chase policy</th><th>ATR stop</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>LCB/episode</th></tr></thead><tbody id="scenario-chase-stops"></tbody></table></div></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
 <script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Complete policies evaluated',cs.unique_policies_evaluated||s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ol>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+'</li>').join('')+'</ol>').join('')||'<p>No matured family evidence yet.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">No matured drawdown evidence yet.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.cvar95_usd??'—')+'</td><td>'+Object.entries(r.gates||{}).filter(x=>x[1]!==true).map(x=>x[0]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">No matured V3.1 policy evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});</script>
 <script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const sweep=((d.candidate_screen||{}).scenario_c_atr_stop_sweep)||{},byStop=sweep.leaders_by_stop||{},byChase=sweep.best_by_chase_and_stop||{},orderedStops=Object.entries(byStop).sort(([a],[b])=>{if(a==='CONTROL_NO_ATR_STOP')return 1;if(b==='CONTROL_NO_ATR_STOP')return -1;return Number(a)-Number(b)});document.getElementById('scenario-warning').textContent=(sweep.qualification||'INSUFFICIENT')+' · '+(sweep.warning||'No Scenario C stop evidence yet.');document.getElementById('scenario-stops').innerHTML=orderedStops.map(([stop,items])=>{const row=(items||[])[0]||{};return '<tr><td>'+stop+'</td><td>'+String(row.policy_id||'—')+'</td><td>'+String(row.oos_episodes??'—')+'</td><td>'+String(row.sealed_oos_net_usd??'—')+'</td><td>'+String(row.max_drawdown_usd??'—')+'</td><td>'+String(row.cvar95_usd??'—')+'</td><td>'+String(row.expectancy_lcb_usd??'—')+'</td></tr>'}).join('')||'<tr><td colspan="7">No Scenario C × ATR stop evidence yet.</td></tr>';const chaseRows=[];Object.entries(byChase).forEach(([chase,stops])=>Object.entries(stops||{}).forEach(([stop,row])=>chaseRows.push({chase,stop,row:row||{}})));document.getElementById('scenario-chase-stops').innerHTML=chaseRows.map(x=>'<tr><td>'+x.chase+'</td><td>'+x.stop+'</td><td>'+String(x.row.oos_episodes??'—')+'</td><td>'+String(x.row.sealed_oos_net_usd??'—')+'</td><td>'+String(x.row.max_drawdown_usd??'—')+'</td><td>'+String(x.row.expectancy_lcb_usd??'—')+'</td></tr>').join('')||'<tr><td colspan="6">No chase × stop cells have been materialized yet.</td></tr>';});</script></body></html>
 """)
@@ -2405,13 +2497,13 @@ def _safe_policy_v3_dashboard_source() -> dict:
     These pages now consume the same artifact as the Safe Policy Genome page
     and remain fail-closed when its evidence is immature or invalid.
     """
-    report = dict(_read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {})
+    report = dict(_current_generation_report(SAFE_POLICY_GENOME_V3_REPORT_FILE))
     epoch_id = report.get("epoch_id") or (report.get("epoch_scope") or {}).get("selected_epoch_id")
     # The compatibility report evaluates explicit cohort-level maturity gates
     # (minimum independent episodes, execution paths, market segments and OOS).
     # Surface those exact blockers on every V3.1 dashboard instead of reducing
     # an empty Top 100 table to the unhelpful NO_SAFE_QUALIFIED_POLICY label.
-    compatibility = _read_json(BEST_POLICY_RESEARCH_REPORT_FILE) or {}
+    compatibility = _read_report(BEST_POLICY_RESEARCH_REPORT_FILE, {}) or {}
     compatibility_schema = str(compatibility.get("schema") or "")
     if (
         compatibility_schema.startswith("best_policy_research_v3_1_adapter")
@@ -2441,7 +2533,7 @@ def _best_policy_research_v31_payload() -> dict:
     source = _safe_policy_v3_dashboard_source()
     report, screen, ranking = source["report"], source["screen"], source["ranking"]
     collection = report.get("collection") or {}
-    compatibility = _read_json(BEST_POLICY_RESEARCH_REPORT_FILE) or {}
+    compatibility = _read_report(BEST_POLICY_RESEARCH_REPORT_FILE, {}) or {}
     compatibility_evidence = compatibility.get("evidence") or {}
     compatibility_matches = bool(
         str(compatibility.get("schema") or "").startswith("best_policy_research_v3_1_adapter")
@@ -2610,9 +2702,9 @@ def api_shadow_policy_research():
     source = _safe_policy_v3_dashboard_source()
     report = source["report"]
     collection = report.get("collection") or {}
-    paused = _read_json("paused_shadow_research_report.json")
-    real_edge = _read_json("real_edge_summary.json")
-    legacy_detail = _read_json("policy_candidate_oos_report.json")
+    paused = _read_report("paused_shadow_research_report.json", {})
+    real_edge = _read_report("real_edge_summary.json", {})
+    legacy_detail = _read_report("policy_candidate_oos_report.json", {})
     legacy_shadow = legacy_detail.get("shadow_research") or {}
     return jsonify({
         "schema": "shadow_policy_dashboard_v3_1",
@@ -2694,7 +2786,7 @@ def shadow_policy_page():
 
 
 def _v31_evidence_payload(kind: str) -> dict:
-    report = dict(_read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {})
+    report = dict(_current_generation_report(SAFE_POLICY_GENOME_V3_REPORT_FILE))
     screen = report.get("candidate_screen") or {}
     collection = report.get("collection") or {}
     base = {
@@ -4082,11 +4174,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-combos">
     <h2>Top Profitable Conservative Policy Combos</h2>
-    <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
+    <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. Execution fills are split into full and partial receipts. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
-    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS episodes</th><th>Diagnostic touches</th><th>Diagnostic wins / losses</th><th>Diagnostic replay PnL</th><th>Execution fills</th><th>Execution wins / losses</th><th>Execution OOS PnL</th><th>Execution max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS episodes</th><th>Supported episodes</th><th>Full fills</th><th>Partial fills</th><th>No fills</th><th>Unsupported</th><th>Fill rate</th><th>Execution wins / losses</th><th>Execution OOS PnL</th><th>Execution EV / episode</th><th>Execution max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
     <h2>Positive Ideal-Touch Diagnostic Hypotheses</h2>
-    <p class="note">Separate research screen: price-path touches only. These rows can prioritize further testing but are not execution-verified and cannot qualify a strategy.</p>
+    <div class="stale-banner" style="display:block;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong></div>
+    <p class="note">Separate research screen: Diagnostic touches are price-path touches only. Diagnostic replay PnL is not conservative execution PnL. These rows can prioritize further testing but cannot qualify a strategy.</p>
     <table><thead><tr><th>#</th><th>Family</th><th>Policy / parameters</th><th>Rolling OOS episodes</th><th>Touches</th><th>No touches</th><th>Wins / losses after touch</th><th>Diagnostic PnL</th><th>Diagnostic drawdown</th><th>Evidence status</th></tr></thead><tbody id="diagnostic-policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
     <p class="note" id="combos-note">Separate legacy direction-only cohort: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
@@ -4343,7 +4436,7 @@ if (showAllEl) {
   });
 }
 function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
-function fmtExecutionUsd(v) { return v == null ? '—' : '$' + fmtUsd(v); }
+function fmtExecutionUsd(v) { return v == null ? 'UNAVAILABLE' : '$' + fmtUsd(v); }
 function fmtAdxBucket(v) {
   const key = String(v || '').toLowerCase();
   if (['adx_low', 'adx<18', 'adx_lt_18'].includes(key)) return 'ADX <18';
@@ -4587,14 +4680,15 @@ async function loadCombos() {
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
+    const fillRate = p.conservative_fill_rate == null ? 'UNAVAILABLE' : `${(Number(p.conservative_fill_rate) * 100).toFixed(2)}%`;
+    const executionWinsLosses = p.oos_wins == null ? 'UNAVAILABLE' : `${p.oos_wins} / ${p.oos_losses}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td><td>${p.family_rank||'—'}</td><td><strong>${p.policy_id||'—'}</strong><br><small>global rank ${p.global_rank||'—'} · ${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.diagnostic_touch_episodes ?? 0}</td>`
-      + `<td>${p.diagnostic_replay_wins ?? 0} / ${p.diagnostic_replay_losses ?? 0}</td>`
-      + `<td>${fmtExecutionUsd(p.diagnostic_replay_net_pnl_usd)}</td><td>${p.oos_fills||0}</td>`
-      + `<td>${p.oos_wins == null ? '—' : `${p.oos_wins} / ${p.oos_losses}`}</td>`
-      + `<td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td>`
-      + `<td class="bad">${p.metric_evidence||p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
-  }).join('') || '<tr><td colspan="13">No current-epoch OOS policy grid is available yet.</td></tr>';
+      + `<td>${p.oos_episodes||0}</td><td>${p.supported_conservative_episodes ?? 0}</td>`
+      + `<td>${p.full_fills ?? 0}</td><td>${p.partial_fills ?? 0}</td><td>${p.no_fills ?? 0}</td><td>${p.unsupported_episodes ?? 0}</td>`
+      + `<td>${fillRate}</td><td>${executionWinsLosses}</td>`
+      + `<td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_expectancy_usd)}</td><td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td>`
+      + `<td class="bad">${p.execution_metric_status||p.metric_evidence||p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
+  }).join('') || '<tr><td colspan="16">No profitable conservative policy with supported terminal fills exists in the current analyzer generation. Execution PnL, EV, wins/losses, and drawdown are UNAVAILABLE.</td></tr>';
   document.getElementById('diagnostic-policy-grid-body').innerHTML = diagnosticRows.map(p => {
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · protection ${p.protection_model ?? '—'}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td>`
@@ -4602,7 +4696,7 @@ async function loadCombos() {
       + `<td>${p.oos_episodes||0}</td><td>${p.diagnostic_touch_episodes||0}</td><td>${p.diagnostic_no_touch_episodes||0}</td>`
       + `<td>${p.diagnostic_replay_wins||0} / ${p.diagnostic_replay_losses||0}</td>`
       + `<td>${fmtExecutionUsd(p.diagnostic_replay_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.diagnostic_replay_max_drawdown_usd)}</td>`
-      + `<td class="bad">IDEAL_TOUCH_DIAGNOSTIC_ONLY</td></tr>`;
+      + `<td class="bad">IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · NOT QUALIFICATION ELIGIBLE</td></tr>`;
   }).join('') || '<tr><td colspan="10">No positive ideal-touch diagnostic policy exists in the current rolling generation.</td></tr>';
 }
 

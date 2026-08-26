@@ -34,7 +34,7 @@ def deterministic_supervisor_storage(monkeypatch):
     monkeypatch.setattr(
         module,
         "local_storage_snapshot",
-        lambda _mirror: (True, {"disk_free_percent": 30.0, "test_fixture": True}),
+        lambda _mirror, **_kwargs: (True, {"rag": "GREEN", "disk_free_percent": 30.0, "test_fixture": True}),
     )
     monkeypatch.setattr(
         module,
@@ -67,24 +67,30 @@ def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
     assert detail["quarantine_files"] == 1
     assert detail["quarantine_bytes"] == 10
     assert detail["disk_free_percent"] == pytest.approx(31.64, abs=0.01)
-    assert detail["minimum_free_bytes"] == 50 * 1024**3
+    assert detail["rag"] == "GREEN"
+    assert detail["green_minimum_free_bytes"] == 150 * 1024**3
+    assert detail["amber_minimum_free_bytes"] == 100 * 1024**3
     assert detail["maximum_mirror_bytes"] == 25 * 1024**3
     assert detail["maximum_quarantine_bytes"] == 25 * 1024**3
     assert detail["retention_action"] == "QUARANTINE_AND_REVIEW; NEVER_SILENTLY_DELETE"
     assert detail["automatic_delete"] is False
 
 
-def test_local_storage_snapshot_fails_before_disk_pressure(tmp_path):
+@pytest.mark.parametrize(
+    ("free_gib", "expected_rag", "expected_ok"),
+    [(150, "GREEN", True), (149, "AMBER", False), (100, "AMBER", False), (99, "RED", False)],
+)
+def test_local_storage_snapshot_uses_explicit_gib_rag_boundaries(tmp_path, free_gib, expected_rag, expected_ok):
     mirror = tmp_path / "fly-data-mirror"
     mirror.mkdir()
 
     ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
         mirror,
-        disk_usage=lambda _path: (1024**4, 984 * 1024**3, 40 * 1024**3),
+        disk_usage=lambda _path: (1024**4, (1024 - free_gib) * 1024**3, free_gib * 1024**3),
     )
 
-    assert ok is False
-    assert detail["disk_free_percent"] == pytest.approx(3.91, abs=0.01)
+    assert ok is expected_ok
+    assert detail["rag"] == expected_rag
 
 
 def test_local_storage_snapshot_requires_absolute_reserve_on_large_disk(tmp_path):
@@ -98,6 +104,65 @@ def test_local_storage_snapshot_requires_absolute_reserve_on_large_disk(tmp_path
 
     assert detail["disk_free_percent"] == 9.0
     assert detail["disk_free_bytes"] == 45 * 1024**3
+    assert ok is False
+    assert detail["rag"] == "RED"
+
+
+def test_local_storage_snapshot_records_reports_temp_growth_and_ranked_consumers(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    reports = tmp_path / "reports"
+    temp = tmp_path / "processing-temp"
+    quarantine = tmp_path / "fly-data-quarantine"
+    for path in (mirror, reports, temp, quarantine):
+        path.mkdir()
+    (mirror / "events.jsonl").write_bytes(b"m" * 30)
+    (reports / "report.json").write_bytes(b"r" * 20)
+    (temp / "working.tmp").write_bytes(b"t" * 12)
+    (quarantine / "old.jsonl").write_bytes(b"q" * 40)
+
+    ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
+        mirror,
+        report_dir=reports,
+        temp_dir=temp,
+        previous_snapshot={"temporary_bytes": 5},
+        disk_usage=lambda _path: (1024**4, 824 * 1024**3, 200 * 1024**3),
+    )
+
+    assert ok is True
+    assert detail["analyzer_report_bytes"] == 20
+    assert detail["temporary_bytes"] == 12
+    assert detail["temporary_growth_bytes"] == 7
+    assert detail["temporary_growth_alert"] is False
+    consumers = detail["five_largest_known_generated_data_consumers"]
+    assert len(consumers) == 5
+    assert [row["name"] for row in consumers[:4]] == [
+        "fly_data_quarantine", "active_fly_mirror", "analyzer_reports", "temporary_processing"
+    ]
+    assert all({"name", "path", "files", "bytes"} <= set(row) for row in consumers)
+
+
+def test_local_storage_snapshot_alerts_on_abnormal_temp_growth_before_capacity_threshold(tmp_path):
+    mirror = tmp_path / "fly-data-mirror"
+    temp = tmp_path / "processing-temp"
+    mirror.mkdir()
+    temp.mkdir()
+    original = module.directory_size
+    module.directory_size = lambda path: (
+        (1, 2 * 1024**3) if path == temp else (0, 0)
+    )
+    try:
+        ok, detail = REAL_LOCAL_STORAGE_SNAPSHOT(
+            mirror,
+            temp_dir=temp,
+            previous_snapshot={"temporary_bytes": 0, "observed": True},
+            disk_usage=lambda _path: (1024**4, 824 * 1024**3, 200 * 1024**3),
+        )
+    finally:
+        module.directory_size = original
+
+    assert detail["rag"] == "GREEN"
+    assert detail["temporary_growth_rag"] == "AMBER"
+    assert detail["temporary_growth_alert"] is True
     assert ok is False
 
 

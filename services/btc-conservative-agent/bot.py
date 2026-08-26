@@ -5759,18 +5759,29 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
         # a worse price than its limit.  Walking the unrestricted market book
         # here previously produced impossible fills (for example a SHORT sell
         # below its sell limit) and broke paper-to-Bitfinex lifecycle fidelity.
-        fill_px = round(limit, 2)
+        sim = simulate_market_fill(side, qty) if qty > 0 else {}
+        book_vwap = float(sim.get("avg_price") or 0)
+        # Marketable limits receive available price improvement while the
+        # limit remains the hard worst-price boundary.
+        if side == "buy":
+            fill_px = min(book_vwap or ask or limit, limit)
+        else:
+            fill_px = max(book_vwap or bid or limit, limit)
+        filled_qty = float(sim.get("filled_qty") or qty)
+        if filled_qty <= 0:
+            filled_qty = qty
+        fill_px = round(fill_px, 2)
         return {
             "fill_price": fill_px,
-            "filled_qty": qty,
+            "filled_qty": filled_qty,
             "is_taker": True,
             "avg_price": fill_px,
             "best_price": ask if side == "buy" else bid,
-            "slippage_usd": 0.0,
-            "fully_filled": True,
-            "partial_fill": False,
-            "levels_consumed": 1,
-            "unfilled_qty": 0.0,
+            "slippage_usd": float(sim.get("slippage_usd") or 0),
+            "fully_filled": bool(sim.get("fully_filled", True)),
+            "partial_fill": bool(sim.get("partial_fill", False)),
+            "levels_consumed": int(sim.get("levels_consumed") or 1),
+            "unfilled_qty": float(sim.get("unfilled_qty") or 0),
         }
     fill_px = round(limit, 2) if limit > 0 else last
     return {
@@ -11935,6 +11946,68 @@ def build_pure_ai_context(state_snapshot, buffers):
     return sanitize_ai_inputs(ctx)
 
 
+def build_shared_direction_prompt_context(ctx: dict) -> dict:
+    """Build the compact, timestamped raw/derived payload used by the AI.
+
+    The durable collector retains the full context.  The model receives only
+    causal decision inputs, with raw observations separated from derived
+    labels so repeated labels cannot overpower the underlying measurements.
+    """
+    source = ctx or {}
+    mc = source.get("market_context") or {}
+    cycle = source.get("cycle_3m_universe") or source.get("exhaustion_3m") or {}
+    upgrade = source.get("ai_input_upgrade") or {}
+    raw = {
+        "price": source.get("price"),
+        "closed_3m_ts": cycle.get("closed_3m_ts") or cycle.get("candle_ts") or cycle.get("bucket_ts"),
+        "rsi_3m": cycle.get("rsi_3m") or cycle.get("rsi14_3m"),
+        "stoch_rsi_k_3m": cycle.get("stoch_rsi_k_3m"),
+        "stoch_rsi_d_3m": cycle.get("stoch_rsi_d_3m"),
+        "atr14_pct_3m": cycle.get("atr14_pct_3m"),
+        "donchian_loc_3m": cycle.get("donchian_loc_3m"),
+        "bb_width_3m": cycle.get("bb_width_3m"),
+        "ret_1m": source.get("ret_1m"),
+        "ret_5m": source.get("ret_5m"),
+        "ema9": source.get("ema9"),
+        "ema21": source.get("ema21"),
+        "ema200": source.get("ema200"),
+        "ema_alignment": mc.get("ema_alignment") or {},
+        "multi_tf": mc.get("multi_tf") or {},
+        "adx": (mc.get("trend_strength") or {}).get("adx") or source.get("adx"),
+        "delta": source.get("delta"),
+        "imbalance": source.get("imbalance"),
+        "volume_ratio": source.get("volume_ratio"),
+        "velocity": source.get("velocity"),
+        "dist_to_support": source.get("dist_to_support"),
+        "dist_to_resistance": source.get("dist_to_resistance"),
+        "sr_bias": source.get("sr_bias"),
+    }
+    derived = {
+        "market_structure": mc.get("market_structure") or {},
+        "market_structure_shift": upgrade.get("market_structure_shift") or source.get("market_structure_shift"),
+        "trend_health_state": upgrade.get("trend_health_state") or source.get("trend_health_state"),
+        "micro_structure_confirmed": upgrade.get("micro_structure_confirmed", source.get("micro_structure_confirmed")),
+        "higher_low_detected": upgrade.get("higher_low_detected", source.get("higher_low_detected")),
+        "lower_high_detected": upgrade.get("lower_high_detected", source.get("lower_high_detected")),
+        "reversal_risk_score": upgrade.get("reversal_risk_score", source.get("reversal_risk_score")),
+    }
+    conflicts = [
+        reason for reason in (
+            weak_countertrend_conflict(source, "LONG"),
+            weak_countertrend_conflict(source, "SHORT"),
+        ) if reason and reason != "NO_EXECUTABLE_DIRECTION"
+    ]
+    return sanitize_ai_inputs({
+        "schema": "shared_direction_prompt_v4",
+        "as_of_utc": utc_iso(),
+        "shared_ai_call_id": source.get("trade_id"),
+        "data_quality": source.get("data_quality"),
+        "raw": raw,
+        "derived": derived,
+        "contraindications": conflicts,
+    })
+
+
 def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
     """Freeze fill-time 3m ATR / Donchian / S-R so offline TPs do not chase ATR."""
     ctx = context or (signal or {}).get("context") or {}
@@ -13043,7 +13116,7 @@ def derive_research_decision_tier(win_prob: int, long_score: int, short_score: i
 
 
 def derive_candidate_direction(long_score: int, short_score: int, raw_direction: str = "") -> str:
-    """Return one deterministic candidate side; NO_TRADE is never a lane gate."""
+    """Return a deterministic side, or NO_TRADE when evidence is tied/abstained."""
     try:
         long_value = int(long_score or 0)
     except (TypeError, ValueError):
@@ -13056,12 +13129,7 @@ def derive_candidate_direction(long_score: int, short_score: int, raw_direction:
         return "LONG"
     if short_value > long_value:
         return "SHORT"
-    raw = str(raw_direction or "").upper()
-    if raw in ("LONG", "SHORT"):
-        return raw
-    # Stable tie-break only supplies a candidate for lane evaluation. Continuous
-    # still rejects a zero score gap; each current lane applies its registered policy.
-    return "LONG"
+    return "NO_TRADE"
 
 
 def parse_ai_response_fields(text: str) -> dict:
@@ -13075,15 +13143,25 @@ def parse_ai_response_fields(text: str) -> dict:
     # zeros). This keeps the continuous_shared_direction_gap_v1 policy honest.
     zero_score_reject = bool(factors.get("zero_score_reject"))
 
-    dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
+    dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE|CONFLICTED)", text, re.IGNORECASE)
     raw_direction = dir_match.group(1).upper() if dir_match else None
     if raw_direction not in ("LONG", "SHORT"):
         jd = json_blob.get("direction") or json_blob.get("preferred_direction") or factors.get("preferred_direction")
         if jd:
             raw_direction = str(jd).upper()
+    if raw_direction == "CONFLICTED":
+        raw_direction = "NO_TRADE"
     if raw_direction not in ("LONG", "SHORT", "NO_TRADE"):
         raw_direction = "NO_TRADE"
-    if zero_score_reject:
+    long_score = int(factors.get("long_score") or 0)
+    short_score = int(factors.get("short_score") or 0)
+    score_direction_mismatch = (
+        (raw_direction == "LONG" and short_score > long_score)
+        or (raw_direction == "SHORT" and long_score > short_score)
+    )
+    score_tie = long_score == short_score
+    explicit_abstain = raw_direction == "NO_TRADE"
+    if zero_score_reject or explicit_abstain or score_direction_mismatch or score_tie:
         # Preserve raw_direction for telemetry but do not derive a candidate
         # side from inert zeros. direction stays NO_TRADE so no lane can spawn.
         direction = "NO_TRADE"
@@ -13119,7 +13197,7 @@ def parse_ai_response_fields(text: str) -> dict:
         if jd:
             decision = str(jd).upper()
     parsed_from_json = False
-    if zero_score_reject:
+    if zero_score_reject or explicit_abstain or score_direction_mismatch or score_tie:
         # Hard override: bypass derive_research_decision_tier so the gap policy
         # never operates on the inert zeros. Reason is propagated via comment
         # so downstream tranche logs capture the root cause.
@@ -13151,6 +13229,9 @@ def parse_ai_response_fields(text: str) -> dict:
         "json_blob": json_blob,
         "parsed_decision_from_json": parsed_from_json,
         "zero_score_reject": zero_score_reject,
+        "explicit_abstain": explicit_abstain,
+        "score_direction_mismatch": score_direction_mismatch,
+        "score_tie": score_tie,
     }
 
 
@@ -13240,10 +13321,20 @@ def parse_ai_factor_block(text: str) -> dict:
         reason = json_blob.get("reason")
         factors["reasons_for"] = json_blob.get("reasons_for_trade") or json_blob.get("reasons_for") or ([reason] if reason else [])
         factors["reasons_against"] = json_blob.get("reasons_against_trade") or json_blob.get("reasons_against") or []
-        factors["bull_score"] = int(json_blob.get("bull_score", 0) or 0)
-        factors["bear_score"] = int(json_blob.get("bear_score", 0) or 0)
-        factors["long_score"] = int(json_blob.get("long_score", 0) or 0)
-        factors["short_score"] = int(json_blob.get("short_score", 0) or 0)
+        def safe_score(name):
+            try:
+                value = int(float(json_blob.get(name, 0) or 0))
+            except (TypeError, ValueError):
+                factors["score_parse_error"] = f"INVALID_{name.upper()}"
+                return 0
+            if value < 0 or value > 100:
+                factors["score_parse_error"] = f"OUT_OF_RANGE_{name.upper()}"
+                return 0
+            return value
+        factors["bull_score"] = safe_score("bull_score")
+        factors["bear_score"] = safe_score("bear_score")
+        factors["long_score"] = safe_score("long_score")
+        factors["short_score"] = safe_score("short_score")
         if factors["long_score"] <= 0 and factors["bull_score"] > 0:
             factors["long_score"] = factors["bull_score"] * 10
         if factors["short_score"] <= 0 and factors["bear_score"] > 0:
@@ -13253,6 +13344,8 @@ def parse_ai_factor_block(text: str) -> dict:
             factors["preferred_direction"] = str(pref).upper()
         factors["factor_parse_ok"] = True
         _apply_zero_score_reject_check(factors)
+        if factors.get("score_parse_error"):
+            factors["zero_score_reject"] = True
         return factors
     bull_m = re.search(r"Bull\s*score:\s*(\d+)", text, re.IGNORECASE)
     bear_m = re.search(r"Bear\s*score:\s*(\d+)", text, re.IGNORECASE)
@@ -13519,6 +13612,64 @@ def apply_structure_agreement_gate(ctx: dict, ai_result: dict) -> dict:
         ai_result["approved"] = False
         ai_result["research_soft"] = "REJECT"
         ai_result["execution_tier"] = "REJECT"
+    return ai_result
+
+
+def weak_countertrend_conflict(ctx: dict, direction: str) -> str:
+    """Return a low-ADX contradiction code, otherwise an empty string."""
+    direction = str(direction or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return "NO_EXECUTABLE_DIRECTION"
+    mc = ctx.get("market_context") or {}
+    trend = mc.get("trend_strength") or {}
+    ema = mc.get("ema_alignment") or {}
+    structure = mc.get("market_structure") or {}
+    mtf = mc.get("multi_tf") or {}
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    try:
+        adx = float(trend.get("adx") or ctx.get("adx") or 0)
+    except (TypeError, ValueError):
+        adx = 0.0
+    if adx >= 20:
+        return ""
+    stack = str(ema.get("stack") or "").upper()
+    ema_bull = bool(ema.get("stack_bull")) or stack in ("BULL", "BULLISH")
+    ema_bear = bool(ema.get("stack_bear")) or stack in ("BEAR", "BEARISH")
+    structure_score = float(structure.get("structure_score") or 0)
+    agreement = str(mtf.get("agreement") or "").upper()
+    sr_bias = str(ctx.get("sr_bias") or "").upper()
+    micro_confirmed = bool(upgrade.get("micro_structure_confirmed", ctx.get("micro_structure_confirmed")))
+    higher_low = bool(upgrade.get("higher_low_detected", ctx.get("higher_low_detected")))
+    lower_high = bool(upgrade.get("lower_high_detected", ctx.get("lower_high_detected")))
+    if direction == "SHORT":
+        conflicts = ema_bull or structure_score >= 2 or sr_bias == "LONG_PREFERRED" or higher_low
+        confirmed = agreement == "BEAR_ALIGNED" and (ema_bear or structure_score <= -2) and micro_confirmed
+        if conflicts and not confirmed:
+            return f"WEAK_COUNTERTREND_SHORT_ADX_{adx:.1f}"
+    else:
+        conflicts = ema_bear or structure_score <= -2 or sr_bias == "SHORT_PREFERRED" or lower_high
+        confirmed = agreement == "BULL_ALIGNED" and (ema_bull or structure_score >= 2) and micro_confirmed
+        if conflicts and not confirmed:
+            return f"WEAK_COUNTERTREND_LONG_ADX_{adx:.1f}"
+    return ""
+
+
+def apply_weak_countertrend_gate(ctx: dict, ai_result: dict) -> dict:
+    """Fail closed on weak countertrend entries while preserving shadow evidence."""
+    if ai_result.get("ai_error"):
+        return ai_result
+    tier = str(ai_result.get("execution_tier") or ai_result.get("research_soft") or ai_result.get("decision") or "").upper()
+    if tier not in AI_EXECUTE_TIERS:
+        return ai_result
+    reason = weak_countertrend_conflict(ctx, ai_result.get("direction"))
+    if reason:
+        ai_result["pre_weak_countertrend_decision"] = ai_result.get("decision")
+        ai_result["weak_countertrend_gate"] = reason
+        ai_result["decision"] = "REJECT"
+        ai_result["approved"] = False
+        ai_result["research_soft"] = "REJECT"
+        ai_result["execution_tier"] = "REJECT"
+        logger.warning(f"[WEAK COUNTERTREND] {reason} - hard REJECT [PIPELINE ENFORCEMENT]")
     return ai_result
 
 
@@ -15917,7 +16068,8 @@ def evaluate_signal_with_ai(
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
         # One shared direction prompt is the only runtime AI layer.
-        prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        prompt_context = build_shared_direction_prompt_context(ctx)
+        prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(prompt_context, indent=2))
         if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
@@ -15998,6 +16150,8 @@ def evaluate_signal_with_ai(
         # weak counter-trend verdicts) so the worst-case LONG-vs-BEAR_CONTINUATION
         # pattern is blocked even when trend continuation does not hold.
         ai_result = apply_structure_agreement_gate(ctx, ai_result)
+        ai_result = normalize_research_ai_decision(ai_result)
+        ai_result = apply_weak_countertrend_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
         if not shadow_only:
             ai_result = apply_phase_c_factor_gate(ai_result)
@@ -19894,6 +20048,36 @@ def _pending_limit_ready_for_fill(
         return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
 
+
+FILL_DIRECTION_REVALIDATE_AFTER_SEC = float(os.getenv("FILL_DIRECTION_REVALIDATE_AFTER_SEC", "180"))
+
+
+def stale_fill_direction_conflict(order: dict, signal: dict, *, now: float, latest_ai: dict, latest_ai_ts: float, current_context: dict = None) -> str:
+    """Cancel an aged order when a newer shared decision withdrew/reversed it."""
+    age_sec = _order_signal_age_sec(order, signal, now)
+    if age_sec < FILL_DIRECTION_REVALIDATE_AFTER_SEC:
+        return ""
+    signal_ts = float(
+        (signal.get("timing") or {}).get("signal_ts")
+        or signal.get("created_ts_ts")
+        or order.get("signal_created_ts")
+        or order.get("created_ts")
+        or 0
+    )
+    original = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
+    current_conflict = weak_countertrend_conflict(current_context or {}, original)
+    if current_conflict and current_conflict != "NO_EXECUTABLE_DIRECTION":
+        return f"FILL_REVALIDATION_{current_conflict}"
+    if latest_ai_ts <= signal_ts or now - latest_ai_ts > get_effective_ai_cooldown_sec() + 120:
+        return ""
+    current = str((latest_ai or {}).get("direction") or (latest_ai or {}).get("candidate_direction") or "").upper()
+    current_decision = str((latest_ai or {}).get("decision") or "").upper()
+    if current not in ("LONG", "SHORT") or current_decision in ("REJECT", "SOFT_REJECT", "NO_TRADE", "CONFLICTED"):
+        return "FILL_REVALIDATION_NO_TRADE"
+    if original in ("LONG", "SHORT") and current != original:
+        return f"FILL_REVALIDATION_REVERSED_{original}_TO_{current}"
+    return ""
+
 def process_pending_orders():
     if manual_admin_pause_active():
         circuit_breaker_cancel_pending("ADMIN_MANUAL")
@@ -19937,6 +20121,7 @@ def process_pending_orders():
     process_limit_chase(price)
     process_virtual_chase_chase6_market_conversions(price)
     fills = []
+    cancelled_at_fill = []
     # Preserve the global state->trade lock order.  The previous implementation
     # called _pending_limit_touched under trade_lock and acquired state_lock
     # there, producing intermittent relay snapshot timeouts at a natural fill.
@@ -19956,6 +20141,14 @@ def process_pending_orders():
     # section below revalidates identity/status before committing FILLED.
     with trade_lock:
         pending_snapshot = list(pending_orders)
+    with state_lock:
+        latest_ai_for_fill = copy.deepcopy(state.get("last_ai") or {})
+        latest_ai_ts_for_fill = float(state.get("last_ai_ts") or 0)
+        fill_context_for_revalidation = {
+            "market_context": copy.deepcopy(state.get("market_context") or {}),
+            "sr_bias": (state.get("support_resistance") or {}).get("sr_bias"),
+            "adx": ((state.get("market_context") or {}).get("trend_strength") or {}).get("adx"),
+        }
     ready_orders = []
     for order in pending_snapshot:
         if order.get("status") != "PENDING":
@@ -19991,6 +20184,19 @@ def process_pending_orders():
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
                 continue
+            revalidation_reason = stale_fill_direction_conflict(
+                order,
+                fill_signal,
+                now=time.time(),
+                latest_ai=latest_ai_for_fill,
+                latest_ai_ts=latest_ai_ts_for_fill,
+                current_context=fill_context_for_revalidation,
+            )
+            if revalidation_reason:
+                order["status"] = "CANCELLED"
+                order["fill_revalidation_reason"] = revalidation_reason
+                cancelled_at_fill.append((order, fill_signal, revalidation_reason))
+                continue
             if order.pop("await_confirm", None):
                 logger.debug(
                     f"[SIM] limit touched - filling despite prior await_confirm "
@@ -20004,6 +20210,17 @@ def process_pending_orders():
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal))
+    for order, fill_signal, reason in cancelled_at_fill:
+        lane_unregister_pending_order(order)
+        schedule_close = globals().get("close_research_order_schedule")
+        if callable(schedule_close):
+            schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
+        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+        if callable(collector_refresh):
+            collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
+        _record_expired_order(order, reason)
+        expire_signal_for_order(order, reason)
+        logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
     for order, fill_signal in fills:
         schedule_close = globals().get("close_research_order_schedule")
         if callable(schedule_close):
@@ -23911,11 +24128,12 @@ def close_position(pos: dict, exit_reason: str):
     clear_pending_trade()
     pipeline_state_sync()
 
-SHARED_DIRECTION_PROMPT_ID = "shared_direction_adx_evidence_v3_20260721"
+SHARED_DIRECTION_PROMPT_ID = "shared_direction_conflict_abstain_v4_20260826"
 
 AI_PROMPT_TEMPLATE = """
 You are a direction classifier for short-duration BTC perpetual research.
-Choose exactly one candidate side: LONG or SHORT. Never return NO_TRADE.
+Choose LONG, SHORT, or NO_TRADE. Use NO_TRADE when evidence is conflicted,
+stale, insufficient, or does not support a direction without forcing a tie.
 Do not estimate win probability, confidence, entries, exits, targets, or order prices.
 
 Given the following market data:
@@ -23937,17 +24155,18 @@ ADX measures trend strength, not direction. Apply it non-monotonically:
   gap unless multi-timeframe structure, EMA alignment, and order flow all agree.
 - ADX 30-35 is usable but can be late-cycle; require structure/order-flow support.
 - ADX 40+ confirms strength but still cannot choose LONG versus SHORT by itself.
-- ADX below 25 is not an automatic direction rejection; use the supplied
-  structure and order flow to decide the higher-scoring candidate.
+- ADX below 20 is not an automatic rejection, but a weak counter-trend side
+  must be NO_TRADE unless structure and order flow clearly confirm reversal.
 
-Score LONG and SHORT independently from 0 to 100. The direction must match the
-higher score. Support alone is not a LONG reason and resistance alone is not a
-SHORT reason. Strong counter-trend candidates require confirmed structure shift
-and order-flow expansion. Use only supplied facts.
+Score LONG and SHORT independently from 0 to 100. LONG/SHORT must match the
+higher score; tied or materially conflicted evidence is NO_TRADE. Support alone
+is not a LONG reason and resistance alone is not a SHORT reason. Strong
+counter-trend candidates require confirmed structure shift and order-flow
+expansion. Use only supplied facts and honor listed contraindications.
 
 Return exactly one JSON object:
 {{
-  "direction": "LONG or SHORT",
+  "direction": "LONG or SHORT or NO_TRADE",
   "long_score": 0,
   "short_score": 0,
   "reason": "One short sentence naming the decisive evidence"
@@ -23958,7 +24177,8 @@ RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
 - This is the one shared call made on the three-minute AI_SCAN cadence.
-- Patient Chase and CONTINUOUS independently accept or reject the candidate afterward.
+- Every enabled family tile and the CONTINUOUS benchmark independently accepts
+  or rejects the same shared candidate afterward.
 - Do not decide either tile's verdict and do not return any field beyond direction,
   long_score, short_score, and one short reason.
 - exhaustion_3m / exhaustion_3m_line is the cycle-aligned oscillator block
@@ -24624,6 +24844,10 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        # Cleanup-only literals for physically retired Type-B writers.  Keep
+        # these names here so a fresh epoch removes stale active files without
+        # restoring any runtime constant or writer that could recreate them.
+        "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE,
         COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         COLLECTOR_V22_EVENT_INDEX_FILE,
@@ -24680,6 +24904,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
@@ -27504,7 +27729,10 @@ DASHBOARD_JS = """(function () {
       const key = spec.toggle_key;
       if (key === 'research_lane_enabled') {
         const m = d.research_lane_enabled || {};
-        return m[spec.lane] !== false;
+        if (!Object.prototype.hasOwnProperty.call(m, spec.lane)) {
+          return spec.default_enabled === true;
+        }
+        return m[spec.lane] === true;
       }
       return null;
     }
@@ -27688,7 +27916,7 @@ DASHBOARD_JS = """(function () {
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
             + (spec.is_independent_ai
-              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">Patient Chase and Continuous share one direction call while keeping independent policies, orders, chase, and P&amp;L.</div>'
+              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">All enabled family tiles and Continuous share one direction call while keeping separate policies, orders, chase, and P&amp;L; their child outcomes remain one correlated AI cluster.</div>'
               : '')
             + (function () {
               const prom = spec.promotion_criteria;
@@ -27715,7 +27943,7 @@ DASHBOARD_JS = """(function () {
             + '</div>';
         }).join('');
       } else if (tiles) {
-        tiles.innerHTML = '<p style="color:#8b949e;font-size:0.85em;">Pathway specs loading — restart bot on ' + (d.bot_version || 'latest') + '</p>';
+        tiles.innerHTML = '<p style="color:#fbbf24;font-size:0.85em;">Owner-only tile details are unavailable in this view. Sign in as admin or refresh authenticated state; no tile status is inferred.</p>';
       }
     }
     function renderPathwayScorecard(d) {
@@ -28096,7 +28324,7 @@ DASHBOARD_JS = """(function () {
         let wsAgeText = wsAgeSec != null ? wsAgeSec + ' s' : '-';
         const wsStaleSec = d.dashboard_ws_stale_sec != null ? Number(d.dashboard_ws_stale_sec) : 30;
         const wsConnected = d.ws_transport_connected === true || d.ws_ready === true;
-        const wsStale = wsAgeSec != null && wsAgeSec > wsStaleSec && !wsConnected;
+        const wsStale = wsAgeSec != null && wsAgeSec > wsStaleSec;
         if (wsStale) wsAgeText += ' (STALE!)';
         safeText('ws_age', wsAgeText);
         const wsBadge = document.getElementById('wsStaleBadge');
@@ -28286,7 +28514,7 @@ DASHBOARD_JS = """(function () {
             'Cooldown ~' + (d.ai_cooldown_sec || 300) + 's between continuous calls',
             'Triggers on edge &gt; 0 (PERIODIC_RESEARCH_AI)',
             'Lane tag: CONTINUOUS in ai_tranche + ai_input_log.jsonl',
-            'Spawns 7 experiment lanes on CONTINUOUS APPROVE',
+            'Fans one shared candidate into the enabled five-family registry plus Continuous benchmark; child outcomes are correlated',
           ];
           contAiList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }

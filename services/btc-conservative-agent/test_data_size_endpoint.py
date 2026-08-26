@@ -2,6 +2,7 @@
 
 import os
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -75,6 +76,21 @@ class DataSizeEndpointTests(unittest.TestCase):
 
         return fake_run
 
+    @staticmethod
+    def _one_gib_disk_usage():
+        """Return the deterministic 1 GiB Fly-volume fixture used below.
+
+        The endpoint now discovers capacity with ``shutil.disk_usage`` instead
+        of assuming that every volume is 1 GiB.  Pin capacity in these tests so
+        their percentage assertions do not depend on the developer machine's
+        C: drive.
+        """
+        return SimpleNamespace(
+            total=1024 * 1024 * 1024,
+            used=0,
+            free=1024 * 1024 * 1024,
+        )
+
     def test_unauthenticated_request_is_rejected(self):
         # Force strict auth to fail by clearing both local-operator and token.
         with mock.patch.object(bot, "_admin_authed_strict", return_value=False):
@@ -106,11 +122,12 @@ class DataSizeEndpointTests(unittest.TestCase):
             raise OSError("missing")
 
         with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
-            with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess()):
-                with mock.patch.object(bot.os, "walk", side_effect=fake_walk):
-                    with mock.patch.object(bot.os.path, "getsize", side_effect=fake_getsize):
-                        with bot.app.test_client() as client:
-                            resp = client.get("/api/data_size")
+            with mock.patch.object(bot.shutil, "disk_usage", return_value=self._one_gib_disk_usage()):
+                with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess()):
+                    with mock.patch.object(bot.os, "walk", side_effect=fake_walk):
+                        with mock.patch.object(bot.os.path, "getsize", side_effect=fake_getsize):
+                            with bot.app.test_client() as client:
+                                resp = client.get("/api/data_size")
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
         self.assertEqual(body["status"], "ok")
@@ -136,9 +153,10 @@ class DataSizeEndpointTests(unittest.TestCase):
     def test_critical_threshold_when_over_80_percent(self):
         # 900/1024*100 ~= 87.9 -> critical
         with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
-            with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess(du_total_mb=900.0)):
-                with bot.app.test_client() as client:
-                    resp = client.get("/api/data_size")
+            with mock.patch.object(bot.shutil, "disk_usage", return_value=self._one_gib_disk_usage()):
+                with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess(du_total_mb=900.0)):
+                    with bot.app.test_client() as client:
+                        resp = client.get("/api/data_size")
         body = resp.get_json()
         self.assertGreater(body["volume_pct"], 80.0)
         self.assertEqual(body["cleanup_status"], "critical")
@@ -146,9 +164,10 @@ class DataSizeEndpointTests(unittest.TestCase):
     def test_warn_threshold_between_60_and_80(self):
         # 700/1024*100 ~= 68.4 -> warn
         with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
-            with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess(du_total_mb=700.0)):
-                with bot.app.test_client() as client:
-                    resp = client.get("/api/data_size")
+            with mock.patch.object(bot.shutil, "disk_usage", return_value=self._one_gib_disk_usage()):
+                with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess(du_total_mb=700.0)):
+                    with bot.app.test_client() as client:
+                        resp = client.get("/api/data_size")
         body = resp.get_json()
         self.assertGreater(body["volume_pct"], 60.0)
         self.assertLessEqual(body["volume_pct"], 80.0)

@@ -215,6 +215,23 @@ def test_status_api_and_header_publish_revision_epoch_and_policy_identity(tmp_pa
     monkeypatch.setattr(dashboard, "REPORT_MANIFEST_FILE", manifest)
     monkeypatch.setattr(dashboard, "COMPACT_SUMMARY_FILE", compact)
     monkeypatch.setattr(dashboard, "SAFE_POLICY_GENOME_V3_REPORT_FILE", genome)
+    monkeypatch.setattr(
+        dashboard,
+        "_current_generation_report",
+        lambda name: (
+            {
+                "collection": {
+                    "effective_paper_execution_identities": [
+                        {"policy_signature": "policy-b"},
+                        {"policy_signature": "policy-a"},
+                    ]
+                }
+            }
+            if str(name).replace("\\", "/").endswith("/safe_policy_genome_v3_report.json")
+            or str(name) == "safe_policy_genome_v3_report.json"
+            else {}
+        ),
+    )
     monkeypatch.setattr(dashboard, "_analyzer_run_state", lambda: {"in_progress": False})
 
     payload = dashboard.app.test_client().get("/api/status").get_json()
