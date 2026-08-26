@@ -832,6 +832,8 @@ def test_main_dashboard_links_to_all_policy_research_pages():
     assert "NONE — both candidates unprofitable" not in source
     assert "Relative leader only" in source
     assert "Descriptive winner" not in source
+    assert "t.win_rate_pct ?? t.wr_pct" in source
+    assert "t.sum_pnl_usd ?? t.pnl_usd" in source
 
 
 def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):

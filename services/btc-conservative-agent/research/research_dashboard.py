@@ -4636,9 +4636,9 @@ async function loadChaseThreshold() {
     ['Tile LAB shadows', coverage.tile_lab_shadow_outcomes ?? 0],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const renderThresholdRows = rows => (rows||[]).map(t => {
-    const wr = t.wr_pct ?? t.wr ?? 'n/a';
+    const wr = t.win_rate_pct ?? t.wr_pct ?? t.wr ?? 'n/a';
     const ev = t.ev_usd ?? t.ev ?? 'n/a';
-    const pnl = t.pnl_usd ?? t.pnl ?? 0;
+    const pnl = t.sum_pnl_usd ?? t.pnl_usd ?? t.pnl ?? 0;
     const cls = (Number(ev) >= 0.8) ? 'green' : '';
     return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${wr}%</td><td>$${fmtUsd(pnl)}</td><td>$${fmtUsd(ev)}</td><td>${t.avg_hold_min??'—'}</td></tr>`;
   }).join('') || '<tr><td colspan="6">No terminal evidence in this evidence class for the selected lane.</td></tr>';
