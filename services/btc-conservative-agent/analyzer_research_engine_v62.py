@@ -11750,9 +11750,11 @@ def chase_attribution_report(trades=None, session=None):
     print(f"\n=== CHASE ATTRIBUTION REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     rows = _filter_jsonl_rows_by_session(_load_jsonl_rows(EXECUTION_FUNNEL_FILE), session)
-    intent_rows = _filter_jsonl_rows_by_session(
-        _load_jsonl_rows("duplicate_intent_audit.jsonl"), session
-    )
+    # Identity rows do not consistently repeat the fresh-epoch/session marker.
+    # Load the identity ledger unfiltered and join only by the already in-scope,
+    # globally unique canonical trade ID. This recovers metadata without
+    # importing any out-of-session PnL, fill, or outcome evidence.
+    intent_rows = _load_jsonl_rows("duplicate_intent_audit.jsonl")
     intent_lane = {}
     for intent in intent_rows:
         intent_tid = str(intent.get("trade_id") or "")
