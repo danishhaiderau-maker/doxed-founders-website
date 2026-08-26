@@ -14575,7 +14575,11 @@ def _combo_stats_from_df(sub: pd.DataFrame) -> dict:
     if sub is None or sub.empty:
         return {"trades": 0, "wins": 0, "wr_pct": 0.0, "pnl_usd": 0.0, "ev_usd": 0.0}
     pnl_col = "net_pnl_usd" if "net_pnl_usd" in sub.columns else "outcome_net_pnl_usd"
-    pnl = pd.to_numeric(sub.get(pnl_col, 0), errors="coerce").fillna(0)
+    pnl_source = (
+        sub[pnl_col] if pnl_col in sub.columns
+        else pd.Series(0.0, index=sub.index)
+    )
+    pnl = pd.to_numeric(pnl_source, errors="coerce").fillna(0)
     wins = int((pnl > 0).sum())
     n = len(sub)
     total = round(float(pnl.sum()), 2)
@@ -14760,8 +14764,21 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         if lot_col:
             work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
         else:
-            peak = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-            booked = pd.to_numeric(work.get("net_pnl_usd", 0), errors="coerce").fillna(0)
+            # Sparse shadow/lab terminal rows legitimately omit MFE and/or
+            # booked-PnL fields.  Always supply an index-aligned Series here;
+            # pd.to_numeric(None/0) returns a scalar numpy value, which cannot
+            # be fillna'd and previously aborted the entire analyzer run.
+            peak_source = (
+                work["mfe_margin_pct"] if "mfe_margin_pct" in work.columns
+                else work["max_profit"] if "max_profit" in work.columns
+                else pd.Series(0.0, index=work.index)
+            )
+            booked_source = (
+                work["net_pnl_usd"] if "net_pnl_usd" in work.columns
+                else pd.Series(0.0, index=work.index)
+            )
+            peak = pd.to_numeric(peak_source, errors="coerce").fillna(0)
+            booked = pd.to_numeric(booked_source, errors="coerce").fillna(0)
             work["left_on_table_usd"] = (peak - booked).clip(lower=0)
         combos = []
         for keys, sub in work.groupby(dims, observed=True, dropna=False):

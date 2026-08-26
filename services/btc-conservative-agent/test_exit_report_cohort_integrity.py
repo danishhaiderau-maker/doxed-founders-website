@@ -1,7 +1,15 @@
 from pathlib import Path
+import sys
+
+import pandas as pd
 
 
 ROOT = Path(__file__).parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import analyzer_research_engine_v62 as analyzer
+
 ANALYZER = (ROOT / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
 DASHBOARD = (ROOT / "research" / "research_dashboard.py").read_text(encoding="utf-8")
 
@@ -47,3 +55,26 @@ def test_exit_dashboard_renders_separated_shadow_terminal_evidence():
     assert "exit-reason-shadow-body" in DASHBOARD
     assert "No explicit shadow/lab terminal exit evidence in this epoch." in DASHBOARD
     assert "Executed-paper and shadow/lab rows are never merged" in DASHBOARD
+
+
+def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, monkeypatch):
+    shadow = pd.DataFrame([
+        {
+            "trade_id": "shadow-terminal-1",
+            "exit_reason": "TIME_EXIT",
+            "research_lane": "FAMILY_ATR_TRAIL",
+            "direction": "LONG",
+        }
+    ])
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: shadow)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+
+    report = analyzer.exit_combinations_report(
+        trades=pd.DataFrame(),
+        session={"mode": "FRESH-COLLECTION"},
+    )
+
+    shadow_report = report["evidence_classes"]["shadow_lab"]
+    assert shadow_report["terminal_rows"] == 1
+    assert shadow_report["total_combos"] == 1
+    assert shadow_report["top"][0]["left_on_table_usd"] == 0.0
