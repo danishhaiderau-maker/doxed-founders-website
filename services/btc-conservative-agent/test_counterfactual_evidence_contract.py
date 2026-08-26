@@ -543,6 +543,46 @@ def test_missing_exchange_evidence_and_horizons_fail_closed_without_invention():
     assert "REQUIRED_POST_EXIT_HORIZON_INCOMPLETE" in fields["analysis_exclusion_reasons"]
 
 
+def test_counterfactual_propagates_only_explicit_causal_identity():
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    snapshot["shared_ai_call_id"] = "scan-causal-1"
+    snapshot["policy_signature"] = "policy-causal-1"
+    snapshot["epoch_id"] = "epoch-causal-1"
+    replay["collection_epoch_id"] = "epoch-causal-1"
+    replay["schedule_id"] = "schedule:epoch-causal-1:event-1:paper-primary"
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    expected_episode = "episode-" + hashlib.sha256(b"shared:scan-causal-1").hexdigest()[:20]
+    assert fields["epoch_id"] == "epoch-causal-1"
+    assert fields["opportunity_id"] == f"opportunity:{expected_episode}"
+    assert fields["policy_signature"] == "policy-causal-1"
+    assert fields["schedule_id"] == "schedule:epoch-causal-1:event-1:paper-primary"
+    assert "tape_id" not in fields
+    assert "fill_id" not in fields
+
+
+def test_counterfactual_never_invents_opportunity_from_trade_id():
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    snapshot.pop("shared_ai_call_id", None)
+    replay.pop("shared_ai_call_id", None)
+    buf.pop("shared_ai_call_id", None)
+    snapshot["trade_id"] = "trade-is-not-a-shared-call"
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    assert fields["opportunity_id"] is None
+    assert "schedule_id" not in fields
+    assert "tape_id" not in fields
+    assert "fill_id" not in fields
+
+
 def test_policy_key_changes_with_execution_cost_or_ladder():
     namespace = _load_evidence_functions()
     buf, snapshot, _replay, _outcome = _complete_fixture()

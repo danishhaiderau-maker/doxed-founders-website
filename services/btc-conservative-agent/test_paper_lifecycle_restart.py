@@ -88,6 +88,40 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         # Snapshot normalization must not rewrite the live accounting object.
         self.assertEqual(self.bot.open_positions[0]["sl"], 77500.0)
 
+    def test_snapshot_retries_transient_nested_mapping_mutation(self):
+        class MutatesOnce(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.failed = False
+
+            def items(self):
+                if not self.failed:
+                    self.failed = True
+                    raise RuntimeError("dictionary changed size during iteration")
+                return super().items()
+
+        position = self._position()
+        position["features"] = MutatesOnce({"velocity": 0.1})
+        self.bot.open_positions.append(position)
+
+        self.assertTrue(self.bot.save_paper_lifecycle(reason="transient-race"))
+        payload = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(payload["positions"][0]["features"]["velocity"], 0.1)
+
+    def test_snapshot_failure_keeps_prior_atomic_file_and_does_not_raise(self):
+        self.bot.open_positions.append(self._position())
+        self.assertTrue(self.bot.save_paper_lifecycle(reason="baseline"))
+        baseline = Path(self.bot.PAPER_LIFECYCLE_FILE).read_bytes()
+
+        with mock.patch.object(
+            self.bot,
+            "_stable_paper_lifecycle_copy",
+            side_effect=RuntimeError("paper lifecycle row remained mutable during snapshot"),
+        ):
+            self.assertFalse(self.bot.save_paper_lifecycle(reason="persistent-race"))
+
+        self.assertEqual(Path(self.bot.PAPER_LIFECYCLE_FILE).read_bytes(), baseline)
+
     def test_family_restore_repairs_generic_tp_sl_projection(self):
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
                    "positions": [self._position()], "pending_orders": []}

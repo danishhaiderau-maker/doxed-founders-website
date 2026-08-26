@@ -89,6 +89,63 @@ def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
     return None
 
 
+def _paper_fill_execution_receipt(
+    order: Mapping[str, Any], position: Mapping[str, Any], signal: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Freeze the exact conservative fill evidence instead of implying it."""
+    evidence = order.get("source_order_market_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    observation = evidence.get("latest_observation")
+    observation = observation if isinstance(observation, Mapping) else {}
+    gate = order.get("venue_fill_gate")
+    gate = gate if isinstance(gate, Mapping) else {}
+    source = observation or gate
+    verdict = str(_first(source.get("verdict"), source.get("gate_verdict")) or "").upper()
+
+    def number(*values: Any) -> float | None:
+        value = _first(*values)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    requested = number(order.get("requested_qty"), order.get("qty"))
+    filled = number(position.get("qty"), order.get("filled_qty"), order.get("qty"))
+    remaining = max(0.0, requested - filled) if requested is not None and filled is not None else None
+    required = (
+        source.get("best_bid"), source.get("best_ask"),
+        source.get("side_correct_executable_quote"), source.get("visible_executable_qty"),
+        source.get("book_ts"),
+    )
+    supported = verdict == "EXECUTABLE" and all(value not in (None, "") for value in required)
+    fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
+    return {
+        "execution_basis": "CONSERVATIVE_BBO_DEPTH" if supported else "UNSUPPORTED",
+        "conservative_fill_supported": supported,
+        "fill_gate_policy": _first(source.get("gate_policy"), evidence.get("gate_policy")),
+        "fill_gate_verdict": verdict or None,
+        "activation_ts": _first(source.get("activation_ts"), evidence.get("activation_ts")),
+        "limit_generation": _first(source.get("generation"), order.get("limit_generation"), 0),
+        "original_limit_price": number(source.get("original_limit_price"), order.get("orig_limit")),
+        "current_limit_price": number(source.get("current_limit_price"), order.get("limit_price")),
+        "requested_qty": requested,
+        "filled_qty": filled,
+        "remaining_qty": remaining,
+        "partial_fill": bool(order.get("partial_fill")) or bool(remaining and remaining > 0),
+        "book_ts": _first(source.get("book_ts"), source.get("market_ts")),
+        "book_age_sec": number(source.get("book_age_sec")),
+        "best_bid": number(source.get("best_bid")),
+        "best_ask": number(source.get("best_ask")),
+        "side_correct_executable_quote": number(source.get("side_correct_executable_quote")),
+        "visible_executable_qty": number(source.get("visible_executable_qty")),
+        "recent_aggressor_qty": number(source.get("recent_aggressor_qty")),
+        "entry_slippage_from_signal_usd": number(
+            position.get("entry_slippage"), order.get("entry_slippage")
+        ),
+        "book_walk_slippage_usd": number(fill_sim.get("slippage_usd"), order.get("book_slippage_usd")),
+    }
+
+
 def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load the immutable one-second tape covering one observed paper path."""
     source = Path(data_dir) / "market_microstructure_1s.jsonl"
@@ -155,6 +212,30 @@ def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, An
     return {"event_id": str(event_id), "episode_id": episode_id, "shared_ai_call_id": shared or None,
             "symbol": symbol, "raw_direction": raw_direction, "executed_direction": executed_direction,
             "grouping_basis": grouping_basis}
+
+
+def _explicit_causal_ids(
+    *, epoch_id: str, event_id: str, episode_id: str,
+    include_schedule: bool = False, include_fill: bool = False,
+    tape_id: str | None = None,
+) -> dict[str, Any]:
+    """Name real causal objects without inferring equivalence from time/price.
+
+    These IDs identify the already-existing opportunity, paper-order schedule,
+    primary fill slot and immutable tape object.  They are deliberately based
+    only on their durable causal owner; a missing schedule/tape/fill remains
+    missing rather than being reconstructed heuristically downstream.
+    """
+    ids: dict[str, Any] = {
+        "opportunity_id": f"opportunity:{episode_id}",
+    }
+    if include_schedule:
+        ids["schedule_id"] = f"schedule:{epoch_id}:{event_id}:paper-primary"
+    if include_fill:
+        ids["fill_id"] = f"fill:{epoch_id}:{event_id}:paper-primary"
+    if tape_id:
+        ids["tape_id"] = str(tape_id)
+    return ids
 
 
 def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -288,6 +369,10 @@ def dual_write_lane_entry_resolution(
     material["research_lane"] = lane_name
     identity = _causal_identity(f"lane-entry:{lane_name}:{call_id}", material)
     policy = _paper_policy_identity(str(epoch_id), material)
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=identity["event_id"],
+        episode_id=identity["episode_id"],
+    )
     now_ts = float(observed_ts if observed_ts is not None else time.time())
     signal_ts = float(_first(
         source.get("signal_ts"), source.get("shared_ai_call_ts_epoch"),
@@ -321,6 +406,7 @@ def dual_write_lane_entry_resolution(
         "terminal": terminal_no_order,
         "ranking_eligible": False,
         "ranking_blocker": "NO_ORDER" if terminal_no_order else "PATH_NOT_MATURED",
+        **causal_ids,
         **policy,
     }
     write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("lifecycle", row)
@@ -357,6 +443,9 @@ def dual_write_lane_decision(
     event_id = f"lane-decision:{lane_name}:{call_id}"
     identity = _causal_identity(event_id, material)
     policy = _paper_policy_identity(str(epoch_id), material)
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+    )
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     signal_ts = float(_first(
         source.get("signal_ts"), source.get("shared_ai_call_ts_epoch"),
@@ -379,6 +468,7 @@ def dual_write_lane_decision(
         "feature_snapshot_at_signal": source.get("feature_snapshot_at_signal") or {},
         "grouping_basis": identity["grouping_basis"],
         "collector_version": COLLECTOR_VERSION,
+        **causal_ids,
     })
     decision = store.append("decision", {
         "record_id": f"decision:{identity['episode_id']}:{policy['policy_signature']}:LANE_POLICY_VERDICT",
@@ -401,6 +491,7 @@ def dual_write_lane_decision(
         "order_intent_expected": execution_disposition == "ORDER_ELIGIBLE",
         "decision_ts": signal_ts,
         "resolution_deadline_ts": signal_ts + float(policy["paper_policy_spec"]["declared_entry_ttl_sec"]) + float(policy["paper_policy_spec"]["entry_reconciliation_allowance_sec"]),
+        **causal_ids,
         **policy,
     })
     resolution = dual_write_lane_entry_resolution(
@@ -424,6 +515,12 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, order)
     policy = _paper_policy_identity(str(epoch_id), signal, order)
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+        include_schedule=schedule_available,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     signal_ts = float(_first((signal.get("timing") or {}).get("signal_ts"), signal.get("created_ts_ts"), order.get("signal_created_ts"), order.get("created_ts"), 0) or 0)
     opportunity = store.append("opportunity", {
@@ -432,6 +529,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "symbol": identity["symbol"], "raw_direction": identity["raw_direction"],
         "feature_snapshot_at_signal": signal.get("research_feature_snapshot") or {},
         "grouping_basis": identity["grouping_basis"], "collector_version": COLLECTOR_VERSION,
+        **causal_ids,
     })
     atr14_pct_at_signal = _paper_atr14_pct_3m(order, signal)
     signal_price = _first(order.get("signal_price"), signal.get("signal_price"))
@@ -477,6 +575,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "entry_children_count": len(entry_children),
         "atr14_pct_at_signal": atr14_pct_at_signal,
         "atr14_pct_basis": "SIGNAL_TIME_3M_ATR14" if atr14_pct_at_signal is not None else "UNAVAILABLE",
+        **causal_ids,
         **policy,
         "effective_execution_mode": "PAPER_OBSERVED",
     })
@@ -489,6 +588,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "terminal": False,
         "ranking_eligible": False, "ranking_blocker": "PATH_NOT_MATURED",
         "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
+        **causal_ids,
         **policy,
     })
     resolution = None
@@ -505,6 +605,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     if resolution is not None:
         writes.append(resolution["write"])
     return {"schema": "v3_paper_order_intent_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            **causal_ids, **policy,
             "writes": writes, "store_verification": store.verify()}
 
 
@@ -515,23 +616,31 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
     # The lane-owned position/order is authoritative.  ``signal`` is shared
     # across sibling lanes and may carry only the base/control identity.
     policy = _paper_policy_identity(str(epoch_id), position, order, signal)
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+        include_schedule=isinstance(schedule, Mapping) and schedule.get("authoritative") is True,
+        include_fill=True,
+    )
     lifecycle_identity = {
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        **causal_ids,
         **policy,
     }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     atr14_pct_at_fill = _paper_atr14_pct_3m(position, order)
+    execution_receipt = _paper_fill_execution_receipt(order, position, signal)
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:primary-fill", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "fill_ts": _first(position.get("entry_ts"), order.get("fill_ts")),
-        "fill_price": _first(position.get("entry"), order.get("fill_price")), "filled_qty": _first(position.get("qty"), order.get("qty")),
-        "requested_qty": order.get("qty"), "partial_fill": bool(order.get("partial_fill")),
+        "fill_price": _first(position.get("entry"), order.get("fill_price")),
         "fill_model": _first(position.get("fill_model"), order.get("fill_model")),
         "atr14_pct_at_fill": atr14_pct_at_fill,
         "atr14_pct_basis": "FILL_TIME_3M_ATR14" if atr14_pct_at_fill is not None else "UNAVAILABLE",
         "authenticated_exchange_actual": False, "paper_observation": True,
         "source_market_evidence_required_for_conservative_claim": True,
+        **execution_receipt,
         **lifecycle_identity,
     })
     lifecycle = store.append("lifecycle", {
@@ -542,6 +651,7 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_fill_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            **causal_ids, **policy,
             "writes": [execution, lifecycle], "store_verification": store.verify()}
 
 
@@ -552,12 +662,13 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     # Preserve the identity frozen on the lane-owned position.  A shared AI
     # signal must never override it during terminal attribution.
     policy = _paper_policy_identity(str(epoch_id), position, outcome, signal)
-    lifecycle_identity = {
-        "shared_ai_call_id": identity["shared_ai_call_id"],
-        "research_lane": policy["paper_policy_spec"].get("research_lane"),
-        **policy,
-    }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    schedule = (
+        position.get("research_chase_schedule")
+        or signal.get("research_chase_schedule")
+        or outcome.get("research_chase_schedule")
+    )
+    schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
     start_ts = _timestamp(_first(
         signal.get("created_ts_ts"), signal.get("signal_ts"),
         position.get("signal_created_ts"), position.get("entry_ts"),
@@ -585,6 +696,17 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
                 rows=segment_rows,
             )
             segment_refs.append(segment_ref)
+            tape_id = f"tape:{segment_ref['sha256']}"
+            causal_ids = _explicit_causal_ids(
+                epoch_id=str(epoch_id), event_id=event_id,
+                episode_id=identity["episode_id"], include_schedule=schedule_available,
+                include_fill=True, tape_id=tape_id,
+            )
+            lifecycle_identity = {
+                "shared_ai_call_id": identity["shared_ai_call_id"],
+                "research_lane": policy["paper_policy_spec"].get("research_lane"),
+                **causal_ids, **policy,
+            }
             segment_writes.append(store.append("market_segment", {
                 "record_id": f"market-segment:{event_id}:{segment_ref['sha256']}",
                 "episode_id": identity["episode_id"],
@@ -593,6 +715,17 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
                 "coverage": segment_coverage,
                 **lifecycle_identity,
             }))
+    if not segment_refs:
+        causal_ids = _explicit_causal_ids(
+            epoch_id=str(epoch_id), event_id=event_id,
+            episode_id=identity["episode_id"], include_schedule=schedule_available,
+            include_fill=True,
+        )
+        lifecycle_identity = {
+            "shared_ai_call_id": identity["shared_ai_call_id"],
+            "research_lane": policy["paper_policy_spec"].get("research_lane"),
+            **causal_ids, **policy,
+        }
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
@@ -621,6 +754,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            **causal_ids, **policy,
             "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
 
 

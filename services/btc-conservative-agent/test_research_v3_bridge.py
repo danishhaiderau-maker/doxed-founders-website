@@ -360,6 +360,13 @@ class V3BridgeTests(unittest.TestCase):
                 "research_lane": "OFFSET_029_ATR_TP_25", "paper_only": True,
                 "relay_eligible": False, "chase_schedule_authoritative": True,
                 "research_chase_schedule": {"authoritative": True, "intervals": [{"step": 0}]},
+                "source_order_market_evidence": {"latest_observation": {
+                    "verdict": "EXECUTABLE", "gate_policy": "BBO_DEPTH_V1",
+                    "activation_ts": 1002, "generation": 2, "book_ts": 1009,
+                    "book_age_sec": 1.0, "best_bid": 100.70, "best_ask": 100.71,
+                    "side_correct_executable_quote": 100.71,
+                    "visible_executable_qty": 4.0, "recent_aggressor_qty": 1.0,
+                }},
             }
             submit = dual_write_paper_order_intent(order, signal, epoch_id="epoch-v3-test", data_dir=tmp)
             position = {"trade_id": "o29atr-1", "entry_ts": 1010, "entry": 100.7071, "qty": 0.2,
@@ -370,6 +377,8 @@ class V3BridgeTests(unittest.TestCase):
             self.assertTrue(fill["store_verification"]["passed"])
             intent = json.loads(store.ledger_path("order_intent").read_text().strip())
             execution = json.loads(store.ledger_path("execution").read_text().strip())
+            self.assertEqual(submit["policy_signature"], intent["policy_signature"])
+            self.assertEqual(fill["policy_signature"], execution["policy_signature"])
             self.assertEqual(intent["intent_kind"], "ACTUAL_PAPER_LIMIT_SUBMIT")
             self.assertEqual(intent["requested_qty"], 0.2)
             self.assertTrue(intent["chase_schedule_authoritative"])
@@ -384,9 +393,22 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(execution["execution_world"], "SHOWCASE_PAPER_OBSERVED")
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertEqual(execution["filled_qty"], 0.2)
+            self.assertEqual(execution["execution_basis"], "CONSERVATIVE_BBO_DEPTH")
+            self.assertTrue(execution["conservative_fill_supported"])
+            self.assertEqual(execution["fill_gate_verdict"], "EXECUTABLE")
+            self.assertEqual(execution["limit_generation"], 2)
+            self.assertEqual(execution["remaining_qty"], 0.0)
+            self.assertFalse(execution["partial_fill"])
             self.assertEqual(execution["atr14_pct_at_fill"], 0.083)
             self.assertEqual(execution["atr14_pct_basis"], "FILL_TIME_3M_ATR14")
             self.assertEqual(intent["episode_id"], execution["episode_id"])
+            self.assertEqual(intent["opportunity_id"], f"opportunity:{intent['episode_id']}")
+            self.assertEqual(execution["opportunity_id"], intent["opportunity_id"])
+            self.assertEqual(execution["schedule_id"], intent["schedule_id"])
+            self.assertEqual(
+                execution["fill_id"],
+                "fill:epoch-v3-test:o29atr-1:paper-primary",
+            )
             lifecycle_rows = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
             fill_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_POSITION_OPEN")
             submit_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_ORDER_SUBMITTED")
@@ -601,6 +623,9 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(envelope["rows"][0]["price"], 100.0)
             self.assertEqual(envelope["rows"][-1]["ask_qty"], 3.0)
             self.assertEqual(lifecycle["ranking_blocker"], "POLICY_REPLAY_PENDING")
+            self.assertEqual(lifecycle["opportunity_id"], f"opportunity:{receipt['episode_id']}")
+            self.assertEqual(lifecycle["tape_id"], f"tape:{ref['sha256']}")
+            self.assertEqual(market_row["tape_id"], lifecycle["tape_id"])
 
     def test_paper_close_fails_path_qualification_when_tape_has_large_gap(self):
         with tempfile.TemporaryDirectory() as tmp:

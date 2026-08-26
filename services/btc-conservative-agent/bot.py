@@ -3167,10 +3167,16 @@ def _write_pending_order_evidence(job: dict) -> None:
     if callable(collector_bridge):
         collector_bridge(order, master_signal)
     if payload.get("is_paper_entry"):
-        dual_write_paper_order_intent(
+        identity_receipt = dual_write_paper_order_intent(
             order, master_signal,
             epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
         )
+        for key in (
+            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+            "schedule_id", "fill_id", "tape_id",
+        ):
+            if identity_receipt.get(key):
+                order[key] = identity_receipt[key]
     _emit_genome_execution_event("LIMIT_CREATED", {
         "trade_id": order.get("trade_id"),
         "limit_price": order.get("limit_price") or order.get("price"),
@@ -4345,16 +4351,23 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     close_qty = max(0.0, original_qty * close_fraction) if remaining_after > 0 else 0.0
     dir_factor = 1.0 if direction == "LONG" else -1.0
     realized_gross = (float(price) - entry) * dir_factor * close_qty
-    pos["policy_partial_realized_gross_usd"] = round(
-        _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0) + realized_gross, 8
-    )
-    pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
+    # Only genuine reductions belong in the partial-realized accumulator.
+    # A terminal family action is priced once by close_position's remaining
+    # runner calculation. Recording it here as a partial and then closing the
+    # still-full position doubled both PnL USD and margin-return percentage.
+    if remaining_after > 0:
+        pos["policy_partial_realized_gross_usd"] = round(
+            _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0) + realized_gross, 8
+        )
+        pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
     receipt = {
         "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
         "remaining_fraction": remaining_after, "price": float(price), "policy_id": pos.get("policy_id"),
         "closed_qty": close_qty if remaining_after > 0 else float(pos.get("qty") or 0),
         "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
-        "cumulative_realized_net_usd": pos["policy_partial_realized_net_usd"],
+        "cumulative_realized_net_usd": _buf_float(
+            pos.get("policy_partial_realized_net_usd"), 0.0
+        ),
     }
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
@@ -15843,6 +15856,13 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     # Honour explicit cancel before simulate (CANCELLED > TTL).
     explicit = str(buf.get("exit_outcome") or buf.get("block_reason") or "").upper()
     outcome = simulate_replay_outcome(buf)
+    shared_call_id = str(buf.get("shared_ai_call_id") or buf.get("source_trade_id") or "").strip()
+    opportunity_id = None
+    if shared_call_id:
+        episode_id = "episode-" + hashlib.sha256(
+            f"shared:{shared_call_id}".encode("utf-8")
+        ).hexdigest()[:20]
+        opportunity_id = f"opportunity:{episode_id}"
     if explicit == "CANCELLED" and not outcome.get("filled"):
         outcome["exit_reason"] = "CANCELLED"
         outcome["entry_outcome"] = "CANCELLED"
@@ -15861,6 +15881,7 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "research_lane": lane,
         "source_trade_id": buf.get("source_trade_id"),
         "shared_ai_call_id": buf.get("shared_ai_call_id") or buf.get("source_trade_id"),
+        "opportunity_id": opportunity_id,
         "shared_ai_call_ts": buf.get("shared_ai_call_ts"),
         "lane_recorded_ts": utc_iso(
             datetime.fromtimestamp(float(buf.get("start_ts") or time.time()), tz=timezone.utc)
@@ -20350,13 +20371,19 @@ def fill_order(order):
     # slower persistence/analytics callback below.
     position_opened_relay_ts = utc_iso()
     try:
-        dual_write_paper_fill(
+        fill_identity_receipt = dual_write_paper_fill(
             order,
             signal if isinstance(signal, dict) else {},
             pos,
             epoch_id=_collector_v22_epoch_id(),
             data_dir=os.getcwd(),
         )
+        for key in (
+            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+            "schedule_id", "fill_id", "tape_id",
+        ):
+            if fill_identity_receipt.get(key):
+                pos[key] = fill_identity_receipt[key]
     except Exception as exc:
         logger.error(
             f"[COLLECTOR_V3] paper fill write failed "
@@ -23667,7 +23694,11 @@ def _paper_terminal_pnl_components(
         remaining_qty,
         _buf_float(pos.get("policy_original_qty"), remaining_qty),
     )
-    partial_receipts = list(pos.get("partial_exit_receipts") or [])
+    partial_receipts = [
+        receipt for receipt in (pos.get("partial_exit_receipts") or [])
+        if receipt.get("remaining_fraction") is None
+        or _buf_float(receipt.get("remaining_fraction"), 0.0) > 0
+    ]
     partial_gross = 0.0
     partial_exit_fees = 0.0
     for receipt in partial_receipts:
@@ -23835,6 +23866,12 @@ def close_position(pos: dict, exit_reason: str):
             "ts_melbourne": close_mel,
             "close_ts_melbourne": close_mel,
             "trade_id": trade_id,
+            "epoch_id": pos.get("epoch_id") or _collector_v22_epoch_id(),
+            "opportunity_id": pos.get("opportunity_id"),
+            "policy_signature": pos.get("policy_signature"),
+            "schedule_id": pos.get("schedule_id"),
+            "fill_id": pos.get("fill_id"),
+            "tape_id": pos.get("tape_id"),
             "research_lane": pos.get("research_lane") or master.get("research_lane"),
             "shared_ai_call_id": (
                 master.get("shared_ai_call_id")
@@ -23994,10 +24031,16 @@ def close_position(pos: dict, exit_reason: str):
         }
     if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
         try:
-            dual_write_paper_close(
+            close_identity_receipt = dual_write_paper_close(
                 pos, master if isinstance(master, dict) else {}, trade_row,
                 epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
             )
+            for key in (
+                "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+                "schedule_id", "fill_id", "tape_id",
+            ):
+                if close_identity_receipt.get(key):
+                    trade_row[key] = close_identity_receipt[key]
         except Exception as exc:
             logger.error(
                 f"[COLLECTOR_V3] paper close write failed "
@@ -36413,6 +36456,28 @@ def _paper_lifecycle_row_valid(row: dict, kind: str) -> bool:
     return status == "PENDING" and float(row.get("limit_price") or 0) > 0
 
 
+def _stable_paper_lifecycle_copy(row: dict, attempts: int = 3) -> dict:
+    """Copy a live lifecycle row without turning a transient writer race into a crash.
+
+    Position metrics are updated by the market/exit workers at tick frequency.  A
+    nested mapping can therefore change while ``deepcopy`` is walking it even
+    though the top-level lifecycle list is protected by ``trade_lock``.  Retry a
+    bounded number of times and let the caller preserve the last good snapshot
+    when the row never becomes stable.
+    """
+    last_error = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            return copy.deepcopy(row) if isinstance(row, dict) else {}
+        except RuntimeError as exc:
+            if "changed size during iteration" not in str(exc).lower():
+                raise
+            last_error = exc
+            if attempt + 1 < max(1, int(attempts)):
+                time.sleep(0)
+    raise RuntimeError("paper lifecycle row remained mutable during snapshot") from last_error
+
+
 def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     """Persist the protection fields enforced by the position's frozen policy.
 
@@ -36424,7 +36489,7 @@ def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     execution and V3.1 policy identity.  Normalize only the copied snapshot so
     the in-memory accounting object remains untouched.
     """
-    snapshot = copy.deepcopy(row) if isinstance(row, dict) else {}
+    snapshot = _stable_paper_lifecycle_copy(row)
     lane = str(snapshot.get("research_lane") or "").upper()
     if not is_patient_chase_lane(lane):
         return snapshot
@@ -36451,11 +36516,20 @@ def _canonicalize_paper_lifecycle_identity(row: dict) -> dict:
 
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
     """Atomically persist every paper lane's executable lifecycle."""
-    with trade_lock:
-        positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
-                     if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
-        orders = [_canonicalize_paper_lifecycle_identity(copy.deepcopy(row)) for row in pending_orders
-                  if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
+    try:
+        with trade_lock:
+            positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
+                         if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
+            orders = [_canonicalize_paper_lifecycle_identity(_stable_paper_lifecycle_copy(row)) for row in pending_orders
+                      if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
+    except RuntimeError as exc:
+        # Keep the prior atomic file rather than killing the position manager or
+        # publishing a partial lifecycle.  The next tick retries naturally.
+        logger.warning(
+            f"[PAPER_LIFECYCLE] snapshot deferred reason={reason} error={exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return False
     payload = {
         "schema": "paper_lifecycle_v1", "saved_at": utc_iso(), "git_rev": _runtime_git_rev(),
         "reason": reason, "paper_only": bool(_force_paper_mode_active()),
@@ -38815,6 +38889,46 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
     bitfinex_evidence = _counterfactual_bitfinex_evidence(buf, snapshot, replay, outcome)
     post_exit_horizons = _counterfactual_post_exit_horizons(replay)
     entry_horizons = _counterfactual_entry_horizons(replay)
+    # Preserve only identities owned by the immutable source records.  A shared
+    # AI call is the causal owner of an opportunity, so that ID can be derived
+    # deterministically.  Schedule, tape and fill IDs are copied only when an
+    # upstream writer explicitly supplied them; absence must remain visible to
+    # the cross-world analyzer rather than being papered over by a fuzzy join.
+    epoch_id = (
+        snapshot.get("epoch_id")
+        or snapshot.get("collection_epoch_id")
+        or replay.get("epoch_id")
+        or replay.get("collection_epoch_id")
+        or buf.get("epoch_id")
+        or buf.get("collection_epoch_id")
+    )
+    shared_ai_call_id = (
+        snapshot.get("shared_ai_call_id")
+        or replay.get("shared_ai_call_id")
+        or buf.get("shared_ai_call_id")
+    )
+    opportunity_id = (
+        "opportunity:episode-"
+        + hashlib.sha256(('shared:' + str(shared_ai_call_id)).encode('utf-8')).hexdigest()[:20]
+        if shared_ai_call_id else None
+    )
+    policy_identity = next((
+        source.get("policy_identity") for source in (snapshot, replay, buf)
+        if isinstance(source, dict)
+        and isinstance(source.get("policy_identity"), dict)
+        and source.get("policy_identity")
+    ), {})
+    policy_signature = (
+        snapshot.get("policy_signature")
+        or replay.get("policy_signature")
+        or buf.get("policy_signature")
+        or policy_identity.get("policy_signature")
+    )
+    explicit_causal_ids = {
+        key: next((source.get(key) for source in (snapshot, replay, buf)
+                   if isinstance(source, dict) and source.get(key)), None)
+        for key in ("schedule_id", "tape_id", "fill_id")
+    }
     exclusion_reasons = []
     if missing_policy:
         exclusion_reasons.append("POLICY_SNAPSHOT_INCOMPLETE")
@@ -38840,6 +38954,10 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         exclusion_reasons.append("REQUIRED_POST_EXIT_HORIZON_INCOMPLETE")
     fields = {
         "evidence_schema": "counterfactual_evidence_v1",
+        "epoch_id": epoch_id,
+        "opportunity_id": opportunity_id,
+        "policy_signature": policy_signature,
+        **{key: value for key, value in explicit_causal_ids.items() if value},
         "policy_snapshot": policy_snapshot,
         "policy_version": policy_snapshot.get("policy_version"),
         "policy_comparability_key": policy_key,

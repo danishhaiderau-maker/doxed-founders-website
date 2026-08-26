@@ -98,3 +98,32 @@ def test_terminal_pnl_without_partials_matches_quantity_based_position_pnl():
     assert result["partial_gross_pnl"] == 0.0
     assert result["runner_gross_pnl"] == 2.0
     assert result["net_pnl"] == 2.0
+
+
+def test_terminal_family_receipt_is_not_counted_again_as_a_partial():
+    pos = {
+        "dir": "SHORT",
+        "qty": 0.000319,
+        "policy_original_qty": 0.000319,
+        "entry_fee_type": "MAKER",
+        "partial_exit_receipts": [{
+            "closed_qty": 0.000319,
+            "price": 78_649.0,
+            "realized_gross_usd": None,
+            "remaining_fraction": 0.0,
+            "reason": "PHYSICAL_HARD_STOP_30PCT",
+        }],
+    }
+    result = bot._paper_terminal_pnl_components(
+        pos,
+        entry=78_401.0,
+        exit_price=78_649.0,
+        exit_is_maker=False,
+        maker_fee=0.0,
+        taker_fee=0.0,
+        funding_total=0.0,
+    )
+    expected = (78_401.0 - 78_649.0) * 0.000319
+    assert result["partial_gross_pnl"] == 0.0
+    assert abs(result["runner_gross_pnl"] - expected) < 1e-12
+    assert abs(result["gross_pnl"] - expected) < 1e-12

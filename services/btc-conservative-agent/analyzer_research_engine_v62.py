@@ -135,6 +135,7 @@ COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
 POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 CROSS_WORLD_EVIDENCE_REPORT_FILE = "cross_world_evidence_report.json"
+FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE = "fill_time_guard_counterfactual_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 PUBLISHED_REPORTS_DIR = "published_reports"
@@ -537,6 +538,7 @@ ANALYZER_JSON_REPORT_FILES = (
     SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
     CROSS_WORLD_EVIDENCE_REPORT_FILE,
+    FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
@@ -545,6 +547,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current signed V3.1 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
     ("Cross-World Evidence", CROSS_WORLD_EVIDENCE_REPORT_FILE, "Explicit-identity-only agreement and disagreement across ideal-touch, conservative, shadow, paper, and Bitfinex-copy evidence"),
+    ("Fill-Time Guard Counterfactual", FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE, "Research-only adverse-momentum, EMA/DMI, and microstructure order-flow fill revalidation candidates"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
@@ -1174,6 +1177,21 @@ def validate_feature_variance(df):
                 numeric = pd.to_numeric(df[f], errors='coerce')
                 std_val = numeric.std()
                 if pd.isna(std_val) or std_val < 1e-9:
+                    if f == "momentum":
+                        velocity = None
+                        for alias in ("features_velocity", "feature_velocity", "velocity"):
+                            if alias in df.columns:
+                                candidate = pd.to_numeric(df[alias], errors="coerce")
+                                if candidate.notna().sum() >= 2 and candidate.std() >= 1e-9:
+                                    velocity = alias
+                                    break
+                        if velocity:
+                            print(
+                                f"⚠️ momentum is a constant legacy/coarse label; "
+                                f"current momentum analytics use {velocity} (non-zero variance) "
+                                f"{PIPELINE_ENFORCEMENT_TAG}"
+                            )
+                            continue
                     print(f"🚨 CRITICAL: {f} has zero variance → upstream broken {PIPELINE_ENFORCEMENT_TAG}")
                 else:
                     print(f"✅ {f} variance OK (std={std_val:.4f}) {PIPELINE_ENFORCEMENT_TAG}")
@@ -2260,10 +2278,16 @@ def _filter_policy_analysis_df(
         print(f"  {label}: blocked — trade_id missing; no policy conclusions allowed. {PIPELINE_ENFORCEMENT_TAG}")
         return df.iloc[0:0].copy()
     before = len(df)
-    filtered = df[df["trade_id"].astype(str).isin(eligible)].copy()
+    contamination = df.apply(_family_terminal_double_count_detail, axis=1)
+    contaminated = contamination.apply(lambda item: bool(item.get("contaminated")))
+    filtered = df[
+        df["trade_id"].astype(str).isin(eligible) & ~contaminated
+    ].copy()
+    contaminated_n = int(contaminated.sum())
     print(
         f"  {label}: {cohort} eligibility {len(filtered)}/{before} rows "
-        f"(evidence={evidence_rows}, exclusions={exclusions}). {PIPELINE_ENFORCEMENT_TAG}"
+        f"(evidence={evidence_rows}, exclusions={exclusions}, "
+        f"terminal-double-count-excluded={contaminated_n}). {PIPELINE_ENFORCEMENT_TAG}"
     )
     return filtered
 
@@ -7564,6 +7588,12 @@ def _bot_version_era(bot_version) -> str:
     bv = str(bot_version or "").strip().lower()
     if not bv:
         return "LEGACY_LAST_PRICE"
+    # V3.1 is the current BBO/depth-aware collector family.  The old parser
+    # understood only v1.1.x tags and therefore mislabeled every current trade
+    # as pre-realism legacy evidence even when explicit execution receipts and
+    # book-slippage fields were present.
+    if "v31-" in bv or "v3.1" in bv or "five-family-atomic" in bv:
+        return "DEPTH_REALISM"
     if "data-collection" in bv or "v1.1.20" in bv:
         return "DEPTH_REALISM"
     if "realism-complete" in bv or "v1.1.18" in bv:
@@ -7591,6 +7621,74 @@ def _attach_realism_era(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["sim_era"] = "LEGACY_LAST_PRICE"
     return out
+
+
+def _partial_exit_receipts(value):
+    """Decode the immutable receipt list without accepting arbitrary syntax."""
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [row for row in parsed if isinstance(row, dict)] if isinstance(parsed, list) else []
+
+
+def _family_terminal_double_count_detail(row) -> dict:
+    """Identify the pre-fix family terminal receipt accounting defect."""
+    receipts = _partial_exit_receipts(row.get("partial_exit_receipts"))
+    prior_cumulative = 0.0
+    terminal = None
+    for receipt in receipts:
+        remaining = pd.to_numeric(receipt.get("remaining_fraction"), errors="coerce")
+        cumulative = pd.to_numeric(receipt.get("cumulative_realized_net_usd"), errors="coerce")
+        if pd.notna(remaining) and float(remaining) <= 0:
+            if pd.notna(cumulative) and abs(float(cumulative) - prior_cumulative) > 1e-8:
+                terminal = receipt
+            break
+        if pd.notna(cumulative):
+            prior_cumulative = float(cumulative)
+    if terminal is None:
+        return {"contaminated": False}
+
+    entry = pd.to_numeric(
+        row.get("execution_entry_price") if row.get("execution_entry_price") is not None else row.get("entry"),
+        errors="coerce",
+    )
+    exit_price = pd.to_numeric(
+        row.get("execution_exit_price") if row.get("execution_exit_price") is not None else row.get("exit"),
+        errors="coerce",
+    )
+    qty = pd.to_numeric(
+        row.get("execution_qty") if row.get("execution_qty") is not None else row.get("qty"),
+        errors="coerce",
+    )
+    direction = str(row.get("final_direction") or row.get("dir") or "").upper()
+    corrected_gross = None
+    if pd.notna(entry) and pd.notna(exit_price) and pd.notna(qty) and direction in {"LONG", "SHORT"}:
+        sign = 1.0 if direction == "LONG" else -1.0
+        runner_gross = (float(exit_price) - float(entry)) * sign * float(qty)
+        genuine_partial_gross = 0.0
+        for receipt in receipts:
+            remaining = pd.to_numeric(receipt.get("remaining_fraction"), errors="coerce")
+            if pd.notna(remaining) and float(remaining) <= 0:
+                break
+            realized = pd.to_numeric(receipt.get("realized_gross_usd"), errors="coerce")
+            if pd.notna(realized):
+                genuine_partial_gross += float(realized)
+        corrected_gross = round(genuine_partial_gross + runner_gross, 8)
+    return {
+        "contaminated": True,
+        "reason": "PRE_FIX_TERMINAL_ACTION_COUNTED_AS_PARTIAL_AND_RUNNER",
+        "corrected_quantity_price_gross_usd": corrected_gross,
+        "raw_net_pnl_usd": safe_float(row.get("net_pnl_usd")),
+        "raw_gross_pnl_usd": safe_float(
+            row.get("gross_pnl_usd") if row.get("gross_pnl_usd") is not None
+            else row.get("outcome_gross_pnl_usd")
+        ),
+    }
 
 
 def _realism_era_summary(df: pd.DataFrame, pnl_col: str = "net_pnl_usd") -> pd.DataFrame:
@@ -7646,10 +7744,15 @@ def realism_sim_audit(trades, analysis_df):
         elif depth_n == 0:
             print(f"\n  ⚠️ No v1.1.18+ trades yet — stats may be optimistic until bot restarts. {PIPELINE_ENFORCEMENT_TAG}")
 
-    book_entry = pd.to_numeric(work.get("book_slippage_usd_entry"), errors="coerce")
-    book_exit = pd.to_numeric(work.get("book_slippage_usd_exit"), errors="coerce")
-    book_total = pd.to_numeric(work.get("book_slippage_usd_total"), errors="coerce")
-    has_book = book_total.notna().any() and book_total.fillna(0).abs().sum() >= 0
+    def _numeric_column(name):
+        source = work[name] if name in work.columns else pd.Series(index=work.index, dtype="float64")
+        return pd.to_numeric(source, errors="coerce")
+
+    book_entry = _numeric_column("book_slippage_usd_entry")
+    book_exit = _numeric_column("book_slippage_usd_exit")
+    book_total = _numeric_column("book_slippage_usd_total")
+    book_observed = int(book_total.notna().sum())
+    has_book = book_observed > 0
 
     report = {
         "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -7657,22 +7760,60 @@ def realism_sim_audit(trades, analysis_df):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "trade_count": int(len(work)),
         "era_breakdown": era_df.to_dict(orient="records") if not era_df.empty else [],
-        "book_slippage": {},
+        "book_slippage": {
+            "evidence_status": "MISSING",
+            "observed_trades": 0,
+            "missing_trades": int(len(work)),
+        },
         "execution_types": {},
         "partial_fills": 0,
+        "family_terminal_double_count": {
+            "evidence_status": "NOT_DETECTED",
+            "contaminated_rows": 0,
+            "rows": [],
+            "ranking_treatment": "RAW_EVIDENCE_PRESERVED",
+        },
         "replay_note": (
             "signal_replay ticks from v1.1.18+ use executable depth marks; "
             "legacy replay used last-trade unreal — counterfactual sweeps may differ."
         ),
     }
 
-    if has_book or "book_slippage_usd_total" in work.columns:
+    contamination_rows = []
+    for _, row in work.iterrows():
+        detail = _family_terminal_double_count_detail(row)
+        if detail.get("contaminated"):
+            contamination_rows.append({
+                "trade_id": row.get("trade_id"),
+                "research_lane": row.get("research_lane"),
+                **detail,
+            })
+    if contamination_rows:
+        report["family_terminal_double_count"] = {
+            "evidence_status": "CONTAMINATED_RAW_EXCLUDED",
+            "contaminated_rows": len(contamination_rows),
+            "rows": contamination_rows,
+            "ranking_treatment": (
+                "RAW_ROWS_PRESERVED_BUT_EXCLUDED; corrected quantity-price gross is "
+                "separately labelled and is not a fee-adjusted replacement net PnL"
+            ),
+        }
+        print(
+            f"\n  ⚠️ Excluded {len(contamination_rows)} pre-fix family terminal "
+            f"double-count row(s) from policy rankings; raw evidence remains unchanged. "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
+
+    if has_book:
         depth_work = work[work["sim_era"] == "DEPTH_REALISM"] if "sim_era" in work.columns else work
         if depth_work.empty:
             depth_work = work[book_total.notna()]
-        be = pd.to_numeric(depth_work.get("book_slippage_usd_entry"), errors="coerce").fillna(0)
-        bx = pd.to_numeric(depth_work.get("book_slippage_usd_exit"), errors="coerce").fillna(0)
-        bt = pd.to_numeric(depth_work.get("book_slippage_usd_total"), errors="coerce").fillna(0)
+        be_raw = pd.to_numeric(depth_work.get("book_slippage_usd_entry"), errors="coerce")
+        bx_raw = pd.to_numeric(depth_work.get("book_slippage_usd_exit"), errors="coerce")
+        bt_raw = pd.to_numeric(depth_work.get("book_slippage_usd_total"), errors="coerce")
+        be = be_raw
+        bx = bx_raw
+        bt = bt_raw
         print("\n  --- Order-book slippage (USD) ---")
         print(f"  Entry avg: ${be.mean():.4f} | Exit avg: ${bx.mean():.4f} | Total avg: ${bt.mean():.4f} {PIPELINE_ENFORCEMENT_TAG}")
         print(f"  Total book slippage (all trades): ${bt.sum():.2f} {PIPELINE_ENFORCEMENT_TAG}")
@@ -7693,6 +7834,9 @@ def realism_sim_audit(trades, analysis_df):
             print("\n  --- PnL by book_slippage_usd_total bucket ---")
             print(pd.DataFrame(buckets).to_string(index=False))
         report["book_slippage"] = {
+            "evidence_status": "OBSERVED_ZERO" if bt.abs().sum() == 0 else "OBSERVED_NONZERO",
+            "observed_trades": int(bt_raw.notna().sum()),
+            "missing_trades": int(len(depth_work) - bt_raw.notna().sum()),
             "entry_avg_usd": round(float(be.mean()), 4),
             "exit_avg_usd": round(float(bx.mean()), 4),
             "total_avg_usd": round(float(bt.mean()), 4),
@@ -7750,8 +7894,8 @@ def realism_sim_audit(trades, analysis_df):
                     f"(v1.1.19+ uses taker book walk). {PIPELINE_ENFORCEMENT_TAG}"
                 )
 
-    signal_slip = pd.to_numeric(work.get("slippage"), errors="coerce")
-    exec_slip = pd.to_numeric(work.get("execution_slippage"), errors="coerce")
+    signal_slip = _numeric_column("slippage")
+    exec_slip = _numeric_column("execution_slippage")
     if signal_slip.notna().any():
         print(f"\n  Signal-vs-limit slippage (price units): mean={signal_slip.mean():.4f} max={signal_slip.max():.4f} {PIPELINE_ENFORCEMENT_TAG}")
         report["signal_slippage_mean"] = round(float(signal_slip.mean()), 6)
@@ -7801,7 +7945,25 @@ def momentum_edge(df):
     if "momentum" not in df.columns:
         return
     df = df.copy()
-    df["mom_bucket"] = pd.cut(pd.to_numeric(df["momentum"], errors='coerce'), bins=[-2, -1, 0, 1, 2, 5])
+    momentum = pd.to_numeric(df["momentum"], errors="coerce")
+    if momentum.nunique(dropna=True) <= 1:
+        varying_alias = next(
+            (
+                alias
+                for alias in ("features_velocity", "feature_velocity", "velocity")
+                if alias in df.columns
+                and pd.to_numeric(df[alias], errors="coerce").nunique(dropna=True) > 1
+            ),
+            None,
+        )
+        if varying_alias:
+            print(
+                f"Legacy/coarse momentum is constant; skip legacy momentum buckets. "
+                f"Current continuous evidence is available as {varying_alias}. "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
+            )
+        return
+    df["mom_bucket"] = pd.cut(momentum, bins=[-2, -1, 0, 1, 2, 5])
     stats = df.groupby("mom_bucket")["net_pnl_usd"].mean().round(2)
     print(stats)
 
@@ -15627,7 +15789,10 @@ def feature_importance_report(trades=None, session=None):
         ("spread", ("factor_spread",)),
         ("mtf_alignment", ("directional_factor_spread",)),
         ("adx", ("adx_at_entry", "adx")),
-        ("momentum", ("momentum",)),
+        # `momentum` is a legacy/coarse direction label in current V3.1 trade
+        # rows and can legitimately be constant. Prefer the continuously-valued
+        # entry velocity captured by the current feature schema.
+        ("momentum", ("features_velocity", "feature_velocity", "velocity", "momentum")),
         ("volatility", ("volatility",)),
         ("participation", ("features_volume_ratio",)),
         ("velocity", ("features_velocity", "velocity")),
@@ -16256,6 +16421,10 @@ def pre_test_analytics_reports(
     research_cohort_split_reports()
     showcase_losing_cluster_descriptive_report(trades=trades, session=session)
     research_horizon_maturity_report()
+    try:
+        fill_time_guard_counterfactual_report(trades=trades)
+    except Exception as exc:
+        print(f"  ⚠️ fill-time guard counterfactual skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     try:
         research_counterfactual_coverage_report()
     except Exception as exc:
@@ -17004,6 +17173,53 @@ def cross_world_evidence_report():
         f"status={report['join_summary']['status']} "
         f"computable={report['join_summary']['pairwise_computable_comparisons']} "
         f"disagreements={report['join_summary']['pairwise_disagreements']} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return report
+
+
+def fill_time_guard_counterfactual_report(trades=None):
+    """Build research-only fill revalidation grids from the signed epoch.
+
+    Historical/quarantine rows are intentionally not backfilled here: an
+    execution receipt, exact epoch, AI payload, and pre-fill tape are all
+    required.  Missing joins are reported as insufficiency, never synthesized.
+    """
+    from research.fill_time_guard_counterfactual import build_fill_time_guard_counterfactual
+
+    execution_rows = _load_jsonl_rows(os.path.join("v3", "ledgers", "execution.jsonl"))
+    primary_fills = [row for row in execution_rows if row.get("fill_ts") is not None]
+    epoch_ids = sorted({str(row.get("epoch_id") or "") for row in primary_fills if row.get("epoch_id")})
+    # A mixed ledger must not silently choose an epoch. Current mirrors normally
+    # contain one signed epoch after verified quarantine.
+    if len(epoch_ids) == 1:
+        epoch_id = epoch_ids[0]
+    else:
+        epoch_id = ""
+        primary_fills = []
+    trade_rows = []
+    if trades is not None and not trades.empty:
+        trade_rows = trades.where(pd.notna(trades), None).to_dict("records")
+    report = build_fill_time_guard_counterfactual(
+        trades=trade_rows,
+        executions=primary_fills,
+        ai_inputs=_load_jsonl_rows(AI_INPUT_LOG_FILE),
+        tape_rows=_load_jsonl_rows("market_microstructure_1s.jsonl"),
+        source_observations=_load_jsonl_rows(SOURCE_ORDER_MARKET_EVIDENCE_FILE),
+        epoch_id=epoch_id,
+    )
+    if len(epoch_ids) != 1:
+        report["insufficiency"] = sorted(set(report.get("insufficiency", [])) | {"SIGNED_EPOCH_NOT_UNIQUE"})
+        report["qualification"] = "INSUFFICIENT_RESEARCH_ONLY"
+        report["observed_epoch_ids"] = epoch_ids
+    target = analyzer_report_path(FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE)
+    temp = f"{target}.tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    os.replace(temp, target)
+    print(
+        f"  ✅ Fill-time guard counterfactual: trades={report['observed_trades']} "
+        f"clusters={report['independent_clusters']} status={report['qualification']} "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
     return report

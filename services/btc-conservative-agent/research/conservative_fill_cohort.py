@@ -255,9 +255,19 @@ def build_v3_conservative_fill_cohort(
             "event_id": event_id,
             "episode_id": identity_row.get("episode_id") or row.get("episode_id"),
             "epoch_id": identity_row.get("epoch_id") or row.get("epoch_id"),
+            "opportunity_id": identity_row.get("opportunity_id") or row.get("opportunity_id"),
             "policy_epoch_id": identity_row.get("policy_epoch_id") or row.get("policy_epoch_id"),
             "policy_id": identity_row.get("policy_id") or row.get("policy_id"),
             "policy_signature": identity_row.get("policy_signature") or row.get("policy_signature"),
+            "schedule_id": identity_row.get("schedule_id") or row.get("schedule_id"),
+            "tape_id": identity_row.get("tape_id") or row.get("tape_id"),
+            "fill_id": (
+                f"fill:{identity_row.get('epoch_id') or row.get('epoch_id')}:{event_id}:paper-primary"
+                if receipt.get("outcome") in {"FILL", "PARTIAL_FILL"}
+                and (identity_row.get("epoch_id") or row.get("epoch_id"))
+                and event_id
+                else None
+            ),
             "research_lane": identity_row.get("research_lane") or row.get("research_lane"),
             "source_schema": "research_evidence_v3",
             "source_record_id": row.get("record_id"),

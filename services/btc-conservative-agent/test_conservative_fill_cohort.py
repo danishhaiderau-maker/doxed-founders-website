@@ -135,6 +135,8 @@ def test_v31_finalized_intent_produces_identity_preserving_partial_fill():
         "schema": "research_evidence_v3", "ledger": "order_intent",
         "record_id": "order-intent:evt-v31:submit", "event_id": "evt-v31",
         "episode_id": "episode-v31", "epoch_id": "epoch-v31",
+        "opportunity_id": "opportunity:episode-v31",
+        "schedule_id": "schedule:epoch-v31:evt-v31:paper-primary",
         "policy_epoch_id": "policy-epoch-v31", "policy_id": "POLICY_V31",
         "policy_signature": "signature-v31", "research_lane": "LANE_V31",
         "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT",
@@ -166,6 +168,10 @@ def test_v31_finalized_intent_produces_identity_preserving_partial_fill():
     assert receipt["filled_qty"] == .2
     assert receipt["policy_signature"] == "signature-v31"
     assert receipt["source_record_id"] == "order-intent:evt-v31:final"
+    assert receipt["opportunity_id"] == "opportunity:episode-v31"
+    assert receipt["schedule_id"] == "schedule:epoch-v31:evt-v31:paper-primary"
+    assert receipt["fill_id"] == "fill:epoch-v31:evt-v31:paper-primary"
+    assert receipt["tape_id"] is None
 
 
 def test_v31_terminal_fractional_second_is_included_without_generation_overlap():
