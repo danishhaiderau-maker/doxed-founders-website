@@ -187,6 +187,27 @@ def test_chase_attribution_without_trade_rows_keeps_unknown_hold_fail_closed(tmp
     assert report["trades"][0]["avg_hold_min"] is None
 
 
+def test_chase_attribution_keeps_v31_lane_without_legacy_chase_column(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [{
+        "trade_id": "fc3-current",
+        "stage": "ORDER_SUBMITTED",
+        "limit_price": 63_000,
+    }])
+    monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda _name: str(tmp_path / "chase.json"))
+    trades = pd.DataFrame([{
+        "trade_id": "fc3-current",
+        "research_lane": "FAMILY_CHANDELIER_3",
+        "net_pnl_usd": 0.12,
+        "duration_min": 7.5,
+    }])
+
+    report = analyzer.chase_attribution_report(trades=trades, session={})
+
+    assert report["trades"][0]["lane"] == "FAMILY_CHANDELIER_3"
+    assert report["trades"][0]["avg_hold_min"] == 7.5
+
+
 def test_fresh_epoch_chase_attribution_excludes_pre_epoch_relay_only_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [])
     monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)

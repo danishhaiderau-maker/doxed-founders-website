@@ -11770,16 +11770,20 @@ def chase_attribution_report(trades=None, session=None):
                 if pd.notna(pnl):
                     trade_pnl[tid] = float(pnl)
                     trade_wr[tid] = float(pnl) > 0
-        if "limit_chase_count" in work.columns:
-            for _, t in work.iterrows():
-                tid = str(t.get("trade_id") or "")
-                if tid:
+        for _, t in work.iterrows():
+            tid = str(t.get("trade_id") or "")
+            if tid:
+                # Lane and hold identity are independent of whether this
+                # particular trade export has the legacy chase-count column.
+                # Keeping them inside that optional branch made signed V3.1
+                # family trades render as UNKNOWN in chase attribution.
+                if "research_lane" in work.columns:
+                    trade_lane[tid] = _normalize_lane_label(t.get("research_lane"))
+                hold = t.get("dur_min") if "dur_min" in work.columns else t.get("duration_min")
+                if hold is not None and pd.notna(hold):
+                    trade_hold[tid] = round(float(hold), 2)
+                if "limit_chase_count" in work.columns:
                     trade_chase[tid] = int(pd.to_numeric(t.get("limit_chase_count"), errors="coerce") or 0)
-                    if "research_lane" in work.columns:
-                        trade_lane[tid] = _normalize_lane_label(t.get("research_lane"))
-                    hold = t.get("dur_min") if "dur_min" in work.columns else t.get("duration_min")
-                    if hold is not None and pd.notna(hold):
-                        trade_hold[tid] = round(float(hold), 2)
 
     by_tid = {}
     for row in rows:
