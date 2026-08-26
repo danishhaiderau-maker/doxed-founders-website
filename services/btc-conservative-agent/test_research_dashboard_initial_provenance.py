@@ -27,3 +27,10 @@ def test_dashboard_source_has_no_double_encoded_separator():
     source = SOURCE.read_text(encoding="utf-8")
 
     assert "Â·" not in source
+
+
+def test_fresh_collection_banner_explains_truthful_empty_sections():
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "Empty sections may truthfully mean no eligible evidence" in source
+    assert "Run analyzer after bot restart if sections look empty" not in source

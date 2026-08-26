@@ -4886,7 +4886,7 @@ async function loadSummary() {
       banner.style.borderColor = '#58a6ff';
       banner.style.color = '#c9d1d9';
       banner.innerHTML = '<strong>ℹ Using fresh-collection window from reports/all_data/</strong> '
-        + '(full CSV since last Fresh Collection ON). Run analyzer after bot restart if sections look empty.';
+        + '(full CSV since last Fresh Collection ON). Empty sections may truthfully mean no eligible evidence in the current cohort; check each section\'s evidence status.';
     } else {
       banner.style.display = 'none';
     }
