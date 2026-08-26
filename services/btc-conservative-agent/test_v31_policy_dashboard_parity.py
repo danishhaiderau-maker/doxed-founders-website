@@ -84,7 +84,10 @@ def test_best_top_and_shadow_share_canonical_v31_epoch_and_counts(monkeypatch):
     assert best["current_candidate"] is None
 
     assert combos["current_evidence_source"] == "safe_policy_genome_v3_report.json"
-    assert [row["policy_id"] for row in combos["top"]] == ["v31-policy-1"]
+    # A zero-fill policy remains available in the canonical V3.1 source but
+    # must not be promoted into the public profitable shortlist.
+    assert combos["top"] == []
+    assert combos["policy_grid"]["rows"] == []
     assert combos["policy_grid"]["epoch_id"] == "epoch-v31-clean"
     assert combos["policy_grid"]["search_counts"]["entry_cartesian"] == 2700
     assert combos["policy_grid"]["search_counts"]["nominal_full_cartesian"] == 1106127912960000000
