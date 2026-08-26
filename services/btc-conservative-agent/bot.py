@@ -33151,7 +33151,13 @@ def health():
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "path_schema_version": PATH_SCHEMA_VERSION,
             "replay_version": REPLAY_VERSION,
-            "fill_model": FILL_MODEL_IDEAL_TOUCH,
+            # The collector deliberately preserves ideal-touch replay as a
+            # diagnostic world, while qualification uses pinned BBO/depth
+            # receipts.  A single IDEAL_TOUCH label here made the separated
+            # evidence contract look contradictory to operators.
+            "fill_model": "SEPARATED_EVIDENCE_WORLDS",
+            "diagnostic_fill_model": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "qualification_fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
             "microstructure_tape": {
                 "schema": MICROSTRUCTURE_TAPE_SCHEMA,
                 "file": MICROSTRUCTURE_TAPE_FILE,

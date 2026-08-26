@@ -63,6 +63,13 @@ def test_api_exposes_collector_and_legacy_writer_as_separate_identities() -> Non
     assert 'safeText(\'legacyCollectorVersionBanner\', d.legacy_collector_version || \'none\')' in BOT_SOURCE
 
 
+def test_health_separates_diagnostic_and_qualification_fill_worlds() -> None:
+    body = _function_source("health")
+    assert '"fill_model": "SEPARATED_EVIDENCE_WORLDS"' in body
+    assert '"diagnostic_fill_model": "IDEAL_TOUCH_DIAGNOSTIC_ONLY"' in body
+    assert '"qualification_fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE"' in body
+
+
 def test_fresh_session_uses_signed_epoch_cutoff_across_bot_restart() -> None:
     fn = _isolated_function(
         "_showcase_trade_session_start",

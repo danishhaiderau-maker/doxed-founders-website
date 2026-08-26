@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Iterable
 
 from research_v3_risk import drawdown_budget_gate, portfolio_risk_metrics
@@ -73,9 +74,12 @@ def _policy_values(rows: list[dict[str, Any]], policy_id: str) -> tuple[list[flo
     return values, states, missing
 
 
-def episode_block_bootstrap(values: list[float], *, samples: int = 1000, seed: int = 7) -> dict[str, Any]:
+@lru_cache(maxsize=8192)
+def _episode_block_bootstrap_cached(
+    values: tuple[float, ...], samples: int, seed: int,
+) -> tuple[int, float | None, float | None, float | None]:
     if not values:
-        return {"samples": 0, "mean_lcb95": None, "mean_ucb95": None, "probability_mean_positive": None}
+        return 0, None, None, None
     rng = random.Random(seed)
     means = []
     value_count = len(values)
@@ -90,11 +94,27 @@ def episode_block_bootstrap(values: list[float], *, samples: int = 1000, seed: i
         for _index in range(value_count):
             total += float(values[rng.randrange(value_count)])
         means.append(total / value_count)
+    return (
+        samples,
+        round(float(_percentile(means, 0.025)), 8),
+        round(float(_percentile(means, 0.975)), 8),
+        round(sum(value > 0 for value in means) / len(means), 8),
+    )
+
+
+def episode_block_bootstrap(values: list[float], *, samples: int = 1000, seed: int = 7) -> dict[str, Any]:
+    # A 21k-policy grid contains many policies with exactly the same OOS return
+    # vector.  Re-running an identical seeded bootstrap for each policy made a
+    # scheduled analyzer generation take tens of minutes. Cache the immutable
+    # evidence vector; this changes no samples, probabilities, or gates.
+    result = _episode_block_bootstrap_cached(
+        tuple(float(value) for value in values), int(samples), int(seed),
+    )
     return {
-        "samples": samples,
-        "mean_lcb95": round(float(_percentile(means, 0.025)), 8),
-        "mean_ucb95": round(float(_percentile(means, 0.975)), 8),
-        "probability_mean_positive": round(sum(value > 0 for value in means) / len(means), 8),
+        "samples": result[0],
+        "mean_lcb95": result[1],
+        "mean_ucb95": result[2],
+        "probability_mean_positive": result[3],
     }
 
 
