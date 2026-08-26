@@ -24,11 +24,25 @@ def test_tile_headlines_use_one_identical_six_metric_contract():
 
 def test_tile_headlines_always_use_executed_fresh_collection_metrics():
     chunk = _render_chunk()
-    assert "stats.real_fills" in chunk
-    assert "stats.net_pnl_real" in chunk
-    assert "stats.per_approve_ev" in chunk
+    assert "currentSettingsPeriod" in chunk
+    assert "headlineClosed" in chunk
+    assert "headlinePnl" in chunk
+    assert "headlineEv" in chunk
+    assert "current execution-settings period; earlier rows remain separate" in chunk
     assert "labPrimaryTrades" not in chunk
     assert "v2ChkPass" not in chunk
+
+
+def test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference():
+    assert "function tradeStopEvidence" in SOURCE
+    assert "Observed PnL % of margin" in SOURCE
+    assert "Observed Net USD" in SOURCE
+    assert "STOP OVERSHOOT" in SOURCE
+    assert "trigger-level reference $" in SOURCE
+    assert "not reconstructed execution" in SOURCE
+    assert "inferredMargin" in SOURCE
+    assert "PRE-FIX PNL ACCOUNTING CONTAMINATED" in SOURCE
+    assert "terminal_single_count_v1" in SOURCE
 
 
 def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
@@ -104,6 +118,7 @@ def test_settings_period_approvals_reconcile_to_analyzer_headline():
 if __name__ == "__main__":
     test_tile_headlines_use_one_identical_six_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
+    test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference()
     test_settings_periods_are_durable_and_attached_to_both_payload_paths()
     test_server_is_authoritative_for_execution_gate_controls()
     test_virtual_chase_candidates_are_separate_from_pending_orders()

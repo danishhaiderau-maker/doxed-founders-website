@@ -23891,6 +23891,7 @@ def close_position(pos: dict, exit_reason: str):
             "market_bid_ask_spread_bps_at_entry": pos.get("market_bid_ask_spread_bps_at_entry"),
             "net_pnl_usd": round(net_pnl, 2),
             "gross_pnl_usd": round(gross_pnl, 2),
+            "pnl_accounting_schema": "terminal_single_count_v1",
             "partial_realized_pnl_usd": round(
                 _buf_float(pos.get("policy_partial_realized_net_usd"), 0.0), 4
             ),
@@ -27308,7 +27309,7 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
 <table>
-    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause</th><th>PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
+    <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause / stop evidence</th><th>Observed PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Observed Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
     <tbody id="tradesTable"></tbody>
 </table>
 
@@ -27352,6 +27353,25 @@ DASHBOARD_JS = """(function () {
         CIRCUIT_BREAKER_ADMIN_MANUAL: 'Safety flat'
       };
       return labels[raw.toUpperCase()] || raw.replace(/_/g, ' ');
+    }
+    function tradeStopEvidence(t) {
+      const observedPct = Number(t && t.pnl);
+      const observedNet = Number(t && t.net_pnl_usd);
+      const explicitMargin = Number(t && (t.margin_usdt ?? t.margin_usd));
+      const inferredMargin = explicitMargin > 0
+        ? explicitMargin
+        : (Number.isFinite(observedPct) && observedPct !== 0 && Number.isFinite(observedNet)
+          ? Math.abs(observedNet) / (Math.abs(observedPct) / 100)
+          : 0);
+      const hardStopPct = Number(t && (t.hard_stop_pct ?? t.physical_hard_stop_pct ?? 30));
+      const stopReason = String(t && t.exit_reason || '').toUpperCase();
+      const lane = String(t && t.research_lane || '').toUpperCase();
+      const accountingSchema = String(t && t.pnl_accounting_schema || '');
+      const accountingContaminated = lane.startsWith('FAMILY_') && accountingSchema !== 'terminal_single_count_v1';
+      const isStop = /STOP|EARLY_FAIL|THESIS/.test(stopReason);
+      const overshoot = !accountingContaminated && isStop && Number.isFinite(observedPct) && observedPct < -Math.abs(hardStopPct);
+      const capReferenceNet = inferredMargin > 0 ? -(inferredMargin * Math.abs(hardStopPct) / 100) : null;
+      return {explicitMargin, inferredMargin, hardStopPct, overshoot, capReferenceNet, accountingContaminated};
     }
     function formatMelbourneDateTime(ts) {
       if (!ts || ts === '-') return '-';
@@ -27838,8 +27858,15 @@ DASHBOARD_JS = """(function () {
               + '<div style="color:' + (col || '#c9d1d9') + ';font-weight:600;font-size:0.9em;">' + val + '</div></div>';
           };
           const pnl = stats.net_pnl_real != null ? stats.net_pnl_real : 0;
-          const pnlCol = pnl >= 0 ? '#3fb950' : '#f85149';
           const settingPeriods = Array.isArray(stats.settings_periods) ? stats.settings_periods : [];
+          const currentSettingsPeriod = settingPeriods.find(function (period) { return period && period.current; }) || null;
+          const headlineClosed = currentSettingsPeriod ? Number(currentSettingsPeriod.executed || 0) : Number(stats.real_fills || 0);
+          const headlinePnl = currentSettingsPeriod ? Number(currentSettingsPeriod.pnl_usd || 0) : Number(pnl || 0);
+          const headlineApprovals = currentSettingsPeriod ? Number(currentSettingsPeriod.approvals || 0) : Number(stats.approves || 0);
+          const headlineEv = currentSettingsPeriod
+            ? (currentSettingsPeriod.ev_per_approval == null ? (headlineApprovals ? headlinePnl / headlineApprovals : 0) : Number(currentSettingsPeriod.ev_per_approval))
+            : Number(stats.per_approve_ev || 0);
+          const headlinePnlCol = headlinePnl >= 0 ? '#3fb950' : '#f85149';
           const formatPeriodTime = function (epoch) {
             if (!epoch) return '—';
             try {
@@ -27870,9 +27897,11 @@ DASHBOARD_JS = """(function () {
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + (periodEv == null ? '—' : ('$' + Number(periodEv).toFixed(2))) + '</td>'
               + '</tr>';
           }).join('');
-          const statsScope = stats.scope === 'SIGNED_FRESH_EPOCH'
-            ? 'current signed clean-epoch total'
-            : 'historical/analyzer total';
+          const statsScope = currentSettingsPeriod
+            ? 'current execution-settings period; earlier rows remain separate'
+            : (stats.scope === 'SIGNED_FRESH_EPOCH'
+              ? 'current signed clean-epoch total'
+              : 'historical/analyzer total');
           const settingsBreakdown = '<div style="margin-top:8px;border:1px solid #30363d;border-radius:8px;overflow:auto;">'
             + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the ' + statsScope + '</div>'
             + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
@@ -27887,9 +27916,9 @@ DASHBOARD_JS = """(function () {
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Pending', laneNow.pending || 0)
             + statRow('Open', laneNow.open || 0)
-            + statRow('Closed', stats.real_fills != null ? stats.real_fills : 0)
-            + statRow('PnL', '$' + Number(pnl).toFixed(2), pnlCol)
-            + statRow('EV/appr', '$' + Number(stats.per_approve_ev || 0).toFixed(2))
+            + statRow('Closed', headlineClosed)
+            + statRow('PnL', '$' + headlinePnl.toFixed(2), headlinePnlCol)
+            + statRow('EV/appr', '$' + headlineEv.toFixed(2))
             + '</div>'
             + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
@@ -27985,7 +28014,7 @@ DASHBOARD_JS = """(function () {
               if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
               return html + '</div>';
             })()
-            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">' + (stats.summary_line || 'Collecting session data…') + '</div>'
+            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Current settings period: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV $' + headlineEv.toFixed(2) + '/approve</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
@@ -28914,7 +28943,8 @@ DASHBOARD_JS = """(function () {
             ? (bf.classification || 'AUTHENTICATED')
             : '-';
           const relLabel = rel.shadow_label || rel.divergence_classification || '-';
-          const margin = Number(t.margin_usdt ?? t.margin_usd ?? 0);
+          const stopEvidence = tradeStopEvidence(t);
+          const margin = stopEvidence.explicitMargin;
           const leverage = Number(t.leverage ?? 0);
           const notional = Number(t.requested_notional_usd ?? t.accepted_notional_usd ?? (margin > 0 && leverage > 0 ? margin * leverage : 0));
           return `
@@ -28926,9 +28956,9 @@ DASHBOARD_JS = """(function () {
             <td>${t.entry != null ? t.entry.toFixed(2) : '-'}</td>
             <td>${t.exit != null ? t.exit.toFixed(2) : '-'}</td>
             <td>${t.dur_min != null ? t.dur_min.toFixed(1) : '-'}</td>
-            <td>${displayExitCause(t.exit_reason)}</td>
+            <td>${displayExitCause(t.exit_reason)}${stopEvidence.accountingContaminated ? '<br><span style="color:#f85149;font-size:0.76em;">PRE-FIX PNL ACCOUNTING CONTAMINATED · raw family PnL may be double-counted · excluded from qualification</span>' : (stopEvidence.overshoot ? '<br><span style="color:#f0c14b;font-size:0.76em;">STOP OVERSHOOT · observed loss crossed ' + stopEvidence.hardStopPct.toFixed(0) + '% trigger' + (stopEvidence.capReferenceNet == null ? '' : ' · trigger-level reference $' + stopEvidence.capReferenceNet.toFixed(2)) + ' · not reconstructed execution</span>' : '')}</td>
             <td title="Percentage return on the displayed margin, not on account equity">${t.pnl != null ? t.pnl.toFixed(2) : '-' }%</td>
-            <td>${margin > 0 ? '$' + margin.toFixed(2) : '-'}</td>
+            <td>${margin > 0 ? '$' + margin.toFixed(2) : (stopEvidence.inferredMargin > 0 ? '~$' + stopEvidence.inferredMargin.toFixed(2) + ' inferred' : '-')}</td>
             <td>${notional > 0 ? '$' + notional.toFixed(2) : '-'}</td>
             <td>$${t.net_pnl_usd?.toFixed(2)||'-'}</td>
             <td>$${t.gross_pnl_usd?.toFixed(2)||'-'}</td>

@@ -14670,35 +14670,76 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     return payload
 
 
-def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
-    """Exit × entry combo cohorts — find leakage (left on table) and best exit paths."""
+def _descriptive_terminal_exit_df(df, label):
+    """Closed-path evidence without the real-copy qualification allow-list."""
+    if df is None or df.empty or "trade_id" not in df.columns:
+        return pd.DataFrame(), 0
+    work = df.copy()
+    # Shadow files may contain provisional observations alongside terminal
+    # outcomes.  Only accept a row when it has an explicit close/exit fact;
+    # never infer a terminal from a touch or an approval.
+    terminal_markers = [
+        column for column in (
+            "exit_reason", "close_reason", "closed_at", "close_ts",
+            "exit_ts", "terminal_ts", "terminal_event_id",
+        ) if column in work.columns
+    ]
+    if terminal_markers:
+        terminal_mask = pd.Series(False, index=work.index)
+        for column in terminal_markers:
+            terminal_mask |= work[column].notna() & work[column].astype(str).str.strip().ne("")
+        work = work.loc[terminal_mask].copy()
+    contamination = work.apply(_family_terminal_double_count_detail, axis=1)
+    contaminated = contamination.apply(lambda item: bool(item.get("contaminated")))
+    clean = work.loc[~contaminated].copy()
+    clean = clean.drop_duplicates(subset=["trade_id"], keep="last")
+    print(
+        f"  {label}: descriptive terminals {len(clean)}/{len(df)}; "
+        f"terminal-double-count-excluded={int(contaminated.sum())}. "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return clean, int(contaminated.sum())
+
+
+def _load_descriptive_shadow_exit_df(session: dict = None):
+    """Raw shadow/lab rows for exit analysis, without live-copy eligibility."""
+    rows = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
+    rows.update(_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {})
+    if not rows:
+        return None
+    df = pd.DataFrame(list(rows.values()))
+    if session and not df.empty and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=(
+            "exit_ts", "closed_at", "close_ts", "terminal_ts", "ts", "timestamp",
+        ))
+    return df
+
+
+def _exit_identity_labels(sub):
+    def values(column):
+        if column not in sub.columns:
+            return []
+        return sorted({str(value) for value in sub[column].dropna() if str(value).strip()})
+    epochs = values("epoch_id")
+    settings = values("settings_period_id")
+    signatures = values("policy_signature")
+    opportunities = values("opportunity_id") or values("shared_ai_call_id") or values("scan_id")
+    return {
+        "epoch_ids": epochs,
+        "settings_period_ids": settings,
+        "policy_signatures": signatures,
+        "independent_ai_episodes": len(opportunities),
+        "terminal_child_rows": int(len(sub)),
+        "correlated_family_children_separated": True,
+    }
+
+
+def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100):
+    """Executed-paper and shadow exit cohorts, always kept as separate evidence."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT COMBINATIONS — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    trades = _filter_policy_analysis_df(trades, "exit combinations report")
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
-    if work.empty:
-        payload = {"schema": "exit_combinations_v1", "top": [], "worst_leakage": [], "session_scope": scope}
-        with open(analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    if "exit_reason" not in work.columns:
-        work["exit_reason"] = "UNKNOWN"
-    work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
-    lot_col = None
-    for c in ("profit_left_on_table", "left_on_table_usd", "left_on_table"):
-        if c in work.columns:
-            lot_col = c
-            break
-    if lot_col:
-        work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
-    else:
-        peak = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-        booked = pd.to_numeric(work.get("net_pnl_usd", 0), errors="coerce").fillna(0)
-        work["left_on_table_usd"] = (peak - booked).clip(lower=0)
-
     dims = [
         "exit_reason",
         "ai_probability_bucket",
@@ -14707,37 +14748,58 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         "time_in_trade_bucket",
         "research_lane",
     ]
-    combos = []
-    for keys, sub in work.groupby(dims, observed=True, dropna=False):
-        ex, ai_b, sp_b, mfe_b, time_b, lane = keys
-        stats = _combo_stats_from_df(sub)
-        if stats["trades"] < min_trades:
-            continue
-        left = round(float(sub["left_on_table_usd"].sum()), 2)
-        avg_left = round(float(sub["left_on_table_usd"].mean()), 2)
-        combos.append({
-            "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{str(lane).upper()}",
-            "exit_reason": ex,
-            "ai_bucket": ai_b,
-            "spread_bucket": sp_b,
-            "peak_mfe_bucket": mfe_b,
-            "time_in_trade_bucket": time_b,
-            "lane": str(lane).upper(),
-            "left_on_table_usd": left,
-            "avg_left_usd": avg_left,
-            **stats,
-        })
-    by_ev = sorted(combos, key=lambda x: (x["ev_usd"], x["pnl_usd"]), reverse=True)
-    by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"], -x["ev_usd"]), reverse=True)
-    top = by_ev[:top_n]
-    worst_leak = by_leak[:top_n]
+    def build(source, evidence_class):
+        clean, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit combinations")
+        work = _enrich_trades_with_buckets(clean.copy()) if not clean.empty else pd.DataFrame()
+        if work.empty:
+            return {"evidence_class": evidence_class, "terminal_rows": 0, "contaminated_rows_excluded": contaminated_n, "top": [], "worst_leakage": [], "overall_left_on_table_usd": 0.0}
+        if "exit_reason" not in work.columns:
+            work["exit_reason"] = "UNKNOWN"
+        work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
+        lot_col = next((c for c in ("profit_left_on_table", "left_on_table_usd", "left_on_table") if c in work.columns), None)
+        if lot_col:
+            work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
+        else:
+            peak = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
+            booked = pd.to_numeric(work.get("net_pnl_usd", 0), errors="coerce").fillna(0)
+            work["left_on_table_usd"] = (peak - booked).clip(lower=0)
+        combos = []
+        for keys, sub in work.groupby(dims, observed=True, dropna=False):
+            ex, ai_b, sp_b, mfe_b, time_b, lane = keys
+            stats = _combo_stats_from_df(sub)
+            if stats["trades"] < min_trades:
+                continue
+            combos.append({
+                "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{str(lane).upper()}",
+                "exit_reason": ex, "ai_bucket": ai_b, "spread_bucket": sp_b,
+                "peak_mfe_bucket": mfe_b, "time_in_trade_bucket": time_b,
+                "lane": str(lane).upper(), "evidence_class": evidence_class,
+                "left_on_table_usd": round(float(sub["left_on_table_usd"].sum()), 2),
+                "avg_left_usd": round(float(sub["left_on_table_usd"].mean()), 2),
+                "sample_status": "LOW_SAMPLE_N1" if stats["trades"] == 1 else "DESCRIPTIVE_SAMPLE",
+                "qualification_eligible": False,
+                **_exit_identity_labels(sub), **stats,
+            })
+        by_ev = sorted(combos, key=lambda x: (x["ev_usd"], x["pnl_usd"]), reverse=True)
+        by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"], -x["ev_usd"]), reverse=True)
+        return {
+            "evidence_class": evidence_class, "terminal_rows": int(len(work)),
+            "contaminated_rows_excluded": contaminated_n, "total_combos": len(combos),
+            "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
+            "top": by_ev[:top_n], "worst_leakage": by_leak[:top_n],
+        }
+
+    executed = build(trades, "EXECUTED_PAPER_DESCRIPTIVE")
+    shadow_df = _load_descriptive_shadow_exit_df(session=session)
+    shadow = build(shadow_df, "SHADOW_LAB_DESCRIPTIVE")
+    top, worst_leak = executed["top"], executed["worst_leakage"]
     for row in top[:6]:
         print(
             f"  TOP {row['combo']}: n={row['trades']} EV=${row['ev_usd']:+.2f} "
             f"left=${row['left_on_table_usd']:+.0f} {PIPELINE_ENFORCEMENT_TAG}"
         )
     payload = {
-        "schema": "exit_combinations_v1",
+        "schema": "exit_combinations_v2",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -14745,16 +14807,18 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         "benchmark_lane": BENCHMARK_LANE,
         "min_trades_per_combo": min_trades,
         "dimensions": dims,
-        "total_combos": len(combos),
-        "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
-        "filter_note": "Generic historical exit combinations; current-lane qualification is handled separately.",
+        "total_combos": executed.get("total_combos", 0),
+        "overall_left_on_table_usd": executed["overall_left_on_table_usd"],
+        "filter_note": "Current executed-paper terminals and shadow/lab terminals are descriptive, separated, and never qualification eligible. N=1 rows are visibly low sample.",
+        "qualification_eligible": False,
+        "evidence_classes": {"executed_paper": executed, "shadow_lab": shadow},
         "top": top,
         "worst_leakage": worst_leak,
     }
     try:
         with open(analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {EXIT_COMBINATIONS_REPORT_FILE} ({len(combos)} exit combos) {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  ✅ Wrote {EXIT_COMBINATIONS_REPORT_FILE} ({executed.get('total_combos', 0)} executed exit combos) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_COMBINATIONS_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
@@ -14832,94 +14896,103 @@ def _exit_leak_recommendations(reasons: list) -> list:
 
 
 def exit_leakage_by_reason_report(trades=None, session=None):
-    """Aggregate hindsight MFE-to-close gaps by exit reason."""
+    """Aggregate exit gaps for executed-paper and shadow/lab separately."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LEAKAGE BY REASON — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    trades = _filter_policy_analysis_df(trades, "exit leakage report")
-    if trades is None or trades.empty:
-        payload = {
-            "schema": "exit_leakage_by_reason_v1",
-            "session_scope": scope,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "overall_left_usd": 0.0,
-            "reasons": [],
+    def build(source, evidence_class):
+        work, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit leakage")
+        if work.empty:
+            return {
+                "evidence_class": evidence_class, "terminal_rows": 0,
+                "contaminated_rows_excluded": contaminated_n, "overall_left_usd": 0.0,
+                "overall_booked_usd": 0.0, "overall_peak_usd": 0.0,
+                "reasons": [], "recommendations": [], "qualification_eligible": False,
+            }
+        pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
+        if pnl_col not in work.columns:
+            work[pnl_col] = 0.0
+        work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0.0)
+        mfe_source = work["max_profit"] if "max_profit" in work.columns else work.get("mfe_margin_pct", pd.Series(np.nan, index=work.index))
+        final_source = work["pnl"] if "pnl" in work.columns else work.get("final_pnl_margin_pct", pd.Series(np.nan, index=work.index))
+        mfe = pd.to_numeric(mfe_source, errors="coerce")
+        final_margin = pd.to_numeric(final_source, errors="coerce")
+        margin_source = work.get("margin_usdt", pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index))
+        margin_usd = pd.to_numeric(margin_source, errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
+        peak_usd = (mfe / 100.0) * margin_usd
+        booked_usd = work[pnl_col]
+        left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
+        capture = (booked_usd / peak_usd.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        work = work.assign(_left=left_usd, _peak=peak_usd, _booked=booked_usd, _capture=capture)
+        reason_col = "exit_reason" if "exit_reason" in work.columns else "close_reason"
+        if reason_col not in work.columns:
+            work["exit_reason"] = "UNKNOWN"
+        elif reason_col != "exit_reason":
+            work["exit_reason"] = work[reason_col]
+        work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
+        reasons = []
+        for reason, sub in work.groupby("exit_reason", observed=True):
+            n = int(len(sub))
+            sub_mfe, sub_final = mfe.loc[sub.index], final_margin.loc[sub.index]
+            reasons.append({
+                "exit_reason": str(reason), "trades": n,
+                "left_on_table_usd": round(float(sub["_left"].sum()), 2),
+                "avg_left_usd": round(float(sub["_left"].mean()), 2),
+                "avg_mfe_margin_pct": round(float(sub_mfe.mean()), 2) if sub_mfe.notna().any() else None,
+                "avg_realized_margin_pct": round(float(sub_final.mean()), 2) if sub_final.notna().any() else None,
+                "avg_leakage_margin_pct": round(float((sub_mfe - sub_final).mean()), 2) if sub_mfe.notna().any() else None,
+                "booked_profit_usd": round(float(sub["_booked"].sum()), 2),
+                "peak_profit_usd": round(float(sub["_peak"].sum()), 2),
+                "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1) if sub["_capture"].notna().any() else 0.0,
+                "evidence_class": evidence_class,
+                "sample_status": "LOW_SAMPLE_N1" if n == 1 else "DESCRIPTIVE_SAMPLE",
+                "qualification_eligible": False,
+                **_exit_identity_labels(sub),
+            })
+        reasons.sort(key=lambda x: (-x["left_on_table_usd"], -x["trades"]))
+        return {
+            "evidence_class": evidence_class, "terminal_rows": int(len(work)),
+            "contaminated_rows_excluded": contaminated_n,
+            "overall_left_usd": round(float(left_usd.sum()), 2),
+            "overall_booked_usd": round(float(booked_usd.sum()), 2),
+            "overall_peak_usd": round(float(peak_usd.sum()), 2),
+            "reasons": reasons, "recommendations": _exit_leak_recommendations(reasons),
+            "qualification_eligible": False,
         }
-        with open(EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
 
-    work = trades.copy()
-    if "trade_id" in work.columns:
-        work = work.drop_duplicates(subset=["trade_id"], keep="last")
-    pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
-    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0.0)
-    mfe = pd.to_numeric(work.get("max_profit", work.get("mfe_margin_pct")), errors="coerce")
-    final_margin = pd.to_numeric(work.get("pnl", work.get("final_pnl_margin_pct")), errors="coerce")
-    margin_usd = pd.to_numeric(work.get("margin_usdt", FLAT_MARGIN_LIVE_USD), errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
-    peak_usd = (mfe / 100.0) * margin_usd
-    booked_usd = work[pnl_col]
-    left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
-    capture = (booked_usd / peak_usd.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
-
-    work = work.assign(_left=left_usd, _peak=peak_usd, _booked=booked_usd, _capture=capture)
-    if "exit_reason" not in work.columns:
-        work["exit_reason"] = "UNKNOWN"
-    work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
-
-    reasons = []
-    for reason, sub in work.groupby("exit_reason", observed=True):
-        if sub.empty:
-            continue
-        n = int(len(sub))
-        left_sum = round(float(sub["_left"].sum()), 2)
-        avg_left = round(float(sub["_left"].mean()), 2)
-        avg_mfe = round(float(mfe.loc[sub.index].mean()), 2) if mfe.loc[sub.index].notna().any() else None
-        avg_realized = round(float(final_margin.loc[sub.index].mean()), 2) if final_margin.loc[sub.index].notna().any() else None
-        avg_leak_pct = round(float((mfe.loc[sub.index] - final_margin.loc[sub.index]).mean()), 2) if mfe.loc[sub.index].notna().any() else None
-        reasons.append({
-            "exit_reason": str(reason),
-            "trades": n,
-            "left_on_table_usd": left_sum,
-            "avg_left_usd": avg_left,
-            "avg_mfe_margin_pct": avg_mfe,
-            "avg_realized_margin_pct": avg_realized,
-            "avg_leakage_margin_pct": avg_leak_pct,
-            "booked_profit_usd": round(float(sub["_booked"].sum()), 2),
-            "peak_profit_usd": round(float(sub["_peak"].sum()), 2),
-            "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1)
-            if sub["_capture"].notna().any() else 0.0,
-        })
-    reasons.sort(key=lambda x: (-x["left_on_table_usd"], -x["trades"]))
-    overall_left = round(float(left_usd.sum()), 2)
-    for row in reasons[:6]:
+    executed = build(trades, "EXECUTED_PAPER_DESCRIPTIVE")
+    shadow = build(_load_descriptive_shadow_exit_df(session=session), "SHADOW_LAB_DESCRIPTIVE")
+    for row in executed["reasons"][:6]:
         print(
             f"  {row['exit_reason']}: n={row['trades']} left=${row['left_on_table_usd']:.2f} "
             f"avg_leak={row['avg_leakage_margin_pct']}% {PIPELINE_ENFORCEMENT_TAG}"
         )
 
     payload = {
-        "schema": "exit_leakage_by_reason_v3",
+        "schema": "exit_leakage_by_reason_v4",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "overall_left_usd": overall_left,
-        "overall_booked_usd": round(float(booked_usd.sum()), 2),
-        "overall_peak_usd": round(float(peak_usd.sum()), 2),
+        "overall_left_usd": executed["overall_left_usd"],
+        "overall_booked_usd": executed["overall_booked_usd"],
+        "overall_peak_usd": executed["overall_peak_usd"],
         "metric_label": "hindsight_peak_to_close_gap",
         "metric_warning": (
             "Peak MFE minus realized close is a hindsight excursion gap, not directly "
             "capturable profit and not evidence that a ladder change will improve PnL."
         ),
-        "reasons": reasons,
-        "recommendations": _exit_leak_recommendations(reasons),
+        "filter_note": "Executed-paper and shadow/lab terminal cohorts are descriptive and separated; terminal-double-count contaminated rows are excluded.",
+        "qualification_eligible": False,
+        "evidence_classes": {"executed_paper": executed, "shadow_lab": shadow},
+        "reasons": executed["reasons"],
+        "recommendations": executed["recommendations"],
     }
     try:
         with open(EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {EXIT_LEAKAGE_BY_REASON_REPORT_FILE} ({len(reasons)} reasons) {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  ✅ Wrote {EXIT_LEAKAGE_BY_REASON_REPORT_FILE} ({len(executed['reasons'])} executed reasons) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_LEAKAGE_BY_REASON_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload

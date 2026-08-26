@@ -689,6 +689,20 @@ def _data_file_candidates(name: str) -> list[Path]:
 def _public_policy_evidence_row(row: dict) -> dict:
     """Separate ideal-touch hypothesis metrics from terminal-fill evidence."""
     public = dict(row or {})
+    policy_id = str(public.get("policy_id") or "").strip()
+    # A complete policy identity is ENTRY|EXIT.  Older malformed reports could
+    # concatenate a second exit profile; keep the raw value for audit, but never
+    # present that ambiguous string as a selectable policy identity.
+    if policy_id.count("|") > 1:
+        public["raw_policy_id"] = policy_id
+        public["policy_id"] = "INVALID_CONCATENATED_POLICY_ID"
+        public["policy_identity_status"] = "AMBIGUOUS_MULTIPLE_EXIT_PROFILES"
+        public["qualification"] = "INVALID_POLICY_IDENTITY"
+    if isinstance(public.get("gates"), dict):
+        public["gates"] = {
+            str(name): _gate_passed(value)
+            for name, value in public["gates"].items()
+        }
     full_fills = int(public.get("full_fills") or 0)
     partial_fills = int(public.get("partial_fills") or 0)
     # Older pinned generations only exposed ``oos_fills``.  Prefer the
@@ -729,6 +743,38 @@ def _public_policy_evidence_row(row: dict) -> dict:
     else:
         public["execution_metric_status"] = "SUPPORTED_TERMINAL_FILLS"
     return public
+
+
+def _gate_passed(value) -> bool:
+    """Interpret report booleans without treating textual true as a failure."""
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().casefold() in {"true", "pass", "passed", "ok", "yes", "1"}
+    if isinstance(value, (int, float)):
+        return value == 1
+    return False
+
+
+def _failed_gate_names(gates: dict | None) -> list[str]:
+    return [str(name) for name, value in (gates or {}).items() if not _gate_passed(value)]
+
+
+def _mirror_source_revision() -> str | None:
+    """Return the Fly revision recorded by the canonical mirror loop receipt."""
+    candidates = (
+        _AGENT_ROOT.parents[1] / ".fly-data-sync-loop.heartbeat.json",
+        DATA_ROOT / ".fly-data-sync-loop.heartbeat.json",
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+            revision = payload.get("sourceRevision") or payload.get("source_revision")
+            if revision:
+                return str(revision)
+        except (OSError, ValueError, TypeError):
+            continue
+    return None
 
 
 def _bounded_safe_policy_payload(report: dict) -> dict:
@@ -1893,30 +1939,40 @@ def _chase_delay_payload():
 
 def _exit_combos_payload():
     rep = _read_report("exit_combinations_report.json")
-
-    top = list(rep.get("top") or [])
-    worst = list(rep.get("worst_leakage") or [])
+    classes = rep.get("evidence_classes") or {}
+    executed = classes.get("executed_paper") or {"top": rep.get("top") or [], "worst_leakage": rep.get("worst_leakage") or []}
+    shadow = classes.get("shadow_lab") or {"top": [], "worst_leakage": []}
+    top = list(executed.get("top") or [])
+    worst = list(executed.get("worst_leakage") or [])
     return {
         **_nonqualifying_scope(
-            "LEGACY_EXECUTED",
-            "Historical executed-lane exit combinations; excluded from active V3.1 rankings.",
+            "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
+            "Terminal exit evidence is descriptive only. Executed-paper and shadow/lab rows are never merged or qualification eligible.",
         ),
         "generated_at": rep.get("generated_at"),
         "benchmark_lane": rep.get("benchmark_lane"),
         "overall_left_on_table_usd": rep.get("overall_left_on_table_usd"),
-        "total_combos": len(top),
+        "total_combos": executed.get("total_combos", len(top)),
         "filter_note": rep.get("filter_note") or "Generic historical exit combinations.",
-        "top": top[:50],
-        "worst_leakage": worst[:30],
+        "qualification_eligible": False,
+        "top": top[:100],
+        "worst_leakage": worst[:100],
+        "evidence_classes": {
+            "executed_paper": {**executed, "top": top[:100], "worst_leakage": worst[:100]},
+            "shadow_lab": {**shadow, "top": list(shadow.get("top") or [])[:100], "worst_leakage": list(shadow.get("worst_leakage") or [])[:100]},
+        },
     }
 
 
 def _exit_reason_leak_payload():
     rep = _read_report("exit_leakage_by_reason_report.json")
+    classes = rep.get("evidence_classes") or {}
+    executed = classes.get("executed_paper") or {"reasons": rep.get("reasons") or [], "recommendations": rep.get("recommendations") or []}
+    shadow = classes.get("shadow_lab") or {"reasons": [], "recommendations": []}
     return {
         **_nonqualifying_scope(
-            "LEGACY_HINDSIGHT",
-            "Historical peak-to-close hindsight only; not directly capturable profit or a V3.1 policy.",
+            "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
+            "Peak-to-close hindsight is descriptive only; executed-paper and shadow/lab rows are shown separately.",
         ),
         "generated_at": rep.get("generated_at"),
         "overall_left_usd": rep.get("overall_left_usd"),
@@ -1924,8 +1980,10 @@ def _exit_reason_leak_payload():
         "overall_peak_usd": rep.get("overall_peak_usd"),
         "metric_label": rep.get("metric_label"),
         "metric_warning": rep.get("metric_warning"),
-        "reasons": rep.get("reasons") or [],
-        "recommendations": rep.get("recommendations") or [],
+        "qualification_eligible": False,
+        "reasons": executed.get("reasons") or [],
+        "recommendations": executed.get("recommendations") or [],
+        "evidence_classes": {"executed_paper": executed, "shadow_lab": shadow},
     }
 
 
@@ -1997,6 +2055,8 @@ def _pathway_audit_payload():
         ),
         "generated_at": manifest.get("generated_at"),
         "generation_revision": manifest.get("generation_revision"),
+        "analyzer_source_revision": manifest.get("generation_revision"),
+        "mirror_source_revision": _mirror_source_revision(),
         "epoch_id": (manifest.get("fresh_epoch") or {}).get("epoch_id"),
         "analyzer_sync_id": manifest_sync,
         "expected_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -2213,6 +2273,17 @@ def api_status():
     ).get("policy_signature")
     if legacy_policy_signature and not policy_signatures:
         policy_signatures = [str(legacy_policy_signature)]
+    analyzer_source_revision = manifest.get("generation_revision")
+    mirror_source_revision = _mirror_source_revision()
+    source_revision_parity = (
+        "MATCH" if analyzer_source_revision and mirror_source_revision
+        and (
+            str(analyzer_source_revision).startswith(str(mirror_source_revision))
+            or str(mirror_source_revision).startswith(str(analyzer_source_revision))
+        )
+        else "MISMATCH" if analyzer_source_revision and mirror_source_revision
+        else "UNAVAILABLE"
+    )
     return jsonify({
         "ok": bool(runtime_sync_ok and (report_sync_ok is True or report_pending)),
         "read_only": True,
@@ -2235,6 +2306,11 @@ def api_status():
         "analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "report_analyzer_sync_id": manifest_sync,
         "generation_revision": manifest.get("generation_revision"),
+        "generation_revision_label": "ANALYZER_SOURCE_REVISION",
+        "analyzer_source_revision": analyzer_source_revision,
+        "mirror_source_revision": mirror_source_revision,
+        "fly_mirror_source_revision": mirror_source_revision,
+        "source_revision_parity": source_revision_parity,
         "source_data_revision": manifest.get("source_data_revision"),
         "fresh_epoch_id": fresh_epoch_id,
         "tile_registry_signature": manifest.get("tile_registry_signature"),
@@ -2638,7 +2714,11 @@ def api_static_policy_research():
     source = _safe_policy_v3_dashboard_source()
     report, screen = source["report"], source["screen"]
     all_rows = screen.get("descriptive_top_100") or []
-    rows = [row for row in all_rows if float(row.get("sealed_oos_net_usd") or 0) > 0]
+    rows = [
+        _public_policy_evidence_row(row)
+        for row in all_rows
+        if float(row.get("sealed_oos_net_usd") or 0) > 0
+    ]
     collection = report.get("collection") or {}
     return jsonify({
         "schema": "static_policy_dashboard_v3_1",
@@ -2687,10 +2767,18 @@ def api_dynamic_policy_research():
     source = _safe_policy_v3_dashboard_source()
     report, screen = source["report"], source["screen"]
     leaders = screen.get("dynamic_regime_leaders") or {}
-    rows = [
-        {"regime": regime, "policies": policies}
-        for regime, policies in sorted(leaders.items())
-    ]
+    rows = []
+    for regime, policies in sorted(leaders.items()):
+        supported = [
+            policy for policy in (policies or [])
+            if policy.get("expectancy_lcb_usd") is not None
+            or policy.get("sealed_oos_net_usd") is not None
+        ]
+        if supported:
+            rows.append({
+                "regime": regime,
+                "policies": [_public_policy_evidence_row(policy) for policy in supported],
+            })
     return jsonify({
         "schema": "dynamic_policy_dashboard_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
@@ -2703,6 +2791,7 @@ def api_dynamic_policy_research():
         "winner_kind": "DYNAMIC" if source["qualified"] and rows else "NONE",
         "winner_status": "QUALIFIED" if source["qualified"] and rows else "NO_QUALIFIED_OOS_WINNER",
         "relative_leader_kind": "DYNAMIC" if rows else "NONE",
+        "relative_leader_status": "EV_AVAILABLE" if rows else "UNAVAILABLE_EV_NOT_COMPUTABLE",
         "comparison_delta": {},
         "static_oos": None,
         "dynamic_oos": None,
@@ -2740,6 +2829,18 @@ def api_shadow_policy_research():
         "epoch_id": source["epoch_id"],
         "current_epoch_rejected": int((collection.get("decision_outcomes") or {}).get("REJECTED") or 0),
         "current_v3_1_collection": collection,
+        "evidence_classes": {
+            "shadow_counterfactual": {
+                "status": "DESCRIPTIVE_ONLY",
+                "pnl_kind": "SIMULATED_COUNTERFACTUAL",
+                "merged_with_executed": False,
+            },
+            "executed_paper": {
+                "status": "SEPARATE_COHORT",
+                "pnl_kind": "EXECUTED_PAPER",
+                "merged_with_shadow": False,
+            },
+        },
         "v22_shadow": {},
         "paused_shadow": paused,
         "real_edge": real_edge,
@@ -2825,7 +2926,7 @@ def _v31_evidence_payload(kind: str) -> dict:
     }
     if kind == "risk_drawdown":
         rows = screen.get("drawdown_control_leaders") or screen.get("descriptive_top_100") or []
-        return {**base, "rows": rows[:100], "warning": "Risk metrics are descriptive current-epoch evidence; no row authorizes live trading."}
+        return {**base, "rows": [_public_policy_evidence_row(row) for row in rows[:100]], "warning": "Risk metrics are descriptive current-epoch evidence; no row authorizes live trading."}
     if kind == "chronological_oos":
         return {
             **base,
@@ -4238,12 +4339,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
     <h3>Worst leakage cohorts</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Left on table</th><th>Avg left</th><th>EV</th></tr></thead><tbody id="exit-leak-body"></tbody></table>
+    <h3>Shadow/lab exit combos — separate descriptive evidence</h3>
+    <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>PnL</th><th>EV</th></tr></thead><tbody id="exit-shadow-combos-body"></tbody></table>
   </section>
   <section id="sec-exit-reason-leak">
     <h2>Exit Peak-to-Close Gap (Combined Lanes)</h2>
     <p class="note" id="exit-reason-note">Hindsight MFE minus realized close. This is not directly capturable profit and cannot prescribe an exit change without tick replay validation.</p>
     <div class="kpis" id="exit-reason-kpis"></div>
     <table><thead><tr><th>Exit reason</th><th>N</th><th>Hindsight gap $</th><th>Avg gap $</th><th>Avg MFE%</th><th>Realized%</th><th>Peak-close gap%</th><th>Peak capture%</th></tr></thead><tbody id="exit-reason-body"></tbody></table>
+    <h3>Shadow/lab peak-to-close gap — separate descriptive evidence</h3>
+    <table><thead><tr><th>Exit reason</th><th>N</th><th>Sample</th><th>Hindsight gap $</th><th>Booked $</th><th>Peak $</th></tr></thead><tbody id="exit-reason-shadow-body"></tbody></table>
     <h3>Validation required</h3>
     <ul id="exit-reason-recs"></ul>
   </section>
@@ -4656,8 +4761,14 @@ async function loadLanes() {
   ];
   document.getElementById('chase-kpis').innerHTML = ck.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  const renderChaseBuckets = rows => (rows||[]).map(b =>
-    `<tr><td>${b.bucket||b.threshold||''}</td><td>${b.trades||0}</td><td>${b.win_rate_pct??'n/a'}%</td><td>$${fmtUsd(b.sum_pnl_usd??b.pnl_usd??0)}</td><td>$${fmtUsd(b.ev_usd??b.ev??0)}</td><td>${b.avg_hold_min??'—'}</td></tr>`).join('') || '<tr><td colspan="6">No terminal outcomes in this evidence class.</td></tr>';
+  const renderChaseBuckets = rows => {
+    const byBucket = new Map((rows || []).map(row => [String(row.bucket || row.threshold), row]));
+    return ['0', '1', '2', '3', '4', '5+'].map(bucket => {
+      const b = byBucket.get(bucket) || {bucket, trades: 0};
+      const hasEvidence = Number(b.trades || 0) > 0;
+      return `<tr><td>${bucket}</td><td>${b.trades||0}</td><td>${hasEvidence ? `${b.win_rate_pct??'n/a'}%` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(b.sum_pnl_usd??b.pnl_usd??0)}` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(b.ev_usd??b.ev??0)}` : '—'}</td><td>${hasEvidence ? (b.avg_hold_min??'—') : 'NO TERMINAL EVIDENCE'}</td></tr>`;
+    }).join('');
+  };
   document.getElementById('chase-body').innerHTML = renderChaseBuckets(d.executed_buckets || d.buckets || []);
   document.getElementById('chase-shadow-body').innerHTML = renderChaseBuckets(d.shadow_buckets || []);
 }
@@ -4692,8 +4803,9 @@ async function loadCombos() {
   document.getElementById('policy-grid-kpis').innerHTML = [
     ['Profitable conservative rows', Number(policyStats.profitable_conservative_rows_displayed ?? policyRows.length).toLocaleString()],
     ['Positive ideal-touch hypotheses', Number(policyStats.positive_ideal_touch_hypotheses_displayed ?? diagnosticRows.length).toLocaleString()],
-    ['Families represented', Number(selection.families_represented ?? 0).toLocaleString()],
-    ['Maximum per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
+    ['Policy families searched', Number(selection.families_represented ?? 0).toLocaleString()],
+    ['Maximum rows per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
+    ['Maximum shortlist capacity', (Number(selection.families_represented ?? 0) * Number(selection.per_family_cap ?? 0)).toLocaleString()],
     ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
     ['Policies with terminal OOS fills', Number(policyStats.terminal_oos_policies_tested || 0).toLocaleString()],
     ['Profitable terminal OOS policies', Number(policyStats.profitable_terminal_oos_policies || 0).toLocaleString()],
@@ -4754,13 +4866,18 @@ async function loadChaseThreshold() {
     ['Generic shadows', coverage.generic_shadow_counterfactuals ?? 0],
     ['Tile LAB shadows', coverage.tile_lab_shadow_outcomes ?? 0],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  const renderThresholdRows = rows => (rows||[]).map(t => {
+  const completeThresholdBuckets = rows => {
+    const byBucket = new Map((rows || []).map(row => [String(row.threshold), row]));
+    return ['0', '1', '2', '3', '4', '5+'].map(bucket => byBucket.get(bucket) || ({threshold: bucket, trades: 0, evidence_available: false}));
+  };
+  const renderThresholdRows = rows => completeThresholdBuckets(rows).map(t => {
+    const hasEvidence = Number(t.trades || 0) > 0;
     const wr = t.win_rate_pct ?? t.wr_pct ?? t.wr ?? 'n/a';
     const ev = t.ev_usd ?? t.ev ?? 'n/a';
     const pnl = t.sum_pnl_usd ?? t.pnl_usd ?? t.pnl ?? 0;
     const cls = (Number(ev) >= 0.8) ? 'green' : '';
-    return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${wr}%</td><td>$${fmtUsd(pnl)}</td><td>$${fmtUsd(ev)}</td><td>${t.avg_hold_min??'—'}</td></tr>`;
-  }).join('') || '<tr><td colspan="6">No terminal evidence in this evidence class for the selected lane.</td></tr>';
+    return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${hasEvidence ? `${wr}%` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(pnl)}` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(ev)}` : '—'}</td><td>${hasEvidence ? (t.avg_hold_min??'—') : 'NO TERMINAL EVIDENCE'}</td></tr>`;
+  }).join('');
   document.getElementById('chase-threshold-body').innerHTML = renderThresholdRows(d.executed_thresholds || d.thresholds || []);
   document.getElementById('chase-threshold-shadow-body').innerHTML = renderThresholdRows(d.shadow_thresholds || []);
 }
@@ -4797,6 +4914,9 @@ async function loadExitCombos() {
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.type||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Run analyzer for exit combos.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td><td>$${fmtUsd(c.avg_left_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No leakage data.</td></tr>';
+  const shadow = ((d.evidence_classes||{}).shadow_lab||{});
+  document.getElementById('exit-shadow-combos-body').innerHTML = (shadow.top||[]).map(c =>
+    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No explicit shadow/lab terminal exit evidence in this epoch.</td></tr>';
 }
 
 async function loadExitReasonLeak() {
@@ -4812,6 +4932,10 @@ async function loadExitReasonLeak() {
   document.getElementById('exit-reason-body').innerHTML = (d.reasons||[]).map(r =>
     `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td class="red">$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.avg_left_usd)}</td><td>${r.avg_mfe_margin_pct??'n/a'}%</td><td>${r.avg_realized_margin_pct??'n/a'}%</td><td class="red">${r.avg_leakage_margin_pct??'n/a'}%</td><td>${r.capture_ratio_pct??'n/a'}%</td></tr>`
   ).join('') || '<tr><td colspan="8">Run analyzer for exit reason leakage.</td></tr>';
+  const shadow = ((d.evidence_classes||{}).shadow_lab||{});
+  document.getElementById('exit-reason-shadow-body').innerHTML = (shadow.reasons||[]).map(r =>
+    `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td>${r.sample_status||'DESCRIPTIVE'}</td><td>$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.booked_profit_usd)}</td><td>$${fmtUsd(r.peak_profit_usd)}</td></tr>`
+  ).join('') || '<tr><td colspan="6">No explicit shadow/lab terminal leakage evidence in this epoch.</td></tr>';
   const recEl = document.getElementById('exit-reason-recs');
   if (recEl) {
     recEl.innerHTML = (d.recommendations||[]).map(rec =>
@@ -4881,7 +5005,8 @@ async function loadPathwayAudit() {
     ['Analyzer expected', d.expected_analyzer_sync_id || 'n/a'],
     ['Exchange', d.expected_exchange || 'bitfinex'],
     ['Current analyzer↔registry', currentSync.status || 'CURRENT STATUS UNAVAILABLE'],
-    ['Current revision', currentSync.generation_revision || 'n/a'],
+    ['Analyzer source revision', currentSync.analyzer_source_revision || currentSync.generation_revision || 'n/a'],
+    ['Fly/mirror source revision', currentSync.mirror_source_revision || 'n/a'],
     ['Current epoch', currentSync.epoch_id || 'n/a'],
     ['Analyzer integrity', ais.report_status || (ais.valid === true ? 'VALID' : 'n/a')],
     ['Tile independence', receiptLabel('tile_independence_report.json', ti)],
@@ -5199,8 +5324,8 @@ async function loadStatus() {
   const revisionEl = document.getElementById('revision');
   if (revisionEl) {
     const revision = d.generation_revision || 'UNKNOWN';
-    revisionEl.textContent = `rev ${revision.slice(0, 12)}`;
-    revisionEl.title = `Analyzer generation revision: ${revision}`;
+    revisionEl.textContent = `analyzer rev ${revision.slice(0, 12)}`;
+    revisionEl.title = `Analyzer source revision: ${revision} · Fly/mirror source revision: ${d.mirror_source_revision || 'UNAVAILABLE'} · parity: ${d.source_revision_parity || 'UNAVAILABLE'}`;
   }
   const epochEl = document.getElementById('epoch');
   if (epochEl) {

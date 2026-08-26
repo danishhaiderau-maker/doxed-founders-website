@@ -90,8 +90,10 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
     for payload in payloads[1:]:
         assert payload["qualified_v3_1"] is False
         assert payload["ranking_eligible"] is False
-        assert payload["evidence_scope"].startswith("LEGACY")
         assert payload["warning"]
+    assert payloads[1]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[2]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[3]["evidence_scope"].startswith("LEGACY")
 
 
 def test_chase_surfaces_publish_executed_and_shadow_separately(monkeypatch):
@@ -194,8 +196,9 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "SOURCE UNAVAILABLE" in html
     assert "Profitable conservative rows" in html
     assert "Positive ideal-touch hypotheses" in html
-    assert "Families represented" in html
-    assert "Maximum per family" in html
+    assert "Policy families searched" in html
+    assert "Maximum rows per family" in html
+    assert "Maximum shortlist capacity" in html
     assert "Top 100 Policy Combos" in html
     assert "Entry configurations" in html
     assert "Policy specs enumerated" in html
