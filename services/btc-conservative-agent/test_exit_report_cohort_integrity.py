@@ -218,5 +218,7 @@ def test_ladder_zero_sample_profiles_are_never_rendered_as_comparable():
 def test_empty_exit_views_explain_insufficient_terminal_evidence_not_analyzer_failure():
     assert "Run analyzer for exit combos." not in DASHBOARD
     assert "Run analyzer for exit reason leakage." not in DASHBOARD
+    assert "Run analyzer to generate action items." not in DASHBOARD
     assert "Analyzer completed: no current-epoch terminal exit paths exist yet" in DASHBOARD
     assert "Analyzer completed: no current-epoch terminal exits exist yet" in DASHBOARD
+    assert "No current-epoch terminal exits exist yet; validation action items are unavailable." in DASHBOARD

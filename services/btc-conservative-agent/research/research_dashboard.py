@@ -5111,7 +5111,7 @@ async function loadExitReasonLeak() {
   if (recEl) {
     recEl.innerHTML = (d.recommendations||[]).map(rec =>
       `<li><b>${rec.exit_reason}</b> (${rec.priority})<br/><em>Observation:</em> ${rec.finding||rec.action}<br/><em>QA rule:</em> ${rec.recommendation||rec.action}</li>`
-    ).join('') || '<li>Run analyzer to generate action items.</li>';
+    ).join('') || '<li>No current-epoch terminal exits exist yet; validation action items are unavailable.</li>';
   }
 }
 
