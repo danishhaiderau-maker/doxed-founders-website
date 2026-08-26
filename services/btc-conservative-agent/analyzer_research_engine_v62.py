@@ -11864,22 +11864,22 @@ def chase_attribution_report(trades=None, session=None):
             funnel_cc = int(expire_row.get("limit_chase_count") or 0)
         chase_count, chase_count_source = _resolve_chase_count(tid, funnel_cc, trade_chase)
 
-        lane = _normalize_lane_label(
-            (order_row or {}).get("research_lane")
-            or (fill_row or {}).get("research_lane")
-            or (chase_rows[0].get("research_lane") if chase_rows else None)
-            or (expire_row or {}).get("research_lane")
-            or next(
-                (
-                    event.get("research_lane")
-                    for event in events
-                    if event.get("research_lane")
-                ),
-                None,
-            )
-            or intent_lane.get(tid)
-            or trade_lane.get(tid)
-            or "UNKNOWN"
+        lane_candidates = [
+            (order_row or {}).get("research_lane"),
+            (fill_row or {}).get("research_lane"),
+            intent_lane.get(tid),
+            (chase_rows[0].get("research_lane") if chase_rows else None),
+            (expire_row or {}).get("research_lane"),
+        ]
+        lane_candidates.extend(event.get("research_lane") for event in events)
+        lane_candidates.append(trade_lane.get(tid))
+        lane = next(
+            (
+                normalized
+                for candidate in lane_candidates
+                if (normalized := _normalize_lane_label(candidate)) != "UNKNOWN"
+            ),
+            "UNKNOWN",
         )
         original_limit = (
             (order_row or {}).get("original_limit_price")

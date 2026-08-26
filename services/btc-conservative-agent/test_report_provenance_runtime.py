@@ -197,6 +197,7 @@ def test_chase_attribution_keeps_v31_lane_without_legacy_chase_column(tmp_path, 
         return [{
             "trade_id": "fc3-current",
             "stage": "ORDER_SUBMITTED",
+            "research_lane": "UNKNOWN",
             "limit_price": 63_000,
         }]
 
