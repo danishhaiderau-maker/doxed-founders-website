@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sys
 
 import pandas as pd
@@ -89,6 +90,15 @@ def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, m
     assert shadow_report["total_combos"] == 1
     assert shadow_report["top"][0]["left_on_table_usd"] == 0.0
     assert shadow_report["top"][0]["lane"] == "UNKNOWN"
+
+    leakage = analyzer.exit_leakage_by_reason_report(
+        trades=pd.DataFrame(),
+        session={"mode": "FRESH-COLLECTION"},
+    )
+    shadow_leakage = leakage["evidence_classes"]["shadow_lab"]
+    assert shadow_leakage["terminal_rows"] == 6
+    assert shadow_leakage["reasons"][0]["avg_left_usd"] == 0.0
+    json.dumps(leakage, allow_nan=False)
 
 
 def test_exit_gap_converts_margin_percentage_to_usd_before_subtracting_booked_pnl(tmp_path, monkeypatch):

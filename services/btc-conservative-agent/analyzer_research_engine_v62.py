@@ -14954,9 +14954,9 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         final_margin = pd.to_numeric(final_source, errors="coerce")
         margin_source = work.get("margin_usdt", pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index))
         margin_usd = pd.to_numeric(margin_source, errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
-        peak_usd = (mfe / 100.0) * margin_usd
+        peak_usd = ((mfe / 100.0) * margin_usd).fillna(0.0)
         booked_usd = work[pnl_col]
-        left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
+        left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0).fillna(0.0)
         capture = (booked_usd / peak_usd.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
         work = work.assign(_left=left_usd, _peak=peak_usd, _booked=booked_usd, _capture=capture)
         reason_col = "exit_reason" if "exit_reason" in work.columns else "close_reason"
