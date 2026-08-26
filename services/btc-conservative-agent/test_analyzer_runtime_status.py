@@ -112,6 +112,11 @@ checks = {
         and 'research\\analyzer_research_engine_v62.py' not in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in local_analyzer
     ),
+    "analyzer stamps reports with the deployed Fly revision": (
+        "Invoke-RestMethod" in start_analyzer
+        and "source_git_rev" in start_analyzer
+        and "rev-parse $runtimeRevision" in start_analyzer
+    ),
     "dashboard refreshes only the active tab": (
         "const SECTION_LOADERS" in source
         and "refreshActiveSection" in source
