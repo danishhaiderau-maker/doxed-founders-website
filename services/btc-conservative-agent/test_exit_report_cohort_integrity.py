@@ -82,3 +82,27 @@ def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, m
     assert shadow_report["total_combos"] == 1
     assert shadow_report["top"][0]["left_on_table_usd"] == 0.0
     assert shadow_report["top"][0]["lane"] == "UNKNOWN"
+
+
+def test_exit_gap_converts_margin_percentage_to_usd_before_subtracting_booked_pnl(tmp_path, monkeypatch):
+    shadow = pd.DataFrame([
+        {
+            "trade_id": "shadow-unit-check",
+            "exit_reason": "TIME_EXIT",
+            "research_lane": "FAMILY_ATR_TRAIL",
+            "direction": "LONG",
+            "mfe_margin_pct": 40.0,
+            "margin_usdt": 0.25,
+            "net_pnl_usd": 0.03,
+        }
+    ])
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: shadow)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+
+    report = analyzer.exit_combinations_report(
+        trades=pd.DataFrame(),
+        session={"mode": "FRESH-COLLECTION"},
+    )
+
+    row = report["evidence_classes"]["shadow_lab"]["top"][0]
+    assert row["left_on_table_usd"] == 0.07

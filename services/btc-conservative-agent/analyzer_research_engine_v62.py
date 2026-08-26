@@ -14787,9 +14787,16 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
                 work["net_pnl_usd"] if "net_pnl_usd" in work.columns
                 else pd.Series(0.0, index=work.index)
             )
-            peak = pd.to_numeric(peak_source, errors="coerce").fillna(0)
+            peak_margin_pct = pd.to_numeric(peak_source, errors="coerce").fillna(0)
             booked = pd.to_numeric(booked_source, errors="coerce").fillna(0)
-            work["left_on_table_usd"] = (peak - booked).clip(lower=0)
+            margin_source = (
+                work["margin_usdt"] if "margin_usdt" in work.columns
+                else work["margin_usd"] if "margin_usd" in work.columns
+                else pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index)
+            )
+            margin_usd = pd.to_numeric(margin_source, errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
+            peak_usd = (peak_margin_pct / 100.0) * margin_usd
+            work["left_on_table_usd"] = (peak_usd - booked).clip(lower=0)
         combos = []
         for keys, sub in work.groupby(dims, observed=True, dropna=False):
             ex, ai_b, sp_b, mfe_b, time_b, lane = keys
