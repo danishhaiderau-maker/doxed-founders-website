@@ -4,6 +4,7 @@
  * Uses the executor's fresh raw Bitfinex reconciliation and does not print credentials.
  */
 import fs from 'node:fs';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import prismaPackage from '../node_modules/.prisma/client/default.js';
@@ -128,6 +129,49 @@ export function describeOwnerFetchError(error, url, timeoutMs, attempts = 1) {
   );
 }
 
+export function buildOwnerHttpsRequestOptions(url, token, timeoutMs) {
+  const parsed = new URL(url);
+  return {
+    protocol: parsed.protocol,
+    hostname: parsed.hostname,
+    port: parsed.port || 443,
+    path: `${parsed.pathname}${parsed.search}`,
+    method: 'GET',
+    family: 4,
+    timeout: timeoutMs,
+    headers: token ? { 'X-Bot-Admin-Token': token } : undefined,
+  };
+}
+
+export function fetchOwnerJsonViaHttps(url, token = '', timeoutMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      buildOwnerHttpsRequestOptions(url, token, timeoutMs),
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+            reject(new Error(`HTTPS HTTP ${response.statusCode ?? 'unknown'}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (error) {
+            reject(new Error('HTTPS owner state returned invalid JSON', { cause: error }));
+          }
+        });
+      },
+    );
+    request.on('timeout', () => {
+      request.destroy(new Error(`HTTPS owner state timed out after ${timeoutMs}ms`));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 async function fetchOwnerJson(url) {
   let lastError = null;
   for (let attempt = 1; attempt <= ownerFetchAttempts; attempt += 1) {
@@ -142,6 +186,18 @@ async function fetchOwnerJson(url) {
       return await response.json();
     } catch (error) {
       lastError = error;
+      // Node's global fetch uses undici. On this Windows monitor host it can
+      // intermittently exhaust its dual-stack connect attempt while the same
+      // canonical Fly route remains healthy. Fall back to a fresh native HTTPS
+      // request pinned to IPv4; preserve the same authentication and fail-closed
+      // response checks instead of weakening the money-path boundary proof.
+      try {
+        return await fetchOwnerJsonViaHttps(url, adminToken, ownerFetchTimeoutMs);
+      } catch (httpsError) {
+        lastError = new Error('fetch and HTTPS fallback both failed', {
+          cause: new AggregateError([error, httpsError]),
+        });
+      }
       if (attempt < ownerFetchAttempts) {
         await new Promise((resolve) => setTimeout(resolve, attempt * 350));
       }

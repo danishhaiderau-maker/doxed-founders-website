@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  buildOwnerHttpsRequestOptions,
   describeOwnerFetchError,
   hasFullOwnerOrderState,
   isStrictExchangeOrderAuditFlat,
@@ -8,6 +9,21 @@ import {
   isRelayPausedAndDisarmed,
   ownerFetchErrorChain,
 } from './check-relay-flat.mjs';
+
+test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4', () => {
+  const options = buildOwnerHttpsRequestOptions(
+    'https://doxed-btc-bot.fly.dev/api/relay-execution-state?fresh=1',
+    'redacted-test-token',
+    15_000,
+  );
+  assert.equal(options.protocol, 'https:');
+  assert.equal(options.hostname, 'doxed-btc-bot.fly.dev');
+  assert.equal(options.port, 443);
+  assert.equal(options.path, '/api/relay-execution-state?fresh=1');
+  assert.equal(options.family, 4);
+  assert.equal(options.timeout, 15_000);
+  assert.equal(options.headers['X-Bot-Admin-Token'], 'redacted-test-token');
+});
 
 test('paused relay accepts legacy null mode only when arming timestamps are clear', () => {
   assert.equal(isRelayPausedAndDisarmed({
