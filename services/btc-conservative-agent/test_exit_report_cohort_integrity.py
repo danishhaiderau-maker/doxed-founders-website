@@ -58,13 +58,16 @@ def test_exit_dashboard_renders_separated_shadow_terminal_evidence():
 
 
 def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, monkeypatch):
+    # Six rows intentionally match the six grouping dimensions.  Without an
+    # explicit fallback for the missing research_lane column, pandas may treat
+    # the dimension-name list as a row-wise grouping vector.
     shadow = pd.DataFrame([
         {
-            "trade_id": "shadow-terminal-1",
+            "trade_id": f"shadow-terminal-{index}",
             "exit_reason": "TIME_EXIT",
-            "research_lane": "FAMILY_ATR_TRAIL",
             "direction": "LONG",
         }
+        for index in range(6)
     ])
     monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: shadow)
     monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
@@ -75,6 +78,7 @@ def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, m
     )
 
     shadow_report = report["evidence_classes"]["shadow_lab"]
-    assert shadow_report["terminal_rows"] == 1
+    assert shadow_report["terminal_rows"] == 6
     assert shadow_report["total_combos"] == 1
     assert shadow_report["top"][0]["left_on_table_usd"] == 0.0
+    assert shadow_report["top"][0]["lane"] == "UNKNOWN"

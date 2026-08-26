@@ -14760,6 +14760,16 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         if "exit_reason" not in work.columns:
             work["exit_reason"] = "UNKNOWN"
         work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
+        # A shadow terminal may predate per-family lane metadata.  Pandas can
+        # misinterpret a list of six missing/available column labels as a
+        # six-row grouping vector when the frame also has six rows, producing
+        # nonsensical variable-length keys rather than a clear KeyError.
+        # Materialize every dimension explicitly so grouping is deterministic.
+        for dimension in dims:
+            if dimension not in work.columns:
+                work[dimension] = "UNKNOWN"
+            else:
+                work[dimension] = work[dimension].fillna("UNKNOWN")
         lot_col = next((c for c in ("profit_left_on_table", "left_on_table_usd", "left_on_table") if c in work.columns), None)
         if lot_col:
             work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
