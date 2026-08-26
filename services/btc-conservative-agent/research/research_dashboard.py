@@ -4227,7 +4227,7 @@ const EVIDENCE_SCOPES = {
   summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
-  lanes: ['CURRENT FOUR-TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
+  lanes: ['CURRENT CANONICAL TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
   ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
   chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],

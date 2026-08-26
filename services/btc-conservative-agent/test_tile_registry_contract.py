@@ -91,4 +91,4 @@ def test_analyzer_dashboard_does_not_override_the_registry_roster():
     assert "tile_lanes=tuple(DASHBOARD_PRIMARY_LANES)" in source
     assert "{% for lane in tile_lanes %}" in source
     assert "CURRENT TWO-LANE EVIDENCE" not in source
-    assert "CURRENT FOUR-TILE EVIDENCE" in source
+    assert "CURRENT CANONICAL TILE EVIDENCE" in source
