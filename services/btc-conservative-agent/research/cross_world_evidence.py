@@ -162,7 +162,24 @@ def build_cross_world_evidence_report(
     not_computable: list[dict[str, Any]] = []
 
     for world in WORLD_ORDER:
-        rows = [row for row in (world_rows.get(world) or []) if isinstance(row, Mapping)]
+        source_rows = [row for row in (world_rows.get(world) or []) if isinstance(row, Mapping)]
+        excluded_missing_epoch = 0
+        excluded_other_epoch = 0
+        rows = []
+        for row in source_rows:
+            row_epoch = _clean(row.get("epoch_id")) or _clean(
+                (row.get("causal_identity") or {}).get("epoch_id")
+                if isinstance(row.get("causal_identity"), Mapping)
+                else None
+            )
+            if epoch_id:
+                if row_epoch is None:
+                    excluded_missing_epoch += 1
+                    continue
+                if row_epoch != epoch_id:
+                    excluded_other_epoch += 1
+                    continue
+            rows.append(row)
         candidates: dict[tuple[str, ...], list[Mapping[str, Any]]] = defaultdict(list)
         missing_counts: Counter[str] = Counter()
         complete = 0
@@ -207,6 +224,9 @@ def build_cross_world_evidence_report(
                 else "NOT_COMPUTABLE"
             ),
             "rows_observed": len(rows),
+            "source_rows_total": len(source_rows),
+            "rows_excluded_missing_epoch": excluded_missing_epoch,
+            "rows_excluded_other_epoch": excluded_other_epoch,
             "rows_with_complete_explicit_identity": complete,
             "unique_joinable_rows": len(indexes[world]),
             "ambiguous_duplicate_identity_rows": sum(len(v) for v in duplicate_keys.values()),

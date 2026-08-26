@@ -213,3 +213,10 @@ def test_ladder_zero_sample_profiles_are_never_rendered_as_comparable():
     assert "['Best profile', noComparableProfiles ? 'n/a'" in DASHBOARD
     assert "if (noComparableProfiles)" in DASHBOARD
     assert "Profiles with zero simulated trades are not ranked or displayed as results." in DASHBOARD
+
+
+def test_empty_exit_views_explain_insufficient_terminal_evidence_not_analyzer_failure():
+    assert "Run analyzer for exit combos." not in DASHBOARD
+    assert "Run analyzer for exit reason leakage." not in DASHBOARD
+    assert "Analyzer completed: no current-epoch terminal exit paths exist yet" in DASHBOARD
+    assert "Analyzer completed: no current-epoch terminal exits exist yet" in DASHBOARD

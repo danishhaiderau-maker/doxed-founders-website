@@ -58,16 +58,29 @@ def test_missing_identity_is_not_computable_and_never_fuzzy_joined():
     assert "timestamp_proximity" in result["join_contract"]["prohibited_fallbacks"]
 
 
-def test_csv_nan_is_missing_identity_not_a_manufactured_duplicate_key():
+def test_csv_nan_epoch_is_excluded_from_the_current_epoch_not_manufactured_as_a_key():
     missing = {**identity(), "fill_state": "FILL"}
     missing["epoch_id"] = math.nan
     result = report({"OBSERVED_PAPER": [missing, dict(missing)]})
     world = result["worlds"]["OBSERVED_PAPER"]
-    assert world["rows_observed"] == 2
+    assert world["source_rows_total"] == 2
+    assert world["rows_observed"] == 0
+    assert world["rows_excluded_missing_epoch"] == 2
     assert world["rows_with_complete_explicit_identity"] == 0
     assert world["unique_joinable_rows"] == 0
     assert world["ambiguous_duplicate_identity_rows"] == 0
-    assert world["missing_identity_counts"] == {"epoch_id": 2}
+    assert world["missing_identity_counts"] == {}
+
+
+def test_wrong_epoch_rows_are_excluded_from_current_cross_world_inventory():
+    stale = {**identity(epoch_id="epoch-old"), "fill_state": "FILL"}
+    current = {**identity(), "fill_state": "FILL"}
+    result = report({"BITFINEX_COPY": [stale, current]})
+    world = result["worlds"]["BITFINEX_COPY"]
+    assert world["source_rows_total"] == 2
+    assert world["rows_observed"] == 1
+    assert world["rows_excluded_other_epoch"] == 1
+    assert world["unique_joinable_rows"] == 1
 
 
 def test_complete_explicit_identity_exposes_agreement_and_disagreement():
@@ -143,9 +156,12 @@ def test_nested_causal_identity_is_accepted_but_aliases_are_not():
         "CONSERVATIVE_BBO_DEPTH": [aliases],
     })
     assert result["worlds"]["IDEAL_TOUCH_DIAGNOSTIC"]["unique_joinable_rows"] == 1
-    assert result["worlds"]["CONSERVATIVE_BBO_DEPTH"]["unique_joinable_rows"] == 0
-    missing = result["worlds"]["CONSERVATIVE_BBO_DEPTH"]["missing_identity_counts"]
-    assert set(missing) == set(REQUIRED_CAUSAL_IDENTITIES) - {"policy_signature"}
+    alias_world = result["worlds"]["CONSERVATIVE_BBO_DEPTH"]
+    assert alias_world["source_rows_total"] == 1
+    assert alias_world["rows_observed"] == 0
+    assert alias_world["rows_excluded_missing_epoch"] == 1
+    assert alias_world["unique_joinable_rows"] == 0
+    assert alias_world["missing_identity_counts"] == {}
 
 
 def test_engine_publishes_report_atomically_and_manifest_catalog_owns_it(tmp_path, monkeypatch):
@@ -198,3 +214,6 @@ def test_cross_world_page_uses_canonical_world_inventory_fields():
     assert "w.rows_with_complete_explicit_identity??0" in source
     assert "w.unique_joinable_rows??0" in source
     assert "w.rows??w.row_count??0" not in source
+    assert "excluded legacy/missing epoch" in source
+    assert "d.epoch_id" in source
+    assert "d.source_revision" in source
