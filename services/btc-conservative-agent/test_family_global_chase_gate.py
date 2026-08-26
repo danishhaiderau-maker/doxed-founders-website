@@ -69,6 +69,44 @@ def test_settings_change_reconciles_existing_family_pending_orders():
     assert "_cancel_pending_for_chase_gate(order)" in source
 
 
+def test_disabled_early_bucket_cannot_leave_a_resting_order_fillable():
+    buckets = {
+        "0_chases": False,
+        "1_chase": False,
+        "2_chases": False,
+        "3_chases": True,
+        "4_chases": True,
+        "5+_chases": True,
+    }
+
+    def chase_count_bucket(n):
+        n = min(max(int(n or 0), 0), 5)
+        return "5+_chases" if n >= 5 else ("1_chase" if n == 1 else f"{n}_chases")
+
+    namespace = {
+        "Optional": __import__("typing").Optional,
+        "CHASE_WINDOW_SEC": 300,
+        "CHASE_WINDOW_MAX_INDEX": 5,
+        "CHASE_EXECUTION_BUCKET_ORDER": tuple(buckets),
+        "get_chase_execution_buckets": lambda: buckets,
+        "chase_count_bucket": chase_count_bucket,
+    }
+    _compile_functions(
+        "chase_age_window_index",
+        "last_enabled_chase_count",
+        "min_enabled_chase_count",
+        "chase_bucket_allowed",
+        "chase_age_window_should_cancel",
+        namespace=namespace,
+    )
+    should_cancel = namespace["chase_age_window_should_cancel"]
+    assert should_cancel(0) is True
+    assert should_cancel(14 * 60) is True
+    assert should_cancel(15 * 60) is False
+    assert should_cancel(20 * 60) is False
+    assert should_cancel(27 * 60) is False
+
+
 def test_existing_family_order_is_pulled_into_nonterminal_virtual_wait():
     signal = {
         "trade_id": "fat-existing",

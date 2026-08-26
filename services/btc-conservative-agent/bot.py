@@ -16503,11 +16503,14 @@ def _order_signal_age_sec(order: dict, signal: dict, now: float) -> float:
 
 
 def chase_age_window_should_cancel(age_sec) -> bool:
-    """Cancel only when every chase window is off.
+    """Pull a resting order out of any currently disabled active window.
 
-    Early disabled windows (0/1 OFF) wait to submit; they must not kill a
-    resting order just because count ticked to 5+ at ~9 min. After the last
-    enabled window (5+ OFF), rest until 30 min TTL.
+    Signals that have not submitted yet remain virtual until the first enabled
+    bucket.  A pre-existing resting order is different: after the operator
+    disables its current bucket it must be cancelled and returned to virtual
+    wait, otherwise it could still fill through a disabled execution gate.
+    After the last enabled window, retain the existing order until TTL so a
+    late disabled bucket does not erase an order created by an allowed stage.
     """
     last = last_enabled_chase_count()
     if last is None:
@@ -16517,7 +16520,7 @@ def chase_age_window_should_cancel(age_sec) -> bool:
         return False
     mn = min_enabled_chase_count()
     if mn is not None and idx < mn:
-        return False
+        return True
     return not chase_bucket_allowed(idx)
 
 
@@ -17137,10 +17140,11 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
 
 
 def enforce_dashboard_chase_gates_on_pending() -> None:
-    """Cancel pending only when the current 5-minute age window is an early disabled bucket.
+    """Reconcile resting orders with the current global age-window selector.
 
-    After the last enabled window (e.g. 5+ OFF while 2/3/4 ON), rest until TTL.
-    Do not cancel at ~9 min just because chase-count ticked to 5+.
+    Disabled windows before or between enabled stages are pulled back into
+    virtual wait.  A disabled window after the last enabled stage holds the
+    already-valid order until TTL.
     """
     now = time.time()
     with trade_lock:
