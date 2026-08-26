@@ -7,6 +7,7 @@ import {
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
   isRelayPausedAndDisarmed,
+  isRetryablePrismaConnectionError,
   ownerFetchErrorChain,
 } from './check-relay-flat.mjs';
 
@@ -23,6 +24,21 @@ test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4'
   assert.equal(options.family, 4);
   assert.equal(options.timeout, 15_000);
   assert.equal(options.headers['X-Bot-Admin-Token'], 'redacted-test-token');
+});
+
+test('Neon proof retries only transient connection failures', () => {
+  assert.equal(
+    isRetryablePrismaConnectionError(new Error("Can't reach database server at host:5432")),
+    true,
+  );
+  assert.equal(
+    isRetryablePrismaConnectionError(new Error('P1017: Server has closed the connection')),
+    true,
+  );
+  assert.equal(
+    isRetryablePrismaConnectionError(new Error('conservative-btc agent missing')),
+    false,
+  );
 });
 
 test('paused relay accepts legacy null mode only when arming timestamps are clear', () => {

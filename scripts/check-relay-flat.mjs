@@ -54,6 +54,13 @@ const ownerFetchAttempts = Math.max(
     Number.parseInt(process.env.OWNER_STATE_FETCH_ATTEMPTS ?? '3', 10) || 3,
   ),
 );
+const prismaProofAttempts = Math.max(
+  1,
+  Math.min(
+    5,
+    Number.parseInt(process.env.PRISMA_PROOF_ATTEMPTS ?? '3', 10) || 3,
+  ),
+);
 const botUrls = requireCanonicalFlyOwner
   ? [CANONICAL_FLY_OWNER_URL]
   : [
@@ -315,6 +322,73 @@ export function isRelayPausedAndDisarmed(row) {
   );
 }
 
+export function isRetryablePrismaConnectionError(error) {
+  const message = String(error?.message ?? error ?? '');
+  return /P1001|P1002|P1017|Can't reach database server|Server has closed the connection/i.test(message);
+}
+
+async function loadRelayBoundaryRows() {
+  let lastError = null;
+  for (let attempt = 1; attempt <= prismaProofAttempts; attempt += 1) {
+    try {
+      const agent = await prisma.tradingAgent.findUnique({
+        where: { slug: 'conservative-btc' },
+        select: { id: true },
+      });
+      if (!agent) throw new Error('conservative-btc agent missing');
+
+      const instances = await prisma.tradingAgentInstance.findMany({
+        where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
+        include: {
+          user: { select: { platformHandle: true, name: true } },
+        },
+      });
+
+      const rows = [];
+      for (const instance of instances) {
+        const dashboard = instance.dashboardState ?? {};
+        const activeParticipants = await prisma.signalCycleParticipant.count({
+          where: {
+            userId: instance.userId,
+            cycle: { agentId: agent.id },
+            status: { in: ['PENDING_ENTRY', 'OPEN'] },
+          },
+        });
+        const reconcile =
+          dashboard.copyRelayReconcile
+          ?? dashboard.copyRelaySim?.reconcile
+          ?? null;
+        rows.push({
+          instanceId: instance.id,
+          user:
+            instance.user.platformHandle
+            || instance.user.name
+            || instance.userId,
+          status: instance.status,
+          lastError: instance.lastError,
+          activeParticipants,
+          reconcile,
+          relayExecutionMode: dashboard.relayExecutionMode ?? null,
+          relayArmedAt: dashboard.relayArmedAt ?? null,
+          realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
+          exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
+          orphanOrderIds: dashboard.orphanOrderIds ?? [],
+          orphanPositionIds: dashboard.orphanPositionIds ?? [],
+        });
+      }
+      return rows;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryablePrismaConnectionError(error) || attempt >= prismaProofAttempts) {
+        throw error;
+      }
+      await prisma.$disconnect().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+    }
+  }
+  throw lastError ?? new Error('Neon boundary proof unavailable');
+}
+
 async function main() {
   const { bot, baseUrl: botUrl } = await fetchOwnerState();
   const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
@@ -325,51 +399,7 @@ async function main() {
       ),
   );
 
-  const agent = await prisma.tradingAgent.findUnique({
-    where: { slug: 'conservative-btc' },
-    select: { id: true },
-  });
-  if (!agent) throw new Error('conservative-btc agent missing');
-
-  const instances = await prisma.tradingAgentInstance.findMany({
-    where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
-    include: {
-      user: { select: { platformHandle: true, name: true } },
-    },
-  });
-
-  const rows = [];
-  for (const instance of instances) {
-    const dashboard = instance.dashboardState ?? {};
-    const activeParticipants = await prisma.signalCycleParticipant.count({
-      where: {
-        userId: instance.userId,
-        cycle: { agentId: agent.id },
-        status: { in: ['PENDING_ENTRY', 'OPEN'] },
-      },
-    });
-    const reconcile =
-      dashboard.copyRelayReconcile
-      ?? dashboard.copyRelaySim?.reconcile
-      ?? null;
-    rows.push({
-      instanceId: instance.id,
-      user:
-        instance.user.platformHandle
-        || instance.user.name
-        || instance.userId,
-      status: instance.status,
-      lastError: instance.lastError,
-      activeParticipants,
-      reconcile,
-      relayExecutionMode: dashboard.relayExecutionMode ?? null,
-      relayArmedAt: dashboard.relayArmedAt ?? null,
-      realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
-      exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
-      orphanOrderIds: dashboard.orphanOrderIds ?? [],
-      orphanPositionIds: dashboard.orphanPositionIds ?? [],
-    });
-  }
+  const rows = await loadRelayBoundaryRows();
 
   const output = {
     at: new Date().toISOString(),
