@@ -1461,12 +1461,16 @@ def test_chase_2_to_3_does_not_happen_at_60s():
     assert idx(900) == 3
 
 
-def test_five_plus_off_does_not_cancel_chase_4_at_9_min():
+def test_disabled_early_window_cancels_but_post_last_window_holds():
     _idx, _start, cancel, reprice, _ready = _five_min_chase_helpers()
-    assert cancel(9 * 60) is False
+    # Before the first enabled bucket, a resting order must be removed so it
+    # cannot fill through an operator-disabled execution window.
+    assert cancel(9 * 60) is True
     assert reprice(9 * 60) is False
     assert cancel(22 * 60) is False
     assert reprice(22 * 60) is True
+    # After the final enabled bucket, preserve the resting limit until TTL but
+    # do not move it again.
     assert cancel(26 * 60) is False
     assert reprice(26 * 60) is False
 

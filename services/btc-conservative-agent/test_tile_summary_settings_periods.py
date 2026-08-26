@@ -71,6 +71,13 @@ def test_server_is_authoritative_for_execution_gate_controls():
     assert "_patch_api_state_cache_fields(\n        spread_gate=out" in SOURCE
 
 
+def test_paper_tile_banner_reports_each_relay_blocker_truthfully():
+    assert '"BLOCKED_UNQUALIFIED": "strategy is not qualified"' in SOURCE
+    assert '"BLOCKED_PARTIAL_REDUCTION_UNPROVEN": (' in SOURCE
+    assert '"BLOCKED_INITIAL_STOP_SWEEP_REQUIRED": (' in SOURCE
+    assert "live copy blocked until partial-close relay support is verified" not in SOURCE
+
+
 def test_virtual_chase_candidates_are_separate_from_pending_orders():
     assert '<tbody id="virtualChaseTable"></tbody>' in SOURCE
     # Danish decision 6 (2026-08-01) — virtual candidates expose the full

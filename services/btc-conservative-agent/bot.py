@@ -16601,7 +16601,17 @@ def chase_age_window_should_cancel(age_sec) -> bool:
 
 
 def chase_age_window_may_reprice(age_sec) -> bool:
-    idx = chase_age_window_index(age_sec)
+    try:
+        age = max(0.0, float(age_sec or 0))
+    except (TypeError, ValueError):
+        age = 0.0
+    # ``chase_age_window_index`` deliberately clamps everything at 5+ for
+    # display and attribution.  Repricing permission is narrower: the final
+    # 25-30 minute window ends at 30 minutes, after which the order may rest
+    # until its TTL but must hold the last operator-authorized limit.
+    if age >= (CHASE_WINDOW_MAX_INDEX + 1) * CHASE_WINDOW_SEC:
+        return False
+    idx = chase_age_window_index(age)
     last = last_enabled_chase_count()
     if last is None:
         return False
@@ -21995,6 +22005,14 @@ def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: flo
     ):
         return False
     age_sec = now - created
+    # The operator's global age-window selector is the final authority for
+    # every family order, including a tile's own post-submit schedule.  The
+    # outer pending-order reconciliation normally enforces this first, but the
+    # family helper must also fail closed when called independently or after
+    # the last enabled window.  In the latter case the resting order remains on
+    # the book until TTL; it simply holds its last permitted limit.
+    if not chase_age_window_may_reprice(age_sec):
+        return False
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
@@ -25603,10 +25621,19 @@ def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
         if lane_id in PLATFORM_RELAY_ELIGIBLE_LANES:
             return "LOCAL PAPER ORDERS ENABLED — live copy requires platform relay ON"
         if lane_id in PLATFORM_RELAY_CONFIGURED_LANES:
-            return (
-                "LOCAL PAPER ORDERS ENABLED — live copy blocked until partial-close "
-                "relay support is verified"
-            )
+            capability = str(
+                (COMBO_LANE_SPECS.get(lane_id) or {}).get("relay_capability") or ""
+            ).upper()
+            blocker_text = {
+                "BLOCKED_UNQUALIFIED": "strategy is not qualified",
+                "BLOCKED_PARTIAL_REDUCTION_UNPROVEN": (
+                    "partial-close relay support is not verified"
+                ),
+                "BLOCKED_INITIAL_STOP_SWEEP_REQUIRED": (
+                    "initial-stop evidence is still required"
+                ),
+            }.get(capability, "relay capability is not proven")
+            return f"LOCAL PAPER ORDERS ENABLED — live copy blocked: {blocker_text}"
         return "PAPER ORDERS ENABLED — not eligible for live copy"
     if mode == EXEC_MODE_EXIT_ONLY:
         return "OFF — no new entries; existing positions still managed"

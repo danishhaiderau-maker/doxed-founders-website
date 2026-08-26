@@ -165,6 +165,50 @@ def test_family_offset_policy_remains_separate_from_global_chase_timing_gate():
     assert 'if not any(get_chase_execution_buckets().values()):' in gate
 
 
+def test_family_reprice_directly_obeys_global_age_window_gate():
+    chase = ast.get_source_segment(BOT_SOURCE, _function("_apply_family_policy_chase"))
+    assert "if not chase_age_window_may_reprice(age_sec):" in chase
+    assert chase.index("if not chase_age_window_may_reprice(age_sec):") < chase.index(
+        "_compute_limit_chase_target("
+    )
+
+
+def test_last_enabled_window_holds_resting_family_limit_without_reprice():
+    buckets = {
+        "0_chases": False,
+        "1_chase": False,
+        "2_chases": False,
+        "3_chases": True,
+        "4_chases": True,
+        "5+_chases": True,
+    }
+
+    def chase_count_bucket(n):
+        n = min(max(int(n or 0), 0), 5)
+        return "5+_chases" if n >= 5 else ("1_chase" if n == 1 else f"{n}_chases")
+
+    namespace = {
+        "Optional": __import__("typing").Optional,
+        "CHASE_WINDOW_SEC": 300,
+        "CHASE_WINDOW_MAX_INDEX": 5,
+        "CHASE_EXECUTION_BUCKET_ORDER": tuple(buckets),
+        "get_chase_execution_buckets": lambda: buckets,
+        "chase_count_bucket": chase_count_bucket,
+    }
+    _compile_functions(
+        "chase_age_window_index",
+        "last_enabled_chase_count",
+        "chase_bucket_allowed",
+        "chase_age_window_may_reprice",
+        namespace=namespace,
+    )
+    may_reprice = namespace["chase_age_window_may_reprice"]
+    assert may_reprice(14 * 60) is False
+    assert may_reprice(15 * 60) is True
+    assert may_reprice(29 * 60) is True
+    assert may_reprice(31 * 60) is False
+
+
 def test_tile_api_and_dashboard_distinguish_global_submit_from_template_reprice():
     annotate = ast.get_source_segment(BOT_SOURCE, _function("_annotate_lanes_with_exec_mode"))
     assert 'spec["chase_timing"]' in annotate
