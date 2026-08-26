@@ -15618,6 +15618,23 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         else:
             disposition = "ORDER_ELIGIBLE"
             decision_reason = "SHARED_AI_APPROVE_AND_POLICY_PASS"
+        # Keep the operator-facing AI History joined to the same signed
+        # per-family decision that is written to the V3 ledger below.  The
+        # ledger was complete, but without this stamp genuine family
+        # evaluations rendered as "not evaluated" even while their paper
+        # workers and orders were advancing.
+        _stamp_shared_ai_lane_verdict(
+            _shared_ai_call_id(ai_result=ai, ctx=ctx),
+            lane,
+            policy_accepted,
+            decision_reason,
+            score=spread,
+            policy_version=str(
+                (_v3_lane_policy_material(lane) or {}).get("policy_signature")
+                or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
+                or lane
+            ),
+        )
         _write_v3_shared_lane_decision(
             lane, ai, ctx, enriched,
             policy_decision="ACCEPT" if policy_accepted else "REJECT",

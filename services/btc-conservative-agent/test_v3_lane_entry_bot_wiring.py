@@ -131,6 +131,18 @@ def test_ai_fanout_queues_lane_execution_instead_of_blocking_scheduler():
     assert "_spawn_combo_lane(" not in fanout
 
 
+def test_family_decision_stamps_dashboard_history_before_v3_ledger_write():
+    fanout = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "spawn_combo_lanes_from_ai_scan"),
+    )
+    stamp = fanout.index("_stamp_shared_ai_lane_verdict(")
+    ledger = fanout.index("_write_v3_shared_lane_decision(")
+    assert stamp < ledger
+    assert "policy_accepted" in fanout[stamp:ledger]
+    assert "decision_reason" in fanout[stamp:ledger]
+
+
 def test_verdict_and_resolution_share_one_policy_material_builder():
     decision = ast.get_source_segment(
         SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
