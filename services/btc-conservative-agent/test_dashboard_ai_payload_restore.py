@@ -43,9 +43,17 @@ def test_restore_last_ai_payload_from_log(tmp_path, monkeypatch):
     monkeypatch.setattr(bot_mod, "LAST_AI_PAYLOAD", {})
     monkeypatch.setattr(bot_mod, "LAST_AI_TIMESTAMP", None)
     assert bot_mod.restore_last_ai_payload_from_log(str(log)) is True
-    assert bot_mod.LAST_AI_PAYLOAD["price"] == 64000
+    assert bot_mod.LAST_AI_PAYLOAD["schema"] == "shared_direction_prompt_v4"
+    assert bot_mod.LAST_AI_PAYLOAD["raw"]["price"] == 64000
+    assert "historically_profitable_patterns" not in bot_mod.LAST_AI_PAYLOAD
     assert bot_mod.LAST_AI_PAYLOAD["_dashboard_restore"]["status"] == "RESTORED_AFTER_RESTART"
     assert bot_mod.LAST_AI_TIMESTAMP == "2026-08-19T11:50:00Z"
+
+
+def test_dashboard_names_canonical_non_onedrive_mirror():
+    html = bot_mod.HTML
+    assert "C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror" in html
+    assert "services/btc-conservative-agent/fly-data-mirror" not in html
 
 
 def test_json_for_js_keeps_quotes_newlines_backticks_inside_json():

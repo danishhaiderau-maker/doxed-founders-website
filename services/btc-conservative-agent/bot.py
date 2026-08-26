@@ -3934,7 +3934,8 @@ def restore_last_ai_payload_from_log(path: str = None) -> bool:
                     last = row
         if not last:
             return False
-        payload = copy.deepcopy(last.get("context") or {})
+        full_context = copy.deepcopy(last.get("context") or {})
+        payload = build_shared_direction_prompt_context(full_context)
         payload = json.loads(json.dumps(payload, default=str))
         payload["_dashboard_restore"] = {
             "status": "RESTORED_AFTER_RESTART",
@@ -16101,9 +16102,6 @@ def evaluate_signal_with_ai(
             logger.warning(f"[AI] Feature validation failed: {reason} - reject without API call [PIPELINE ENFORCEMENT]")
             return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"FEATURE_VALIDATION:{reason}", "ai_error": True, "factors": {}, "source": "VALIDATION", "approved": False, "trade_id": raw_context.get("trade_id")}
         global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
-        if not shadow_only:
-            LAST_AI_PAYLOAD = copy.deepcopy(ctx)
-            LAST_AI_TIMESTAMP = utc_iso()
         logger.info(f"[AI PAYLOAD SNAPSHOT] lane={research_lane} {ctx} [PIPELINE ENFORCEMENT]")
         temperature = research_ai_temperature()
         replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
@@ -16111,6 +16109,12 @@ def evaluate_signal_with_ai(
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
         # One shared direction prompt is the only runtime AI layer.
         prompt_context = build_shared_direction_prompt_context(ctx)
+        if not shadow_only:
+            # The dashboard label promises the exact model payload.  Keep the
+            # full research context in ai_input_log.jsonl, but expose only the
+            # compact context actually serialized into the DeepSeek prompt.
+            LAST_AI_PAYLOAD = copy.deepcopy(prompt_context)
+            LAST_AI_TIMESTAMP = utc_iso()
         prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(prompt_context, indent=2))
         if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
@@ -27232,7 +27236,7 @@ __ADMIN_ACCESS_CONTROLS__
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
-    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> syncs on growth
+  Local mirror at <code>C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror</code> syncs on growth
     (≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code>, default 50 MB) or every 3 min — then ACK-prunes rotated shards only.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
@@ -27261,7 +27265,7 @@ __ADMIN_ACCESS_CONTROLS__
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
-    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
+    Local mirror: <code>C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
 
