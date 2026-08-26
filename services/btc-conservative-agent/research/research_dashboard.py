@@ -4502,6 +4502,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-body"></tbody></table>
     <h3>Shadow/lab stop-effectiveness matrix — separate descriptive evidence</h3>
     <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-shadow-body"></tbody></table>
+    <h3>Causal exit-policy combinations</h3>
+    <p class="note">Family × exit profile × terminal reason. Paper and shadow/lab rows remain separate; missing dimensions are not guessed.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-policy-body"></tbody></table>
+    <h3>Risk and chase combinations</h3>
+    <p class="note">Initial ATR stop × hard-stop percentage × exact chase bucket × terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-risk-body"></tbody></table>
+    <h3>Market-context exit combinations</h3>
+    <p class="note">Regime × direction × family × terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-market-body"></tbody></table>
+    <h3>Entry/execution exit combinations</h3>
+    <p class="note">Offset × exact chase bucket × entry-delay band × fill status × terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-entry-body"></tbody></table>
     <h3>Highest descriptive exit-combo EV — unqualified</h3>
     <p class="note">Observed cohorts only. Small or unmatched samples are not evidence that an exit caused the result and cannot qualify a policy.</p>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
@@ -5103,6 +5115,23 @@ async function loadExitCombos() {
   document.getElementById('exit-family-scorecard-shadow-body').innerHTML = renderFamilies(shadow.exit_family_scorecard);
   document.getElementById('stop-effectiveness-body').innerHTML = renderStops(executed.stop_effectiveness_matrix);
   document.getElementById('stop-effectiveness-shadow-body').innerHTML = renderStops(shadow.stop_effectiveness_matrix);
+  const causalWorlds = [['PAPER', executed], ['SHADOW/LAB', shadow]];
+  const renderCausalView = key => {
+    const rows = [];
+    const reasons = [];
+    causalWorlds.forEach(([label, world]) => {
+      const view = ((world.causal_combination_views||{})[key]||{});
+      (view.rows||[]).forEach(row => rows.push(
+        `<tr><td>${label}</td><td>${row.combination||'—'}</td><td>${row.trades??0}</td><td>${row.wr_pct??'n/a'}%</td><td>${money(row.pnl_usd)}</td><td>${money(row.ev_usd)}</td><td>${row.identity_status||row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
+      ));
+      if (!(view.rows||[]).length) reasons.push(`${label}: ${view.empty_reason||world.empty_reason||'NO TERMINAL EVIDENCE'}`);
+    });
+    return rows.join('') || `<tr><td colspan="7">${reasons.join(' · ')}</td></tr>`;
+  };
+  document.getElementById('exit-causal-policy-body').innerHTML = renderCausalView('exit_policy');
+  document.getElementById('exit-causal-risk-body').innerHTML = renderCausalView('risk_and_chase');
+  document.getElementById('exit-causal-market-body').innerHTML = renderCausalView('market_context');
+  document.getElementById('exit-causal-entry-body').innerHTML = renderCausalView('entry_execution');
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Analyzer completed: no current-epoch terminal exit paths exist yet, so exit-combo EV is unavailable.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>

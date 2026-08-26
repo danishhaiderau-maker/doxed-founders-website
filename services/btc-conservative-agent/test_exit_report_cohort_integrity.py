@@ -290,6 +290,17 @@ def test_dashboard_renders_all_four_exit_worlds_and_null_kpis_as_na():
         assert element_id in DASHBOARD
     assert "['Left on table', money(d.overall_left_on_table_usd)]" in DASHBOARD
     assert "['Hindsight gap', money(d.overall_left_usd)]" in DASHBOARD
+    for element_id in (
+        "exit-causal-policy-body",
+        "exit-causal-risk-body",
+        "exit-causal-market-body",
+        "exit-causal-entry-body",
+    ):
+        assert element_id in DASHBOARD
+    assert "renderCausalView('exit_policy')" in DASHBOARD
+    assert "renderCausalView('risk_and_chase')" in DASHBOARD
+    assert "renderCausalView('market_context')" in DASHBOARD
+    assert "renderCausalView('entry_execution')" in DASHBOARD
 
 
 def test_causal_exit_views_use_only_explicit_available_dimensions():
