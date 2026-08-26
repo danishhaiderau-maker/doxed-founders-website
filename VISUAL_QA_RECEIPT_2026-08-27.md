@@ -61,3 +61,17 @@
 - Disk free space was approximately 113 GB: AMBER under the goal threshold of 150 GB.
 - The clean epoch does not yet have adequate conservative terminal OOS evidence. Empty rankings and exit tables are therefore truthful, and strategy qualification remains DESCRIPTIVE ONLY.
 - This receipt verifies rendered UI and evidence labelling for the bound candidate. It does not qualify a policy or authorize Bitfinex.
+
+## Post-deployment retest — exit-evidence repair
+
+- Retest time: `2026-08-27 05:46 AEST`.
+- Exact deployed revision: `b358f4ba21f5c3e4fffd41bcc92a05012e093351`.
+- Clean epoch: `epoch-ca59fec3c223953a05bc0da4`.
+- Production rendered `collector_v3.1`, the exact revision, PAPER_ONLY family labels, five family tiles plus Continuous, and a disarmed live boundary.
+- Production rendered Chase 0, 1 and 2 unchecked and Chase 3, 4 and 5+ checked. Every tile now explains that this global selector controls first paper-order submission, while its own Chase label is a post-submit repricing template.
+- Production AI History advanced through multiple post-deployment cycles and rendered `NO_TRADE` with independent per-family `AI_REJECT` outcomes and no paper orders, positions or closes.
+- Analyzer rendered revision `b358f4ba21f5`, epoch `ca59fec3`, and the new four-world exit contract: executed paper, shadow/lab, conservative BBO/depth replay and ideal-touch diagnostic.
+- Exit Combinations rendered `n/a` for unavailable leakage and EV metrics and an explicit clean-epoch terminal-evidence insufficiency reason.
+- Exit Reason Leak rendered `n/a`, zero exit reasons, and an explicit clean-epoch terminal-evidence insufficiency reason; it did not fabricate zero PnL, zero drawdown or a recommendation.
+- Narrow analyzer viewport `390 x 844` had no page-level horizontal overflow; navigation wrapped into usable rows and wide report tables remained locally scrollable.
+- Result: PASS for the deployed analyzer exit-evidence repair. Strategy qualification remains blocked by immature terminal execution evidence and storage remains AMBER.
