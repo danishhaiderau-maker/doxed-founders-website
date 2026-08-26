@@ -11858,6 +11858,14 @@ def chase_attribution_report(trades=None, session=None):
             or (fill_row or {}).get("research_lane")
             or (chase_rows[0].get("research_lane") if chase_rows else None)
             or (expire_row or {}).get("research_lane")
+            or next(
+                (
+                    event.get("research_lane")
+                    for event in events
+                    if event.get("research_lane")
+                ),
+                None,
+            )
             or trade_lane.get(tid)
             or "UNKNOWN"
         )
