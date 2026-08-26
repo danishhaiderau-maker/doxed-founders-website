@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -135,6 +136,57 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(patient_row["outcome_state"], "REJECTED")
             self.assertFalse(patient_row["order_intent_expected"])
             self.assertEqual(store.verify()["ledger_counts"]["order_intent"], 0)
+
+    def test_rejected_shared_lanes_reuse_one_pre_signal_market_context_segment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "market_microstructure_1s.jsonl"
+            tape.write_text("\n".join([
+                json.dumps({"bucket_ts": 998, "last": 100.0, "best_bid": 99.9, "best_ask": 100.1}),
+                json.dumps({"bucket_ts": 1000, "last": 100.2, "best_bid": 100.1, "best_ask": 100.3}),
+            ]) + "\n", encoding="utf-8")
+            source = {
+                "trade_id": "scan-context", "shared_ai_call_id": "scan-context",
+                "shared_ai_call_ts_epoch": 1000, "symbol": "tBTCF0:USTF0",
+                "raw_direction": "NO_TRADE", "executed_direction": "NO_TRADE",
+                "feature_snapshot_at_signal": {"adx": 14, "regime": "RANGE"},
+            }
+            receipts = [
+                dual_write_lane_decision(
+                    source, lane=lane, policy_decision="REJECT",
+                    execution_disposition="AI_REJECTED_NO_ORDER",
+                    exact_reason="NO_TRADE", epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": lane, "paper_only": True},
+                )
+                for lane in ("CONTINUOUS", "FAMILY_ATR_TRAIL")
+            ]
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            verification = store.verify()
+            self.assertEqual(verification["ledger_counts"]["opportunity"], 1)
+            self.assertEqual(verification["ledger_counts"]["decision"], 2)
+            self.assertEqual(verification["ledger_counts"]["market_segment"], 1)
+            decisions = [
+                json.loads(line)
+                for line in store.ledger_path("decision").read_text().splitlines()
+            ]
+            refs = [row["market_context_segment_refs"][0] for row in decisions]
+            self.assertEqual(refs[0]["sha256"], refs[1]["sha256"])
+            self.assertEqual(refs[0]["source"], "LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL")
+            self.assertTrue(all(
+                row["market_context_segment_coverage"]["future_exit_path_included"] is False
+                for row in decisions
+            ))
+            lifecycles = [
+                json.loads(line)
+                for line in store.ledger_path("lifecycle").read_text().splitlines()
+            ]
+            self.assertTrue(all(row["market_context_segment_refs"] for row in lifecycles))
+            context_row = json.loads(
+                store.ledger_path("market_segment").read_text().strip()
+            )
+            self.assertEqual(context_row["event_id"], "market-context:episode-" + hashlib.sha256(b"shared:scan-context").hexdigest()[:20])
+            self.assertEqual(context_row["tape_id"], f"tape:{refs[0]['sha256']}")
+            self.assertEqual(len(receipts[0]["writes"]), 4)
+            self.assertTrue(receipts[1]["writes"][1]["duplicate"])
 
     def test_accepted_but_disabled_lane_is_no_trade_not_zero_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:

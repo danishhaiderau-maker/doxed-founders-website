@@ -182,6 +182,18 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
     terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
     executions = [row for row in scoped(_read_ledger(store.ledger_path("execution"))) if str(row.get("episode_id") or "") in allowed_episodes]
+    market_segment_rows = [
+        row for row in scoped(_read_ledger(store.ledger_path("market_segment")))
+        if str(row.get("episode_id") or "") in allowed_episodes
+    ]
+    pre_signal_context_segments = [
+        row for row in market_segment_rows
+        if str(row.get("context_role") or "").upper() == "PRE_SIGNAL_ONLY"
+        or (row.get("coverage") or {}).get("future_exit_path_included") is False
+    ]
+    terminal_path_segments = [
+        row for row in market_segment_rows if row not in pre_signal_context_segments
+    ]
     observed_epochs = sorted({str(row.get("epoch_id")) for row in all_opportunities if row.get("epoch_id")})
     excluded_opportunities = len(all_opportunities) - len(opportunities)
     policy_ids_by_signature: dict[str, set[str]] = {}
@@ -487,7 +499,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             },
             "outcome_states": dict(sorted(outcome_counts.items())),
             "ledger_counts": verification["ledger_counts"],
-            "market_segments": verification["market_segment_count"],
+            # Qualification requires a signal-to-terminal market path.  A
+            # frozen pre-signal context segment makes rejected/NO_TRADE regime
+            # analysis auditable, but must never satisfy the execution-path
+            # maturity gate merely because it is stored in the same
+            # content-addressed segment library.
+            "market_segments": len(terminal_path_segments),
+            "terminal_path_market_segments": len(terminal_path_segments),
+            "pre_signal_context_segments": len(pre_signal_context_segments),
+            "market_segment_ledger_rows": len(market_segment_rows),
+            "market_segment_objects_verified": verification["market_segment_count"],
             "entry_resolution_integrity": entry_resolution_integrity,
             "effective_paper_execution_identities": effective_paper_execution_identities,
         },

@@ -2033,7 +2033,7 @@ def _exit_combos_payload():
     classes = rep.get("evidence_worlds") or rep.get("evidence_classes") or {}
     executed = classes.get("executed_paper") or {"top": rep.get("top") or [], "worst_leakage": rep.get("worst_leakage") or []}
     shadow = classes.get("shadow_lab") or {"top": [], "worst_leakage": []}
-    top = list(executed.get("top") or [])
+    top = list(executed.get("top_family_balanced") or executed.get("top") or [])
     worst = list(executed.get("worst_leakage") or [])
     return {
         **_nonqualifying_scope(
@@ -2044,6 +2044,7 @@ def _exit_combos_payload():
         "benchmark_lane": rep.get("benchmark_lane"),
         "overall_left_on_table_usd": rep.get("overall_left_on_table_usd"),
         "total_combos": executed.get("total_combos", len(top)),
+        "family_balance": executed.get("family_balance") or {},
         "filter_note": rep.get("filter_note") or "Generic historical exit combinations.",
         "qualification_eligible": False,
         "exit_family_scorecard": list(executed.get("exit_family_scorecard") or []),
@@ -4580,7 +4581,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Entry/execution exit combinations</h3>
     <p class="note">Offset × exact chase bucket × entry-delay band × fill status × terminal reason.</p>
     <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-entry-body"></tbody></table>
-    <h3>Highest descriptive exit-combo EV — unqualified</h3>
+    <h3>Market microstructure exit combinations</h3>
+    <p class="note">Regime × volatility band × session × support/resistance state × direction × terminal reason. Only explicitly recorded fields are grouped.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-microstructure-body"></tbody></table>
+    <h3>Profit-path exit combinations</h3>
+    <p class="note">Exit profile × MAE band × entry-delay band × terminal reason. Missing excursion data remains unavailable.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-profit-path-body"></tbody></table>
+    <h3>Cost and fill exit combinations</h3>
+    <p class="note">Fill status × slippage band × fee band × terminal reason. Diagnostic and execution costs remain in separate evidence worlds.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-cost-body"></tbody></table>
+    <h3>Family-balanced descriptive exit-combo EV — unqualified</h3>
     <p class="note">Observed cohorts only. Small or unmatched samples are not evidence that an exit caused the result and cannot qualify a policy.</p>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
     <h3>Worst leakage cohorts</h3>
@@ -5198,6 +5208,9 @@ async function loadExitCombos() {
   document.getElementById('exit-causal-risk-body').innerHTML = renderCausalView('risk_and_chase');
   document.getElementById('exit-causal-market-body').innerHTML = renderCausalView('market_context');
   document.getElementById('exit-causal-entry-body').innerHTML = renderCausalView('entry_execution');
+  document.getElementById('exit-causal-microstructure-body').innerHTML = renderCausalView('market_microstructure');
+  document.getElementById('exit-causal-profit-path-body').innerHTML = renderCausalView('profit_path');
+  document.getElementById('exit-causal-cost-body').innerHTML = renderCausalView('cost_and_fill');
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Analyzer completed: no current-epoch terminal exit paths exist yet, so exit-combo EV is unavailable.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>

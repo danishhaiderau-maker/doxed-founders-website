@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 import copy
 from datetime import datetime
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ from research_v3_contract import canonical_json, normalize_lifecycle_outcome
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
 DEFAULT_DECLARED_ENTRY_TTL_SEC = 30 * 60
 ENTRY_RECONCILIATION_ALLOWANCE_SEC = 3 * 60
+PRE_SIGNAL_CONTEXT_SEC = 3 * 60
 
 
 def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str, Any]]:
@@ -187,6 +189,25 @@ def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> t
         "parse_errors": parse_errors,
     }
     return rows, coverage
+
+
+@lru_cache(maxsize=512)
+def _pre_signal_market_segment(
+    data_dir: str, signal_ts: float,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+    """Freeze one shared, causal lookback without implying future path data."""
+    rows, coverage = _paper_market_segment(
+        data_dir,
+        start_ts=float(signal_ts) - PRE_SIGNAL_CONTEXT_SEC,
+        end_ts=float(signal_ts),
+    )
+    receipt = dict(coverage)
+    receipt.update({
+        "context_role": "PRE_SIGNAL_ONLY",
+        "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
+        "future_exit_path_included": False,
+    })
+    return tuple(rows), receipt
 
 
 def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -386,6 +407,8 @@ def dual_write_lane_entry_resolution(
         "AWAITING": "awaiting", "ORDER_SUBMITTED": "submitted", "NO_ORDER": "no-order",
     }[resolution]
     terminal_no_order = resolution == "NO_ORDER"
+    segment_refs = list(source.get("market_context_segment_refs") or [])
+    segment_coverage = dict(source.get("market_context_segment_coverage") or {})
     row = {
         "record_id": (
             f"lifecycle:{identity['episode_id']}:{policy['policy_signature']}:"
@@ -406,6 +429,8 @@ def dual_write_lane_entry_resolution(
         "terminal": terminal_no_order,
         "ranking_eligible": False,
         "ranking_blocker": "NO_ORDER" if terminal_no_order else "PATH_NOT_MATURED",
+        "market_context_segment_refs": segment_refs,
+        "market_context_segment_coverage": segment_coverage,
         **causal_ids,
         **policy,
     }
@@ -458,6 +483,44 @@ def dual_write_lane_decision(
         else "NO_TRADE" if execution_disposition != "ORDER_ELIGIBLE"
         else "CENSORED"
     )
+    segment_refs: list[dict[str, Any]] = []
+    segment_writes: list[dict[str, Any]] = []
+    segment_coverage: dict[str, Any] = {
+        "context_role": "PRE_SIGNAL_ONLY",
+        "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
+        "future_exit_path_included": False,
+        "row_count": 0,
+        "two_second_or_better": False,
+        "reason": "SIGNAL_TIMESTAMP_MISSING",
+    }
+    if signal_ts > 0:
+        segment_rows, segment_coverage = _pre_signal_market_segment(
+            str(Path(data_dir).resolve()), signal_ts,
+        )
+        if segment_rows:
+            segment_ref = store.put_market_segment(
+                source="LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL",
+                symbol=identity["symbol"], timeframe="1s",
+                start_ts=signal_ts - PRE_SIGNAL_CONTEXT_SEC,
+                end_ts=signal_ts, rows=segment_rows,
+            )
+            segment_refs.append(segment_ref)
+            context_event_id = f"market-context:{identity['episode_id']}"
+            context_causal_ids = _explicit_causal_ids(
+                epoch_id=str(epoch_id), event_id=context_event_id,
+                episode_id=identity["episode_id"],
+                tape_id=f"tape:{segment_ref['sha256']}",
+            )
+            segment_writes.append(store.append("market_segment", {
+                "record_id": f"market-context:{identity['episode_id']}:{segment_ref['sha256']}",
+                "event_id": context_event_id,
+                "episode_id": identity["episode_id"],
+                "shared_ai_call_id": identity["shared_ai_call_id"],
+                "context_role": "PRE_SIGNAL_ONLY",
+                "segment_ref": segment_ref,
+                "coverage": segment_coverage,
+                **context_causal_ids,
+            }))
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{identity['episode_id']}",
         "episode_id": identity["episode_id"],
@@ -466,6 +529,8 @@ def dual_write_lane_decision(
         "symbol": identity["symbol"],
         "raw_direction": identity["raw_direction"],
         "feature_snapshot_at_signal": source.get("feature_snapshot_at_signal") or {},
+        "market_context_segment_refs": segment_refs,
+        "market_context_segment_coverage": segment_coverage,
         "grouping_basis": identity["grouping_basis"],
         "collector_version": COLLECTOR_VERSION,
         **causal_ids,
@@ -491,11 +556,16 @@ def dual_write_lane_decision(
         "order_intent_expected": execution_disposition == "ORDER_ELIGIBLE",
         "decision_ts": signal_ts,
         "resolution_deadline_ts": signal_ts + float(policy["paper_policy_spec"]["declared_entry_ttl_sec"]) + float(policy["paper_policy_spec"]["entry_reconciliation_allowance_sec"]),
+        "market_context_segment_refs": segment_refs,
+        "market_context_segment_coverage": segment_coverage,
         **causal_ids,
         **policy,
     })
+    resolution_material = dict(material)
+    resolution_material["market_context_segment_refs"] = segment_refs
+    resolution_material["market_context_segment_coverage"] = segment_coverage
     resolution = dual_write_lane_entry_resolution(
-        material, lane=lane_name,
+        resolution_material, lane=lane_name,
         entry_resolution="AWAITING" if execution_disposition == "ORDER_ELIGIBLE" else "NO_ORDER",
         exact_reason="ORDER_ELIGIBLE_AWAITING_EXECUTION" if execution_disposition == "ORDER_ELIGIBLE" else exact_reason,
         epoch_id=str(epoch_id), data_dir=data_dir, lane_policy=lane_policy,
@@ -505,7 +575,7 @@ def dual_write_lane_decision(
         "schema": "v3_lane_decision_receipt_v1",
         "epoch_id": str(epoch_id),
         **identity,
-        "writes": [opportunity, decision, resolution["write"]],
+        "writes": [opportunity, *segment_writes, decision, resolution["write"]],
         "store_verification": store.verify(),
     }
 

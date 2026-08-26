@@ -174,3 +174,5 @@ def test_tile_api_and_dashboard_distinguish_global_submit_from_template_reprice(
     assert "Effective order timing:" in BOT_SOURCE
     assert "global submit buckets" in BOT_SOURCE
     assert "tile reprice template" in BOT_SOURCE
+    assert "Global submit windows" in BOT_SOURCE
+    assert "Reprice template" in BOT_SOURCE

@@ -27931,7 +27931,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the ' + statsScope + '</div>'
             + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
             + '<thead><tr style="color:#8b949e;background:#101820;">'
-            + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Chase</th>'
+            + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Global submit windows</th>'
             + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Closed</th>'
             + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th>'
             + '</tr></thead><tbody>'
@@ -27947,7 +27947,10 @@ DASHBOARD_JS = """(function () {
             + '</div>'
             + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
-            return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + c + '</span>';
+            const chip = /^Chase\b/i.test(String(c || ''))
+              ? String(c).replace(/^Chase\b/i, 'Reprice template')
+              : c;
+            return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + chip + '</span>';
           }).join('');
           const badge = spec.badge
             ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#3d2e00;border:1px solid #d4a72c;border-radius:4px;color:#f0c14b;font-size:0.72em;font-weight:700;">' + spec.badge + '</span>')

@@ -200,7 +200,7 @@ def test_exit_dashboard_exposes_family_and_stop_tables_for_both_worlds():
 
 
 def test_exit_combo_heading_is_explicitly_descriptive_and_unqualified():
-    assert "Highest descriptive exit-combo EV — unqualified" in DASHBOARD
+    assert "Family-balanced descriptive exit-combo EV — unqualified" in DASHBOARD
     assert "Small or unmatched samples" in DASHBOARD
     assert "Best exit combos (by EV)" not in DASHBOARD
 
@@ -325,7 +325,10 @@ def test_causal_exit_views_use_only_explicit_available_dimensions():
         },
     ])
     views = analyzer._exit_causal_combination_views(rows, "EXECUTED_PAPER_DESCRIPTIVE")
-    assert set(views) == {"exit_policy", "risk_and_chase", "market_context", "entry_execution"}
+    assert set(views) == {
+        "exit_policy", "risk_and_chase", "market_context", "entry_execution",
+        "market_microstructure", "profit_path", "cost_and_fill",
+    }
     assert views["exit_policy"]["rows"]
     assert views["market_context"]["rows"]
     assert views["entry_execution"]["rows"]
@@ -337,3 +340,57 @@ def test_causal_exit_views_do_not_rank_unknown_or_missing_dimensions():
     views = analyzer._exit_causal_combination_views(sparse, "SHADOW_LAB_DESCRIPTIVE")
     assert all(view["rows"] == [] for view in views.values())
     assert all(view["empty_reason"] == "INSUFFICIENT_EXPLICIT_DIMENSIONS" for view in views.values())
+
+
+def test_family_balanced_exit_ranking_caps_each_family(tmp_path, monkeypatch):
+    rows = pd.DataFrame([
+        {
+            "trade_id": f"trade-{index}", "opportunity_id": f"opp-{index}",
+            "exit_reason": f"EXIT_{index}", "research_lane": family,
+            "cfg_family": family, "net_pnl_usd": pnl,
+        }
+        for index, (family, pnl) in enumerate([
+            ("FIXED_TARGET", .50), ("FIXED_TARGET", .40), ("FIXED_TARGET", .30),
+            ("ATR_TRAIL", .20), ("ATR_TRAIL", .10), ("CHANDELIER", .05),
+        ])
+    ])
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: pd.DataFrame())
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    report = analyzer.exit_combinations_report(rows, {"mode": "FRESH-COLLECTION"})
+    paper = report["evidence_worlds"]["executed_paper"]
+    balanced = paper["top_family_balanced"]
+    assert [row["family"] for row in balanced].count("FIXED_TARGET") == 2
+    assert {row["family"] for row in balanced} == {"FIXED_TARGET", "ATR_TRAIL", "CHANDELIER"}
+    assert paper["family_balance"] == {"max_per_family": 2, "families_represented": 3}
+
+
+def test_missing_peak_data_never_becomes_zero_capture(tmp_path, monkeypatch):
+    sparse = pd.DataFrame([{
+        "trade_id": "sparse", "opportunity_id": "opp-sparse",
+        "exit_reason": "TIME_EXIT", "net_pnl_usd": 0.01,
+    }])
+    monkeypatch.setattr(analyzer, "_load_exit_evidence_worlds", lambda trades=None, session=None: {
+        name: {"evidence_class": label, "source_files": [name], "frame": sparse, "pnl_semantics": name}
+        for name, label in {
+            "executed_paper": "EXECUTED_PAPER_DESCRIPTIVE",
+            "shadow_lab": "SHADOW_LAB_DESCRIPTIVE",
+            "conservative_bbo_depth": "CONSERVATIVE_BBO_DEPTH_DESCRIPTIVE",
+            "ideal_touch_diagnostic": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        }.items()
+    })
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    report = analyzer.exit_leakage_by_reason_report(sparse, {})
+    assert report["reasons"][0]["capture_ratio_pct"] is None
+
+
+def test_dashboard_renders_expanded_exit_views_and_family_balanced_heading():
+    for element_id in (
+        "exit-causal-microstructure-body", "exit-causal-profit-path-body",
+        "exit-causal-cost-body",
+    ):
+        assert element_id in DASHBOARD
+    assert "renderCausalView('market_microstructure')" in DASHBOARD
+    assert "renderCausalView('profit_path')" in DASHBOARD
+    assert "renderCausalView('cost_and_fill')" in DASHBOARD
+    assert "Family-balanced descriptive exit-combo EV" in DASHBOARD
+    assert 'executed.get("top_family_balanced") or executed.get("top")' in DASHBOARD

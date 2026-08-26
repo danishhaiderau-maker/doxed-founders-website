@@ -62,6 +62,31 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["data_scope"], "FRESH-COLLECTION")
             self.assertEqual(report["collection"]["outcome_states"], {"REALIZED_PROFIT": 1})
 
+    def test_pre_signal_context_does_not_mature_terminal_market_path_gate(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+            })
+            context_ref = store.put_market_segment(
+                source="LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL", symbol="BTCUSD",
+                timeframe="1s", start_ts=998, end_ts=1000,
+                rows=[{"ts": 998, "price": 100}, {"ts": 1000, "price": 101}],
+            )
+            store.append("market_segment", {
+                "record_id": "context-1", "episode_id": "episode-1",
+                "context_role": "PRE_SIGNAL_ONLY", "segment_ref": context_ref,
+                "coverage": {"future_exit_path_included": False},
+            })
+
+            report = build_safe_policy_genome_v3_report(data, reports)
+            collection = report["collection"]
+            self.assertEqual(collection["pre_signal_context_segments"], 1)
+            self.assertEqual(collection["terminal_path_market_segments"], 0)
+            self.assertEqual(collection["market_segments"], 0)
+            self.assertEqual(collection["market_segment_ledger_rows"], 1)
+            self.assertEqual(collection["market_segment_objects_verified"], 1)
+
     def test_shared_ai_call_children_are_one_independent_cluster(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             store = V3EvidenceStore(data, epoch_id="epoch-v3")

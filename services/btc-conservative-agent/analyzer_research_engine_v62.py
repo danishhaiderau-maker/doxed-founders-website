@@ -14892,6 +14892,22 @@ def _exit_sample_status(independent_n: int) -> str:
     return "DESCRIPTIVE_30PLUS_INDEPENDENT"
 
 
+def _family_balanced_exit_rows(rows, *, top_n: int, max_per_family: int = 2):
+    """Keep a single prolific family from hiding other explicit families."""
+    selected = []
+    family_counts = {}
+    for row in rows:
+        family = str(row.get("family") or row.get("lane") or "UNKNOWN").strip().upper()
+        family = family or "UNKNOWN"
+        if family_counts.get(family, 0) >= max_per_family:
+            continue
+        selected.append(row)
+        family_counts[family] = family_counts.get(family, 0) + 1
+        if len(selected) >= top_n:
+            break
+    return selected
+
+
 def _exit_numeric_series(work: pd.DataFrame, names, default=np.nan) -> pd.Series:
     for name in names:
         if name in work.columns:
@@ -15048,6 +15064,12 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
     delay = first_series(("entry_delay_min",), numeric=True)
     if delay.isna().all():
         delay = first_series(("signal_age_sec", "entry_delay_sec"), numeric=True) / 60.0
+    volatility = first_series(("volatility_percentile", "atr_percentile"), numeric=True)
+    session_bucket = first_series(("session_bucket", "market_session")).fillna("").astype(str).str.upper()
+    sr_state = first_series(("sr_state", "support_resistance_state")).fillna("").astype(str).str.upper()
+    mae = first_series(("mae_margin_pct", "max_drawdown"), numeric=True).abs()
+    slippage = first_series(("book_slippage_usd_total", "execution_slippage", "slippage"), numeric=True).abs()
+    fees = first_series(("trading_fees_usd", "outcome_trading_fees_usd", "fees_usd"), numeric=True).abs()
 
     frame["_exit_family_view"] = family.replace("", np.nan)
     frame["_exit_profile_view"] = profile.replace("", np.nan)
@@ -15060,12 +15082,21 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
     frame["_hard_stop_view"] = hard_stop.round(3)
     frame["_offset_view"] = offset.round(4)
     frame["_delay_view"] = pd.cut(delay, [-np.inf, 5, 10, 20, 30, np.inf], labels=["0-5m", "5-10m", "10-20m", "20-30m", "30m+"])
+    frame["_volatility_view"] = pd.cut(volatility, [-np.inf, 20, 50, 80, np.inf], labels=["LOW", "NORMAL", "HIGH", "EXTREME"])
+    frame["_session_view"] = session_bucket.replace("", np.nan)
+    frame["_sr_state_view"] = sr_state.replace("", np.nan)
+    frame["_mae_view"] = pd.cut(mae, [-np.inf, 10, 30, 60, np.inf], labels=["<=10%", "10-30%", "30-60%", "60%+"])
+    frame["_slippage_view"] = pd.cut(slippage, [-np.inf, 0, .0025, .01, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH"])
+    frame["_fee_view"] = pd.cut(fees, [-np.inf, 0, .0025, .01, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH"])
 
     definitions = {
         "exit_policy": ["_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
         "risk_and_chase": ["_stop_atr_view", "_hard_stop_view", "_chase_view", "_exit_reason_view"],
         "market_context": ["_regime_view", "_direction_view", "_exit_family_view", "_exit_reason_view"],
         "entry_execution": ["_offset_view", "_chase_view", "_delay_view", "_fill_status_view", "_exit_reason_view"],
+        "market_microstructure": ["_regime_view", "_volatility_view", "_session_view", "_sr_state_view", "_direction_view", "_exit_reason_view"],
+        "profit_path": ["_exit_profile_view", "_mae_view", "_delay_view", "_exit_reason_view"],
+        "cost_and_fill": ["_fill_status_view", "_slippage_view", "_fee_view", "_exit_reason_view"],
     }
     views = {}
     for view_name, dimensions in definitions.items():
@@ -15125,7 +15156,8 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
                 "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
                 "top": [], "worst_leakage": [], "overall_left_on_table_usd": None,
                 "exit_family_scorecard": [], "stop_effectiveness_matrix": [],
-                "causal_combination_views": {},
+                "causal_combination_views": {}, "top_family_balanced": [],
+                "family_balance": {"max_per_family": 2, "families_represented": 0},
             }
         if "exit_reason" not in work.columns:
             work["exit_reason"] = "UNKNOWN"
@@ -15173,11 +15205,20 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             stats = _combo_stats_from_df(sub)
             if stats["trades"] < min_trades:
                 continue
+            explicit_families = []
+            if "cfg_family" in sub.columns:
+                explicit_families = sorted({
+                    str(value).strip().upper()
+                    for value in sub["cfg_family"].dropna()
+                    if str(value).strip()
+                })
+            family = explicit_families[0] if len(explicit_families) == 1 else str(lane).upper()
             combos.append({
                 "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{str(lane).upper()}",
                 "exit_reason": ex, "ai_bucket": ai_b, "spread_bucket": sp_b,
                 "peak_mfe_bucket": mfe_b, "time_in_trade_bucket": time_b,
-                "lane": str(lane).upper(), "evidence_class": evidence_class,
+                "lane": str(lane).upper(), "family": family,
+                "evidence_class": evidence_class,
                 "left_on_table_usd": round(float(sub["left_on_table_usd"].dropna().sum()), 2) if sub["left_on_table_usd"].notna().any() else None,
                 "avg_left_usd": round(float(sub["left_on_table_usd"].dropna().mean()), 2) if sub["left_on_table_usd"].notna().any() else None,
                 "sample_status": "LOW_SAMPLE_N1" if stats["trades"] == 1 else "DESCRIPTIVE_SAMPLE",
@@ -15186,14 +15227,23 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             })
         by_ev = sorted(combos, key=lambda x: (x["ev_usd"] is not None, x["ev_usd"] or 0, x["pnl_usd"] or 0), reverse=True)
         by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"] is not None, x["left_on_table_usd"] or 0), reverse=True)
+        balanced = _family_balanced_exit_rows(by_ev, top_n=top_n, max_per_family=2)
         return {
             "evidence_class": evidence_class, "source_files": source_files or [],
             "source_rows": source_rows, "terminal_rows": int(len(work)),
             "contaminated_rows_excluded": contaminated_n, "total_combos": len(combos),
-            "empty_reason": None, "pnl_semantics": pnl_semantics,
+            "empty_reason": None if combos else "NO_COMBINATIONS_MEET_MIN_TRADES",
+            "pnl_semantics": pnl_semantics,
             "pnl_aggregation_allowed": False,
             "overall_left_on_table_usd": round(float(work["left_on_table_usd"].dropna().sum()), 2) if work["left_on_table_usd"].notna().any() else None,
             "top": by_ev[:top_n], "worst_leakage": by_leak[:top_n],
+            "top_family_balanced": balanced,
+            "family_balance": {
+                "max_per_family": 2,
+                "families_represented": len({
+                    str(row.get("family") or "UNKNOWN") for row in balanced
+                }),
+            },
             **_exit_family_and_stop_summaries(work, evidence_class),
             "causal_combination_views": _exit_causal_combination_views(work, evidence_class, top_n),
         }
@@ -15366,7 +15416,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
                 "avg_leakage_margin_pct": round(float((sub_mfe - sub_final).mean()), 2) if sub_mfe.notna().any() else None,
                 "booked_profit_usd": round(float(sub["_booked"].dropna().sum()), 2) if sub["_booked"].notna().any() else None,
                 "peak_profit_usd": round(float(sub["_peak"].dropna().sum()), 2) if sub["_peak"].notna().any() else None,
-                "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1) if sub["_capture"].notna().any() else 0.0,
+                "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1) if sub["_capture"].notna().any() else None,
                 "evidence_class": evidence_class,
                 "sample_status": "LOW_SAMPLE_N1" if n == 1 else "DESCRIPTIVE_SAMPLE",
                 "qualification_eligible": False,
