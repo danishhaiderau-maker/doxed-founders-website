@@ -137,6 +137,8 @@ assert.match(startAnalyzer, /\$dashboardHealthy = \(Test-AnalyzerHealthy\)/);
 assert.match(startAnalyzer, /\$engineAlive = \(Test-AnalyzerEngineAlive\)/);
 assert.match(startAnalyzer, /git -C \$repoRoot rev-parse HEAD/);
 assert.match(startAnalyzer, /\$env:SOURCE_GIT_REV = \$sourceRevision\.ToLowerInvariant\(\)/);
+assert.match(startAnalyzer, /--source-revision=\$\(\$sourceRevision\.ToLowerInvariant\(\)\)/);
+assert.match(startAnalyzer, /belongs to another or unproven source revision/);
 assert.match(
   startAnalyzer,
   /if \(\$dashboardHealthy -and \$listenerPids\.Count -eq 1 -and \$engineAlive\)[\s\S]*not starting a duplicate/,

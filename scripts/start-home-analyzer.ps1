@@ -186,6 +186,23 @@ if ($discoveredEnginePids.Count -gt 1) {
   if (-not $NoWait) { Wait-ForKey }
   exit 2
 }
+$expectedRevisionMarker = "--source-revision=$($sourceRevision.ToLowerInvariant())"
+if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
+  $incumbentPid = [int]$discoveredEnginePids[0]
+  $incumbentCommandLine = [string](Get-ProcessCommandLineFast -ProcessId $incumbentPid)
+  if (-not $incumbentCommandLine.Contains($expectedRevisionMarker)) {
+    Write-Host (
+      "Analyzer engine PID $incumbentPid belongs to another or unproven source revision; " +
+      "replacing the engine while preserving the independent dashboard."
+    ) -ForegroundColor Yellow
+    Stop-Process -Id $incumbentPid -Force -ErrorAction SilentlyContinue
+    $pidFile = Join-Path $repoRoot ".home-analyzer.pid"
+    if (Test-Path -LiteralPath $pidFile) {
+      Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    }
+    $discoveredEnginePids = @()
+  }
+}
 if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
   Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") `
     -Value "$($discoveredEnginePids[0])" -NoNewline -Encoding UTF8
@@ -256,6 +273,7 @@ Write-Host ""
 $pyArgs = @("analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
 $pyArgs += "--owner-port=$AnalyzerPort"
+$pyArgs += $expectedRevisionMarker
 
 if ($NoWait) {
   Write-Host "Starting analyzer detached on :$AnalyzerPort ..."
