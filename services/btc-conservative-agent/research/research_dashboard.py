@@ -4457,8 +4457,8 @@ const EVIDENCE_SCOPES = {
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
   combos: ['MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
-  'exit-combos': ['LEGACY EXECUTED', 'Historical executed-lane exit combinations.'],
-  'exit-reason-leak': ['LEGACY HINDSIGHT', 'Peak-to-close hindsight gap; not directly capturable profit or a policy recommendation.'],
+  'exit-combos': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current terminal exit combinations; observed paper and shadow/lab evidence are displayed separately and remain descriptive.'],
+  'exit-reason-leak': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current peak-to-close hindsight gaps; paper and shadow/lab evidence remain separate and are not directly capturable profit.'],
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current signed V3.1 Safe Policy Genome.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
@@ -4911,7 +4911,7 @@ async function loadExitCombos() {
     ['Benchmark', d.benchmark_lane || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
-    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.type||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Run analyzer for exit combos.</td></tr>';
+    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Run analyzer for exit combos.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td><td>$${fmtUsd(c.avg_left_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No leakage data.</td></tr>';
   const shadow = ((d.evidence_classes||{}).shadow_lab||{});

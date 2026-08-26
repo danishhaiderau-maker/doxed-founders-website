@@ -57,6 +57,13 @@ def test_exit_dashboard_renders_separated_shadow_terminal_evidence():
     assert "Executed-paper and shadow/lab rows are never merged" in DASHBOARD
 
 
+def test_exit_dashboard_labels_current_separated_evidence_and_sample_status():
+    assert "'exit-combos': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED'" in DASHBOARD
+    assert "'exit-reason-leak': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED'" in DASHBOARD
+    assert "c.sample_status||'DESCRIPTIVE'" in DASHBOARD
+    assert "c.type||''" not in DASHBOARD
+
+
 def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, monkeypatch):
     # Six rows intentionally match the six grouping dimensions.  Without an
     # explicit fallback for the missing research_lane column, pandas may treat
