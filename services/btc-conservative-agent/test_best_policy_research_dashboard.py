@@ -75,7 +75,12 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
         "chase_attribution_report.json": {"trades": []},
         "exit_combinations_report.json": {"top": [{"type": "CONTINUOUS"}]},
         "exit_leakage_by_reason_report.json": {"reasons": []},
-        "exit_ladder_simulator_report.json": {"profiles": []},
+        "exit_ladder_simulator_report.json": {
+            "profiles": [],
+            "raw_replays_available": 92,
+            "eligible_replays_available": 0,
+            "replays_available": 0,
+        },
     }
     monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
 
@@ -94,6 +99,8 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
     assert payloads[1]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
     assert payloads[2]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
     assert payloads[3]["evidence_scope"].startswith("LEGACY")
+    assert payloads[3]["raw_replays_available"] == 92
+    assert payloads[3]["eligible_replays_available"] == 0
 
 
 def test_chase_surfaces_publish_executed_and_shadow_separately(monkeypatch):

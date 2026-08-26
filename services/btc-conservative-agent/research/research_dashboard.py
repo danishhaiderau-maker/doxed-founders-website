@@ -2102,6 +2102,8 @@ def _ladder_sim_payload():
         "matched_actual_realized_usd": rep.get("matched_actual_realized_usd"),
         "matched_actual_trades": rep.get("matched_actual_trades"),
         "comparison_scope": rep.get("comparison_scope"),
+        "raw_replays_available": rep.get("raw_replays_available"),
+        "eligible_replays_available": rep.get("eligible_replays_available"),
         "replays_available": rep.get("replays_available"),
         "replays_matched_executed": rep.get("replays_matched_executed"),
         "disclaimer": rep.get("disclaimer"),
@@ -5161,7 +5163,7 @@ async function loadLadderSim() {
     ['Full-session trades', d.actual_trades ?? 0],
     ['Matched-cohort actual', '$' + fmtUsd(d.matched_actual_realized_usd)],
     ['Matched replays', d.replays_matched_executed ?? 0],
-    ['Replays on disk', d.replays_available ?? 0],
+    ['Replays on disk', d.raw_replays_available ?? d.replays_available ?? 0],
     ['Best profile', noComparableProfiles ? 'n/a' : (d.best_profile_id || 'n/a')],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   if (noComparableProfiles) {
