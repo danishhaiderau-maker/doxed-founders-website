@@ -14,6 +14,8 @@ proceed with an audit trail.
 
 import os
 import sys
+import json
+import tempfile
 import unittest
 from unittest import mock
 
@@ -182,6 +184,70 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
         self.assertFalse(result.get("ok"))
         self.assertIn("EXECUTION_NOT_PAUSED", result.get("blockers") or [])
         seal.assert_not_called()
+
+    def test_verified_archive_preserves_exact_deletion_set_and_truthful_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = os.path.join(tmp, "one.jsonl")
+            second = os.path.join(tmp, "two.csv")
+            with open(first, "wb") as handle:
+                handle.write(b"one\n")
+            with open(second, "wb") as handle:
+                handle.write(b"two,2\n")
+            archive_root = os.path.join(tmp, "archive")
+            with mock.patch.object(bot, "RESEARCH_ARCHIVE_DIR", archive_root), \
+                 mock.patch.object(bot, "all_research_wipe_paths", return_value=[first, second]), \
+                 mock.patch("research.epoch_quarantine.purge_quarantine_archives", return_value={"deleted_trees": [], "deleted_files": 0, "errors": []}):
+                archive = bot.create_research_archive_receipt(
+                    {"archive_id": "past-1", "analysis_generated_at": "now"},
+                    "test", source_paths=[first, second],
+                )
+                result = bot.reset_all_research_files(archive_path=archive)
+            self.assertFalse(result["wipe_aborted"])
+            self.assertFalse(os.path.exists(first))
+            self.assertFalse(os.path.exists(second))
+            with open(os.path.join(archive, "archive_meta.json"), encoding="utf-8") as handle:
+                meta = json.load(handle)
+            with open(os.path.join(archive, "archive_compaction_receipt.json"), encoding="utf-8") as handle:
+                receipt = json.load(handle)
+            self.assertTrue(meta["integrity"]["verified"])
+            self.assertEqual(meta["integrity"]["file_count"], 2)
+            self.assertEqual(meta["integrity"]["total_source_bytes"], 10)
+            self.assertTrue(meta["raw_payloads_retained"])
+            self.assertTrue(receipt["deletion_verified"])
+            self.assertEqual(receipt["deleted_files"], 2)
+            self.assertEqual(receipt["deleted_bytes"], 10)
+            for row in meta["source_inventory"]:
+                preserved = os.path.join(archive, row["preserved_path"])
+                self.assertTrue(os.path.isfile(preserved))
+                self.assertEqual(bot._file_sha256(preserved), row["sha256"])
+
+    def test_reset_aborts_without_deleting_when_source_changes_after_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "changing.jsonl")
+            with open(source, "wb") as handle:
+                handle.write(b"before\n")
+            with mock.patch.object(bot, "RESEARCH_ARCHIVE_DIR", os.path.join(tmp, "archive")):
+                archive = bot.create_research_archive_receipt(
+                    {"archive_id": "past-2", "analysis_generated_at": "now"},
+                    "test", source_paths=[source],
+                )
+            with open(source, "ab") as handle:
+                handle.write(b"after\n")
+            with mock.patch.object(bot, "all_research_wipe_paths", return_value=[source]):
+                with self.assertRaises(bot.ArchiveIntegrityError):
+                    bot.reset_all_research_files(archive_path=archive)
+            self.assertTrue(os.path.isfile(source))
+
+    def test_reset_refuses_any_unarchived_direct_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "must-survive.jsonl")
+            with open(source, "wb") as handle:
+                handle.write(b"evidence\n")
+            with mock.patch.object(bot, "all_research_wipe_paths", return_value=[source]):
+                result = bot.reset_all_research_files()
+            self.assertTrue(result["wipe_aborted"])
+            self.assertTrue(os.path.isfile(source))
+            self.assertIn("verified archive_path is required", result["errors"][0])
 
         with bot.state_lock:
             bot.state["execution_paused"] = True

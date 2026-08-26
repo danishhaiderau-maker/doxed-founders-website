@@ -5117,7 +5117,7 @@ async function loadSpreadPerf() {
   document.getElementById('spread-perf-body').innerHTML = (d.buckets||[]).map(b => {
     const cls = (b.pnl_usd ?? 0) >= 0 ? 'green' : 'red';
     return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td><td>${b.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(b.pnl_usd)}</td><td>$${fmtUsd(b.ev_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">No spread performance data - run analyzer after fresh collection.</td></tr>';
+  }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
 }
 
 async function loadChaseThreshold() {
@@ -5379,7 +5379,8 @@ async function loadLeakage() {
     ['Top trades shown', (d.trades||[]).length],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('leak-body').innerHTML = (d.trades||[]).slice(0,100).map(t =>
-    `<tr><td>${(t.trade_id||'').slice(0,12)}</td><td>${t.lane||''}</td><td>${t.exit_reason||''}</td><td>${t.mfe_margin_pct??'n/a'}%</td><td>${t.realized_margin_pct??'n/a'}%</td><td class="red">${t.leakage_margin_pct??'n/a'}%</td><td>$${fmtUsd(t.realized_usd)}</td><td>$${fmtUsd(t.peak_profit_usd)}</td><td class="red">$${fmtUsd(t.left_on_table_usd)}</td></tr>`).join('');
+    `<tr><td>${(t.trade_id||'').slice(0,12)}</td><td>${t.lane||''}</td><td>${t.exit_reason||''}</td><td>${t.mfe_margin_pct??'n/a'}%</td><td>${t.realized_margin_pct??'n/a'}%</td><td class="red">${t.leakage_margin_pct??'n/a'}%</td><td>$${fmtUsd(t.realized_usd)}</td><td>$${fmtUsd(t.peak_profit_usd)}</td><td class="red">$${fmtUsd(t.left_on_table_usd)}</td></tr>`).join('')
+    || '<tr><td colspan="9">No legacy hindsight exit-leakage evidence exists in the current cohort.</td></tr>';
 }
 
 async function loadRegime() {

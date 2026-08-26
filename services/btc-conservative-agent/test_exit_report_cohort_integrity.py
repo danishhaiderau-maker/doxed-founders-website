@@ -394,3 +394,9 @@ def test_dashboard_renders_expanded_exit_views_and_family_balanced_heading():
     assert "renderCausalView('cost_and_fill')" in DASHBOARD
     assert "Family-balanced descriptive exit-combo EV" in DASHBOARD
     assert 'executed.get("top_family_balanced") or executed.get("top")' in DASHBOARD
+
+
+def test_legacy_empty_states_are_explicit_and_do_not_request_analyzer_rerun():
+    assert "No legacy spread-performance evidence exists in the current cohort." in DASHBOARD
+    assert "No spread performance data - run analyzer after fresh collection." not in DASHBOARD
+    assert "No legacy hindsight exit-leakage evidence exists in the current cohort." in DASHBOARD

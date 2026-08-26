@@ -176,3 +176,18 @@ def test_tile_api_and_dashboard_distinguish_global_submit_from_template_reprice(
     assert "tile reprice template" in BOT_SOURCE
     assert "Global submit windows" in BOT_SOURCE
     assert "Reprice template" in BOT_SOURCE
+
+
+def test_compact_family_tile_chip_names_reprice_template_not_chase():
+    common_source = Path(__file__).with_name("family_policy_common.py").read_text(encoding="utf-8")
+    tree = ast.parse(common_source)
+    dashboard_policy = ast.get_source_segment(
+        common_source,
+        next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "dashboard_policy"
+        ),
+    )
+    assert 'f"Reprice template {' in dashboard_policy
+    assert 'f"Chase {' not in dashboard_policy
+    assert "The tile Reprice template label is its post-submit schedule" in BOT_SOURCE

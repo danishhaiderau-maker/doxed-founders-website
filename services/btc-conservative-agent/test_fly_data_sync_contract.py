@@ -132,6 +132,8 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
         (root / "collector_storage_state.json").write_text(
             "{}\n", encoding="utf-8"
         )
+        (root / "open_positions.json").write_text("[]\n", encoding="utf-8")
+        (root / "paper_lifecycle_v1.json").write_text("{}\n", encoding="utf-8")
         excluded = [
             root / "research_epoch_quarantine" / "epoch_1" / "old.jsonl",
             root / "research_archive" / "session_1" / "old.json",
@@ -148,7 +150,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
             "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({"pipeline_events_3factor.csv"}),
             "_DATA_SYNC_EXCLUDED_NAMES": frozenset({
                 "manifest.json", "research_events_v22.provisional.json",
-                "collector_storage_state.json",
+                "collector_storage_state.json", "open_positions.json",
             }),
             "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({
                 "research_epoch_quarantine", "research_archive",
@@ -162,7 +164,9 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
         rows = namespace["_data_sync_inventory"]()
-        assert [row["path"] for row in rows] == ["signal_snapshot.jsonl"]
+        assert [row["path"] for row in rows] == [
+            "paper_lifecycle_v1.json", "signal_snapshot.jsonl",
+        ]
         for path in excluded:
             assert namespace["_data_sync_path_allowed"](path) is False
 
@@ -205,6 +209,18 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
             handle.write(b'}\n')
         rows = namespace["_data_sync_inventory"]()
         assert rows[0]["size"] == target.stat().st_size
+
+
+def test_ephemeral_open_positions_is_explicitly_optional_not_required():
+    assert '"open_positions.json",' in BOT[BOT.index("_DATA_SYNC_EXCLUDED_NAMES"):BOT.index("_DATA_SYNC_EXCLUDED_DIR_NAMES")]
+    assert '"classification": "OPTIONAL_OPERATIONAL_PROJECTION"' in BOT
+    assert '"canonical_replacement": "paper_lifecycle_v1.json"' in BOT
+    assert '"optional_files": _data_sync_optional_file_audit()' in BOT
+    # The client remains fail-closed for every row in the required file list;
+    # optional classification is a server-manifest concern, not a skip rule.
+    assert "$selectedFiles = @($manifest.files)" in SYNC_SCRIPT
+    assert "Fly sync chunk failed for $rel" in SYNC_SCRIPT
+    assert "optional_files" not in SYNC_SCRIPT
 
 
 def test_data_sync_generation_fence_rejects_every_generation_change():

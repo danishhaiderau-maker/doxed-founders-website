@@ -842,8 +842,10 @@ def archive_research_session(reason: str = "manual") -> str:
     return dest
 
 
-def create_research_archive_receipt(past_analysis: dict, reason: str) -> str:
-    """Record a wipe receipt without duplicating already-analyzed raw payloads."""
+def create_research_archive_receipt(
+    past_analysis: dict, reason: str, source_paths=None,
+) -> str:
+    """Preserve and verify the exact planned deletion set before a reset."""
     os.makedirs(RESEARCH_ARCHIVE_DIR, exist_ok=True)
     sessions = [
         name for name in os.listdir(RESEARCH_ARCHIVE_DIR)
@@ -860,8 +862,30 @@ def create_research_archive_receipt(past_analysis: dict, reason: str) -> str:
         f"session_{(max(numbers) if numbers else 0) + 1:03d}",
     )
     os.makedirs(destination, exist_ok=False)
-    source_inventory = list(past_analysis.get("source_inventory") or [])
-    total_bytes = sum(int(row.get("bytes") or 0) for row in source_inventory if isinstance(row, dict))
+    payload_dir = os.path.join(destination, "payload")
+    os.makedirs(payload_dir, exist_ok=False)
+    source_inventory = []
+    for index, path in enumerate(sorted(set(source_paths or []))):
+        if not path or not os.path.isfile(path):
+            continue
+        source_size = os.path.getsize(path)
+        source_sha = _file_sha256(path)
+        preserved_name = f"{index:06d}_{os.path.basename(path)}"
+        preserved_path = os.path.join(payload_dir, preserved_name)
+        shutil.copy2(path, preserved_path)
+        preserved_size = os.path.getsize(preserved_path)
+        preserved_sha = _file_sha256(preserved_path)
+        if preserved_size != source_size or preserved_sha != source_sha:
+            raise ArchiveIntegrityError(f"archive verification failed for {path}")
+        source_inventory.append({
+            "path": os.path.relpath(os.path.abspath(path), os.getcwd()).replace("\\", "/"),
+            "bytes": source_size,
+            "sha256": source_sha,
+            "preserved_path": f"payload/{preserved_name}",
+            "preserved_bytes": preserved_size,
+            "preserved_sha256": preserved_sha,
+        })
+    total_bytes = sum(int(row["bytes"]) for row in source_inventory)
     meta = {
         "schema": "research_archive_receipt_v2",
         "reason": reason,
@@ -872,13 +896,13 @@ def create_research_archive_receipt(past_analysis: dict, reason: str) -> str:
         "analysis_generated_at": past_analysis.get("analysis_generated_at"),
         "source_inventory": source_inventory,
         "integrity": {
-            "verified": bool(source_inventory),
-            "method": "source fingerprints preserved in Past Analysis",
+            "verified": True,
+            "method": "exact deletion set copied and sha256 verified",
             "file_count": len(source_inventory),
             "total_source_bytes": total_bytes,
         },
-        "compacted": True,
-        "raw_payloads_retained": False,
+        "compacted": False,
+        "raw_payloads_retained": True,
     }
     with open(os.path.join(destination, "archive_meta.json"), "w", encoding="utf-8") as handle:
         json.dump(meta, handle, indent=2)
@@ -887,11 +911,55 @@ def create_research_archive_receipt(past_analysis: dict, reason: str) -> str:
             "schema": "research_archive_compaction_v1",
             "compacted_at": meta["archived_ts"],
             "past_analysis_id": meta["past_analysis_id"],
-            "deleted_files": 0,
-            "deleted_bytes": 0,
-            "raw_payloads_retained": False,
+            "deleted_files": None,
+            "deleted_bytes": None,
+            "deletion_verified": False,
+            "raw_payloads_retained": True,
         }, handle, indent=2)
     return destination
+
+
+def _load_verified_archive_inventory(archive_path: str) -> list:
+    meta_path = os.path.join(archive_path, "archive_meta.json")
+    with open(meta_path, "r", encoding="utf-8") as handle:
+        meta = json.load(handle)
+    if not (meta.get("integrity") or {}).get("verified"):
+        raise ArchiveIntegrityError("archive inventory is not verified")
+    inventory = list(meta.get("source_inventory") or [])
+    for row in inventory:
+        source = os.path.abspath(str(row.get("path") or ""))
+        preserved = os.path.join(archive_path, str(row.get("preserved_path") or ""))
+        if not os.path.isfile(source) or not os.path.isfile(preserved):
+            raise ArchiveIntegrityError(f"archive source/payload missing: {row.get('path')}")
+        expected_size = int(row.get("bytes") or -1)
+        expected_sha = str(row.get("sha256") or "")
+        if os.path.getsize(source) != expected_size or _file_sha256(source) != expected_sha:
+            raise ArchiveIntegrityError(f"source changed after archive: {row.get('path')}")
+        if os.path.getsize(preserved) != expected_size or _file_sha256(preserved) != expected_sha:
+            raise ArchiveIntegrityError(f"preserved payload changed: {row.get('path')}")
+    return inventory
+
+
+def _finalize_archive_deletion_receipt(archive_path: str, inventory: list, deleted: list) -> dict:
+    deleted_abs = {os.path.abspath(path) for path in deleted}
+    expected_abs = {os.path.abspath(str(row["path"])) for row in inventory}
+    if deleted_abs != expected_abs:
+        raise ArchiveIntegrityError(
+            f"deleted set mismatch expected={len(expected_abs)} actual={len(deleted_abs)}"
+        )
+    deleted_bytes = sum(int(row["bytes"]) for row in inventory)
+    receipt_path = os.path.join(archive_path, "archive_compaction_receipt.json")
+    with open(receipt_path, "r", encoding="utf-8") as handle:
+        receipt = json.load(handle)
+    receipt.update({
+        "deleted_files": len(deleted_abs), "deleted_bytes": deleted_bytes,
+        "deletion_verified": True, "raw_payloads_retained": True,
+    })
+    temporary = receipt_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, indent=2)
+    os.replace(temporary, receipt_path)
+    return receipt
 
 def _wipe_research_on_startup_if_needed():
     if not _should_wipe_research_on_startup():
@@ -900,9 +968,15 @@ def _wipe_research_on_startup_if_needed():
             "Use dashboard Fresh Collection to archive+wipe, or WIPE_CSV_ON_STARTUP=1 [PIPELINE ENFORCEMENT]"
         )
         return
-    archive_research_session(reason="startup_wipe_env")
+    planned = all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
+    archive = create_research_archive_receipt(
+        _seal_past_analysis_with_fallback(reason="startup_wipe_env"),
+        reason="startup_wipe_env", source_paths=planned,
+    )
     logger.warning("[STARTUP] WIPE_CSV_ON_STARTUP=1 - wiping research files after archive [PIPELINE ENFORCEMENT]")
-    reset_all_research_files()
+    result = reset_all_research_files(archive_path=archive)
+    if result.get("wipe_aborted") or result.get("errors"):
+        raise ArchiveIntegrityError(f"startup wipe aborted: {result.get('errors')}")
 
 def _log_credential_sources():
     """Log where API keys come from — Railway must use Admin Control, not synced research defaults."""
@@ -24723,7 +24797,7 @@ def _reset_runtime_log_handlers():
         except Exception as e:
             logger.error(f"[FRESH COLLECTION] Log handler reset failed: {e} [PIPELINE ENFORCEMENT]")
 
-def reset_all_research_files() -> dict:
+def reset_all_research_files(*, archive_path: str = None) -> dict:
     """Delete live epoch research files AND permanently purge quarantine trees.
 
     Infected fills must not be recoverable. Previous resets only moved files
@@ -24731,10 +24805,26 @@ def reset_all_research_files() -> dict:
     JSONL/logs and every quarantine archive under the runtime root.
     """
     from research.epoch_quarantine import purge_quarantine_archives
+    if not archive_path:
+        return {
+            "wipe_aborted": True, "deleted": [],
+            "errors": ["verified archive_path is required before research deletion"],
+        }
     live_paths = all_research_wipe_paths(include_validation_artifacts=True, include_legacy_logs=True)
+    inventory = _load_verified_archive_inventory(archive_path) if archive_path else []
+    if archive_path:
+        inventoried = {os.path.abspath(str(row["path"])) for row in inventory}
+        actual = {os.path.abspath(path) for path in live_paths if path and os.path.isfile(path)}
+        if inventoried != actual:
+            return {"wipe_aborted": True, "deleted": [], "errors": [
+                f"planned deletion set changed expected={len(inventoried)} actual={len(actual)}"
+            ]}
     deleted, errors = _delete_paths(live_paths)
-    purge = purge_quarantine_archives(os.getcwd())
+    purge = purge_quarantine_archives(os.getcwd(), preserve_research_archive=True)
     errors.extend(purge.get("errors") or [])
+    deletion_receipt = None
+    if archive_path and not errors:
+        deletion_receipt = _finalize_archive_deletion_receipt(archive_path, inventory, deleted)
     return {
         "epoch_id": None,
         "path": None,
@@ -24744,6 +24834,8 @@ def reset_all_research_files() -> dict:
         "purged_quarantine": purge.get("deleted_trees") or [],
         "purged_files": int(purge.get("deleted_files") or 0),
         "errors": errors,
+        "deletion_receipt": deletion_receipt,
+        "wipe_aborted": bool(errors),
     }
 
 def maintain_fresh_collection_files():
@@ -24891,9 +24983,13 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
         past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
         past_analysis_id = str(past_analysis.get("archive_id") or "")
+        planned_delete_paths = all_research_wipe_paths(
+            include_validation_artifacts=True, include_legacy_logs=True,
+        )
         archive_path = create_research_archive_receipt(
             past_analysis,
             reason="fresh_collection_dashboard",
+            source_paths=planned_delete_paths,
         )
     except (ArchiveIntegrityError, ImportError, OSError, RuntimeError, ValueError) as exc:
         logger.error(f"[FRESH COLLECTION] ABORT WIPE — preservation failed: {exc} [PIPELINE ENFORCEMENT]")
@@ -24903,7 +24999,22 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             "error": str(exc),
             "summary": "ABORT WIPE — final analysis preservation failed",
         }
-    logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, wiping session state")
+    logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, verifying deletion set")
+    try:
+        quarantine = reset_all_research_files(archive_path=archive_path)
+    except (ArchiveIntegrityError, OSError, RuntimeError, ValueError) as exc:
+        quarantine = {"wipe_aborted": True, "errors": [str(exc)], "deleted": []}
+    if quarantine.get("wipe_aborted") or quarantine.get("errors"):
+        errors = list(quarantine.get("errors") or [])
+        logger.error(f"[FRESH COLLECTION] ABORT WIPE — deletion verification failed: {errors} [PIPELINE ENFORCEMENT]")
+        return {
+            "ok": False, "wipe_aborted": True,
+            "error": "archive_or_deletion_verification_failed",
+            "errors": errors, "archive_path": archive_path,
+            "past_analysis_id": past_analysis_id,
+            "summary": "ABORT WIPE — exact deletion set was not verified",
+        }
+    logger.warning(f"[FRESH COLLECTION] Verified archive and deletion; resetting session state")
     genome_reset = {}
     bridge = get_genome_bridge()
     if bridge is not None:
@@ -24932,7 +25043,6 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         trades.clear()
         recent_trades.clear()
         _canonical_source_order_market_evidence.clear()
-    quarantine = reset_all_research_files()
     moved, errors = quarantine.get("moved") or [], quarantine.get("errors") or []
     deleted = list(quarantine.get("deleted") or [])
     purged_trees = list(quarantine.get("purged_quarantine") or [])
@@ -24949,8 +25059,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     archive_compaction = {
         "past_analysis_id": past_analysis_id,
         "deleted_files": len(deleted),
-        "deleted_bytes": 0,
-        "raw_payloads_retained": False,
+        "deleted_bytes": int((quarantine.get("deletion_receipt") or {}).get("deleted_bytes") or 0),
+        "raw_payloads_retained": True,
         "quarantined_files": 0,
         "quarantine_path": None,
         "purged_quarantine": purged_trees,
