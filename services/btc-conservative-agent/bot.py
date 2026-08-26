@@ -32784,8 +32784,15 @@ def _api_state_cache_refresher_loop():
                         pending=snap.get("orders") or [], positions=snap.get("positions") or [],
                         closed=snap.get("trades") or [], expired=snap.get("expired_orders") or [],
                     )
-                snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
-                    for_api=True
+                # Keep tile summaries on the same live signed-epoch overlay as
+                # positions/orders.  Reusing the cached heavy presentation here
+                # made approvals/fills stay at their pre-resume zero values even
+                # while the tile headline correctly showed live lifecycles.
+                snap["pathway_lane_specs"] = _scope_pathway_specs_to_signed_epoch(
+                    get_pathway_lane_specs_cached(for_api=True),
+                    snap.get("trades") or [],
+                    snap.get("lane_opportunity_counters") or {},
+                    snap.get("fresh_epoch_cutoff_utc") or "",
                 )
                 paused_shadow_stats = snap.get("paused_shadow_stats")
                 if isinstance(paused_shadow_stats, dict):

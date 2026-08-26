@@ -48,6 +48,9 @@ def test_active_overlay_refreshes_and_reprojects_diagnostics() -> None:
         assert key in body
     assert "snap.update(build_dashboard_display(snap))" in body
     assert 'snap["strategy_progress"] = _strategy_progress_health_snapshot()' in body
+    assert 'snap["pathway_lane_specs"] = _scope_pathway_specs_to_signed_epoch(' in body
+    assert 'snap.get("lane_opportunity_counters") or {}' in body
+    assert 'snap.get("fresh_epoch_cutoff_utc") or ""' in body
 
 
 def test_dashboard_display_does_not_present_historical_manual_pause_as_current() -> None:
