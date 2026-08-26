@@ -3,6 +3,7 @@ import unittest
 from collections import Counter
 
 from research_v3_candidates import (
+    _apply_multifactor_ranking,
     _bind_candidate_receipt_identity,
     _conservative_child_receipt,
     _conservative_ohlc_prices,
@@ -77,6 +78,80 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
 
 
 class V3CandidateTests(unittest.TestCase):
+    @staticmethod
+    def _ranking_row(policy_id, *, family="FIXED_TARGET", pnl=1.0, drawdown=-0.2,
+                     cvar=-0.1, lcb=0.02, fills=8, partial=0, no_fills=2,
+                     regimes=None, parameter=1.0):
+        if regimes is None:
+            regimes = {
+                "BULL": {"scored_episodes": 3, "expectancy_usd": 0.03},
+                "BEAR": {"scored_episodes": 3, "expectancy_usd": 0.02},
+                "SIDEWAYS": {"scored_episodes": 4, "expectancy_usd": 0.01},
+            }
+        return {
+            "policy_id": policy_id,
+            "policy_family": family,
+            "policy_spec": {"entry": {"offset_pct": parameter}, "exit": {"atr_k": 2.5}},
+            "oos_episodes": 10,
+            "full_fills": fills,
+            "partial_fills": partial,
+            "no_fills": no_fills,
+            "sealed_oos_net_usd": pnl,
+            "max_drawdown_usd": drawdown,
+            "cvar95_usd": cvar,
+            "expectancy_lcb_usd": lcb,
+            "regime_breakdown": regimes,
+        }
+
+    def test_multifactor_ranking_penalizes_missing_risk_and_execution_evidence(self):
+        complete = [
+            self._ranking_row("balanced", pnl=1.0, parameter=0.10),
+            self._ranking_row("balanced-neighbor-a", pnl=0.9, parameter=0.11),
+            self._ranking_row("balanced-neighbor-b", pnl=0.8, parameter=0.12),
+        ]
+        raw_profit_only = self._ranking_row("raw-profit-only", pnl=99.0, parameter=0.9)
+        raw_profit_only.update({
+            "max_drawdown_usd": None,
+            "cvar95_usd": None,
+            "expectancy_lcb_usd": None,
+            "full_fills": 0,
+            "no_fills": 0,
+            "regime_breakdown": {},
+        })
+
+        ranked = _apply_multifactor_ranking([raw_profit_only, *complete])
+        raw = next(row for row in ranked if row["policy_id"] == "raw-profit-only")
+        leader = ranked[0]
+
+        self.assertNotEqual(leader["policy_id"], "raw-profit-only")
+        self.assertFalse(raw["ranking_complete"])
+        self.assertEqual(raw["qualification"], "DESCRIPTIVE_ONLY")
+        self.assertIn("drawdown", raw["ranking_evidence"]["missing_metrics"])
+        self.assertIn("expected_shortfall", raw["ranking_evidence"]["missing_metrics"])
+        self.assertIn("fill_realism", raw["ranking_evidence"]["missing_metrics"])
+        self.assertIsNone(raw["ranking_evidence"]["raw_metrics"]["drawdown"])
+        self.assertGreater(raw["ranking_evidence"]["missing_metric_penalty"], 0)
+
+    def test_multifactor_ranking_exposes_tail_regime_and_neighbor_components(self):
+        rows = [
+            self._ranking_row("p1", parameter=0.10),
+            self._ranking_row("p2", pnl=0.9, parameter=0.11),
+            self._ranking_row("p3", pnl=0.8, parameter=0.12),
+        ]
+        ranked = _apply_multifactor_ranking(rows)
+        evidence = ranked[0]["ranking_evidence"]
+
+        self.assertTrue(evidence["complete"])
+        self.assertEqual(evidence["qualification"], "DESCRIPTIVE_ONLY")
+        self.assertEqual(set(evidence["weights"]), {
+            "profit", "drawdown", "expected_shortfall", "fill_realism",
+            "uncertainty_lower_bound", "regime_stability",
+            "neighboring_parameter_robustness",
+        })
+        self.assertGreater(evidence["raw_metrics"]["regime_stability"], 0)
+        self.assertEqual(evidence["neighbor_evidence"]["neighbors_supported"], 2)
+        self.assertGreaterEqual(evidence["raw_metrics"]["neighboring_parameter_robustness"], 0)
+
     def test_current_actual_paper_schema_materializes_complete_policy_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-clean")
@@ -237,7 +312,11 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(report["unique_policies_evaluated"], len(protection_screen()))
         self.assertTrue(report["descriptive_top_100"])
         selection = report["descriptive_selection"]
-        self.assertEqual(selection["method"], "GLOBAL_RANK_THEN_FAMILY_CAP")
+        self.assertEqual(
+            selection["method"],
+            "MULTIFACTOR_CONSERVATIVE_RANK_THEN_FAMILY_CAP",
+        )
+        self.assertIn("expected_shortfall", selection["ranking_dimensions"])
         self.assertEqual(selection["per_family_cap"], 2)
         family_counts = Counter(
             row["policy_family"] for row in report["descriptive_top_100"]
@@ -247,6 +326,9 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(selection["families_represented"], len(family_counts))
         self.assertEqual(selection["globally_ranked_policies"], len(report["candidates"]))
         self.assertTrue(all(row["family_rank"] in {1, 2} for row in report["descriptive_top_100"]))
+        self.assertTrue(all(
+            len(rows) <= 2 for rows in report["profit_capture_leaders"].values()
+        ))
         self.assertEqual(progress[-1]["phase"], "PROTECTION_REPLAY")
         self.assertEqual(progress[-1]["input_events_completed"], 1)
         self.assertEqual(progress[-1]["input_events_total"], 1)

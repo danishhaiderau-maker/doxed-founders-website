@@ -142,6 +142,205 @@ def _number(value: Any) -> float | None:
         return None
 
 
+_RANKING_WEIGHTS = {
+    "profit": 0.20,
+    "drawdown": 0.15,
+    "expected_shortfall": 0.15,
+    "fill_realism": 0.15,
+    "uncertainty_lower_bound": 0.15,
+    "regime_stability": 0.10,
+    "neighboring_parameter_robustness": 0.10,
+}
+
+
+def _finite_number(value: Any) -> float | None:
+    number = _number(value)
+    return number if number is not None and math.isfinite(number) else None
+
+
+def _flatten_policy_parameters(value: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten a policy spec without inventing defaults for absent parameters."""
+    flattened: dict[str, Any] = {}
+    if isinstance(value, Mapping):
+        for key, child in sorted(value.items(), key=lambda item: str(item[0])):
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            flattened.update(_flatten_policy_parameters(child, child_prefix))
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            flattened.update(_flatten_policy_parameters(child, f"{prefix}[{index}]"))
+    elif isinstance(value, (str, int, float, bool)) and value is not None:
+        flattened[prefix] = value
+    return flattened
+
+
+def _policy_parameter_distance(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+    """Mixed numeric/categorical distance over explicitly shared policy fields."""
+    left_flat = _flatten_policy_parameters(left)
+    right_flat = _flatten_policy_parameters(right)
+    keys = sorted(set(left_flat) | set(right_flat))
+    if not keys:
+        return float("inf")
+    distance = 0.0
+    compared = 0
+    for key in keys:
+        if key not in left_flat or key not in right_flat:
+            distance += 1.0
+            compared += 1
+            continue
+        a, b = left_flat[key], right_flat[key]
+        a_number, b_number = _finite_number(a), _finite_number(b)
+        if a_number is not None and b_number is not None and not isinstance(a, bool) and not isinstance(b, bool):
+            scale = max(abs(a_number), abs(b_number), 1.0)
+            distance += min(1.0, abs(a_number - b_number) / scale)
+        else:
+            distance += 0.0 if str(a) == str(b) else 1.0
+        compared += 1
+    return distance / compared if compared else float("inf")
+
+
+def _neighbor_robustness(row: Mapping[str, Any], population: list[dict[str, Any]]) -> dict[str, Any]:
+    """Measure whether nearby parameter choices retain positive conservative OOS behavior."""
+    peers = [
+        candidate for candidate in population
+        if candidate is not row
+        and str(candidate.get("policy_family") or "UNKNOWN") == str(row.get("policy_family") or "UNKNOWN")
+    ]
+    nearest = sorted(
+        peers,
+        key=lambda candidate: (
+            _policy_parameter_distance(row.get("policy_spec") or {}, candidate.get("policy_spec") or {}),
+            str(candidate.get("policy_id") or ""),
+        ),
+    )[:5]
+    usable = [
+        candidate for candidate in nearest
+        if _finite_number(candidate.get("sealed_oos_net_usd")) is not None
+        and _finite_number(candidate.get("expectancy_lcb_usd")) is not None
+        and int(candidate.get("full_fills") or 0) + int(candidate.get("partial_fills") or 0) > 0
+    ]
+    if len(usable) < 2:
+        return {"score": None, "neighbors_considered": len(nearest), "neighbors_supported": len(usable)}
+    pnls = [_finite_number(candidate.get("sealed_oos_net_usd")) for candidate in usable]
+    positive = sum(
+        1 for candidate, pnl in zip(usable, pnls)
+        if pnl is not None and pnl > 0 and float(candidate.get("expectancy_lcb_usd")) >= 0
+    )
+    mean = sum(float(value) for value in pnls if value is not None) / len(pnls)
+    dispersion = sum(abs(float(value) - mean) for value in pnls if value is not None) / len(pnls)
+    scale = max(abs(mean), 0.01)
+    score = (positive / len(usable)) * (1.0 / (1.0 + dispersion / scale))
+    return {
+        "score": round(score, 8),
+        "neighbors_considered": len(nearest),
+        "neighbors_supported": len(usable),
+    }
+
+
+def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach auditable, conservative multi-factor scores and return ranked rows.
+
+    Missing inputs receive a zero score contribution *and* remain listed in
+    ``missing_metrics``.  They are never converted into zero PnL, zero
+    drawdown, or a fictitious lower confidence bound.
+    """
+    enriched: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        fills = int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0)
+        supported = fills + int(row.get("no_fills") or 0)
+        oos = int(row.get("oos_episodes") or 0)
+        fill_realism = None
+        if supported > 0 and oos > 0:
+            fill_quality = (
+                int(row.get("full_fills") or 0)
+                + 0.5 * int(row.get("partial_fills") or 0)
+            ) / supported
+            fill_realism = fill_quality * min(1.0, supported / oos)
+
+        scored_regimes = [
+            details for name, details in (row.get("regime_breakdown") or {}).items()
+            if str(name).upper() != "UNKNOWN"
+            and int((details or {}).get("scored_episodes") or 0) > 0
+            and _finite_number((details or {}).get("expectancy_usd")) is not None
+        ]
+        regime_stability = None
+        if len(scored_regimes) >= 3:
+            expectancies = [float(details["expectancy_usd"]) for details in scored_regimes]
+            profitable_fraction = sum(value > 0 for value in expectancies) / len(expectancies)
+            spread = max(expectancies) - min(expectancies)
+            scale = max(max(abs(value) for value in expectancies), 0.01)
+            regime_stability = profitable_fraction * (1.0 / (1.0 + spread / scale))
+
+        neighbor = _neighbor_robustness(source, rows)
+        raw = {
+            "profit": _finite_number(row.get("sealed_oos_net_usd")),
+            "drawdown": (
+                -abs(float(row["max_drawdown_usd"]))
+                if _finite_number(row.get("max_drawdown_usd")) is not None else None
+            ),
+            "expected_shortfall": _finite_number(row.get("cvar95_usd")),
+            "fill_realism": fill_realism,
+            "uncertainty_lower_bound": _finite_number(row.get("expectancy_lcb_usd")),
+            "regime_stability": regime_stability,
+            "neighboring_parameter_robustness": neighbor["score"],
+        }
+        row["ranking_evidence"] = {
+            "schema": "descriptive_multifactor_ranking_v1",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "raw_metrics": raw,
+            "missing_metrics": [name for name, value in raw.items() if value is None],
+            "neighbor_evidence": neighbor,
+            "weights": dict(_RANKING_WEIGHTS),
+        }
+        enriched.append(row)
+
+    percentiles: dict[str, dict[int, float]] = {}
+    for metric in _RANKING_WEIGHTS:
+        present = sorted(
+            (float(row["ranking_evidence"]["raw_metrics"][metric]), index)
+            for index, row in enumerate(enriched)
+            if row["ranking_evidence"]["raw_metrics"][metric] is not None
+        )
+        scores: dict[int, float] = {}
+        if present:
+            denominator = max(1, len(present) - 1)
+            start = 0
+            while start < len(present):
+                end = start + 1
+                while end < len(present) and present[end][0] == present[start][0]:
+                    end += 1
+                average_position = (start + end - 1) / 2
+                percentile = average_position / denominator if len(present) > 1 else 1.0
+                for _value, index in present[start:end]:
+                    scores[index] = percentile
+                start = end
+        percentiles[metric] = scores
+
+    for index, row in enumerate(enriched):
+        components = {
+            metric: round(percentiles[metric].get(index, 0.0), 8)
+            for metric in _RANKING_WEIGHTS
+        }
+        score = sum(components[name] * weight for name, weight in _RANKING_WEIGHTS.items())
+        row["ranking_evidence"]["component_scores"] = components
+        row["ranking_evidence"]["missing_metric_penalty"] = round(sum(
+            _RANKING_WEIGHTS[name]
+            for name in row["ranking_evidence"]["missing_metrics"]
+        ), 8)
+        row["ranking_evidence"]["composite_score"] = round(score, 8)
+        row["ranking_evidence"]["complete"] = not row["ranking_evidence"]["missing_metrics"]
+        row["ranking_score"] = round(score, 8)
+        row["ranking_complete"] = row["ranking_evidence"]["complete"]
+        row["qualification"] = "DESCRIPTIVE_ONLY"
+
+    return sorted(enriched, key=lambda row: (
+        -float(row.get("ranking_score") or 0),
+        len((row.get("ranking_evidence") or {}).get("missing_metrics") or []),
+        -float(row.get("sealed_oos_net_usd")) if _finite_number(row.get("sealed_oos_net_usd")) is not None else float("inf"),
+        str(row.get("policy_id") or ""),
+    ))
+
+
 def _identity_text(value: Any) -> str | None:
     """Preserve an upstream identity only when it is explicitly present."""
     text = str(value or "").strip()
@@ -823,6 +1022,7 @@ def evaluate_protection_screen(
         full_fills = int(outcome_states.get("FULL_FILL", 0))
         partial_fills = int(outcome_states.get("PARTIAL_FILL", 0))
         no_fills = int(outcome_states.get("NO_FILL", 0))
+        has_conservative_execution = full_fills + partial_fills > 0
         unsupported = sum(
             int(count) for state, count in outcome_states.items()
             if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
@@ -889,10 +1089,15 @@ def evaluate_protection_screen(
                 "wins": int(diagnostic_validation["risk"].get("wins") or 0),
                 "losses": int(diagnostic_validation["risk"].get("losses") or 0),
             },
-            "sealed_oos_net_usd": risk.get("net_pnl_usd"),
-            "max_drawdown_usd": risk.get("max_drawdown_usd"),
-            "cvar95_usd": risk.get("cvar95_usd"),
-            "expectancy_lcb_usd": validation["bootstrap"].get("mean_lcb95"),
+            # No supported terminal execution means these metrics are
+            # unavailable, not $0.  The validation receipt retains the raw
+            # opportunity accounting for audit, while ranking stays fail
+            # closed against invented profitability or risk.
+            "sealed_oos_net_usd": risk.get("net_pnl_usd") if has_conservative_execution else None,
+            "max_drawdown_usd": risk.get("max_drawdown_usd") if has_conservative_execution else None,
+            "cvar95_usd": risk.get("cvar95_usd") if has_conservative_execution else None,
+            "expectancy_lcb_usd": validation["bootstrap"].get("mean_lcb95") if has_conservative_execution else None,
+            "longest_losing_sequence": risk.get("longest_loss_streak") if has_conservative_execution else None,
             "mean_profit_retention_ratio": round(sum(retentions) / len(retentions), 8) if retentions else None,
             "mean_profit_giveback_pct": round(sum(givebacks) / len(givebacks), 8) if givebacks else None,
             "mean_underwater_observation_ratio": round(sum(underwater) / len(underwater), 8) if underwater else None,
@@ -902,11 +1107,11 @@ def evaluate_protection_screen(
             "gates": validation["gates"],
             "validation": validation,
         })
-    globally_ranked = sorted(assessed, key=lambda row: (
-        -float(row.get("sealed_oos_net_usd") or 0),
-        abs(float(row.get("max_drawdown_usd") or 0)),
-        str(row["policy_id"]),
-    ))
+    # Public conservative policy ordering is multi-factor.  Raw profit remains
+    # visible, but can no longer dominate missing execution, tail-risk,
+    # uncertainty, regime, or neighboring-parameter evidence.
+    assessed = _apply_multifactor_ranking(assessed)
+    globally_ranked = list(assessed)
 
     def _family_balanced(rows: list[dict[str, Any]], *, cap: int = 2) -> list[dict[str, Any]]:
         counts: dict[str, int] = defaultdict(int)
@@ -961,15 +1166,23 @@ def evaluate_protection_screen(
     family_leaders = {}
     for family in sorted({row["policy_family"] for row in assessed}):
         family_rows = [row for row in assessed if row["policy_family"] == family]
-        family_leaders[family] = sorted(family_rows, key=lambda row: (-float(row.get("sealed_oos_net_usd") or 0), abs(float(row.get("max_drawdown_usd") or 0)), str(row["policy_id"])))[:10]
+        family_leaders[family] = sorted(family_rows, key=lambda row: (
+            -float(row.get("ranking_score") or 0),
+            len((row.get("ranking_evidence") or {}).get("missing_metrics") or []),
+            str(row["policy_id"]),
+        ))[:2]
     dynamic_regime_leaders = {}
     regimes = sorted({regime for row in assessed for regime in row.get("regime_breakdown", {})})
     for regime in regimes:
         eligible = [row for row in assessed if (row.get("regime_breakdown") or {}).get(regime, {}).get("scored_episodes", 0) > 0]
-        dynamic_regime_leaders[regime] = sorted(
+        dynamic_regime_leaders[regime] = _family_balanced(sorted(
             eligible,
-            key=lambda row: (-float(row["regime_breakdown"][regime].get("net_pnl_usd") or 0), abs(float(row.get("max_drawdown_usd") or 0)), str(row["policy_id"])),
-        )[:10]
+            key=lambda row: (
+                -float(row.get("ranking_score") or 0),
+                -float(row["regime_breakdown"][regime].get("net_pnl_usd") or 0),
+                str(row["policy_id"]),
+            ),
+        ), cap=2)[:10]
     scenario_c_rows = [
         row for row in assessed
         if "|ATR_TP_2.5_SCENARIO_C" in str(row.get("policy_id") or "")
@@ -1052,7 +1265,9 @@ def evaluate_protection_screen(
         "profitable_conservative_top_100": profitable_conservative,
         "profitable_ideal_touch_diagnostic_top_100": profitable_ideal_touch_diagnostic,
         "descriptive_selection": {
-            "method": "GLOBAL_RANK_THEN_FAMILY_CAP",
+            "method": "MULTIFACTOR_CONSERVATIVE_RANK_THEN_FAMILY_CAP",
+            "ranking_schema": "descriptive_multifactor_ranking_v1",
+            "ranking_dimensions": list(_RANKING_WEIGHTS),
             "per_family_cap": descriptive_family_cap,
             "families_represented": len(family_counts),
             "rows_displayed": len(descriptive),
@@ -1060,7 +1275,11 @@ def evaluate_protection_screen(
             "note": "The exhaustive policy grid is unchanged; only the public shortlist is family-balanced.",
         },
         "profit_capture_leaders": family_leaders,
-        "drawdown_control_leaders": sorted(assessed, key=lambda row: (abs(float(row.get("max_drawdown_usd") or 0)), -float(row.get("sealed_oos_net_usd") or 0)))[:25],
+        "drawdown_control_leaders": sorted(assessed, key=lambda row: (
+            _finite_number(row.get("max_drawdown_usd")) is None,
+            abs(float(row["max_drawdown_usd"])) if _finite_number(row.get("max_drawdown_usd")) is not None else float("inf"),
+            -float(row.get("ranking_score") or 0),
+        ))[:25],
         "dynamic_regime_leaders": dynamic_regime_leaders,
         "scenario_c_atr_stop_sweep": scenario_c_atr_stop_sweep,
         "warning": "Descriptive rows use conservative BBO/depth entry receipts but remain unqualified until all OOS and safety gates pass. Ideal-touch references are diagnostic only.",

@@ -2479,6 +2479,31 @@ def api_conservative_fill_research():
     return jsonify(payload)
 
 
+@app.route("/api/cross-world-evidence")
+def api_cross_world_evidence():
+    """Expose only the manifest-owned current analyzer generation."""
+    payload = _current_generation_report("cross_world_evidence_report.json")
+    if not payload:
+        payload = {
+            "schema": "cross_world_evidence_v1",
+            "status": "NOT_COMPUTABLE",
+            "qualification": "DESCRIPTIVE_ONLY",
+            "join_summary": {"status": "NOT_COMPUTABLE"},
+            "blockers": ["CURRENT_MANIFEST_REPORT_NOT_AVAILABLE"],
+            "worlds": {},
+        }
+    return jsonify(payload)
+
+
+@app.route("/cross-world-evidence")
+def cross_world_evidence_page():
+    return render_template_string("""
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cross-World Evidence</title>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{max-width:1400px;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.value{font-size:22px;font-weight:700}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:1fr}}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Cross-World Evidence</h1><div id="banner" class="banner bad">Loading current manifest report…</div><div class="card"><strong>Strict causal join:</strong> epoch + opportunity + policy + schedule + tape + fill. Missing or duplicate identity remains NOT_COMPUTABLE; diagnostic touch is never relabelled as a fill.</div><div id="worlds" class="grid"></div><div class="card"><h2>Join summary and blockers</h2><pre id="detail"></pre></div></div>
+<script>fetch('/api/cross-world-evidence').then(r=>r.json()).then(d=>{const j=d.join_summary||{},worlds=d.worlds||{};document.getElementById('banner').textContent=(j.status||d.status||'NOT_COMPUTABLE')+' · comparisons '+String(j.pairwise_computable_comparisons??0)+' · disagreements '+String(j.pairwise_disagreements??0);document.getElementById('worlds').innerHTML=Object.entries(worlds).map(([name,w])=>'<div class="card"><small>'+name+'</small><div class="value">'+String(w.status||'NOT_COMPUTABLE')+'</div><div>rows '+String(w.rows??w.row_count??0)+' · joinable '+String(w.joinable_rows??0)+'</div></div>').join('')||'<div class="card">No current world inventory is available.</div>';document.getElementById('detail').textContent=JSON.stringify({join_summary:j,blockers:d.blockers,missing_identity_counts:d.missing_identity_counts,source_inventory:d.source_inventory},null,2)}).catch(e=>{document.getElementById('banner').textContent='FAILED TO LOAD · '+e});</script></body></html>
+""")
+
+
 def _policy_detail_is_current(detail: dict, best: dict) -> bool:
     return bool(
         detail
@@ -4119,7 +4144,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="cohort-note"></p>
     <h2>Best Policy Research</h2>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
-    <p class="note"><strong>V3.1 evidence:</strong> <a href="/safe-policy-genome-v3.1">Safe Policy Genome</a> · <a href="/static-policies">Static policies</a> · <a href="/dynamic-policies">Dynamic/regime</a> · <a href="/shadow-research">Shadow paths</a> · <a href="/risk-drawdown">Risk/drawdown</a> · <a href="/chronological-oos">Chronological OOS</a> · <a href="/evidence-maturity">Evidence maturity</a> · <a href="/partial-reduction">Partial-reduction reconciliation</a></p>
+    <p class="note"><strong>V3.1 evidence:</strong> <a href="/safe-policy-genome-v3.1">Safe Policy Genome</a> · <a href="/cross-world-evidence">Cross-world evidence</a> · <a href="/static-policies">Static policies</a> · <a href="/dynamic-policies">Dynamic/regime</a> · <a href="/shadow-research">Shadow paths</a> · <a href="/risk-drawdown">Risk/drawdown</a> · <a href="/chronological-oos">Chronological OOS</a> · <a href="/evidence-maturity">Evidence maturity</a> · <a href="/partial-reduction">Partial-reduction reconciliation</a></p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>

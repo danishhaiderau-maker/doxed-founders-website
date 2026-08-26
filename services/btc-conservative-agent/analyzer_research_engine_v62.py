@@ -134,6 +134,7 @@ RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
 COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
 POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
+CROSS_WORLD_EVIDENCE_REPORT_FILE = "cross_world_evidence_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
 PUBLISHED_REPORTS_DIR = "published_reports"
@@ -535,6 +536,7 @@ ANALYZER_JSON_REPORT_FILES = (
     BEST_POLICY_RESEARCH_REPORT_FILE,
     SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
+    CROSS_WORLD_EVIDENCE_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
@@ -542,6 +544,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
     ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current signed V3.1 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
+    ("Cross-World Evidence", CROSS_WORLD_EVIDENCE_REPORT_FILE, "Explicit-identity-only agreement and disagreement across ideal-touch, conservative, shadow, paper, and Bitfinex-copy evidence"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
@@ -16896,6 +16899,116 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
     os.replace(temp, path)
 
 
+def _cross_world_list(payload, *paths):
+    """Return the first explicit list at a known report path."""
+    for path in paths:
+        current = payload
+        for name in path.split("."):
+            current = current.get(name) if isinstance(current, dict) else None
+        if isinstance(current, list):
+            return [row for row in current if isinstance(row, dict)]
+    return []
+
+
+def _cross_world_bitfinex_rows():
+    """Flatten authenticated relay events without manufacturing join fields."""
+    path = _agent_data_path("relay_lifecycle_evidence_v1.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return []
+    documents = payload if isinstance(payload, list) else [payload]
+    rows = []
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        for record in document.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            for event in record.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                event_payload = event.get("payload")
+                event_payload = event_payload if isinstance(event_payload, dict) else {}
+                rows.append({
+                    **record,
+                    **event,
+                    **event_payload,
+                    "relay_evidence_revision": document.get("evidence_revision"),
+                    "relay_generating_revision": document.get("generating_revision"),
+                })
+    return rows
+
+
+def cross_world_evidence_report():
+    """Publish an explicit-identity-only cross-world agreement audit."""
+    from research.cross_world_evidence import build_cross_world_evidence_report
+
+    safe = _load_json_report(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
+    conservative = _load_json_report(CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE) or {}
+    # These are deliberately known paths, not heuristic recursive extraction.
+    # Aggregate policy rows lacking causal identities remain NOT_COMPUTABLE.
+    ideal_rows = _cross_world_list(
+        safe,
+        "ideal_touch_receipts",
+        "candidate_screen.ideal_touch_receipts",
+        "candidate_screen.profitable_ideal_touch_diagnostic_top_100",
+        "candidate_screen.descriptive_top_100",
+        "safe_policy_ranking.rows",
+        "candidate_screen.rows",
+    )
+    conservative_rows = _cross_world_list(conservative, "receipts")
+    shadow_rows = [
+        *_load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE),
+        *_load_jsonl_rows(COUNTERFACTUAL_FILE),
+    ]
+    paper = robust_read_csv(TRADES_FILE, "cross-world observed paper")
+    paper_rows = paper.to_dict("records") if paper is not None and not paper.empty else []
+    bitfinex_rows = _cross_world_bitfinex_rows()
+    epoch = _fresh_epoch_provenance()
+    revision = (
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    report = build_cross_world_evidence_report(
+        {
+            "IDEAL_TOUCH_DIAGNOSTIC": ideal_rows,
+            "CONSERVATIVE_BBO_DEPTH": conservative_rows,
+            "SHADOW_COUNTERFACTUAL": shadow_rows,
+            "OBSERVED_PAPER": paper_rows,
+            "BITFINEX_COPY": bitfinex_rows,
+        },
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        source_revision=revision,
+        epoch_id=epoch.get("fresh_epoch_id"),
+    )
+    report["source_inventory"] = {
+        "ideal_touch": SAFE_POLICY_GENOME_V3_REPORT_FILE,
+        "conservative_bbo_depth": CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
+        "shadow_counterfactual": [SHADOW_LANE_OUTCOME_FILE, COUNTERFACTUAL_FILE],
+        "observed_paper": TRADES_FILE,
+        "bitfinex_copy": "relay_lifecycle_evidence_v1.json",
+    }
+    target = analyzer_report_path(CROSS_WORLD_EVIDENCE_REPORT_FILE)
+    temp = f"{target}.tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    os.replace(temp, target)
+    print(
+        "  ✅ Cross-world evidence: "
+        f"status={report['join_summary']['status']} "
+        f"computable={report['join_summary']['pairwise_computable_comparisons']} "
+        f"disagreements={report['join_summary']['pairwise_disagreements']} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return report
+
+
 def write_report_manifest(payload=None):
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = manifest_started_at.timestamp() - (15 * 60)
@@ -16918,6 +17031,10 @@ def write_report_manifest(payload=None):
         # A missing/corrupt v2.2 input must degrade to no report, never interrupt
         # the established analyzer cycle or leak a stale policy candidate.
         print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
+    try:
+        cross_world_evidence_report()
+    except Exception as exc:
+        print(f"  ⚠️ Cross-world evidence unavailable: {type(exc).__name__}: {exc}")
     cohort_summary = {}
     for cohort in (
         SHOWCASE_STRATEGY,
