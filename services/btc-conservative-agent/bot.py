@@ -17000,27 +17000,22 @@ def evaluate_dashboard_execution_gate(
     ):
         return False, str(signal.get("entry_reason") or "STRUCTURAL_LIMIT_UNAVAILABLE"), False
 
-    if is_patient_chase_lane(lane):
-        # Registered paper policy: shared AI APPROVE places its exact 0.29%
-        # resting limit immediately. Global spread/AI-band/chase-bucket gates
-        # belong to Continuous experiments and must not rewrite this cohort.
-        if not ensure_signal_capacity():
-            return False, "MAX_ACTIVE_SIGNALS", False
-        if lev < 1 or lev > MAX_RESEARCH_LEVERAGE:
-            return False, "LEVERAGE_OUT_OF_RANGE", False
-        return True, "OK_OFFSET029_REGISTERED_POLICY", False
+    registered_family = is_patient_chase_lane(lane)
+    if not registered_family:
+        # Spread and advisory AI-band controls remain Continuous-only. Registered
+        # families retain their signed entry policy, but the operator's exact
+        # chase-window selector below is a global paper-order timing gate.
+        sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
+        if sg_blocked:
+            logger.info(
+                f"[SPREAD GATE] spread_bucket={sg_bucket} spread={sg_spread} blocked "
+                f"trade_id={signal.get('trade_id')} — skipping limit order [PIPELINE ENFORCEMENT]"
+            )
+            return False, "SPREAD_BUCKET_BLOCKED", False
 
-    sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
-    if sg_blocked:
-        logger.info(
-            f"[SPREAD GATE] spread_bucket={sg_bucket} spread={sg_spread} blocked "
-            f"trade_id={signal.get('trade_id')} — skipping limit order [PIPELINE ENFORCEMENT]"
-        )
-        return False, "SPREAD_BUCKET_BLOCKED", False
-
-    win_prob = _signal_ai_win_prob(signal, ai)
-    if dashboard_ai_band_blocks(win_prob):
-        return False, "AI_BAND_BLOCKED", False
+        win_prob = _signal_ai_win_prob(signal, ai)
+        if dashboard_ai_band_blocks(win_prob):
+            return False, "AI_BAND_BLOCKED", False
 
     if not ensure_signal_capacity():
         return False, "MAX_ACTIVE_SIGNALS", False
@@ -17141,8 +17136,6 @@ def enforce_dashboard_chase_gates_on_pending() -> None:
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
-        if is_patient_chase_lane(order.get("research_lane")):
-            continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
         age_sec = _order_signal_age_sec(order, signal or {}, now)
@@ -25435,6 +25428,24 @@ def _annotate_lanes_with_exec_mode(lanes: list) -> list:
             spec["exec_mode"] = mode
             spec["exec_block_reason"] = block
             spec["exec_banner"] = _exec_mode_banner_text(mode, block, lane_id)
+            selected = [
+                chase_count_bucket(n).replace("_chases", "").replace("_chase", "")
+                for n in range(0, CHASE_WINDOW_MAX_INDEX + 1)
+                if chase_bucket_allowed(n)
+            ]
+            policy_module = TILE_POLICY_MODULES.get(lane_id)
+            template = list(getattr(getattr(policy_module, "SPEC", None), "chase_windows", ()))
+            spec["chase_timing"] = {
+                "global_submit_buckets": selected,
+                "global_submit_label": ", ".join(selected) if selected else "none",
+                "template_reprice_buckets": template,
+                "template_reprice_label": ", ".join(str(n) for n in template) if template else "continuous/global",
+                "contract": (
+                    "A paper order may first appear only inside a globally selected bucket. "
+                    "The tile Chase label is its post-submit reprice template, not permission "
+                    "to bypass the global selector."
+                ),
+            }
             spec["platform_relay_eligible"] = (
                 lane_id in PLATFORM_RELAY_ELIGIBLE_LANES
             )
@@ -27927,6 +27938,12 @@ DASHBOARD_JS = """(function () {
           const badge = spec.badge
             ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#3d2e00;border:1px solid #d4a72c;border-radius:4px;color:#f0c14b;font-size:0.72em;font-weight:700;">' + spec.badge + '</span>')
             : '';
+          const chaseTiming = spec.chase_timing || {};
+          const chaseTruth = '<div style="margin-top:8px;padding:7px 9px;background:#132033;border:1px solid #1f6feb;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+            + '<strong style="color:#58a6ff;">Effective order timing:</strong> global submit buckets '
+            + (chaseTiming.global_submit_label || 'none')
+            + ' · tile reprice template ' + (chaseTiming.template_reprice_label || 'continuous/global')
+            + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
           const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
           let orderBanner = '';
           // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
@@ -27985,6 +28002,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
+            + chaseTruth
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
