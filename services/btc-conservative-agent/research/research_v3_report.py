@@ -118,6 +118,48 @@ def _exclude_identity_aliases(opportunities: list[dict[str, Any]]) -> tuple[list
     return kept, excluded
 
 
+def _shared_call_independence_clusters(
+    opportunities: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Describe the causal clusters used for independent-opportunity counts.
+
+    A shared AI call may fan out into several policy/lane decisions.  Those
+    children remain useful paired evidence, but they are not independent
+    observations.  Keep that distinction explicit in the report contract.
+    """
+    decisions_by_episode: dict[str, list[dict[str, Any]]] = {}
+    for row in decisions:
+        episode_id = str(row.get("episode_id") or "").strip()
+        if episode_id:
+            decisions_by_episode.setdefault(episode_id, []).append(row)
+
+    clusters = []
+    for row in opportunities:
+        episode_id = str(row.get("episode_id") or "").strip()
+        shared_call_id = str(row.get("shared_ai_call_id") or "").strip()
+        grouping_basis = "SHARED_AI_CALL" if shared_call_id else str(
+            row.get("grouping_basis") or "EPISODE_ID_FALLBACK"
+        )
+        children = decisions_by_episode.get(episode_id, [])
+        child_identities = {
+            (
+                str(child.get("research_lane") or "UNKNOWN"),
+                str(child.get("policy_signature") or child.get("policy_id") or "UNKNOWN"),
+            )
+            for child in children
+        }
+        clusters.append({
+            "cluster_id": shared_call_id or episode_id,
+            "grouping_basis": grouping_basis,
+            "episode_id": episode_id,
+            "shared_ai_call_id": shared_call_id or None,
+            "child_decision_count": len(children),
+            "child_lane_count": len(child_identities),
+        })
+    return clusters
+
+
 def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidates=None) -> dict[str, Any]:
     v3_root = Path(data_dir) / "v3"
     all_opportunities = _read_ledger(v3_root / "ledgers" / "opportunity.jsonl")
@@ -135,6 +177,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     opportunities, identity_aliases = _exclude_identity_aliases(opportunities)
     allowed_episodes = {str(row.get("episode_id") or "") for row in opportunities}
     decisions = [row for row in scoped(_read_ledger(store.ledger_path("decision"))) if str(row.get("episode_id") or "") in allowed_episodes]
+    independence_clusters = _shared_call_independence_clusters(opportunities, decisions)
     order_intents = [row for row in scoped(_read_ledger(store.ledger_path("order_intent"))) if str(row.get("episode_id") or "") in allowed_episodes]
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
     terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
@@ -426,6 +469,12 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         },
         "collection": {
             "independent_opportunities": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
+            "independence_grouping_basis": "SHARED_AI_CALL_WITH_EPISODE_ID_FALLBACK",
+            "independence_clusters": independence_clusters,
+            "independent_cluster_count": len(independence_clusters),
+            "correlated_child_decision_count": sum(
+                cluster["child_decision_count"] for cluster in independence_clusters
+            ),
             "decision_branches": len(decisions),
             "execution_rows": len(executions),
             "terminal_lifecycles": len(terminal_lifecycles),

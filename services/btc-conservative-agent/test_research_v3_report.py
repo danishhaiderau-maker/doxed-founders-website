@@ -62,6 +62,40 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(report["data_scope"], "FRESH-COLLECTION")
             self.assertEqual(report["collection"]["outcome_states"], {"REALIZED_PROFIT": 1})
 
+    def test_shared_ai_call_children_are_one_independent_cluster(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1000,
+                "grouping_basis": "SHARED_AI_CALL", "shared_ai_call_id": "scan-1",
+            })
+            for index, lane in enumerate(("PATIENT", "CONTINUOUS", "TILE_3", "TILE_4"), 1):
+                store.append("decision", {
+                    "record_id": f"d-{index}", "episode_id": "episode-1",
+                    "decision_stage": "LANE_POLICY_VERDICT", "research_lane": lane,
+                    "policy_id": lane, "policy_signature": f"sig-{index}",
+                    "policy_epoch_id": "pe-1", "policy_decision": "REJECT",
+                })
+
+            report = build_safe_policy_genome_v3_report(data, reports)
+            collection = report["collection"]
+            self.assertEqual(collection["independent_opportunities"], 1)
+            self.assertEqual(collection["decision_branches"], 4)
+            self.assertEqual(collection["independent_cluster_count"], 1)
+            self.assertEqual(collection["correlated_child_decision_count"], 4)
+            self.assertEqual(
+                collection["independence_grouping_basis"],
+                "SHARED_AI_CALL_WITH_EPISODE_ID_FALLBACK",
+            )
+            self.assertEqual(collection["independence_clusters"], [{
+                "cluster_id": "scan-1",
+                "grouping_basis": "SHARED_AI_CALL",
+                "episode_id": "episode-1",
+                "shared_ai_call_id": "scan-1",
+                "child_decision_count": 4,
+                "child_lane_count": 4,
+            }])
+
     def test_report_blocks_overdue_lane_order_orphan_and_accepts_resolutions(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             store = V3EvidenceStore(data, epoch_id="epoch-v3")
