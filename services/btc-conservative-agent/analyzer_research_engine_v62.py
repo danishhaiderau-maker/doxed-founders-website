@@ -2937,7 +2937,7 @@ def research_counterfactual_coverage_report():
         "live_params_unchanged": {
             "cluster_bps": 9,
             "thesis_cut": -12,
-            "hard_stop_pct": 13,
+            "hard_stop_pct": HARD_STOP_MARGIN_PCT,
             "ladder": "SCENARIO_C",
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -4091,7 +4091,7 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
 def qualified_exit_policy_grid_report():
     """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
 
-    The physical hard stop is an invariant (13%), not an optimisation axis.
+    The physical hard stop is an invariant (30%), not an optimisation axis.
     Actual exchange results remain separate from counterfactual simulations.
     """
     all_replays = _load_jsonl_replays()
@@ -4287,7 +4287,10 @@ def qualified_exit_policy_grid_report():
                 "ladder_first_lock_pct": selected["ladder_first_lock_pct"],
                 "mfe_protect_pct": selected["mfe_protect_pct"],
             } if conclusions_allowed else None),
-            "note": "The physical hard stop remains the fixed 13% invariant; this report never widens it.",
+            "note": (
+                f"The physical hard stop remains the fixed {HARD_STOP_MARGIN_PCT:g}% "
+                "invariant; this report never widens it."
+            ),
         },
         "question_outputs": {
             "hard_stop": {"status": "FIXED_SAFETY_INVARIANT", "value_pct": HARD_STOP_MARGIN_PCT},
