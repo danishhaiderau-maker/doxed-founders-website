@@ -1,8 +1,10 @@
 import tempfile
+import time
 import unittest
 from collections import Counter
 
 from research_v3_candidates import (
+    _PolicyNeighborIndex,
     _apply_multifactor_ranking,
     _bind_candidate_receipt_identity,
     _conservative_child_receipt,
@@ -151,6 +153,63 @@ class V3CandidateTests(unittest.TestCase):
         self.assertGreater(evidence["raw_metrics"]["regime_stability"], 0)
         self.assertEqual(evidence["neighbor_evidence"]["neighbors_supported"], 2)
         self.assertGreaterEqual(evidence["raw_metrics"]["neighboring_parameter_robustness"], 0)
+
+    def test_multifactor_neighbor_index_scales_and_keeps_local_semantics(self):
+        rows = []
+        for family_index in range(5):
+            family = f"FAMILY_{family_index}"
+            for parameter_index in range(1000):
+                rows.append(self._ranking_row(
+                    f"{family}-{parameter_index:04d}",
+                    family=family,
+                    pnl=1.0 + parameter_index / 10000,
+                    parameter=parameter_index / 1000,
+                ))
+
+        started = time.perf_counter()
+        ranked = _apply_multifactor_ranking(rows)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(len(ranked), 5000)
+        target = next(row for row in ranked if row["policy_id"] == "FAMILY_2-0500")
+        evidence = target["ranking_evidence"]["neighbor_evidence"]
+        self.assertEqual(evidence["neighbors_considered"], 5)
+        self.assertEqual(evidence["neighbors_supported"], 5)
+        self.assertIsNotNone(evidence["score"])
+        # The indexed implementation should comfortably avoid the former
+        # 25-million-distance all-pairs path on ordinary CI hardware.
+        self.assertLess(elapsed, 8.0)
+
+    def test_multifactor_neighbor_index_matches_cartesian_nearest_neighbors(self):
+        rows = []
+        for offset in (0.02, 0.03, 0.04):
+            for atr_k in (1.5, 2.0, 2.5):
+                row = self._ranking_row(
+                    f"policy-{offset}-{atr_k}",
+                    parameter=offset,
+                )
+                row["policy_spec"]["exit"]["atr_k"] = atr_k
+                rows.append(row)
+
+        target_index = 4
+        target = rows[target_index]
+        expected = sorted(
+            (candidate for candidate in rows if candidate is not target),
+            key=lambda candidate: (
+                # Import-free reference implementation for these two numeric
+                # dimensions, whose scales are both one or greater here.
+                abs(candidate["policy_spec"]["entry"]["offset_pct"] - target["policy_spec"]["entry"]["offset_pct"])
+                + abs(candidate["policy_spec"]["exit"]["atr_k"] - target["policy_spec"]["exit"]["atr_k"])
+                / max(candidate["policy_spec"]["exit"]["atr_k"], target["policy_spec"]["exit"]["atr_k"]),
+                candidate["policy_id"],
+            ),
+        )[:5]
+        actual = _PolicyNeighborIndex(rows).nearest(target_index)
+
+        self.assertEqual(
+            [row["policy_id"] for row in actual],
+            [row["policy_id"] for row in expected],
+        )
 
     def test_current_actual_paper_schema_materializes_complete_policy_grid(self):
         with tempfile.TemporaryDirectory() as tmp:

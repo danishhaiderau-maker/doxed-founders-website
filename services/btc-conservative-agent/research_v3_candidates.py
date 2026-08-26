@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_left
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
@@ -198,20 +199,148 @@ def _policy_parameter_distance(left: Mapping[str, Any], right: Mapping[str, Any]
     return distance / compared if compared else float("inf")
 
 
-def _neighbor_robustness(row: Mapping[str, Any], population: list[dict[str, Any]]) -> dict[str, Any]:
+def _flat_parameter_distance(left_flat: Mapping[str, Any], right_flat: Mapping[str, Any]) -> float:
+    """Cached-flat equivalent of :func:`_policy_parameter_distance`."""
+    keys = sorted(set(left_flat) | set(right_flat))
+    if not keys:
+        return float("inf")
+    distance = 0.0
+    for key in keys:
+        if key not in left_flat or key not in right_flat:
+            distance += 1.0
+            continue
+        a, b = left_flat[key], right_flat[key]
+        a_number, b_number = _finite_number(a), _finite_number(b)
+        if a_number is not None and b_number is not None and not isinstance(a, bool) and not isinstance(b, bool):
+            scale = max(abs(a_number), abs(b_number), 1.0)
+            distance += min(1.0, abs(a_number - b_number) / scale)
+        else:
+            distance += 0.0 if str(a) == str(b) else 1.0
+    return distance / len(keys)
+
+
+def _parameter_signature(flattened: Mapping[str, Any], *, omit: str | None = None) -> tuple[tuple[str, str, str], ...]:
+    """Return a hashable, type-preserving signature for an explicit policy spec."""
+    return tuple(
+        (key, type(value).__name__, repr(value))
+        for key, value in sorted(flattened.items())
+        if key != omit
+    )
+
+
+class _PolicyNeighborIndex:
+    """Bounded index for locally adjacent policies in a Cartesian policy grid.
+
+    Grid neighbors normally share every explicit parameter except one.  The
+    old implementation rediscovered those peers with an all-pairs scan and
+    sort.  This index builds those equivalence buckets once and, for numeric
+    dimensions, uses a sorted-value lookup to retain only the closest values.
+    """
+
+    _SIDE_CANDIDATES = 4
+
+    def __init__(self, population: list[dict[str, Any]]) -> None:
+        self.population = population
+        self.flats = [_flatten_policy_parameters(row.get("policy_spec") or {}) for row in population]
+        self.families: dict[str, list[int]] = defaultdict(list)
+        self.exact: dict[tuple[str, tuple[tuple[str, str, str], ...]], list[int]] = defaultdict(list)
+        self.numeric: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], list[tuple[float, str, int]]] = defaultdict(list)
+        self.categorical: dict[tuple[str, str, tuple[tuple[str, str, str], ...]], list[int]] = defaultdict(list)
+        self.dimension_numeric: dict[tuple[str, str], list[tuple[float, str, int]]] = defaultdict(list)
+        self.dimension_value: dict[tuple[str, str, str, str], list[tuple[str, int]]] = defaultdict(list)
+
+        for index, (row, flattened) in enumerate(zip(population, self.flats)):
+            family = str(row.get("policy_family") or "UNKNOWN")
+            policy_id = str(row.get("policy_id") or "")
+            self.families[family].append(index)
+            self.exact[(family, _parameter_signature(flattened))].append(index)
+            for key, value in flattened.items():
+                bucket = (family, key, _parameter_signature(flattened, omit=key))
+                number = _finite_number(value)
+                if number is not None and not isinstance(value, bool):
+                    self.numeric[bucket].append((number, policy_id, index))
+                    self.dimension_numeric[(family, key)].append((number, policy_id, index))
+                else:
+                    self.categorical[bucket].append(index)
+                    self.dimension_value[(family, key, type(value).__name__, repr(value))].append((policy_id, index))
+
+        for values in self.numeric.values():
+            values.sort()
+        for values in self.dimension_numeric.values():
+            values.sort()
+        for values in self.dimension_value.values():
+            values.sort()
+        for values in self.categorical.values():
+            values.sort(key=lambda idx: str(population[idx].get("policy_id") or ""))
+        for values in self.exact.values():
+            values.sort(key=lambda idx: str(population[idx].get("policy_id") or ""))
+
+    def nearest(self, row_index: int, *, limit: int = 5) -> list[dict[str, Any]]:
+        row = self.population[row_index]
+        flattened = self.flats[row_index]
+        family = str(row.get("policy_family") or "UNKNOWN")
+        candidates: set[int] = set()
+
+        exact = self.exact.get((family, _parameter_signature(flattened)), [])
+        candidates.update(exact[:limit + 1])
+        for key, value in flattened.items():
+            bucket_key = (family, key, _parameter_signature(flattened, omit=key))
+            number = _finite_number(value)
+            if number is not None and not isinstance(value, bool):
+                values = self.numeric.get(bucket_key, [])
+                position = bisect_left(values, (number, "", -1))
+                lo = max(0, position - self._SIDE_CANDIDATES)
+                hi = min(len(values), position + self._SIDE_CANDIDATES + 1)
+                candidates.update(item[2] for item in values[lo:hi])
+                dimension_values = self.dimension_numeric.get((family, key), [])
+                policy_id = str(row.get("policy_id") or "")
+                position = bisect_left(dimension_values, (number, policy_id, row_index))
+                lo = max(0, position - self._SIDE_CANDIDATES)
+                hi = min(len(dimension_values), position + self._SIDE_CANDIDATES + 1)
+                candidates.update(item[2] for item in dimension_values[lo:hi])
+            else:
+                candidates.update(self.categorical.get(bucket_key, [])[:limit + 1])
+                dimension_values = self.dimension_value.get(
+                    (family, key, type(value).__name__, repr(value)), []
+                )
+                policy_id = str(row.get("policy_id") or "")
+                position = bisect_left(dimension_values, (policy_id, row_index))
+                lo = max(0, position - self._SIDE_CANDIDATES)
+                hi = min(len(dimension_values), position + self._SIDE_CANDIDATES + 1)
+                candidates.update(item[1] for item in dimension_values[lo:hi])
+
+        candidates.discard(row_index)
+        # Sparse, non-Cartesian fixtures may have no one-coordinate neighbors.
+        # Keep that fallback bounded; production grids use the indexed path.
+        if len(candidates) < limit:
+            for candidate_index in self.families.get(family, [])[:limit + 1]:
+                if candidate_index != row_index:
+                    candidates.add(candidate_index)
+                if len(candidates) >= limit:
+                    break
+
+        nearest_indices = sorted(
+            candidates,
+            key=lambda candidate_index: (
+                _flat_parameter_distance(flattened, self.flats[candidate_index]),
+                str(self.population[candidate_index].get("policy_id") or ""),
+            ),
+        )[:limit]
+        return [self.population[index] for index in nearest_indices]
+
+
+def _neighbor_robustness(
+    row: Mapping[str, Any],
+    population: list[dict[str, Any]],
+    *,
+    index: _PolicyNeighborIndex | None = None,
+    row_index: int | None = None,
+) -> dict[str, Any]:
     """Measure whether nearby parameter choices retain positive conservative OOS behavior."""
-    peers = [
-        candidate for candidate in population
-        if candidate is not row
-        and str(candidate.get("policy_family") or "UNKNOWN") == str(row.get("policy_family") or "UNKNOWN")
-    ]
-    nearest = sorted(
-        peers,
-        key=lambda candidate: (
-            _policy_parameter_distance(row.get("policy_spec") or {}, candidate.get("policy_spec") or {}),
-            str(candidate.get("policy_id") or ""),
-        ),
-    )[:5]
+    neighbor_index = index or _PolicyNeighborIndex(population)
+    if row_index is None:
+        row_index = next((i for i, candidate in enumerate(population) if candidate is row), None)
+    nearest = neighbor_index.nearest(row_index, limit=5) if row_index is not None else []
     usable = [
         candidate for candidate in nearest
         if _finite_number(candidate.get("sealed_oos_net_usd")) is not None
@@ -244,7 +373,8 @@ def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any
     drawdown, or a fictitious lower confidence bound.
     """
     enriched: list[dict[str, Any]] = []
-    for source in rows:
+    neighbor_index = _PolicyNeighborIndex(rows)
+    for row_index, source in enumerate(rows):
         row = dict(source)
         fills = int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0)
         supported = fills + int(row.get("no_fills") or 0)
@@ -271,7 +401,7 @@ def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any
             scale = max(max(abs(value) for value in expectancies), 0.01)
             regime_stability = profitable_fraction * (1.0 / (1.0 + spread / scale))
 
-        neighbor = _neighbor_robustness(source, rows)
+        neighbor = _neighbor_robustness(source, rows, index=neighbor_index, row_index=row_index)
         raw = {
             "profit": _finite_number(row.get("sealed_oos_net_usd")),
             "drawdown": (
