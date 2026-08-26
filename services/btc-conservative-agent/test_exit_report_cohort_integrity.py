@@ -290,3 +290,39 @@ def test_dashboard_renders_all_four_exit_worlds_and_null_kpis_as_na():
         assert element_id in DASHBOARD
     assert "['Left on table', money(d.overall_left_on_table_usd)]" in DASHBOARD
     assert "['Hindsight gap', money(d.overall_left_usd)]" in DASHBOARD
+
+
+def test_causal_exit_views_use_only_explicit_available_dimensions():
+    rows = pd.DataFrame([
+        {
+            "trade_id": "paper-1", "opportunity_id": "opp-1",
+            "exit_reason": "ATR_TARGET", "cfg_family": "FIXED_TARGET",
+            "cfg_exit_profile_id": "ATR_TP_2_5", "final_direction": "LONG",
+            "regime": "BULL", "cfg_initial_stop_atr_k": 1.5,
+            "cfg_hard_stop_margin_pct": 30.0, "limit_chase_count": 3,
+            "cfg_entry_offset_fraction": 0.0003, "entry_delay_min": 12,
+            "source_fill_status": "FILLED", "net_pnl_usd": 0.2,
+        },
+        {
+            "trade_id": "paper-2", "opportunity_id": "opp-2",
+            "exit_reason": "ATR_STOP", "cfg_family": "FIXED_TARGET",
+            "cfg_exit_profile_id": "ATR_TP_2_5", "final_direction": "LONG",
+            "regime": "BULL", "cfg_initial_stop_atr_k": 1.5,
+            "cfg_hard_stop_margin_pct": 30.0, "limit_chase_count": 4,
+            "cfg_entry_offset_fraction": 0.0003, "entry_delay_min": 18,
+            "source_fill_status": "FILLED", "net_pnl_usd": -0.1,
+        },
+    ])
+    views = analyzer._exit_causal_combination_views(rows, "EXECUTED_PAPER_DESCRIPTIVE")
+    assert set(views) == {"exit_policy", "risk_and_chase", "market_context", "entry_execution"}
+    assert views["exit_policy"]["rows"]
+    assert views["market_context"]["rows"]
+    assert views["entry_execution"]["rows"]
+    assert all(row["qualification_eligible"] is False for row in views["risk_and_chase"]["rows"])
+
+
+def test_causal_exit_views_do_not_rank_unknown_or_missing_dimensions():
+    sparse = pd.DataFrame([{"trade_id": "x", "exit_reason": "TIME_EXIT"}])
+    views = analyzer._exit_causal_combination_views(sparse, "SHADOW_LAB_DESCRIPTIVE")
+    assert all(view["rows"] == [] for view in views.values())
+    assert all(view["empty_reason"] == "INSUFFICIENT_EXPLICIT_DIMENSIONS" for view in views.values())

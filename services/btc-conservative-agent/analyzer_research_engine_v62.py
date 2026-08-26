@@ -15020,6 +15020,84 @@ def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> 
     return {"exit_family_scorecard": family_rows, "stop_effectiveness_matrix": stop_rows}
 
 
+def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_n: int = 100) -> dict:
+    """Low-dimensional, within-world exit slices; missing dimensions stay unavailable."""
+    if work is None or work.empty:
+        return {}
+    frame = work.copy()
+
+    def first_series(names, *, numeric=False):
+        for name in names:
+            if name in frame.columns:
+                series = frame[name]
+                return pd.to_numeric(series, errors="coerce") if numeric else series
+        return pd.Series(np.nan if numeric else None, index=frame.index)
+
+    family = first_series(("cfg_family", "exit_family", "research_lane")).fillna("").astype(str).str.upper()
+    profile = first_series(("cfg_exit_profile_id", "exit_profile_id", "cfg_raw_policy_id", "policy_id")).fillna("").astype(str)
+    reason = first_series(("exit_reason", "close_reason")).fillna("").astype(str).str.upper()
+    direction = first_series(("final_direction", "dir", "direction")).fillna("").astype(str).str.upper()
+    regime = first_series(("regime", "market_regime", "regime_at_entry")).fillna("").astype(str).str.upper()
+    fill_status = first_series(("source_fill_status", "fill_status", "outcome_state")).fillna("").astype(str).str.upper()
+    chase = first_series(("limit_chase_count", "chase_count"), numeric=True)
+    stop_atr = first_series(("cfg_initial_stop_atr_k", "initial_stop_atr_k"), numeric=True)
+    hard_stop = first_series(("cfg_hard_stop_margin_pct", "hard_stop_margin_pct"), numeric=True)
+    offset = first_series(("entry_offset_pct",), numeric=True)
+    if offset.isna().all():
+        offset = first_series(("cfg_entry_offset_fraction", "entry_offset_fraction"), numeric=True) * 100.0
+    delay = first_series(("entry_delay_min",), numeric=True)
+    if delay.isna().all():
+        delay = first_series(("signal_age_sec", "entry_delay_sec"), numeric=True) / 60.0
+
+    frame["_exit_family_view"] = family.replace("", np.nan)
+    frame["_exit_profile_view"] = profile.replace("", np.nan)
+    frame["_exit_reason_view"] = reason.replace("", np.nan)
+    frame["_direction_view"] = direction.replace("", np.nan)
+    frame["_regime_view"] = regime.replace("", np.nan)
+    frame["_fill_status_view"] = fill_status.replace("", np.nan)
+    frame["_chase_view"] = chase.apply(lambda value: "5+" if pd.notna(value) and value >= 5 else (str(int(value)) if pd.notna(value) else np.nan))
+    frame["_stop_atr_view"] = stop_atr.round(3)
+    frame["_hard_stop_view"] = hard_stop.round(3)
+    frame["_offset_view"] = offset.round(4)
+    frame["_delay_view"] = pd.cut(delay, [-np.inf, 5, 10, 20, 30, np.inf], labels=["0-5m", "5-10m", "10-20m", "20-30m", "30m+"])
+
+    definitions = {
+        "exit_policy": ["_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
+        "risk_and_chase": ["_stop_atr_view", "_hard_stop_view", "_chase_view", "_exit_reason_view"],
+        "market_context": ["_regime_view", "_direction_view", "_exit_family_view", "_exit_reason_view"],
+        "entry_execution": ["_offset_view", "_chase_view", "_delay_view", "_fill_status_view", "_exit_reason_view"],
+    }
+    views = {}
+    for view_name, dimensions in definitions.items():
+        available = [name for name in dimensions if frame[name].notna().any()]
+        missing = [name for name in dimensions if name not in available]
+        # Exit reason is causal terminal metadata and mandatory for every view.
+        if "_exit_reason_view" not in available or len(available) < 2:
+            views[view_name] = {
+                "rows": [], "available_dimensions": available,
+                "missing_dimensions": missing, "empty_reason": "INSUFFICIENT_EXPLICIT_DIMENSIONS",
+            }
+            continue
+        rows = []
+        eligible = frame.dropna(subset=available)
+        for keys, sub in eligible.groupby(available, observed=True, dropna=False):
+            keys = keys if isinstance(keys, tuple) else (keys,)
+            values = {dimension.lstrip("_").removesuffix("_view"): value for dimension, value in zip(available, keys)}
+            stats = _combo_stats_from_df(sub)
+            rows.append({
+                "combination": " + ".join(f"{key}={value}" for key, value in values.items()),
+                "dimensions": values, "evidence_class": evidence_class,
+                "qualification_eligible": False, **_exit_identity_labels(sub), **stats,
+            })
+        rows.sort(key=lambda row: (row["ev_usd"] is not None, row["ev_usd"] or 0, row["trades"]), reverse=True)
+        views[view_name] = {
+            "rows": rows[:top_n], "available_dimensions": available,
+            "missing_dimensions": missing,
+            "empty_reason": None if rows else "NO_ROWS_WITH_COMPLETE_VIEW_DIMENSIONS",
+        }
+    return views
+
+
 def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100):
     """Four exit evidence worlds, always separate and never PnL-additive."""
     if session is None:
@@ -15047,6 +15125,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
                 "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
                 "top": [], "worst_leakage": [], "overall_left_on_table_usd": None,
                 "exit_family_scorecard": [], "stop_effectiveness_matrix": [],
+                "causal_combination_views": {},
             }
         if "exit_reason" not in work.columns:
             work["exit_reason"] = "UNKNOWN"
@@ -15116,6 +15195,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             "overall_left_on_table_usd": round(float(work["left_on_table_usd"].dropna().sum()), 2) if work["left_on_table_usd"].notna().any() else None,
             "top": by_ev[:top_n], "worst_leakage": by_leak[:top_n],
             **_exit_family_and_stop_summaries(work, evidence_class),
+            "causal_combination_views": _exit_causal_combination_views(work, evidence_class, top_n),
         }
 
     sources = _load_exit_evidence_worlds(trades=trades, session=session)
@@ -15250,6 +15330,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
                 "empty_reason": "NO_EXPLICIT_TERMINAL_EXIT_ROWS" if source_rows else "SOURCE_EMPTY_OR_UNAVAILABLE",
                 "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
                 "reasons": [], "recommendations": [], "qualification_eligible": False,
+                "causal_combination_views": {},
             }
         pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
         if pnl_col not in work.columns:
@@ -15302,6 +15383,7 @@ def exit_leakage_by_reason_report(trades=None, session=None):
             "overall_booked_usd": round(float(booked_usd.dropna().sum()), 2) if booked_usd.notna().any() else None,
             "overall_peak_usd": round(float(peak_usd.dropna().sum()), 2) if peak_usd.notna().any() else None,
             "reasons": reasons, "recommendations": _exit_leak_recommendations(reasons),
+            "causal_combination_views": _exit_causal_combination_views(work, evidence_class),
             "qualification_eligible": False,
         }
 
