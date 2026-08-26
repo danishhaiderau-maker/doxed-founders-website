@@ -3157,6 +3157,7 @@ def partial_reduction_page(): return _v31_evidence_page("V3.1 Partial-Reduction 
 @app.route("/api/summary")
 def api_summary():
     compact = _read_json(COMPACT_SUMMARY_FILE)
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
     real = _read_json("real_edge_summary.json")
     historical = _read_json(HISTORICAL_COHORT_REPORT_FILE)
     retention = _read_json(RETENTION_STATUS_FILE)
@@ -3170,9 +3171,69 @@ def api_summary():
         except (OSError, ValueError, TypeError):
             mirror_size = {}
     stale_meta = _summary_stale_meta(compact)
-    p = dict(compact.get("performance") or {})
-    re = compact.get("real_edge") or real
-    if not p.get("trades") and int(re.get("executed") or 0):
+    # The atomic manifest is the authority for the current generation.  An old
+    # real_edge artifact used to repopulate an intentionally empty fresh epoch
+    # (for example 0 current trades became 44 historical trades).  Keep such an
+    # artifact on disk, but never expose its metrics as current dashboard data.
+    manifest_performance = manifest.get("performance")
+    p = dict(
+        manifest_performance
+        if isinstance(manifest_performance, dict)
+        else (compact.get("performance") or {})
+    )
+    current_revision = str(manifest.get("generation_revision") or "").strip()
+    current_epoch = str((manifest.get("fresh_epoch") or {}).get("epoch_id") or "").strip()
+
+    def _real_edge_identity(payload):
+        payload = payload if isinstance(payload, dict) else {}
+        provenance = payload.get("analysis_provenance") or {}
+        revision = str(
+            payload.get("generation_revision")
+            or provenance.get("generation_revision")
+            or ""
+        ).strip()
+        epoch = str(
+            payload.get("epoch_id")
+            or (payload.get("fresh_epoch") or {}).get("epoch_id")
+            or provenance.get("fresh_epoch_id")
+            or ""
+        ).strip()
+        return revision, epoch
+
+    rejected_real_edge = []
+    re = None
+    for source, candidate in (
+        ("research_compact_summary.json.real_edge", compact.get("real_edge")),
+        ("real_edge_summary.json", real),
+    ):
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        revision, epoch = _real_edge_identity(candidate)
+        revision_matches = bool(current_revision and revision and revision == current_revision)
+        epoch_matches = bool(current_epoch and epoch and epoch == current_epoch)
+        if revision_matches and epoch_matches:
+            re = candidate
+            break
+        rejected_real_edge.append({
+            "source": source,
+            "generation_revision": revision or None,
+            "epoch_id": epoch or None,
+            "reason": "CROSS_GENERATION_IDENTITY_MISMATCH",
+        })
+    if re is None:
+        re = {
+            "schema": "current_real_edge_unavailable_v1",
+            "status": "UNAVAILABLE_CURRENT_GENERATION",
+            "qualification_eligible": False,
+            "generation_revision": current_revision or None,
+            "epoch_id": current_epoch or None,
+            "excluded_candidates": rejected_real_edge,
+        }
+    if (
+        not isinstance(manifest_performance, dict)
+        and not p.get("trades")
+        and int(re.get("executed") or 0)
+    ):
         p["trades"] = int(re.get("executed") or 0)
         if p.get("net_pnl_usd") is None and re.get("executed_pnl_usd") is not None:
             p["net_pnl_usd"] = re.get("executed_pnl_usd")
@@ -3189,8 +3250,13 @@ def api_summary():
     return jsonify({
         "scope": compact.get("session_scope"),
         "data_scope": compact.get("data_scope"),
-        "generated_at": compact.get("generated_at"),
+        "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
         "performance": p,
+        "performance_source": (
+            "CURRENT_ATOMIC_MANIFEST"
+            if isinstance(manifest_performance, dict)
+            else "CURRENT_COMPACT_SUMMARY"
+        ),
         "real_edge": re,
         "approve_to_fill_pct": fill_pct,
         "executive_text": _read_text(EXECUTIVE_SUMMARY_FILE),
