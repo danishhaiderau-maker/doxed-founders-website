@@ -13409,13 +13409,28 @@ def ai_decision_should_execute(ai: dict) -> bool:
 def continuous_score_gap_execution_tier(ai: dict) -> str:
     """Derive the Continuous lane verdict from directional scores only.
 
-    The shared direction prompt may still emit a textual ``decision`` field,
-    but the Continuous contract is deliberately deterministic: the higher
-    LONG/SHORT score selects the side and its raw gap selects the execution
-    tier.  Trusting the model's textual decision here can silently reject an
-    otherwise executable score pair (for example SHORT 65 vs LONG 35).
+    The score gap may refine an already executable shared verdict, but it may
+    never manufacture one.  In particular, an explicit NO_TRADE/CONFLICTED
+    direction or a rejected shared decision must remain non-executable for
+    every child lane, including the Continuous benchmark.
     """
     if not ai or ai.get("ai_error") or ai.get("zero_score_reject"):
+        return "REJECT"
+    shared_direction = str(
+        ai.get("candidate_direction")
+        or ai.get("direction")
+        or ai.get("raw_direction")
+        or ""
+    ).upper()
+    shared_decision = str(ai.get("decision") or "").upper()
+    raw_decision = str(ai.get("raw_decision") or shared_decision).upper()
+    if (
+        bool(ai.get("explicit_abstain"))
+        or shared_direction not in ("LONG", "SHORT")
+        or shared_decision not in AI_EXECUTE_TIERS | {"APPROVE"}
+        or raw_decision in {"REJECT", "SOFT_REJECT", "AI_ERROR"}
+        or ai.get("approved") is False
+    ):
         return "REJECT"
     try:
         long_score = int(ai.get("long_score", 0) or 0)
@@ -13426,11 +13441,7 @@ def continuous_score_gap_execution_tier(ai: dict) -> str:
     # that construct an AI record without the parser's zero_score_reject flag.
     if long_score + short_score < 50:
         return "REJECT"
-    direction = derive_candidate_direction(
-        long_score,
-        short_score,
-        ai.get("direction") or ai.get("candidate_direction") or ai.get("raw_direction"),
-    )
+    direction = derive_candidate_direction(long_score, short_score, shared_direction)
     return derive_research_decision_tier(0, long_score, short_score, direction)
 
 
@@ -15932,12 +15943,16 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     continuous_ai["raw_decision"] = str(
         continuous_ai.get("raw_decision") or continuous_ai.get("decision") or ""
     ).upper()
-    continuous_ai["direction"] = derive_candidate_direction(
-        long_score,
-        short_score,
-        continuous_ai.get("direction")
-        or continuous_ai.get("candidate_direction")
-        or continuous_ai.get("raw_direction"),
+    shared_direction = str(
+        continuous_ai.get("candidate_direction")
+        or continuous_ai.get("direction")
+        or continuous_ai.get("raw_direction")
+        or ""
+    ).upper()
+    continuous_ai["direction"] = (
+        derive_candidate_direction(long_score, short_score, shared_direction)
+        if shared_direction in ("LONG", "SHORT")
+        else "NO_TRADE"
     )
     continuous_ai["candidate_direction"] = continuous_ai["direction"]
     continuous_ai["execution_tier"] = continuous_tier

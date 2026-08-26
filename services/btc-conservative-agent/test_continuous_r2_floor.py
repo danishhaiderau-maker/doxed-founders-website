@@ -113,8 +113,8 @@ def test_raw_gap_thirty_is_accepted(monkeypatch) -> None:
     assert normalized["direction"] == "SHORT"
 
 
-def test_textual_reject_cannot_override_executable_score_gap(monkeypatch) -> None:
-    """Production regression: 35/65 must execute even if the model says REJECT."""
+def test_textual_reject_cannot_be_overridden_by_executable_score_gap(monkeypatch) -> None:
+    """A score gap refines an approval; it cannot manufacture one from REJECT."""
     normalized = _run_spawn(
         long_score=35,
         short_score=65,
@@ -122,9 +122,40 @@ def test_textual_reject_cannot_override_executable_score_gap(monkeypatch) -> Non
         textual_decision="REJECT",
     )
     assert normalized["raw_decision"] == "REJECT"
-    assert normalized["decision"] == "APPROVE"
-    assert normalized["execution_tier"] == "STRONG_APPROVE"
-    assert normalized["approved"] is True
+    assert normalized["decision"] == "REJECT"
+    assert normalized["execution_tier"] == "REJECT"
+    assert normalized["approved"] is False
+
+
+def test_explicit_no_trade_cannot_create_continuous_order(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_spawn_combo_lane(ctx, ai, edge_score, features, target_lane, trigger_reason):
+        calls.append(dict(ai))
+
+    monkeypatch.setattr(bot, "_spawn_combo_lane", fake_spawn_combo_lane)
+    monkeypatch.setattr(bot, "continuous_ai_research_enabled", lambda: True)
+    bot.spawn_continuous_lane_from_ai_scan(
+        ctx={"trade_id": "test-no-trade"},
+        ai={
+            "decision": "REJECT",
+            "raw_decision": "REJECT",
+            "approved": False,
+            "direction": "NO_TRADE",
+            "candidate_direction": "NO_TRADE",
+            "raw_direction": "NO_TRADE",
+            "explicit_abstain": True,
+            "long_score": 65,
+            "short_score": 35,
+        },
+        edge_score=5.0,
+        features={},
+        source_lane=bot.RESEARCH_LANE_AI_SCAN,
+    )
+    assert len(calls) == 1
+    assert calls[0]["direction"] == "NO_TRADE"
+    assert calls[0]["decision"] == "REJECT"
+    assert calls[0]["approved"] is False
 
 
 def test_zero_gap_remains_rejected(monkeypatch) -> None:
