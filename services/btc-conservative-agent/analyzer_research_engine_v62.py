@@ -17375,6 +17375,7 @@ def cross_world_evidence_report():
     )
     conservative_rows = _cross_world_list(conservative, "receipts")
     shadow_rows = [
+        *_load_jsonl_rows(SHADOW_OUTCOME_FILE),
         *_load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE),
         *_load_jsonl_rows(COUNTERFACTUAL_FILE),
     ]
@@ -17403,7 +17404,11 @@ def cross_world_evidence_report():
     report["source_inventory"] = {
         "ideal_touch": SAFE_POLICY_GENOME_V3_REPORT_FILE,
         "conservative_bbo_depth": CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
-        "shadow_counterfactual": [SHADOW_LANE_OUTCOME_FILE, COUNTERFACTUAL_FILE],
+        "shadow_counterfactual": [
+            SHADOW_OUTCOME_FILE,
+            SHADOW_LANE_OUTCOME_FILE,
+            COUNTERFACTUAL_FILE,
+        ],
         "observed_paper": TRADES_FILE,
         "bitfinex_copy": "relay_lifecycle_evidence_v1.json",
     }

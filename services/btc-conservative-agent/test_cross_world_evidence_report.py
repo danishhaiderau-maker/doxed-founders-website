@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -55,6 +56,18 @@ def test_missing_identity_is_not_computable_and_never_fuzzy_joined():
         "schedule_id": 1
     }
     assert "timestamp_proximity" in result["join_contract"]["prohibited_fallbacks"]
+
+
+def test_csv_nan_is_missing_identity_not_a_manufactured_duplicate_key():
+    missing = {**identity(), "fill_state": "FILL"}
+    missing["epoch_id"] = math.nan
+    result = report({"OBSERVED_PAPER": [missing, dict(missing)]})
+    world = result["worlds"]["OBSERVED_PAPER"]
+    assert world["rows_observed"] == 2
+    assert world["rows_with_complete_explicit_identity"] == 0
+    assert world["unique_joinable_rows"] == 0
+    assert world["ambiguous_duplicate_identity_rows"] == 0
+    assert world["missing_identity_counts"] == {"epoch_id": 2}
 
 
 def test_complete_explicit_identity_exposes_agreement_and_disagreement():
@@ -148,7 +161,11 @@ def test_engine_publishes_report_atomically_and_manifest_catalog_owns_it(tmp_pat
         engine.CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE: {"receipts": [full]},
     }
     monkeypatch.setattr(engine, "_load_json_report", lambda name: reports.get(name, {}))
-    monkeypatch.setattr(engine, "_load_jsonl_rows", lambda _name: [full])
+    loaded_jsonl = []
+    def load_jsonl(name):
+        loaded_jsonl.append(name)
+        return [full]
+    monkeypatch.setattr(engine, "_load_jsonl_rows", load_jsonl)
     monkeypatch.setattr(engine, "_cross_world_bitfinex_rows", lambda: [full])
     monkeypatch.setattr(engine, "_fresh_epoch_provenance", lambda: {"fresh_epoch_id": "epoch-1"})
     monkeypatch.setattr(engine, "robust_read_csv", lambda *_args: __import__("pandas").DataFrame([full]))
@@ -165,3 +182,19 @@ def test_engine_publishes_report_atomically_and_manifest_catalog_owns_it(tmp_pat
         row[1] == engine.CROSS_WORLD_EVIDENCE_REPORT_FILE
         for row in engine.DEEP_DIVE_REPORT_CATALOG
     )
+    assert engine.SHADOW_OUTCOME_FILE in loaded_jsonl
+    assert engine.SHADOW_LANE_OUTCOME_FILE in loaded_jsonl
+    assert engine.COUNTERFACTUAL_FILE in loaded_jsonl
+    assert payload["source_inventory"]["shadow_counterfactual"] == [
+        engine.SHADOW_OUTCOME_FILE,
+        engine.SHADOW_LANE_OUTCOME_FILE,
+        engine.COUNTERFACTUAL_FILE,
+    ]
+
+
+def test_cross_world_page_uses_canonical_world_inventory_fields():
+    source = (ROOT / "research" / "research_dashboard.py").read_text(encoding="utf-8")
+    assert "w.rows_observed??0" in source
+    assert "w.rows_with_complete_explicit_identity??0" in source
+    assert "w.unique_joinable_rows??0" in source
+    assert "w.rows??w.row_count??0" not in source

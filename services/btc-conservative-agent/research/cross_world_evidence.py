@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from itertools import combinations
+from math import isfinite
+from numbers import Real
 from typing import Any, Iterable, Mapping
 
 
@@ -35,7 +37,14 @@ COMPARISON_FIELDS = ("entry_observed", "direction", "pnl_sign")
 def _clean(value: Any) -> str | None:
     if value is None or isinstance(value, (dict, list, tuple, set)):
         return None
+    # pandas represents empty CSV cells as NaN.  Stringifying that value would
+    # manufacture the shared identity "nan" and collapse unrelated legacy rows
+    # into a bogus duplicate key.
+    if isinstance(value, Real) and not isinstance(value, bool) and not isfinite(float(value)):
+        return None
     text = str(value).strip()
+    if text.casefold() in {"nan", "none", "null", "nat", "<na>"}:
+        return None
     return text or None
 
 
