@@ -123,3 +123,79 @@ def test_exit_gap_converts_margin_percentage_to_usd_before_subtracting_booked_pn
 
     row = report["evidence_classes"]["shadow_lab"]["top"][0]
     assert row["left_on_table_usd"] == 0.07
+
+
+def test_exit_family_and_stop_scorecards_keep_evidence_worlds_separate(tmp_path, monkeypatch):
+    executed = pd.DataFrame([
+        {
+            "trade_id": "paper-1", "opportunity_id": "opp-paper-1",
+            "exit_reason": "INITIAL_ATR_STOP", "research_lane": "FAMILY_ATR_TARGET_2_5",
+            "cfg_family": "ATR_TARGET", "cfg_initial_stop_atr_k": 1.5,
+            "cfg_hard_stop_margin_pct": 30.0, "limit_chase_count": 3,
+            "net_pnl_usd": -0.10, "gross_pnl_usd": -0.09,
+            "trading_fees_usd": 0.01, "funding_fees_usd": 0.0,
+            "book_slippage_usd_total": 0.002, "mae_margin_pct": -31.0,
+        },
+        {
+            "trade_id": "paper-2", "opportunity_id": "opp-paper-2",
+            "exit_reason": "ATR_TP_2_5X", "research_lane": "FAMILY_ATR_TARGET_2_5",
+            "cfg_family": "ATR_TARGET", "cfg_initial_stop_atr_k": 1.5,
+            "cfg_hard_stop_margin_pct": 30.0, "limit_chase_count": 4,
+            "net_pnl_usd": 0.20, "gross_pnl_usd": 0.21,
+            "trading_fees_usd": 0.01, "funding_fees_usd": 0.0,
+            "book_slippage_usd_total": 0.003, "mae_margin_pct": -4.0,
+        },
+    ])
+    shadow = pd.DataFrame([{
+        "trade_id": "shadow-1", "opportunity_id": "opp-shadow-1",
+        "exit_reason": "TIME_EXIT", "research_lane": "FAMILY_CHANDELIER_3",
+        "cfg_family": "CHANDELIER", "cfg_initial_stop_atr_k": 2.0,
+        "cfg_hard_stop_margin_pct": 30.0, "limit_chase_count": 5,
+        "net_pnl_usd": 0.50, "mae_margin_pct": -2.0,
+    }])
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: shadow)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+
+    report = analyzer.exit_combinations_report(executed, {"mode": "FRESH-COLLECTION"})
+    paper = report["evidence_classes"]["executed_paper"]
+    lab = report["evidence_classes"]["shadow_lab"]
+
+    assert report["schema"] == "exit_combinations_v3"
+    assert paper["exit_family_scorecard"][0]["exit_family"] == "ATR_TARGET"
+    assert paper["exit_family_scorecard"][0]["terminal_rows"] == 2
+    assert paper["exit_family_scorecard"][0]["independent_episodes"] == 2
+    assert paper["exit_family_scorecard"][0]["net_pnl_usd"] == 0.1
+    assert paper["exit_family_scorecard"][0]["qualification_eligible"] is False
+    assert lab["exit_family_scorecard"][0]["exit_family"] == "CHANDELIER"
+    assert lab["exit_family_scorecard"][0]["net_pnl_usd"] == 0.5
+    assert all(row["evidence_class"] == "EXECUTED_PAPER_DESCRIPTIVE" for row in paper["stop_effectiveness_matrix"])
+    assert all(row["evidence_class"] == "SHADOW_LAB_DESCRIPTIVE" for row in lab["stop_effectiveness_matrix"])
+    assert all(row["evidence_status"] == "LOW_SAMPLE_LT5_INDEPENDENT" for row in paper["stop_effectiveness_matrix"])
+
+
+def test_exit_scorecard_surfaces_explicit_missing_counts(tmp_path, monkeypatch):
+    rows = pd.DataFrame([{
+        "trade_id": "missing-fields", "exit_reason": "TIME_EXIT",
+        "research_lane": "FAMILY_ATR_TRAIL", "net_pnl_usd": 0.01,
+    }])
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: pd.DataFrame())
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+
+    report = analyzer.exit_combinations_report(rows, {"mode": "FRESH-COLLECTION"})
+    family = report["evidence_classes"]["executed_paper"]["exit_family_scorecard"][0]
+    stop = report["evidence_classes"]["executed_paper"]["stop_effectiveness_matrix"][0]
+    assert family["missing_identity_rows"] == 1
+    assert family["missing_cost_rows"] == 1
+    assert family["missing_slippage_rows"] == 1
+    assert stop["missing_mae_rows"] == 1
+    assert stop["missing_stop_slippage_rows"] == 1
+
+
+def test_exit_dashboard_exposes_family_and_stop_tables_for_both_worlds():
+    for element_id in (
+        "exit-family-scorecard-body", "exit-family-scorecard-shadow-body",
+        "stop-effectiveness-body", "stop-effectiveness-shadow-body",
+    ):
+        assert element_id in DASHBOARD
+    assert "EV is divided by independent shared opportunities" in DASHBOARD
+    assert "NOT QUALIFIED" in DASHBOARD

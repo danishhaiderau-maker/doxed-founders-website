@@ -14738,6 +14738,142 @@ def _exit_identity_labels(sub):
     }
 
 
+def _exit_sample_status(independent_n: int) -> str:
+    if independent_n < 5:
+        return "LOW_SAMPLE_LT5_INDEPENDENT"
+    if independent_n < 30:
+        return "DESCRIPTIVE_5_TO_29_INDEPENDENT"
+    return "DESCRIPTIVE_30PLUS_INDEPENDENT"
+
+
+def _exit_numeric_series(work: pd.DataFrame, names, default=np.nan) -> pd.Series:
+    for name in names:
+        if name in work.columns:
+            return pd.to_numeric(work[name], errors="coerce")
+    return pd.Series(default, index=work.index, dtype="float64")
+
+
+def _exit_missing_identity_rows(work: pd.DataFrame) -> int:
+    identity_columns = [
+        name for name in ("opportunity_id", "shared_ai_call_id", "scan_id")
+        if name in work.columns
+    ]
+    if not identity_columns:
+        return int(len(work))
+    present = pd.Series(False, index=work.index)
+    for name in identity_columns:
+        present |= work[name].notna() & work[name].astype(str).str.strip().ne("")
+    return int((~present).sum())
+
+
+def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> dict:
+    """Truthful low-dimensional exit summaries for one evidence world only."""
+    if work is None or work.empty:
+        return {"exit_family_scorecard": [], "stop_effectiveness_matrix": []}
+
+    frame = work.copy()
+    lane_source = frame.get("research_lane", pd.Series("", index=frame.index)).fillna("").astype(str)
+    family_source = frame.get("cfg_family", pd.Series("", index=frame.index)).fillna("").astype(str)
+    family_source = family_source.where(family_source.str.strip().ne(""), lane_source)
+    frame["_exit_family"] = family_source.fillna("").astype(str).str.strip().str.upper()
+    frame.loc[frame["_exit_family"].eq(""), "_exit_family"] = "UNKNOWN"
+    pnl = _exit_numeric_series(frame, ("net_pnl_usd", "outcome_net_pnl_usd"))
+    gross = _exit_numeric_series(frame, ("gross_pnl_usd", "outcome_gross_pnl_usd"))
+    fees = _exit_numeric_series(frame, ("trading_fees_usd", "outcome_trading_fees_usd", "fees_usd"))
+    funding = _exit_numeric_series(frame, ("funding_fees_usd", "outcome_funding_fees_usd", "funding_fees"))
+    slippage = _exit_numeric_series(frame, ("book_slippage_usd_total", "execution_slippage", "slippage"))
+    mae = _exit_numeric_series(frame, ("mae_margin_pct", "max_drawdown"))
+    frame["_pnl"] = pnl
+    frame["_gross"] = gross
+    frame["_fees"] = fees
+    frame["_funding"] = funding
+    frame["_slippage"] = slippage
+    frame["_mae"] = mae
+
+    family_rows = []
+    for family, sub in frame.groupby("_exit_family", observed=True, dropna=False):
+        identity = _exit_identity_labels(sub)
+        independent_n = int(identity["independent_ai_episodes"])
+        chronological = sub.copy()
+        time_column = next((name for name in ("close_ts", "ts", "terminal_ts") if name in chronological.columns), None)
+        if time_column:
+            chronological["_exit_order_ts"] = pd.to_datetime(chronological[time_column], errors="coerce", utc=True)
+            chronological = chronological.sort_values("_exit_order_ts", kind="stable", na_position="last")
+        valid_pnl = chronological["_pnl"].dropna()
+        cumulative = valid_pnl.cumsum()
+        max_drawdown = float((cumulative.cummax() - cumulative).max()) if not cumulative.empty else None
+        family_rows.append({
+            "exit_family": str(family),
+            "evidence_class": evidence_class,
+            "terminal_rows": int(len(sub)),
+            "independent_episodes": independent_n,
+            "missing_identity_rows": _exit_missing_identity_rows(sub),
+            "missing_pnl_rows": int(sub["_pnl"].isna().sum()),
+            "missing_cost_rows": int((sub["_fees"].isna() | sub["_funding"].isna()).sum()),
+            "missing_slippage_rows": int(sub["_slippage"].isna().sum()),
+            "wins": int((valid_pnl > 0).sum()),
+            "losses": int((valid_pnl <= 0).sum()),
+            "net_pnl_usd": round(float(valid_pnl.sum()), 4) if not valid_pnl.empty else None,
+            "gross_pnl_usd": round(float(sub["_gross"].dropna().sum()), 4) if sub["_gross"].notna().any() else None,
+            "fees_usd": round(float(sub["_fees"].fillna(0).sum()), 4),
+            "funding_usd": round(float(sub["_funding"].fillna(0).sum()), 4),
+            "slippage_usd": round(float(sub["_slippage"].dropna().sum()), 4) if sub["_slippage"].notna().any() else None,
+            "ev_per_independent_episode_usd": round(float(valid_pnl.sum()) / independent_n, 4) if independent_n and not valid_pnl.empty else None,
+            "max_drawdown_usd": round(max_drawdown, 4) if max_drawdown is not None else None,
+            "evidence_status": _exit_sample_status(independent_n),
+            "qualification_eligible": False,
+        })
+    family_rows.sort(key=lambda row: (row["net_pnl_usd"] is not None, row["net_pnl_usd"] or 0), reverse=True)
+
+    policy_text = frame.get("cfg_raw_policy_id", frame.get("policy_signature", pd.Series("", index=frame.index))).fillna("").astype(str).str.upper()
+    configured_atr = _exit_numeric_series(frame, ("cfg_initial_stop_atr_k",))
+    hard_pct = _exit_numeric_series(frame, ("cfg_hard_stop_margin_pct",))
+    frame["_stop_type"] = np.select(
+        [configured_atr.notna(), hard_pct.notna()],
+        ["INITIAL_ATR_STOP", "PHYSICAL_HARD_STOP"],
+        default="UNSPECIFIED",
+    )
+    frame.loc[policy_text.str.contains("ATR_SL", regex=False) & frame["_stop_type"].eq("UNSPECIFIED"), "_stop_type"] = "INITIAL_ATR_STOP"
+    frame["_stop_distance_atr"] = configured_atr
+    frame["_hard_stop_margin_pct"] = hard_pct
+    exit_reason = frame.get("exit_reason", pd.Series("UNKNOWN", index=frame.index)).fillna("UNKNOWN").astype(str).str.upper()
+    frame["_exit_reason"] = exit_reason
+    chase = _exit_numeric_series(frame, ("limit_chase_count",), 0.0).fillna(0)
+    frame["_chase_bucket"] = chase.apply(lambda value: "5+" if value >= 5 else str(int(value)))
+
+    stop_rows = []
+    stop_dims = ["_stop_type", "_stop_distance_atr", "_hard_stop_margin_pct", "_exit_reason", "_chase_bucket"]
+    for keys, sub in frame.groupby(stop_dims, observed=True, dropna=False):
+        stop_type, atr_distance, hard_stop_pct, reason, chase_bucket = keys
+        identity = _exit_identity_labels(sub)
+        independent_n = int(identity["independent_ai_episodes"])
+        valid_pnl = sub["_pnl"].dropna()
+        stop_rows.append({
+            "stop_type": str(stop_type),
+            "stop_distance_atr": None if pd.isna(atr_distance) else round(float(atr_distance), 3),
+            "hard_stop_margin_pct": None if pd.isna(hard_stop_pct) else round(float(hard_stop_pct), 3),
+            "exit_reason": str(reason),
+            "chase_bucket": str(chase_bucket),
+            "evidence_class": evidence_class,
+            "terminal_rows": int(len(sub)),
+            "independent_episodes": independent_n,
+            "missing_identity_rows": _exit_missing_identity_rows(sub),
+            "missing_pnl_rows": int(sub["_pnl"].isna().sum()),
+            "missing_mae_rows": int(sub["_mae"].isna().sum()),
+            "missing_stop_slippage_rows": int(sub["_slippage"].isna().sum()),
+            "wins": int((valid_pnl > 0).sum()),
+            "losses": int((valid_pnl <= 0).sum()),
+            "net_pnl_usd": round(float(valid_pnl.sum()), 4) if not valid_pnl.empty else None,
+            "ev_per_independent_episode_usd": round(float(valid_pnl.sum()) / independent_n, 4) if independent_n and not valid_pnl.empty else None,
+            "avg_mae_margin_pct": round(float(sub["_mae"].dropna().mean()), 3) if sub["_mae"].notna().any() else None,
+            "avg_stop_slippage": round(float(sub["_slippage"].dropna().mean()), 6) if sub["_slippage"].notna().any() else None,
+            "evidence_status": _exit_sample_status(independent_n),
+            "qualification_eligible": False,
+        })
+    stop_rows.sort(key=lambda row: (-row["terminal_rows"], row["stop_type"], row["exit_reason"]))
+    return {"exit_family_scorecard": family_rows, "stop_effectiveness_matrix": stop_rows}
+
+
 def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100):
     """Executed-paper and shadow exit cohorts, always kept as separate evidence."""
     if session is None:
@@ -14756,7 +14892,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         clean, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit combinations")
         work = _enrich_trades_with_buckets(clean.copy()) if not clean.empty else pd.DataFrame()
         if work.empty:
-            return {"evidence_class": evidence_class, "terminal_rows": 0, "contaminated_rows_excluded": contaminated_n, "top": [], "worst_leakage": [], "overall_left_on_table_usd": 0.0}
+            return {"evidence_class": evidence_class, "terminal_rows": 0, "contaminated_rows_excluded": contaminated_n, "top": [], "worst_leakage": [], "overall_left_on_table_usd": 0.0, "exit_family_scorecard": [], "stop_effectiveness_matrix": []}
         if "exit_reason" not in work.columns:
             work["exit_reason"] = "UNKNOWN"
         work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
@@ -14821,6 +14957,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             "contaminated_rows_excluded": contaminated_n, "total_combos": len(combos),
             "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
             "top": by_ev[:top_n], "worst_leakage": by_leak[:top_n],
+            **_exit_family_and_stop_summaries(work, evidence_class),
         }
 
     executed = build(trades, "EXECUTED_PAPER_DESCRIPTIVE")
@@ -14833,7 +14970,7 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             f"left=${row['left_on_table_usd']:+.0f} {PIPELINE_ENFORCEMENT_TAG}"
         )
     payload = {
-        "schema": "exit_combinations_v2",
+        "schema": "exit_combinations_v3",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,

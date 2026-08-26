@@ -1955,6 +1955,8 @@ def _exit_combos_payload():
         "total_combos": executed.get("total_combos", len(top)),
         "filter_note": rep.get("filter_note") or "Generic historical exit combinations.",
         "qualification_eligible": False,
+        "exit_family_scorecard": list(executed.get("exit_family_scorecard") or []),
+        "stop_effectiveness_matrix": list(executed.get("stop_effectiveness_matrix") or []),
         "top": top[:100],
         "worst_leakage": worst[:100],
         "evidence_classes": {
@@ -4335,6 +4337,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Exit Combinations</h2>
     <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane.</p>
     <div class="kpis" id="exit-combos-kpis"></div>
+    <h3>Executed-paper exit-family scorecard</h3>
+    <p class="note">Low-dimensional family comparison. EV is divided by independent shared opportunities, not correlated family children. Missing values remain missing.</p>
+    <table><thead><tr><th>Exit family</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>EV / independent</th><th>Max DD</th><th>Missing identity / PnL / costs / slip</th><th>Evidence</th></tr></thead><tbody id="exit-family-scorecard-body"></tbody></table>
+    <h3>Shadow/lab exit-family scorecard — separate descriptive evidence</h3>
+    <table><thead><tr><th>Exit family</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>EV / independent</th><th>Max DD</th><th>Missing identity / PnL / costs / slip</th><th>Evidence</th></tr></thead><tbody id="exit-family-scorecard-shadow-body"></tbody></table>
+    <h3>Executed-paper stop-effectiveness matrix</h3>
+    <p class="note">Exit reason × configured stop × chase bucket. This is descriptive attribution, not evidence that a stop caused or prevented profit.</p>
+    <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-body"></tbody></table>
+    <h3>Shadow/lab stop-effectiveness matrix — separate descriptive evidence</h3>
+    <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-shadow-body"></tbody></table>
     <h3>Best exit combos (by EV)</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
     <h3>Worst leakage cohorts</h3>
@@ -4910,11 +4922,23 @@ async function loadExitCombos() {
     ['Left on table', '$' + fmtUsd(d.overall_left_on_table_usd)],
     ['Benchmark', d.benchmark_lane || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const executed = ((d.evidence_classes||{}).executed_paper||{});
+  const shadow = ((d.evidence_classes||{}).shadow_lab||{});
+  const money = value => value == null ? 'n/a' : '$' + fmtUsd(value);
+  const renderFamilies = rows => (rows||[]).map(row =>
+    `<tr><td>${row.exit_family||'UNKNOWN'}</td><td>${row.terminal_rows??0}</td><td>${row.independent_episodes??0}</td><td>${row.wins??0} / ${row.losses??0}</td><td>${money(row.net_pnl_usd)}</td><td>${money(row.ev_per_independent_episode_usd)}</td><td>${money(row.max_drawdown_usd)}</td><td>${row.missing_identity_rows??0} / ${row.missing_pnl_rows??0} / ${row.missing_cost_rows??0} / ${row.missing_slippage_rows??0}</td><td>${row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
+  ).join('') || '<tr><td colspan="9">No terminal evidence for this evidence world.</td></tr>';
+  const renderStops = rows => (rows||[]).map(row =>
+    `<tr><td>${row.stop_type||'UNSPECIFIED'}</td><td>${row.stop_distance_atr??'n/a'}</td><td>${row.hard_stop_margin_pct??'n/a'}</td><td>${row.exit_reason||'UNKNOWN'}</td><td>${row.chase_bucket??'n/a'}</td><td>${row.terminal_rows??0}</td><td>${row.independent_episodes??0}</td><td>${row.wins??0} / ${row.losses??0}</td><td>${money(row.net_pnl_usd)}</td><td>${row.avg_mae_margin_pct??'n/a'}</td><td>${row.avg_stop_slippage??'n/a'}</td><td>${row.missing_identity_rows??0} / ${row.missing_pnl_rows??0} / ${row.missing_mae_rows??0} / ${row.missing_stop_slippage_rows??0}</td><td>${row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
+  ).join('') || '<tr><td colspan="13">No terminal stop evidence for this evidence world.</td></tr>';
+  document.getElementById('exit-family-scorecard-body').innerHTML = renderFamilies(executed.exit_family_scorecard);
+  document.getElementById('exit-family-scorecard-shadow-body').innerHTML = renderFamilies(shadow.exit_family_scorecard);
+  document.getElementById('stop-effectiveness-body').innerHTML = renderStops(executed.stop_effectiveness_matrix);
+  document.getElementById('stop-effectiveness-shadow-body').innerHTML = renderStops(shadow.stop_effectiveness_matrix);
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Run analyzer for exit combos.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td><td>$${fmtUsd(c.avg_left_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No leakage data.</td></tr>';
-  const shadow = ((d.evidence_classes||{}).shadow_lab||{});
   document.getElementById('exit-shadow-combos-body').innerHTML = (shadow.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No explicit shadow/lab terminal exit evidence in this epoch.</td></tr>';
 }
