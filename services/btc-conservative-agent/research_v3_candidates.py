@@ -812,7 +812,10 @@ def evaluate_protection_screen(
     for row in scenario_c_rows:
         protection_id = str(row.get("policy_id") or "").split("|", 1)[-1]
         stop_label = (
-            protection_id.rsplit("_ATR_SL_", 1)[-1]
+            # A composed policy identity can append another ``|<exit>`` after
+            # the Scenario-C protection.  Keep that suffix out of the numeric
+            # stop key or the report sorter attempts float("1.5|ATR_TP...").
+            protection_id.rsplit("_ATR_SL_", 1)[-1].split("|", 1)[0]
             if "_ATR_SL_" in protection_id
             else "CONTROL_NO_ATR_STOP"
         )

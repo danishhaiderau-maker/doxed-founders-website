@@ -5803,6 +5803,14 @@ _TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
     "PROFIT_LOCK_LADDER",
     "THESIS_FAST_CUT",
     "THESIS_INVALIDATED",
+    # Registry-owned family policies are evaluated from the fresh side-correct
+    # tick in _apply_position_exits.  Booking a second, independently refreshed
+    # book walk after the trigger can turn a 30% paper hard stop into a much
+    # larger reported loss and make the dashboard exit disagree with its PnL.
+    "PHYSICAL_HARD_STOP_30PCT",
+    "INITIAL_ATR_STOP",
+    "PROFIT_PROTECTION_STOP",
+    "PATH_END_120M",
 })
 
 
@@ -20667,8 +20675,14 @@ def process_signal(event: dict):
                     }
                 if is_ai_scan_lane(research_lane) and ai:
                     # Fan out five independent paper-only family lifecycles
-                    # directly from the completed shared-AI result.
+                    # and the Continuous benchmark directly from the completed
+                    # shared-AI result.  Continuous owns an independent verdict,
+                    # order ID, and lifecycle; omitting this call leaves the
+                    # benchmark tile evaluation-only even while its toggle is ON.
                     spawn_combo_lanes_from_ai_scan(
+                        ctx, ai, edge_score, features, research_lane,
+                    )
+                    spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
 
