@@ -79,8 +79,14 @@ function Write-SyncProgressHeartbeat {
     inProgress = $true
     phase = $Phase
     updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+    # Keep the canonical heartbeat timestamp populated while a long atomic
+    # sync is in progress.  Supervisors written against the completed
+    # heartbeat contract read syncedAt; dropping it made an active download
+    # look infinitely stale until the final heartbeat replaced this record.
+    syncedAt = [DateTimeOffset]::UtcNow.ToString("o")
     source = $SourceUrl
     sourceRevision = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+    tileRegistrySignature = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
     currentFile = $RelativePath
     fileIndex = $FileIndex
     fileCount = $FileCount

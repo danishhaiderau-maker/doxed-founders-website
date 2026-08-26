@@ -64,6 +64,8 @@ def test_sync_loop_has_sha256_fallback_for_minimal_windows_hosts():
 
 
 def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
+    progress_function = SYNC_SCRIPT.split("function Write-SyncProgressHeartbeat", 1)[1]
+    progress_function = progress_function.split("$syncState = @{}", 1)[0]
     assert "[string]$ProgressHeartbeatFile" in SYNC_SCRIPT
     assert "function Write-SyncProgressHeartbeat" in SYNC_SCRIPT
     assert '-Phase "file_start"' in SYNC_SCRIPT
@@ -71,6 +73,8 @@ def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
     assert "sourceRevision" in SYNC_SCRIPT
     assert "fileIndex" in SYNC_SCRIPT and "fileCount" in SYNC_SCRIPT
     assert "fileBytes" in SYNC_SCRIPT and "remoteBytes" in SYNC_SCRIPT
+    assert 'syncedAt = [DateTimeOffset]::UtcNow.ToString("o")' in progress_function
+    assert "tileRegistrySignature" in progress_function
     assert "Invoke-MirrorAtomicReplace" in SYNC_SCRIPT
     assert "ProgressHeartbeatFile = $heartbeatFile" in SYNC_LOOP
     assert "ProgressRelayEvidenceJson" in SYNC_LOOP
@@ -78,8 +82,6 @@ def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
     assert "$loopPid -eq $PID" in SYNC_SCRIPT
     assert '$ProgressHeartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"' in SYNC_SCRIPT
     assert "$previousHeartbeat.relayEvidence" in SYNC_SCRIPT
-    progress_function = SYNC_SCRIPT.split("function Write-SyncProgressHeartbeat", 1)[1]
-    progress_function = progress_function.split("$syncState = @{}", 1)[0]
     assert "AdminToken" not in progress_function
 
 

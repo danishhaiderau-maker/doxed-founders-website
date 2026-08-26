@@ -1040,7 +1040,11 @@ class Supervisor:
         sync_registry_signature = None
         try:
             heartbeat = read_json(heartbeat_path)
-            stamp = parse_time(heartbeat.get("syncedAt"))
+            # Progress heartbeats emitted during a long atomic download use
+            # updatedAt.  Accept it as a backwards-compatible freshness
+            # fallback so active sync work is not reported as infinitely
+            # stale between completed-cycle heartbeats.
+            stamp = parse_time(heartbeat.get("syncedAt") or heartbeat.get("updatedAt"))
             age = (self.now() - stamp).total_seconds() if stamp else float("inf")
             sync_revision = heartbeat.get("sourceRevision") or heartbeat.get("source_revision")
             sync_registry_signature = heartbeat.get("tileRegistrySignature") or heartbeat.get("tile_registry_signature")
