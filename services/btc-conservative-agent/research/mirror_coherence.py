@@ -115,6 +115,7 @@ def assert_mirror_coherent(
     previous: MirrorCoherenceToken | None = None,
     now: datetime | None = None,
     max_age_seconds: int | None = None,
+    held_lease: object | None = None,
 ) -> MirrorCoherenceToken:
     """Validate a completed, current, revision-matched mirror receipt.
 
@@ -157,7 +158,17 @@ def assert_mirror_coherent(
     )
     observed_now = now or datetime.now(timezone.utc)
     age = (observed_now.astimezone(timezone.utc) - _parse_utc(payload.get("syncedAt"))).total_seconds()
-    if age < -60 or age > age_limit:
+    same_held_generation = bool(
+        previous is not None
+        and held_lease is not None
+        and getattr(held_lease, "held", False)
+        and Path(getattr(held_lease, "path", "")).resolve()
+        == (root / ".fly-mirror-generation.lease").resolve()
+    )
+    # Freshness is mandatory when an iteration starts.  At publication a long
+    # calculation may legitimately outlive the receipt-age SLA, but only the
+    # still-held cross-process lease plus the same token can waive age alone.
+    if age < -60 or (age > age_limit and not same_held_generation):
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_STALE")
 
     # Heartbeat timestamps and relay-health observations can refresh while the

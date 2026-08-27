@@ -53,6 +53,7 @@ $mirrorDir = Get-DoxxedFlyMirrorDir
 $relayEvidenceDestination = Join-Path $mirrorDir "relay_lifecycle_evidence_v1.json"
 $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
 $growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
+$generationLeaseFile = Join-Path $repoRoot ".fly-mirror-generation.lease"
 $relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf) {
   (Get-Item -LiteralPath $relayEvidenceDestination).LastWriteTimeUtc.ToString("o")
 } else { $null }
@@ -489,8 +490,30 @@ try {
         $syncArgs.PublishAnalyzerReport = $publishReport
       }
       $syncArgs.TargetDir = $mirrorDir
-      $currentStage = "atomic_mirror_sync"
-      $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
+      # A complete analyzer iteration and a mirror mutation are mutually
+      # exclusive.  Acquire before the child can publish inProgress so a
+      # deferred sync never masks the last completed MATCH receipt.
+      $generationLease = $null
+      try {
+        $generationLease = [System.IO.File]::Open(
+          $generationLeaseFile,
+          [System.IO.FileMode]::OpenOrCreate,
+          [System.IO.FileAccess]::ReadWrite,
+          [System.IO.FileShare]::None
+        )
+      } catch {
+        Add-Content -LiteralPath $logFile -Value (
+          "$((Get-Date).ToUniversalTime().ToString('o'))`tDEFER`tanalyzer owns mirror-generation lease"
+        )
+        Start-Sleep -Seconds $pollSec
+        continue
+      }
+      try {
+        $currentStage = "atomic_mirror_sync"
+        $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
+      } finally {
+        if ($generationLease) { $generationLease.Dispose() }
+      }
       $didSync = $true
       $lastSyncedTotalBytes = $currentTotalBytes
       $lastSyncAt = [datetime]::UtcNow

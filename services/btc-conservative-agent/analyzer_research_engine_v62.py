@@ -8820,6 +8820,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
     while True:
         iteration += 1
         crashed = False
+        retry_sec = sleep_sec
         print(f"\n=== ANALYZER {ANALYZER_VERSION} ITERATION {iteration} START {PIPELINE_ENFORCEMENT_TAG} ===")
         try:
             _run_analyzer_iteration(iteration, interval_min, session_only)
@@ -8827,6 +8828,13 @@ def run(interval_min=30, session_only=True, max_iterations=None):
             raise
         except Exception as exc:
             crashed = True
+            try:
+                from research.mirror_coherence import MirrorCoherenceError
+                from research.mirror_generation_lease import MirrorGenerationLeaseTimeout
+                if isinstance(exc, (MirrorCoherenceError, MirrorGenerationLeaseTimeout)):
+                    retry_sec = min(60, sleep_sec)
+            except Exception:
+                pass
             tb = traceback.format_exc()
             print(
                 f"\n❌ ANALYZER ITERATION {iteration} FAILED: {exc} {PIPELINE_ENFORCEMENT_TAG}\n{tb}"
@@ -8839,10 +8847,26 @@ def run(interval_min=30, session_only=True, max_iterations=None):
         )
         if max_iterations is not None and iteration >= max_iterations:
             break
-        time.sleep(sleep_sec)
+        time.sleep(retry_sec)
 
 
 def _run_analyzer_iteration(iteration, interval_min, session_only):
+        global _CURRENT_MIRROR_GENERATION_LEASE
+        from research.mirror_generation_lease import MirrorGenerationLease
+
+        lease = MirrorGenerationLease(
+            Path(__file__).resolve().parents[2], owner=f"analyzer-iteration-{iteration}"
+        )
+        wait_sec = float(os.getenv("ANALYZER_MIRROR_LEASE_WAIT_SEC", "1200"))
+        with lease.acquire(timeout_seconds=wait_sec):
+            _CURRENT_MIRROR_GENERATION_LEASE = lease
+            try:
+                return _run_analyzer_iteration_with_lease(iteration, interval_min, session_only)
+            finally:
+                _CURRENT_MIRROR_GENERATION_LEASE = None
+
+
+def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         global _CURRENT_ANALYZER_GENERATION_STARTED_AT
         global _CURRENT_MIRROR_COHERENCE_TOKEN
         from research.mirror_coherence import assert_mirror_coherent
@@ -19132,6 +19156,7 @@ def _publish_completed_report_generation(manifest):
         data_root=os.environ["BTC_AGENT_DATA_DIR"],
         expected_revision=str(manifest.get("generation_revision") or ""),
         previous=globals().get("_CURRENT_MIRROR_COHERENCE_TOKEN"),
+        held_lease=globals().get("_CURRENT_MIRROR_GENERATION_LEASE"),
     )
     published = Path(PUBLISHED_REPORTS_DIR)
     staging = Path(f".{PUBLISHED_REPORTS_DIR}.staging-{os.getpid()}-{time.time_ns()}")
