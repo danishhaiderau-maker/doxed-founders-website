@@ -128,6 +128,9 @@ def test_report_stamp_marks_ungated_report_descriptive_and_unqualified(tmp_path)
 def test_empty_current_lanes_are_written_and_publish_with_exact_generation_identity(
     tmp_path, monkeypatch
 ):
+    import research.mirror_coherence as mirror_coherence
+
+    monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(analyzer, "_load_signal_snapshots", lambda: {})
     monkeypatch.setattr(analyzer, "load_research_session", lambda: {
