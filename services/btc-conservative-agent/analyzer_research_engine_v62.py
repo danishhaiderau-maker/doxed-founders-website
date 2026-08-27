@@ -11644,16 +11644,24 @@ def benchmark_relative_scorecard_report(
     bench_m = lane_metrics.get(BENCHMARK_LANE) or {}
     bench_trade = _lane_trade_stats(trades, BENCHMARK_LANE)
     bench_wr = bench_trade["win_rate_pct"]
-    bench_pnl = float(bench_m.get("net_pnl_real") or bench_trade["sum_pnl_usd"] or 0)
-    bench_ev = float(bench_m.get("per_approve_ev") or 0)
+    bench_pnl = bench_m.get("net_pnl_real")
+    if bench_pnl is None:
+        bench_pnl = bench_trade["sum_pnl_usd"]
+    bench_pnl = float(bench_pnl) if bench_pnl is not None else None
+    bench_ev_raw = bench_m.get("per_approve_ev")
+    bench_ev = float(bench_ev_raw) if bench_ev_raw is not None else None
 
     lanes_out = []
     for lane in BENCHMARK_LANES:
         m = lane_metrics.get(lane) or {}
         lane_trade = _lane_trade_stats(trades, lane)
         wr = lane_trade["win_rate_pct"]
-        pnl = float(m.get("net_pnl_real") or lane_trade["sum_pnl_usd"] or 0)
-        ev = float(m.get("per_approve_ev") or 0)
+        pnl = m.get("net_pnl_real")
+        if pnl is None:
+            pnl = lane_trade["sum_pnl_usd"]
+        pnl = float(pnl) if pnl is not None else None
+        ev_raw = m.get("per_approve_ev")
+        ev = float(ev_raw) if ev_raw is not None else None
         entry = {
             "lane": lane,
             "label": RESEARCH_LANE_LABELS.get(lane, lane),
@@ -11661,27 +11669,33 @@ def benchmark_relative_scorecard_report(
             "approves": m.get("approves", 0),
             "fills": m.get("real_fills", lane_trade["trades"]),
             "win_rate_pct": wr,
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve_usd": round(ev, 2),
+            "pnl_usd": round(pnl, 2) if pnl is not None else None,
+            "ev_per_approve_usd": round(ev, 2) if ev is not None else None,
         }
         if lane == BENCHMARK_LANE:
             entry["vs_benchmark"] = {
-                "pnl_delta": 0.0,
-                "wr_delta": 0.0,
-                "ev_delta": 0.0,
-                "fill_pct_delta": 0.0,
+                "pnl_delta": 0.0 if pnl is not None else None,
+                "wr_delta": 0.0 if wr is not None else None,
+                "ev_delta": 0.0 if ev is not None else None,
+                "fill_pct_delta": 0.0 if m.get("approve_to_fill_pct") is not None else None,
                 "beats_benchmark": None,
             }
         else:
             vs = {
-                "pnl_delta": round(pnl - bench_pnl, 2),
-                "wr_delta": round(wr - bench_wr, 1),
-                "ev_delta": round(ev - bench_ev, 2),
+                "pnl_delta": round(pnl - bench_pnl, 2) if pnl is not None and bench_pnl is not None else None,
+                "wr_delta": round(wr - bench_wr, 1) if wr is not None and bench_wr is not None else None,
+                "ev_delta": round(ev - bench_ev, 2) if ev is not None and bench_ev is not None else None,
                 "fill_pct_delta": m.get("delta_approve_to_fill_pct"),
-                "beats_benchmark": bool(pnl > bench_pnl or ev > bench_ev),
+                "beats_benchmark": (
+                    bool(pnl > bench_pnl or ev > bench_ev)
+                    if pnl is not None and bench_pnl is not None and ev is not None and bench_ev is not None
+                    else None
+                ),
             }
             entry["vs_benchmark"] = vs
-            if m.get("approves", 0):
+            if m.get("approves", 0) and all(
+                value is not None for value in (pnl, bench_pnl, wr, bench_wr, ev, bench_ev)
+            ):
                 print(
                     f"  {lane}: PnL ${pnl:.2f} (Δ ${vs['pnl_delta']:+.2f}) "
                     f"WR {wr:.1f}% (Δ {vs['wr_delta']:+.1f}pp) "
@@ -11703,9 +11717,9 @@ def benchmark_relative_scorecard_report(
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "benchmark_summary": {
-            "pnl_usd": round(bench_pnl, 2),
+            "pnl_usd": round(bench_pnl, 2) if bench_pnl is not None else None,
             "win_rate_pct": bench_wr,
-            "ev_per_approve_usd": round(bench_ev, 2),
+            "ev_per_approve_usd": round(bench_ev, 2) if bench_ev is not None else None,
             "approves": bench_m.get("approves", 0),
         },
         "lanes": lanes_out,
@@ -17597,14 +17611,25 @@ def _edge_decile_counts(edge_val):
 
 def _blocked_opportunity_usd(missed_list, real_edge):
     total = 0.0
+    observed = False
     for row in missed_list or []:
         try:
-            total += float(row.get("missed_profit_usd") or 0)
+            value = row.get("missed_profit_usd")
+            if value is None:
+                continue
+            total += float(value)
+            observed = True
         except (TypeError, ValueError):
             pass
-    if total:
+    if observed:
         return round(total, 2)
-    return round(float(real_edge.get("blocked_shadow_pnl_usd") or 0), 2)
+    fallback = real_edge.get("blocked_shadow_pnl_usd")
+    if fallback is None:
+        fallback = real_edge.get("net_pnl_shadow_blocked")
+    try:
+        return round(float(fallback), 2) if fallback is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _best_exit_from_mix(exit_mix):
@@ -17677,11 +17702,13 @@ def _generate_research_findings(payload):
             f"({best_exit.get('n')} trades, ${float(best_exit.get('pnl_usd', 0)):+.2f})."
         )
 
-    gate = float(re.get("gate_damage_usd") or 0)
-    if abs(gate) < 5:
-        findings.append(f"Gate damage ${gate:+.2f} — post-AI gates are not the main PnL leak.")
-    else:
-        findings.append(f"Gate damage ${gate:+.2f} — investigate blocked APPROVEs.")
+    gate_raw = re.get("gate_damage_usd")
+    if int(re.get("approve_attempts") or 0) > 0 and gate_raw is not None:
+        gate = float(gate_raw)
+        if abs(gate) < 5:
+            findings.append(f"Gate damage ${gate:+.2f} — post-AI gates are not the main PnL leak.")
+        else:
+            findings.append(f"Gate damage ${gate:+.2f} — investigate blocked APPROVEs.")
 
     left = sc.get("leakage_left_usd")
     if left is not None:
@@ -18516,10 +18543,12 @@ def build_executive_summary_payload(
     best_exit = _best_exit_from_mix(exit_mix_dicts)
     worst_exit = _worst_exit_from_mix(exit_mix_dicts)
     fc_sum = fast_cut.get("summary") or {}
-    fast_cut_damage = round(
-        sum(float(x.get("pnl_usd") or 0) for x in exit_mix_dicts if "FAST_CUT" in str(x.get("reason", ""))),
-        2,
+    fast_cut_rows = [x for x in exit_mix_dicts if "FAST_CUT" in str(x.get("reason", ""))]
+    fast_cut_damage = (
+        round(sum(float(x["pnl_usd"]) for x in fast_cut_rows if x.get("pnl_usd") is not None), 2)
+        if fast_cut_rows else None
     )
+    gate_damage = real_edge.get("gate_damage_usd") if n_approves > 0 else None
 
     payload = {
         "schema": "research_hierarchy_v1",
@@ -18555,7 +18584,7 @@ def build_executive_summary_payload(
             "edge_correlation": (edge_val.get("overall") or {}).get("correlation_edge_vs_pnl"),
             "best_exit": best_exit,
             "worst_exit": worst_exit,
-            "gate_damage_usd": round(float(real_edge.get("gate_damage_usd") or 0), 2),
+            "gate_damage_usd": round(float(gate_damage), 2) if gate_damage is not None else None,
             "leakage_left_usd": round(float(left_usd), 2) if left_usd is not None else None,
         },
         "coverage": {
@@ -19041,14 +19070,26 @@ def write_analysis_dashboard_html(payload):
     def esc(x):
         return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    def html_usd(value, signed=False):
+        if value is None:
+            return "$n/a"
+        try:
+            spec = "+.2f" if signed else ".2f"
+            return f"${format(float(value), spec)}"
+        except (TypeError, ValueError):
+            return "$n/a"
+
+    def html_pct(value):
+        return f"{esc(value)}%" if value is not None else "n/a"
+
     lane_rows = ""
     for lane in BENCHMARK_LANES:
         m = (bench.get("lanes") or {}).get(lane) or {}
-        pnl = m.get("net_pnl_real", m.get("net_pnl_usd", 0))
+        pnl = m.get("net_pnl_real", m.get("net_pnl_usd"))
         lane_rows += (
             f"<tr><td>{esc(lane)}</td><td>{m.get('real_fills', m.get('fills', 0))}</td>"
-            f"<td>{m.get('approves', 0)}</td><td>${float(pnl or 0):.2f}</td>"
-            f"<td>${float(m.get('per_approve_ev') or 0):.2f}</td></tr>\n"
+            f"<td>{m.get('approves', 0)}</td><td>{html_usd(pnl)}</td>"
+            f"<td>{html_usd(m.get('per_approve_ev'))}</td></tr>\n"
         )
 
     cal_rows = ""
@@ -19129,11 +19170,11 @@ def write_analysis_dashboard_html(payload):
 <p class="meta">Generating revision: <b>{esc(generation_revision)}</b> · cohort schema: <b>{esc(cohort_schema)}</b>. UNKNOWN means this snapshot is unqualified for live-policy conclusions.</p>
 <div class="kpis">
   <div class="kpi"><div class="lbl">Trades</div><div class="val">{p.get('trades', 0)}</div></div>
-  <div class="kpi"><div class="lbl">Win Rate</div><div class="val">{p.get('win_rate_pct', 'n/a')}%</div></div>
-  <div class="kpi"><div class="lbl">Net PnL</div><div class="val">${float(p.get('net_pnl_usd') or 0):+.2f}</div></div>
-  <div class="kpi"><div class="lbl">Expectancy</div><div class="val">${esc(p.get('expectancy_usd', 'n/a'))}</div></div>
-  <div class="kpi"><div class="lbl">MFE Capture</div><div class="val">{esc(p.get('mfe_capture_pct', 'n/a'))}%</div></div>
-  <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">${float(re.get('gate_damage_usd') or 0):+.2f}</div></div>
+  <div class="kpi"><div class="lbl">Win Rate</div><div class="val">{html_pct(p.get('win_rate_pct'))}</div></div>
+  <div class="kpi"><div class="lbl">Net PnL</div><div class="val">{html_usd(p.get('net_pnl_usd'), signed=True)}</div></div>
+  <div class="kpi"><div class="lbl">Expectancy</div><div class="val">{html_usd(p.get('expectancy_usd'))}</div></div>
+  <div class="kpi"><div class="lbl">MFE Capture</div><div class="val">{html_pct(p.get('mfe_capture_pct'))}</div></div>
+  <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">{html_usd(re.get('gate_damage_usd'), signed=True)}</div></div>
 </div>
 <section><h2>Lanes</h2><table><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>Real PnL</th><th>EV/Approve</th></tr>{lane_rows}</table></section>
 <section><h2>Research Cohorts</h2><table><tr><th>Cohort</th><th>Included</th><th>Excluded</th><th>Exclusion reasons</th></tr>{cohort_rows or '<tr><td colspan="4">UNKNOWN — cohort evidence missing</td></tr>'}</table></section>
@@ -19141,7 +19182,7 @@ def write_analysis_dashboard_html(payload):
 <section><h2>Chase</h2><p>Assisted fills: <b>{ch.get('assisted_fills', 0)}</b> / {ch.get('total_fills', 0)} · Saved: {ch.get('saved_fills', 0)} · TTL expired: {ch.get('ttl_expired', 0)}</p></section>
 <section><h2>Scenario C — Leakage &amp; Exits</h2>
 <p>Peak ${leak.get('peak_profit_usd', leak.get('peak_usd', 'n/a'))} → Booked ${leak.get('booked_profit_usd', leak.get('booked_usd', 'n/a'))} · Left ${payload.get('scenario_c', {}).get('leakage_left_usd', 'n/a')}</p>
-<p>Fast-cut trades: {fc_sum.get('fast_cut_trades', 0)} · Missed ladder profit: ${float(fc_sum.get('missed_ladder_profit_usd') or 0):.2f}</p></section>
+<p>Fast-cut trades: {fc_sum.get('fast_cut_trades', 0)} · Missed ladder profit: {html_usd(fc_sum.get('missed_ladder_profit_usd'))}</p></section>
 <section><h2>Horizon Profitability (losers)</h2>
 <p class="note">Would losing trades have been green N minutes after exit? (tick replay)</p>
 <table><tr><th>Horizon</th><th>Profitable</th><th>Still loss</th><th>Unknown</th><th>% profitable</th></tr>{hz_rows or '<tr><td colspan="5">No losing trades</td></tr>'}</table></section>

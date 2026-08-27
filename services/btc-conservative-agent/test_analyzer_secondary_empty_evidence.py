@@ -149,3 +149,104 @@ def test_highlights_render_unavailable_derived_metrics_as_na():
     assert "+0.00" not in text
     assert "Top Lane:     n/a  $+0.00" not in text
     assert "Best Conf:    n/a  0.0% WR" not in text
+
+
+def test_empty_findings_do_not_invent_gate_or_blocked_profit():
+    analyzer = _load_analyzer()
+    payload = {
+        "performance": {"trades": 0, "net_pnl_usd": None},
+        "real_edge": {
+            "approve_attempts": 0,
+            "gate_damage_usd": 0.0,
+            "blocked_shadow_pnl_usd": None,
+        },
+        "benchmark": {"best_lane": None, "worst_lane": None},
+        "scenario_c": {"fast_cut_trades": 0, "leakage_left_usd": None},
+        "coverage": {"confidence_status": "POOR", "confidence_note": "no outcomes"},
+    }
+
+    assert analyzer._blocked_opportunity_usd([], payload["real_edge"]) is None
+    findings = analyzer._generate_research_findings(payload)
+    assert not any("Gate damage" in finding for finding in findings)
+    assert not any("Blocked shadow opportunity" in finding for finding in findings)
+
+
+def test_static_dashboard_renders_unavailable_money_as_na(tmp_path, monkeypatch):
+    analyzer = _load_analyzer()
+    output = tmp_path / "analysis_dashboard.html"
+    monkeypatch.setattr(analyzer, "ANALYSIS_DASHBOARD_HTML", str(output))
+
+    empty_report = tmp_path / "empty.json"
+    empty_report.write_text("{}", encoding="utf-8")
+    for attr in (
+        "BENCHMARK_VS_LANES_REPORT_FILE",
+        "AI_CALIBRATION_REPORT_FILE",
+        "CHASE_ATTRIBUTION_REPORT_FILE",
+        "SCENARIO_C_LEAKAGE_REPORT_FILE",
+        "HORIZON_PROFITABILITY_REPORT_FILE",
+        "FAST_CUT_SURVIVOR_REPORT_FILE",
+    ):
+        monkeypatch.setattr(analyzer, attr, str(empty_report))
+
+    payload = {
+        "performance": {
+            "trades": 0,
+            "win_rate_pct": None,
+            "net_pnl_usd": None,
+            "expectancy_usd": None,
+            "mfe_capture_pct": None,
+        },
+        "real_edge": {"approve_attempts": 0, "gate_damage_usd": None},
+        "scenario_c": {"leakage_left_usd": None},
+        "coverage": {},
+        "analysis_provenance": {},
+    }
+
+    assert analyzer.write_analysis_dashboard_html(payload) is True
+    html = output.read_text(encoding="utf-8")
+    assert html.count("$n/a") >= 4
+    assert "Net PnL</div><div class=\"val\">$+0.00" not in html
+    assert "Gate Damage</div><div class=\"val\">$+0.00" not in html
+    assert "Missed ladder profit: $0.00" not in html
+
+
+def test_benchmark_relative_scorecard_keeps_empty_deltas_unavailable(tmp_path, monkeypatch):
+    analyzer = _load_analyzer()
+    monkeypatch.setattr(
+        analyzer,
+        "BENCHMARK_RELATIVE_SCORECARD_FILE",
+        str(tmp_path / "scorecard.json"),
+    )
+
+    report = analyzer.benchmark_relative_scorecard_report(
+        trades=pd.DataFrame(),
+        session={},
+        benchmark_report={
+            "lanes": {
+                lane: {
+                    "approves": 0,
+                    "real_fills": 0,
+                    "net_pnl_real": None,
+                    "per_approve_ev": None,
+                    "approve_to_fill_pct": None,
+                    "delta_approve_to_fill_pct": None,
+                }
+                for lane in analyzer.BENCHMARK_LANES
+            }
+        },
+    )
+
+    assert report["benchmark_summary"]["pnl_usd"] is None
+    assert report["benchmark_summary"]["win_rate_pct"] is None
+    assert report["benchmark_summary"]["ev_per_approve_usd"] is None
+    for lane in report["lanes"]:
+        assert lane["pnl_usd"] is None
+        assert lane["win_rate_pct"] is None
+        assert lane["ev_per_approve_usd"] is None
+        assert lane["vs_benchmark"] == {
+            "pnl_delta": None,
+            "wr_delta": None,
+            "ev_delta": None,
+            "fill_pct_delta": None,
+            "beats_benchmark": None,
+        }
