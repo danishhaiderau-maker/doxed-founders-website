@@ -19127,6 +19127,20 @@ def write_report_manifest(payload=None):
             "available_in_generation": False,
             "generation_error": f"{type(exc).__name__}: {exc}",
         }
+    if isinstance(payload, dict):
+        # The filesystem can retain optional/stale JSON artifacts which are
+        # intentionally excluded from this immutable generation.  The summary
+        # must therefore quote the completed manifest, not count files on disk.
+        payload["manifest_report_count"] = manifest["report_count"]
+        try:
+            Path(EXECUTIVE_SUMMARY_FILE).write_text(
+                format_executive_summary_short(payload), encoding="utf-8"
+            )
+        except OSError as exc:
+            print(
+                f"  ⚠️ Could not align executive summary report count: {exc} "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
+            )
     try:
         _publish_completed_report_generation(manifest)
     except Exception as exc:
@@ -19518,7 +19532,9 @@ def format_executive_summary_short(payload):
         f"  • {RESEARCH_HIGHLIGHTS_FILE} — detailed tables",
         f"  • {RESEARCH_FINDINGS_FILE} — auto conclusions",
         f"  • {RESEARCH_COVERAGE_FILE} — bucket counts & statistical health",
-        f"  • {DEEP_DIVE_INDEX_FILE} — all {payload.get('json_reports_written', 0)} JSON reports",
+        f"  • {DEEP_DIVE_INDEX_FILE} — all "
+        f"{payload.get('manifest_report_count', payload.get('json_reports_written', 0))} "
+        "JSON reports",
         f"  • {ANALYSIS_DASHBOARD_HTML} | {ANALYZER_RUN_LOG_FILE} (full verbose)",
         "=" * 72,
     ]

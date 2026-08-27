@@ -45,6 +45,17 @@ def format_melbourne_dt(value) -> str:
         return str(value)[:19] if value else "—"
 
 
+def _parse_utc_dt(value):
+    """Best-effort aware datetime used only for truthful receipt comparisons."""
+    if value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
 
 try:
@@ -2045,6 +2056,19 @@ def _combos_payload():
     }
 
 
+def _current_generation_identity():
+    """Return the immutable generation identity shared by lightweight APIs."""
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    fresh_epoch = manifest.get("fresh_epoch") or {}
+    return {
+        "generation_id": manifest.get("generation_id"),
+        "generated_at": manifest.get("generated_at"),
+        "generation_revision": manifest.get("generation_revision"),
+        "source_data_revision": manifest.get("source_data_revision"),
+        "epoch_id": fresh_epoch.get("epoch_id"),
+    }
+
+
 def _spread_performance_payload():
     """Aggregate Top Combos by normalized score-gap bucket -> P&L / WR / EV.
 
@@ -2080,8 +2104,7 @@ def _spread_performance_payload():
         })
     order = {"0-1": 0, "2": 1, "3": 2, "4": 3, "5+": 4}
     out.sort(key=lambda x: (order.get(x["spread_bucket"], 99), x["spread_bucket"]))
-    return {
-        "generated_at": rep.get("generated_at"),
+    payload = {
         "total_combos": len(rows),
         "filter_note": (
             "Normalized score gap = abs(LONG score - SHORT score) / 10. "
@@ -2089,6 +2112,13 @@ def _spread_performance_payload():
         ),
         "buckets": out,
     }
+    payload.update(_current_generation_identity())
+    if not out:
+        payload["empty_reason"] = (
+            "INSUFFICIENT_EXECUTED_SCORE_GAP_EVIDENCE: no eligible terminal "
+            "executed combinations exist in the current generation"
+        )
+    return payload
 
 
 def _chase_bucket_stats_from_trades(rows):
@@ -2366,9 +2396,16 @@ def _horizon_payload():
             }
             for label in ("5m", "10m", "15m", "30m", "60m", "120m")
         ]
-    return {
-        "horizons": recovery,
-        "losing_trades": rep.get("losing_trades", 0),
+    losing_trades = int(rep.get("losing_trades") or 0)
+    normalized_recovery = []
+    for row in recovery:
+        item = dict(row)
+        if losing_trades == 0 and item.get("coverage_pct") is None:
+            item["coverage_pct"] = 0.0
+        normalized_recovery.append(item)
+    payload = {
+        "horizons": normalized_recovery,
+        "losing_trades": losing_trades,
         "fast_cut_recovery": rep.get("fast_cut_recovery"),
         "fast_cut_recovery_summary": rep.get("fast_cut_recovery_summary") or [],
         "conclusions_allowed": rep.get("conclusions_allowed", False),
@@ -2377,21 +2414,48 @@ def _horizon_payload():
         "note": rep.get("note"),
         "coverage_reason": rep.get("coverage_reason"),
     }
+    payload.update(_current_generation_identity())
+    if losing_trades == 0:
+        payload["empty_reason"] = (
+            "INSUFFICIENT_POST_EXIT_HORIZON_EVIDENCE: no eligible losing terminal "
+            "trades exist in the current generation"
+        )
+        payload["coverage_reason"] = payload["empty_reason"]
+        payload["note"] = payload["note"] or payload["empty_reason"]
+        payload["max_horizon_coverage_pct"] = 0.0
+    return payload
 
 
 def _leakage_payload():
     rep = _read_json("top_leakage_report.json") or _read_json(str(Path(REPORTS_DIR) / "top_leakage_report.json"))
     leak = _read_json("scenario_c_leakage_report.json") or _read_json(str(Path(REPORTS_DIR) / "scenario_c_leakage_report.json"))
-    return {
+    payload = {
         "overall_left_usd": rep.get("overall_left_usd") or (leak.get("overall") or {}).get("left_on_table_usd"),
         "by_exit_reason": rep.get("by_exit_reason") or {},
         "trades": rep.get("trades") or [],
     }
+    payload.update(_current_generation_identity())
+    if not payload["trades"] and not payload["by_exit_reason"]:
+        payload["empty_reason"] = (
+            "INSUFFICIENT_TERMINAL_EXIT_EVIDENCE: no eligible terminal exits with "
+            "peak-to-close observations exist in the current generation"
+        )
+    return payload
 
 
 def _feature_payload():
     rep = _read_json("feature_importance_report.json") or _read_json(str(Path(REPORTS_DIR) / "feature_importance_report.json"))
-    return {"features": rep.get("features") or [], "weak_signals": rep.get("weak_signals") or []}
+    payload = {
+        "features": rep.get("features") or [],
+        "weak_signals": rep.get("weak_signals") or [],
+    }
+    payload.update(_current_generation_identity())
+    if not payload["features"] and not payload["weak_signals"]:
+        payload["empty_reason"] = (
+            "INSUFFICIENT_OUTCOME_FEATURE_EVIDENCE: no eligible terminal outcomes "
+            "exist for feature attribution in the current generation"
+        )
+    return payload
 
 
 def _ai_payload():
@@ -2436,14 +2500,29 @@ def _normalize_archive_session(entry, folder_name=None):
     sid = entry.get("id") or entry.get("session_id") or folder_name
     if not sid:
         return None
+    archive_path = Path(
+        entry.get("path") or (ROOT / ARCHIVE_DIR / str(sid))
+    )
+    archived_manifest = _read_json(str(archive_path / REPORT_MANIFEST_FILE), {}) or {}
+    summary_generated_at = entry.get("generated_at")
     return {
         "id": str(sid),
         "session_id": str(sid),
-        "generated_at": entry.get("generated_at"),
+        # Archive rows identify an immutable analyzer generation.  Its manifest
+        # timestamp is authoritative; the earlier summary timestamp is exposed
+        # separately rather than silently standing in for generation time.
+        "generated_at": archived_manifest.get("generated_at") or summary_generated_at,
+        "manifest_generated_at": archived_manifest.get("generated_at"),
+        "summary_generated_at": summary_generated_at,
+        "generation_id": archived_manifest.get("generation_id"),
+        "generation_revision": archived_manifest.get("generation_revision"),
+        "source_data_revision": archived_manifest.get("source_data_revision"),
+        "epoch_id": (archived_manifest.get("fresh_epoch") or {}).get("epoch_id"),
+        "report_count": archived_manifest.get("report_count"),
         "trades": entry.get("trades"),
         "net_pnl_usd": entry.get("net_pnl_usd"),
         "win_rate_pct": entry.get("win_rate_pct"),
-        "path": entry.get("path") or (str(ROOT / ARCHIVE_DIR / sid) if sid else None),
+        "path": str(archive_path),
     }
 
 
@@ -2520,7 +2599,7 @@ def api_status():
         or safe_genome.get("epoch_id")
         or (safe_genome.get("epoch_scope") or {}).get("selected_epoch_id")
     )
-    policy_signatures = sorted({
+    observed_execution_policy_signatures = sorted({
         str(identity.get("policy_signature") or "").strip()
         for identity in (
             (safe_genome.get("collection") or {}).get(
@@ -2534,8 +2613,14 @@ def api_status():
     legacy_policy_signature = safe_genome.get("policy_signature") or (
         safe_genome.get("epoch_scope") or {}
     ).get("policy_signature")
-    if legacy_policy_signature and not policy_signatures:
-        policy_signatures = [str(legacy_policy_signature)]
+    if legacy_policy_signature and not observed_execution_policy_signatures:
+        observed_execution_policy_signatures = [str(legacy_policy_signature)]
+    active_tile_policy_signatures = sorted({
+        str(tile.get("policy_signature") or "").strip()
+        for tile in (manifest.get("active_tiles") or [])
+        if isinstance(tile, dict)
+        and str(tile.get("policy_signature") or "").strip()
+    })
     analyzer_source_revision = manifest.get("generation_revision")
     mirror_source_revision = _mirror_source_revision()
     source_revision_parity = (
@@ -2546,6 +2631,13 @@ def api_status():
         )
         else "MISMATCH" if analyzer_source_revision and mirror_source_revision
         else "UNAVAILABLE"
+    )
+    dashboard_started_dt = _parse_utc_dt(_DASHBOARD_STARTED_AT.isoformat())
+    report_generated_dt = _parse_utc_dt(previous_report_at)
+    restart_observed = bool(
+        dashboard_started_dt
+        and report_generated_dt
+        and dashboard_started_dt > report_generated_dt
     )
     return jsonify({
         "ok": bool(runtime_sync_ok and (report_sync_ok is True or report_pending)),
@@ -2577,7 +2669,26 @@ def api_status():
         "source_data_revision": manifest.get("source_data_revision"),
         "fresh_epoch_id": fresh_epoch_id,
         "tile_registry_signature": manifest.get("tile_registry_signature"),
-        "policy_signatures": policy_signatures,
+        # Compatibility alias retained for older clients.  Its evidence scope
+        # is now explicit so observed execution identities cannot be confused
+        # with the complete five-family tile registry.
+        "policy_signatures": observed_execution_policy_signatures,
+        "policy_signatures_scope": "OBSERVED_EXECUTION_IDENTITIES",
+        "observed_execution_policy_signatures": observed_execution_policy_signatures,
+        "active_tile_policy_signatures": active_tile_policy_signatures,
+        "policy_signature_counts": {
+            "observed_execution": len(observed_execution_policy_signatures),
+            "active_tile_registry": len(active_tile_policy_signatures),
+        },
+        "active_tile_policy_signatures_match_manifest": bool(
+            active_tile_policy_signatures
+            and active_tile_policy_signatures == sorted({
+                str(tile.get("policy_signature") or "").strip()
+                for tile in (manifest.get("active_tiles") or [])
+                if isinstance(tile, dict)
+                and str(tile.get("policy_signature") or "").strip()
+            })
+        ),
         "generated_at": previous_report_at,
         "generated_at_melbourne": format_melbourne_dt(previous_report_at),
         "melbourne_now": format_melbourne_dt(datetime.now(timezone.utc).isoformat()),
@@ -2586,6 +2697,27 @@ def api_status():
         "last_files": {
             "manifest": _file_mtime(REPORT_MANIFEST_FILE),
             "compact": _file_mtime(COMPACT_SUMMARY_FILE),
+        },
+        "availability_receipt": {
+            "schema": "analyzer_dashboard_availability_v1",
+            "dashboard_started_at": _DASHBOARD_STARTED_AT.isoformat(),
+            "dashboard_pid": os.getpid(),
+            "report_generated_at": previous_report_at,
+            "analysis_last_completed_at": run_state.get("last_completed_at"),
+            "restart_observed_with_preserved_reports": bool(
+                restart_observed
+            ),
+            "restart_classification": (
+                "EXPECTED_CONTROLLED_RESTART"
+                if str(os.getenv("ANALYZER_EXPECTED_CONTROLLED_RESTART") or "").strip().lower()
+                in {"1", "true", "yes"}
+                else "RESTART_OBSERVED_UNCLASSIFIED"
+                if restart_observed
+                else "NO_RESTART_SINCE_CURRENT_REPORT"
+            ),
+            "note": (
+                "A dashboard restart never rewrites or silently advances the immutable report generation."
+            ),
         },
     })
 
