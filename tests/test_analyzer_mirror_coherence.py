@@ -126,3 +126,15 @@ def test_unchanged_coherent_receipt_passes_both_gates(tmp_path):
     _write_heartbeat(repo)
     token = _check(repo, mirror)
     assert _check(repo, mirror, previous=token) == token
+
+
+def test_analyzer_retry_log_uses_actual_retry_interval_and_reason():
+    engine = (
+        Path(__file__).resolve().parents[1]
+        / "services"
+        / "btc-conservative-agent"
+        / "analyzer_research_engine_v62.py"
+    ).read_text(encoding="utf-8")
+    assert 'retry_reason = "mirror coherence/lease retry"' in engine
+    assert "Next run in {retry_label} ({retry_reason})" in engine
+    assert "Next run in {interval_min} minutes" not in engine

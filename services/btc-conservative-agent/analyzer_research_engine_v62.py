@@ -8821,6 +8821,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
         iteration += 1
         crashed = False
         retry_sec = sleep_sec
+        retry_reason = "scheduled interval"
         print(f"\n=== ANALYZER {ANALYZER_VERSION} ITERATION {iteration} START {PIPELINE_ENFORCEMENT_TAG} ===")
         try:
             _run_analyzer_iteration(iteration, interval_min, session_only)
@@ -8833,6 +8834,7 @@ def run(interval_min=30, session_only=True, max_iterations=None):
                 from research.mirror_generation_lease import MirrorGenerationLeaseTimeout
                 if isinstance(exc, (MirrorCoherenceError, MirrorGenerationLeaseTimeout)):
                     retry_sec = min(60, sleep_sec)
+                    retry_reason = "mirror coherence/lease retry"
             except Exception:
                 pass
             tb = traceback.format_exc()
@@ -8841,8 +8843,13 @@ def run(interval_min=30, session_only=True, max_iterations=None):
             )
             _write_analyzer_crash_log(iteration, tb)
         crash_note = " (recovered from error)" if crashed else ""
+        retry_label = (
+            f"{retry_sec // 60} minute{'s' if retry_sec != 60 else ''}"
+            if retry_sec % 60 == 0
+            else f"{retry_sec} seconds"
+        )
         print(
-            f"\n⏳ Next run in {interval_min} minutes... "
+            f"\n⏳ Next run in {retry_label} ({retry_reason})... "
             f"Iteration {iteration} complete{crash_note} {PIPELINE_ENFORCEMENT_TAG}\n"
         )
         if max_iterations is not None and iteration >= max_iterations:
