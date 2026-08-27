@@ -38,6 +38,7 @@ import signal
 import ssl
 import hashlib
 import hmac
+import sqlite3
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
@@ -35221,6 +35222,7 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "open_positions.json",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
+    ".data-sync-snapshots",
     "research_epoch_quarantine",
     "research_archive",
     "research_session_archives",
@@ -35376,6 +35378,8 @@ def _data_sync_consistency_mode(path: Path) -> str:
     rewrite those files in place. Runtime .log files are logging-handler-owned
     append streams; rotation changes the inode and is therefore still fenced.
     """
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        return "sqlite_snapshot_v1"
     # Some ledgers use the serialized append helper for new rows but are also
     # atomically rewritten when an outcome is patched.  They are not true
     # append-only generations and must retain the full inode/mtime/size fence.
@@ -35398,6 +35402,48 @@ def _data_sync_consistency_mode(path: Path) -> str:
         or v3_append_only_ledger
     )
     return "append_prefix_v1" if append_prefix else "strict_generation_v1"
+
+
+def _data_sync_sqlite_snapshot(path: Path) -> dict:
+    """Create one integrity-checked online backup for a complete sync run."""
+    snapshot_root = _data_sync_volume_root() / ".data-sync-snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - (15 * 60)
+    for stale in snapshot_root.glob("*.db"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            pass
+    token = uuid.uuid4().hex
+    snapshot = snapshot_root / f"{token}.db"
+    source = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
+    destination = sqlite3.connect(str(snapshot), timeout=15)
+    try:
+        source.backup(destination)
+        result = destination.execute("PRAGMA integrity_check").fetchone()
+        if not result or str(result[0]).lower() != "ok":
+            raise sqlite3.DatabaseError("online backup failed integrity_check")
+    finally:
+        destination.close()
+        source.close()
+    payload = snapshot.read_bytes()
+    return {
+        "snapshot_id": token,
+        "snapshot_size": len(payload),
+        "snapshot_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _data_sync_resolve_sqlite_snapshot(snapshot_id: str) -> Path:
+    token = str(snapshot_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("invalid sqlite snapshot identity")
+    path = (_data_sync_volume_root() / ".data-sync-snapshots" / f"{token}.db").resolve()
+    path.relative_to(_data_sync_volume_root())
+    if not path.is_file():
+        raise ValueError("sqlite snapshot is unavailable or expired")
+    return path
 
 
 def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> bool:
@@ -35434,6 +35480,11 @@ def _data_sync_inventory() -> list:
                 "inode": int(getattr(stat, "st_ino", 0) or 0),
                 "consistency_mode": _data_sync_consistency_mode(resolved),
             })
+            if rows[-1]["consistency_mode"] == "sqlite_snapshot_v1":
+                snapshot = _data_sync_sqlite_snapshot(resolved)
+                rows[-1].update(snapshot)
+                rows[-1]["size"] = snapshot["snapshot_size"]
+                rows[-1]["physical_size"] = snapshot["snapshot_size"]
         except (OSError, ValueError):
             return
 
@@ -35606,6 +35657,31 @@ def api_data_sync_file():
         server_mode = _data_sync_consistency_mode(path)
         if requested_mode != server_mode:
             return jsonify({"error": "file consistency mode mismatch"}), 409
+        if requested_mode == "sqlite_snapshot_v1":
+            snapshot = _data_sync_resolve_sqlite_snapshot(request.args.get("snapshot_id"))
+            expected_snapshot_size = int(request.args.get("expected_snapshot_size") or -1)
+            expected_snapshot_sha = str(request.args.get("expected_snapshot_sha256") or "").lower()
+            snapshot_size = snapshot.stat().st_size
+            if snapshot_size != expected_snapshot_size:
+                return jsonify({"error": "sqlite snapshot size mismatch"}), 409
+            if offset > snapshot_size:
+                return jsonify({"error": "offset beyond sqlite snapshot", "size": snapshot_size}), 416
+            with snapshot.open("rb") as handle:
+                handle.seek(offset)
+                payload = handle.read(min(limit, snapshot_size - offset))
+            if hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_snapshot_sha:
+                return jsonify({"error": "sqlite snapshot identity mismatch"}), 409
+            response = make_response(payload)
+            response.headers["Content-Type"] = "application/octet-stream"
+            response.headers["X-Data-Path"] = _data_sync_relpath(path)
+            response.headers["X-Data-Offset"] = str(offset)
+            response.headers["X-Data-Size"] = str(snapshot_size)
+            response.headers["X-Data-Published-Size"] = str(snapshot_size)
+            response.headers["X-Data-Snapshot-Id"] = str(request.args.get("snapshot_id"))
+            response.headers["X-Data-Snapshot-Sha256"] = expected_snapshot_sha
+            response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
+            response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= snapshot_size else "0"
+            return response
         append_prefix = requested_mode == "append_prefix_v1"
         if append_prefix:
             if None in (expected_size, expected_inode, expected_published_size):

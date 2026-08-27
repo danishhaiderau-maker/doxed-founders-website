@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -233,7 +234,10 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         '{"canonical":false}\n', encoding="utf-8"
     )
     (runtime / "ordinary.json").write_text("{}\n", encoding="utf-8")
-    (runtime / "research.db").write_bytes(b"sqlite-source")
+    db = sqlite3.connect(runtime / "research.db")
+    db.execute("create table evidence(id integer primary key)")
+    db.commit()
+    db.close()
     monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
     monkeypatch.chdir(runtime)
 
@@ -243,7 +247,8 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         "_data_sync_volume_root", "_data_sync_allowed_roots",
         "_data_sync_relpath", "_data_sync_path_allowed",
         "_data_sync_resolve_relpath", "_data_sync_complete_record_size",
-        "_data_sync_consistency_mode", "_data_sync_inventory",
+        "_data_sync_consistency_mode", "_data_sync_sqlite_snapshot",
+        "_data_sync_inventory",
     }
     selected = [
         node for node in tree.body
@@ -257,6 +262,10 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
         "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
         "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(receipt_names),
+        "sqlite3": sqlite3,
+        "uuid": uuid,
+        "hashlib": hashlib,
+        "time": time,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
 
@@ -277,6 +286,52 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         pass
     else:
         raise AssertionError("path traversal must be rejected")
+
+
+def test_hot_sqlite_is_advertised_as_integrity_checked_snapshot(monkeypatch, tmp_path):
+    source = tmp_path / "research.db"
+    conn = sqlite3.connect(source)
+    conn.execute("create table evidence(id integer primary key, value text)")
+    conn.execute("insert into evidence(value) values ('preserved')")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+
+    namespace = _load_bot_functions(
+        "_data_sync_volume_root",
+        "_data_sync_sqlite_snapshot",
+        "_data_sync_resolve_sqlite_snapshot",
+    )
+    namespace.update({"sqlite3": sqlite3, "uuid": uuid, "hashlib": hashlib, "re": re})
+    # Reload with the dependencies used by the selected function bodies.
+    tree = ast.parse(BOT)
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in {
+            "_data_sync_volume_root", "_data_sync_sqlite_snapshot",
+            "_data_sync_resolve_sqlite_snapshot",
+        }
+    ]
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    receipt = namespace["_data_sync_sqlite_snapshot"](source)
+    snapshot = namespace["_data_sync_resolve_sqlite_snapshot"](receipt["snapshot_id"])
+    assert snapshot.stat().st_size == receipt["snapshot_size"]
+    assert hashlib.sha256(snapshot.read_bytes()).hexdigest() == receipt["snapshot_sha256"]
+    copied = sqlite3.connect(snapshot)
+    try:
+        assert copied.execute("pragma integrity_check").fetchone()[0] == "ok"
+        assert copied.execute("select value from evidence").fetchone()[0] == "preserved"
+    finally:
+        copied.close()
+
+
+def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
+    assert 'requested_mode == "sqlite_snapshot_v1"' in BOT
+    assert '"snapshot_id": token' in BOT
+    assert 'X-Data-Snapshot-Id' in BOT
+    assert '$consistencyMode -eq "sqlite_snapshot_v1"' in SYNC_SCRIPT
+    assert '&snapshot_id=$([uri]::EscapeDataString([string]$row.snapshot_id))' in SYNC_SCRIPT
+    assert 'SQLite snapshot identity changed while downloading $rel.' in SYNC_SCRIPT
 
 
 def test_ephemeral_open_positions_is_explicitly_optional_not_required():

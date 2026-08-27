@@ -335,6 +335,13 @@ foreach ($row in $selectedFiles) {
               "&expected_physical_size=$expectedPhysicalSize&expected_published_size=$expectedPublishedSize" +
               "&expected_mtime_ns=$expectedMtime&expected_inode=$expectedInode&consistency_mode=$consistencyMode"
             )
+            if ($consistencyMode -eq "sqlite_snapshot_v1") {
+              $requestUrl += (
+                "&snapshot_id=$([uri]::EscapeDataString([string]$row.snapshot_id))" +
+                "&expected_snapshot_size=$([int64]$row.snapshot_size)" +
+                "&expected_snapshot_sha256=$([string]$row.snapshot_sha256)"
+              )
+            }
           }
           $response = $downloadClient.GetAsync($requestUrl).GetAwaiter().GetResult()
           if (-not $response.IsSuccessStatusCode) {
@@ -349,6 +356,18 @@ foreach ($row in $selectedFiles) {
             $expectedHash = [string](
               $response.Headers.GetValues("X-Chunk-Sha256") | Select-Object -First 1
             )
+            if ($consistencyMode -eq "sqlite_snapshot_v1") {
+              $returnedSnapshotId = [string](
+                $response.Headers.GetValues("X-Data-Snapshot-Id") | Select-Object -First 1
+              )
+              $returnedSnapshotSha = [string](
+                $response.Headers.GetValues("X-Data-Snapshot-Sha256") | Select-Object -First 1
+              )
+              if ($returnedSnapshotId -ne [string]$row.snapshot_id -or
+                  $returnedSnapshotSha -ne [string]$row.snapshot_sha256) {
+                throw "SQLite snapshot identity changed while downloading $rel."
+              }
+            }
             if ($atomicSnapshotFallback) {
               # The server validates that this complete small-file read stayed
               # on one generation.  Adopt the exact generation returned by
