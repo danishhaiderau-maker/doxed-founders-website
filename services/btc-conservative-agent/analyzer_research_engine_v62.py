@@ -14800,10 +14800,39 @@ def _descriptive_terminal_exit_df(df, label):
     contamination = work.apply(_family_terminal_double_count_detail, axis=1)
     contaminated = contamination.apply(lambda item: bool(item.get("contaminated")))
     clean = work.loc[~contaminated].copy()
-    clean = clean.drop_duplicates(subset=["trade_id"], keep="last")
+    # One causal opportunity can legitimately produce one terminal child per
+    # policy family. Only collapse rows carrying a complete explicit child
+    # lifecycle identity; incomplete legacy rows remain distinct.
+    identity_groups = (
+        ("epoch_id", "opportunity_id", "policy_signature", "lifecycle_id"),
+        ("epoch_id", "opportunity_id", "policy_signature", "terminal_event_id"),
+        ("epoch_id", "opportunity_id", "policy_signature", "event_id"),
+        ("epoch_id", "opportunity_id", "policy_signature", "record_id"),
+    )
+    duplicate_rows_excluded = 0
+    def explicit_child_key(row):
+        for columns in identity_groups:
+            values = [row.get(column) for column in columns]
+            if all(value is not None and str(value).strip() for value in values):
+                return "|".join(str(value).strip() for value in values)
+        return None
+
+    if not clean.empty:
+        child_keys = clean.apply(explicit_child_key, axis=1)
+        complete_identity = child_keys.notna()
+        identified = clean.loc[complete_identity].copy().assign(
+            _explicit_child_key=child_keys.loc[complete_identity]
+        )
+        unidentified = clean.loc[~complete_identity].copy()
+        before = len(identified)
+        identified = identified.drop_duplicates(subset=["_explicit_child_key"], keep="last")
+        duplicate_rows_excluded = before - len(identified)
+        identified = identified.drop(columns=["_explicit_child_key"])
+        clean = pd.concat([identified, unidentified], axis=0).sort_index(kind="stable")
     print(
         f"  {label}: descriptive terminals {len(clean)}/{len(df)}; "
-        f"terminal-double-count-excluded={int(contaminated.sum())}. "
+        f"terminal-double-count-excluded={int(contaminated.sum())}; "
+        f"exact-child-duplicates-excluded={duplicate_rows_excluded}. "
         f"{PIPELINE_ENFORCEMENT_TAG}"
     )
     return clean, int(contaminated.sum())
@@ -14977,8 +15006,8 @@ def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> 
             "losses": int((valid_pnl <= 0).sum()),
             "net_pnl_usd": round(float(valid_pnl.sum()), 4) if not valid_pnl.empty else None,
             "gross_pnl_usd": round(float(sub["_gross"].dropna().sum()), 4) if sub["_gross"].notna().any() else None,
-            "fees_usd": round(float(sub["_fees"].fillna(0).sum()), 4),
-            "funding_usd": round(float(sub["_funding"].fillna(0).sum()), 4),
+            "fees_usd": round(float(sub["_fees"].dropna().sum()), 4) if sub["_fees"].notna().any() else None,
+            "funding_usd": round(float(sub["_funding"].dropna().sum()), 4) if sub["_funding"].notna().any() else None,
             "slippage_usd": round(float(sub["_slippage"].dropna().sum()), 4) if sub["_slippage"].notna().any() else None,
             "ev_per_independent_episode_usd": round(float(valid_pnl.sum()) / independent_n, 4) if independent_n and not valid_pnl.empty else None,
             "max_drawdown_usd": round(max_drawdown, 4) if max_drawdown is not None else None,
@@ -15146,6 +15175,10 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
     terminal_no_fill = first_series(("terminal_no_fill",))
     terminal_ttl = first_series(("terminal_ttl_expired",))
     terminal_reason = first_series(("terminal_reason",)).fillna("").astype(str).str.upper()
+    exit_depth = nested_series(("exit_market_receipt",), ("visible_executable_qty",), numeric=True)
+    exit_levels = nested_series(("exit_market_receipt",), ("levels_consumed",), numeric=True)
+    exit_basis = nested_series(("exit_market_receipt",), ("basis",)).fillna("").astype(str).str.upper()
+    funding = first_series(("funding_fees_usd", "outcome_funding_fees_usd", "funding_usd"), numeric=True).abs()
 
     frame["_exit_family_view"] = family.replace("", np.nan)
     frame["_exit_profile_view"] = profile.replace("", np.nan)
@@ -15205,6 +15238,18 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
     frame["_terminal_no_fill_view"] = terminal_no_fill.apply(explicit_partial_bucket).map({"PARTIAL": "YES", "FULL": "NO"})
     frame["_terminal_ttl_view"] = terminal_ttl.apply(explicit_partial_bucket).map({"PARTIAL": "YES", "FULL": "NO"})
     frame["_terminal_reason_view"] = terminal_reason.replace("", np.nan)
+    frame["_path_order_view"] = np.select(
+        [time_to_mae.notna() & time_to_mfe.notna() & (time_to_mae < time_to_mfe),
+         time_to_mae.notna() & time_to_mfe.notna() & (time_to_mfe < time_to_mae),
+         time_to_mae.notna() & time_to_mfe.notna() & (time_to_mfe == time_to_mae)],
+        ["MAE_FIRST", "MFE_FIRST", "SAME_TICK"], default=None,
+    )
+    frame["_exit_depth_view"] = pd.cut(exit_depth, [-np.inf, 0, .01, .1, 1, np.inf], labels=["ZERO", "<=0.01", "0.01-0.1", "0.1-1", "1+"])
+    frame["_exit_levels_view"] = pd.cut(exit_levels, [-np.inf, 0, 1, 3, np.inf], labels=["ZERO", "ONE", "2-3", "4+"])
+    frame["_exit_basis_view"] = exit_basis.replace("", np.nan)
+    total_cost = fees.where(fees.notna(), 0) + funding.where(funding.notna(), 0) + slippage.where(slippage.notna(), 0)
+    total_cost = total_cost.where(fees.notna() | funding.notna() | slippage.notna())
+    frame["_cost_drag_view"] = pd.cut(total_cost, [-np.inf, 0, .0025, .01, .05, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH", "EXTREME"])
 
     definitions = {
         "exit_policy": ["_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
@@ -15223,6 +15268,11 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
         "regime_transition": ["_regime_view", "_exit_regime_view", "_adx_entry_view", "_adx_exit_view", "_direction_view", "_exit_reason_view"],
         "fill_revalidation": ["_revalidation_result_view", "_revalidation_reason_view", "_revalidation_age_view", "_chase_view", "_exit_reason_view"],
         "terminal_order_outcome": ["_terminal_no_fill_view", "_terminal_ttl_view", "_terminal_reason_view", "_chase_view", "_exit_reason_view"],
+        "path_sequence": ["_path_order_view", "_path_mae_view", "_path_mfe_view", "_exit_family_view", "_exit_reason_view"],
+        "protection_activation": ["_partial_exit_count_view", "_remaining_fraction_view", "_exit_profile_view", "_exit_reason_view"],
+        "stop_execution_quality": ["_stop_atr_view", "_hard_stop_view", "_slippage_view", "_partial_fill_view", "_exit_reason_view"],
+        "liquidity_at_exit": ["_exit_basis_view", "_exit_depth_view", "_exit_levels_view", "_slippage_view", "_exit_reason_view"],
+        "cost_drag": ["_cost_drag_view", "_fee_view", "_slippage_view", "_exit_family_view", "_exit_reason_view"],
     }
     required_any = {
         "direction_quality": {"_adx_entry_view", "_mtf_view", "_structure_view"},
@@ -15234,6 +15284,11 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
         "regime_transition": {"_regime_view", "_exit_regime_view", "_adx_entry_view", "_adx_exit_view"},
         "fill_revalidation": {"_revalidation_result_view", "_revalidation_reason_view", "_revalidation_age_view"},
         "terminal_order_outcome": {"_terminal_no_fill_view", "_terminal_ttl_view", "_terminal_reason_view"},
+        "path_sequence": {"_path_order_view"},
+        "protection_activation": {"_partial_exit_count_view", "_remaining_fraction_view"},
+        "stop_execution_quality": {"_stop_atr_view", "_hard_stop_view", "_slippage_view", "_partial_fill_view"},
+        "liquidity_at_exit": {"_exit_basis_view", "_exit_depth_view", "_exit_levels_view"},
+        "cost_drag": {"_cost_drag_view"},
     }
     views = {}
     for view_name, dimensions in definitions.items():
@@ -15311,11 +15366,17 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         # six-row grouping vector when the frame also has six rows, producing
         # nonsensical variable-length keys rather than a clear KeyError.
         # Materialize every dimension explicitly so grouping is deterministic.
+        missing_dimension_counts = {}
+        complete_dimensions = pd.Series(True, index=work.index)
+        unavailable_labels = {"", "UNKNOWN", "UNAVAILABLE", "NONE", "NAN", "NULL"}
         for dimension in dims:
             if dimension not in work.columns:
-                work[dimension] = "UNKNOWN"
+                work[dimension] = np.nan
             else:
-                work[dimension] = work[dimension].fillna("UNKNOWN")
+                work[dimension] = work[dimension].replace(r"^\s*$", np.nan, regex=True)
+            present = work[dimension].notna() & ~work[dimension].astype(str).str.strip().str.upper().isin(unavailable_labels)
+            missing_dimension_counts[dimension] = int((~present).sum())
+            complete_dimensions &= present
         lot_col = next((c for c in ("profit_left_on_table", "left_on_table_usd", "left_on_table") if c in work.columns), None)
         if lot_col:
             work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
@@ -15338,13 +15399,14 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             margin_source = (
                 work["margin_usdt"] if "margin_usdt" in work.columns
                 else work["margin_usd"] if "margin_usd" in work.columns
-                else pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index)
+                else pd.Series(np.nan, index=work.index)
             )
-            margin_usd = pd.to_numeric(margin_source, errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
+            margin_usd = pd.to_numeric(margin_source, errors="coerce")
             peak_usd = (peak_margin_pct / 100.0) * margin_usd
             work["left_on_table_usd"] = (peak_usd - booked).clip(lower=0)
+        combo_work = work.loc[complete_dimensions].copy()
         combos = []
-        for keys, sub in work.groupby(dims, observed=True, dropna=False):
+        for keys, sub in combo_work.groupby(dims, observed=True, dropna=False):
             ex, ai_b, sp_b, mfe_b, time_b, lane = keys
             stats = _combo_stats_from_df(sub)
             if stats["trades"] < min_trades:
@@ -15376,7 +15438,17 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
             "evidence_class": evidence_class, "source_files": source_files or [],
             "source_rows": source_rows, "terminal_rows": int(len(work)),
             "contaminated_rows_excluded": contaminated_n, "total_combos": len(combos),
-            "empty_reason": None if combos else "NO_COMBINATIONS_MEET_MIN_TRADES",
+            "empty_reason": None if combos else (
+                "NO_ROWS_WITH_COMPLETE_COMBINATION_DIMENSIONS"
+                if len(work) and combo_work.empty else "NO_COMBINATIONS_MEET_MIN_TRADES"
+            ),
+            "rows_with_complete_combination_dimensions": int(len(combo_work)),
+            "rows_excluded_incomplete_combination_dimensions": int(len(work) - len(combo_work)),
+            "missing_dimension_counts": missing_dimension_counts,
+            "missing_margin_rows": int(pd.to_numeric(
+                work.get("margin_usdt", work.get("margin_usd", pd.Series(np.nan, index=work.index))),
+                errors="coerce",
+            ).isna().sum()),
             "pnl_semantics": pnl_semantics,
             "pnl_aggregation_allowed": False,
             "overall_left_on_table_usd": round(float(work["left_on_table_usd"].dropna().sum()), 2) if work["left_on_table_usd"].notna().any() else None,
@@ -15534,8 +15606,11 @@ def exit_leakage_by_reason_report(trades=None, session=None):
         final_source = work["pnl"] if "pnl" in work.columns else work.get("final_pnl_margin_pct", pd.Series(np.nan, index=work.index))
         mfe = pd.to_numeric(mfe_source, errors="coerce")
         final_margin = pd.to_numeric(final_source, errors="coerce")
-        margin_source = work.get("margin_usdt", pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index))
-        margin_usd = pd.to_numeric(margin_source, errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
+        margin_source = work.get(
+            "margin_usdt",
+            work.get("margin_usd", pd.Series(np.nan, index=work.index)),
+        )
+        margin_usd = pd.to_numeric(margin_source, errors="coerce")
         peak_usd = (mfe / 100.0) * margin_usd
         booked_usd = work[pnl_col]
         left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
@@ -15571,6 +15646,8 @@ def exit_leakage_by_reason_report(trades=None, session=None):
             "evidence_class": evidence_class, "source_files": source_files or [],
             "source_rows": source_rows, "terminal_rows": int(len(work)),
             "contaminated_rows_excluded": contaminated_n,
+            "missing_margin_rows": int(margin_usd.isna().sum()),
+            "missing_pnl_rows": int(booked_usd.isna().sum()),
             "empty_reason": None, "pnl_semantics": pnl_semantics,
             "pnl_aggregation_allowed": False,
             "overall_left_usd": round(float(left_usd.dropna().sum()), 2) if left_usd.notna().any() else None,

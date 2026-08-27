@@ -85,9 +85,10 @@ def test_sparse_shadow_exit_without_mfe_or_booked_pnl_does_not_abort(tmp_path, m
 
     shadow_report = report["evidence_classes"]["shadow_lab"]
     assert shadow_report["terminal_rows"] == 6
-    assert shadow_report["total_combos"] == 1
-    assert shadow_report["top"][0]["left_on_table_usd"] is None
-    assert shadow_report["top"][0]["lane"] == "UNKNOWN"
+    assert shadow_report["total_combos"] == 0
+    assert shadow_report["top"] == []
+    assert shadow_report["empty_reason"] == "NO_ROWS_WITH_COMPLETE_COMBINATION_DIMENSIONS"
+    assert shadow_report["rows_excluded_incomplete_combination_dimensions"] == 6
 
     leakage = analyzer.exit_leakage_by_reason_report(
         trades=pd.DataFrame(),
@@ -106,6 +107,8 @@ def test_exit_gap_converts_margin_percentage_to_usd_before_subtracting_booked_pn
             "exit_reason": "TIME_EXIT",
             "research_lane": "FAMILY_ATR_TRAIL",
             "direction": "LONG",
+            "ai_probability_bucket": "50-60", "directional_spread_bucket": "1",
+            "peak_mfe_bucket": "30-60", "time_in_trade_bucket": "20-30m",
             "mfe_margin_pct": 40.0,
             "margin_usdt": 0.25,
             "net_pnl_usd": 0.03,
@@ -187,6 +190,41 @@ def test_exit_scorecard_surfaces_explicit_missing_counts(tmp_path, monkeypatch):
     assert family["missing_slippage_rows"] == 1
     assert stop["missing_mae_rows"] == 1
     assert stop["missing_stop_slippage_rows"] == 1
+
+
+def test_terminal_dedup_preserves_sibling_policy_children_and_drops_exact_duplicate():
+    base = {
+        "trade_id": "shared-trade", "epoch_id": "epoch-1",
+        "opportunity_id": "opp-1", "exit_reason": "TIME_EXIT",
+    }
+    rows = pd.DataFrame([
+        {**base, "policy_signature": "policy-a", "lifecycle_id": "life-a", "net_pnl_usd": .1},
+        {**base, "policy_signature": "policy-a", "lifecycle_id": "life-a", "net_pnl_usd": .2},
+        {**base, "policy_signature": "policy-b", "lifecycle_id": "life-b", "net_pnl_usd": -.1},
+    ])
+    clean, contaminated = analyzer._descriptive_terminal_exit_df(rows, "test")
+    assert contaminated == 0
+    assert len(clean) == 2
+    assert set(clean["policy_signature"]) == {"policy-a", "policy-b"}
+    assert clean.loc[clean["policy_signature"] == "policy-a", "net_pnl_usd"].iloc[0] == .2
+
+
+def test_missing_cost_and_margin_values_remain_unavailable(tmp_path, monkeypatch):
+    rows = pd.DataFrame([{
+        "trade_id": "paper-missing", "opportunity_id": "opp-missing",
+        "exit_reason": "TIME_EXIT", "research_lane": "ATR_TRAIL",
+        "cfg_family": "ATR_TRAIL", "net_pnl_usd": .01,
+    }])
+    monkeypatch.setattr(analyzer, "_load_descriptive_shadow_exit_df", lambda session=None: pd.DataFrame())
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    combos = analyzer.exit_combinations_report(rows, {})["evidence_worlds"]["executed_paper"]
+    family = combos["exit_family_scorecard"][0]
+    assert family["fees_usd"] is None
+    assert family["funding_usd"] is None
+    assert combos["missing_margin_rows"] == 1
+    leakage = analyzer.exit_leakage_by_reason_report(rows, {})["evidence_worlds"]["executed_paper"]
+    assert leakage["missing_margin_rows"] == 1
+    assert leakage["overall_left_usd"] is None
 
 
 def test_exit_dashboard_exposes_family_and_stop_tables_for_both_worlds():
@@ -273,8 +311,9 @@ def test_four_world_reports_keep_missing_metrics_unavailable(tmp_path, monkeypat
     for world in worlds:
         combo = combos["evidence_worlds"][world]
         leak = leakage["evidence_worlds"][world]
-        assert combo["top"][0]["pnl_usd"] is None
-        assert combo["top"][0]["ev_usd"] is None
+        assert combo["top"] == []
+        assert combo["empty_reason"] == "NO_ROWS_WITH_COMPLETE_COMBINATION_DIMENSIONS"
+        assert combo["rows_excluded_incomplete_combination_dimensions"] == 1
         assert combo["pnl_aggregation_allowed"] is False
         assert leak["reasons"][0]["booked_profit_usd"] is None
         assert leak["reasons"][0]["left_on_table_usd"] is None
@@ -353,6 +392,8 @@ def test_causal_exit_views_use_only_explicit_available_dimensions():
         "partial_profit_path", "chase_detail", "excursion_timing",
         "regime_transition",
         "fill_revalidation", "terminal_order_outcome",
+        "path_sequence", "protection_activation", "stop_execution_quality",
+        "liquidity_at_exit", "cost_drag",
     }
     assert views["exit_policy"]["rows"]
     assert views["market_context"]["rows"]
@@ -384,6 +425,10 @@ def test_high_value_exit_views_use_collected_v31_fields_and_report_coverage():
                                    "signal_age_sec": 900},
         "terminal_no_fill": False, "terminal_ttl_expired": False,
         "terminal_reason": "ATR_TARGET",
+        "exit_market_receipt": {"basis": "SIDE_CORRECT_BBO_DEPTH",
+                                "visible_executable_qty": .25,
+                                "levels_consumed": 1, "slippage_usd": .001},
+        "trading_fees_usd": .002, "funding_fees_usd": .001,
     }
     views = analyzer._exit_causal_combination_views(
         pd.DataFrame([row]), "EXECUTED_PAPER_DESCRIPTIVE"
@@ -393,6 +438,8 @@ def test_high_value_exit_views_use_collected_v31_fields_and_report_coverage():
         "partial_profit_path", "chase_detail",
         "excursion_timing", "regime_transition",
         "fill_revalidation", "terminal_order_outcome",
+        "path_sequence", "protection_activation", "stop_execution_quality",
+        "liquidity_at_exit", "cost_drag",
     ):
         assert views[name]["rows"], name
         assert views[name]["source_terminal_rows"] == 1
@@ -456,6 +503,8 @@ def test_family_balanced_exit_ranking_caps_each_family(tmp_path, monkeypatch):
             "trade_id": f"trade-{index}", "opportunity_id": f"opp-{index}",
             "exit_reason": f"EXIT_{index}", "research_lane": family,
             "cfg_family": family, "net_pnl_usd": pnl,
+            "ai_probability_bucket": "50-60", "directional_spread_bucket": "1",
+            "peak_mfe_bucket": "0-10", "time_in_trade_bucket": "5-10m",
         }
         for index, (family, pnl) in enumerate([
             ("FIXED_TARGET", .50), ("FIXED_TARGET", .40), ("FIXED_TARGET", .30),

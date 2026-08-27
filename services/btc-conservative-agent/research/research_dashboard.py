@@ -4626,6 +4626,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Terminal order outcomes</h3>
     <p class="note">No-fill and TTL classification × terminal reason × exact chase. Missing results are unavailable rather than zero PnL.</p>
     <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-terminal-order-body"></tbody></table>
+    <h3>Path-sequence combinations</h3>
+    <p class="note">Whether adverse or favorable excursion occurred first, combined with excursion bands, family and exit reason. Only timestamped tape paths are included.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-path-sequence-body"></tbody></table>
+    <h3>Protection-activation combinations</h3>
+    <p class="note">Partial-profit count and terminal remaining fraction by exit profile and terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-protection-body"></tbody></table>
+    <h3>Stop execution quality</h3>
+    <p class="note">Configured ATR/hard stop versus observed slippage and partial/full entry. Missing execution receipts remain unavailable.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-stop-quality-body"></tbody></table>
+    <h3>Liquidity at exit</h3>
+    <p class="note">Side-correct exit-book basis, visible executable depth, levels consumed and slippage by terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-liquidity-body"></tbody></table>
+    <h3>Cost-drag combinations</h3>
+    <p class="note">Observed fees, funding and slippage are combined only when at least one cost receipt exists; missing cost data is never treated as zero.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-cost-drag-body"></tbody></table>
     <h3>Family-balanced descriptive exit-combo EV — unqualified</h3>
     <p class="note">Observed cohorts only. Small or unmatched samples are not evidence that an exit caused the result and cannot qualify a policy.</p>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
@@ -5271,6 +5286,11 @@ async function loadExitCombos() {
   document.getElementById('exit-causal-regime-transition-body').innerHTML = renderCausalView('regime_transition');
   document.getElementById('exit-causal-fill-revalidation-body').innerHTML = renderCausalView('fill_revalidation');
   document.getElementById('exit-causal-terminal-order-body').innerHTML = renderCausalView('terminal_order_outcome');
+  document.getElementById('exit-causal-path-sequence-body').innerHTML = renderCausalView('path_sequence');
+  document.getElementById('exit-causal-protection-body').innerHTML = renderCausalView('protection_activation');
+  document.getElementById('exit-causal-stop-quality-body').innerHTML = renderCausalView('stop_execution_quality');
+  document.getElementById('exit-causal-liquidity-body').innerHTML = renderCausalView('liquidity_at_exit');
+  document.getElementById('exit-causal-cost-drag-body').innerHTML = renderCausalView('cost_drag');
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Analyzer completed: no current-epoch terminal exit paths exist yet, so exit-combo EV is unavailable.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>
