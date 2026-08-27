@@ -40403,7 +40403,8 @@ def rotate_log(file):
 
 _jsonl_append_locks_guard = threading.Lock()
 _jsonl_append_locks = {}
-_jsonl_validated_targets = set()
+_jsonl_validated_targets = {}
+_JSONL_VALIDATION_TAIL_BYTES = 64 * 1024
 _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "AI_INPUT_LOG_FILE",
     "CSV_FALLBACK_JSONL",
@@ -40471,16 +40472,102 @@ def _jsonl_path_lock(path: str):
         return lock
 
 
+def _jsonl_validation_signature(path: str):
+    stat = os.stat(path)
+    return (
+        int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns),
+    )
+
+
+def _jsonl_validation_tail_sha256(path: str, size_bytes: int) -> str:
+    start = max(0, int(size_bytes) - _JSONL_VALIDATION_TAIL_BYTES)
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        for chunk in iter(lambda: handle.read(64 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _jsonl_validation_receipt_path(path: str) -> str:
+    return os.path.abspath(path) + ".validation.json"
+
+
+def _fsync_jsonl_validation_parent(path: str) -> None:
+    if os.name == "nt" or not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _persist_jsonl_validation_receipt(path: str, signature) -> None:
+    key = os.path.abspath(path)
+    receipt_path = _jsonl_validation_receipt_path(key)
+    receipt = {
+        "schema": "jsonl_validation_receipt_v1",
+        "complete": True,
+        "source_name": os.path.basename(key),
+        "device": signature[0],
+        "inode": signature[1],
+        "size_bytes": signature[2],
+        "mtime_ns": signature[3],
+        "tail_bytes": min(signature[2], _JSONL_VALIDATION_TAIL_BYTES),
+        "tail_sha256": _jsonl_validation_tail_sha256(key, signature[2]),
+    }
+    temp = receipt_path + ".tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, receipt_path)
+    _fsync_jsonl_validation_parent(receipt_path)
+    _jsonl_validated_targets[key] = signature
+
+
+def _jsonl_validation_receipt_matches(path: str, signature) -> bool:
+    receipt_path = _jsonl_validation_receipt_path(path)
+    try:
+        with open(receipt_path, "r", encoding="utf-8") as handle:
+            receipt = json.load(handle)
+        expected = (
+            int(receipt["device"]), int(receipt["inode"]),
+            int(receipt["size_bytes"]), int(receipt["mtime_ns"]),
+        )
+        if (
+            receipt.get("schema") != "jsonl_validation_receipt_v1"
+            or receipt.get("complete") is not True
+            or receipt.get("source_name") != os.path.basename(path)
+            or expected != signature
+        ):
+            return False
+        return receipt.get("tail_sha256") == _jsonl_validation_tail_sha256(
+            path, signature[2]
+        )
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
     """Preserve a corrupt source file and make the active target writable.
 
-    Validation runs once per process/path under the same lock as append. The
-    corrupt bytes are never deleted or rewritten; they are moved with a
-    SHA-256/line receipt into an excluded evidence quarantine.
+    A durable exact-file receipt avoids reparsing an unchanged historical
+    prefix after restart. Every append refreshes the receipt. Any external
+    replacement, mutation or truncation invalidates both the in-memory and
+    durable signatures and falls back to a full fail-closed parse. Corrupt
+    bytes are moved with a SHA-256/line receipt into evidence quarantine.
     """
     key = os.path.abspath(path)
-    if key in _jsonl_validated_targets or not os.path.isfile(path):
-        _jsonl_validated_targets.add(key)
+    if not os.path.isfile(path):
+        _jsonl_validated_targets[key] = None
+        return True
+    signature = _jsonl_validation_signature(key)
+    if _jsonl_validated_targets.get(key) == signature:
+        return True
+    if _jsonl_validation_receipt_matches(key, signature):
+        _jsonl_validated_targets[key] = signature
         return True
     bad_line = None
     error = None
@@ -40499,7 +40586,8 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
         bad_line = 0
         error = f"{type(exc).__name__}: {exc}"
     if bad_line is None:
-        _jsonl_validated_targets.add(key)
+        signature = _jsonl_validation_signature(key)
+        _persist_jsonl_validation_receipt(key, signature)
         return True
 
     quarantine_root = os.path.join(
@@ -40514,6 +40602,12 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     os.replace(key, target)
+    validation_receipt = _jsonl_validation_receipt_path(key)
+    if os.path.isfile(validation_receipt):
+        os.replace(
+            validation_receipt,
+            os.path.join(quarantine_root, os.path.basename(validation_receipt)),
+        )
     receipt = {
         "schema": "corrupt_jsonl_quarantine_v1",
         "complete": True,
@@ -40533,7 +40627,7 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temp, receipt_path)
-    _jsonl_validated_targets.add(key)
+    _jsonl_validated_targets[key] = None
     logger.error(
         f"[{label}] corrupt JSONL preserved at {quarantine_root}; bad_line={bad_line} "
         "new active file will start [PIPELINE ENFORCEMENT]"
@@ -40557,6 +40651,20 @@ def _safe_append_jsonl(
                     f.write(line)
                     f.flush()
                     os.fsync(f.fileno())
+                try:
+                    _persist_jsonl_validation_receipt(
+                        path, _jsonl_validation_signature(path)
+                    )
+                except Exception as receipt_error:
+                    # The evidence row is already durable. Never retry it merely
+                    # because its acceleration receipt failed; force the next
+                    # append through fail-closed historical validation instead.
+                    _jsonl_validated_targets.pop(os.path.abspath(path), None)
+                    logger.error(
+                        f"[{label}] JSONL validation receipt refresh failed ({path}): "
+                        f"{receipt_error}; row is durable and will not be retried "
+                        "[PIPELINE ENFORCEMENT]"
+                    )
                 return True
             except Exception as e:
                 last_err = e

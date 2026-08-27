@@ -575,7 +575,13 @@ def test_append_prefix_mode_is_narrow_and_allows_only_same_inode_growth():
 
 def _load_jsonl_writer(tmp_path):
     tree = ast.parse(BOT)
-    wanted = {"_jsonl_path_lock", "_validate_or_quarantine_jsonl", "_safe_append_jsonl"}
+    wanted = {
+        "_jsonl_path_lock", "_jsonl_validation_signature",
+        "_jsonl_validation_tail_sha256", "_jsonl_validation_receipt_path",
+        "_fsync_jsonl_validation_parent",
+        "_persist_jsonl_validation_receipt", "_jsonl_validation_receipt_matches",
+        "_validate_or_quarantine_jsonl", "_safe_append_jsonl",
+    }
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -601,7 +607,8 @@ def _load_jsonl_writer(tmp_path):
         "CSV_WRITE_RETRY_BASE_SEC": 0,
         "_jsonl_append_locks_guard": threading.Lock(),
         "_jsonl_append_locks": {},
-        "_jsonl_validated_targets": set(),
+        "_jsonl_validated_targets": {},
+        "_JSONL_VALIDATION_TAIL_BYTES": 64 * 1024,
         "_jsonl_serialized_append_targets": set(),
         "rotate_log": lambda _path: None,
         "_transient_csv_lock_error": lambda _error: False,
@@ -655,6 +662,104 @@ def test_jsonl_writer_quarantines_corrupt_bytes_with_receipt(tmp_path):
     assert receipt["size_bytes"] == len(corrupt)
     assert receipt["sha256"] == hashlib.sha256(corrupt).hexdigest()
     assert receipt["preserved_path"] == target.name
+
+
+def test_jsonl_writer_restart_uses_durable_bounded_validation_receipt(tmp_path):
+    target = tmp_path / "ai_input_log.jsonl"
+    target.write_text(
+        "".join(json.dumps({"row": index}) + "\n" for index in range(5000)),
+        encoding="utf-8",
+    )
+    first = _load_jsonl_writer(tmp_path)
+    assert first["_safe_append_jsonl"](str(target), {"row": 5000}, "AI_INPUT")
+    assert Path(str(target) + ".validation.json").is_file()
+
+    # A fresh namespace models a watchdog/process restart with an empty memory
+    # cache. Loading the small receipt may decode once; historical rows must
+    # not be decoded again.
+    restarted = _load_jsonl_writer(tmp_path)
+    original_loads = restarted["json"].loads
+    decoded = []
+
+    def _counting_loads(value, *args, **kwargs):
+        decoded.append(len(value))
+        return original_loads(value, *args, **kwargs)
+
+    restarted["json"].loads = _counting_loads
+    try:
+        assert restarted["_safe_append_jsonl"](
+            str(target), {"row": 5001}, "AI_INPUT"
+        )
+    finally:
+        restarted["json"].loads = original_loads
+    assert len(decoded) <= 2
+    assert len(target.read_text(encoding="utf-8").splitlines()) == 5002
+
+
+def test_jsonl_writer_external_mutation_invalidates_receipt_and_quarantines(tmp_path):
+    namespace = _load_jsonl_writer(tmp_path)
+    target = tmp_path / "ai_input_log.jsonl"
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 1}, "AI_INPUT")
+
+    target.write_bytes(b'{"row": X}\n')
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 2}, "AI_INPUT")
+    assert [json.loads(line) for line in target.read_text().splitlines()] == [{"row": 2}]
+    quarantine_dirs = list((tmp_path / "corrupt_evidence_quarantine").iterdir())
+    assert len(quarantine_dirs) == 1
+    receipt = json.loads(
+        (quarantine_dirs[0] / "quarantine_manifest.json").read_text()
+    )
+    assert receipt["bad_line"] == 1
+
+
+def test_jsonl_writer_external_truncation_invalidates_receipt(tmp_path):
+    namespace = _load_jsonl_writer(tmp_path)
+    target = tmp_path / "ai_input_log.jsonl"
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 1}, "AI_INPUT")
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 2}, "AI_INPUT")
+
+    target.write_bytes(b'{"row":')
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 3}, "AI_INPUT")
+    assert [json.loads(line) for line in target.read_text().splitlines()] == [{"row": 3}]
+    quarantine_dirs = list((tmp_path / "corrupt_evidence_quarantine").iterdir())
+    assert len(quarantine_dirs) == 1
+    assert (quarantine_dirs[0] / target.name).read_bytes() == b'{"row":'
+
+
+def test_jsonl_receipt_failure_never_retries_a_durable_row(tmp_path):
+    namespace = _load_jsonl_writer(tmp_path)
+    target = tmp_path / "ai_input_log.jsonl"
+    original_persist = namespace["_persist_jsonl_validation_receipt"]
+    persist_calls = []
+
+    def _fail_receipt(*_args):
+        persist_calls.append(True)
+        raise OSError("simulated receipt failure")
+
+    namespace["_persist_jsonl_validation_receipt"] = _fail_receipt
+    assert namespace["_safe_append_jsonl"](str(target), {"row": 1}, "AI_INPUT")
+    assert persist_calls == [True]
+    assert [json.loads(line) for line in target.read_text().splitlines()] == [{"row": 1}]
+
+    # Receipt failure invalidates the memory cache. The next append must parse
+    # the existing row before proceeding, then restore the durable receipt.
+    namespace["_persist_jsonl_validation_receipt"] = original_persist
+    original_loads = namespace["json"].loads
+    decoded = []
+
+    def _counting_loads(value, *args, **kwargs):
+        decoded.append(value)
+        return original_loads(value, *args, **kwargs)
+
+    namespace["json"].loads = _counting_loads
+    try:
+        assert namespace["_safe_append_jsonl"](str(target), {"row": 2}, "AI_INPUT")
+    finally:
+        namespace["json"].loads = original_loads
+    assert decoded
+    assert [json.loads(line) for line in target.read_text().splitlines()] == [
+        {"row": 1}, {"row": 2}
+    ]
 
 
 def test_jsonl_writer_is_serialized_and_corruption_is_preserved_not_deleted():
