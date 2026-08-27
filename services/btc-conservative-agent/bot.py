@@ -27647,6 +27647,8 @@ HTML = """<!DOCTYPE html>
         h3 { color:var(--text); font-size:1rem; margin-top:22px; }
         a { color:var(--blue); }
         table { border-collapse:collapse; width:100%; max-width:100%; margin:14px 0 20px; display:block; overflow-x:auto; overscroll-behavior-inline:contain; -webkit-overflow-scrolling:touch; font-variant-numeric:tabular-nums; }
+        .activity-table-scroll { width:100%; max-width:100%; overflow-x:auto; overscroll-behavior-inline:contain; -webkit-overflow-scrolling:touch; touch-action:pan-x; margin:14px 0 20px; border-radius:6px; }
+        .activity-table-scroll table { display:table; width:max-content; min-width:100%; max-width:none; margin:0; overflow:visible; }
         thead, tbody { min-width:max-content; }
         th, td { padding:9px 10px; border:1px solid var(--line); text-align:left; white-space:nowrap; }
         th { background:var(--surface-2); color:#b7c2cf; font-size:0.78rem; font-weight:600; }
@@ -27757,9 +27759,9 @@ __ADMIN_ACCESS_CONTROLS__
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. Direction-only entries use the deterministic 0.1% offset anchor.</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. The Continuous benchmark and legacy direct path use the deterministic 0.1% anchor; the five family tiles use their signed per-policy offsets shown on each tile (Fixed 0.27%; the other four 0.30%).</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
-<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Entry anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. Example at BTC $63,000 → LONG $62,937 / SHORT $63,063. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain visible below as research/advisory fields only and never replace this anchor.</p>
+<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Benchmark / legacy direct anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. This does not override the five family policies: Fixed uses 0.27%; Chandelier, ATR Trail, Hybrid Runner and MFE Giveback use 0.30%. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
@@ -27904,17 +27906,17 @@ __ADMIN_ACCESS_CONTROLS__
   not the same as the live queue below.
 </p>
 <p style="color:#58a6ff;font-size:0.82em;margin:4px 0 8px;">
-  Anchor = deterministic 0.1% offset (LONG=price×0.999 / SHORT=price×1.001). Virtual limit is the
+  Initial limit comes from the owning policy (Continuous/legacy direct = 0.1%; Fixed = 0.27%; other family tiles = 0.30%). Virtual limit is the
   chased price; exchange order ID appears only after a real order exists. A crossed virtual limit
   before the first selected stage is recorded as <code>VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY</code>
   (no invented fill, no marketable order at the old price).
 </p>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="Virtual chase candidates table" tabindex="0"><table>
     <thead><tr>
       <th>Signal ID</th>
       <th>Dir</th>
       <th>Signal/ref price</th>
-      <th>Initial 0.1% limit</th>
+      <th>Initial policy limit</th>
       <th>Virt. stage</th>
       <th>Selected stages</th>
       <th>Virtual limit</th>
@@ -27926,47 +27928,47 @@ __ADMIN_ACCESS_CONTROLS__
       <th>Exchange order ID</th>
     </tr></thead>
     <tbody id="virtualChaseTable"></tbody>
-</table>
+</table></div>
 
 <h2>Active Signals</h2>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="Active signals table" tabindex="0"><table>
     <thead><tr><th>Signal Time (Melbourne)</th><th>Duration min</th><th>Model</th><th>Dir (final)</th><th>Conf</th><th>Regime</th><th>Strategy</th><th>Trigger</th><th>Pull Req</th><th>Signal Price</th><th>Max Pull</th><th>Outcome</th><th>Fill Price</th><th>Exit Reason</th></tr></thead>
     <tbody id="signalsTable"></tbody>
-</table>
+</table></div>
 
 <h2>Positions</h2>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="Positions table" tabindex="0"><table>
     <thead><tr><th>Fill / Entry Time (Melbourne)</th><th>Leg</th><th>Model</th><th>Side</th><th>Qty</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>PnL</th><th>Action</th></tr></thead>
     <tbody id="positionsTable"></tbody>
-</table>
+</table></div>
 
 <h2>Pending Orders</h2>
 <p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Only limits still resting on the book. Older APPROVE/TTL rows are not active — they move to Expired Orders. AI History is every scan, not every working order.</p>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="Pending orders table" tabindex="0"><table>
     <thead><tr><th>Order Time (Melbourne)</th><th>Age min</th><th>Model</th><th>Side</th><th>Status</th><th>Qty</th><th>Limit Price</th><th>Orig Limit</th><th>Chase</th><th>Signal Price</th><th>Venue fill gate</th></tr></thead>
     <tbody id="ordersTable"></tbody>
-</table>
+</table></div>
 
 <h2>Expired Orders</h2>
 <p id="expiredOrdersTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 expired orders — full log in expired_orders_3factor.csv. Age 0.0 with DUPLICATE_LIMIT_PRICE means a duplicate candidate was rejected before placement; no paper or exchange order was cancelled.</p>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="Expired orders table" tabindex="0"><table>
     <thead><tr><th>Expired Time (Melbourne)</th><th>Model</th><th>Dir</th><th>Limit Price</th><th>Age min</th><th>Reason</th><th>Conf</th><th>Mode</th></tr></thead>
     <tbody id="expiredOrdersTable"></tbody>
-</table>
+</table></div>
 
 <h2>Trades</h2>
 <p id="tradesTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Last 5 closed trades — Showcase simulated, Bitfinex authenticated, and relationship are separate facts. Export full session via /api/export_csv.</p>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="Trades table" tabindex="0"><table>
     <thead><tr><th>Close Time (Melbourne)</th><th>ID</th><th>Model</th><th>Dir (final)</th><th>Entry</th><th>Exit</th><th>Duration min</th><th>Exit cause / stop evidence</th><th>Observed PnL % of margin</th><th>Margin USD</th><th>Notional USD</th><th>Observed Net USD</th><th>Gross USD</th><th>Trade Fees</th><th>Funding</th><th>Showcase</th><th>Bitfinex</th><th>Relationship</th></tr></thead>
     <tbody id="tradesTable"></tbody>
-</table>
+</table></div>
 
 <h2>AI History (Session)</h2>
 <p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Raw AI verdict and each tile's evaluation/lifecycle are independent facts. Executable orders are only in Pending Orders.</p>
-<table>
+<div class="activity-table-scroll" role="region" aria-label="AI history table" tabindex="0"><table>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Five family tile evaluations / lifecycles</th><th>AI explanation / block reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
-</table>
+</table></div>
 
 <script src="/static/dashboard.js?v=__BOT_VERSION__"></script>
 <script>
