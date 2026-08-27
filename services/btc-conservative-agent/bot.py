@@ -3121,6 +3121,44 @@ def _ensure_lane_bucket(lane: str) -> str:
 LANE_MEMORY_CHECK_INTERVAL_SEC = 600
 _last_lane_memory_check_ts = 0.0
 _PATHWAY_STARTUP_SNAPSHOT = {}
+_pathway_receipt_lock = threading.RLock()
+
+
+def _pathway_receipt_identity() -> dict:
+    """Identity binding shared by every current runtime pathway receipt."""
+    return {
+        "source_git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "fresh_epoch_id": _collector_v22_epoch_id(),
+        "tile_registry_signature": active_tile_registry_signature(),
+        "analyzer_sync_id": COMBO_ANALYZER_SYNC_ID,
+    }
+
+
+def _publish_pathway_receipt(name: str, payload: dict) -> bool:
+    """Atomically publish one receipt into the canonical Fly data directory."""
+    root = _data_sync_volume_root()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / Path(name).name
+    return _atomic_file_replace(
+        str(target),
+        lambda handle: json.dump(payload, handle, indent=2, sort_keys=True),
+        _pathway_receipt_lock,
+        label="PATHWAY RECEIPT",
+    )
+
+
+def publish_startup_pathway_receipts() -> dict:
+    from pathway_lab_validation import build_startup_contract_receipts
+    receipts = build_startup_contract_receipts(
+        _pathway_receipt_identity(),
+        research_spawn_lanes=tuple(RESEARCH_SPAWN_LANES),
+        ai_scan_orders_allowed=lane_orders_allowed(RESEARCH_LANE_AI_SCAN),
+    )
+    return {
+        name: _publish_pathway_receipt(name, payload)
+        for name, payload in receipts.items()
+    }
 
 
 def capture_pathway_startup_snapshot() -> dict:
@@ -3147,9 +3185,18 @@ def validate_lane_memory() -> dict:
     open_counts = {ln: len(get_lane_open_positions(ln)) for ln in LANE_TRACKING_LANES}
     try:
         from pathway_lab_validation import validate_lane_memory_runtime
-        payload = validate_lane_memory_runtime(pending_counts, open_counts, tuple(retired))
+        payload = validate_lane_memory_runtime(
+            pending_counts, open_counts, tuple(retired),
+            identity=_pathway_receipt_identity(),
+        )
     except Exception as exc:
-        payload = {"verdict": "ERROR", "error": str(exc)}
+        payload = {
+            **_pathway_receipt_identity(),
+            "schema": "lane_memory_validation_v3",
+            "generated_at": utc_iso(),
+            "verdict": "ERROR",
+            "error": str(exc),
+        }
     verdict = payload.get("verdict")
     if verdict == "CRITICAL":
         logger.critical(
@@ -3159,6 +3206,18 @@ def validate_lane_memory() -> dict:
         logger.warning(
             f"[LANE MEMORY] WARN — {payload.get('warn_issues')} [PIPELINE ENFORCEMENT]"
         )
+    _publish_pathway_receipt("lane_memory_validation.json", payload)
+    if verdict == "CRITICAL":
+        _publish_pathway_receipt("lane_memory_violation.json", payload)
+    else:
+        _publish_pathway_receipt("lane_memory_violation.json", {
+            **_pathway_receipt_identity(),
+            "schema": "lane_memory_violation_v1",
+            "generated_at": utc_iso(),
+            "active": False,
+            "verdict": None,
+            "detail": "No active lane-memory violation; see lane_memory_validation.json",
+        })
     return payload
 
 
@@ -3175,9 +3234,16 @@ def validate_runtime_pathway_integrity() -> dict:
             ai_direct_research_lanes=AI_DIRECT_RESEARCH_LANES,
             research_spawn_lanes=tuple(RESEARCH_SPAWN_LANES),
             ai_scan_orders_allowed=lane_orders_allowed(RESEARCH_LANE_AI_SCAN),
+            identity=_pathway_receipt_identity(),
         )
     except Exception as exc:
-        payload = {"verdict": "ERROR", "error": str(exc)}
+        payload = {
+            **_pathway_receipt_identity(),
+            "schema": "runtime_pathway_integrity_v2",
+            "generated_at": utc_iso(),
+            "verdict": "ERROR",
+            "error": str(exc),
+        }
     verdict = payload.get("verdict")
     if verdict == "CRITICAL":
         logger.critical(
@@ -3187,6 +3253,7 @@ def validate_runtime_pathway_integrity() -> dict:
         logger.warning(
             f"[PATHWAY INTEGRITY] WARN — {payload.get('issues')} [PIPELINE ENFORCEMENT]"
         )
+    _publish_pathway_receipt("runtime_pathway_integrity.json", payload)
     return payload
 
 
@@ -40362,6 +40429,11 @@ def ttl_monitor():
                 _last_lane_memory_check_ts = now
                 lm = validate_lane_memory()
                 ri = validate_runtime_pathway_integrity()
+                # The dashboard intentionally rejects contract receipts older
+                # than one hour. Re-evaluate immutable startup invariants on the
+                # same ten-minute cadence so a healthy long-running process does
+                # not regress to a stale receipt solely because it stayed up.
+                publish_startup_pathway_receipts()
                 apply_pathway_safety_block(lm, ri)
             if state.get("fresh_collection_mode"):
                 if now - _last_fresh_maintain_ts >= FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC:
@@ -41011,10 +41083,12 @@ def main():
             live_trading_enabled=bool(LIVE_TRADING_ENABLED),
         )
         capture_pathway_startup_snapshot()
+        receipt_writes = publish_startup_pathway_receipts()
         logger.info(
             f"[PATHWAY VALIDATION] {v['verdict']} "
             f"tiles={v.get('tile_independence')} ai_scan={v.get('ai_scan_independence')} "
             f"ai_scan_role={v.get('ai_scan_role')} sync={v.get('bot_analyzer_sync')} "
+            f"receipts={receipt_writes} "
             f"[PIPELINE ENFORCEMENT]"
         )
     except SystemExit:

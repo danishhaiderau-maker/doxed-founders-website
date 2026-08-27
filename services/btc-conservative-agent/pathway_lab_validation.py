@@ -15,6 +15,97 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def build_startup_contract_receipts(
+    identity: dict = None,
+    research_spawn_lanes: tuple = (),
+    ai_scan_orders_allowed: bool = False,
+) -> dict:
+    """Build current registry-owned startup receipts without filesystem policy.
+
+    The runtime owns publication; keeping construction here makes the receipts
+    deterministic and directly testable without importing the full bot.
+    """
+    identity = dict(identity or {})
+    execution_lanes = tuple(COMBO_EXECUTION_LANES)
+    expected_lanes = tuple(lane for lane in ACTIVE_TILE_ORDER if lane != "CONTINUOUS")
+    common = {**identity, "generated_at": _utc_now()}
+
+    tile_tests = [
+        {
+            "test": "registry execution roster exactly matches active paper tiles",
+            "passed": execution_lanes == expected_lanes,
+            "detail": f"execution={list(execution_lanes)} expected={list(expected_lanes)}",
+        },
+        {
+            "test": "active tile identities are unique",
+            "passed": len(execution_lanes) == len(set(execution_lanes)),
+            "detail": f"count={len(execution_lanes)} unique={len(set(execution_lanes))}",
+        },
+        {
+            "test": "Continuous is excluded from execution tiles",
+            "passed": "CONTINUOUS" not in execution_lanes,
+            "detail": f"execution={list(execution_lanes)}",
+        },
+    ]
+    ai_tests = [
+        {
+            "test": "AI_SCAN is not an execution lane",
+            "passed": (
+                RESEARCH_LANE_AI_SCAN not in execution_lanes
+                and not ai_scan_orders_allowed
+            ),
+            "detail": (
+                f"execution={list(execution_lanes)} "
+                f"orders_allowed={bool(ai_scan_orders_allowed)}"
+            ),
+        },
+        {
+            "test": "shared AI path targets current registry lanes only",
+            "passed": execution_lanes == expected_lanes,
+            "detail": f"targets={list(execution_lanes)}",
+        },
+    ]
+    role_checks = [
+        {
+            "check": "AI_SCAN is coordinator-only",
+            "passed": (
+                RESEARCH_LANE_AI_SCAN not in execution_lanes
+                and not ai_scan_orders_allowed
+            ),
+            "detail": (
+                "AI_SCAN has no execution-lane membership and "
+                f"orders_allowed={bool(ai_scan_orders_allowed)}"
+            ),
+        },
+        {
+            "check": "legacy research spawn lanes are absent",
+            "passed": not research_spawn_lanes,
+            "detail": f"research_spawn_lanes={list(research_spawn_lanes)}",
+        },
+    ]
+
+    def receipt(schema: str, rows_name: str, rows: list) -> dict:
+        passed = all(bool(row.get("passed")) for row in rows)
+        return {
+            **common,
+            "schema": schema,
+            "verdict": "PASS" if passed else "FAIL",
+            rows_name: rows,
+        }
+
+    return {
+        "tile_independence_report.json": receipt(
+            "tile_independence_v2", "tests", tile_tests
+        ),
+        "ai_scan_independence_report.json": receipt(
+            "ai_scan_independence_v2", "tests", ai_tests
+        ),
+        "ai_scan_role_validation.json": receipt(
+            "ai_scan_role_validation_v2", "checks", role_checks
+        ),
+    }
+
+
 def log_retired_lane_violation(lane: str, context: str, trade_id: str = None) -> dict:
     # Runtime no longer registers retired lane names. Unknown names are rejected
     # generically and logged without restoring experiment-specific code.
@@ -27,7 +118,7 @@ def log_retired_lane_violation(lane: str, context: str, trade_id: str = None) ->
 
 def validate_lane_memory_runtime(
     lane_pending_counts: dict, lane_open_counts: dict, retired_lanes: tuple,
-    max_bucket: int = 1000,
+    max_bucket: int = 1000, identity: dict = None,
 ) -> dict:
     allowed = set(ACTIVE_TILE_ORDER)
     critical = []
@@ -38,6 +129,7 @@ def validate_lane_memory_runtime(
         elif int(count or 0) > max_bucket:
             warnings.append(f"LANE_BUCKET_OVERFLOW:{lane}:{count}")
     return {
+        **dict(identity or {}),
         "schema": "lane_memory_validation_v3", "generated_at": _utc_now(),
         "critical_issues": critical, "warn_issues": warnings,
         "issues": critical + warnings,
@@ -49,6 +141,7 @@ def validate_runtime_pathway_integrity(
     startup_snapshot: dict, current_pathway_lane_status: dict,
     current_combo_execution_lanes: tuple, ai_direct_research_lanes: frozenset,
     research_spawn_lanes: tuple, ai_scan_orders_allowed: bool,
+    identity: dict = None,
 ) -> dict:
     critical = []
     expected = tuple(lane for lane in ACTIVE_TILE_ORDER if lane != "CONTINUOUS")
@@ -59,6 +152,7 @@ def validate_runtime_pathway_integrity(
     if research_spawn_lanes:
         critical.append(f"LEGACY_SPAWN_LANES:{research_spawn_lanes}")
     return {
+        **dict(identity or {}),
         "schema": "runtime_pathway_integrity_v2", "generated_at": _utc_now(),
         "critical_issues": critical, "issues": critical,
         "verdict": "CRITICAL" if critical else "PASS",
