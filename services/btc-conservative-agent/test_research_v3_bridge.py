@@ -3,6 +3,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
@@ -11,7 +12,7 @@ from research_v3_bridge import dual_write_lane_entry_resolution
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
 from research_v3_bridge import reconcile_overdue_expected_order_decisions
 from research_v3_bridge import reconcile_terminal_v22_into_v3
-from research_v3_store import V3EvidenceStore
+from research_v3_store import V3EvidenceStore, _id_cache, _segment_hash_cache
 
 
 def _event(event_id="cont-1", episode_id="episode-1"):
@@ -208,6 +209,99 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(patient_row["order_intent_expected"])
             self.assertEqual(store.verify()["ledger_counts"]["order_intent"], 0)
 
+    def test_lane_decision_verifies_only_touched_ledgers_and_referenced_segments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            store.ledger_path("order_intent").write_text(
+                '{"record_id":"untouched-broken"}', encoding="utf-8",
+            )
+            _id_cache.clear()
+            source = {
+                "trade_id": "scan-scoped", "shared_ai_call_id": "scan-scoped",
+                "shared_ai_call_ts_epoch": 0, "raw_direction": "NO_TRADE",
+            }
+            loaded = []
+            original = V3EvidenceStore._load_ids
+
+            def track(path):
+                loaded.append(path.name)
+                return original(path)
+
+            with mock.patch.object(V3EvidenceStore, "_load_ids", side_effect=track):
+                receipt = dual_write_lane_decision(
+                    source, lane="CONTINUOUS", policy_decision="REJECT",
+                    execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="NO_TRADE",
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+                )
+            verification = receipt["store_verification"]
+            self.assertTrue(verification["passed"])
+            self.assertEqual(verification["scope"], "TOUCHED_OBJECTS_ONLY")
+            self.assertFalse(verification["full_store_verified"])
+            self.assertEqual(
+                set(verification["ledger_counts"]),
+                {"opportunity", "decision", "lifecycle"},
+            )
+            self.assertNotIn("order_intent.jsonl", loaded)
+            self.assertFalse(store.verify()["passed"])
+
+    def test_six_lane_cold_cache_parses_each_touched_ledger_at_most_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-six", "shared_ai_call_id": "scan-six",
+                "shared_ai_call_ts_epoch": 0, "raw_direction": "NO_TRADE",
+            }
+            _id_cache.clear()
+            loaded = []
+            original = V3EvidenceStore._load_ids
+
+            def track(path):
+                loaded.append(path.name)
+                return original(path)
+
+            with mock.patch.object(V3EvidenceStore, "_load_ids", side_effect=track):
+                for lane in (
+                    "CONTINUOUS", "FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5",
+                    "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK",
+                ):
+                    receipt = dual_write_lane_decision(
+                        source, lane=lane, policy_decision="REJECT",
+                        execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="NO_TRADE",
+                        epoch_id="epoch-v3-test", data_dir=tmp,
+                        lane_policy={"policy_id": lane, "paper_only": True},
+                    )
+                    self.assertTrue(receipt["store_verification"]["passed"])
+            for ledger in ("opportunity.jsonl", "decision.jsonl", "lifecycle.jsonl"):
+                self.assertLessEqual(loaded.count(ledger), 1)
+
+    def test_lane_decision_does_not_rehash_unreferenced_old_segments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            old_ref = store.put_market_segment(
+                source="OLD", symbol="BTC", timeframe="1s", start_ts=1, end_ts=2,
+                rows=[{"ts": 1, "price": 1}],
+            )
+            old_path = str((store.root / old_ref["relative_path"]).resolve())
+            _segment_hash_cache.clear()
+            hashed = []
+            original = V3EvidenceStore._hash_segment
+
+            def track(path):
+                hashed.append(str(path.resolve()))
+                return original(path)
+
+            with mock.patch.object(V3EvidenceStore, "_hash_segment", side_effect=track):
+                receipt = dual_write_lane_decision(
+                    {"trade_id": "scan-no-segment", "shared_ai_call_id": "scan-no-segment",
+                     "shared_ai_call_ts_epoch": 0, "raw_direction": "NO_TRADE"},
+                    lane="CONTINUOUS", policy_decision="REJECT",
+                    execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="NO_TRADE",
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+                )
+            self.assertTrue(receipt["store_verification"]["passed"])
+            self.assertNotIn(old_path, hashed)
+
     def test_rejected_shared_lanes_reuse_one_pre_signal_market_context_segment(self):
         with tempfile.TemporaryDirectory() as tmp:
             tape = Path(tmp) / "market_microstructure_1s.jsonl"
@@ -258,6 +352,14 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(context_row["tape_id"], f"tape:{refs[0]['sha256']}")
             self.assertEqual(len(receipts[0]["writes"]), 4)
             self.assertTrue(receipts[1]["writes"][1]["duplicate"])
+            for receipt in receipts:
+                verification = receipt["store_verification"]
+                self.assertEqual(verification["scope"], "TOUCHED_OBJECTS_ONLY")
+                self.assertEqual(verification["market_segment_count"], 1)
+                self.assertEqual(
+                    set(verification["ledger_counts"]),
+                    {"opportunity", "market_segment", "decision", "lifecycle"},
+                )
 
     def test_accepted_but_disabled_lane_is_no_trade_not_zero_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:

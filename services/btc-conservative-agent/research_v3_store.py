@@ -245,3 +245,63 @@ class V3EvidenceStore:
             "passed": not defects,
         }
 
+    def verify_write_set(
+        self,
+        *,
+        ledgers: Iterable[str],
+        segment_refs: Iterable[dict[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """Synchronously verify only the durable objects touched by one write.
+
+        This is a hot-path receipt, not a replacement for :meth:`verify`.
+        Startup, analyzer and qualification code must continue to use the full
+        store verification so corruption in untouched historical objects is
+        still detected.
+        """
+        ledger_names = tuple(dict.fromkeys(str(name) for name in ledgers))
+        counts: dict[str, int] = {}
+        defects: list[dict[str, str]] = []
+        for ledger in ledger_names:
+            if ledger not in LEDGER_NAMES:
+                counts[ledger] = 0
+                defects.append({"ledger": ledger, "reason": "UNKNOWN_V3_LEDGER"})
+                continue
+            path = self.ledger_path(ledger)
+            try:
+                with _path_lock(path):
+                    counts[ledger] = len(self._cached_ids(path))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                counts[ledger] = 0
+                defects.append({"ledger": ledger, "reason": str(exc)})
+
+        segment_count = 0
+        seen_sha: set[str] = set()
+        for ref in segment_refs:
+            expected = str((ref or {}).get("sha256") or "").lower()
+            if expected in seen_sha:
+                continue
+            seen_sha.add(expected)
+            if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+                defects.append({"segment": expected or "MISSING", "reason": "INVALID_SEGMENT_REF"})
+                continue
+            path = self.segment_dir / expected[:2] / f"{expected}.json"
+            try:
+                with _path_lock(path):
+                    actual = self._cached_segment_hash(path)
+                if actual != expected:
+                    defects.append({"segment": path.as_posix(), "reason": "SHA256_MISMATCH"})
+                else:
+                    segment_count += 1
+            except OSError as exc:
+                defects.append({"segment": path.as_posix(), "reason": str(exc)})
+        return {
+            "schema": "v3_store_write_set_verification_v1",
+            "scope": "TOUCHED_OBJECTS_ONLY",
+            "full_store_verified": False,
+            "epoch_id": self.epoch_id,
+            "ledger_counts": counts,
+            "market_segment_count": segment_count,
+            "defects": defects,
+            "passed": not defects,
+        }
+

@@ -654,7 +654,15 @@ def dual_write_lane_decision(
         "epoch_id": str(epoch_id),
         **identity,
         "writes": [opportunity, *segment_writes, decision, resolution["write"]],
-        "store_verification": store.verify(),
+        "store_verification": store.verify_write_set(
+            ledgers=(
+                "opportunity",
+                *(('market_segment',) if segment_writes else ()),
+                "decision",
+                "lifecycle",
+            ),
+            segment_refs=segment_refs,
+        ),
     }
 
 
