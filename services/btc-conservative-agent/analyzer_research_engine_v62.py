@@ -43,6 +43,7 @@ exit forensics, TIME_EXIT deep dive, edge×structure×MTF combos, factor-gate fu
 import pandas as pd
 import numpy as np
 import time
+import math
 import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -516,6 +517,13 @@ AI_DECISION_FINGERPRINT_REPORT_FILE = "ai_decision_fingerprint_report.json"
 APPROVE_OUTCOME_CONF_DIRECTION_FILE = "approve_outcome_confidence_direction.json"
 BENCHMARK_RELATIVE_SCORECARD_FILE = "benchmark_relative_scorecard.json"
 MISSED_OPPORTUNITY_HEATMAP_FILE = "missed_opportunity_heatmap.json"
+MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
+CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
+COMPRESSED_SHADOW_SCHEDULE_FILES = (
+    "chase_offset_touch_grid.jsonl",
+    "compressed_shadow_schedule.jsonl",
+    "signed_compressed_shadow_schedule.jsonl",
+)
 CHASE_ATTRIBUTION_REPORT_FILE = "chase_attribution_report.json"
 CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
 QUALIFIED_CHASE_POLICY_REPORT_FILE = "qualified_chase_policy_report.json"
@@ -603,6 +611,8 @@ ANALYZER_JSON_REPORT_FILES = (
     LANE_OPPORTUNITY_REPORT_FILE,
     COLLECTOR_V21_REPORT_FILE,
     MISSED_OPPORTUNITY_HEATMAP_FILE,
+    MISSED_OPPORTUNITY_PROOF_REPORT_FILE,
+    CHASE_POLICY_LAB_REPORT_FILE,
     PATHWAY_SURVIVAL_REPORT_FILE,
     REAL_EDGE_SUMMARY_FILE,
     SCENARIO_C_CAPTURE_RATIO_REPORT_FILE,
@@ -673,6 +683,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Lane Opportunity", LANE_OPPORTUNITY_REPORT_FILE, "Missed lane capture vs shadow fills"),
     ("collector_v2.1 Opportunity Capture", COLLECTOR_V21_REPORT_FILE, "Four cohorts: actual / unfilled / rejected / hypothetical; CONTROL vs Stage-1"),
     ("Missed Opportunities", MISSED_OPPORTUNITY_HEATMAP_FILE, "Blocked signals by reason and $ left"),
+    ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
+    ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
     ("Pathway Survival", PATHWAY_SURVIVAL_REPORT_FILE, "Pathway stage survival and drop rates"),
     ("Real Edge / Gate Damage", REAL_EDGE_SUMMARY_FILE, "APPROVE funnel, executed vs blocked shadow PnL"),
     ("Scenario C Capture", SCENARIO_C_CAPTURE_RATIO_REPORT_FILE, "MFE capture % distribution"),
@@ -11865,6 +11877,537 @@ def missed_opportunity_heatmap_report(trades=None, session=None):
     return payload
 
 
+_MISSED_PROOF_CLASSES = (
+    "PROVEN_MISSED_PROFIT",
+    "PROVEN_AVOIDED_LOSS",
+    "AMBIGUOUS",
+    "INSUFFICIENT_EVIDENCE",
+)
+
+
+def _first_number(*values):
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def _v3_ledger_rows(name):
+    candidates = (
+        Path("v3") / "ledgers" / f"{name}.jsonl",
+        Path(os.getenv("BTC_AGENT_DATA_DIR") or ".") / "v3" / "ledgers" / f"{name}.jsonl",
+    )
+    for path in candidates:
+        if path.is_file():
+            return _load_jsonl_rows(str(path))
+    return []
+
+
+def _compressed_shadow_rows(session=None):
+    rows = []
+    seen = set()
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
+    roots = (Path(configured_root),) if configured_root else (Path("."),)
+    for filename in COMPRESSED_SHADOW_SCHEDULE_FILES:
+        for root in roots:
+            path = root / filename
+            resolved = str(path.resolve())
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            for row in _load_jsonl_rows(str(path)):
+                if str(row.get("schema") or "") == "compressed_chase_shadow_v1":
+                    rows.append(row)
+    return _filter_jsonl_rows_by_session(rows, session)
+
+
+def _shadow_checkpoint_price(row, direction, *, entry=True):
+    bbo = row.get("bbo") if isinstance(row.get("bbo"), dict) else {}
+    if direction == "LONG":
+        side = "ask" if entry else "bid"
+        return _first_number(bbo.get(side), row.get(side))
+    if direction == "SHORT":
+        side = "bid" if entry else "ask"
+        return _first_number(bbo.get(side), row.get(side))
+    return None
+
+
+def _shadow_return_pct(direction, entry, mark):
+    if not entry or mark is None:
+        return None
+    raw = (mark / entry - 1.0) * 100.0
+    return raw if direction == "LONG" else -raw if direction == "SHORT" else None
+
+
+def _one_second_tape_by_bucket():
+    rows = _load_jsonl_rows("market_microstructure_1s.jsonl")
+    return {
+        int(row["bucket_ts"]): row for row in rows
+        if row.get("bucket_ts") is not None
+        and str(row.get("schema") or "") == "market_microstructure_1s_v1"
+    }
+
+
+def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
+    if not touch_row or not expiry:
+        return {}
+    touch_ts = _first_number(touch_row.get("observed_ts"), touch_row.get("ts"))
+    start_values = [value for value in (
+        touch_ts,
+        _first_number(first.get("tape_window_start_ts")),
+    ) if value is not None]
+    if not start_values:
+        return {}
+    start_ts = max(start_values)
+    end_ts = _first_number(
+        expiry.get("tape_window_end_ts"),
+        first.get("tape_window_end_ts"),
+        expiry.get("observed_ts"),
+        expiry.get("ts"),
+    )
+    if end_ts is None or end_ts < start_ts:
+        return {}
+    expected = list(range(int(math.ceil(start_ts)), int(math.floor(end_ts)) + 1))
+    points = []
+    missing = []
+    for second in expected:
+        row = tape_by_bucket.get(second)
+        if not row or row.get("fresh") is not True or row.get("valid_bbo") is not True:
+            missing.append(second)
+            continue
+        points.append({
+            "bucket_ts": second,
+            "bbo": {"bid": row.get("bid"), "ask": row.get("ask"), "last": row.get("last")},
+            "bid_qty": row.get("bid_qty"),
+            "ask_qty": row.get("ask_qty"),
+            "row_sha256": row.get("row_sha256"),
+        })
+    requested_qty = _first_number(first.get("requested_qty"), first.get("quantity"))
+    entry_bucket = tape_by_bucket.get(int(math.ceil(touch_ts))) if touch_ts is not None else None
+    available_qty = _first_number(
+        (entry_bucket or {}).get("ask_qty") if direction == "LONG" else (entry_bucket or {}).get("bid_qty")
+    )
+    execution_supported = bool(
+        requested_qty is not None and available_qty is not None and available_qty >= requested_qty
+    )
+    entry_execution_price = _first_number(
+        (entry_bucket or {}).get("ask") if direction == "LONG" else (entry_bucket or {}).get("bid")
+    )
+    receipt_material = "|".join(
+        [str(int(math.ceil(start_ts))), str(int(math.floor(end_ts)))]
+        + [str(point.get("row_sha256") or "") for point in points]
+    )
+    return {
+        "schema": "analyzer_one_second_tape_join_v1",
+        "receipt_id": "tape-join-sha256-" + hashlib.sha256(receipt_material.encode("utf-8")).hexdigest(),
+        "source_path": first.get("tape_evidence_path") or "market_microstructure_1s.jsonl",
+        "timeframe": "1s",
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "coverage_status": "COMPLETE" if expected and not missing else "INSUFFICIENT",
+        "expected_seconds": len(expected),
+        "observed_seconds": len(points),
+        "missing_seconds": len(missing),
+        "missing_second_sample": missing[:20],
+        "conservative_execution_supported": execution_supported,
+        "fill_status": "FULL_FILL" if execution_supported else "UNSUPPORTED",
+        "entry_execution_price": entry_execution_price,
+        "quantity": requested_qty,
+        "points": points,
+        # Fees and additional slippage deliberately remain absent unless an
+        # explicit signed source supplies them; gross paths cannot be PROVEN.
+    }
+
+
+def build_missed_opportunity_proof_report(session=None):
+    """Build fail-closed proof rows from the signed compressed shadow schedule.
+
+    The artifact is descriptive shadow evidence only.  A positive/negative proof
+    requires a complete signed identity join, every scheduled checkpoint plus
+    expiry, a conservative BBO touch, and an executable terminal BBO mark.
+    """
+    schedules = _compressed_shadow_rows(session=session)
+    opportunities = _v3_ledger_rows("opportunity")
+    decisions = _v3_ledger_rows("decision")
+    executions = _v3_ledger_rows("execution")
+    tape_by_bucket = _one_second_tape_by_bucket() if schedules else {}
+    opp_by_id = {str(r.get("opportunity_id")): r for r in opportunities if r.get("opportunity_id")}
+    opp_by_call = {str(r.get("shared_ai_call_id")): r for r in opportunities if r.get("shared_ai_call_id")}
+    decision_by_call = {}
+    for row in decisions:
+        call_id = str(row.get("shared_ai_call_id") or "")
+        if call_id:
+            decision_by_call.setdefault(call_id, []).append(row)
+    execution_keys = {
+        (str(r.get("episode_id") or ""), str(r.get("policy_id") or ""))
+        for r in executions
+    }
+    grouped = {}
+    for row in schedules:
+        key = (
+            str(row.get("episode_id") or row.get("trade_id") or ""),
+            str(row.get("policy_id") or ""),
+            str(row.get("policy_signature") or ""),
+            str(row.get("schedule_generation_id") or ""),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    proofs = []
+    for (episode_id, policy_id, policy_signature, schedule_generation_id), rows in grouped.items():
+        rows.sort(key=lambda r: _first_number(r.get("observed_ts"), r.get("ts")) or 0.0)
+        first = rows[0]
+        call_id = str(first.get("shared_ai_call_id") or "")
+        opportunity_id = str(first.get("opportunity_id") or "")
+        opportunity = opp_by_id.get(opportunity_id) or opp_by_call.get(call_id) or {}
+        decision_rows = decision_by_call.get(call_id, [])
+        decision = next((r for r in decision_rows if str(r.get("episode_id") or "") == episode_id), None)
+        decision = decision or (decision_rows[0] if decision_rows else {})
+        direction = str(first.get("direction") or opportunity.get("raw_direction") or "").upper()
+        expected = [int(x) for x in (first.get("schedule_seconds") or [0, 60, 120, 240, 420, 600])]
+        expiry_sec = int(_first_number(first.get("terminal_expiry_sec"), 780) or 780)
+        stages = {int(r.get("stage_index")): r for r in rows if str(r.get("event") or "").upper() == "STAGE" and r.get("stage_index") is not None}
+        expiry = next((r for r in reversed(rows) if str(r.get("event") or "").upper() == "EXPIRED"), None)
+        checkpoints = []
+        touch_row = None
+        for index, due_sec in enumerate(expected):
+            row = stages.get(index)
+            price = _shadow_checkpoint_price(row or {}, direction)
+            limit_price = _first_number((row or {}).get("virtual_limit_price"))
+            stage_supported = bool(
+                row is not None
+                and row.get("identity_complete") is True
+                and row.get("eligible_at_stage") is True
+                and row.get("bbo_fresh") is True
+                and row.get("bbo_valid") is True
+                and str(row.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
+            )
+            touched = bool(
+                stage_supported and
+                price is not None and limit_price is not None and (
+                    (direction == "LONG" and price <= limit_price)
+                    or (direction == "SHORT" and price >= limit_price)
+                )
+            )
+            if touch_row is None and touched:
+                touch_row = row
+            checkpoints.append({
+                "stage_index": index,
+                "due_sec": due_sec,
+                "enabled": row is not None,
+                "eligible_at_stage": (row or {}).get("eligible_at_stage"),
+                "coverage_status": (row or {}).get("coverage_status"),
+                "direction_revalidation_result": (row or {}).get("direction_revalidation_result"),
+                "direction_revalidation_reason": (row or {}).get("direction_revalidation_reason"),
+                "observed_delay_sec": _first_number((row or {}).get("observed_delay_sec")),
+                "observed_ts": (row or {}).get("observed_ts"),
+                "reference_price": _first_number((row or {}).get("reference_price")),
+                "virtual_limit_price": limit_price,
+                "conservative_bbo_price": price,
+                "conservative_touch": touched,
+            })
+        entry_price = None
+        tape = {}
+        if expiry:
+            tape = expiry.get("tape_evidence") or expiry.get("path_evidence") or {}
+        if not isinstance(tape, dict):
+            tape = {}
+        if not tape:
+            tape = _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket)
+        fill_status = str(tape.get("fill_status") or "").upper()
+        entry_price = _first_number(
+            tape.get("entry_execution_price"),
+            tape.get("conservative_fill_price"),
+        )
+        tape_points = tape.get("points") or tape.get("bbo_points") or []
+        if not isinstance(tape_points, list):
+            tape_points = []
+        tape_receipt = tape.get("receipt_id") or tape.get("sha256") or (expiry or {}).get("tape_receipt_id")
+        path_prices = [
+            _shadow_checkpoint_price(point, direction, entry=False)
+            for point in tape_points if isinstance(point, dict)
+        ]
+        path_prices = [price for price in path_prices if price is not None]
+        expiry_mark = path_prices[-1] if path_prices else None
+        post_touch_returns = []
+        if touch_row is not None:
+            post_touch_returns = [
+                value for value in (
+                    _shadow_return_pct(direction, entry_price, price) for price in path_prices
+                ) if value is not None
+            ]
+        gross_terminal_return = _shadow_return_pct(direction, entry_price, expiry_mark)
+        fee_usd = _first_number(tape.get("fee_usd"), (expiry or {}).get("fee_usd"))
+        slippage_usd = _first_number(tape.get("slippage_usd"), (expiry or {}).get("slippage_usd"))
+        quantity = _first_number(tape.get("quantity"), first.get("quantity"), first.get("requested_qty"))
+        notional_usd = _first_number(tape.get("notional_usd"))
+        if notional_usd is None and quantity is not None and entry_price is not None:
+            notional_usd = quantity * entry_price
+        explicit_costs = fee_usd is not None and slippage_usd is not None and notional_usd not in (None, 0)
+        total_cost_usd = (fee_usd + slippage_usd) if explicit_costs else None
+        net_terminal_return = (
+            gross_terminal_return - total_cost_usd / notional_usd * 100.0
+            if gross_terminal_return is not None and explicit_costs else None
+        )
+        net_pnl_usd = (
+            net_terminal_return / 100.0 * notional_usd
+            if net_terminal_return is not None else None
+        )
+        feature = opportunity.get("feature_snapshot_at_signal") if isinstance(opportunity.get("feature_snapshot_at_signal"), dict) else {}
+        scores = decision.get("scores") if isinstance(decision.get("scores"), dict) else {}
+        if not scores:
+            scores = {
+                "long": _first_number(decision.get("long_score"), decision.get("score_long")),
+                "short": _first_number(decision.get("short_score"), decision.get("score_short")),
+                "confidence": _first_number(decision.get("confidence"), decision.get("ai_confidence")),
+            }
+        contraindications = decision.get("contraindications") or decision.get("reasons") or decision.get("reason") or []
+        if not isinstance(contraindications, list):
+            contraindications = [str(contraindications)] if contraindications else []
+        identity_missing = [name for name, value in (
+            ("shared_ai_call_id", call_id), ("opportunity", opportunity),
+            ("episode_id", episode_id), ("policy_id", policy_id),
+            ("policy_signature", policy_signature),
+            ("schedule_generation_id", schedule_generation_id),
+            ("tape_receipt", tape_receipt),
+        ) if not value]
+        for row in rows:
+            if row.get("identity_complete") is not True:
+                identity_missing.extend(row.get("missing_identity_fields") or ["runtime_identity_complete"])
+        identity_missing = sorted({str(value) for value in identity_missing if value})
+        stage_coverage_complete = len(stages) == len(expected) and all(
+            r.get("identity_complete") is True
+            and r.get("eligible_at_stage") is True
+            and r.get("bbo_fresh") is True
+            and r.get("bbo_valid") is True
+            and str(r.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
+            for r in stages.values()
+        )
+        tape_coverage_complete = bool(
+            tape_receipt and tape_points
+            and str(tape.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
+            and int(tape.get("missing_seconds") or 0) == 0
+            and tape.get("conservative_execution_supported") is True
+            and fill_status in {"FULL_FILL", "PARTIAL_FILL"}
+            and entry_price is not None
+            and str(tape.get("timeframe") or "").lower() == "1s"
+            and _first_number(tape.get("start_ts")) is not None
+            and _first_number(tape.get("end_ts")) is not None
+            and touch_row is not None
+            and _first_number(tape.get("start_ts")) <= (_first_number(touch_row.get("observed_ts"), touch_row.get("ts")) or float("-inf"))
+            and _first_number(tape.get("end_ts")) >= (_first_number((expiry or {}).get("observed_ts"), (expiry or {}).get("ts")) or float("inf"))
+        )
+        coverage_complete = stage_coverage_complete and expiry is not None and tape_coverage_complete
+        proof_class = "INSUFFICIENT_EVIDENCE"
+        if not identity_missing and coverage_complete and touch_row is not None and net_terminal_return is not None:
+            if net_terminal_return > 0:
+                proof_class = "PROVEN_MISSED_PROFIT"
+            elif net_terminal_return < 0:
+                proof_class = "PROVEN_AVOIDED_LOSS"
+            else:
+                proof_class = "AMBIGUOUS"
+        proofs.append({
+            "classification": proof_class,
+            "evidence_world": "SIGNED_COMPRESSED_SHADOW",
+            "qualification_eligible": False,
+            "execution_class": "SHADOW_ONLY",
+            "trade_id": first.get("trade_id"),
+            "shared_ai_call_id": call_id or None,
+            "opportunity_id": opportunity_id or opportunity.get("opportunity_id"),
+            "episode_id": episode_id or None,
+            "epoch_id": first.get("epoch_id") or opportunity.get("epoch_id"),
+            "policy_id": policy_id or None,
+            "policy_signature": policy_signature or None,
+            "schedule_generation_id": schedule_generation_id or None,
+            "direction": direction or None,
+            "signal_ts": opportunity.get("signal_ts"),
+            "scores": scores,
+            "regime": feature.get("regime") or feature.get("market_regime"),
+            "adx": _first_number(feature.get("adx"), feature.get("adx14"), decision.get("adx")),
+            "contraindications": contraindications,
+            "schedule": {
+                "checkpoint_seconds": expected,
+                "terminal_expiry_sec": expiry_sec,
+                "stages_expected": len(expected),
+                "stages_observed": len(stages),
+                "enabled_states": [bool(c["enabled"]) for c in checkpoints],
+            },
+            "checkpoint_market_counterfactuals": checkpoints,
+            "conservative_touch": touch_row is not None,
+            "conservative_fill_status": fill_status or "UNAVAILABLE",
+            "touch_ts": (touch_row or {}).get("observed_ts"),
+            "conservative_entry_price": entry_price,
+            "terminal_ts": (expiry or {}).get("observed_ts"),
+            "terminal_mark_price": expiry_mark,
+            "gross_terminal_return_pct": gross_terminal_return,
+            "net_terminal_return_pct": net_terminal_return,
+            "net_pnl_usd": net_pnl_usd,
+            "mfe_pct": max(post_touch_returns) if post_touch_returns else None,
+            "mae_pct": min(post_touch_returns) if post_touch_returns else None,
+            "coverage": {
+                "status": "COMPLETE" if coverage_complete else "INSUFFICIENT",
+                "stage_ratio": round((len(stages) + int(expiry is not None)) / (len(expected) + 1), 6),
+                "tape_status": tape.get("coverage_status") or "UNAVAILABLE",
+                "missing_seconds": tape.get("missing_seconds"),
+                "tape_receipt": tape_receipt,
+                "identity_missing": identity_missing,
+            },
+            "cost_assumption": {
+                "fee_profile": EXPECTED_FEE_PROFILE,
+                "fee_usd": fee_usd,
+                "slippage_usd": slippage_usd,
+                "total_cost_usd": total_cost_usd,
+                "notional_usd": notional_usd,
+                "slippage_model": tape.get("slippage_model") or "UNAVAILABLE",
+                "explicit_costs_complete": explicit_costs,
+                "note": "A PROVEN classification requires explicit fee and slippage amounts; gross-only paths fail closed.",
+            },
+            "matching_executed_record": (episode_id, policy_id) in execution_keys,
+        })
+    counts = {name: 0 for name in _MISSED_PROOF_CLASSES}
+    for row in proofs:
+        counts[row["classification"]] += 1
+    empty_reason = None if proofs else "SOURCE_EMPTY_OR_UNAVAILABLE: no compressed_chase_shadow_v1 rows"
+    return {
+        "schema": "missed_opportunity_proof_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_world": "SIGNED_COMPRESSED_SHADOW",
+        "qualification_eligible": False,
+        "classification_contract": list(_MISSED_PROOF_CLASSES),
+        "empty_reason": empty_reason,
+        "proof_count": len(proofs),
+        "classification_counts": counts,
+        "proofs": proofs,
+    }
+
+
+def missed_opportunity_proof_report(session=None):
+    payload = build_missed_opportunity_proof_report(session=session)
+    with open(MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
+
+
+def _wilson_lower_bound(wins, total, z=1.96):
+    if total <= 0:
+        return None
+    p = wins / total
+    denominator = 1.0 + z * z / total
+    centre = p + z * z / (2.0 * total)
+    margin = z * math.sqrt((p * (1.0 - p) + z * z / (4.0 * total)) / total)
+    return (centre - margin) / denominator
+
+
+def chase_policy_lab_report(session=None, proof_payload=None):
+    proof_payload = proof_payload or build_missed_opportunity_proof_report(session=session)
+    groups = {}
+    for row in proof_payload.get("proofs") or []:
+        policy_id = str(row.get("policy_id") or "UNKNOWN")
+        group = groups.setdefault(policy_id, {"rows": [], "episodes": set()})
+        group["rows"].append(row)
+        if row.get("episode_id"):
+            group["episodes"].add(row["episode_id"])
+    ranked = []
+    for policy_id, group in groups.items():
+        rows = group["rows"]
+        supported = [r for r in rows if (r.get("coverage") or {}).get("status") == "COMPLETE"]
+        fills = [r for r in supported if r.get("conservative_touch")]
+        full_fills = [r for r in fills if r.get("conservative_fill_status") == "FULL_FILL"]
+        partial_fills = [r for r in fills if r.get("conservative_fill_status") == "PARTIAL_FILL"]
+        returns = [r.get("net_terminal_return_pct") for r in fills if r.get("net_terminal_return_pct") is not None]
+        pnls = [r.get("net_pnl_usd") for r in fills if r.get("net_pnl_usd") is not None]
+        wins = sum(1 for value in returns if value > 0)
+        losses = sum(1 for value in returns if value < 0)
+        executed_matches = len({
+            r.get("episode_id") for r in rows
+            if r.get("matching_executed_record") and r.get("episode_id")
+        })
+        running = peak = max_dd = 0.0
+        for value in returns:
+            running += value
+            peak = max(peak, running)
+            max_dd = min(max_dd, running - peak)
+        running_usd = peak_usd = max_dd_usd = 0.0
+        for value in pnls:
+            running_usd += value
+            peak_usd = max(peak_usd, running_usd)
+            max_dd_usd = min(max_dd_usd, running_usd - peak_usd)
+        first = rows[0]
+        status = "DESCRIPTIVE_LEADER" if len(supported) >= 30 and returns else "INSUFFICIENT_EVIDENCE"
+        ranked.append({
+            "policy_id": policy_id,
+            "policy_signature": first.get("policy_signature"),
+            "checkpoint_seconds": (first.get("schedule") or {}).get("checkpoint_seconds") or [],
+            "terminal_expiry_sec": (first.get("schedule") or {}).get("terminal_expiry_sec"),
+            "independent_opportunities": len(group["episodes"]),
+            "supported": len(supported),
+            "full_fills": len(full_fills),
+            "partial_fills": len(partial_fills),
+            "no_fills": len(supported) - len(fills),
+            "unsupported": len(rows) - len(supported),
+            "fill_rate_pct": round(len(fills) / len(supported) * 100.0, 3) if supported else None,
+            "shadow": {
+                "wins": wins, "losses": losses,
+                "net_pnl_usd": round(sum(pnls), 6) if pnls else None,
+                "ev_usd": round(sum(pnls) / len(pnls), 6) if pnls else None,
+                "net_return_pct": round(sum(returns), 6) if returns else None,
+                "ev_return_pct": round(sum(returns) / len(returns), 6) if returns else None,
+                "max_drawdown_pct": round(max_dd, 6) if returns else None,
+                "tail_loss_pct": round(min(returns), 6) if returns else None,
+                "max_drawdown_usd": round(max_dd_usd, 6) if pnls else None,
+                "tail_loss_usd": round(min(pnls), 6) if pnls else None,
+                "avg_mfe_pct": round(sum(r["mfe_pct"] for r in fills if r.get("mfe_pct") is not None) / max(1, sum(r.get("mfe_pct") is not None for r in fills)), 6) if any(r.get("mfe_pct") is not None for r in fills) else None,
+                "avg_mae_pct": round(sum(r["mae_pct"] for r in fills if r.get("mae_pct") is not None) / max(1, sum(r.get("mae_pct") is not None for r in fills)), 6) if any(r.get("mae_pct") is not None for r in fills) else None,
+            },
+            "executed": {
+                "independent_opportunities": executed_matches,
+                "pnl_usd": None,
+                "ev_usd": None,
+                "status": (
+                    "MATCHED_EXECUTION_WITHOUT_TERMINAL_PNL"
+                    if executed_matches else "NO_MATCHING_EXECUTED_POLICY_EVIDENCE"
+                ),
+            },
+            "coverage_pct": round(len(supported) / len(rows) * 100.0, 3) if rows else None,
+            "confidence": {
+                "label": "INSUFFICIENT" if len(supported) < 30 else "DESCRIPTIVE_ONLY",
+                "fill_rate_wilson_lower_95_pct": round((_wilson_lower_bound(len(fills), len(supported)) or 0.0) * 100.0, 3) if supported else None,
+            },
+            "regimes": sorted({str(r.get("regime")) for r in supported if r.get("regime")}),
+            "evidence_status": status,
+            "qualification_status": "NOT_QUALIFICATION_ELIGIBLE_SHADOW_ONLY",
+        })
+    ranked.sort(key=lambda r: (
+        r.get("evidence_status") == "DESCRIPTIVE_LEADER",
+        r.get("shadow", {}).get("ev_return_pct") is not None,
+        r.get("shadow", {}).get("ev_return_pct") or float("-inf"),
+        r.get("supported") or 0,
+    ), reverse=True)
+    top = ranked[0] if ranked else None
+    payload = {
+        "schema": "chase_policy_lab_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_worlds_separate": True,
+        "qualification_eligible": False,
+        "empty_reason": None if ranked else proof_payload.get("empty_reason"),
+        "leader_label": (top or {}).get("evidence_status") or "INSUFFICIENT_EVIDENCE",
+        "top_schedule": top,
+        "ranked_schedules": ranked,
+        "all_schedule_count": len(ranked),
+        "full_artifact_note": "All signed schedule permutations are retained in ranked_schedules and Missed Opportunity Proof rows.",
+    }
+    with open(CHASE_POLICY_LAB_REPORT_FILE, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
+
+
 def _funnel_row_epoch(row: dict):
     ts = row.get("ts")
     if ts is None:
@@ -17328,6 +17871,8 @@ def pre_test_analytics_reports(
         shadow_report=shadow_report,
     )
     missed_opportunity_heatmap_report(trades=trades, session=session)
+    missed_proof = missed_opportunity_proof_report(session=session)
+    chase_policy_lab_report(session=session, proof_payload=missed_proof)
     chase_payload = chase_attribution_report(trades=trades, session=session)
     chase_effectiveness_report(trades=trades, session=session, chase_payload=chase_payload)
     qualified_chase_policy_report()

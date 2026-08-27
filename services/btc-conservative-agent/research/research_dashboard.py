@@ -165,6 +165,7 @@ CONDITIONAL_ANALYZER_RAW_INPUTS = {
     # recorded explicitly in the bundle instead of being confused with zero
     # PnL or silently treated as a populated cohort.
     "trades_3factor.csv": "NO_TERMINAL_TRADES",
+    "chase_offset_touch_grid.jsonl": "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS",
 }
 OPTIONAL_ANALYZER_RAW_INPUTS = (
     "blocked_signals_3factor.csv",
@@ -261,6 +262,7 @@ REPORT_NAV_GROUPS = (
     )),
     ("trading-group", "Chase & Exits", (
         ("chase", "Attribution", "chase_attribution_report.json"),
+        ("chase-policy-lab", "Chase Policy Lab", "chase_policy_lab_report.json"),
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
         ("chase-delay", "Delay", "chase_delay_report.json"),
         ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
@@ -3675,6 +3677,34 @@ def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
 
 
+@app.route("/api/chase-policy-lab")
+def api_chase_policy_lab():
+    path = _best_report_path("chase_policy_lab_report.json")
+    if path is None:
+        return jsonify({
+            "schema": "chase_policy_lab_v1",
+            "qualification_eligible": False,
+            "leader_label": "INSUFFICIENT_EVIDENCE",
+            "empty_reason": "SOURCE_EMPTY_OR_UNAVAILABLE",
+            "ranked_schedules": [],
+        })
+    return jsonify(_read_json(path))
+
+
+@app.route("/api/missed-opportunity-proof")
+def api_missed_opportunity_proof():
+    path = _best_report_path("missed_opportunity_proof_report.json")
+    if path is None:
+        return jsonify({
+            "schema": "missed_opportunity_proof_v1",
+            "qualification_eligible": False,
+            "empty_reason": "SOURCE_EMPTY_OR_UNAVAILABLE",
+            "proof_count": 0,
+            "proofs": [],
+        })
+    return jsonify(_read_json(path))
+
+
 @app.route("/api/report/<path:filename>")
 def api_report(filename):
     safe = os.path.basename(filename)
@@ -4323,6 +4353,19 @@ def download_everything():
                 "canonical_v3_market_segments": any(
                     name.startswith("raw/current_fly_mirror/v3/market_segments/")
                     for name in member_names
+                ),
+                "signed_compressed_shadow_schedule": {
+                    "present": "raw/current_fly_mirror/chase_offset_touch_grid.jsonl" in member_names,
+                    "absence_status": (
+                        None if "raw/current_fly_mirror/chase_offset_touch_grid.jsonl" in member_names
+                        else "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS"
+                    ),
+                },
+                "missed_opportunity_proof_report": any(
+                    name.endswith("/missed_opportunity_proof_report.json") for name in member_names
+                ),
+                "chase_policy_lab_report": any(
+                    name.endswith("/chase_policy_lab_report.json") for name in member_names
                 ),
                 "replay_rotations": any(
                     name.startswith("raw/current_fly_mirror/signal_replay.jsonl.")
@@ -5073,6 +5116,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Includes generic shadows and per-tile LAB paths. These are simulated outcomes, not fills or realized profit.</p>
     <table><thead><tr><th>Threshold</th><th>N</th><th>WR%</th><th>Shadow PnL</th><th>Shadow EV</th><th>Avg hold (min)</th></tr></thead><tbody id="chase-threshold-shadow-body"></tbody></table>
   </section>
+  <section id="sec-chase-policy-lab">
+    <h2>Chase Policy Lab</h2>
+    <div class="stale-banner" style="display:block;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"><strong>SHADOW-ONLY DESCRIPTIVE EVIDENCE</strong> · Never mixed with executed PnL or qualification.</div>
+    <p class="note" id="chase-policy-lab-note">Signed compressed schedules are joined to causal identity and checkpoint tape evidence.</p>
+    <h3 id="chase-policy-leader-label">INSUFFICIENT EVIDENCE</h3>
+    <pre id="chase-policy-top">No signed schedule evidence.</pre>
+    <div class="kpis" id="chase-policy-kpis"></div>
+    <table><thead><tr><th>Rank</th><th>Schedule</th><th>Independent opportunities</th><th>Supported</th><th>Full / partial / no-fill / unsupported</th><th>Fill rate</th><th>Shadow PnL / EV</th><th>Max DD / tail</th><th>MFE / MAE</th><th>Coverage / confidence / lower bound</th><th>Regimes</th><th>Evidence / qualification</th></tr></thead><tbody id="chase-policy-body"></tbody></table>
+    <h3>Missed Opportunity Proof</h3>
+    <p class="note">Only four classifications are permitted: PROVEN_MISSED_PROFIT, PROVEN_AVOIDED_LOSS, AMBIGUOUS, or INSUFFICIENT_EVIDENCE.</p>
+    <div class="kpis" id="missed-proof-kpis"></div>
+    <table><thead><tr><th>Classification</th><th>Episode / policy</th><th>Direction</th><th>Touch / terminal return</th><th>MFE / MAE</th><th>Coverage</th><th>Regime / ADX</th><th>Contraindications</th></tr></thead><tbody id="missed-proof-body"></tbody></table>
+  </section>
   <section id="sec-chase-delay">
     <label class="lane-toggle chase-lane-filter-wrap">Lane: <select class="chase-lane-filter"><option value="">Combined</option>{% for lane in tile_lanes %}<option value="{{ lane }}">{{ lane }}</option>{% endfor %}</select></label>
     <h2>Chase Delay (Pathway Lab)</h2>
@@ -5317,6 +5373,7 @@ const EVIDENCE_SCOPES = {
   lanes: ['CURRENT CANONICAL TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
   ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
   chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
+  'chase-policy-lab': ['SIGNED COMPRESSED SHADOW — NOT QUALIFICATION ELIGIBLE', 'Descriptive schedule and missed-opportunity proof evidence; executed outcomes remain separate and unavailable unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
   combos: ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
@@ -5763,6 +5820,58 @@ async function loadChaseThreshold() {
   }).join('');
   document.getElementById('chase-threshold-body').innerHTML = renderThresholdRows(d.executed_thresholds || d.thresholds || []);
   document.getElementById('chase-threshold-shadow-body').innerHTML = renderThresholdRows(d.shadow_thresholds || []);
+}
+
+async function loadChasePolicyLab() {
+  const [labResponse, proofResponse] = await Promise.all([
+    fetch('/api/chase-policy-lab'),
+    fetch('/api/missed-opportunity-proof'),
+  ]);
+  const lab = await labResponse.json();
+  const proof = await proofResponse.json();
+  const rows = lab.ranked_schedules || [];
+  const top = lab.top_schedule || null;
+  const note = document.getElementById('chase-policy-lab-note');
+  if (note) note.textContent = lab.empty_reason || lab.full_artifact_note || 'All schedule permutations are retained in the downloadable JSON artifact.';
+  document.getElementById('chase-policy-leader-label').textContent = top
+    ? `${lab.leader_label || 'INSUFFICIENT_EVIDENCE'} — ${top.policy_id || 'UNKNOWN'}`
+    : 'INSUFFICIENT EVIDENCE — NO SIGNED SCHEDULE ROWS';
+  document.getElementById('chase-policy-top').textContent = top
+    ? `Checkpoints: ${(top.checkpoint_seconds||[]).map(x=>x+'s').join(' → ')} · Expiry: ${top.terminal_expiry_sec ?? '—'}s\nExecuted evidence: ${(top.executed||{}).status || 'UNAVAILABLE'}\nQualification: ${top.qualification_status || 'NOT ELIGIBLE'}`
+    : (lab.empty_reason || 'SOURCE_EMPTY_OR_UNAVAILABLE');
+  document.getElementById('chase-policy-kpis').innerHTML = [
+    ['Schedules retained', lab.all_schedule_count ?? rows.length],
+    ['Evidence world', 'SHADOW ONLY'],
+    ['Leader label', lab.leader_label || 'INSUFFICIENT_EVIDENCE'],
+    ['Qualification', 'NOT ELIGIBLE'],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('chase-policy-body').innerHTML = rows.map((row, index) => {
+    const shadow = row.shadow || {};
+    const confidence = row.confidence || {};
+    const fillRate = row.fill_rate_pct == null ? 'UNAVAILABLE' : `${Number(row.fill_rate_pct).toFixed(2)}%`;
+    return `<tr><td>${index+1}</td><td><strong>${row.policy_id||'UNKNOWN'}</strong><br><small>${(row.checkpoint_seconds||[]).join('/')}s · expire ${row.terminal_expiry_sec ?? '—'}s</small></td>`
+      + `<td>${row.independent_opportunities||0}</td><td>${row.supported||0}</td><td>${row.full_fills||0} / ${row.partial_fills||0} / ${row.no_fills||0} / ${row.unsupported||0}</td>`
+      + `<td>${fillRate}</td><td>shadow net ${shadow.net_pnl_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.net_pnl_usd)} / EV ${shadow.ev_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.ev_usd)}<br><small>return ${shadow.net_return_pct ?? 'UNAVAILABLE'}% / ${shadow.ev_return_pct ?? 'UNAVAILABLE'}% · executed ${(row.executed||{}).pnl_usd ?? 'UNAVAILABLE'} / ${(row.executed||{}).ev_usd ?? 'UNAVAILABLE'}</small></td>`
+      + `<td>${shadow.max_drawdown_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.max_drawdown_usd)} / ${shadow.tail_loss_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.tail_loss_usd)}<br><small>${shadow.max_drawdown_pct ?? 'UNAVAILABLE'}% / ${shadow.tail_loss_pct ?? 'UNAVAILABLE'}%</small></td><td>${shadow.avg_mfe_pct ?? 'UNAVAILABLE'}% / ${shadow.avg_mae_pct ?? 'UNAVAILABLE'}%</td>`
+      + `<td>${row.coverage_pct ?? 'UNAVAILABLE'}% / ${confidence.label||'INSUFFICIENT'} / ${confidence.fill_rate_wilson_lower_95_pct ?? 'UNAVAILABLE'}%</td>`
+      + `<td>${(row.regimes||[]).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${row.qualification_status||'NOT ELIGIBLE'}</td></tr>`;
+  }).join('') || '<tr><td colspan="12">No signed compressed shadow schedule evidence is available in this generation.</td></tr>';
+  const proofs = proof.proofs || [];
+  const counts = proof.classification_counts || {};
+  document.getElementById('missed-proof-kpis').innerHTML = [
+    ['Proof rows', proof.proof_count ?? proofs.length],
+    ['Proven missed profit', counts.PROVEN_MISSED_PROFIT || 0],
+    ['Proven avoided loss', counts.PROVEN_AVOIDED_LOSS || 0],
+    ['Ambiguous', counts.AMBIGUOUS || 0],
+    ['Insufficient evidence', counts.INSUFFICIENT_EVIDENCE || 0],
+  ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  document.getElementById('missed-proof-body').innerHTML = proofs.slice(0, 100).map(row => {
+    const coverage = row.coverage || {};
+    return `<tr><td><strong>${row.classification}</strong></td><td>${row.episode_id||'—'}<br><small>${row.policy_id||'—'}</small></td><td>${row.direction||'—'}</td>`
+      + `<td>${row.conservative_touch ? 'TOUCHED' : 'NO TOUCH'} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : '$'+fmtUsd(row.net_pnl_usd)}</td>`
+      + `<td>${row.mfe_pct ?? 'UNAVAILABLE'}% / ${row.mae_pct ?? 'UNAVAILABLE'}%</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 0}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
+      + `<td>${row.regime||'UNAVAILABLE'} / ${row.adx ?? 'UNAVAILABLE'}</td><td>${(row.contraindications||[]).join('; ')||'none recorded'}</td></tr>`;
+  }).join('') || `<tr><td colspan="8">${proof.empty_reason || 'No proof rows exist.'}</td></tr>`;
 }
 
 async function loadChaseDelay() {
@@ -6311,6 +6420,7 @@ const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
   lanes: [loadLanes],
   ai: [loadAI], chase: [loadChase],
+  'chase-policy-lab': [loadChasePolicyLab],
   'chase-threshold': [loadChaseThreshold], 'chase-delay': [loadChaseDelay],
   combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
