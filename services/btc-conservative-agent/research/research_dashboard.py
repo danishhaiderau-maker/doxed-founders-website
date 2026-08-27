@@ -1450,7 +1450,11 @@ def _lane_rows(*, include_evidence: bool = False):
     evidence = {
         "status": (
             "CURRENT_GENERATION"
-            if bench_evidence.get("status") == "CURRENT_GENERATION"
+            if (
+                bench_evidence.get("status") == "CURRENT_GENERATION"
+                and str(bench.get("status") or "").upper()
+                == "CURRENT_SESSION_EVIDENCE"
+            )
             else "UNAVAILABLE_CURRENT_GENERATION"
         ),
         "benchmark": bench_evidence,

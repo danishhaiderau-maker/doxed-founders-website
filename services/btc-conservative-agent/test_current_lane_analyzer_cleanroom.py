@@ -179,6 +179,40 @@ def test_current_lanes_fail_closed_on_stale_revision_epoch_and_scope(monkeypatch
     assert lane["all_time_pnl"] == 0.0
 
 
+def test_current_lanes_treat_identity_matched_empty_receipt_as_insufficient(monkeypatch):
+    manifest = {
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "session_scope": "FRESH-COLLECTION",
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "reports": [{"file": "benchmark_vs_lanes_report.json"}],
+    }
+    empty_receipt = {
+        "status": "CURRENT_SESSION_NO_APPROVE_SNAPSHOTS",
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "epoch_id": "epoch-current",
+        "session_scope": "FRESH-COLLECTION",
+        "benchmark_lane": "CONTINUOUS",
+        "lanes": {},
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_iter_data_payloads",
+        lambda name: iter([(Path("published_reports") / name, empty_receipt, 1.0)]),
+    )
+    monkeypatch.setattr(dashboard, "_opportunity_lane_stats", lambda: {})
+
+    payload = dashboard.app.test_client().get("/api/lanes").get_json()
+
+    assert payload["evidence_status"] == "UNAVAILABLE_CURRENT_GENERATION"
+
+
 def test_current_lanes_never_reads_all_data_fallback(monkeypatch, tmp_path):
     manifest = {
         "generation_revision": "revision-current",
