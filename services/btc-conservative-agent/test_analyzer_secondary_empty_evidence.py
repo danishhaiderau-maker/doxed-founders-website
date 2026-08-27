@@ -210,6 +210,58 @@ def test_static_dashboard_renders_unavailable_money_as_na(tmp_path, monkeypatch)
     assert "Missed ladder profit: $0.00" not in html
 
 
+def test_money_formatters_collapse_near_zero_negative_values(tmp_path, monkeypatch):
+    analyzer = _load_analyzer()
+    assert analyzer._fmt_usd(-0.0049) == "0.00"
+    assert analyzer._fmt_usd(-0.0051) == "-0.01"
+    assert analyzer._fmt_usd(0.0049) == "0.00"
+    findings = analyzer._generate_research_findings({
+        "performance": {"trades": 1, "net_pnl_usd": -0.0049},
+        "real_edge": {"approve_attempts": 1, "gate_damage_usd": -0.0049},
+        "benchmark": {"best_lane": None, "worst_lane": None},
+        "scenario_c": {"fast_cut_trades": 0, "leakage_left_usd": -0.0049},
+        "coverage": {},
+        "blocked_opportunity_usd": -0.0049,
+    })
+    assert all("$-0.00" not in finding for finding in findings)
+    assert any("Gate damage $0.00" in finding for finding in findings)
+
+    output = tmp_path / "analysis_dashboard.html"
+    monkeypatch.setattr(analyzer, "ANALYSIS_DASHBOARD_HTML", str(output))
+    empty_report = tmp_path / "empty.json"
+    empty_report.write_text("{}", encoding="utf-8")
+    for attr in (
+        "BENCHMARK_VS_LANES_REPORT_FILE",
+        "AI_CALIBRATION_REPORT_FILE",
+        "CHASE_ATTRIBUTION_REPORT_FILE",
+        "SCENARIO_C_LEAKAGE_REPORT_FILE",
+        "HORIZON_PROFITABILITY_REPORT_FILE",
+        "FAST_CUT_SURVIVOR_REPORT_FILE",
+    ):
+        monkeypatch.setattr(analyzer, attr, str(empty_report))
+    payload = {
+        "performance": {
+            "trades": 1,
+            "win_rate_pct": 0,
+            "net_pnl_usd": -0.0049,
+            "expectancy_usd": -0.0049,
+            "mfe_capture_pct": 0,
+        },
+        "real_edge": {"approve_attempts": 1, "gate_damage_usd": -0.0049},
+        "scenario_c": {},
+        "coverage": {},
+        "analysis_provenance": {},
+    }
+    assert analyzer.write_analysis_dashboard_html(payload) is True
+    html = output.read_text(encoding="utf-8")
+    assert "$-0.00" not in html
+    assert "Net PnL</div><div class=\"val\">$0.00" in html
+    assert "Gate Damage</div><div class=\"val\">$0.00" in html
+
+    dashboard_source = (ROOT / "research" / "research_dashboard.py").read_text(encoding="utf-8")
+    assert "if (Math.abs(value) < 0.005) return '0.00';" in dashboard_source
+
+
 def test_benchmark_relative_scorecard_keeps_empty_deltas_unavailable(tmp_path, monkeypatch):
     analyzer = _load_analyzer()
     monkeypatch.setattr(

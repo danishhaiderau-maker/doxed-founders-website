@@ -5064,7 +5064,13 @@ if (showAllEl) {
     loadLanes();
   });
 }
-function fmtUsd(v) { return v == null ? 'n/a' : (v >= 0 ? '+' : '') + Number(v).toFixed(2); }
+function fmtUsd(v) {
+  if (v == null) return 'n/a';
+  const value = Number(v);
+  if (!Number.isFinite(value)) return 'n/a';
+  if (Math.abs(value) < 0.005) return '0.00';
+  return (value > 0 ? '+' : '') + value.toFixed(2);
+}
 function fmtExecutionUsd(v) { return v == null ? 'UNAVAILABLE' : '$' + fmtUsd(v); }
 function fmtAdxBucket(v) {
   const key = String(v || '').toLowerCase();

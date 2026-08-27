@@ -435,7 +435,10 @@ def _fmt_usd(val, digits=2):
     if val is None:
         return "n/a"
     try:
-        return f"${float(val):.{digits}f}"
+        value = float(val)
+        if round(value, digits) == 0:
+            value = 0.0
+        return f"${value:.{digits}f}"
     except (TypeError, ValueError):
         return "n/a"
 
@@ -17678,11 +17681,11 @@ def _generate_research_findings(payload):
     if bl.get("lane") and net:
         share = 100.0 * float(bl.get("pnl") or 0) / net if net else 0
         findings.append(
-            f"{bl['lane']} lane accounts for {share:.0f}% of net profit (${float(bl.get('pnl', 0)):+.2f})."
+            f"{bl['lane']} lane accounts for {share:.0f}% of net profit (${_fmt_usd(bl.get('pnl'))})."
         )
     if wl.get("lane"):
         findings.append(
-            f"Lowest lane: {wl['lane']} at ${float(wl.get('pnl', 0)):+.2f} "
+            f"Lowest lane: {wl['lane']} at ${_fmt_usd(wl.get('pnl'))} "
             f"({int(wl.get('fills', 0))} fills) — review if sample grows."
         )
     if bc.get("bucket"):
@@ -17702,7 +17705,7 @@ def _generate_research_findings(payload):
     fc_loss = sum(float(x.get("pnl_usd") or 0) for x in exit_mix if "FAST_CUT" in str(x.get("reason", "")))
     if fc_n:
         findings.append(
-            f"Fast-cut exits: {fc_n} trades, ${fc_loss:+.2f} booked"
+            f"Fast-cut exits: {fc_n} trades, ${_fmt_usd(fc_loss)} booked"
             f" — {'not a major leak' if fc_loss > -10 else 'review thesis cut threshold'}."
         )
     else:
@@ -17712,21 +17715,21 @@ def _generate_research_findings(payload):
     if best_exit:
         findings.append(
             f"Dominant exit: {best_exit.get('reason')} "
-            f"({best_exit.get('n')} trades, ${float(best_exit.get('pnl_usd', 0)):+.2f})."
+            f"({best_exit.get('n')} trades, ${_fmt_usd(best_exit.get('pnl_usd'))})."
         )
 
     gate_raw = re.get("gate_damage_usd")
     if int(re.get("approve_attempts") or 0) > 0 and gate_raw is not None:
         gate = float(gate_raw)
         if abs(gate) < 5:
-            findings.append(f"Gate damage ${gate:+.2f} — post-AI gates are not the main PnL leak.")
+            findings.append(f"Gate damage ${_fmt_usd(gate)} — post-AI gates are not the main PnL leak.")
         else:
-            findings.append(f"Gate damage ${gate:+.2f} — investigate blocked APPROVEs.")
+            findings.append(f"Gate damage ${_fmt_usd(gate)} — investigate blocked APPROVEs.")
 
     left = sc.get("leakage_left_usd")
     if left is not None:
         findings.append(
-            f"Scenario C left ${float(left):.1f} on table vs peak — exit timing is the bigger lever than entry gates."
+            f"Scenario C left ${_fmt_usd(left)} on table vs peak — exit timing is the bigger lever than entry gates."
         )
 
     edge_verdict = payload.get("edge_verdict")
@@ -17748,7 +17751,7 @@ def _generate_research_findings(payload):
 
     blocked_usd = payload.get("blocked_opportunity_usd")
     if blocked_usd is not None:
-        findings.append(f"Blocked shadow opportunity (heuristic): ${float(blocked_usd):+.2f}.")
+        findings.append(f"Blocked shadow opportunity (heuristic): ${_fmt_usd(blocked_usd)}.")
 
     top_leak = payload.get("top_leakage") or {}
     if top_leak.get("overall_left_usd"):
@@ -18669,7 +18672,10 @@ def _fmt_usd(val, default="n/a"):
     if val is None:
         return default
     try:
-        return f"{float(val):+.2f}"
+        value = float(val)
+        if round(value, 2) == 0:
+            return "0.00"
+        return f"{value:+.2f}"
     except (TypeError, ValueError):
         return default
 
@@ -19087,8 +19093,11 @@ def write_analysis_dashboard_html(payload):
         if value is None:
             return "$n/a"
         try:
+            value = float(value)
+            if round(value, 2) == 0:
+                return "$0.00"
             spec = "+.2f" if signed else ".2f"
-            return f"${format(float(value), spec)}"
+            return f"${format(value, spec)}"
         except (TypeError, ValueError):
             return "$n/a"
 
@@ -19111,7 +19120,7 @@ def write_analysis_dashboard_html(payload):
             continue
         cal_rows += (
             f"<tr><td>{esc(b.get('bucket'))}</td><td>{b.get('trades')}</td>"
-            f"<td>{b.get('win_rate_pct')}%</td><td>${float(b.get('sum_pnl_usd') or 0):.2f}</td></tr>\n"
+            f"<td>{b.get('win_rate_pct')}%</td><td>{html_usd(b.get('sum_pnl_usd'))}</td></tr>\n"
         )
 
     ch = payload.get("chase") or {}
