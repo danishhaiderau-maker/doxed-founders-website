@@ -9,6 +9,7 @@ from research_v3_bridge import dual_write_provisional_source
 from research_v3_bridge import dual_write_lane_decision
 from research_v3_bridge import dual_write_lane_entry_resolution
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
+from research_v3_bridge import reconcile_overdue_expected_order_decisions
 from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_store import V3EvidenceStore
 
@@ -35,6 +36,68 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def _lost_expected_order(self, tmp):
+        dual_write_lane_decision(
+            {
+                "trade_id": "scan-lost", "shared_ai_call_id": "scan-lost",
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "research_lane": "CONTINUOUS",
+            },
+            lane="CONTINUOUS", policy_decision="ACCEPT",
+            execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+            epoch_id="epoch-v3-test", data_dir=tmp,
+            lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 60},
+        )
+        # Model the historical interruption: decision survived, pre-order
+        # awaiting state and its lifecycle row did not.
+        V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("lifecycle").unlink()
+
+    def test_restart_ledger_reconciliation_heals_already_lost_expectation_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            first = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000,
+                runtime_revision="repair-rev",
+            )
+            second = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2001,
+                runtime_revision="repair-rev",
+            )
+            self.assertEqual(first["reconciled"], 1)
+            self.assertEqual(second["reconciled"], 0)
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().strip())
+            self.assertEqual(row["entry_resolution"], "NO_ORDER")
+            self.assertEqual(row["policy_signature"], json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+                .ledger_path("decision").read_text().strip()
+            )["policy_signature"])
+            self.assertEqual(
+                row["restart_recovery_provenance"]["runtime_revision"],
+                "repair-rev",
+            )
+
+    def test_restart_ledger_reconciliation_refuses_active_or_not_overdue_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            decision = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("decision").read_text().strip())
+            active = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000,
+                active_rows=[decision], runtime_revision="repair-rev",
+            )
+            early = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=1001,
+                runtime_revision="repair-rev",
+            )
+            self.assertEqual(active["resolved_or_active"], 1)
+            self.assertEqual(early["not_overdue"], 1)
+            self.assertFalse(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").exists())
+
     def test_lane_entry_receipts_are_append_only_and_no_order_has_no_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = {

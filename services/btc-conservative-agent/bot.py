@@ -176,7 +176,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -41054,6 +41054,30 @@ def main():
         set_execution_paused("SIMULATION_ONLY")
     load_positions()
     load_paper_lifecycle()
+    try:
+        active_v3_rows = [
+            row for row in [*open_positions, *pending_orders]
+            if isinstance(row, dict)
+        ]
+        active_v3_rows.extend(
+            entry.get("signal_ref") for entry in trades_map.values()
+            if isinstance(entry, dict) and isinstance(entry.get("signal_ref"), dict)
+        )
+        recovery = reconcile_overdue_expected_order_decisions(
+            epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            active_rows=active_v3_rows, runtime_revision=_runtime_git_rev(),
+        )
+        if recovery.get("reconciled"):
+            logger.warning(
+                f"[COLLECTOR_V3] restart reconciled overdue lost pre-order "
+                f"expectations={recovery['reconciled']} [PIPELINE ENFORCEMENT]"
+            )
+    except Exception as exc:
+        # Ledger uncertainty is fail closed: never infer that an order was absent.
+        logger.error(
+            f"[COLLECTOR_V3] restart ledger reconciliation refused: {exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
     rebuild_state_from_snapshots()
     reconcile_restored_paper_terminal_conflicts()
     reconcile_stale_signals()

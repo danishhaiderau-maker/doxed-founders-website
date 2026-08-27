@@ -1,7 +1,7 @@
 """Dual-write bridge from immutable v2.2 events into normalized V3 ledgers."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 import copy
 from datetime import datetime
 from functools import lru_cache
@@ -569,6 +569,8 @@ def dual_write_lane_decision(
         "two_second_or_better": False,
         "reason": "SIGNAL_TIMESTAMP_MISSING",
     }
+
+
     if signal_ts > 0:
         segment_rows, segment_coverage = _pre_signal_market_segment(
             str(Path(data_dir).resolve()), signal_ts,
@@ -654,6 +656,87 @@ def dual_write_lane_decision(
         "writes": [opportunity, *segment_writes, decision, resolution["write"]],
         "store_verification": store.verify(),
     }
+
+
+def reconcile_overdue_expected_order_decisions(
+    *, epoch_id: str, data_dir: str, active_rows: Iterable[Mapping[str, Any]] = (),
+    observed_ts: float | None = None, runtime_revision: str = "",
+) -> dict[str, int]:
+    """Close durable pre-order expectations lost by a runtime interruption."""
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+
+    def rows(name: str) -> list[dict[str, Any]]:
+        path = store.ledger_path(name)
+        if not path.exists():
+            return []
+        result = []
+        with path.open("r", encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, 1):
+                if not line.endswith("\n"):
+                    raise ValueError(f"TRUNCATED_JSONL_LINE:{name}:{line_no}")
+                result.append(json.loads(line))
+        return result
+
+    def key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+        return (str(row.get("episode_id") or ""), str(row.get("policy_signature") or ""),
+                str(row.get("research_lane") or "").upper())
+
+    decisions = [row for row in rows("decision")
+                 if str(row.get("epoch_id") or "") == str(epoch_id)
+                 and row.get("order_intent_expected") is True]
+    intent_keys = {key(row) for row in rows("order_intent")
+                   if str(row.get("epoch_id") or "") == str(epoch_id)}
+    terminal_keys = {key(row) for row in rows("lifecycle")
+                     if str(row.get("epoch_id") or "") == str(epoch_id)
+                     and row.get("resolution_scope") == "LANE_ENTRY"
+                     and str(row.get("entry_resolution") or "").upper()
+                     in {"ORDER_SUBMITTED", "NO_ORDER"}}
+    active_keys = {key(row) for row in active_rows if all(key(row))}
+    now_ts = float(observed_ts if observed_ts is not None else time.time())
+    result = {"expected": len(decisions), "reconciled": 0, "duplicates": 0,
+              "not_overdue": 0, "resolved_or_active": 0}
+    for decision in decisions:
+        identity = key(decision)
+        if not all(identity):
+            continue
+        if identity in intent_keys or identity in terminal_keys or identity in active_keys:
+            result["resolved_or_active"] += 1
+            continue
+        deadline = float(decision.get("resolution_deadline_ts") or 0)
+        if deadline > now_ts:
+            result["not_overdue"] += 1
+            continue
+        episode_id, policy_signature, lane = identity
+        row = {
+            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order",
+            "episode_id": episode_id, "event_id": str(decision.get("event_id") or ""),
+            "shared_ai_call_id": str(decision.get("shared_ai_call_id") or ""),
+            "research_lane": lane, "policy_signature": policy_signature,
+            "resolution_scope": "LANE_ENTRY", "entry_resolution": "NO_ORDER",
+            "entry_resolution_terminal": True,
+            "exact_reason": "RUNTIME_RESTART_LEDGER_RECONCILIATION",
+            "observed_ts": now_ts, "resolution_deadline_ts": deadline,
+            "observation_status": "NO_ORDER", "outcome_state": "NO_TRADE",
+            "terminal": True, "ranking_eligible": False, "ranking_blocker": "NO_ORDER",
+            "restart_recovery_provenance": {
+                "schema": "v3_restart_ledger_reconciliation_v1",
+                "source_decision_record_id": str(decision.get("record_id") or ""),
+                "source_epoch_id": str(epoch_id), "source_resolution_deadline_ts": deadline,
+                "reconciled_at": now_ts, "runtime_revision": str(runtime_revision or "UNKNOWN"),
+            },
+        }
+        for field in ("collection_epoch_id", "opportunity_id", "policy_epoch_id",
+                      "policy_comparability_key", "paper_policy_spec", "policy_execution_scope",
+                      "relay_capability", "market_context_segment_refs", "market_context_segment_coverage"):
+            if field in decision:
+                row[field] = copy.deepcopy(decision[field])
+        write = store.append("lifecycle", row)
+        if write.get("written"):
+            result["reconciled"] += 1
+            terminal_keys.add(identity)
+        else:
+            result["duplicates"] += 1
+    return result
 
 
 def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
