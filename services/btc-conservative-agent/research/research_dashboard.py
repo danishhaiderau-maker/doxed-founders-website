@@ -3983,6 +3983,44 @@ def _capture_bundle_member(path: Path) -> tuple[bytes, dict]:
     return _read_generation_fenced(path)
 
 
+def _count_valid_compressed_shadow_rows(payload: bytes) -> int:
+    """Count signed shadow schedule rows, never legacy touch-grid rows."""
+    count = 0
+    for raw_line in payload.decode("utf-8-sig", errors="strict").splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            row = json.loads(raw_line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("schema") != "compressed_chase_shadow_v1":
+            continue
+        if (
+            row.get("execution_class") != "SHADOW_ONLY"
+            or row.get("places_order") is not False
+            or row.get("relay_eligible") is not False
+            or row.get("event") not in {"STAGE", "EXPIRED"}
+        ):
+            continue
+        if not all(
+            str(row.get(name) or "").strip()
+            for name in (
+                "trade_id",
+                "shared_ai_call_id",
+                "opportunity_id",
+                "episode_id",
+                "epoch_id",
+                "policy_id",
+                "policy_signature",
+            )
+        ):
+            continue
+        count += 1
+    return count
+
+
 @app.route("/download/everything")
 def download_everything():
     """One verified ZIP containing raw research data, reports, sessions, genome,
@@ -4400,6 +4438,7 @@ def download_everything():
         },
     }
     buf = io.BytesIO()
+    compressed_shadow_row_count = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for arcname, path in sorted(unique.items()):
             try:
@@ -4421,6 +4460,23 @@ def download_everything():
                 }
             )
             zf.writestr(arcname, data)
+            if arcname == "raw/current_fly_mirror/chase_offset_touch_grid.jsonl":
+                compressed_shadow_row_count = _count_valid_compressed_shadow_rows(data)
+        compressed_present = compressed_shadow_row_count > 0
+        compressed_status = manifest["notes"]["conditional_analyzer_raw_status"][
+            "chase_offset_touch_grid.jsonl"
+        ]
+        compressed_status["present"] = compressed_present
+        compressed_status["absence_status"] = (
+            None if compressed_present else "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS"
+        )
+        compressed_status["valid_compressed_shadow_rows"] = compressed_shadow_row_count
+        compressed_coverage = manifest["notes"]["component_coverage"][
+            "signed_compressed_shadow_schedule"
+        ]
+        compressed_coverage["present"] = compressed_present
+        compressed_coverage["absence_status"] = compressed_status["absence_status"]
+        compressed_coverage["valid_compressed_shadow_rows"] = compressed_shadow_row_count
         coherence_after = {
             name: _snapshot_generation(path)
             for name, path in coherence_anchor_paths.items()
@@ -4438,15 +4494,23 @@ def download_everything():
             datetime.now(timezone.utc).isoformat()
         )
         manifest["capture_contract"]["coherence_verified"] = True
-        zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
-        zf.writestr(
-            "README.txt",
+        readme = (
             "Doxxed Crypto all-in-one research bundle.\n"
-            "MANIFEST.json lists every included file, size, and SHA-256 checksum.\n"
+            "MANIFEST.json lists every included payload file except itself, "
+            "with size and SHA-256 checksum.\n"
             "raw/current_fly_mirror is the configured current data source; "
             "raw/research_history is retained separately.\n"
-            "Past Analysis is included only after a preserved analysis exists.\n",
-        )
+            "Past Analysis is included only after a preserved analysis exists.\n"
+        ).encode("utf-8")
+        manifest["files"].append({
+            "path": "README.txt",
+            "bytes": len(readme),
+            "sha256": hashlib.sha256(readme).hexdigest(),
+            "capture_mode": "generated_bundle_member_v1",
+            "captured_bytes": len(readme),
+        })
+        zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
+        zf.writestr("README.txt", readme)
     buf.seek(0)
     return send_file(
         buf,

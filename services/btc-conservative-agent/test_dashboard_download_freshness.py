@@ -434,6 +434,13 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         )
         (mirror / "signal_persist.log").write_text("stage=kept\n", encoding="utf-8")
         (mirror / "counterfactual.jsonl").write_text("{}\n", encoding="utf-8")
+        (mirror / "chase_offset_touch_grid.jsonl").write_text(
+            json.dumps({
+                "schema": "chase_offset_touch_grid_v1",
+                "event": "ARMED",
+            }) + "\n",
+            encoding="utf-8",
+        )
         _write_csv(root / "trades_3factor.csv", [{"trade_id": "history"}])
         _write_json(root / "historical_trade_cohort_report.json", {"cohorts": {}})
         for db_path in (
@@ -576,6 +583,22 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         for name in dashboard.CURRENT_PATHWAY_RECEIPTS
                     }
                     indexed = {item["path"]: item for item in manifest["files"]}
+                    assert "README.txt" in indexed
+                    assert indexed["README.txt"]["capture_mode"] == (
+                        "generated_bundle_member_v1"
+                    )
+                    assert set(names) - {"MANIFEST.json"} == set(indexed)
+                    compressed_status = manifest["notes"][
+                        "conditional_analyzer_raw_status"
+                    ]["chase_offset_touch_grid.jsonl"]
+                    assert compressed_status == {
+                        "present": False,
+                        "absence_status": "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS",
+                        "valid_compressed_shadow_rows": 0,
+                    }
+                    assert manifest["notes"]["component_coverage"][
+                        "signed_compressed_shadow_schedule"
+                    ] == compressed_status
                     assert manifest["capture_contract"]["schema"] == (
                         "generation_fenced_bundle_capture_v2"
                     )
@@ -601,6 +624,38 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         payload = zf.read(name)
                         assert record["bytes"] == len(payload)
                         assert record["sha256"] == hashlib.sha256(payload).hexdigest()
+                (mirror / "chase_offset_touch_grid.jsonl").write_text(
+                    json.dumps({
+                        "schema": "compressed_chase_shadow_v1",
+                        "event": "STAGE",
+                        "execution_class": "SHADOW_ONLY",
+                        "places_order": False,
+                        "relay_eligible": False,
+                        "trade_id": "shadow-1",
+                        "shared_ai_call_id": "ai-1",
+                        "opportunity_id": "opp-1",
+                        "episode_id": "episode-1",
+                        "epoch_id": "epoch-test",
+                        "policy_id": "compressed-policy",
+                        "policy_signature": "policy-signature",
+                    }) + "\n",
+                    encoding="utf-8",
+                )
+                populated_shadow = client.get("/download/everything")
+                assert populated_shadow.status_code == 200
+                with zipfile.ZipFile(io.BytesIO(populated_shadow.data)) as zf:
+                    populated_manifest = json.loads(zf.read("MANIFEST.json"))
+                    populated_status = populated_manifest["notes"][
+                        "conditional_analyzer_raw_status"
+                    ]["chase_offset_touch_grid.jsonl"]
+                    assert populated_status == {
+                        "present": True,
+                        "absence_status": None,
+                        "valid_compressed_shadow_rows": 1,
+                    }
+                    assert populated_manifest["notes"]["component_coverage"][
+                        "signed_compressed_shadow_schedule"
+                    ] == populated_status
                 (mirror / "v3" / "ledgers" / "execution.jsonl").unlink()
                 empty_execution = client.get("/download/everything")
                 assert empty_execution.status_code == 200
