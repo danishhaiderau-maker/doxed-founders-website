@@ -13666,14 +13666,29 @@ def edge_incremental_value_report(trades=None, session=None):
     baseline = filters[0] if filters else {}
     best_ev = baseline
     for row in filters[1:]:
-        if row["approves"] >= 10 and row.get("ev_usd", 0) > best_ev.get("ev_usd", -999):
+        row_ev = row.get("ev_usd")
+        best_ev_value = best_ev.get("ev_usd")
+        if (
+            row["approves"] >= 10
+            and row_ev is not None
+            and (best_ev_value is None or row_ev > best_ev_value)
+        ):
             best_ev = row
 
     improves_wr = any(
-        f["min_edge"] > 0 and f["approves"] >= 10 and f["win_rate_pct"] > baseline.get("win_rate_pct", 0) + 2
+        f["min_edge"] > 0
+        and f["approves"] >= 10
+        and f.get("win_rate_pct") is not None
+        and baseline.get("win_rate_pct") is not None
+        and f["win_rate_pct"] > baseline["win_rate_pct"] + 2
         for f in filters
     )
-    improves_ev = best_ev.get("min_edge", 0) > 0 and best_ev.get("ev_usd", 0) > baseline.get("ev_usd", 0) + 0.15
+    improves_ev = (
+        best_ev.get("min_edge", 0) > 0
+        and best_ev.get("ev_usd") is not None
+        and baseline.get("ev_usd") is not None
+        and best_ev["ev_usd"] > baseline["ev_usd"] + 0.15
+    )
     improves_ladder = any(
         f["min_edge"] > 0 and f["ladder_known_fills"] >= 5
         and f["ladder_hit_pct"] > baseline.get("ladder_hit_pct", 0) + 3
