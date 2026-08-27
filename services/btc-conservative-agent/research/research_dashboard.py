@@ -4671,6 +4671,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <section id="sec-lanes">
     <h2>Current Lane Analysis</h2>
     <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
+    <p class="note" id="lanes-evidence-note"></p>
     <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual results never count as fills, executed PnL, or strategy qualification.</p>
     <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
@@ -5235,11 +5236,19 @@ async function loadLanes() {
   const current = await rCurrent.json();
   const noteCurrent = document.getElementById('lanes-filter-note');
   if (noteCurrent) noteCurrent.textContent = current.lane_filter_note || noteCurrent.textContent;
+  const evidenceNote = document.getElementById('lanes-evidence-note');
+  const currentAvailable = current.evidence_status === 'CURRENT_GENERATION';
+  if (evidenceNote) {
+    const blockers = (((current.evidence || {}).benchmark || {}).blockers || []).join(', ');
+    evidenceNote.textContent = currentAvailable
+      ? 'Evidence status: CURRENT GENERATION — revision, source data, epoch and session scope match the atomic report manifest.'
+      : `Evidence status: INSUFFICIENT CURRENT-GENERATION EXECUTION EVIDENCE${blockers ? ` — ${blockers}` : ''}. Historical results are not substituted.`;
+  }
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
     `<tr><td>${row.lane || row.research_lane || ''}</td><td>${row.status || row.pathway_status || 'COLLECTING'}</td>`
-    + `<td>${row.approves || 0}</td><td>${row.executed_closes || 0}</td>`
-    + `<td>$${fmtUsd(row.pnl || 0)}</td><td>$${fmtUsd(row.ev || 0)}</td>`
-    + `<td>${row.counterfactual_closes || 0}</td><td>$${fmtUsd(row.counterfactual_pnl || 0)}</td></tr>`
+    + `<td>${row.approves || 0}</td><td>${currentAvailable ? (row.executed_closes || 0) : '—'}</td>`
+    + `<td>${currentAvailable ? `$${fmtUsd(row.pnl || 0)}` : '—'}</td><td>${currentAvailable ? `$${fmtUsd(row.ev || 0)}` : '—'}</td>`
+    + `<td>${currentAvailable ? (row.counterfactual_closes || 0) : '—'}</td><td>${currentAvailable ? `$${fmtUsd(row.counterfactual_pnl || 0)}` : '—'}</td></tr>`
   ).join('') || '<tr><td colspan="8">No current-lane evidence yet.</td></tr>';
   return;
 }async function loadChase() {
