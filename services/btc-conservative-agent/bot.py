@@ -25629,7 +25629,15 @@ def reset_all_research_files(*, archive_path: str = None) -> dict:
                 ],
             }
     deleted, errors = _delete_paths(live_paths)
-    purge = purge_quarantine_archives(os.getcwd(), preserve_research_archive=True)
+    # Fly runs from data/runtime while research/ is a sibling volume path
+    # reached through a link. Use their verified common data root so the purge
+    # guard accepts only that volume instead of falsely treating the canonical
+    # genome quarantine as outside the runtime boundary.
+    runtime_root = os.path.commonpath([
+        str(Path(os.getcwd()).resolve()),
+        str(Path("research/genome/epoch_quarantine").resolve()),
+    ])
+    purge = purge_quarantine_archives(runtime_root, preserve_research_archive=True)
     errors.extend(purge.get("errors") or [])
     deletion_receipt = None
     if archive_path and not errors:

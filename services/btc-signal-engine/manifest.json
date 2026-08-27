@@ -3,7 +3,7 @@
   "combo_version": "2026-08-27",
   "exit_version": "scenario-c-v4",
   "benchmark_lane": "CONTINUOUS",
-  "signal_hash": "beec7cd03e49",
+  "signal_hash": "0b4f4acf7e93",
   "source": "bybit-15m-research-bot/bybit_bot.py",
-  "updated_at": "2026-08-27T20:47:18.434Z"
+  "updated_at": "2026-08-27T20:56:25.252Z"
 }
