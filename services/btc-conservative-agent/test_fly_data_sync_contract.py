@@ -726,6 +726,49 @@ def test_jsonl_writer_external_truncation_invalidates_receipt(tmp_path):
     assert (quarantine_dirs[0] / target.name).read_bytes() == b'{"row":'
 
 
+def test_jsonl_writer_restored_mtime_prefix_mutation_invalidates_on_ctime(tmp_path):
+    namespace = _load_jsonl_writer(tmp_path)
+    target = tmp_path / "ai_input_log.jsonl"
+    target.write_text(
+        "".join(json.dumps({"row": index, "payload": "x" * 80}) + "\n"
+                for index in range(2000)),
+        encoding="utf-8",
+    )
+    assert namespace["_safe_append_jsonl"](
+        str(target), {"row": 2000, "payload": "x" * 80}, "AI_INPUT"
+    )
+    before = target.stat()
+    content = bytearray(target.read_bytes())
+    mutation_at = content.find(b'"row": 100')
+    assert 0 <= mutation_at < len(content) - 64 * 1024
+    content[mutation_at + len(b'"row": ')] = ord("X")
+    target.write_bytes(content)
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    # Windows exposes creation time as st_ctime, while production Linux exposes
+    # inode change time. Model the production stat transition explicitly when
+    # the host cannot provide it so this regression remains cross-platform.
+    real_signature = namespace["_jsonl_validation_signature"]
+    current = real_signature(str(target))
+    if current[4] == before.st_ctime_ns:
+        namespace["_jsonl_validation_signature"] = (
+            lambda path: real_signature(path)[:4] + (before.st_ctime_ns + 1,)
+        )
+
+    assert namespace["_safe_append_jsonl"](
+        str(target), {"row": 2001, "payload": "x" * 80}, "AI_INPUT"
+    )
+    quarantine_dirs = list((tmp_path / "corrupt_evidence_quarantine").iterdir())
+    assert len(quarantine_dirs) == 1
+    receipt = json.loads(
+        (quarantine_dirs[0] / "quarantine_manifest.json").read_text()
+    )
+    assert receipt["bad_line"] == 101
+    assert [json.loads(line) for line in target.read_text().splitlines()] == [
+        {"row": 2001, "payload": "x" * 80}
+    ]
+
+
 def test_jsonl_receipt_failure_never_retries_a_durable_row(tmp_path):
     namespace = _load_jsonl_writer(tmp_path)
     target = tmp_path / "ai_input_log.jsonl"

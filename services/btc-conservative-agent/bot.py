@@ -40476,6 +40476,7 @@ def _jsonl_validation_signature(path: str):
     stat = os.stat(path)
     return (
         int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns),
+        int(stat.st_ctime_ns),
     )
 
 
@@ -40514,6 +40515,7 @@ def _persist_jsonl_validation_receipt(path: str, signature) -> None:
         "inode": signature[1],
         "size_bytes": signature[2],
         "mtime_ns": signature[3],
+        "ctime_ns": signature[4],
         "tail_bytes": min(signature[2], _JSONL_VALIDATION_TAIL_BYTES),
         "tail_sha256": _jsonl_validation_tail_sha256(key, signature[2]),
     }
@@ -40535,6 +40537,7 @@ def _jsonl_validation_receipt_matches(path: str, signature) -> bool:
         expected = (
             int(receipt["device"]), int(receipt["inode"]),
             int(receipt["size_bytes"]), int(receipt["mtime_ns"]),
+            int(receipt["ctime_ns"]),
         )
         if (
             receipt.get("schema") != "jsonl_validation_receipt_v1"
