@@ -69,7 +69,7 @@ switch ($Action) {
       Stop-ListenPortFast $AnalyzerPort | Out-Null
       Start-Sleep -Seconds 1
     }
-    if (-not (Test-AnalyzerHealthy)) {
+    if (-not (Test-AnalyzerAlive)) {
       if ($isLocal) {
         Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
       } else {

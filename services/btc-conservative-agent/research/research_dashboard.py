@@ -474,9 +474,35 @@ def _load_bot_session():
 
 
 def _integrity_payload() -> dict:
-    rep = _read_report(ANALYZER_INTEGRITY_FILE)
+    return _integrity_with_generation_freshness(
+        _read_report(ANALYZER_INTEGRITY_FILE) or {}
+    )
+
+
+def _integrity_with_generation_freshness(receipt: dict | None) -> dict:
+    rep = dict(receipt or {})
     if not rep:
-        return {"valid": True, "report_status": "UNKNOWN", "checks": [], "banner": None}
+        rep = {"valid": True, "report_status": "UNKNOWN", "checks": [], "banner": None}
+    freshness = _generation_freshness_meta()
+    rep["generation_freshness"] = freshness
+    if not freshness["current"]:
+        rep["valid"] = False
+        rep["report_status"] = "STALE_GENERATION"
+        rep["banner"] = "STALE ANALYZER GENERATION — QUALIFICATION BLOCKED"
+        failed = list(rep.get("failed_checks") or [])
+        failed.append({
+            "check": "generation_revision_and_epoch_parity",
+            "expected": {
+                "mirror_source_revision": freshness.get("mirror_source_revision"),
+                "mirror_epoch_id": freshness.get("mirror_epoch_id"),
+            },
+            "found": {
+                "generation_revision": freshness.get("generation_revision"),
+                "generation_epoch_id": freshness.get("generation_epoch_id"),
+            },
+            "reasons": freshness.get("reasons") or [],
+        })
+        rep["failed_checks"] = failed
     return rep
 
 
@@ -515,6 +541,11 @@ def _summary_stale_meta(compact: dict) -> dict:
             stale = True
             reasons.append("Trades CSV empty but report shows historical trades")
 
+    freshness = _generation_freshness_meta()
+    if not freshness["current"]:
+        stale = True
+        reasons.extend(freshness["reasons"])
+
     return {
         "stale": stale,
         "reasons": reasons,
@@ -523,6 +554,7 @@ def _summary_stale_meta(compact: dict) -> dict:
         "bot_version": session.get("bot_version"),
         "trades_csv_rows": trades_rows,
         "report_generated_at": gen_at,
+        "generation_freshness": freshness,
     }
 
 
@@ -894,6 +926,68 @@ def _mirror_source_revision() -> str | None:
     return None
 
 
+def _identity_matches(left, right) -> bool:
+    """Compare full or intentionally abbreviated immutable identities."""
+    left = str(left or "").strip()
+    right = str(right or "").strip()
+    return bool(left and right and (left.startswith(right) or right.startswith(left)))
+
+
+def _generation_freshness_meta(manifest: dict | None = None) -> dict:
+    """Fail closed unless the published generation matches mirror revision and epoch.
+
+    Saved reports remain readable as historical evidence during synchronization,
+    but this receipt prevents them from looking current or authorizing a policy.
+    """
+    manifest = manifest if isinstance(manifest, dict) else (
+        _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    )
+    session = _load_bot_session() or {}
+    generation_revision = manifest.get("generation_revision")
+    mirror_revision = _mirror_source_revision()
+    generation_epoch = (manifest.get("fresh_epoch") or {}).get("epoch_id")
+    mirror_epoch = (
+        session.get("collector_v22_epoch_id")
+        or session.get("fresh_epoch_id")
+        or session.get("epoch_id")
+    )
+    revision_parity = (
+        "MATCH" if _identity_matches(generation_revision, mirror_revision)
+        else "MISMATCH" if generation_revision and mirror_revision
+        else "UNAVAILABLE"
+    )
+    epoch_parity = (
+        "MATCH" if _identity_matches(generation_epoch, mirror_epoch)
+        else "MISMATCH" if generation_epoch and mirror_epoch
+        else "UNAVAILABLE"
+    )
+    reasons = []
+    if revision_parity != "MATCH":
+        reasons.append(
+            "Analyzer generation revision does not match the canonical Fly mirror"
+            if revision_parity == "MISMATCH"
+            else "Analyzer or mirror revision identity is unavailable"
+        )
+    if epoch_parity != "MATCH":
+        reasons.append(
+            "Analyzer generation epoch does not match the canonical Fly mirror epoch"
+            if epoch_parity == "MISMATCH"
+            else "Analyzer or mirror epoch identity is unavailable"
+        )
+    return {
+        "current": revision_parity == "MATCH" and epoch_parity == "MATCH",
+        "stale": revision_parity != "MATCH" or epoch_parity != "MATCH",
+        "revision_parity": revision_parity,
+        "epoch_parity": epoch_parity,
+        "generation_revision": generation_revision,
+        "mirror_source_revision": mirror_revision,
+        "generation_epoch_id": generation_epoch,
+        "mirror_epoch_id": mirror_epoch,
+        "reasons": reasons,
+        "qualification_allowed": revision_parity == "MATCH" and epoch_parity == "MATCH",
+    }
+
+
 def _bounded_safe_policy_payload(report: dict) -> dict:
     """Public Safe/Top APIs expose summaries; full artifact stays downloadable."""
     if not report:
@@ -907,7 +1001,7 @@ def _bounded_safe_policy_payload(report: dict) -> dict:
             "live_policy_change_allowed", "real_bitfinex_trading_allowed",
             "analysis_provenance", "cohort_schema", "generation_revision",
             "source_data_revision", "policy_comparability_key", "cohorts",
-            "report_eligibility",
+            "report_eligibility", "generation_freshness",
         )
         if key in report
     }
@@ -2561,10 +2655,13 @@ def _past_analysis_index():
 # ---------------------------------------------------------------------------
 @app.route("/api/health")
 def api_health():
-    """Cheap process-liveness probe that never reads large report artifacts."""
+    """Cheap readiness probe; process liveness remains explicit and separate."""
     runtime_sync_ok = RESEARCH_DASHBOARD_VERSION == EXPECTED_ANALYZER_SYNC_ID
+    freshness = _generation_freshness_meta()
     return jsonify({
-        "ok": runtime_sync_ok,
+        "ok": bool(runtime_sync_ok and freshness["current"]),
+        "alive": True,
+        "ready": bool(runtime_sync_ok and freshness["current"]),
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
         "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -2573,6 +2670,9 @@ def api_health():
         "pid": os.getpid(),
         "data_root": str(DATA_ROOT),
         "report_root": str(ROOT),
+        "generation_freshness": freshness,
+        "source_revision_parity": freshness["revision_parity"],
+        "epoch_parity": freshness["epoch_parity"],
     })
 
 
@@ -2623,15 +2723,8 @@ def api_status():
     })
     analyzer_source_revision = manifest.get("generation_revision")
     mirror_source_revision = _mirror_source_revision()
-    source_revision_parity = (
-        "MATCH" if analyzer_source_revision and mirror_source_revision
-        and (
-            str(analyzer_source_revision).startswith(str(mirror_source_revision))
-            or str(mirror_source_revision).startswith(str(analyzer_source_revision))
-        )
-        else "MISMATCH" if analyzer_source_revision and mirror_source_revision
-        else "UNAVAILABLE"
-    )
+    freshness = _generation_freshness_meta(manifest)
+    source_revision_parity = freshness["revision_parity"]
     dashboard_started_dt = _parse_utc_dt(_DASHBOARD_STARTED_AT.isoformat())
     report_generated_dt = _parse_utc_dt(previous_report_at)
     restart_observed = bool(
@@ -2640,7 +2733,17 @@ def api_status():
         and dashboard_started_dt > report_generated_dt
     )
     return jsonify({
-        "ok": bool(runtime_sync_ok and (report_sync_ok is True or report_pending)),
+        "ok": bool(
+            runtime_sync_ok
+            and (report_sync_ok is True or report_pending)
+            and freshness["current"]
+        ),
+        "alive": True,
+        "ready": bool(
+            runtime_sync_ok
+            and report_sync_ok is True
+            and freshness["current"]
+        ),
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
         "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -2666,6 +2769,10 @@ def api_status():
         "mirror_source_revision": mirror_source_revision,
         "fly_mirror_source_revision": mirror_source_revision,
         "source_revision_parity": source_revision_parity,
+        "epoch_parity": freshness["epoch_parity"],
+        "generation_freshness": freshness,
+        "stale": freshness["stale"],
+        "stale_reasons": freshness["reasons"],
         "source_data_revision": manifest.get("source_data_revision"),
         "fresh_epoch_id": fresh_epoch_id,
         "tile_registry_signature": manifest.get("tile_registry_signature"),
@@ -2907,7 +3014,9 @@ def api_best_policy_research():
 @app.route("/api/safe-policy-genome-v3")
 @app.route("/api/safe-policy-genome-v3.1")
 def api_safe_policy_genome_v3():
-    payload = _safe_policy_v3_dashboard_source()["report"]
+    source = _safe_policy_v3_dashboard_source()
+    payload = dict(source["report"])
+    report_was_missing = not payload
     if not payload:
         payload = {
             "schema": "safe_policy_genome_v3_1_report_v1",
@@ -2920,6 +3029,22 @@ def api_safe_policy_genome_v3():
             "collection": {},
             "blockers": ["V3_REPORT_NOT_GENERATED"],
         }
+    freshness = source.get("generation_freshness") or {
+        "current": True, "stale": False, "revision_parity": "MATCH",
+        "epoch_parity": "MATCH", "reasons": [],
+    }
+    if (
+        not report_was_missing
+        and payload.get("status") != "REPORT_NOT_IN_CURRENT_GENERATION"
+        and not freshness["current"]
+    ):
+        payload["status"] = "STALE_GENERATION"
+        payload["qualification"] = "STALE_GENERATION_NOT_QUALIFICATION_ELIGIBLE"
+        payload["number_one_strategy"] = None
+        payload["live_policy_change_allowed"] = False
+        payload["real_bitfinex_trading_allowed"] = False
+        payload["blockers"] = source["blockers"]
+        payload["generation_freshness"] = freshness
     return jsonify(_bounded_safe_policy_payload(payload))
 
 
@@ -3010,17 +3135,28 @@ def _safe_policy_v3_dashboard_source() -> dict:
         ))
     screen = report.get("candidate_screen") or {}
     ranking = report.get("safe_policy_ranking") or {}
+    freshness = _generation_freshness_meta()
+    blockers = list(report.get("blockers") or (['V3_REPORT_NOT_GENERATED'] if not report else []))
+    if not freshness["current"]:
+        blockers.append("STALE_ANALYZER_GENERATION")
+        if freshness["revision_parity"] != "MATCH":
+            blockers.append(f"SOURCE_REVISION_PARITY_{freshness['revision_parity']}")
+        if freshness["epoch_parity"] != "MATCH":
+            blockers.append(f"EPOCH_PARITY_{freshness['epoch_parity']}")
     return {
         "report": report,
         "screen": screen,
         "ranking": ranking,
         "epoch_id": epoch_id,
         "qualified": bool(
+            freshness["current"]
+            and
             report.get("number_one_strategy")
             and ranking.get("qualification") == "QUALIFIED"
             and report.get("live_policy_change_allowed") is True
         ),
-        "blockers": list(report.get("blockers") or (["V3_REPORT_NOT_GENERATED"] if not report else [])),
+        "blockers": sorted(set(blockers)),
+        "generation_freshness": freshness,
     }
 
 
@@ -3077,12 +3213,24 @@ def _best_policy_research_v31_payload() -> dict:
     descriptive = screen.get("descriptive_top_100") or []
     generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
     qualified = source["qualified"]
+    # Real sources always include this receipt. The fallback keeps isolated
+    # test/extension stubs compatible without weakening production behavior.
+    freshness = source.get("generation_freshness") or {
+        "current": True, "stale": False, "revision_parity": "MATCH",
+        "epoch_parity": "MATCH", "reasons": [],
+    }
     return {
         "schema": "best_policy_research_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
-        "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
-        "qualification": report.get("qualification") or "NO_SAFE_QUALIFIED_POLICY",
+        "status": (
+            "QUALIFIED" if qualified else
+            "STALE GENERATION — QUALIFICATION BLOCKED" if not freshness["current"] else
+            "NO QUALIFIED POLICY"
+        ),
+        "qualification": (
+            report.get("qualification") or "NO_SAFE_QUALIFIED_POLICY"
+        ) if freshness["current"] else "STALE_GENERATION_NOT_QUALIFICATION_ELIGIBLE",
         "live_policy_change_allowed": qualified,
         "real_bitfinex_trading_allowed": bool(qualified and report.get("real_bitfinex_trading_allowed")),
         "current_candidate": ranking.get("number_one") if qualified else None,
@@ -3095,6 +3243,8 @@ def _best_policy_research_v31_payload() -> dict:
         "evidence": evidence,
         "live_observed_evidence": collection,
         "blockers": source["blockers"],
+        "generation_freshness": freshness,
+        "stale": freshness["stale"],
         "note": (
             "This endpoint is a V3.1 compatibility projection. A winner appears only after complete "
             "terminal paths pass chronological OOS, conservative execution, drawdown, tail-risk, "
@@ -3147,16 +3297,15 @@ def api_static_policy_research():
 @app.route("/api/integrity")
 def api_integrity():
     """Expose the analyzer's canonical fail-closed integrity receipt."""
-    payload = _read_json(ANALYZER_INTEGRITY_FILE) or {}
-    if not payload:
-        return jsonify({
+    raw = _read_json(ANALYZER_INTEGRITY_FILE) or {}
+    payload = _integrity_with_generation_freshness(raw)
+    if not raw and payload.get("generation_freshness", {}).get("current"):
+        payload.update({
             "schema": "analyzer_integrity_v1",
-            "ok": False,
             "valid": False,
             "report_status": "MISSING",
             "failed_checks": ["ANALYZER_INTEGRITY_REPORT_MISSING"],
-        }), 503
-    payload = dict(payload)
+        })
     payload["ok"] = payload.get("valid") is True
     return jsonify(payload), (200 if payload["ok"] else 503)
 

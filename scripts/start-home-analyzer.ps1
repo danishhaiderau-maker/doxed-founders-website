@@ -225,23 +225,25 @@ if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
 if (Test-PortOpen $AnalyzerPort) {
   $listenerPids = @(Get-AnalyzerListenerPids $AnalyzerPort)
-  $dashboardHealthy = (Test-AnalyzerHealthy)
+  $dashboardAlive = (Test-AnalyzerAlive)
+  $dashboardReady = (Test-AnalyzerHealthy)
   $engineAlive = (Test-AnalyzerEngineAlive)
-  if ($dashboardHealthy -and $listenerPids.Count -eq 1 -and $engineAlive) {
-    Write-Host "Analyzer dashboard and research engine are healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
+  if ($dashboardAlive -and $listenerPids.Count -eq 1 -and $engineAlive) {
+    $state = if ($dashboardReady) { "ready" } else { "alive; generation readiness pending" }
+    Write-Host "Analyzer dashboard is $state and the research engine is alive on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
     if ($lockHandle) { $lockHandle.Dispose() }
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
     if (-not $NoWait) { Wait-ForKey }
     exit 0
   }
-  if ($dashboardHealthy -and $listenerPids.Count -eq 1 -and -not $engineAlive) {
-    Write-Host "Analyzer dashboard is healthy but the research engine is absent - preserving the dashboard and restarting collection." -ForegroundColor Yellow
+  if ($dashboardAlive -and $listenerPids.Count -eq 1 -and -not $engineAlive) {
+    Write-Host "Analyzer dashboard is alive but the research engine is absent - preserving the dashboard and restarting collection." -ForegroundColor Yellow
   } elseif ($listenerPids.Count -gt 1) {
     Write-Host "Port $AnalyzerPort has $($listenerPids.Count) listeners - replacing them with one loopback dashboard owner..." -ForegroundColor Yellow
   } else {
     Write-Host "Port $AnalyzerPort has a stale dashboard listener - clearing and starting the analyzer..." -ForegroundColor Yellow
   }
-  if (-not ($dashboardHealthy -and $listenerPids.Count -eq 1)) {
+  if (-not ($dashboardAlive -and $listenerPids.Count -eq 1)) {
     # The engine and dashboard have separate owners. A stale HTTP listener must
     # never terminate the healthy analyzer engine recorded in
     # .home-analyzer.pid; doing so leaves reports permanently stale until a

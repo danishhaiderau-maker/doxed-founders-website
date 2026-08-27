@@ -86,7 +86,7 @@ while ($true) {
       }
     } else { $botFails = 0 }
 
-    if (-not (Test-AnalyzerHealthy)) {
+    if (-not (Test-AnalyzerAlive)) {
       $analyzerFails++
       if ($analyzerFails -ge $FailThreshold) {
         $since = ((Get-Date) - $lastAnalyzerRecover).TotalSeconds

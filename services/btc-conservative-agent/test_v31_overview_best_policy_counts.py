@@ -3,6 +3,17 @@ from research import research_dashboard as dashboard
 
 
 def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypatch):
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True,
+            "stale": False,
+            "revision_parity": "MATCH",
+            "epoch_parity": "MATCH",
+            "reasons": [],
+        },
+    )
     report = {
         "schema": "safe_policy_genome_v3_1_report_v1",
         "epoch_id": "epoch-clean-808",

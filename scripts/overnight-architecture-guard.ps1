@@ -182,6 +182,7 @@ $tick = 0
 while ((Get-Date) -lt $deadline) {
   $tick++
   $botOk = Test-BotHealthy
+  $analyzerAlive = Test-AnalyzerAlive
   $analyzerOk = Test-AnalyzerHealthy
   $bridgeOk = Test-BridgeHealthy
   $cf = @(Get-Process cloudflared -ErrorAction SilentlyContinue).Count -gt 0
@@ -192,14 +193,14 @@ while ((Get-Date) -lt $deadline) {
   $siteApiOk = Test-ProductionSiteApiHealthy 12
 
   if ($botOk) { $fail.bot = 0 } else { $fail.bot++ }
-  if ($analyzerOk) { $fail.analyzer = 0 } else { $fail.analyzer++ }
+  if ($analyzerAlive) { $fail.analyzer = 0 } else { $fail.analyzer++ }
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
   if ($prodOk) { $fail.prod = 0 } else { $fail.prod++ }
   if ($railwayOk -and $siteApiOk) { $fail.railway = 0 } else { $fail.railway++ }
 
-  Log ("tick #{0} bot={1} analyzer={2} bridge={3} tunnel={4} cf={5} prod_bot={6} railway={7} site_api={8} fails=b{9}/a{10}/t{11}/br{12}/p{13}/rw{14}" -f `
-    $tick, $botOk, $analyzerOk, $bridgeOk, $tunnelOk, $cf, $prodBot, $railwayOk, $siteApiOk, `
+  Log ("tick #{0} bot={1} analyzer_alive={2} analyzer_ready={3} bridge={4} tunnel={5} cf={6} prod_bot={7} railway={8} site_api={9} fails=b{10}/a{11}/t{12}/br{13}/p{14}/rw{15}" -f `
+    $tick, $botOk, $analyzerAlive, $analyzerOk, $bridgeOk, $tunnelOk, $cf, $prodBot, $railwayOk, $siteApiOk, `
     $fail.bot, $fail.analyzer, $fail.tunnel, $fail.bridge, $fail.prod, $fail.railway)
 
   if ($fail.bridge -ge $FailThreshold) {

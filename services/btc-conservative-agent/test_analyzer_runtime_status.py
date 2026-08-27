@@ -68,7 +68,10 @@ checks = {
         and '"report_root": str(ROOT)' in source
         and '"data_root": str(DATA_ROOT)' in source
     ),
-    "health rejects wrong runtime identity": "$s.runtime_sync_match -ne $true" in health,
+    "health rejects wrong runtime identity": (
+        "$s.runtime_sync_match -eq $true" in health
+        and "if (-not $result.RuntimeSync)" in health
+    ),
     "health validates the canonical report root": (
         '$s.report_root' in health
         and "$expectedReportRoot = [System.IO.Path]::GetFullPath($agentDir)" in health
@@ -251,8 +254,12 @@ with research_dashboard.app.test_client() as client:
     if health_response.status_code != 200:
         raise SystemExit(f"failed: /api/health returned {health_response.status_code}")
     health_payload = health_response.get_json()
-    if not health_payload.get("ok") or not health_payload.get("report_root"):
+    if not health_payload.get("alive") or not health_payload.get("report_root"):
         raise SystemExit("failed: /api/health did not expose live canonical identity")
+    if health_payload.get("ok") is not True:
+        freshness = health_payload.get("generation_freshness") or {}
+        if freshness.get("stale") is not True or not freshness.get("reasons"):
+            raise SystemExit("failed: non-ready analyzer health lacked fail-closed stale evidence")
     response = client.get("/api/status")
     if response.status_code != 200:
         raise SystemExit(f"failed: /api/status returned {response.status_code}")

@@ -59,13 +59,13 @@ function Start-LocalAnalyzerWindow {
     & taskkill.exe /F /FI "WINDOWTITLE eq Local Collection Analyzer :$AnalyzerPort" 2>$null | Out-Null
     Start-Sleep -Seconds 2
   }
-  if (-not (Test-AnalyzerHealthy)) {
+  if (-not (Test-AnalyzerAlive)) {
     $analyzerScript = Join-Path $scriptDir "start-local-collection-analyzer.ps1"
     Start-DetachedPs1 $analyzerScript @("-NoWait") -NoExit -WindowTitle "Local Collection Analyzer :$AnalyzerPort" -Show Normal
     $messages.Add("[2/2] Analyzer window opened on :$AnalyzerPort")
     Start-Sleep -Seconds 20
   } else {
-    $messages.Add("[2/2] Analyzer already healthy on :$AnalyzerPort")
+    $messages.Add("[2/2] Analyzer already alive on :$AnalyzerPort (readiness may still be pending)")
   }
 }
 

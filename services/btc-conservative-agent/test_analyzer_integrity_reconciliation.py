@@ -122,6 +122,14 @@ def test_integrity_api_returns_503_for_reconciled_policy_defect(tmp_path, monkey
         ("best_policy_research_report.json", {"blockers": ["V3_ORDER_RESOLUTION_INTEGRITY_FAILED"]}),
     ])
     monkeypatch.setattr(dashboard, "_read_json", lambda _name: result)
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
 
     response = dashboard.app.test_client().get("/api/integrity")
 

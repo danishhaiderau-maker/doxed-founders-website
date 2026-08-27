@@ -478,6 +478,14 @@ def test_integrity_api_is_fail_closed_and_exposes_valid_receipt(monkeypatch):
             if name == dashboard.ANALYZER_INTEGRITY_FILE else {}
         ),
     )
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
     with dashboard.app.test_client() as client:
         response = client.get("/api/integrity")
     assert response.status_code == 200
@@ -863,6 +871,14 @@ def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
         "collection": {"independent_opportunities": 12},
     }
     monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: payload)
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
     dashboard._API_RESPONSE_CACHE.clear()
     client = dashboard.app.test_client()
 
@@ -895,6 +911,14 @@ def test_safe_policy_dashboard_surfaces_exact_v31_maturity_blockers(monkeypatch)
 
     monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: safe)
     monkeypatch.setattr(dashboard, "_read_report", fake_report)
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
     source = dashboard._safe_policy_v3_dashboard_source()
 
     assert source["epoch_id"] == "epoch-clean"
