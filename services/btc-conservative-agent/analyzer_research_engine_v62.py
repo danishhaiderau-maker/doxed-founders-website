@@ -13681,10 +13681,18 @@ def edge_incremental_value_report(trades=None, session=None):
         recommendation = "Edge moves ladder hit rate but not EV/WR — review manually."
 
     for row in filters:
-        b_ev = baseline.get("ev_usd") or 0
-        b_wr = baseline.get("win_rate_pct") or 0
-        row["delta_ev_vs_ai_only"] = round(row["ev_usd"] - b_ev, 2) if row["min_edge"] > 0 else 0.0
-        row["delta_wr_vs_ai_only"] = round(row["win_rate_pct"] - b_wr, 1) if row["min_edge"] > 0 else 0.0
+        b_ev = baseline.get("ev_usd")
+        b_wr = baseline.get("win_rate_pct")
+        row["delta_ev_vs_ai_only"] = (
+            round(row["ev_usd"] - b_ev, 2)
+            if row["min_edge"] > 0 and row.get("ev_usd") is not None and b_ev is not None
+            else (0.0 if row["min_edge"] == 0 and b_ev is not None else None)
+        )
+        row["delta_wr_vs_ai_only"] = (
+            round(row["win_rate_pct"] - b_wr, 1)
+            if row["min_edge"] > 0 and row.get("win_rate_pct") is not None and b_wr is not None
+            else (0.0 if row["min_edge"] == 0 and b_wr is not None else None)
+        )
         row["label"] = "AI_only" if row["min_edge"] == 0 else f"AI_and_edge_ge_{row['min_edge']}"
         if row["approves"] >= 5:
             fill_text = f"{row['fill_pct']:.1f}%" if row.get("fill_pct") is not None else "n/a"
