@@ -8832,6 +8832,19 @@ def run(interval_min=30, session_only=True, max_iterations=None):
 
 def _run_analyzer_iteration(iteration, interval_min, session_only):
         global _CURRENT_ANALYZER_GENERATION_STARTED_AT
+        global _CURRENT_MIRROR_COHERENCE_TOKEN
+        from research.mirror_coherence import assert_mirror_coherent
+
+        _CURRENT_MIRROR_COHERENCE_TOKEN = assert_mirror_coherent(
+            repo_root=Path(__file__).resolve().parents[2],
+            data_root=os.environ["BTC_AGENT_DATA_DIR"],
+            expected_revision=(
+                os.getenv("SOURCE_GIT_REV")
+                or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                or os.getenv("GIT_REVISION")
+                or ""
+            ),
+        )
         _CURRENT_ANALYZER_GENERATION_STARTED_AT = time.time()
         session = load_research_session()
         print_data_provenance_banner(session)
@@ -18549,6 +18562,11 @@ def write_report_manifest(payload=None):
         _publish_completed_report_generation(manifest)
     except Exception as exc:
         print(f"  ⚠️ Could not write {REPORT_MANIFEST_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        from research.mirror_coherence import MirrorCoherenceError
+        if isinstance(exc, MirrorCoherenceError):
+            # Stop this iteration before snapshots/archives can combine the
+            # retained manifest with working files from an incoherent mirror.
+            raise
     return manifest
 
 
@@ -18562,6 +18580,14 @@ def _publish_completed_report_generation(manifest):
     published directory.  The top-level manifest remains a compatibility copy
     and is also replaced atomically only after publication succeeds.
     """
+    from research.mirror_coherence import assert_mirror_coherent
+
+    assert_mirror_coherent(
+        repo_root=Path(__file__).resolve().parents[2],
+        data_root=os.environ["BTC_AGENT_DATA_DIR"],
+        expected_revision=str(manifest.get("generation_revision") or ""),
+        previous=globals().get("_CURRENT_MIRROR_COHERENCE_TOKEN"),
+    )
     published = Path(PUBLISHED_REPORTS_DIR)
     staging = Path(f".{PUBLISHED_REPORTS_DIR}.staging-{os.getpid()}-{time.time_ns()}")
     backup = Path(f".{PUBLISHED_REPORTS_DIR}.previous-{os.getpid()}-{time.time_ns()}")
