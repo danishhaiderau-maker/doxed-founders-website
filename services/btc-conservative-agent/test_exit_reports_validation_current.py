@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import analyzer_research_engine_v62 as analyzer
@@ -94,3 +95,19 @@ def test_mismatched_epoch_fails_current_generation_validation(tmp_path):
     assert receipt["current_generation_valid"] is False
     assert receipt["identity_match"] is False
 
+
+def test_current_receipt_replaces_stale_reports_mirror_before_archive(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _write_reports(tmp_path, source_rows=3, terminal_rows=1, result_rows=1)
+    mirrored = tmp_path / analyzer.REPORTS_DIR / analyzer.EXIT_REPORTS_VALIDATION_FILE
+    mirrored.parent.mkdir(parents=True)
+    mirrored.write_text('{"status":"STALE"}', encoding="utf-8")
+
+    receipt = analyzer._write_current_exit_reports_validation(_manifest())
+
+    current = tmp_path / analyzer.EXIT_REPORTS_VALIDATION_FILE
+    assert receipt["status"] == "POPULATED"
+    assert current.read_bytes() == mirrored.read_bytes()
+    assert hashlib.sha256(current.read_bytes()).hexdigest() == hashlib.sha256(
+        mirrored.read_bytes()
+    ).hexdigest()

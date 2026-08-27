@@ -18317,6 +18317,9 @@ def _write_current_exit_reports_validation(manifest):
     temp = Path(f"{target}.{os.getpid()}.tmp")
     temp.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
     os.replace(temp, target)
+    reports_dir = Path(REPORTS_DIR)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, reports_dir / target.name)
     return receipt
 
 
