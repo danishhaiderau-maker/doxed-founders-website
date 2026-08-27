@@ -29429,7 +29429,7 @@ DASHBOARD_JS = """(function () {
           'virtualChaseTable',
           virtualRows || '<tr><td colspan="13" style="color:#8b949e;">No live virtual-chase candidate right now. Tile approval totals are historical for the current collection/settings period, not a count of orders waiting at this moment.</td></tr>'
         );
-        safeHTML('signalsTable', allLiveSignals.filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
+        const activeSignalRows = allLiveSignals.filter(s => !s.terminal && (s.status === "ACTIVE" || s.status === "ORDERED" || s.status === "AWAITING_MICRO" || s.status === "AWAITING_5M" || s.status === "AWAITING_MIN_AGE")).map(s => `
           <tr>
             <td>${formatMelbourneDateTime(s.created_ts_melbourne || s.created_ts || s.time)}</td>
             <td>${s.age_min != null ? s.age_min.toFixed(1) : (s.age != null ? (s.age / 60).toFixed(1) : '-')}</td>
@@ -29446,8 +29446,12 @@ DASHBOARD_JS = """(function () {
             <td>${s.fill_price != null ? s.fill_price.toFixed(2) : '-'}</td>
             <td>${s.exit_reason || '-'}</td>
           </tr>
-        `).join(''));
-        safeHTML('ordersTable', (d.orders||[]).map(o => {
+        `).join('');
+        safeHTML(
+          'signalsTable',
+          activeSignalRows || '<tr><td colspan="14" style="color:#8b949e;">No active signals right now.</td></tr>'
+        );
+        const pendingOrderRows = (d.orders||[]).map(o => {
           let st = o.status || '-';
           const gate = o.venue_fill_gate || null;
           const gateReason = gate && gate.reason ? String(gate.reason) : 'NOT CHECKED';
@@ -29474,8 +29478,12 @@ DASHBOARD_JS = """(function () {
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
             <td style="color:${gateColor};font-size:0.82em;">${gateReason}${gateQty}${gateAge}</td>
           </tr>`;
-        }).join(''));
-        safeHTML('positionsTable', (d.positions||[]).map(l => {
+        }).join('');
+        safeHTML(
+          'ordersTable',
+          pendingOrderRows || '<tr><td colspan="11" style="color:#8b949e;">No pending orders right now.</td></tr>'
+        );
+        const positionRows = (d.positions||[]).map(l => {
           const marginPct = Number(l.pnl_pct_margin);
           const unrealUsd = Number(l.unreal_usd);
           const pnlText = Number.isFinite(marginPct) && Number.isFinite(unrealUsd)
@@ -29496,7 +29504,11 @@ DASHBOARD_JS = """(function () {
               <td><button type="button" data-trade-id="${l.trade_id || ''}" onclick="closeShowcasePosition(this.dataset.tradeId)">Close paper position</button></td>
             </tr>
           `;
-        }).join(''));
+        }).join('');
+        safeHTML(
+          'positionsTable',
+          positionRows || '<tr><td colspan="11" style="color:#8b949e;">No open paper positions right now.</td></tr>'
+        );
         safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => {
           const ageText = e.age_min != null
             ? Number(e.age_min).toFixed(2) + (e.never_placed ? ' (not placed)' : '')
