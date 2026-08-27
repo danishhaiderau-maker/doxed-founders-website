@@ -13687,10 +13687,15 @@ def edge_incremental_value_report(trades=None, session=None):
         row["delta_wr_vs_ai_only"] = round(row["win_rate_pct"] - b_wr, 1) if row["min_edge"] > 0 else 0.0
         row["label"] = "AI_only" if row["min_edge"] == 0 else f"AI_and_edge_ge_{row['min_edge']}"
         if row["approves"] >= 5:
+            fill_text = f"{row['fill_pct']:.1f}%" if row.get("fill_pct") is not None else "n/a"
+            wr_text = f"{row['win_rate_pct']:.1f}%" if row.get("win_rate_pct") is not None else "n/a"
+            ev_text = f"${row['ev_usd']:.2f}" if row.get("ev_usd") is not None else "$n/a"
+            ladder_text = (
+                f"{row['ladder_hit_pct']:.1f}%" if row.get("ladder_hit_pct") is not None else "n/a"
+            )
             print(
-                f"  {row['label']}: approves={row['approves']} fill={row['fill_pct']:.1f}% "
-                f"WR={row['win_rate_pct']:.1f}% EV=${row['ev_usd']:.2f} "
-                f"ladder={row['ladder_hit_pct']:.1f}% {PIPELINE_ENFORCEMENT_TAG}"
+                f"  {row['label']}: approves={row['approves']} fill={fill_text} "
+                f"WR={wr_text} EV={ev_text} ladder={ladder_text} {PIPELINE_ENFORCEMENT_TAG}"
             )
 
     print(f"  Verdict: {verdict} | live edge min={LIVE_EDGE_THRESHOLD_DEFAULT} {PIPELINE_ENFORCEMENT_TAG}")
