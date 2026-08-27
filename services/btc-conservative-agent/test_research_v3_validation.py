@@ -14,6 +14,22 @@ def episode(index, pnl, *, state="FULL_FILL", regime=None):
 
 
 class V3ValidationTests(unittest.TestCase):
+    def test_empty_scored_cohort_has_unavailable_risk_not_perfect_zeroes(self):
+        report = validate_policy([], policy_id="p", starting_equity_usd=1000,
+            max_drawdown_usd=100, max_drawdown_pct=10, min_cvar95_usd=-10,
+            policies_tested=1, conservative_execution=False,
+            neighborhood_stable=False, sealed_holdout=False)
+
+        self.assertEqual(report["episodes_scored"], 0)
+        self.assertEqual(report["evidence_status"], "INSUFFICIENT_EXECUTION_EVIDENCE")
+        for metric in (
+            "ending_equity_usd", "net_pnl_usd", "max_drawdown_usd",
+            "max_drawdown_pct", "longest_loss_streak", "wins", "losses",
+        ):
+            self.assertIsNone(report["risk"][metric], metric)
+        self.assertIn("DRAWDOWN_UNAVAILABLE", report["drawdown_budget"]["reasons"])
+        self.assertFalse(report["gates"]["drawdown_budget_pass"])
+
     def test_seeded_bootstrap_is_deterministic_and_bounded(self):
         first = episode_block_bootstrap([1.0, -0.5, 2.0], samples=250, seed=19)
         second = episode_block_bootstrap([1.0, -0.5, 2.0], samples=250, seed=19)

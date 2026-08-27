@@ -210,6 +210,12 @@ class V3CandidateTests(unittest.TestCase):
         self.assertIn("fill_realism", raw["ranking_evidence"]["missing_metrics"])
         self.assertIsNone(raw["ranking_evidence"]["raw_metrics"]["drawdown"])
         self.assertGreater(raw["ranking_evidence"]["missing_metric_penalty"], 0)
+        self.assertEqual(raw["ranking_status"], "INCOMPLETE_UNRANKED")
+        self.assertIsNone(raw["ranking_score"])
+        self.assertIsNone(raw["ranking_evidence"]["composite_score"])
+        self.assertTrue(all(
+            value is None for value in raw["ranking_evidence"]["component_scores"].values()
+        ))
 
     def test_multifactor_ranking_exposes_tail_regime_and_neighbor_components(self):
         rows = [
@@ -505,6 +511,14 @@ class V3CandidateTests(unittest.TestCase):
         first = report["candidates"][0]["validation"]
         self.assertEqual(first["episodes_scored"], 0)
         self.assertIn("episode-1", first["missing_or_unsupported_episode_ids"])
+        risk = first["risk"]
+        self.assertIsNone(risk["net_pnl_usd"])
+        self.assertIsNone(risk["max_drawdown_usd"])
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["ranking_status"], "INCOMPLETE_UNRANKED")
+        self.assertIsNone(candidate["ranking_score"])
+        self.assertNotIn("global_rank", candidate)
+        self.assertNotIn("family_rank", candidate)
 
     def test_conservative_full_fill_drives_execution_metrics(self):
         report = evaluate_protection_screen([conservative_source()])

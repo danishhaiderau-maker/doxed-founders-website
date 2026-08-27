@@ -169,6 +169,9 @@ def validate_policy(
         "policy_id": policy_id,
         "episodes_supplied": len(episodes),
         "episodes_scored": len(values),
+        "evidence_status": (
+            "AVAILABLE" if values else "INSUFFICIENT_EXECUTION_EVIDENCE"
+        ),
         "missing_or_unsupported_episode_ids": missing,
         "outcome_states": dict(sorted(states.items())),
         "regimes": sorted(regimes),

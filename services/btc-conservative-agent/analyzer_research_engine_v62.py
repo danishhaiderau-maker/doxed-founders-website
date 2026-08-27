@@ -9376,14 +9376,15 @@ def _empty_lane_benchmark_metrics():
     return {
         "approves": 0,
         "real_fills": 0,
-        "approve_to_fill_pct": 0.0,
+        "approve_to_fill_pct": None,
         "shadow_filled": 0,
-        "shadow_fill_pct": 0.0,
-        "net_pnl_real": 0.0,
-        "net_pnl_shadow_blocked": 0.0,
-        "per_approve_ev": 0.0,
-        "costly_blocks_usd": 0.0,
-        "good_blocks_saved_usd": 0.0,
+        "shadow_fill_pct": None,
+        "net_pnl_real": None,
+        "net_pnl_shadow_blocked": None,
+        "per_approve_ev": None,
+        "counterfactual_ev_per_approve": None,
+        "costly_blocks_usd": None,
+        "good_blocks_saved_usd": None,
     }
 
 
@@ -9406,10 +9407,10 @@ def _lane_fills_pnl_from_trades(trade_df, lane: str) -> tuple[int, float]:
 def _all_time_lane_metrics(all_trades, lane: str) -> dict:
     """Full CSV history stats — shown when session has no activity on a paused lane."""
     fills, pnl = _lane_fills_pnl_from_trades(all_trades, lane)
-    ev = round(pnl / fills, 2) if fills else 0.0
+    ev = round(pnl / fills, 2) if fills else None
     return {
         "real_fills": fills,
-        "net_pnl_real": pnl,
+        "net_pnl_real": pnl if fills else None,
         "ev_usd": ev,
     }
 
@@ -9455,7 +9456,7 @@ def _empty_current_lane_metrics(reason: str) -> dict:
             **_empty_lane_benchmark_metrics(),
             "wins": 0,
             "losses": 0,
-            "win_rate_pct": 0.0,
+            "win_rate_pct": None,
             "verdict": "no current-session terminal execution evidence",
             "evidence_status": reason,
         }
@@ -9593,12 +9594,12 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").fillna(0)
             if not lane_trades.empty else pd.Series(dtype=float)
         )
-        net_pnl_real = round(float(lane_real_pnl.sum()), 2) if not lane_real_pnl.empty else 0.0
+        net_pnl_real = round(float(lane_real_pnl.sum()), 2) if not lane_real_pnl.empty else None
         real_wins = int((lane_real_pnl > 0).sum()) if not lane_real_pnl.empty else 0
         real_losses = int((lane_real_pnl < 0).sum()) if not lane_real_pnl.empty else 0
         real_win_rate_pct = (
             round(100.0 * real_wins / real_fills, 1)
-            if real_fills else 0.0
+            if real_fills else None
         )
         lane_research_metrics = _policy_filtered_research_lane_metrics(
             shadow_lane_df, lane
@@ -9676,9 +9677,9 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 pass
 
         shadow_filled = 0
-        net_pnl_shadow_blocked = 0.0
-        costly_blocks_usd = 0.0
-        good_blocks_saved_usd = 0.0
+        net_pnl_shadow_blocked = None
+        costly_blocks_usd = None
+        good_blocks_saved_usd = None
         if shadow_df is not None and not shadow_df.empty:
             work = shadow_df.copy()
             if "filled" in work.columns:
@@ -9694,23 +9695,27 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             shadow_filled = int(lane_shadow["filled"].sum()) if not lane_shadow.empty else 0
             blocked_shadow = lane_shadow[~lane_shadow["trade_id"].astype(str).isin(executed_ids)]
             blocked_pnl = pd.to_numeric(blocked_shadow.get("net_pnl_usd"), errors="coerce")
-            net_pnl_shadow_blocked = round(float(blocked_pnl.sum()), 2) if not blocked_pnl.empty else 0.0
-            costly_blocks_usd = round(float(blocked_pnl[blocked_pnl > 0].sum()), 2) if not blocked_pnl.empty else 0.0
-            good_blocks_saved_usd = round(float(-blocked_pnl[blocked_pnl <= 0].sum()), 2) if not blocked_pnl.empty else 0.0
+            if not blocked_pnl.empty:
+                net_pnl_shadow_blocked = round(float(blocked_pnl.sum()), 2)
+                costly_blocks_usd = round(float(blocked_pnl[blocked_pnl > 0].sum()), 2)
+                good_blocks_saved_usd = round(float(-blocked_pnl[blocked_pnl <= 0].sum()), 2)
         elif lane in shadow_by_lane:
             shadow_filled = int(shadow_by_lane[lane].get("shadow_filled") or 0)
             costly_blocks_usd = float(shadow_by_lane[lane].get("missed_winner_usd") or 0.0)
             good_blocks_saved_usd = float(shadow_by_lane[lane].get("good_block_saved") or 0.0)
             net_pnl_shadow_blocked = round(costly_blocks_usd - good_blocks_saved_usd, 2)
 
-        approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if approves_n else 0.0
-        shadow_fill_pct = round(100.0 * shadow_filled / approves_n, 1) if approves_n else 0.0
+        approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if approves_n else None
+        shadow_fill_pct = round(100.0 * shadow_filled / approves_n, 1) if approves_n else None
         # The tile labels this as real EV/approve and displays counterfactual
         # P&L separately. Never blend shadow outcomes into the real figure.
-        per_approve_ev = round(net_pnl_real / approves_n, 2) if approves_n else 0.0
+        per_approve_ev = (
+            round(net_pnl_real / approves_n, 2)
+            if approves_n and net_pnl_real is not None else None
+        )
         counterfactual_ev_per_approve = (
             round(net_pnl_shadow_blocked / approves_n, 2)
-            if approves_n else 0.0
+            if approves_n and net_pnl_shadow_blocked is not None else None
         )
 
         lane_metrics[lane] = {
@@ -9739,10 +9744,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
     bench = lane_metrics.get(BENCHMARK_LANE) or _empty_lane_benchmark_metrics()
     for lane, metrics in lane_metrics.items():
         if lane == BENCHMARK_LANE:
-            metrics["delta_approve_to_fill_pct"] = 0.0
-            metrics["delta_net_pnl_real"] = 0.0
-            metrics["delta_per_approve_ev"] = 0.0
-            metrics["delta_costly_blocks_usd"] = 0.0
+            has_execution = int(metrics.get("real_fills") or 0) > 0
+            metrics["delta_approve_to_fill_pct"] = 0.0 if metrics.get("approve_to_fill_pct") is not None else None
+            metrics["delta_net_pnl_real"] = 0.0 if has_execution else None
+            metrics["delta_per_approve_ev"] = 0.0 if has_execution else None
+            metrics["delta_costly_blocks_usd"] = 0.0 if metrics.get("costly_blocks_usd") is not None else None
             metrics["verdict"] = _benchmark_lane_verdict(lane, {}, bench)
             continue
         if metrics["approves"] == 0:
@@ -9752,16 +9758,31 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             metrics["delta_costly_blocks_usd"] = None
             metrics["verdict"] = "no session approves"
             continue
+        comparable = all(
+            metrics.get(field) is not None and bench.get(field) is not None
+            for field in ("approve_to_fill_pct", "net_pnl_real", "per_approve_ev")
+        )
+        if not comparable:
+            metrics["delta_approve_to_fill_pct"] = None
+            metrics["delta_net_pnl_real"] = None
+            metrics["delta_per_approve_ev"] = None
+            metrics["delta_costly_blocks_usd"] = None
+            metrics["verdict"] = "insufficient comparable terminal execution evidence"
+            continue
         metrics["delta_approve_to_fill_pct"] = round(metrics["approve_to_fill_pct"] - bench["approve_to_fill_pct"], 1)
         metrics["delta_net_pnl_real"] = round(metrics["net_pnl_real"] - bench["net_pnl_real"], 2)
         metrics["delta_per_approve_ev"] = round(metrics["per_approve_ev"] - bench["per_approve_ev"], 2)
-        metrics["delta_costly_blocks_usd"] = round(metrics["costly_blocks_usd"] - bench["costly_blocks_usd"], 2)
+        metrics["delta_costly_blocks_usd"] = (
+            round(metrics["costly_blocks_usd"] - bench["costly_blocks_usd"], 2)
+            if metrics.get("costly_blocks_usd") is not None and bench.get("costly_blocks_usd") is not None
+            else None
+        )
         metrics["verdict"] = _benchmark_lane_verdict(
             lane,
             {
                 "delta_approve_to_fill_pct": metrics["delta_approve_to_fill_pct"],
                 "delta_per_approve_ev": metrics["delta_per_approve_ev"],
-                "delta_costly_blocks_usd": metrics["delta_costly_blocks_usd"],
+                "delta_costly_blocks_usd": metrics["delta_costly_blocks_usd"] or 0.0,
             },
             bench,
         )
@@ -9779,10 +9800,13 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             delta_str = "n/a"
         else:
             delta_str = f"Δ fill {m['delta_approve_to_fill_pct']:+.0f}%  Δ PnL ${m['delta_net_pnl_real']:+.2f}"
+        fill_text = f"{m['approve_to_fill_pct']:.1f}%" if m.get("approve_to_fill_pct") is not None else "n/a"
+        real_text = f"{m['net_pnl_real']:.2f}" if m.get("net_pnl_real") is not None else "n/a"
+        shadow_text = f"{m['net_pnl_shadow_blocked']:.2f}" if m.get("net_pnl_shadow_blocked") is not None else "n/a"
+        ev_text = f"{m['per_approve_ev']:.2f}" if m.get("per_approve_ev") is not None else "n/a"
         print(
-            f"{label:<16}{m['approves']:>9}{m['real_fills']:>7}{m['approve_to_fill_pct']:>6.1f}%"
-            f"{m['net_pnl_real']:>9.2f}{m['net_pnl_shadow_blocked']:>11.2f}{m['per_approve_ev']:>11.2f}"
-            f"{delta_str:>14}"
+            f"{label:<16}{m['approves']:>9}{m['real_fills']:>7}{fill_text:>7}"
+            f"{real_text:>9}{shadow_text:>11}{ev_text:>11}{delta_str:>14}"
         )
 
     print(f"\n--- vs {BENCHMARK_LANE} benchmark ---")
@@ -10206,12 +10230,12 @@ def _regime_attribution_bucket(regime_label):
 def _ai_calib_cohort_stats(sub):
     """Return trades, WR, avg PnL, EV for a cohort sub-frame."""
     if sub is None or sub.empty:
-        return {"trades": 0, "win_rate_pct": 0.0, "avg_pnl_usd": 0.0, "ev_usd": 0.0, "sum_pnl_usd": 0.0}
+        return {"trades": 0, "win_rate_pct": None, "avg_pnl_usd": None, "ev_usd": None, "sum_pnl_usd": None}
     pnl = pd.to_numeric(sub.get("net_pnl_usd"), errors="coerce")
     valid = pnl.notna()
     n = int(valid.sum())
     if n == 0:
-        return {"trades": 0, "win_rate_pct": 0.0, "avg_pnl_usd": 0.0, "ev_usd": 0.0, "sum_pnl_usd": 0.0}
+        return {"trades": 0, "win_rate_pct": None, "avg_pnl_usd": None, "ev_usd": None, "sum_pnl_usd": None}
     wins = int((pnl[valid] > 0).sum())
     avg = float(pnl[valid].mean())
     total = float(pnl[valid].sum())
@@ -10401,13 +10425,13 @@ def _confidence_band_label(conf, confidence_requested=None) -> str:
 def _direction_cohort_stats(sub):
     base = _ai_calib_cohort_stats(sub)
     if sub is None or sub.empty:
-        base.update({"avg_edge": 0.0, "avg_ai_confidence": 0.0})
+        base.update({"avg_edge": None, "avg_ai_confidence": None})
         return base
     missing = pd.Series(np.nan, index=sub.index, dtype=float)
     edge = pd.to_numeric(sub.get("edge_score_at_entry", sub.get("edge_score", missing)), errors="coerce")
     ai = pd.to_numeric(sub.get("ai_win_prob", sub.get("conf", missing)), errors="coerce")
-    base["avg_edge"] = round(float(edge.mean()), 2) if edge.notna().any() else 0.0
-    base["avg_ai_confidence"] = round(float(ai.mean()), 1) if ai.notna().any() else 0.0
+    base["avg_edge"] = round(float(edge.mean()), 2) if edge.notna().any() else None
+    base["avg_ai_confidence"] = round(float(ai.mean()), 1) if ai.notna().any() else None
     return base
 
 
@@ -10446,10 +10470,10 @@ def direction_attribution_report(trades=None, decisions=None, session=None):
             "short_calls": ai_call_stats["short_calls"],
             "no_trade_calls": ai_call_stats["no_trade_calls"],
             "total_ai_calls": ai_call_stats["total_calls"],
-            "long_wr": 0,
-            "short_wr": 0,
-            "long_pnl": 0,
-            "short_pnl": 0,
+            "long_wr": None,
+            "short_wr": None,
+            "long_pnl": None,
+            "short_pnl": None,
             "by_regime_direction": [],
             "ai_recommendations": {"long": {}, "short": {}},
             "ai_call_stats": ai_call_stats,
@@ -10545,10 +10569,10 @@ def direction_attribution_report(trades=None, decisions=None, session=None):
         "short_calls": ai_call_stats["short_calls"],
         "no_trade_calls": ai_call_stats["no_trade_calls"],
         "total_ai_calls": ai_call_stats["total_calls"],
-        "long_wr": long_stats.get("win_rate_pct", 0),
-        "short_wr": short_stats.get("win_rate_pct", 0),
-        "long_pnl": long_stats.get("sum_pnl_usd", 0),
-        "short_pnl": short_stats.get("sum_pnl_usd", 0),
+        "long_wr": long_stats.get("win_rate_pct"),
+        "short_wr": short_stats.get("win_rate_pct"),
+        "long_pnl": long_stats.get("sum_pnl_usd"),
+        "short_pnl": short_stats.get("sum_pnl_usd"),
         "by_regime_direction": by_regime,
         "ai_recommendations": ai_recs,
         "ai_call_stats": ai_call_stats,
@@ -10690,7 +10714,7 @@ def confidence_band_report(trades=None, decisions=None, session=None):
 
 def _build_confidence_edge_matrix(with_outcome):
     """2D matrix: AI buckets (50-55, 55-60) × edge buckets (2-3, 3-4, 4+) with WR and n."""
-    empty_cell = {"trades": 0, "win_rate_pct": 0.0}
+    empty_cell = {"trades": 0, "win_rate_pct": None}
     matrix = {
         edge_b: {conf_b: dict(empty_cell) for conf_b in AI_MATRIX_CONF_BUCKETS}
         for edge_b in AI_MATRIX_EDGE_BUCKETS
@@ -14515,10 +14539,10 @@ def pathway_survival_report(trades=None, session=None):
             "order_expired": 0,
             "wins": 0,
             "losses": 0,
-            "net_pnl_usd": 0.0,
-            "win_rate_pct": 0.0,
-            "approve_to_fill_pct": 0.0,
-            "ev_per_fill_usd": 0.0,
+            "net_pnl_usd": None,
+            "win_rate_pct": None,
+            "approve_to_fill_pct": None,
+            "ev_per_fill_usd": None,
         }
 
     for row in rows:
@@ -14532,8 +14556,8 @@ def pathway_survival_report(trades=None, session=None):
                 "label": RESEARCH_LANE_LABELS.get(lane, lane),
                 "approves": 0, "orders": 0, "fills": 0, "closed": 0,
                 "signal_expired": 0, "order_expired": 0,
-                "wins": 0, "losses": 0, "net_pnl_usd": 0.0,
-                "win_rate_pct": 0.0, "approve_to_fill_pct": 0.0, "ev_per_fill_usd": 0.0,
+                "wins": 0, "losses": 0, "net_pnl_usd": None,
+                "win_rate_pct": None, "approve_to_fill_pct": None, "ev_per_fill_usd": None,
             }
         stage = str(row.get("stage") or "").upper()
         bucket = survival[lane]
@@ -14561,29 +14585,32 @@ def pathway_survival_report(trades=None, session=None):
                     "label": RESEARCH_LANE_LABELS.get(lane, lane),
                     "approves": 0, "orders": 0, "fills": 0, "closed": 0,
                     "signal_expired": 0, "order_expired": 0,
-                    "wins": 0, "losses": 0, "net_pnl_usd": 0.0,
-                    "win_rate_pct": 0.0, "approve_to_fill_pct": 0.0, "ev_per_fill_usd": 0.0,
+                    "wins": 0, "losses": 0, "net_pnl_usd": None,
+                    "win_rate_pct": None, "approve_to_fill_pct": None, "ev_per_fill_usd": None,
                 }
-            survival[lane]["wins"] = int((sub[pnl_col] > 0).sum())
-            survival[lane]["losses"] = int((sub[pnl_col] <= 0).sum())
-            survival[lane]["net_pnl_usd"] = round(float(sub[pnl_col].sum()), 2)
-            n = len(sub)
+            valid_pnl = sub[pnl_col].dropna()
+            survival[lane]["wins"] = int((valid_pnl > 0).sum())
+            survival[lane]["losses"] = int((valid_pnl <= 0).sum())
+            n = len(valid_pnl)
             if n:
+                survival[lane]["net_pnl_usd"] = round(float(valid_pnl.sum()), 2)
                 survival[lane]["win_rate_pct"] = round(100.0 * survival[lane]["wins"] / n, 1)
 
     bench_ev = None
     for lane, b in survival.items():
-        if b["approves"]:
+        terminal_entry_outcomes = b["fills"] + b["signal_expired"] + b["order_expired"]
+        if b["approves"] and terminal_entry_outcomes:
             b["approve_to_fill_pct"] = round(100.0 * b["fills"] / b["approves"], 1)
-        if b["fills"]:
+        if b["fills"] and b["net_pnl_usd"] is not None:
             b["ev_per_fill_usd"] = round(b["net_pnl_usd"] / b["fills"], 2)
-        if lane == BENCHMARK_LANE and b["fills"]:
+        if lane == BENCHMARK_LANE and b["ev_per_fill_usd"] is not None:
             bench_ev = b["ev_per_fill_usd"]
         if b["approves"] or b["fills"]:
             print(
                 f"  {lane}: approve={b['approves']} order={b['orders']} fill={b['fills']} "
-                f"closed={b['closed']} win={b['wins']} pnl=${b['net_pnl_usd']:.2f} "
-                f"fill_rate={b['approve_to_fill_pct']:.1f}% {PIPELINE_ENFORCEMENT_TAG}"
+                f"closed={b['closed']} win={b['wins']} pnl={_fmt_usd(b['net_pnl_usd'])} "
+                f"fill_rate={b['approve_to_fill_pct'] if b['approve_to_fill_pct'] is not None else 'n/a'}% "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
             )
 
     payload = {
@@ -14622,7 +14649,9 @@ def top_leakage_report(trades=None, session=None, top_n=50):
             "session_scope": scope,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "top_n": top_n,
-            "overall_left_usd": 0.0,
+            "eligible_terminal_trades": 0,
+            "overall_left_usd": None,
+            "by_exit_reason": {},
             "trades": [],
         }
         try:
@@ -14636,19 +14665,31 @@ def top_leakage_report(trades=None, session=None, top_n=50):
     if "trade_id" in work.columns:
         work = work.drop_duplicates(subset=["trade_id"], keep="last")
     pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
-    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0.0)
-    mfe = pd.to_numeric(work.get("max_profit", work.get("mfe_margin_pct")), errors="coerce")
-    final_margin = pd.to_numeric(work.get("pnl", work.get("final_pnl_margin_pct")), errors="coerce")
-    margin_usd = pd.to_numeric(work.get("margin_usdt", FLAT_MARGIN_LIVE_USD), errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
+    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce")
+    missing = pd.Series(np.nan, index=work.index, dtype=float)
+    mfe = pd.to_numeric(work.get("max_profit", work.get("mfe_margin_pct", missing)), errors="coerce")
+    final_margin = pd.to_numeric(work.get("pnl", work.get("final_pnl_margin_pct", missing)), errors="coerce")
+    default_margin = pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index, dtype=float)
+    margin_usd = pd.to_numeric(work.get("margin_usdt", default_margin), errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
     peak_usd = (mfe / 100.0) * margin_usd
     booked_usd = work[pnl_col]
     left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
 
     rows = []
+    eligible_terminal_trades = 0
     for _, row in work.iterrows():
-        peak = float(peak_usd.loc[row.name]) if row.name in peak_usd.index else 0.0
+        if (
+            row.name not in peak_usd.index
+            or row.name not in left_usd.index
+            or pd.isna(peak_usd.loc[row.name])
+            or pd.isna(booked_usd.loc[row.name])
+            or pd.isna(left_usd.loc[row.name])
+        ):
+            continue
+        peak = float(peak_usd.loc[row.name])
         booked = float(booked_usd.loc[row.name])
-        left = float(left_usd.loc[row.name]) if row.name in left_usd.index else 0.0
+        left = float(left_usd.loc[row.name])
+        eligible_terminal_trades += 1
         mfe_pct = float(mfe.loc[row.name]) if pd.notna(mfe.loc[row.name]) else None
         final_pct = float(final_margin.loc[row.name]) if pd.notna(final_margin.loc[row.name]) else None
         leak_pct = round(mfe_pct - final_pct, 2) if mfe_pct is not None and final_pct is not None else None
@@ -14676,9 +14717,19 @@ def top_leakage_report(trades=None, session=None, top_n=50):
         by_exit[ex]["trades"] += 1
         by_exit[ex]["left_usd"] = round(by_exit[ex]["left_usd"] + r["left_on_table_usd"], 2)
 
-    overall_left = round(sum(r["left_on_table_usd"] for r in rows), 2)
-    top_leak = top_rows[0]["left_on_table_usd"] if top_rows else 0.0
-    print(f"  Overall left: ${overall_left:.2f} | top trade left: ${top_leak:.2f} {PIPELINE_ENFORCEMENT_TAG}")
+    overall_left = (
+        round(sum(r["left_on_table_usd"] for r in rows), 2)
+        if eligible_terminal_trades else None
+    )
+    top_leak = top_rows[0]["left_on_table_usd"] if top_rows else None
+    if overall_left is None:
+        print(f"  No leakage-eligible terminal evidence. {PIPELINE_ENFORCEMENT_TAG}")
+    else:
+        top_leak_text = f"${top_leak:.2f}" if top_leak is not None else "n/a"
+        print(
+            f"  Overall left: ${overall_left:.2f} | top trade left: {top_leak_text} "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
     if top_rows:
         t0 = top_rows[0]
         print(
@@ -14695,6 +14746,7 @@ def top_leakage_report(trades=None, session=None, top_n=50):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "question": "Which trades left the most profit on the table?",
         "top_n": top_n,
+        "eligible_terminal_trades": eligible_terminal_trades,
         "overall_left_usd": overall_left,
         "by_exit_reason": by_exit,
         "trades": top_rows,
@@ -17441,16 +17493,23 @@ def _best_worst_lanes(bench):
     ranked = []
     for lane in BENCHMARK_LANES:
         m = lanes.get(lane) or {}
+        approves = int(m.get("approves") or 0)
+        fills = int(m.get("real_fills") or m.get("fills") or 0)
+        if approves <= 0 or fills <= 0:
+            continue
         pnl = m.get("net_pnl_real")
         if pnl is None:
             pnl = m.get("net_pnl_usd")
         if pnl is None:
             continue
+        pnl = safe_float(pnl)
+        if not np.isfinite(pnl):
+            continue
         ranked.append({
             "lane": lane,
             "pnl": float(pnl),
-            "fills": int(m.get("real_fills") or m.get("fills") or 0),
-            "approves": int(m.get("approves") or 0),
+            "fills": fills,
+            "approves": approves,
         })
     if not ranked:
         return None, None
@@ -17488,15 +17547,17 @@ def _lane_table_rows(bench):
     for lane in BENCHMARK_LANES:
         m = lanes.get(lane) or {}
         pnl = m.get("net_pnl_real", m.get("net_pnl_usd"))
-        if pnl is None and not m.get("approves"):
+        if not m:
             continue
+        fill_pct = m.get("approve_to_fill_pct")
+        ev = m.get("per_approve_ev")
         rows.append({
             "lane": lane,
             "approves": int(m.get("approves") or 0),
             "fills": int(m.get("real_fills") or m.get("fills") or 0),
-            "fill_pct": round(float(m.get("approve_to_fill_pct") or 0), 0),
-            "pnl": round(float(pnl or 0), 2),
-            "ev": round(float(m.get("per_approve_ev") or 0), 2),
+            "fill_pct": round(float(fill_pct), 0) if fill_pct is not None else None,
+            "pnl": round(float(pnl), 2) if pnl is not None else None,
+            "ev": round(float(ev), 2) if ev is not None else None,
         })
     return rows
 
@@ -18571,6 +18632,21 @@ def _fmt_usd(val, default="n/a"):
         return default
 
 
+def _fmt_number(val, decimals=1, default="n/a"):
+    """Format a derived metric without turning unavailable evidence into zero."""
+    if val is None:
+        return default
+    try:
+        return f"{float(val):.{decimals}f}"
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_pct(val, decimals=1, default="n/a"):
+    rendered = _fmt_number(val, decimals=decimals, default=default)
+    return f"{rendered}%" if rendered != default else default
+
+
 def format_executive_summary_short(payload):
     """Layer 1 — ~15 lines: KPIs + funnel + pointers to deeper artifacts."""
     p = payload.get("performance") or {}
@@ -18627,6 +18703,7 @@ def format_research_highlights_text(payload):
         missed_list = [payload.get("top_missed_opportunity")]
     direction = payload.get("direction") or {}
     edge_val = payload.get("edge_validation") or {}
+    has_terminal_evidence = int(p.get("trades") or 0) > 0
 
     lines = [
         "=" * W,
@@ -18636,33 +18713,34 @@ def format_research_highlights_text(payload):
         "",
     ]
     hl = payload.get("highlights") or {}
+    best_lane_hl = hl.get("best_lane") or {}
+    worst_lane_hl = hl.get("worst_lane") or {}
+    best_conf_hl = hl.get("best_confidence") or {}
+    worst_conf_hl = hl.get("worst_confidence") or {}
+    best_exit_hl = hl.get("best_exit") or {}
     lines.extend([
         "=== RESEARCH HIGHLIGHTS (at-a-glance) ===",
-        f"Top Lane:     {(hl.get('best_lane') or {}).get('lane', 'n/a')}  "
-        f"${float((hl.get('best_lane') or {}).get('pnl', 0)):+.2f}",
-        f"Worst Lane:   {(hl.get('worst_lane') or {}).get('lane', 'n/a')}  "
-        f"${float((hl.get('worst_lane') or {}).get('pnl', 0)):+.2f}",
-        f"Best Conf:    {(hl.get('best_confidence') or {}).get('bucket', 'n/a')}  "
-        f"{(hl.get('best_confidence') or {}).get('wr', 0):.1f}% WR",
-        f"Worst Conf:   {(hl.get('worst_confidence') or {}).get('bucket', 'n/a')}  "
-        f"{(hl.get('worst_confidence') or {}).get('wr', 0):.1f}% WR",
-        f"Fast-Cut PnL: ${float(hl.get('fast_cut_damage_usd', 0)):+.2f}",
-        f"Blocked Opp:  ${float(hl.get('blocked_opportunity_usd', 0)):+.2f}",
+        f"Top Lane:     {best_lane_hl.get('lane', 'n/a')}  ${_fmt_usd(best_lane_hl.get('pnl'))}",
+        f"Worst Lane:   {worst_lane_hl.get('lane', 'n/a')}  ${_fmt_usd(worst_lane_hl.get('pnl'))}",
+        f"Best Conf:    {best_conf_hl.get('bucket', 'n/a')}  {_fmt_pct(best_conf_hl.get('wr'))} WR",
+        f"Worst Conf:   {worst_conf_hl.get('bucket', 'n/a')}  {_fmt_pct(worst_conf_hl.get('wr'))} WR",
+        f"Fast-Cut PnL: ${_fmt_usd(hl.get('fast_cut_damage_usd') if has_terminal_evidence else None)}",
+        f"Blocked Opp:  ${_fmt_usd(hl.get('blocked_opportunity_usd') if has_terminal_evidence else None)}",
         f"Edge corr:    {hl.get('edge_correlation', 'n/a')}",
-        f"Best Exit:    {(hl.get('best_exit') or {}).get('reason', 'n/a')}  "
-        f"${float((hl.get('best_exit') or {}).get('pnl_usd', 0)):+.2f}",
+        f"Best Exit:    {best_exit_hl.get('reason', 'n/a')}  ${_fmt_usd(best_exit_hl.get('pnl_usd'))}",
         "",
     ])
     if re:
+        approve_evidence = int(re.get("approve_attempts") or 0) > 0
         lines.extend([
             "--- APPROVE funnel ---",
             _fmt_row(["APPROVE", "Executed", "Exec PnL", "All-APPROVE CF", "Gate damage"], [10, 10, 12, 16, 14]),
             _fmt_row([
                 re.get("approve_attempts", "n/a"),
                 re.get("executed", "n/a"),
-                f"{re.get('executed_pnl_usd', 0):+.2f}",
-                f"{re.get('counterfactual_all_approve_usd', 0):+.2f}",
-                f"{re.get('gate_damage_usd', 0):+.2f}",
+                _fmt_usd(re.get("executed_pnl_usd") if approve_evidence else None),
+                _fmt_usd(re.get("counterfactual_all_approve_usd") if approve_evidence else None),
+                _fmt_usd(re.get("gate_damage_usd") if approve_evidence else None),
             ], [10, 10, 12, 16, 14]),
             "",
         ])
@@ -18676,14 +18754,14 @@ def format_research_highlights_text(payload):
                 row.get("lane"),
                 row.get("approves"),
                 row.get("fills"),
-                f"{row.get('fill_pct', 0)}%",
-                f"{row.get('pnl', 0):+.2f}",
-                f"{row.get('ev', 0):+.2f}",
+                _fmt_pct(row.get("fill_pct"), decimals=0),
+                _fmt_usd(row.get("pnl")),
+                _fmt_usd(row.get("ev")),
             ], [22, 6, 6, 7, 10, 10]))
         if bl or wl:
             lines.append(
-                f"  Best: {bl.get('lane', 'n/a')} ${bl.get('pnl', 0):+.2f} | "
-                f"Worst: {wl.get('lane', 'n/a')} ${wl.get('pnl', 0):+.2f}"
+                f"  Best: {bl.get('lane', 'n/a')} ${_fmt_usd(bl.get('pnl'))} | "
+                f"Worst: {wl.get('lane', 'n/a')} ${_fmt_usd(wl.get('pnl'))}"
             )
         lines.append("")
 
@@ -18696,13 +18774,13 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 row.get("reason"),
                 row.get("n"),
-                f"{row.get('wr_pct', 0)}%",
-                f"{row.get('pnl_usd', 0):+.2f}",
+                _fmt_pct(row.get("wr_pct")),
+                _fmt_usd(row.get("pnl_usd")),
             ], [28, 6, 8, 12]))
         lines.append("")
 
     ai_bands = ai_cal.get("bands") or []
-    if not ai_bands:
+    if "bands" not in ai_cal:
         ai_bands = _load_json_report(AI_CALIBRATION_REPORT_FILE).get("confidence_buckets") or []
     if ai_bands:
         lines.extend([
@@ -18715,17 +18793,17 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 b.get("bucket"),
                 b.get("trades"),
-                f"{b.get('win_rate_pct', b.get('wr', 0))}%",
-                f"{float(b.get('sum_pnl_usd', b.get('pnl', 0)) or 0):+.2f}",
+                _fmt_pct(b.get("win_rate_pct", b.get("wr"))),
+                _fmt_usd(b.get("sum_pnl_usd", b.get("pnl"))),
             ], [10, 6, 8, 12]))
         if bc or wc:
             lines.append(
-                f"  Best: {bc.get('bucket', 'n/a')} WR {bc.get('wr', 0):.1f}% | "
-                f"Worst: {wc.get('bucket', 'n/a')} WR {wc.get('wr', 0):.1f}%"
+                f"  Best: {bc.get('bucket', 'n/a')} WR {_fmt_pct(bc.get('wr'))} | "
+                f"Worst: {wc.get('bucket', 'n/a')} WR {_fmt_pct(wc.get('wr'))}"
             )
         lines.append("")
 
-    if not conf_bands:
+    if "confidence_bands" not in payload:
         conf_bands = _load_json_report(CONFIDENCE_BAND_REPORT_FILE).get("filled_trades_by_band") or []
     if conf_bands:
         lines.extend([
@@ -18738,8 +18816,8 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 b.get("bucket"),
                 b.get("trades"),
-                f"{b.get('win_rate_pct', b.get('wr', 0))}%",
-                f"{float(b.get('sum_pnl_usd', b.get('pnl', 0)) or 0):+.2f}",
+                _fmt_pct(b.get("win_rate_pct", b.get("wr"))),
+                _fmt_usd(b.get("sum_pnl_usd", b.get("pnl"))),
             ], [10, 6, 8, 12]))
         lines.append("")
 
@@ -18755,17 +18833,17 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 b.get("bucket"),
                 b.get("trades"),
-                f"{b.get('win_rate_pct', 0)}%",
-                f"{float(b.get('sum_pnl_usd', 0)):+.2f}",
-                f"{b.get('ev_usd', 0):+.2f}",
+                _fmt_pct(b.get("win_rate_pct")),
+                _fmt_usd(b.get("sum_pnl_usd")),
+                _fmt_usd(b.get("ev_usd")),
             ], [14, 6, 8, 12, 10]))
     lines.append("")
 
     cap_dist = sc.get("capture_distribution") or {}
     lines.extend([
         "--- Scenario C / exits ---",
-        f"Leakage left on table: ${sc.get('leakage_left_usd', 'n/a')} | "
-        f"MFE capture: {sc.get('capture_pct', p.get('mfe_capture_pct', 'n/a'))}% | "
+        f"Leakage left on table: ${_fmt_usd(sc.get('leakage_left_usd'))} | "
+        f"MFE capture: {_fmt_pct(sc.get('capture_pct', p.get('mfe_capture_pct')))} | "
         f"Fast-cut trades: {sc.get('fast_cut_trades', 0)}",
     ])
     if cap_dist:

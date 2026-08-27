@@ -368,9 +368,9 @@ def _neighbor_robustness(
 def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Attach auditable, conservative multi-factor scores and return ranked rows.
 
-    Missing inputs receive a zero score contribution *and* remain listed in
-    ``missing_metrics``.  They are never converted into zero PnL, zero
-    drawdown, or a fictitious lower confidence bound.
+    Missing inputs keep the hypothesis in the exhaustive inventory, but make
+    it explicitly unranked.  No numerical component or composite score is
+    emitted until every required ranking dimension is observed.
     """
     enriched: list[dict[str, Any]] = []
     neighbor_index = _PolicyNeighborIndex(rows)
@@ -421,6 +421,10 @@ def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any
             "missing_metrics": [name for name, value in raw.items() if value is None],
             "neighbor_evidence": neighbor,
             "weights": dict(_RANKING_WEIGHTS),
+            "evidence_status": (
+                "AVAILABLE" if all(value is not None for value in raw.values())
+                else "INCOMPLETE_RANKING_EVIDENCE"
+            ),
         }
         enriched.append(row)
 
@@ -429,7 +433,8 @@ def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any
         present = sorted(
             (float(row["ranking_evidence"]["raw_metrics"][metric]), index)
             for index, row in enumerate(enriched)
-            if row["ranking_evidence"]["raw_metrics"][metric] is not None
+            if not row["ranking_evidence"]["missing_metrics"]
+            and row["ranking_evidence"]["raw_metrics"][metric] is not None
         )
         scores: dict[int, float] = {}
         if present:
@@ -447,23 +452,29 @@ def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any
         percentiles[metric] = scores
 
     for index, row in enumerate(enriched):
+        complete = not row["ranking_evidence"]["missing_metrics"]
         components = {
-            metric: round(percentiles[metric].get(index, 0.0), 8)
+            metric: (round(percentiles[metric][index], 8) if complete else None)
             for metric in _RANKING_WEIGHTS
         }
-        score = sum(components[name] * weight for name, weight in _RANKING_WEIGHTS.items())
+        score = (
+            sum(float(components[name]) * weight for name, weight in _RANKING_WEIGHTS.items())
+            if complete else None
+        )
         row["ranking_evidence"]["component_scores"] = components
         row["ranking_evidence"]["missing_metric_penalty"] = round(sum(
             _RANKING_WEIGHTS[name]
             for name in row["ranking_evidence"]["missing_metrics"]
         ), 8)
-        row["ranking_evidence"]["composite_score"] = round(score, 8)
-        row["ranking_evidence"]["complete"] = not row["ranking_evidence"]["missing_metrics"]
-        row["ranking_score"] = round(score, 8)
-        row["ranking_complete"] = row["ranking_evidence"]["complete"]
+        row["ranking_evidence"]["composite_score"] = round(score, 8) if score is not None else None
+        row["ranking_evidence"]["complete"] = complete
+        row["ranking_score"] = round(score, 8) if score is not None else None
+        row["ranking_complete"] = complete
+        row["ranking_status"] = "RANKED" if complete else "INCOMPLETE_UNRANKED"
         row["qualification"] = "DESCRIPTIVE_ONLY"
 
     return sorted(enriched, key=lambda row: (
+        row.get("ranking_complete") is not True,
         -float(row.get("ranking_score") or 0),
         len((row.get("ranking_evidence") or {}).get("missing_metrics") or []),
         -float(row.get("sealed_oos_net_usd")) if _finite_number(row.get("sealed_oos_net_usd")) is not None else float("inf"),
@@ -1375,6 +1386,7 @@ def evaluate_protection_screen(
     public_ranked = [
         row for row in globally_ranked
         if _has_public_execution_evidence(row)
+        and row.get("ranking_complete") is True
         and row.get("cross_family_rank_eligible") is True
         and row.get("comparison_cohort_key") == canonical_comparison_cohort_key
     ]

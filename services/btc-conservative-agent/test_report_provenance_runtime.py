@@ -148,6 +148,24 @@ def test_empty_current_lanes_are_written_and_publish_with_exact_generation_ident
     assert report["evidence_scope"] == "CURRENT_SESSION"
     assert set(report["lanes"]) == set(analyzer.ACTIVE_TILE_ORDER)
     assert all(row["real_fills"] == 0 for row in report["lanes"].values())
+    unavailable = (
+        "approve_to_fill_pct",
+        "shadow_fill_pct",
+        "net_pnl_real",
+        "net_pnl_shadow_blocked",
+        "per_approve_ev",
+        "counterfactual_ev_per_approve",
+        "win_rate_pct",
+    )
+    assert all(
+        row[field] is None
+        for row in report["lanes"].values()
+        for field in unavailable
+    )
+    assert analyzer._best_worst_lanes(report) == (None, None)
+    compact_rows = analyzer._lane_table_rows(report)
+    assert len(compact_rows) == len(analyzer.ACTIVE_TILE_ORDER)
+    assert all(row["pnl"] is None and row["ev"] is None for row in compact_rows)
     assert all("all_time" not in row for row in report["lanes"].values())
 
     provenance = {
@@ -200,6 +218,30 @@ def test_empty_current_lanes_are_written_and_publish_with_exact_generation_ident
     assert published_report["source_data_revision"] == published_manifest["source_data_revision"]
     assert published_report["epoch_id"] == published_manifest["fresh_epoch"]["epoch_id"]
     assert published_report["evidence_scope"] == "CURRENT_SESSION"
+
+
+def test_lane_ranking_requires_real_terminal_execution_evidence():
+    no_fill = {
+        "lanes": {
+            analyzer.BENCHMARK_LANES[0]: {
+                "approves": 4,
+                "real_fills": 0,
+                "net_pnl_real": 0.0,
+            }
+        }
+    }
+    assert analyzer._best_worst_lanes(no_fill) == (None, None)
+
+    first, second = analyzer.BENCHMARK_LANES[:2]
+    eligible = {
+        "lanes": {
+            first: {"approves": 4, "real_fills": 2, "net_pnl_real": 0.25},
+            second: {"approves": 5, "real_fills": 3, "net_pnl_real": -0.10},
+        }
+    }
+    best, worst = analyzer._best_worst_lanes(eligible)
+    assert best["lane"] == first
+    assert worst["lane"] == second
 
 
 def test_report_stamp_normalizes_report_specific_showcase_counts(tmp_path):
