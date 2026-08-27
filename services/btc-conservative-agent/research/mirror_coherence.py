@@ -19,6 +19,7 @@ class MirrorCoherenceToken:
     heartbeat_path: str
     identity: str
     revision: str
+    epoch: str
 
 
 def _revision_matches(left: object, right: object) -> bool:
@@ -51,6 +52,59 @@ def _heartbeat_path(repo_root: Path, data_root: Path) -> Path:
         if candidate.is_file():
             return candidate
     raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_MISSING")
+
+
+def _read_json_object(path: Path, error_code: str) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise MirrorCoherenceError(error_code) from exc
+    if not isinstance(payload, dict):
+        raise MirrorCoherenceError(error_code)
+    return payload
+
+
+def _completed_mirror_identity(data_root: Path, revision: object) -> tuple[str, str]:
+    """Hash immutable mirror-generation fields, excluding heartbeat timestamps."""
+
+    state = _read_json_object(
+        data_root / ".fly-sync-state.json", "MIRROR_SYNC_STATE_INVALID"
+    )
+    stable_files = {}
+    for relative_path, record in state.items():
+        if not isinstance(record, dict):
+            raise MirrorCoherenceError("MIRROR_SYNC_STATE_INVALID")
+        stable = {
+            key: record[key]
+            for key in ("inode", "size", "mtime_ns", "sha256")
+            if key in record
+        }
+        if not {"inode", "size", "mtime_ns"}.issubset(stable):
+            raise MirrorCoherenceError("MIRROR_SYNC_STATE_INVALID")
+        stable_files[str(relative_path).replace("\\", "/")] = stable
+
+    session = _read_json_object(
+        data_root / "research_session.json", "MIRROR_EPOCH_RECEIPT_INVALID"
+    )
+    epoch = str(
+        session.get("collector_v22_epoch_id")
+        or session.get("epoch_id")
+        or session.get("collection_epoch")
+        or ""
+    ).strip()
+    if not epoch:
+        raise MirrorCoherenceError("MIRROR_EPOCH_IDENTITY_MISSING")
+
+    canonical = json.dumps(
+        {
+            "revision": str(revision or "").strip().lower(),
+            "epoch": epoch,
+            "files": stable_files,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest(), epoch
 
 
 def assert_mirror_coherent(
@@ -106,10 +160,11 @@ def assert_mirror_coherent(
     if age < -60 or age > age_limit:
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_STALE")
 
-    # The receipt itself is the sync identity. Any replacement during analysis
-    # invalidates the run, even when a later sync happens to carry the same rev.
-    identity = hashlib.sha256(raw).hexdigest()
-    token = MirrorCoherenceToken(str(path), identity, str(values[0]))
+    # Heartbeat timestamps and relay-health observations can refresh while the
+    # completed mirror remains unchanged. Bind analysis to the normalized file
+    # generation and collection epoch instead of volatile whole-receipt bytes.
+    identity, epoch = _completed_mirror_identity(mirror, values[2])
+    token = MirrorCoherenceToken(str(path), identity, str(values[2]), epoch)
     if previous is not None and token != previous:
         raise MirrorCoherenceError("MIRROR_SYNC_IDENTITY_CHANGED_DURING_ANALYSIS")
     return token
