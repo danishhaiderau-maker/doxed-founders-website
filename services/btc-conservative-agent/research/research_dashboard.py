@@ -5071,7 +5071,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .kpi { min-width: 0; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
   .kpi .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
   .kpi .val { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
-  table { display: block; width: 100%; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.9rem; margin-top: 12px; }
+  .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; margin-top: 12px; }
+  .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .table-scroll table { display: table; width: max-content; min-width: 100%; max-width: none; overflow: visible; border-collapse: collapse; font-size: 0.9rem; margin-top: 0; }
   th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   th { background: var(--panel); }
   tr:nth-child(even) { background: #101820; }
@@ -5094,9 +5096,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   ul.findings li { margin-bottom: 8px; line-height: 1.4; }
   .explorer-list { list-style: none; padding: 0; margin: 0; max-height: 70vh; overflow: auto; }
-  .explorer-list li { padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.85rem; }
-  .explorer-list li:hover { background: var(--panel); }
-  .explorer-list li.sel { background: #1a2838; color: var(--accent); }
+  .explorer-list li { border-bottom: 1px solid var(--border); }
+  .explorer-list button { width: 100%; padding: 8px 10px; border: 0; border-radius: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; font-size: 0.85rem; }
+  .explorer-list button:hover { background: var(--panel); }
+  .explorer-list button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .explorer-list button.sel { background: #1a2838; color: var(--accent); }
   h2 { font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   .note { max-width: 100%; overflow-wrap: anywhere; color: var(--muted); font-size: 0.8rem; }
   .empty-state { min-width: 0; max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
@@ -5430,6 +5434,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
+function ensureScrollableTables(root = document) {
+  root.querySelectorAll('main table').forEach(table => {
+    if (table.parentElement && table.parentElement.classList.contains('table-scroll')) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'table-scroll';
+    wrapper.setAttribute('role', 'region');
+    wrapper.setAttribute('tabindex', '0');
+    const heading = table.closest('section')?.querySelector('h2');
+    wrapper.setAttribute('aria-label', `${heading?.textContent?.trim() || 'Research'} table — scroll horizontally for more columns`);
+    table.parentNode.insertBefore(wrapper, table);
+    wrapper.appendChild(table);
+  });
+}
+ensureScrollableTables();
 const EVIDENCE_SCOPES = {
   summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
@@ -6398,10 +6416,16 @@ async function loadExplorer() {
     const file = entry.file || entry;
     const title = entry.title || file;
     const li = document.createElement('li');
-    li.textContent = title;
-    li.onclick = async () => {
-      list.querySelectorAll('li').forEach(x => x.classList.remove('sel'));
-      li.classList.add('sel');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = title;
+    button.onclick = async () => {
+      list.querySelectorAll('button').forEach(x => {
+        x.classList.remove('sel');
+        x.removeAttribute('aria-current');
+      });
+      button.classList.add('sel');
+      button.setAttribute('aria-current', 'true');
       const output = document.getElementById('report-json');
       output.textContent = `Loading ${title}…`;
       try {
@@ -6413,6 +6437,7 @@ async function loadExplorer() {
         output.textContent = `Unable to load ${title}: ${error.message || error}`;
       }
     };
+    li.appendChild(button);
     list.appendChild(li);
   });
 }
