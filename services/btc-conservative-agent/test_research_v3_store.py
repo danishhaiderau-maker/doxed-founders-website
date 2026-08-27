@@ -1,11 +1,12 @@
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from research_v3_store import V3EvidenceStore
+from research_v3_store import V3EvidenceStore, _segment_hash_cache
 
 
 class ResearchV3StoreTests(unittest.TestCase):
@@ -59,6 +60,61 @@ class ResearchV3StoreTests(unittest.TestCase):
             b = store.put_market_segment(**args)
             self.assertEqual(a["sha256"], b["sha256"])
             self.assertEqual(store.verify()["market_segment_count"], 1)
+
+    def test_verify_reuses_signature_validated_market_segment_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            ref = store.put_market_segment(
+                source="BITFINEX", symbol="BTC", timeframe="1s",
+                start_ts=1, end_ts=2, rows=[{"ts": 1, "price": 100}],
+            )
+            path = store.root / ref["relative_path"]
+            _segment_hash_cache.pop(str(path.resolve()), None)
+            with mock.patch.object(
+                V3EvidenceStore,
+                "_hash_segment",
+                wraps=V3EvidenceStore._hash_segment,
+            ) as hash_segment:
+                first = store.verify()
+                second = store.verify()
+            self.assertTrue(first["passed"])
+            self.assertTrue(second["passed"])
+            self.assertEqual(hash_segment.call_count, 1)
+
+    def test_external_segment_write_invalidates_hash_cache_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            ref = store.put_market_segment(
+                source="BITFINEX", symbol="BTC", timeframe="1s",
+                start_ts=1, end_ts=2, rows=[{"ts": 1, "price": 100}],
+            )
+            self.assertTrue(store.verify()["passed"])
+            path = store.root / ref["relative_path"]
+            original = path.read_bytes()
+            path.write_bytes(b"X" + original[1:])
+            report = store.verify()
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["market_segment_count"], 0)
+            self.assertEqual(report["defects"][0]["reason"], "SHA256_MISMATCH")
+
+    def test_external_segment_replace_invalidates_cache_even_with_same_size_and_mtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            ref = store.put_market_segment(
+                source="BITFINEX", symbol="BTC", timeframe="1s",
+                start_ts=1, end_ts=2, rows=[{"ts": 1, "price": 100}],
+            )
+            self.assertTrue(store.verify()["passed"])
+            path = store.root / ref["relative_path"]
+            before = path.stat()
+            original = path.read_bytes()
+            replacement = path.with_suffix(".replacement")
+            replacement.write_bytes(b"Y" + original[1:])
+            os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+            os.replace(replacement, path)
+            report = store.verify()
+            self.assertFalse(report["passed"])
+            self.assertEqual(report["defects"][0]["reason"], "SHA256_MISMATCH")
 
     def test_truncated_ledger_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

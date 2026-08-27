@@ -13,6 +13,7 @@ from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
+_segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 
 
 def _path_lock(path: Path) -> threading.RLock:
@@ -149,8 +150,7 @@ class V3EvidenceStore:
         target.parent.mkdir(parents=True, exist_ok=True)
         with _path_lock(target):
             if target.exists():
-                existing = target.read_bytes()
-                if hashlib.sha256(existing).hexdigest() != sha:
+                if self._cached_segment_hash(target) != sha:
                     raise ValueError("CONTENT_ADDRESS_COLLISION_OR_CORRUPTION")
             else:
                 temporary = target.with_suffix(f".{os.getpid()}.tmp")
@@ -160,6 +160,9 @@ class V3EvidenceStore:
                     os.fsync(handle.fileno())
                 os.replace(temporary, target)
                 _fsync_directory(target.parent)
+                signature = _path_signature(target)
+                if signature is not None:
+                    _segment_hash_cache[str(target.resolve())] = (signature, sha)
         return {
             "schema": "market_segment_ref_v3",
             "sha256": sha,
@@ -171,6 +174,36 @@ class V3EvidenceStore:
             "end_ts": float(end_ts),
             "row_count": len(frozen_rows),
         }
+
+    @staticmethod
+    def _hash_segment(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @classmethod
+    def _cached_segment_hash(cls, path: Path) -> str:
+        """Hash a segment once per stable filesystem identity.
+
+        Market segments are immutable content-addressed objects.  Reusing a
+        digest is safe only while device, inode, size and nanosecond mtime all
+        remain unchanged.  An external write, replacement, truncation or
+        recovery therefore invalidates the cache and forces the bytes to be
+        hashed again.
+        """
+        key = str(path.resolve())
+        signature = _path_signature(path)
+        if signature is None:
+            raise FileNotFoundError(path)
+        cached = _segment_hash_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        digest = cls._hash_segment(path)
+        # Re-stat after reading so a concurrent external replacement cannot
+        # bless a digest under the pre-read signature.
+        final_signature = _path_signature(path)
+        if final_signature is None or final_signature != signature:
+            raise OSError("MARKET_SEGMENT_CHANGED_DURING_VERIFICATION")
+        _segment_hash_cache[key] = (final_signature, digest)
+        return digest
 
     def verify(self) -> dict[str, Any]:
         """Verify durable ledgers without reparsing unchanged append files.
@@ -195,7 +228,8 @@ class V3EvidenceStore:
         for path in self.segment_dir.glob("*/*.json"):
             try:
                 expected = path.stem
-                actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                with _path_lock(path):
+                    actual = self._cached_segment_hash(path)
                 if actual != expected:
                     defects.append({"segment": path.as_posix(), "reason": "SHA256_MISMATCH"})
                 else:
