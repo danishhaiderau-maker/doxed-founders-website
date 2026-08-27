@@ -11030,7 +11030,8 @@ def _csv_write_fallback(filename, row, err: BaseException) -> None:
 
 def dynamic_csv_writer(filename, row):
     last_err = None
-    with csv_lock:
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    with research_gate, csv_lock:
         for attempt in range(CSV_WRITE_RETRIES):
             try:
                 _dynamic_csv_writer_once(filename, row)
