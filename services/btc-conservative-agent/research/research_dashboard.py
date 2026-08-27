@@ -4755,7 +4755,7 @@ const EVIDENCE_SCOPES = {
   chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
-  combos: ['MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
+  combos: ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
   'exit-combos': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current terminal exit combinations; observed paper and shadow/lab evidence are displayed separately and remain descriptive.'],
   'exit-reason-leak': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current peak-to-close hindsight gaps; paper and shadow/lab evidence remain separate and are not directly capturable profit.'],
@@ -5089,7 +5089,7 @@ async function loadCombos() {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
     const combo = `${fmtAdxBucket(c.adx_bucket)} + gap ${c.spread_bucket||''} + ${c.entry_mode||''} + ${c.lane||''}`;
     return `<tr class="${cls}"><td>${combo}</td><td>${fmtAdxBucket(c.adx_bucket)}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="9">No known combo data — run analyzer after fresh collection.</td></tr>';
+  }).join('') || '<tr><td colspan="9">No eligible legacy executed-lane combinations exist in the current cohort.</td></tr>';
   const pg = d.policy_grid || {};
   const pe = pg.evidence || {};
   const searchCounts = pg.search_counts || {};
@@ -5104,7 +5104,7 @@ async function loadCombos() {
   document.getElementById('policy-grid-kpis').innerHTML = [
     ['Profitable conservative rows', Number(policyStats.profitable_conservative_rows_displayed ?? policyRows.length).toLocaleString()],
     ['Positive ideal-touch hypotheses', Number(policyStats.positive_ideal_touch_hypotheses_displayed ?? diagnosticRows.length).toLocaleString()],
-    ['Policy families evaluated', Number(selection.families_evaluated ?? 0).toLocaleString()],
+    ['Policy-grid families materialized', Number(selection.families_evaluated ?? 0).toLocaleString()],
     ['Conservative shortlist families', Number(selection.families_represented ?? 0).toLocaleString()],
     ['Diagnostic families represented', new Set(diagnosticRows.map(row => row.policy_family || 'UNKNOWN')).size.toLocaleString()],
     ['Maximum rows per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
@@ -5248,7 +5248,8 @@ async function loadExitCombos() {
         const sourceRows = view.source_terminal_rows ?? 0;
         const eligibleRows = view.eligible_rows ?? 0;
         const coverage = view.coverage_pct ?? 0;
-        const missing = (view.missing_dimensions||[]).join(', ') || 'none recorded';
+        const missing = (view.missing_dimensions||[]).join(', ')
+          || (sourceRows === 0 ? 'not applicable (source empty)' : 'none recorded');
         reasons.push(`${label}: ${view.empty_reason||world.empty_reason||'NO TERMINAL EVIDENCE'} · source ${sourceRows}, eligible ${eligibleRows}, coverage ${coverage}% · missing ${missing}`);
       }
     });

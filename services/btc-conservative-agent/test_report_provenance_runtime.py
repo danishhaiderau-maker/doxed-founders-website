@@ -47,6 +47,10 @@ def test_report_provenance_executes_against_canonical_evidence_root(tmp_path, mo
     assert provenance["policy_comparability_key"] == "policy-one"
     assert provenance["policy_comparability_status"] == "SINGLE_COMPARABLE_POLICY"
     assert all(row["available"] for row in provenance["evidence_inputs"].values())
+    relay = provenance["evidence_inputs"]["relay_lifecycle_evidence_v1.json"]
+    assert relay["generating_revision"] == "a" * 40
+    assert relay["producer_service"] == "PLATFORM_RELAY_EXPORTER"
+    assert relay["producer_revision_role"] == "EXPORTER_DEPLOYMENT_REVISION"
 
 
 def test_provenance_uses_joined_policy_keys_when_raw_jsonl_is_null(tmp_path, monkeypatch):

@@ -17630,6 +17630,12 @@ def _report_source_evidence_provenance():
                         "schema": payload.get("schema"),
                         "generated_at": payload.get("generatedAt"),
                         "generating_revision": payload.get("generatingRevision"),
+                        # This artifact is exported by the platform API (Railway),
+                        # then forwarded to the Fly collector.  Its revision is
+                        # therefore the exporter revision and must not be compared
+                        # with the Fly bot's source_data/generation revision.
+                        "producer_service": "PLATFORM_RELAY_EXPORTER",
+                        "producer_revision_role": "EXPORTER_DEPLOYMENT_REVISION",
                         "run_identity": payload.get("runIdentity"),
                     })
                 except (OSError, ValueError, TypeError):

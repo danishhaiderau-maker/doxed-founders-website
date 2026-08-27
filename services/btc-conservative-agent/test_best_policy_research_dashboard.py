@@ -198,12 +198,16 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     assert "Diagnostic replay PnL" in html
     assert "Execution fills" in html
     assert "Execution OOS PnL" in html
-    assert "MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED" in html
+    assert "CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED" in html
+    assert "MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED" not in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
     assert "Profitable conservative rows" in html
     assert "Positive ideal-touch hypotheses" in html
-    assert "Policy families evaluated" in html
+    assert "Policy-grid families materialized" in html
+    assert "No eligible legacy executed-lane combinations exist in the current cohort." in html
+    assert "No known combo data — run analyzer after fresh collection." not in html
+    assert "not applicable (source empty)" in html
     assert "Conservative shortlist families" in html
     assert "Diagnostic families represented" in html
     assert "Maximum rows per family" in html
