@@ -34,6 +34,8 @@ COMPRESSED_SHADOW_POLICY_ID = "SHADOW_COMPRESSED_CHASE_0_1_2_4_7_10_EXP13_V1"
 COMPRESSED_SHADOW_STAGE_SECONDS = (0, 60, 120, 240, 420, 600)
 COMPRESSED_SHADOW_EXPIRY_SEC = 780
 COMPRESSED_SHADOW_STEP_PCT = 0.25
+COMPRESSED_SHADOW_INITIAL_OFFSET_PCT = LIVE_ORIG_OFFSET_PCT
+COMPRESSED_SHADOW_COST_MODEL = "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
 
 
 def _compressed_policy_signature() -> str:
@@ -42,6 +44,8 @@ def _compressed_policy_signature() -> str:
         "stage_seconds": COMPRESSED_SHADOW_STAGE_SECONDS,
         "expiry_sec": COMPRESSED_SHADOW_EXPIRY_SEC,
         "step_pct": COMPRESSED_SHADOW_STEP_PCT,
+        "initial_offset_pct": COMPRESSED_SHADOW_INITIAL_OFFSET_PCT,
+        "cost_model": COMPRESSED_SHADOW_COST_MODEL,
         "execution_class": "SHADOW_ONLY",
     }, sort_keys=True, separators=(",", ":"))
     return "policy-sha256-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -55,13 +59,24 @@ def arm_compressed_shadow_chase(
     initial_limit_price: float, shared_ai_call_id: str, opportunity_id: str,
     episode_id: str, epoch_id: str, bid: Optional[float] = None,
     ask: Optional[float] = None, last: Optional[float] = None,
-    bbo_fresh: bool = False,
+    bbo_fresh: bool = False, event_id: str = "",
+    requested_qty: Optional[float] = None,
+    requested_margin_usd: Optional[float] = None,
+    leverage: Optional[float] = None, fee_profile: str = "",
+    entry_fee_rate: Optional[float] = None,
+    exit_fee_rate: Optional[float] = None,
+    slippage_model: str = COMPRESSED_SHADOW_COST_MODEL,
 ) -> tuple[dict, dict]:
     """Create an auditable shadow schedule and its stage-0 receipt.
 
-    The returned state has no order quantity, relay identity, or executable
-    flag by design.  It is a counterfactual market-observation state only.
+    Sizing and cost inputs describe a hypothetical conservative fill only.
+    They never authorize an order or relay.
     """
+    derived_event_id = str(event_id or "") or (
+        "event:compressed-chase:" + hashlib.sha256(
+            f"{shared_ai_call_id}|{trade_id}|{float(signal_ts):.6f}".encode("utf-8")
+        ).hexdigest()[:20]
+    )
     identities = {
         "shared_ai_call_id": str(shared_ai_call_id or ""),
         "opportunity_id": str(opportunity_id or ""),
@@ -69,9 +84,10 @@ def arm_compressed_shadow_chase(
         "policy_id": COMPRESSED_SHADOW_POLICY_ID,
         "policy_signature": COMPRESSED_SHADOW_POLICY_SIGNATURE,
         "epoch_id": str(epoch_id or ""),
+        "event_id": derived_event_id,
     }
     missing = [key for key in (
-        "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
+        "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id", "event_id",
     ) if not identities[key]]
     generation_material = (
         f"{COMPRESSED_SHADOW_POLICY_SIGNATURE}|{trade_id}|{float(signal_ts):.6f}|"
@@ -98,6 +114,13 @@ def arm_compressed_shadow_chase(
         "missing_identity_fields": missing,
         "schedule_generation_id": schedule_generation_id,
         "tape_evidence_path": "market_microstructure_1s.jsonl",
+        "requested_qty": requested_qty,
+        "requested_margin_usd": requested_margin_usd,
+        "leverage": leverage,
+        "fee_profile": str(fee_profile or ""),
+        "entry_fee_rate": entry_fee_rate,
+        "exit_fee_rate": exit_fee_rate,
+        "slippage_model": str(slippage_model or ""),
         **identities,
     }
     return state, _compressed_shadow_receipt(
@@ -141,6 +164,7 @@ def _compressed_shadow_receipt(
         "opportunity_id": state["opportunity_id"],
         "episode_id": state["episode_id"],
         "epoch_id": state["epoch_id"],
+        "event_id": state.get("event_id"),
         "policy_id": state["policy_id"],
         "policy_signature": state["policy_signature"],
         "schedule_generation_id": state["schedule_generation_id"],
@@ -168,6 +192,13 @@ def _compressed_shadow_receipt(
         "eligible_at_stage": eligible,
         "schedule_seconds": list(COMPRESSED_SHADOW_STAGE_SECONDS),
         "terminal_expiry_sec": COMPRESSED_SHADOW_EXPIRY_SEC,
+        "requested_qty": state.get("requested_qty"),
+        "requested_margin_usd": state.get("requested_margin_usd"),
+        "leverage": state.get("leverage"),
+        "fee_profile": state.get("fee_profile"),
+        "entry_fee_rate": state.get("entry_fee_rate"),
+        "exit_fee_rate": state.get("exit_fee_rate"),
+        "slippage_model": state.get("slippage_model"),
     }
 
 
@@ -265,9 +296,16 @@ def recover_compressed_shadow_states(
             "missing_identity_fields": missing,
             "schedule_generation_id": latest.get("schedule_generation_id") or "",
             "tape_evidence_path": latest.get("tape_evidence_path") or "",
+            "requested_qty": latest.get("requested_qty"),
+            "requested_margin_usd": latest.get("requested_margin_usd"),
+            "leverage": latest.get("leverage"),
+            "fee_profile": latest.get("fee_profile") or "",
+            "entry_fee_rate": latest.get("entry_fee_rate"),
+            "exit_fee_rate": latest.get("exit_fee_rate"),
+            "slippage_model": latest.get("slippage_model") or "",
             **{key: latest.get(key) or "" for key in (
                 "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
-                "policy_id", "policy_signature",
+                "event_id", "policy_id", "policy_signature",
             )},
         }
     return recovered

@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -48,12 +50,14 @@ def _signed_rows(complete=True):
             "stage_index": index,
             "stage_due_sec": due,
             "observed_ts": 1000 + due,
+            "scheduled_due_ts": 1000 + due,
+            "observed_delay_sec": 0.0,
             "virtual_limit_price": 100.0,
             "reference_price": 100.0,
             "bbo": {"bid": ask - 1, "ask": ask, "last": ask - 0.5},
             "bbo_fresh": True,
             "bbo_valid": True,
-            "coverage_status": "COMPLETE",
+            "coverage_status": "OBSERVED",
             "eligible_at_stage": True,
             "schedule_seconds": schedule,
             "terminal_expiry_sec": 780,
@@ -159,8 +163,60 @@ def test_checkpoint_only_rows_cannot_be_proven(tmp_path, monkeypatch):
 
     row = engine.build_missed_opportunity_proof_report(session={})["proofs"][0]
     assert row["classification"] == "INSUFFICIENT_EVIDENCE"
+    assert row["conservative_touch"] is True
     assert row["net_terminal_return_pct"] is None
     assert row["coverage"]["tape_status"] in {"UNAVAILABLE", "INSUFFICIENT"}
+
+    lab = engine.chase_policy_lab_report(session={}, proof_payload={
+        "proofs": [row], "empty_reason": None,
+    })
+    assert lab["all_schedule_count"] == 1
+    assert lab["top_schedule"]["unsupported"] == 1
+    assert lab["top_schedule"]["supported"] == 0
+
+
+def test_overdue_observed_checkpoint_is_not_accepted(tmp_path, monkeypatch):
+    engine = _load_engine()
+    monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _identity_ledgers(tmp_path)
+    rows = _signed_rows()
+    rows[2]["observed_ts"] += 16
+    rows[2]["observed_delay_sec"] = 16.0
+    _write_jsonl(tmp_path / "chase_offset_touch_grid.jsonl", rows)
+
+    row = engine.build_missed_opportunity_proof_report(session={})["proofs"][0]
+    assert row["classification"] == "INSUFFICIENT_EVIDENCE"
+    assert row["coverage"]["status"] == "INSUFFICIENT"
+
+
+def test_joined_tape_derives_costs_only_from_signed_runtime_basis():
+    engine = _load_engine()
+    first = {
+        "requested_qty": 2.0,
+        "entry_fee_rate": 0.001,
+        "exit_fee_rate": 0.002,
+        "fee_profile": "TEST_EXPLICIT",
+        "slippage_model": "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1",
+        "tape_window_start_ts": 1000.0,
+        "tape_evidence_path": "market_microstructure_1s.jsonl",
+    }
+    touch = {"observed_ts": 1000.0, "virtual_limit_price": 100.0}
+    expiry = {"observed_ts": 1001.0, "tape_window_end_ts": 1001.0}
+    tape = {
+        1000: {"fresh": True, "valid_bbo": True, "bid": 98.0, "ask": 99.0,
+               "bid_qty": 5.0, "ask_qty": 5.0, "row_sha256": "a"},
+        1001: {"fresh": True, "valid_bbo": True, "bid": 109.0, "ask": 110.0,
+               "bid_qty": 5.0, "ask_qty": 5.0, "row_sha256": "b"},
+    }
+    joined = engine._joined_tape_evidence(first, expiry, touch, "LONG", tape)
+    assert joined["coverage_status"] == "COMPLETE"
+    assert joined["conservative_execution_supported"] is True
+    assert joined["quantity"] == 2.0
+    assert joined["notional_usd"] == 198.0
+    assert joined["fee_usd"] == pytest.approx(0.198 + 0.436)
+    assert joined["slippage_usd"] == 0.0
+    assert joined["slippage_model"] == "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
 
 
 def test_gross_path_without_explicit_costs_cannot_be_proven(tmp_path, monkeypatch):
@@ -177,6 +233,28 @@ def test_gross_path_without_explicit_costs_cannot_be_proven(tmp_path, monkeypatc
     assert row["net_terminal_return_pct"] is None
     assert row["classification"] == "INSUFFICIENT_EVIDENCE"
     assert row["cost_assumption"]["explicit_costs_complete"] is False
+
+
+@pytest.mark.parametrize("missing", [
+    "quantity", "fee_usd", "slippage_usd", "receipt_id", "shared_ai_call_id",
+])
+def test_observed_schedule_proof_fails_closed_when_required_evidence_is_missing(
+    tmp_path, monkeypatch, missing,
+):
+    engine = _load_engine()
+    monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _identity_ledgers(tmp_path)
+    rows = _signed_rows()
+    if missing == "shared_ai_call_id":
+        for row in rows:
+            row[missing] = ""
+    else:
+        rows[-1]["tape_evidence"].pop(missing)
+    _write_jsonl(tmp_path / "chase_offset_touch_grid.jsonl", rows)
+
+    row = engine.build_missed_opportunity_proof_report(session={})["proofs"][0]
+    assert row["classification"] == "INSUFFICIENT_EVIDENCE"
 
 
 def test_empty_source_is_truthful_and_not_zero(tmp_path, monkeypatch):

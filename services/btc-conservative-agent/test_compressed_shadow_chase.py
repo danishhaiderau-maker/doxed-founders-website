@@ -18,6 +18,9 @@ def _armed():
         signal_ts=1_000, initial_limit_price=99_900,
         shared_ai_call_id="scan-1", opportunity_id="opp-1",
         episode_id="episode-1", epoch_id="epoch-1",
+        requested_qty=0.00025, requested_margin_usd=0.25, leverage=100,
+        fee_profile="BITFINEX_ZERO", entry_fee_rate=0.0,
+        exit_fee_rate=0.0,
     )
 
 
@@ -37,6 +40,13 @@ def test_signed_schedule_and_stage_zero_are_shadow_only():
     assert row["schedule_generation_id"].startswith("shadow-generation-")
     assert len(row["schedule_generation_id"].removeprefix("shadow-generation-")) == 64
     assert row["tape_evidence_path"] == "market_microstructure_1s.jsonl"
+    assert row["event_id"].startswith("event:compressed-chase:")
+    assert row["requested_qty"] == 0.00025
+    assert row["requested_margin_usd"] == 0.25
+    assert row["fee_profile"] == "BITFINEX_ZERO"
+    assert row["entry_fee_rate"] == 0.0
+    assert row["exit_fee_rate"] == 0.0
+    assert row["slippage_model"] == "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
     assert state["expires_ts"] == 1780
 
 
@@ -72,9 +82,10 @@ def test_receipts_keep_independent_identity_dimensions():
     second = poll_compressed_shadow_chase(state, now_ts=1060, last=100_100)[0]
     keys = (
         "shared_ai_call_id", "opportunity_id", "episode_id", "policy_id",
-        "policy_signature", "epoch_id",
+        "policy_signature", "epoch_id", "event_id", "requested_qty",
+        "entry_fee_rate", "exit_fee_rate", "slippage_model",
     )
-    assert all(first[key] for key in keys)
+    assert all(first[key] is not None and first[key] != "" for key in keys)
     assert {key: first[key] for key in keys} == {key: second[key] for key in keys}
 
 
@@ -125,3 +136,23 @@ def test_canonical_bot_signal_engine_and_manifest_are_in_parity():
     expected = hashlib.sha256(bot.replace("\r\n", "\n").encode("utf-8")).hexdigest()[:12]
     assert manifest["source"] == "services/btc-conservative-agent/bot.py"
     assert manifest["signal_hash"] == expected
+
+
+def test_runtime_owns_one_shadow_schedule_per_shared_ai_call():
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "services/btc-conservative-agent/bot.py").read_text(
+        encoding="utf-8"
+    )
+    assert source.count("_arm_shared_compressed_shadow_chase(") == 2
+    helper = source.split("def _arm_shared_compressed_shadow_chase", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+    assert "if not ai_decision_should_execute(ai):" in helper
+    assert "with _collector_epoch_lock:" in helper
+    assert "call_id in _compressed_shadow_seen_call_ids" in helper
+    assert 'places_order=False' not in helper  # module owns immutable isolation flags
+    process = source.split("def process_signal", 1)[1]
+    arm_at = process.index("_arm_shared_compressed_shadow_chase(ctx, ai)")
+    family_at = process.index("spawn_combo_lanes_from_ai_scan(")
+    continuous_at = process.index("spawn_continuous_lane_from_ai_scan(")
+    assert arm_at < family_at < continuous_at

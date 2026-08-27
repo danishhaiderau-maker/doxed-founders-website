@@ -137,6 +137,8 @@ from cycle_3m_indicators import (
     cycle_bucket_3m,
 )
 from chase_offset_touch_grid import (
+    COMPRESSED_SHADOW_INITIAL_OFFSET_PCT,
+    COMPRESSED_SHADOW_POLICY_SIGNATURE,
     TOUCH_GRID_FILE as CHASE_OFFSET_TOUCH_GRID_FILE,
     arm_compressed_shadow_chase,
     arm_touch_grid_rows,
@@ -12303,6 +12305,7 @@ def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
 _cycle_3m_written_buckets = {}
 _touch_grid_book = {}
 _compressed_shadow_chase_book = {}
+_compressed_shadow_seen_call_ids = set()
 _compressed_shadow_recovery_attempted = False
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
@@ -12496,6 +12499,7 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
         _cycle_3m_written_buckets.clear()
         _touch_grid_book.clear()
         _compressed_shadow_chase_book.clear()
+        _compressed_shadow_seen_call_ids.clear()
         _compressed_shadow_recovery_attempted = True
         _order_multiverse_state.clear()
         _order_multiverse_pending_src.clear()
@@ -12562,26 +12566,6 @@ def _arm_chase_offset_touch_grid(signal: dict):
         for row in rows:
             _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
         _touch_grid_book[tid] = new_grid_state(rows)
-        shared_ai_call_id = str(
-            signal.get("shared_ai_call_id") or signal.get("ai_call_id")
-            or signal.get("source_ai_trade_id") or ""
-        )
-        shadow_state, stage_zero = arm_compressed_shadow_chase(
-            trade_id=tid, direction=direction, signal_price=price, signal_ts=ts,
-            initial_limit_price=orig_limit_price(
-                price, direction, DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
-            ),
-            shared_ai_call_id=shared_ai_call_id,
-            opportunity_id=str(signal.get("opportunity_id") or signal.get("event_id") or ""),
-            episode_id=str(signal.get("event_episode_id") or signal.get("episode_id") or ""),
-            epoch_id=str(signal.get("epoch_id") or signal.get("collection_epoch_id") or ""),
-            bid=signal.get("best_bid") or signal.get("bid"),
-            ask=signal.get("best_ask") or signal.get("ask"),
-            last=signal.get("last") or price,
-            bbo_fresh=bool(signal.get("bbo_fresh") or signal.get("market_data_fresh")),
-        )
-        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE")
-        _compressed_shadow_chase_book[tid] = shadow_state
         logger.info(
             f"[TOUCH GRID] armed trade_id={tid} offsets=0.01-0.30 live_orig="
             f"{DETERMINISTIC_ENTRY_OFFSET_PCT * 100:.2f}% paper_only [PIPELINE ENFORCEMENT]"
@@ -12620,8 +12604,36 @@ def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str,
     return "VALID", f"FILL_REVALIDATION_SAME_{direction}"
 
 
-def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
+def _recover_compressed_shadow_chases_once(now: float = None) -> None:
+    """Load active and terminal shared-call owners before any new arm."""
     global _compressed_shadow_recovery_attempted
+    with _collector_epoch_lock:
+        if _compressed_shadow_recovery_attempted:
+            return
+        durable_rows = []
+        for candidate in (CHASE_OFFSET_TOUCH_GRID_FILE + ".1", CHASE_OFFSET_TOUCH_GRID_FILE):
+            try:
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            row = json.loads(line)
+                        except (TypeError, ValueError):
+                            continue
+                        if row.get("schema") == "compressed_chase_shadow_v1":
+                            durable_rows.append(row)
+                            call_id = str(row.get("shared_ai_call_id") or "").strip()
+                            if call_id:
+                                _compressed_shadow_seen_call_ids.add(call_id)
+            except OSError:
+                continue
+        for tid, recovered in recover_compressed_shadow_states(
+            durable_rows, now_ts=float(now or time.time()),
+        ).items():
+            _compressed_shadow_chase_book.setdefault(tid, recovered)
+        _compressed_shadow_recovery_attempted = True
+
+
+def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
     if price is None or float(price) <= 0:
         return
     now = time.time()
@@ -12646,23 +12658,7 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
                 logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
         for tid in dead:
             _touch_grid_book.pop(tid, None)
-    if not _compressed_shadow_recovery_attempted:
-        _compressed_shadow_recovery_attempted = True
-        durable_rows = []
-        for candidate in (CHASE_OFFSET_TOUCH_GRID_FILE + ".1", CHASE_OFFSET_TOUCH_GRID_FILE):
-            try:
-                with open(candidate, "r", encoding="utf-8") as handle:
-                    for line in handle:
-                        try:
-                            durable_rows.append(json.loads(line))
-                        except (TypeError, ValueError):
-                            continue
-            except OSError:
-                continue
-        for tid, recovered in recover_compressed_shadow_states(
-            durable_rows, now_ts=now,
-        ).items():
-            _compressed_shadow_chase_book.setdefault(tid, recovered)
+    _recover_compressed_shadow_chases_once(now)
     shadow_dead = []
     for tid, shadow in list(_compressed_shadow_chase_book.items()):
         try:
@@ -14669,6 +14665,91 @@ def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
         or (ctx or {}).get("trade_id")
         or ""
     )
+
+
+def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
+    """Arm one non-executable compressed schedule per executable AI call."""
+    if not ai_decision_should_execute(ai):
+        return False
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx).strip()
+    raw_direction = str(
+        (ai or {}).get("candidate_direction")
+        or (ai or {}).get("direction")
+        or (ai or {}).get("raw_direction")
+        or ""
+    ).upper()
+    if not call_id or raw_direction not in ("LONG", "SHORT"):
+        return False
+    direction = raw_direction
+    if invert_signal_active():
+        direction = "SHORT" if raw_direction == "LONG" else "LONG"
+    raw_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
+    try:
+        signal_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        signal_ts = time.time()
+    _recover_compressed_shadow_chases_once(signal_ts)
+    with state_lock:
+        bid = float(state.get("bid") or 0) or None
+        ask = float(state.get("ask") or 0) or None
+        last = float(state.get("rest_price") or state.get("last_trade_price") or 0) or None
+    signal_price = float(
+        last
+        or (ctx or {}).get("price")
+        or ((ctx or {}).get("market_context") or {}).get("price")
+        or 0
+    )
+    if signal_price <= 0:
+        return False
+    episode_id = "episode-" + hashlib.sha256(
+        f"shared:{call_id}".encode("utf-8")
+    ).hexdigest()[:20]
+    opportunity_id = f"opportunity:{episode_id}"
+    trade_id = "compressed-shadow-" + hashlib.sha256(
+        f"{call_id}|{COMPRESSED_SHADOW_POLICY_SIGNATURE}".encode("utf-8")
+    ).hexdigest()[:20]
+    leverage = float(_state_leverage())
+    initial_limit = orig_limit_price(
+        signal_price, direction, COMPRESSED_SHADOW_INITIAL_OFFSET_PCT,
+    )
+    requested_qty = (FIXED_MARGIN_USDT * leverage) / initial_limit
+    maker_fee, taker_fee = get_trading_fee_rates()
+    with _collector_epoch_lock:
+        if call_id in _compressed_shadow_seen_call_ids:
+            return False
+        shadow_state, stage_zero = arm_compressed_shadow_chase(
+            trade_id=trade_id,
+            direction=direction,
+            signal_price=signal_price,
+            signal_ts=signal_ts,
+            initial_limit_price=initial_limit,
+            shared_ai_call_id=call_id,
+            opportunity_id=opportunity_id,
+            episode_id=episode_id,
+            epoch_id=_collector_v22_epoch_id(),
+            event_id=call_id,
+            bid=bid,
+            ask=ask,
+            last=last or signal_price,
+            bbo_fresh=_fresh_rest_entry_quote_ready(),
+            requested_qty=requested_qty,
+            requested_margin_usd=FIXED_MARGIN_USDT,
+            leverage=leverage,
+            fee_profile=EXCHANGE_FEE_PROFILE,
+            entry_fee_rate=maker_fee,
+            exit_fee_rate=taker_fee,
+        )
+        _safe_append_jsonl(
+            CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE",
+        )
+        _compressed_shadow_chase_book[trade_id] = shadow_state
+        _compressed_shadow_seen_call_ids.add(call_id)
+    logger.info(
+        f"[SHADOW CHASE] armed shared_call={call_id} trade_id={trade_id} "
+        "schedule=0,1,2,4,7,10m expiry=13m shadow_only "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    return True
 
 
 def _v3_lane_policy_material(lane: str) -> dict:
@@ -21347,6 +21428,9 @@ def process_signal(event: dict):
                         "exact_reason": "AI_RECOVERY_OBSERVATION_ONLY",
                     }
                 if is_ai_scan_lane(research_lane) and ai:
+                    # One correlated shadow schedule belongs to the paid
+                    # shared call, never to each independently evaluated tile.
+                    _arm_shared_compressed_shadow_chase(ctx, ai)
                     # Fan out five independent paper-only family lifecycles
                     # and the Continuous benchmark directly from the completed
                     # shared-AI result.  Continuous owns an independent verdict,

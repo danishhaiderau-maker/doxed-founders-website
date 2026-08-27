@@ -11974,6 +11974,40 @@ def _shadow_return_pct(direction, entry, mark):
     return raw if direction == "LONG" else -raw if direction == "SHORT" else None
 
 
+def _compressed_stage_observation_supported(row):
+    """Accept signed analyzer receipts and timely runtime observations.
+
+    Runtime emits ``OBSERVED`` only for checkpoints captured within its strict
+    observation-delay window.  Keep that compatibility local to stage
+    coverage; terminal tape, depth, quantity, and cost proof remain separate
+    fail-closed requirements below.
+    """
+    if not isinstance(row, dict):
+        return False
+    if not (
+        row.get("identity_complete") is True
+        and row.get("eligible_at_stage") is True
+        and row.get("bbo_fresh") is True
+        and row.get("bbo_valid") is True
+    ):
+        return False
+    status = str(row.get("coverage_status") or "").upper()
+    if status in {"COMPLETE", "SUPPORTED"}:
+        return True
+    if status != "OBSERVED":
+        return False
+    observed_ts = _first_number(row.get("observed_ts"))
+    scheduled_due_ts = _first_number(row.get("scheduled_due_ts"))
+    observed_delay_sec = _first_number(row.get("observed_delay_sec"))
+    return bool(
+        observed_ts is not None
+        and scheduled_due_ts is not None
+        and observed_delay_sec is not None
+        and 0.0 <= observed_delay_sec <= 15.0
+        and abs((observed_ts - scheduled_due_ts) - observed_delay_sec) <= 0.001
+    )
+
+
 def _one_second_tape_by_bucket():
     rows = _load_jsonl_rows("market_microstructure_1s.jsonl")
     return {
@@ -12028,6 +12062,38 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
     entry_execution_price = _first_number(
         (entry_bucket or {}).get("ask") if direction == "LONG" else (entry_bucket or {}).get("bid")
     )
+    entry_fee_rate = _first_number(first.get("entry_fee_rate"))
+    exit_fee_rate = _first_number(first.get("exit_fee_rate"))
+    slippage_model = str(first.get("slippage_model") or "")
+    virtual_limit_price = _first_number(touch_row.get("virtual_limit_price"))
+    terminal_bucket = tape_by_bucket.get(int(math.floor(end_ts)))
+    terminal_execution_price = _first_number(
+        (terminal_bucket or {}).get("bid") if direction == "LONG"
+        else (terminal_bucket or {}).get("ask")
+    )
+    explicit_cost_basis = bool(
+        requested_qty is not None and requested_qty > 0
+        and entry_execution_price is not None and entry_execution_price > 0
+        and terminal_execution_price is not None and terminal_execution_price > 0
+        and entry_fee_rate is not None and entry_fee_rate >= 0
+        and exit_fee_rate is not None and exit_fee_rate >= 0
+        and slippage_model == "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
+        and virtual_limit_price is not None and virtual_limit_price > 0
+    )
+    notional_usd = requested_qty * entry_execution_price if explicit_cost_basis else None
+    exit_notional_usd = requested_qty * terminal_execution_price if explicit_cost_basis else None
+    fee_usd = (
+        notional_usd * entry_fee_rate + exit_notional_usd * exit_fee_rate
+        if explicit_cost_basis else None
+    )
+    adverse_entry_delta = None
+    if explicit_cost_basis:
+        adverse_entry_delta = (
+            max(0.0, entry_execution_price - virtual_limit_price)
+            if direction == "LONG"
+            else max(0.0, virtual_limit_price - entry_execution_price)
+        )
+    slippage_usd = requested_qty * adverse_entry_delta if explicit_cost_basis else None
     receipt_material = "|".join(
         [str(int(math.ceil(start_ts))), str(int(math.floor(end_ts)))]
         + [str(point.get("row_sha256") or "") for point in points]
@@ -12047,10 +12113,18 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
         "conservative_execution_supported": execution_supported,
         "fill_status": "FULL_FILL" if execution_supported else "UNSUPPORTED",
         "entry_execution_price": entry_execution_price,
+        "terminal_execution_price": terminal_execution_price,
         "quantity": requested_qty,
+        "notional_usd": notional_usd,
+        "fee_usd": fee_usd,
+        "slippage_usd": slippage_usd,
+        "slippage_model": slippage_model or None,
+        "fee_profile": first.get("fee_profile"),
+        "entry_fee_rate": entry_fee_rate,
+        "exit_fee_rate": exit_fee_rate,
         "points": points,
-        # Fees and additional slippage deliberately remain absent unless an
-        # explicit signed source supplies them; gross paths cannot be PROVEN.
+        # Costs are derived only from signed runtime rates/model plus joined
+        # conservative BBO tape. Missing inputs remain absent and fail closed.
     }
 
 
@@ -12108,14 +12182,7 @@ def build_missed_opportunity_proof_report(session=None):
             row = stages.get(index)
             price = _shadow_checkpoint_price(row or {}, direction)
             limit_price = _first_number((row or {}).get("virtual_limit_price"))
-            stage_supported = bool(
-                row is not None
-                and row.get("identity_complete") is True
-                and row.get("eligible_at_stage") is True
-                and row.get("bbo_fresh") is True
-                and row.get("bbo_valid") is True
-                and str(row.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
-            )
+            stage_supported = _compressed_stage_observation_supported(row)
             touched = bool(
                 stage_supported and
                 price is not None and limit_price is not None and (
@@ -12210,12 +12277,7 @@ def build_missed_opportunity_proof_report(session=None):
                 identity_missing.extend(row.get("missing_identity_fields") or ["runtime_identity_complete"])
         identity_missing = sorted({str(value) for value in identity_missing if value})
         stage_coverage_complete = len(stages) == len(expected) and all(
-            r.get("identity_complete") is True
-            and r.get("eligible_at_stage") is True
-            and r.get("bbo_fresh") is True
-            and r.get("bbo_valid") is True
-            and str(r.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
-            for r in stages.values()
+            _compressed_stage_observation_supported(r) for r in stages.values()
         )
         tape_coverage_complete = bool(
             tape_receipt and tape_points
