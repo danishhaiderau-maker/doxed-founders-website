@@ -143,7 +143,6 @@ CURRENT_PATHWAY_RECEIPTS = (
 )
 REQUIRED_ANALYZER_RAW_INPUTS = (
     "research.db",
-    "trades_3factor.csv",
     "decisions_3factor.csv",
     "pipeline_events_3factor.csv",
     "ai_input_log.jsonl",
@@ -161,6 +160,12 @@ REQUIRED_ANALYZER_RAW_INPUTS = (
     "execution_settings_history.jsonl",
     "trend_health.csv",
 )
+CONDITIONAL_ANALYZER_RAW_INPUTS = {
+    # A fresh epoch may truthfully have no terminal trades yet.  Absence is
+    # recorded explicitly in the bundle instead of being confused with zero
+    # PnL or silently treated as a populated cohort.
+    "trades_3factor.csv": "NO_TERMINAL_TRADES",
+}
 OPTIONAL_ANALYZER_RAW_INPUTS = (
     "blocked_signals_3factor.csv",
     "expired_orders_3factor.csv",
@@ -4028,13 +4033,18 @@ def download_everything():
     # market segments are content-addressed below a nested directory tree.
     v3_ledgers = (
         "decision.jsonl",
-        "execution.jsonl",
         "lifecycle.jsonl",
         "market_segment.jsonl",
         "opportunity.jsonl",
         "order_intent.jsonl",
     )
-    for name in v3_ledgers:
+    conditional_v3_ledgers = {
+        # The execution ledger is first created by an observed fill/close.
+        # Its absence before any execution is a truthful empty cohort, not a
+        # transport failure.  Once present it is always exported and hashed.
+        "execution.jsonl": "NO_EXECUTION_EVENTS",
+    }
+    for name in (*v3_ledgers, *conditional_v3_ledgers):
         path = DATA_ROOT / "v3" / "ledgers" / name
         if path.is_file():
             candidates.append((
@@ -4094,6 +4104,30 @@ def download_everything():
                 "artifacts are missing: " + ", ".join(missing_required_raw)
             ),
         )
+    conditional_raw_status = {
+        name: {
+            "present": f"raw/current_fly_mirror/{name}" in member_names,
+            "absence_status": (
+                None
+                if f"raw/current_fly_mirror/{name}" in member_names
+                else absence_status
+            ),
+        }
+        for name, absence_status in CONDITIONAL_ANALYZER_RAW_INPUTS.items()
+    }
+    conditional_v3_status = {
+        name: {
+            "present": (
+                f"raw/current_fly_mirror/v3/ledgers/{name}" in member_names
+            ),
+            "absence_status": (
+                None
+                if f"raw/current_fly_mirror/v3/ledgers/{name}" in member_names
+                else absence_status
+            ),
+        }
+        for name, absence_status in conditional_v3_ledgers.items()
+    }
     accumulator_db_members = sorted(
         name for name in member_names
         if name.startswith("accumulator/")
@@ -4238,6 +4272,8 @@ def download_everything():
             "sqlite": "sqlite_online_backup_v1",
             "hot_files": "append_prefix_or_strict_generation_fence_v1",
             "required_analyzer_raw_inputs": list(REQUIRED_ANALYZER_RAW_INPUTS),
+            "conditional_analyzer_raw_inputs": CONDITIONAL_ANALYZER_RAW_INPUTS,
+            "conditional_v3_ledgers": conditional_v3_ledgers,
             "optional_analyzer_raw_inputs": list(OPTIONAL_ANALYZER_RAW_INPUTS),
             "capture_started_at": capture_started_at,
             "coherence_anchors": sorted(coherence_before),
@@ -4259,6 +4295,8 @@ def download_everything():
             "missing_current_reports": missing_current_reports,
             "accumulator_db_members": accumulator_db_members,
             "optional_analyzer_raw_presence": optional_presence,
+            "conditional_analyzer_raw_status": conditional_raw_status,
+            "conditional_v3_ledger_status": conditional_v3_status,
             "missing_optional_analyzer_raw_inputs": sorted(
                 name for name, present in optional_presence.items() if not present
             ),
@@ -4279,6 +4317,9 @@ def download_everything():
                     f"raw/current_fly_mirror/v3/ledgers/{name}" in member_names
                     for name in v3_ledgers
                 ),
+                "canonical_v3_execution_ledger": conditional_v3_status[
+                    "execution.jsonl"
+                ],
                 "canonical_v3_market_segments": any(
                     name.startswith("raw/current_fly_mirror/v3/market_segments/")
                     for name in member_names

@@ -574,9 +574,16 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         assert record["bytes"] == len(payload)
                         assert record["sha256"] == hashlib.sha256(payload).hexdigest()
                 (mirror / "v3" / "ledgers" / "execution.jsonl").unlink()
-                refused = client.get("/download/everything")
-                assert refused.status_code == 500
-                assert b"execution.jsonl" in refused.data
+                empty_execution = client.get("/download/everything")
+                assert empty_execution.status_code == 200
+                with zipfile.ZipFile(io.BytesIO(empty_execution.data)) as zf:
+                    empty_manifest = json.loads(zf.read("MANIFEST.json"))
+                    assert empty_manifest["notes"]["conditional_v3_ledger_status"][
+                        "execution.jsonl"
+                    ] == {
+                        "present": False,
+                        "absence_status": "NO_EXECUTION_EVENTS",
+                    }
                 (mirror / "v3" / "ledgers" / "execution.jsonl").write_text(
                     "{}\n", encoding="utf-8"
                 )
