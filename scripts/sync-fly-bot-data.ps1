@@ -6,7 +6,9 @@ param(
   [string[]]$IncludePath = @(),
   [int]$MaxLocalMirrorGiB = 30,
   [string]$ProgressHeartbeatFile = "",
-  [string]$ProgressRelayEvidenceJson = ""
+  [string]$ProgressRelayEvidenceJson = "",
+  [switch]$ForceFullRefresh,
+  [string]$MirroredSourceRevision = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,7 +87,14 @@ function Write-SyncProgressHeartbeat {
     # look infinitely stale until the final heartbeat replaced this record.
     syncedAt = [DateTimeOffset]::UtcNow.ToString("o")
     source = $SourceUrl
-    sourceRevision = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+    sourceRevision = $(if ($MirroredSourceRevision) { $MirroredSourceRevision } else { $null })
+    observedSourceRevision = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+    mirroredSourceRevision = $(if ($MirroredSourceRevision) { $MirroredSourceRevision } else { $null })
+    revisionParity = $(
+      if (-not $MirroredSourceRevision -or -not $manifest -or -not $manifest.source_git_rev) { "UNKNOWN" }
+      elseif ([string]$manifest.source_git_rev -ieq $MirroredSourceRevision) { "MATCH" }
+      else { "MISMATCH" }
+    )
     tileRegistrySignature = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
     currentFile = $RelativePath
     fileIndex = $FileIndex
@@ -260,7 +269,9 @@ foreach ($row in $selectedFiles) {
   } else { 0 }
   $extension = [System.IO.Path]::GetExtension($local).ToLowerInvariant()
   $appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")
-  $sameGeneration = if ($appendOnly) {
+  $sameGeneration = if ($ForceFullRefresh) {
+    $false
+  } elseif ($appendOnly) {
     (
       $previous -and
       [int64]$previous.inode -eq $remoteInode -and

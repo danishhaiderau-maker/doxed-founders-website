@@ -379,11 +379,39 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
   assert.match(
     syncLoop,
-    /reason = "below_threshold"[\s\S]*sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
+    /lastSyncedSourceRevision = \[string\]\$growthState\.lastSyncedSourceRevision/,
   );
   assert.match(
     syncLoop,
-    /sourceRevision = \$\(if \(\$result\.SourceRevision\)[\s\S]*\$manifest\.source_git_rev/,
+    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \$observedSourceRevision\.Equals\(\$lastSyncedSourceRevision/,
+  );
+  assert.match(
+    syncLoop,
+    /if \(-not \(\$forceByTime -or \$forceByGrowth -or \$forceFresh -or \$forceByRevision\)\)/,
+  );
+  assert.match(
+    syncLoop,
+    /reason = "below_threshold"[\s\S]*sourceRevision = \$lastSyncedSourceRevision[\s\S]*observedSourceRevision = \$observedSourceRevision[\s\S]*mirroredSourceRevision = \$lastSyncedSourceRevision/,
+  );
+  assert.doesNotMatch(
+    syncLoop,
+    /reason = "below_threshold"[\s\S]{0,800}sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
+  );
+  assert.match(
+    syncLoop,
+    /\$lastSyncedSourceRevision = \$\(if \(\$result\.SourceRevision\)[\s\S]*lastSyncedSourceRevision = \$lastSyncedSourceRevision/,
+  );
+  assert.match(
+    syncLoop,
+    /trigger = \$\(if \(\$forceByRevision\) \{ "revision" \}/,
+  );
+  assert.match(syncLoop, /if \(\$forceByRevision\) \{ \$syncArgs\.ForceFullRefresh = \$true \}/);
+  assert.match(syncLoop, /MirroredSourceRevision = \$\(if \(\$lastSyncedSourceRevision\)/);
+  assert.match(sync, /\[switch\]\$ForceFullRefresh/);
+  assert.match(sync, /\$sameGeneration = if \(\$ForceFullRefresh\) \{\s*\$false/);
+  assert.match(
+    sync,
+    /sourceRevision = \$\(if \(\$MirroredSourceRevision\)[\s\S]*observedSourceRevision = \$\(if \(\$manifest[\s\S]*mirroredSourceRevision = \$\(if \(\$MirroredSourceRevision\)/,
   );
   assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
   assert.match(sync, /Invoke-MirrorAtomicReplace[\s\S]*-Candidate \$stateTmp[\s\S]*-Destination \$statePath/);

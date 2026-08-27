@@ -245,6 +245,7 @@ if (-not $env:BOT_ADMIN_TOKEN) {
 
 $lastSyncedTotalBytes = [int64]0
 $lastSyncAt = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
+$lastSyncedSourceRevision = $null
 if (Test-Path -LiteralPath $growthStateFile) {
   try {
     $growthState = Get-Content -LiteralPath $growthStateFile -Raw | ConvertFrom-Json
@@ -256,6 +257,10 @@ if (Test-Path -LiteralPath $growthStateFile) {
       if ([datetime]::TryParse($growthState.lastSyncAt, [ref]$parsed)) {
         $lastSyncAt = $parsed.ToUniversalTime()
       }
+    }
+    if ($growthState.PSObject.Properties.Name -contains "lastSyncedSourceRevision") {
+      $lastSyncedSourceRevision = [string]$growthState.lastSyncedSourceRevision
+      if (-not $lastSyncedSourceRevision) { $lastSyncedSourceRevision = $null }
     }
   } catch {
     Add-Content -LiteralPath $logFile -Value (
@@ -269,6 +274,7 @@ try {
     Remove-OrphanedMirrorCandidates -MirrorPath $mirrorDir
     $started = Get-Date
     $didSync = $false
+    $observedSourceRevision = $null
     $relayEvidenceStatus = [ordered]@{
       ok = $false
       errorCode = "CONFIG_MISSING"
@@ -304,6 +310,10 @@ try {
         -Uri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest") `
         -Headers $headers `
         -TimeoutSec 45
+      if ($manifest.PSObject.Properties.Name -contains "source_git_rev") {
+        $observedSourceRevision = [string]$manifest.source_git_rev
+        if (-not $observedSourceRevision) { $observedSourceRevision = $null }
+      }
 
       # Fresh Collection signal: when the Fly dashboard's Fresh Collection
       # toggle wipes Fly, it bumps manifest.fresh_collection_signal_ts. The
@@ -346,6 +356,9 @@ try {
         @{ signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
           ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8
         $lastSyncedTotalBytes = 0
+        # The active mirror is now empty. Do not retain a revision receipt for
+        # the quarantined generation if the following refresh fails.
+        $lastSyncedSourceRevision = $null
       }
 
       $currentTotalBytes = [int64]0
@@ -359,8 +372,20 @@ try {
       $forceByTime = $elapsedSec -ge [Math]::Max(15, $IntervalSec)
       $forceByGrowth = $growthBytes -ge $thresholdBytes
       $forceFresh = $currentSignal -gt $lastSeenSignal
+      # A deployment can change schemas or files without adding 50 MB. The
+      # remote revision is only an observation; it becomes the mirrored
+      # revision after the complete atomic sync below succeeds.
+      $forceByRevision = [bool]$observedSourceRevision -and (
+        -not $lastSyncedSourceRevision -or
+        -not $observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)
+      )
 
-      if (-not ($forceByTime -or $forceByGrowth -or $forceFresh)) {
+      if (-not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision)) {
+        $revisionParity = $(
+          if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
+          elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }
+          else { "MISMATCH" }
+        )
         $heartbeat = [ordered]@{
           ok = $true
           syncedAt = (Get-Date).ToUniversalTime().ToString("o")
@@ -373,7 +398,10 @@ try {
           currentTotalBytes = $currentTotalBytes
           lastSyncedTotalBytes = $lastSyncedTotalBytes
           elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
-          sourceRevision = $(if ($manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+          sourceRevision = $lastSyncedSourceRevision
+          observedSourceRevision = $observedSourceRevision
+          mirroredSourceRevision = $lastSyncedSourceRevision
+          revisionParity = $revisionParity
           botVersion = $(if ($manifest.PSObject.Properties.Name -contains "bot_version") { [string]$manifest.bot_version } else { $null })
           tileRegistrySignature = $(if ($manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
           activeTiles = $(if ($manifest.PSObject.Properties.Name -contains "active_tiles") { @($manifest.active_tiles) } else { @() })
@@ -395,7 +423,9 @@ try {
         SourceUrl = $SourceUrl
         ProgressHeartbeatFile = $heartbeatFile
         ProgressRelayEvidenceJson = ($relayEvidenceStatus | ConvertTo-Json -Compress)
+        MirroredSourceRevision = $(if ($lastSyncedSourceRevision) { $lastSyncedSourceRevision } else { "" })
       }
+      if ($forceByRevision) { $syncArgs.ForceFullRefresh = $true }
       # Publish the latest deterministic analyzer HTML back to Fly so admins
       # have an anywhere-access /analysis route. The local :9001 dashboard
       # remains the full interactive report explorer while the PC is online.
@@ -420,9 +450,11 @@ try {
       $didSync = $true
       $lastSyncedTotalBytes = $currentTotalBytes
       $lastSyncAt = [datetime]::UtcNow
+      $lastSyncedSourceRevision = $(if ($result.SourceRevision) { [string]$result.SourceRevision } else { $observedSourceRevision })
       @{
         lastSyncedTotalBytes = $lastSyncedTotalBytes
         lastSyncAt = $lastSyncAt.ToString("o")
+        lastSyncedSourceRevision = $lastSyncedSourceRevision
         thresholdMb = $thresholdMb
       } | ConvertTo-Json | Set-Content -LiteralPath $growthStateFile -Encoding UTF8
 
@@ -432,7 +464,14 @@ try {
         source = $SourceUrl
         files = $result.Files
         bytes = $result.Bytes
-        sourceRevision = $(if ($result.SourceRevision) { $result.SourceRevision } elseif ($manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+        sourceRevision = $lastSyncedSourceRevision
+        observedSourceRevision = $observedSourceRevision
+        mirroredSourceRevision = $lastSyncedSourceRevision
+        revisionParity = $(
+          if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
+          elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }
+          else { "MISMATCH" }
+        )
         botVersion = $(if ($manifest.PSObject.Properties.Name -contains "bot_version") { [string]$manifest.bot_version } else { $null })
         tileRegistrySignature = $(if ($manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
         activeTiles = $(if ($manifest.PSObject.Properties.Name -contains "active_tiles") { @($manifest.active_tiles) } else { @() })
@@ -441,7 +480,7 @@ try {
         prunedRotations = $result.PrunedRotations
         growthBytes = $growthBytes
         thresholdMb = $thresholdMb
-        trigger = $(if ($forceByGrowth) { "growth" } elseif ($forceFresh) { "fresh" } else { "interval" })
+        trigger = $(if ($forceByRevision) { "revision" } elseif ($forceByGrowth) { "growth" } elseif ($forceFresh) { "fresh" } else { "interval" })
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
       }
       Add-Content -LiteralPath $logFile -Value (
@@ -453,6 +492,14 @@ try {
         syncedAt = (Get-Date).ToUniversalTime().ToString("o")
         source = $SourceUrl
         error = $_.Exception.Message
+        sourceRevision = $lastSyncedSourceRevision
+        observedSourceRevision = $observedSourceRevision
+        mirroredSourceRevision = $lastSyncedSourceRevision
+        revisionParity = $(
+          if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
+          elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }
+          else { "MISMATCH" }
+        )
         relayEvidence = $relayEvidenceStatus
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
       }
