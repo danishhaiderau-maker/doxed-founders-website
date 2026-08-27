@@ -35260,6 +35260,9 @@ def _data_sync_rotation_parts(raw_name: str):
 
 
 def _data_sync_runtime_root() -> Path:
+    volume_raw = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if volume_raw:
+        return (Path(volume_raw) / "runtime").resolve()
     return Path.cwd().resolve()
 
 

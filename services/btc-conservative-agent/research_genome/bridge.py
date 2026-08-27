@@ -146,8 +146,18 @@ class GenomeBridge:
 
 def init_genome_bridge(base_dir: str | None = None) -> GenomeBridge:
     global _bridge
-    root = base_dir or os.path.dirname(os.path.abspath(__file__))
-    root = os.path.dirname(root)
+    if base_dir:
+        root = os.path.abspath(base_dir)
+    else:
+        volume_root = (os.getenv("BOT_DATA_DIR") or "").strip()
+        if volume_root:
+            # Fly's authenticated mirror publishes the runtime directory as
+            # its canonical root. Keep the legacy Genome source inside that
+            # persistent/syncable boundary rather than beside deployed code.
+            root = os.path.join(os.path.abspath(volume_root), "runtime")
+        else:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(root, exist_ok=True)
     _bridge = GenomeBridge(root)
     return _bridge
 

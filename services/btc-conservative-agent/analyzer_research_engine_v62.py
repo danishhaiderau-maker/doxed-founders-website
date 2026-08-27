@@ -1190,6 +1190,14 @@ def _agent_data_path(filename: str) -> str:
     return filename
 
 
+def _canonical_genome_source_db_path() -> str:
+    """Return the configured mirror DB path even before that source exists."""
+    data_root = (os.getenv("BTC_AGENT_DATA_DIR") or "").strip()
+    if data_root:
+        return os.path.join(os.path.abspath(data_root), "research.db")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "research.db")
+
+
 def robust_read_csv(filepath, name="file"):
     filepath = _agent_data_path(filepath)
     if not os.path.exists(filepath):
@@ -19460,7 +19468,9 @@ def finalize_analyzer_outputs(
     try:
         from research.genome.run_analyzer import run_genome_analyzer
 
-        genome_payload = run_genome_analyzer()
+        genome_payload = run_genome_analyzer(
+            db_path=_canonical_genome_source_db_path()
+        )
         if genome_payload.get("status") == "GENOME_SOURCE_UNAVAILABLE":
             print(
                 "  ℹ️ Trading Genome: GENOME_SOURCE_UNAVAILABLE | "

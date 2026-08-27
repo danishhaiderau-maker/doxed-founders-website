@@ -233,6 +233,7 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         '{"canonical":false}\n', encoding="utf-8"
     )
     (runtime / "ordinary.json").write_text("{}\n", encoding="utf-8")
+    (runtime / "research.db").write_bytes(b"sqlite-source")
     monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
     monkeypatch.chdir(runtime)
 
@@ -251,7 +252,7 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
     namespace = {
         "Path": Path,
         "os": os,
-        "_DATA_SYNC_EXTENSIONS": frozenset({".json"}),
+        "_DATA_SYNC_EXTENSIONS": frozenset({".json", ".db"}),
         "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset(),
         "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
         "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
@@ -264,6 +265,10 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
     assert receipt_names.issubset(paths)
     assert paths.count("tile_independence_report.json") == 1
     assert "ordinary.json" in paths
+    assert "research.db" in paths
+    assert namespace["_data_sync_resolve_relpath"]("research.db") == (
+        runtime / "research.db"
+    ).resolve()
     resolved = namespace["_data_sync_resolve_relpath"]("tile_independence_report.json")
     assert resolved == (tmp_path / "tile_independence_report.json").resolve()
     try:
