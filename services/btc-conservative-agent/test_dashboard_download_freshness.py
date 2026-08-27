@@ -361,6 +361,13 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             "paper_lifecycle_emergency_test.json",
         ):
             _write_json(mirror / name, {"name": name})
+        for name in dashboard.CURRENT_PATHWAY_RECEIPTS:
+            if name != "exit_reports_validation.json":
+                _write_json(mirror / name, {"schema": name, "verdict": "CURRENT"})
+        _write_json(
+            mirror / "exit_reports_validation.json",
+            {"schema": "stale_mirror_exit_validation", "status": "STALE"},
+        )
         for name in (
             "decision.jsonl",
             "lifecycle.jsonl",
@@ -385,7 +392,19 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 "generated_at": "now",
                 "generation_revision": "test-revision",
                 "source_data_revision": "test-data-revision",
-                "reports": [{"file": "historical_trade_cohort_report.json"}],
+                "reports": [
+                    {"file": "historical_trade_cohort_report.json"},
+                    {"file": "exit_reports_validation.json"},
+                ],
+            },
+        )
+        _write_json(
+            root / "exit_reports_validation.json",
+            {
+                "schema": "exit_reports_validation_v2",
+                "generation_revision": "test-revision",
+                "epoch_id": "epoch-test",
+                "status": "EMPTY",
             },
         )
         _write_json(
@@ -429,6 +448,12 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert "raw/current_fly_mirror/paper_lifecycle_v1.json" in names
                     assert "raw/current_fly_mirror/.fly-sync-state.json" in names
                     assert "raw/current_fly_mirror/signal_replay.jsonl.1" in names
+                    for receipt_name in dashboard.CURRENT_PATHWAY_RECEIPTS:
+                        assert f"current_receipts/{receipt_name}" in names
+                    exit_receipt = json.loads(
+                        zf.read("current_receipts/exit_reports_validation.json")
+                    )
+                    assert exit_receipt["schema"] == "exit_reports_validation_v2"
                     assert (
                         "raw/current_fly_mirror/v3/ledgers/decision.jsonl"
                         in names
@@ -462,6 +487,13 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert coverage["paper_lifecycle_receipt"] is True
                     assert coverage["mirror_sync_receipt"] is True
                     assert coverage["gpt_audit_source_bundle"] is True
+                    assert coverage["current_pathway_receipts_complete"] is True
+                    assert all(coverage["current_pathway_receipts"].values())
+                    assert manifest["notes"]["missing_current_receipts"] == []
+                    assert set(manifest["notes"]["required_current_receipts"]) == {
+                        f"current_receipts/{name}"
+                        for name in dashboard.CURRENT_PATHWAY_RECEIPTS
+                    }
                     indexed = {item["path"]: item for item in manifest["files"]}
                     for name, record in indexed.items():
                         payload = zf.read(name)
@@ -471,6 +503,13 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 refused = client.get("/download/everything")
                 assert refused.status_code == 500
                 assert b"decision.jsonl" in refused.data
+                (mirror / "v3" / "ledgers" / "decision.jsonl").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+                (mirror / "ai_scan_role_validation.json").unlink()
+                refused_receipt = client.get("/download/everything")
+                assert refused_receipt.status_code == 500
+                assert b"current_receipts/ai_scan_role_validation.json" in refused_receipt.data
         finally:
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
 

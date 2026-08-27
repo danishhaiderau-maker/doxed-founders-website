@@ -130,6 +130,15 @@ DATA_ROOT = (
     or _canonical_mirror
     or _AGENT_ROOT
 ).resolve()
+CURRENT_PATHWAY_RECEIPTS = (
+    "tile_independence_report.json",
+    "ai_scan_independence_report.json",
+    "ai_scan_role_validation.json",
+    "lane_memory_validation.json",
+    "lane_memory_violation.json",
+    "runtime_pathway_integrity.json",
+    "exit_reports_validation.json",
+)
 # The canonical source lives in ``agent/research`` but the supported launcher
 # runs ``agent/analyzer_research_engine_v62.py`` and writes its live reports in
 # the agent root.  Resolve the report root from an explicit override first,
@@ -3860,6 +3869,19 @@ def download_everything():
         if path.is_file():
             candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
 
+    # Pathway receipts are a required, named evidence component. Runtime
+    # contracts come from the synchronized Fly mirror. Exit validation is an
+    # analyzer-generation report and must resolve through the current report
+    # manifest rather than a potentially older mirror copy.
+    for name in CURRENT_PATHWAY_RECEIPTS:
+        path = (
+            _best_report_path(name)
+            if name == "exit_reports_validation.json"
+            else DATA_ROOT / name
+        )
+        if path is not None and path.is_file():
+            candidates.append((path, f"current_receipts/{name}"))
+
     # Canonical V3 evidence is recursive by design: ledgers are append-only and
     # market segments are content-addressed below a nested directory tree.
     v3_ledgers = (
@@ -3925,6 +3947,18 @@ def download_everything():
                 "artifacts are missing: " + ", ".join(missing_required_raw)
             ),
         )
+    required_current_receipts = {
+        f"current_receipts/{name}" for name in CURRENT_PATHWAY_RECEIPTS
+    }
+    missing_current_receipts = sorted(required_current_receipts - member_names)
+    if missing_current_receipts:
+        abort(
+            500,
+            description=(
+                "complete research download refused: required current pathway "
+                "receipts are missing: " + ", ".join(missing_current_receipts)
+            ),
+        )
     current_report_manifest = _read_json(REPORT_MANIFEST_FILE) or {}
     current_safe_genome = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
     current_epoch_id = current_safe_genome.get("epoch_id") or (
@@ -3973,6 +4007,8 @@ def download_everything():
             "source_revision": current_generation_revision,
             "required_raw_members": sorted(required_raw_members),
             "missing_required_raw_members": missing_required_raw,
+            "required_current_receipts": sorted(required_current_receipts),
+            "missing_current_receipts": missing_current_receipts,
             "component_coverage": {
                 "relay_lifecycle_evidence_v1": any(
                     name.endswith("/relay_lifecycle_evidence_v1.json")
@@ -4014,6 +4050,14 @@ def download_everything():
                 ),
                 "gpt_audit_source_bundle": (
                     "audit/gpt_audit_bundle.zip" in member_names
+                ),
+                "current_pathway_receipts": {
+                    name: f"current_receipts/{name}" in member_names
+                    for name in CURRENT_PATHWAY_RECEIPTS
+                },
+                "current_pathway_receipts_complete": all(
+                    f"current_receipts/{name}" in member_names
+                    for name in CURRENT_PATHWAY_RECEIPTS
                 ),
             },
         },
