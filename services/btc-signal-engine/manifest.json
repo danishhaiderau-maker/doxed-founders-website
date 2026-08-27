@@ -1,9 +1,9 @@
 {
   "engine_version": "v31-five-family-analyzer-hypothesis-paper",
-  "combo_version": "2026-08-28",
-  "exit_version": "five-family-analyzer-hypotheses-v1",
-  "benchmark_lane": "CONTINUOUS_ANALYTICAL_ONLY",
-  "signal_hash": "672b5e6012f1",
-  "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-27T20:12:20.4372477Z"
+  "combo_version": "2026-08-27",
+  "exit_version": "scenario-c-v4",
+  "benchmark_lane": "CONTINUOUS",
+  "signal_hash": "f2a9dc0d9ff9",
+  "source": "bybit-15m-research-bot/bybit_bot.py",
+  "updated_at": "2026-08-27T20:34:21.493Z"
 }

@@ -459,6 +459,10 @@ _last_ws_trade_fp = None
 _last_ws_trade_fp_ts = 0.0
 _agent_debug_log_lock = threading.Lock()
 _agent_debug_writes_paused = False
+# Execution pause intentionally leaves research collectors alive. A fresh
+# epoch therefore needs its own writer barrier so the archive hash and exact
+# deletion set describe one immutable evidence snapshot.
+_research_write_gate = threading.RLock()
 
 def _pause_agent_debug_writes() -> None:
     global _agent_debug_writes_paused
@@ -25783,6 +25787,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             "open_position_count": open_count,
             "summary": "Pause and disarm execution, then reach a flat order/position boundary",
         }
+    _research_write_gate.acquire()
     _pause_agent_debug_writes()
     try:
         try:
@@ -25822,6 +25827,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             }
     finally:
         _resume_agent_debug_writes()
+        _research_write_gate.release()
     logger.warning(f"[FRESH COLLECTION] Verified archive and deletion; resetting session state")
     genome_reset = {}
     bridge = get_genome_bridge()
@@ -40928,7 +40934,11 @@ def _safe_append_jsonl(
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
     line = json.dumps(row, default=str) + "\n"
     last_err = None
-    with _jsonl_path_lock(path):
+    # Some contract tests compile this helper in isolation; the path lock still
+    # provides their local serialization while production supplies the shared
+    # reset barrier.
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    with research_gate, _jsonl_path_lock(path):
         _jsonl_serialized_append_targets.add(os.path.abspath(path))
         for attempt in range(CSV_WRITE_RETRIES):
             try:
