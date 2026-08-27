@@ -9420,6 +9420,49 @@ def _ordered_lane_catalog(lanes_with_approves, trade_df=None) -> list:
     return list(ACTIVE_TILE_ORDER)
 
 
+def _write_benchmark_vs_lanes_payload(scope: str, lane_metrics: dict, status: str) -> dict:
+    """Write one explicit lane-evidence receipt, including honest empty cohorts."""
+    current_scope = str(scope or "").upper() in {"SESSION", "FRESH-COLLECTION"}
+    report = {
+        "schema": "current_lane_evidence_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "analyzer_version": ANALYZER_VERSION,
+        "benchmark_lane": BENCHMARK_LANE,
+        "session_scope": scope,
+        "data_scope": "session" if current_scope else "all",
+        "evidence_scope": "CURRENT_SESSION" if current_scope else "HISTORICAL_ALL_DATA",
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "lanes": lane_metrics,
+    }
+    target = analyzer_report_path(BENCHMARK_VS_LANES_REPORT_FILE)
+    try:
+        temporary = f"{target}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        os.replace(temporary, target)
+        print(f"\n  ✅ Wrote {BENCHMARK_VS_LANES_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as exc:
+        print(f"\n  ⚠️ Could not write {BENCHMARK_VS_LANES_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    print(PIPELINE_ENFORCEMENT_TAG)
+    return report
+
+
+def _empty_current_lane_metrics(reason: str) -> dict:
+    """Canonical zero rows are evidence receipts, not missing/stale history."""
+    return {
+        lane: {
+            **_empty_lane_benchmark_metrics(),
+            "wins": 0,
+            "losses": 0,
+            "win_rate_pct": 0.0,
+            "verdict": "no current-session terminal execution evidence",
+            "evidence_status": reason,
+        }
+        for lane in ACTIVE_TILE_ORDER
+    }
+
+
 def _benchmark_lane_verdict(lane: str, delta: dict, bench: dict) -> str:
     if lane == BENCHMARK_LANE:
         return "benchmark baseline"
@@ -9452,7 +9495,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
     shared_verdict_lanes = {}
     if not snapshots:
         print(f"  No APPROVE snapshots for {scope.lower()} scope. {PIPELINE_ENFORCEMENT_TAG}")
-        return None
+        return _write_benchmark_vs_lanes_payload(
+            scope,
+            _empty_current_lane_metrics("NO_CURRENT_APPROVE_SNAPSHOTS"),
+            "CURRENT_SESSION_NO_APPROVE_SNAPSHOTS" if scope != "ALL-TIME" else "ALL_DATA_NO_APPROVE_SNAPSHOTS",
+        )
 
     approve_rows = []
     for tid, snap in snapshots.items():
@@ -9466,7 +9513,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
     )
     if approve_df.empty:
         print(f"  No lane-tagged APPROVE snapshots. {PIPELINE_ENFORCEMENT_TAG}")
-        return None
+        return _write_benchmark_vs_lanes_payload(
+            scope,
+            _empty_current_lane_metrics("NO_CURRENT_LANE_APPROVE_SNAPSHOTS"),
+            "CURRENT_SESSION_NO_LANE_APPROVE_SNAPSHOTS" if scope != "ALL-TIME" else "ALL_DATA_NO_LANE_APPROVE_SNAPSHOTS",
+        )
 
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         executed_ids = set(trades["trade_id"].dropna().astype(str))
@@ -9518,8 +9569,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
 
     lane_metrics = {}
     lanes_with_approves = lanes_with_approves_seed
-    all_trade_df = all_trades if all_trades is not None else trade_df
-    lanes_ordered = _ordered_lane_catalog(lanes_with_approves, all_trade_df)
+    lanes_ordered = _ordered_lane_catalog(lanes_with_approves, trade_df)
 
     for lane in lanes_ordered:
         if lane == "EXEC_5M":
@@ -9684,9 +9734,6 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             **lane_research_metrics,
             **lane_extra,
         }
-        if all_trade_df is not None:
-            lane_metrics[lane]["all_time"] = _all_time_lane_metrics(all_trade_df, lane)
-
     _inject_continuous_benchmark_lane(lane_metrics, lanes_ordered)
 
     bench = lane_metrics.get(BENCHMARK_LANE) or _empty_lane_benchmark_metrics()
@@ -9751,22 +9798,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             f"Δ PnL ${m['delta_net_pnl_real']:+.2f}  ({m['verdict']}) {PIPELINE_ENFORCEMENT_TAG}"
         )
 
-    report = {
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": ANALYZER_VERSION,
-        "benchmark_lane": BENCHMARK_LANE,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "lanes": lane_metrics,
-    }
-    try:
-        with open(analyzer_report_path(BENCHMARK_VS_LANES_REPORT_FILE), "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        print(f"\n  ✅ Wrote {BENCHMARK_VS_LANES_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"\n  ⚠️ Could not write {BENCHMARK_VS_LANES_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    print(PIPELINE_ENFORCEMENT_TAG)
-    return report
+    return _write_benchmark_vs_lanes_payload(
+        scope,
+        lane_metrics,
+        "CURRENT_SESSION_EVIDENCE" if scope != "ALL-TIME" else "HISTORICAL_ALL_DATA_EVIDENCE",
+    )
 
 
 def _horizon_outcome_30m_pct(trade_id, snapshots, reversal_index, shadow_row=None, replay=None):
@@ -17808,6 +17844,8 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
     report["cohort_schema"] = analysis_provenance["cohort_schema"]
     report["generation_revision"] = analysis_provenance["generation_revision"]
     report["source_data_revision"] = analysis_provenance["source_data_revision"]
+    if analysis_provenance.get("fresh_epoch_id"):
+        report["epoch_id"] = analysis_provenance["fresh_epoch_id"]
     report["policy_comparability_key"] = report.get(
         "selected_policy_comparability_key",
         analysis_provenance.get("policy_comparability_key"),
@@ -18026,7 +18064,10 @@ def fill_time_guard_counterfactual_report(trades=None):
 
 def write_report_manifest(payload=None):
     manifest_started_at = datetime.now(timezone.utc)
-    current_run_cutoff = manifest_started_at.timestamp() - (15 * 60)
+    current_run_cutoff = float(
+        globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
+        or (manifest_started_at.timestamp() - (15 * 60))
+    )
     """Manifest for research dashboard — no hardcoded report list in UI."""
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports

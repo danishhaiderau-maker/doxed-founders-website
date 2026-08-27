@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -122,6 +123,83 @@ def test_report_stamp_marks_ungated_report_descriptive_and_unqualified(tmp_path)
     assert report["report_eligibility"]["included_row_count"] == 0
     assert report["report_eligibility"]["excluded_row_count"] == 10
     assert report["live_policy_change_allowed"] is False
+
+
+def test_empty_current_lanes_are_written_and_publish_with_exact_generation_identity(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(analyzer, "_load_signal_snapshots", lambda: {})
+    monkeypatch.setattr(analyzer, "load_research_session", lambda: {
+        "fresh_collection_mode": True,
+        "fresh_collection_start_time": 1_787_780_026.0,
+    })
+
+    report = analyzer.benchmark_vs_lanes_report(
+        trades=pd.DataFrame(),
+        session={
+            "fresh_collection_mode": True,
+            "fresh_collection_start_time": 1_787_780_026.0,
+        },
+    )
+
+    assert report["status"] == "CURRENT_SESSION_NO_APPROVE_SNAPSHOTS"
+    assert report["session_scope"] == "FRESH-COLLECTION"
+    assert report["evidence_scope"] == "CURRENT_SESSION"
+    assert set(report["lanes"]) == set(analyzer.ACTIVE_TILE_ORDER)
+    assert all(row["real_fills"] == 0 for row in report["lanes"].values())
+    assert all("all_time" not in row for row in report["lanes"].values())
+
+    provenance = {
+        "cohort_schema": "analysis_cohorts_v1",
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "fresh_epoch_id": "epoch-current",
+        "policy_comparability_key": None,
+        "cohorts": {
+            analyzer.SHOWCASE_STRATEGY: {
+                "included_row_count": 0,
+                "evidence_row_count": 0,
+                "exclusion_reason_counts": {},
+            }
+        },
+    }
+    analyzer._stamp_report_analysis_provenance(
+        analyzer.BENCHMARK_VS_LANES_REPORT_FILE,
+        provenance,
+    )
+    stamped = json.loads(
+        Path(analyzer.BENCHMARK_VS_LANES_REPORT_FILE).read_text(encoding="utf-8")
+    )
+    assert stamped["generation_revision"] == "revision-current"
+    assert stamped["source_data_revision"] == "source-current"
+    assert stamped["epoch_id"] == "epoch-current"
+
+    manifest = {
+        "generation_id": "generation-current",
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "session_scope": "FRESH-COLLECTION",
+        "reports": [{"file": analyzer.BENCHMARK_VS_LANES_REPORT_FILE}],
+        "text_artifacts": [],
+    }
+    analyzer._publish_completed_report_generation(manifest)
+    published_dir = Path(analyzer.PUBLISHED_REPORTS_DIR)
+    published_manifest = json.loads(
+        (published_dir / analyzer.REPORT_MANIFEST_FILE).read_text(encoding="utf-8")
+    )
+    published_report = json.loads(
+        (published_dir / analyzer.BENCHMARK_VS_LANES_REPORT_FILE).read_text(encoding="utf-8")
+    )
+
+    assert analyzer.BENCHMARK_VS_LANES_REPORT_FILE in {
+        row["file"] for row in published_manifest["reports"]
+    }
+    assert published_report["generation_revision"] == published_manifest["generation_revision"]
+    assert published_report["source_data_revision"] == published_manifest["source_data_revision"]
+    assert published_report["epoch_id"] == published_manifest["fresh_epoch"]["epoch_id"]
+    assert published_report["evidence_scope"] == "CURRENT_SESSION"
 
 
 def test_report_stamp_normalizes_report_specific_showcase_counts(tmp_path):
