@@ -6,6 +6,7 @@ from research_v3_candidates import (
     _PolicyNeighborIndex,
     _apply_multifactor_ranking,
     _bind_candidate_receipt_identity,
+    _comparison_cohort_receipt,
     _conservative_child_receipt,
     _conservative_ohlc_prices,
     evaluate_protection_screen,
@@ -79,6 +80,83 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
 
 
 class V3CandidateTests(unittest.TestCase):
+    def test_comparison_cohort_matches_across_distinct_policy_treatments(self):
+        rows = [
+            {
+                "epoch_id": "epoch-clean",
+                "episode_id": f"episode-{index}",
+                "opportunity_id": f"opportunity:episode-{index}",
+                "tape_ids": [f"tape-{index}"],
+                "signal_ts": 1000 + index,
+            }
+            for index in range(4)
+        ]
+        first = _comparison_cohort_receipt(rows, holdout_start=2, sealed_holdout=False)
+        # Family-specific policy and exit material is deliberately outside this
+        # receipt; exact treatment identity remains the policy signature.
+        second = _comparison_cohort_receipt(
+            [{**row, "policy_id": "DIFFERENT_EXIT_FAMILY"} for row in rows],
+            holdout_start=2,
+            sealed_holdout=False,
+        )
+
+        self.assertTrue(first["complete"])
+        self.assertEqual(first["comparison_cohort_key"], second["comparison_cohort_key"])
+        self.assertEqual(first["train_episode_count"], 2)
+        self.assertEqual(first["oos_episode_count"], 2)
+        diagnostic = _comparison_cohort_receipt(
+            rows,
+            holdout_start=2,
+            sealed_holdout=False,
+            evidence_world="IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        )
+        self.assertNotEqual(first["comparison_cohort_key"], diagnostic["comparison_cohort_key"])
+
+    def test_comparison_cohort_rejects_same_count_with_different_oos_opportunity(self):
+        rows = [
+            {
+                "epoch_id": "epoch-clean",
+                "episode_id": f"episode-{index}",
+                "opportunity_id": f"opportunity:episode-{index}",
+                "tape_ids": [f"tape-{index}"],
+                "signal_ts": 1000 + index,
+            }
+            for index in range(4)
+        ]
+        baseline = _comparison_cohort_receipt(rows, holdout_start=2, sealed_holdout=False)
+        changed = [dict(row) for row in rows]
+        changed[-1]["opportunity_id"] = "opportunity:different"
+        mismatch = _comparison_cohort_receipt(changed, holdout_start=2, sealed_holdout=False)
+
+        self.assertTrue(baseline["complete"])
+        self.assertTrue(mismatch["complete"])
+        self.assertNotEqual(
+            baseline["comparison_cohort_key"],
+            mismatch["comparison_cohort_key"],
+        )
+
+    def test_comparison_cohort_fails_closed_when_tape_identity_is_missing(self):
+        receipt = _comparison_cohort_receipt([
+            {
+                "epoch_id": "epoch-clean",
+                "episode_id": "episode-1",
+                "opportunity_id": "opportunity:episode-1",
+                "tape_ids": [],
+                "signal_ts": 1000,
+            },
+            {
+                "epoch_id": "epoch-clean",
+                "episode_id": "episode-2",
+                "opportunity_id": "opportunity:episode-2",
+                "tape_ids": ["tape-2"],
+                "signal_ts": 1001,
+            },
+        ], holdout_start=1, sealed_holdout=False)
+
+        self.assertFalse(receipt["complete"])
+        self.assertIsNone(receipt["comparison_cohort_key"])
+        self.assertIn("TRAIN_TAPE_IDS", receipt["missing_required_identities"])
+
     @staticmethod
     def _ranking_row(policy_id, *, family="FIXED_TARGET", pnl=1.0, drawdown=-0.2,
                      cvar=-0.1, lcb=0.02, fills=8, partial=0, no_fills=2,
@@ -388,23 +466,13 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(progress[-1]["input_events_total"], 1)
         sweep = report["scenario_c_atr_stop_sweep"]
         self.assertEqual(sweep["qualification"], "DESCRIPTIVE_ONLY")
+        self.assertEqual(sweep["leaders_by_stop"], {})
+        self.assertEqual(sweep["best_by_chase_and_stop"], {})
+        self.assertGreater(sweep["policies_enumerated"], 0)
+        self.assertEqual(sweep["policies_tested"], 0)
         self.assertEqual(
-            set(sweep["leaders_by_stop"]),
-            {"0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"},
-        )
-        self.assertEqual(
-            list(sweep["leaders_by_stop"]),
-            ["0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"],
-        )
-        chase_grid = sweep["best_by_chase_and_stop"]
-        self.assertEqual(list(chase_grid), ["patient"])
-        self.assertEqual(
-            list(chase_grid["patient"]),
-            ["0.5", "0.75", "1", "1.25", "1.5", "2", "2.5", "3", "CONTROL_NO_ATR_STOP"],
-        )
-        self.assertEqual(
-            chase_grid["patient"]["1"]["policy_spec"]["entry"]["chase_id"],
-            "patient",
+            sweep["unranked_reason"],
+            "INSUFFICIENT_SHARED_COHORT_OR_EXECUTION_EVIDENCE",
         )
         ranking = rank_safe_policies(report["candidates"])
         self.assertIsNone(ranking["number_one"])

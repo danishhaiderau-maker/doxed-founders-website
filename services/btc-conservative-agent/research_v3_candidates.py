@@ -888,6 +888,88 @@ def _conservative_ohlc_prices(rows: Iterable[Mapping[str, Any]], *, direction: s
     return sorted(result, key=lambda row: row["ts"])
 
 
+def _comparison_cohort_receipt(
+    rows: list[dict[str, Any]],
+    *,
+    holdout_start: int,
+    sealed_holdout: bool,
+    evidence_world: str = "CONSERVATIVE_BBO_DEPTH_V1",
+) -> dict[str, Any]:
+    """Identify one causal opportunity universe without including policy treatment.
+
+    Exact policy identity remains the policy signature.  This receipt answers a
+    different question: were two policies measured on the same independent
+    train/OOS opportunities, epoch, tape, and split rule?  Cross-family ranking
+    is allowed only when this receipt is complete and its key is identical.
+    """
+    train, oos = rows[:holdout_start], rows[holdout_start:]
+
+    def identity_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "episode_id": _identity_text(row.get("episode_id")),
+                "opportunity_id": _identity_text(row.get("opportunity_id")),
+                "tape_ids": sorted({
+                    value for value in (
+                        _identity_text(item) for item in (row.get("tape_ids") or [])
+                    ) if value is not None
+                }),
+                "signal_ts": row.get("signal_ts"),
+            }
+            for row in items
+        ]
+
+    epoch_ids = sorted({
+        value for value in (_identity_text(row.get("epoch_id")) for row in rows)
+        if value is not None
+    })
+    train_identity = identity_rows(train)
+    oos_identity = identity_rows(oos)
+    missing = []
+    if len(epoch_ids) != 1:
+        missing.append("SINGLE_EPOCH_ID")
+    for split_name, identities in (("TRAIN", train_identity), ("OOS", oos_identity)):
+        if not identities:
+            missing.append(f"{split_name}_EPISODES")
+        for item in identities:
+            if not item["episode_id"]:
+                missing.append(f"{split_name}_EPISODE_ID")
+            if not item["opportunity_id"]:
+                missing.append(f"{split_name}_OPPORTUNITY_ID")
+            if not item["tape_ids"]:
+                missing.append(f"{split_name}_TAPE_IDS")
+            if item["signal_ts"] is None:
+                missing.append(f"{split_name}_SIGNAL_TS")
+    missing = sorted(set(missing))
+    material = {
+        "schema": "comparison_cohort_v1",
+        "epoch_id": epoch_ids[0] if len(epoch_ids) == 1 else None,
+        "evidence_world": evidence_world,
+        "independence_rule": "ONE_POLICY_OUTCOME_PER_CAUSAL_EPISODE",
+        "split_rule": "CHRONOLOGICAL_70_30",
+        "sealed_holdout": bool(sealed_holdout),
+        "holdout_start_index": holdout_start,
+        "train": train_identity,
+        "oos": oos_identity,
+    }
+    return {
+        "schema": "comparison_cohort_receipt_v1",
+        "complete": not missing,
+        "comparison_cohort_key": (
+            canonical_hash("comparison-cohort-v1", material) if not missing else None
+        ),
+        "epoch_id": material["epoch_id"],
+        "evidence_world": material["evidence_world"],
+        "split_rule": material["split_rule"],
+        "sealed_holdout": material["sealed_holdout"],
+        "train_episode_count": len(train_identity),
+        "oos_episode_count": len(oos_identity),
+        "train_episode_hash": canonical_hash("comparison-train-v1", train_identity),
+        "oos_episode_hash": canonical_hash("comparison-oos-v1", oos_identity),
+        "missing_required_identities": missing,
+    }
+
+
 def evaluate_protection_screen(
     inputs: list[dict[str, Any]],
     *,
@@ -1078,7 +1160,10 @@ def evaluate_protection_screen(
                 prior = episodes_by_policy[policy_id].get(episode_id)
                 if prior is None or str(source.get("event_id")) < str(prior.get("source_event_id")):
                     episodes_by_policy[policy_id][episode_id] = {
+                        "epoch_id": source.get("epoch_id"),
                         "episode_id": episode_id,
+                        "opportunity_id": source.get("opportunity_id"),
+                        "tape_ids": list(source.get("tape_ids") or []),
                         "source_event_id": source.get("event_id"),
                         "signal_ts": source.get("signal_ts"),
                         "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
@@ -1106,6 +1191,17 @@ def evaluate_protection_screen(
         rows = sorted(by_episode.values(), key=lambda row: float(row.get("signal_ts") or 0))
         holdout_start = int(len(rows) * 0.7)
         oos = rows[holdout_start:]
+        comparison_cohort = _comparison_cohort_receipt(
+            rows,
+            holdout_start=holdout_start,
+            sealed_holdout=sealed_holdout,
+        )
+        diagnostic_comparison_cohort = _comparison_cohort_receipt(
+            rows,
+            holdout_start=holdout_start,
+            sealed_holdout=False,
+            evidence_world="IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        )
         prevalidation_outcomes = [
             (row.get("policy_outcomes") or {}).get(policy_id) or {}
             for row in oos
@@ -1188,6 +1284,11 @@ def evaluate_protection_screen(
             "policy_family": next((p["policy_family"] for p in protections if policy_id.endswith("|" + p["protection_id"])), "UNKNOWN"),
             "episodes_total": len(rows),
             "oos_episodes": len(oos),
+            "comparison_cohort": comparison_cohort,
+            "comparison_cohort_key": comparison_cohort["comparison_cohort_key"],
+            "cross_family_rank_eligible": comparison_cohort["complete"],
+            "diagnostic_comparison_cohort": diagnostic_comparison_cohort,
+            "diagnostic_comparison_cohort_key": diagnostic_comparison_cohort["comparison_cohort_key"],
             "supported_conservative_episodes": full_fills + partial_fills + no_fills,
             "full_fills": full_fills,
             "partial_fills": partial_fills,
@@ -1262,7 +1363,21 @@ def evaluate_protection_screen(
         """
         return int(row.get("supported_conservative_episodes") or 0) > 0
 
-    public_ranked = [row for row in globally_ranked if _has_public_execution_evidence(row)]
+    cohort_counts: dict[str, int] = defaultdict(int)
+    for row in globally_ranked:
+        key = row.get("comparison_cohort_key")
+        if key and _has_public_execution_evidence(row):
+            cohort_counts[str(key)] += 1
+    canonical_comparison_cohort_key = (
+        sorted(cohort_counts, key=lambda key: (-cohort_counts[key], key))[0]
+        if cohort_counts else None
+    )
+    public_ranked = [
+        row for row in globally_ranked
+        if _has_public_execution_evidence(row)
+        and row.get("cross_family_rank_eligible") is True
+        and row.get("comparison_cohort_key") == canonical_comparison_cohort_key
+    ]
 
     def _family_balanced(rows: list[dict[str, Any]], *, cap: int = 2) -> list[dict[str, Any]]:
         counts: dict[str, int] = defaultdict(int)
@@ -1278,14 +1393,27 @@ def evaluate_protection_screen(
         return selected
 
     profitable_conservative = _family_balanced([
-        row for row in globally_ranked
+        row for row in public_ranked
         if int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0) > 0
         and isinstance(row.get("sealed_oos_net_usd"), (int, float))
         and float(row["sealed_oos_net_usd"]) > 0
     ])
+    diagnostic_cohort_counts: dict[str, int] = defaultdict(int)
+    for row in assessed:
+        key = row.get("diagnostic_comparison_cohort_key")
+        if key and int((row.get("ideal_touch_diagnostic") or {}).get("touches") or 0) > 0:
+            diagnostic_cohort_counts[str(key)] += 1
+    canonical_diagnostic_cohort_key = (
+        sorted(
+            diagnostic_cohort_counts,
+            key=lambda key: (-diagnostic_cohort_counts[key], key),
+        )[0]
+        if diagnostic_cohort_counts else None
+    )
     diagnostic_ranked = sorted(
         [
             row for row in assessed
+            if row.get("diagnostic_comparison_cohort_key") == canonical_diagnostic_cohort_key
             if int((row.get("ideal_touch_diagnostic") or {}).get("touches") or 0) > 0
             and isinstance((row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd"), (int, float))
             and float((row.get("ideal_touch_diagnostic") or {})["oos_net_usd"]) > 0
@@ -1323,9 +1451,9 @@ def evaluate_protection_screen(
             str(row["policy_id"]),
         ))[:2]
     dynamic_regime_leaders = {}
-    regimes = sorted({regime for row in assessed for regime in row.get("regime_breakdown", {})})
+    regimes = sorted({regime for row in public_ranked for regime in row.get("regime_breakdown", {})})
     for regime in regimes:
-        eligible = [row for row in assessed if (row.get("regime_breakdown") or {}).get(regime, {}).get("scored_episodes", 0) > 0]
+        eligible = [row for row in public_ranked if (row.get("regime_breakdown") or {}).get(regime, {}).get("scored_episodes", 0) > 0]
         dynamic_regime_leaders[regime] = _family_balanced(sorted(
             eligible,
             key=lambda row: (
@@ -1334,8 +1462,12 @@ def evaluate_protection_screen(
                 str(row["policy_id"]),
             ),
         ), cap=2)[:10]
-    scenario_c_rows = [
+    scenario_c_all_rows = [
         row for row in assessed
+        if "|ATR_TP_2.5_SCENARIO_C" in str(row.get("policy_id") or "")
+    ]
+    scenario_c_rows = [
+        row for row in public_ranked
         if "|ATR_TP_2.5_SCENARIO_C" in str(row.get("policy_id") or "")
     ]
     scenario_c_by_stop: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1373,6 +1505,12 @@ def evaluate_protection_screen(
             "is qualified without sufficient supported execution and sealed OOS gates."
         ),
         "policies_tested": len(scenario_c_rows),
+        "policies_enumerated": len(scenario_c_all_rows),
+        "unranked_policy_count": len(scenario_c_all_rows) - len(scenario_c_rows),
+        "unranked_reason": (
+            None if len(scenario_c_all_rows) == len(scenario_c_rows)
+            else "INSUFFICIENT_SHARED_COHORT_OR_EXECUTION_EVIDENCE"
+        ),
         "leaders_by_stop": {
             stop: sorted(rows, key=scenario_c_sort_key)[:5]
             for stop, rows in sorted(
@@ -1431,6 +1569,26 @@ def evaluate_protection_screen(
             "rows_displayed": len(descriptive),
             "globally_ranked_policies": len(globally_ranked),
             "note": "The exhaustive policy grid is unchanged; only the public shortlist is family-balanced.",
+        },
+        "comparison_cohort": {
+            "schema": "cross_family_comparison_gate_v1",
+            "status": (
+                "SAME_COMPLETE_COHORT" if canonical_comparison_cohort_key
+                else "INSUFFICIENT_SHARED_COHORT"
+            ),
+            "canonical_comparison_cohort_key": canonical_comparison_cohort_key,
+            "eligible_policy_count": cohort_counts.get(canonical_comparison_cohort_key, 0),
+            "distinct_complete_cohorts": len(cohort_counts),
+            "diagnostic_comparison_cohort_key": canonical_diagnostic_cohort_key,
+            "diagnostic_same_cohort_policy_count": diagnostic_cohort_counts.get(
+                canonical_diagnostic_cohort_key, 0
+            ),
+            "cross_policy_pooling_allowed": False,
+            "ranking_rule": "IDENTICAL_COMPLETE_OOS_COHORT_ONLY",
+            "note": (
+                "Policies retain distinct signatures. Cross-family ordering is limited "
+                "to policies measured on the same signed train/OOS opportunity cohort."
+            ),
         },
         "profit_capture_leaders": family_leaders,
         "drawdown_control_leaders": sorted(public_ranked, key=lambda row: (

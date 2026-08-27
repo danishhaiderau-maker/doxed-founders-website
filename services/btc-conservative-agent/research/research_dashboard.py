@@ -1675,6 +1675,9 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             **_decode_counterfactual_policy_id(item.get("policy_id")),
             **_project_v31_policy_spec(policy_spec),
             "policy_family": item.get("policy_family"),
+            "comparison_cohort_key": item.get("comparison_cohort_key"),
+            "comparison_cohort": item.get("comparison_cohort") or {},
+            "cross_family_rank_eligible": item.get("cross_family_rank_eligible") is True,
             "policy_spec": policy_spec,
             "train_episodes": max(0, int(item.get("episodes_total") or 0) - episodes),
             "oos_episodes": episodes,
@@ -1840,6 +1843,12 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         "search_counts": search_counts,
         "rows_available": len(all_candidates),
         "descriptive_selection": screen.get("descriptive_selection") or {},
+        "comparison_cohort": screen.get("comparison_cohort") or {
+            "status": "INSUFFICIENT_SHARED_COHORT",
+            "canonical_comparison_cohort_key": None,
+            "eligible_policy_count": 0,
+            "cross_policy_pooling_allowed": False,
+        },
         "policy_search_statistics": policy_search_statistics,
         "policy_episode_split": {
             "training_episodes": training_episodes,
@@ -5089,6 +5098,7 @@ async function loadCombos() {
   const policyRows = pg.policy_rows || pg.rows || [];
   const diagnosticRows = pg.diagnostic_rows || [];
   const selection = pg.descriptive_selection || {};
+  const comparison = pg.comparison_cohort || {};
   const pgNote = document.getElementById('policy-grid-note');
   if (pgNote) pgNote.textContent = pg.warning || 'Current-epoch policy grid is waiting for a pinned analyzer report.';
   document.getElementById('policy-grid-kpis').innerHTML = [
@@ -5106,6 +5116,8 @@ async function loadCombos() {
     ['Theoretical search space', Number(searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian ?? 0).toLocaleString()],
     ['Independent opportunities (shared episodes)', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 0],
     ['Policy episode split (train / OOS)', `${policySplit.training_episodes ?? 0} / ${policySplit.oos_episodes ?? 0}`],
+    ['Cross-family comparison', comparison.status || 'INSUFFICIENT_SHARED_COHORT'],
+    ['Same-cohort policies', Number(comparison.eligible_policy_count ?? 0).toLocaleString()],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {
