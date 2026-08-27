@@ -142,12 +142,20 @@ CURRENT_PATHWAY_RECEIPTS = (
     "exit_reports_validation.json",
 )
 REQUIRED_ANALYZER_RAW_INPUTS = (
+    "research.db",
     "decisions_3factor.csv",
     "pipeline_events_3factor.csv",
     "ai_input_log.jsonl",
+    "ai_reason_research.jsonl",
+    "ai_edge_disagreement.jsonl",
+    "ai_tranche_log.csv",
+    "cycle_3m_universe.jsonl",
     "market_microstructure_1s.jsonl",
     "order_multiverse.jsonl",
     "research_events_v22.jsonl",
+    "reversal_study.jsonl",
+    "signal_replay.jsonl",
+    "soft_reject_shadow.jsonl",
     "lane_opportunity_capture.jsonl",
     "execution_settings_history.jsonl",
     "trend_health.csv",
@@ -3851,11 +3859,7 @@ def _read_generation_fenced(path: Path, attempts: int = 3) -> tuple[bytes, dict]
     """Capture one stable file generation without stopping its producer."""
     append_prefix = (
         path.name in _APPEND_PREFIX_SNAPSHOT_NAMES
-        or (
-            path.suffix.lower() == ".jsonl"
-            and len(path.parts) >= 2
-            and path.parent.name == "ledgers"
-        )
+        or path.suffix.lower() == ".jsonl"
     )
     for _attempt in range(attempts):
         before = _snapshot_generation(path)

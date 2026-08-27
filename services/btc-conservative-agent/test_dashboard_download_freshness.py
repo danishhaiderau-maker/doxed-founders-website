@@ -348,7 +348,17 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         _write_csv(mirror / "trades_3factor.csv", [{"trade_id": "fly-current"}])
         for name in dashboard.REQUIRED_ANALYZER_RAW_INPUTS:
             path = mirror / name
-            if path.suffix == ".csv":
+            if path.suffix == ".db":
+                connection = sqlite3.connect(path)
+                connection.execute(
+                    "CREATE TABLE evidence (id INTEGER PRIMARY KEY, value TEXT)"
+                )
+                connection.execute(
+                    "INSERT INTO evidence(value) VALUES ('required-input')"
+                )
+                connection.commit()
+                connection.close()
+            elif path.suffix == ".csv":
                 _write_csv(path, [{"event_id": "required-input"}])
             else:
                 path.write_text('{"event_id":"required-input"}\n', encoding="utf-8")
