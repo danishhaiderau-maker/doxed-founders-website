@@ -9,6 +9,8 @@ rule as bot._pending_limit_touched:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
@@ -24,6 +26,236 @@ LIVE_LEVERAGE = 100.0
 DEFAULT_MARGIN_USDT = 0.25
 LIVE_THESIS_CUT = -12.0
 LADDER_4_2 = (4.0, 2.0)
+
+# Signed, shadow-only schedule.  These constants must never be consumed by the
+# executable paper-order or relay chase paths.
+COMPRESSED_SHADOW_SCHEMA = "compressed_chase_shadow_v1"
+COMPRESSED_SHADOW_POLICY_ID = "SHADOW_COMPRESSED_CHASE_0_1_2_4_7_10_EXP13_V1"
+COMPRESSED_SHADOW_STAGE_SECONDS = (0, 60, 120, 240, 420, 600)
+COMPRESSED_SHADOW_EXPIRY_SEC = 780
+COMPRESSED_SHADOW_STEP_PCT = 0.25
+
+
+def _compressed_policy_signature() -> str:
+    material = json.dumps({
+        "policy_id": COMPRESSED_SHADOW_POLICY_ID,
+        "stage_seconds": COMPRESSED_SHADOW_STAGE_SECONDS,
+        "expiry_sec": COMPRESSED_SHADOW_EXPIRY_SEC,
+        "step_pct": COMPRESSED_SHADOW_STEP_PCT,
+        "execution_class": "SHADOW_ONLY",
+    }, sort_keys=True, separators=(",", ":"))
+    return "policy-sha256-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+COMPRESSED_SHADOW_POLICY_SIGNATURE = _compressed_policy_signature()
+
+
+def arm_compressed_shadow_chase(
+    *, trade_id: str, direction: str, signal_price: float, signal_ts: float,
+    initial_limit_price: float, shared_ai_call_id: str, opportunity_id: str,
+    episode_id: str, epoch_id: str, bid: Optional[float] = None,
+    ask: Optional[float] = None, last: Optional[float] = None,
+    bbo_fresh: bool = False,
+) -> tuple[dict, dict]:
+    """Create an auditable shadow schedule and its stage-0 receipt.
+
+    The returned state has no order quantity, relay identity, or executable
+    flag by design.  It is a counterfactual market-observation state only.
+    """
+    identities = {
+        "shared_ai_call_id": str(shared_ai_call_id or ""),
+        "opportunity_id": str(opportunity_id or ""),
+        "episode_id": str(episode_id or ""),
+        "policy_id": COMPRESSED_SHADOW_POLICY_ID,
+        "policy_signature": COMPRESSED_SHADOW_POLICY_SIGNATURE,
+        "epoch_id": str(epoch_id or ""),
+    }
+    missing = [key for key in (
+        "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
+    ) if not identities[key]]
+    state = {
+        "schema": COMPRESSED_SHADOW_SCHEMA,
+        "execution_class": "SHADOW_ONLY",
+        "places_order": False,
+        "relay_eligible": False,
+        "trade_id": str(trade_id),
+        "direction": str(direction or "").upper(),
+        "signal_price": float(signal_price),
+        "signal_ts": float(signal_ts),
+        "expires_ts": float(signal_ts) + COMPRESSED_SHADOW_EXPIRY_SEC,
+        "virtual_limit_price": float(initial_limit_price),
+        "next_stage_index": 1,
+        "terminal_emitted": False,
+        "seen_stage_indexes": {0},
+        "identity_complete": not missing,
+        "missing_identity_fields": missing,
+        **identities,
+    }
+    return state, _compressed_shadow_receipt(
+        state, event="STAGE", stage_index=0, observed_ts=float(signal_ts),
+        reference_price=float(signal_price), bid=bid, ask=ask,
+        last=float(last if last not in (None, 0) else signal_price),
+        bbo_fresh=bbo_fresh, direction_revalidation_result="VALID_AT_SIGNAL",
+        direction_revalidation_reason="SIGNED_AI_DIRECTION_AT_SIGNAL",
+    )
+
+
+def _compressed_shadow_receipt(
+    state: Mapping[str, Any], *, event: str, stage_index: Optional[int],
+    observed_ts: float, reference_price: Optional[float], bid: Optional[float],
+    ask: Optional[float], last: Optional[float], bbo_fresh: bool,
+    direction_revalidation_result: str, direction_revalidation_reason: str,
+    coverage_status: str = "OBSERVED",
+) -> dict:
+    scheduled_due_ts = (
+        None if stage_index is None else
+        float(state["signal_ts"]) + COMPRESSED_SHADOW_STAGE_SECONDS[stage_index]
+    )
+    bbo_valid = bool(
+        bid not in (None, 0) and ask not in (None, 0)
+        and float(ask) >= float(bid)
+    )
+    direction_valid = direction_revalidation_result in ("VALID", "VALID_AT_SIGNAL")
+    eligible = bool(
+        event == "STAGE" and state.get("identity_complete") and coverage_status == "OBSERVED"
+        and bbo_fresh and bbo_valid and direction_valid
+    )
+    return {
+        "schema": COMPRESSED_SHADOW_SCHEMA,
+        "event": event,
+        "execution_class": "SHADOW_ONLY",
+        "places_order": False,
+        "relay_eligible": False,
+        "trade_id": state["trade_id"],
+        "direction": state["direction"],
+        "shared_ai_call_id": state["shared_ai_call_id"],
+        "opportunity_id": state["opportunity_id"],
+        "episode_id": state["episode_id"],
+        "epoch_id": state["epoch_id"],
+        "policy_id": state["policy_id"],
+        "policy_signature": state["policy_signature"],
+        "identity_complete": bool(state.get("identity_complete")),
+        "missing_identity_fields": list(state.get("missing_identity_fields") or []),
+        "signal_price": float(state["signal_price"]),
+        "signal_ts": float(state["signal_ts"]),
+        "expires_ts": float(state["expires_ts"]),
+        "stage_index": stage_index,
+        "stage_due_sec": None if stage_index is None else COMPRESSED_SHADOW_STAGE_SECONDS[stage_index],
+        "observed_ts": float(observed_ts),
+        "scheduled_due_ts": scheduled_due_ts,
+        "observed_delay_sec": None if scheduled_due_ts is None else max(0.0, float(observed_ts) - scheduled_due_ts),
+        "virtual_limit_price": float(state["virtual_limit_price"]),
+        "reference_price": reference_price,
+        "bbo": {"bid": bid, "ask": ask, "last": last},
+        "bbo_fresh": bool(bbo_fresh),
+        "bbo_valid": bbo_valid,
+        "coverage_status": coverage_status,
+        "direction_revalidation_result": direction_revalidation_result,
+        "direction_revalidation_reason": direction_revalidation_reason,
+        "eligible_at_stage": eligible,
+        "schedule_seconds": list(COMPRESSED_SHADOW_STAGE_SECONDS),
+        "terminal_expiry_sec": COMPRESSED_SHADOW_EXPIRY_SEC,
+    }
+
+
+def poll_compressed_shadow_chase(
+    state: dict, *, now_ts: float, last: Optional[float],
+    bid: Optional[float] = None, ask: Optional[float] = None,
+    bbo_fresh: bool = False,
+    direction_revalidation_result: str = "NOT_REVALIDATED",
+    direction_revalidation_reason: str = "NO_FILL_TIME_DIRECTION_RECEIPT",
+    max_observation_delay_sec: float = 15.0,
+) -> list[dict]:
+    """Advance due virtual stages using observed BBO; never submit an order."""
+    if not state or state.get("terminal_emitted"):
+        return []
+    now = float(now_ts)
+    market = last
+    if market in (None, 0):
+        market = ask if state.get("direction") == "LONG" else bid
+    out: list[dict] = []
+    seen = set(state.get("seen_stage_indexes") or {0})
+    next_idx = 1
+    while next_idx < len(COMPRESSED_SHADOW_STAGE_SECONDS):
+        if next_idx in seen:
+            next_idx += 1
+            continue
+        due_ts = float(state["signal_ts"]) + COMPRESSED_SHADOW_STAGE_SECONDS[next_idx]
+        if now < due_ts:
+            break
+        delay = now - due_ts
+        observed = delay <= float(max_observation_delay_sec)
+        if observed and market not in (None, 0):
+            state["virtual_limit_price"] = _chase_target(
+                state["direction"], float(state["virtual_limit_price"]),
+                float(market), COMPRESSED_SHADOW_STEP_PCT,
+            )
+        out.append(_compressed_shadow_receipt(
+            state, event="STAGE", stage_index=next_idx, observed_ts=now,
+            reference_price=None if not observed or market in (None, 0) else float(market),
+            bid=bid if observed else None, ask=ask if observed else None,
+            last=last if observed else None, bbo_fresh=bbo_fresh if observed else False,
+            direction_revalidation_result=direction_revalidation_result,
+            direction_revalidation_reason=direction_revalidation_reason,
+            coverage_status="OBSERVED" if observed else "COVERAGE_GAP_OVERDUE",
+        ))
+        seen.add(next_idx)
+        next_idx += 1
+    state["seen_stage_indexes"] = seen
+    state["next_stage_index"] = next_idx
+    if now >= float(state["expires_ts"]):
+        state["terminal_emitted"] = True
+        out.append(_compressed_shadow_receipt(
+            state, event="EXPIRED", stage_index=None, observed_ts=now,
+            reference_price=None if market in (None, 0) else float(market),
+            bid=bid, ask=ask, last=last, bbo_fresh=bbo_fresh,
+            direction_revalidation_result=direction_revalidation_result,
+            direction_revalidation_reason=direction_revalidation_reason,
+        ))
+    return out
+
+
+def recover_compressed_shadow_states(
+    receipts: Iterable[Mapping[str, Any]], *, now_ts: float,
+) -> dict[str, dict]:
+    """Recover non-terminal signed shadow states without replaying receipts."""
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in receipts or []:
+        if row.get("schema") != COMPRESSED_SHADOW_SCHEMA:
+            continue
+        if row.get("policy_signature") != COMPRESSED_SHADOW_POLICY_SIGNATURE:
+            continue
+        grouped.setdefault(str(row.get("trade_id") or ""), []).append(row)
+    recovered: dict[str, dict] = {}
+    for trade_id, rows in grouped.items():
+        if not trade_id or any(row.get("event") == "EXPIRED" for row in rows):
+            continue
+        rows = sorted(rows, key=lambda row: float(row.get("observed_ts") or 0))
+        latest = rows[-1]
+        if float(latest.get("expires_ts") or 0) <= float(now_ts):
+            # The runtime will emit exactly one terminal receipt on its next poll.
+            pass
+        seen = {int(row["stage_index"]) for row in rows if row.get("stage_index") is not None}
+        missing = list(latest.get("missing_identity_fields") or [])
+        recovered[trade_id] = {
+            "schema": COMPRESSED_SHADOW_SCHEMA,
+            "execution_class": "SHADOW_ONLY", "places_order": False,
+            "relay_eligible": False, "trade_id": trade_id,
+            "direction": latest.get("direction"),
+            "signal_price": float(latest.get("signal_price") or 0),
+            "signal_ts": float(latest.get("signal_ts") or 0),
+            "expires_ts": float(latest.get("expires_ts") or 0),
+            "virtual_limit_price": float(latest.get("virtual_limit_price") or 0),
+            "seen_stage_indexes": seen, "next_stage_index": 1,
+            "terminal_emitted": False,
+            "identity_complete": not missing,
+            "missing_identity_fields": missing,
+            **{key: latest.get(key) or "" for key in (
+                "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
+                "policy_id", "policy_signature",
+            )},
+        }
+    return recovered
 
 
 def offset_pct_to_frac(offset_pct: float) -> float:
