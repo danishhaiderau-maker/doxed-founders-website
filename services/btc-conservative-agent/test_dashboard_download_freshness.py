@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import sqlite3
 import sys
 import tempfile
 import zipfile
@@ -345,6 +346,12 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             {"schema": "trading_genome_analysis_v1"},
         )
         _write_csv(mirror / "trades_3factor.csv", [{"trade_id": "fly-current"}])
+        for name in dashboard.REQUIRED_ANALYZER_RAW_INPUTS:
+            path = mirror / name
+            if path.suffix == ".csv":
+                _write_csv(path, [{"event_id": "required-input"}])
+            else:
+                path.write_text('{"event_id":"required-input"}\n', encoding="utf-8")
         _write_json(mirror / "relay_lifecycle_evidence_v1.json", {
             "schema": "relay_lifecycle_evidence_v1", "records": []
         })
@@ -386,6 +393,16 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         (mirror / "counterfactual.jsonl").write_text("{}\n", encoding="utf-8")
         _write_csv(root / "trades_3factor.csv", [{"trade_id": "history"}])
         _write_json(root / "historical_trade_cohort_report.json", {"cohorts": {}})
+        for db_path in (
+            root / "research.db",
+            root / "research_accumulator" / "research_trades.db",
+        ):
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(db_path)
+            connection.execute("CREATE TABLE evidence (id INTEGER PRIMARY KEY, value TEXT)")
+            connection.execute("INSERT INTO evidence(value) VALUES ('complete')")
+            connection.commit()
+            connection.close()
         _write_json(
             root / "report_manifest.json",
             {
@@ -448,6 +465,8 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert "raw/current_fly_mirror/paper_lifecycle_v1.json" in names
                     assert "raw/current_fly_mirror/.fly-sync-state.json" in names
                     assert "raw/current_fly_mirror/signal_replay.jsonl.1" in names
+                    assert "genome/research.db" in names
+                    assert "accumulator/research_trades.db" in names
                     for receipt_name in dashboard.CURRENT_PATHWAY_RECEIPTS:
                         assert f"current_receipts/{receipt_name}" in names
                     exit_receipt = json.loads(
@@ -495,6 +514,16 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         for name in dashboard.CURRENT_PATHWAY_RECEIPTS
                     }
                     indexed = {item["path"]: item for item in manifest["files"]}
+                    assert manifest["capture_contract"]["schema"] == (
+                        "generation_fenced_bundle_capture_v1"
+                    )
+                    assert indexed["genome/research.db"]["capture_mode"] == (
+                        "sqlite_online_backup_v1"
+                    )
+                    assert indexed["accumulator/research_trades.db"]["integrity_check"] == "ok"
+                    assert indexed[
+                        "raw/current_fly_mirror/research_events_v22.jsonl"
+                    ]["capture_mode"] == "append_prefix_generation_fence_v1"
                     for name, record in indexed.items():
                         payload = zf.read(name)
                         assert record["bytes"] == len(payload)
@@ -510,6 +539,13 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 refused_receipt = client.get("/download/everything")
                 assert refused_receipt.status_code == 500
                 assert b"current_receipts/ai_scan_role_validation.json" in refused_receipt.data
+                (mirror / "ai_scan_role_validation.json").write_text(
+                    "{}", encoding="utf-8"
+                )
+                (mirror / dashboard.REQUIRED_ANALYZER_RAW_INPUTS[0]).unlink()
+                refused_input = client.get("/download/everything")
+                assert refused_input.status_code == 500
+                assert dashboard.REQUIRED_ANALYZER_RAW_INPUTS[0].encode() in refused_input.data
         finally:
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
 

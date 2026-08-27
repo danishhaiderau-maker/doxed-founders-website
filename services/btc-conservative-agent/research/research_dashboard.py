@@ -11,7 +11,9 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -139,6 +141,30 @@ CURRENT_PATHWAY_RECEIPTS = (
     "runtime_pathway_integrity.json",
     "exit_reports_validation.json",
 )
+REQUIRED_ANALYZER_RAW_INPUTS = (
+    "decisions_3factor.csv",
+    "pipeline_events_3factor.csv",
+    "ai_input_log.jsonl",
+    "market_microstructure_1s.jsonl",
+    "order_multiverse.jsonl",
+    "research_events_v22.jsonl",
+    "lane_opportunity_capture.jsonl",
+    "execution_settings_history.jsonl",
+    "trend_health.csv",
+)
+_APPEND_PREFIX_SNAPSHOT_NAMES = frozenset({
+    "research_events_v22.jsonl",
+    "decisions_3factor.csv",
+    "trades_3factor.csv",
+    "expired_orders_3factor.csv",
+    "blocked_signals_3factor.csv",
+    "ai_tranche_log.csv",
+    "setup_log_3factor.csv",
+    "candles_3factor.csv",
+    "pipeline_events_3factor.csv",
+    "ai_errors_3factor.csv",
+    "trend_health.csv",
+})
 # The canonical source lives in ``agent/research`` but the supported launcher
 # runs ``agent/analyzer_research_engine_v62.py`` and writes its live reports in
 # the agent root.  Resolve the report root from an explicit override first,
@@ -3811,6 +3837,95 @@ def download_reports():
     )
 
 
+def _snapshot_generation(path: Path) -> tuple[int, int, int, int]:
+    stat = path.stat()
+    return (
+        int(getattr(stat, "st_dev", 0) or 0),
+        int(getattr(stat, "st_ino", 0) or 0),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+    )
+
+
+def _read_generation_fenced(path: Path, attempts: int = 3) -> tuple[bytes, dict]:
+    """Capture one stable file generation without stopping its producer."""
+    append_prefix = (
+        path.name in _APPEND_PREFIX_SNAPSHOT_NAMES
+        or (
+            path.suffix.lower() == ".jsonl"
+            and len(path.parts) >= 2
+            and path.parent.name == "ledgers"
+        )
+    )
+    for _attempt in range(attempts):
+        before = _snapshot_generation(path)
+        with path.open("rb") as handle:
+            payload = handle.read(before[2])
+        after = _snapshot_generation(path)
+        same_identity = before[:2] == after[:2]
+        stable = (
+            same_identity
+            and len(payload) == before[2]
+            and (
+                (append_prefix and after[2] >= before[2])
+                or (not append_prefix and after == before)
+            )
+        )
+        if not stable:
+            continue
+        if append_prefix and payload and path.suffix.lower() in {".csv", ".jsonl"}:
+            boundary = payload.rfind(b"\n")
+            payload = payload[: boundary + 1] if boundary >= 0 else b""
+        return payload, {
+            "capture_mode": (
+                "append_prefix_generation_fence_v1"
+                if append_prefix
+                else "strict_generation_fence_v1"
+            ),
+            "source_size": before[2],
+            "source_mtime_ns": before[3],
+            "captured_bytes": len(payload),
+        }
+    raise RuntimeError(f"could not capture stable generation: {path}")
+
+
+def _sqlite_online_snapshot(path: Path) -> tuple[bytes, dict]:
+    """Use SQLite's online backup API so a live WAL database is consistent."""
+    fd, temp_name = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    snapshot = Path(temp_name)
+    try:
+        source = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        destination = sqlite3.connect(str(snapshot))
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+        payload = snapshot.read_bytes()
+        check = sqlite3.connect(f"file:{snapshot.as_posix()}?mode=ro", uri=True)
+        try:
+            verdict = check.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            check.close()
+        if str(verdict).lower() != "ok":
+            raise RuntimeError(f"SQLite snapshot integrity check failed: {path}")
+        return payload, {
+            "capture_mode": "sqlite_online_backup_v1",
+            "source_size": int(path.stat().st_size),
+            "captured_bytes": len(payload),
+            "integrity_check": "ok",
+        }
+    finally:
+        snapshot.unlink(missing_ok=True)
+
+
+def _capture_bundle_member(path: Path) -> tuple[bytes, dict]:
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        return _sqlite_online_snapshot(path)
+    return _read_generation_fenced(path)
+
+
 @app.route("/download/everything")
 def download_everything():
     """One verified ZIP containing raw research data, reports, sessions, genome,
@@ -3937,6 +4052,10 @@ def download_everything():
             f"raw/current_fly_mirror/v3/ledgers/{name}"
             for name in v3_ledgers
         },
+        *{
+            f"raw/current_fly_mirror/{name}"
+            for name in REQUIRED_ANALYZER_RAW_INPUTS
+        },
     }
     missing_required_raw = sorted(required_raw_members - member_names)
     if missing_required_raw:
@@ -3997,6 +4116,12 @@ def download_everything():
         # single identity or emitting a misleading null value.
         "policy_signatures": current_policy_signatures,
         "files": [],
+        "capture_contract": {
+            "schema": "generation_fenced_bundle_capture_v1",
+            "sqlite": "sqlite_online_backup_v1",
+            "hot_files": "append_prefix_or_strict_generation_fence_v1",
+            "required_analyzer_raw_inputs": list(REQUIRED_ANALYZER_RAW_INPUTS),
+        },
         "notes": {
             "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
             and any((ROOT / PAST_ANALYSIS_DIR).iterdir()),
@@ -4065,12 +4190,22 @@ def download_everything():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for arcname, path in sorted(unique.items()):
-            data = path.read_bytes()
+            try:
+                data, capture = _capture_bundle_member(path)
+            except (OSError, RuntimeError, sqlite3.Error) as exc:
+                abort(
+                    500,
+                    description=(
+                        "complete research download refused: unable to capture "
+                        f"stable source {arcname}: {exc}"
+                    ),
+                )
             manifest["files"].append(
                 {
                     "path": arcname,
                     "bytes": len(data),
                     "sha256": hashlib.sha256(data).hexdigest(),
+                    **capture,
                 }
             )
             zf.writestr(arcname, data)
