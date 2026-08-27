@@ -138,9 +138,13 @@ from cycle_3m_indicators import (
 )
 from chase_offset_touch_grid import (
     TOUCH_GRID_FILE as CHASE_OFFSET_TOUCH_GRID_FILE,
+    arm_compressed_shadow_chase,
     arm_touch_grid_rows,
     new_grid_state,
+    orig_limit_price,
+    poll_compressed_shadow_chase,
     poll_grid_state,
+    recover_compressed_shadow_states,
 )
 from order_multiverse import (
     ORDER_MULTIVERSE_FILE,
@@ -12266,6 +12270,8 @@ def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
 
 _cycle_3m_written_buckets = {}
 _touch_grid_book = {}
+_compressed_shadow_chase_book = {}
+_compressed_shadow_recovery_attempted = False
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
@@ -12446,7 +12452,7 @@ def _collector_source_in_current_epoch(source: dict) -> bool:
 
 def _reset_collector_epoch_state(reset_anchor: float) -> str:
     """Bind and atomically clear V2/V3 recovery state for a fresh epoch."""
-    global _order_multiverse_last_poll
+    global _order_multiverse_last_poll, _compressed_shadow_recovery_attempted
     with state_lock:
         state["fresh_collection_mode"] = True
     _write_research_session(float(reset_anchor), fresh_collection_reset=True)
@@ -12457,6 +12463,8 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
             replay_buffers.clear()
         _cycle_3m_written_buckets.clear()
         _touch_grid_book.clear()
+        _compressed_shadow_chase_book.clear()
+        _compressed_shadow_recovery_attempted = True
         _order_multiverse_state.clear()
         _order_multiverse_pending_src.clear()
         _order_multiverse_path_complete.clear()
@@ -12522,6 +12530,26 @@ def _arm_chase_offset_touch_grid(signal: dict):
         for row in rows:
             _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
         _touch_grid_book[tid] = new_grid_state(rows)
+        shared_ai_call_id = str(
+            signal.get("shared_ai_call_id") or signal.get("ai_call_id")
+            or signal.get("source_ai_trade_id") or ""
+        )
+        shadow_state, stage_zero = arm_compressed_shadow_chase(
+            trade_id=tid, direction=direction, signal_price=price, signal_ts=ts,
+            initial_limit_price=orig_limit_price(
+                price, direction, DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
+            ),
+            shared_ai_call_id=shared_ai_call_id,
+            opportunity_id=str(signal.get("opportunity_id") or signal.get("event_id") or ""),
+            episode_id=str(signal.get("event_episode_id") or signal.get("episode_id") or ""),
+            epoch_id=str(signal.get("epoch_id") or signal.get("collection_epoch_id") or ""),
+            bid=signal.get("best_bid") or signal.get("bid"),
+            ask=signal.get("best_ask") or signal.get("ask"),
+            last=signal.get("last") or price,
+            bbo_fresh=bool(signal.get("bbo_fresh") or signal.get("market_data_fresh")),
+        )
+        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE")
+        _compressed_shadow_chase_book[tid] = shadow_state
         logger.info(
             f"[TOUCH GRID] armed trade_id={tid} offsets=0.01-0.30 live_orig="
             f"{DETERMINISTIC_ENTRY_OFFSET_PCT * 100:.2f}% paper_only [PIPELINE ENFORCEMENT]"
@@ -12530,7 +12558,38 @@ def _arm_chase_offset_touch_grid(signal: dict):
         logger.warning(f"[TOUCH GRID] arm failed: {exc} [PIPELINE ENFORCEMENT]")
 
 
+def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str, str]:
+    """Reuse the current fill-time direction semantics without enabling execution."""
+    with state_lock:
+        latest_ai = copy.deepcopy(state.get("last_ai") or {})
+        latest_ai_ts = float(state.get("last_ai_ts") or 0)
+        current_context = copy.deepcopy(
+            state.get("last_ai_context") or state.get("last_cycle_3m_universe") or {}
+        )
+    signal_ts = float(shadow.get("signal_ts") or 0)
+    if latest_ai_ts <= signal_ts:
+        return "NOT_REVALIDATED", "NO_NEWER_AI_DECISION"
+    if now - latest_ai_ts > get_effective_ai_cooldown_sec() + 120:
+        return "NOT_REVALIDATED", "LATEST_AI_DECISION_STALE"
+    direction = str(shadow.get("direction") or "").upper()
+    conflict = weak_countertrend_conflict(current_context, direction)
+    if conflict and conflict != "NO_EXECUTABLE_DIRECTION":
+        return "INVALID", f"FILL_REVALIDATION_{conflict}"
+    current = str(
+        latest_ai.get("direction") or latest_ai.get("candidate_direction") or ""
+    ).upper()
+    decision = str(latest_ai.get("decision") or "").upper()
+    if current not in ("LONG", "SHORT") or decision in (
+        "REJECT", "SOFT_REJECT", "NO_TRADE", "CONFLICTED",
+    ):
+        return "INVALID", "FILL_REVALIDATION_NO_TRADE"
+    if current != direction:
+        return "INVALID", f"FILL_REVALIDATION_REVERSED_{direction}_TO_{current}"
+    return "VALID", f"FILL_REVALIDATION_SAME_{direction}"
+
+
 def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
+    global _compressed_shadow_recovery_attempted
     if price is None or float(price) <= 0:
         return
     now = time.time()
@@ -12555,6 +12614,43 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
                 logger.warning(f"[TOUCH GRID] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]")
         for tid in dead:
             _touch_grid_book.pop(tid, None)
+    if not _compressed_shadow_recovery_attempted:
+        _compressed_shadow_recovery_attempted = True
+        durable_rows = []
+        for candidate in (CHASE_OFFSET_TOUCH_GRID_FILE + ".1", CHASE_OFFSET_TOUCH_GRID_FILE):
+            try:
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        try:
+                            durable_rows.append(json.loads(line))
+                        except (TypeError, ValueError):
+                            continue
+            except OSError:
+                continue
+        for tid, recovered in recover_compressed_shadow_states(
+            durable_rows, now_ts=now,
+        ).items():
+            _compressed_shadow_chase_book.setdefault(tid, recovered)
+    shadow_dead = []
+    for tid, shadow in list(_compressed_shadow_chase_book.items()):
+        try:
+            revalidation, revalidation_reason = _shadow_stage_direction_revalidation(shadow, now)
+            for row in poll_compressed_shadow_chase(
+                shadow, now_ts=now, last=float(price),
+                bid=None if not bid else float(bid),
+                ask=None if not ask else float(ask), bbo_fresh=bool(bid and ask),
+                direction_revalidation_result=revalidation,
+                direction_revalidation_reason=revalidation_reason,
+            ):
+                _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="SHADOW_CHASE")
+            if shadow.get("terminal_emitted"):
+                shadow_dead.append(tid)
+        except Exception as exc:
+            logger.warning(
+                f"[SHADOW CHASE] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]"
+            )
+    for tid in shadow_dead:
+        _compressed_shadow_chase_book.pop(tid, None)
     _maybe_complete_pending_order_multiverse()
 
 

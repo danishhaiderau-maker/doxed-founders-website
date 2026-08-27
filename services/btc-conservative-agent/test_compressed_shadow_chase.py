@@ -1,3 +1,7 @@
+import hashlib
+import json
+from pathlib import Path
+
 from chase_offset_touch_grid import (
     COMPRESSED_SHADOW_EXPIRY_SEC,
     COMPRESSED_SHADOW_POLICY_SIGNATURE,
@@ -30,6 +34,9 @@ def test_signed_schedule_and_stage_zero_are_shadow_only():
     assert row["shared_ai_call_id"] == "scan-1"
     assert row["opportunity_id"] == "opp-1"
     assert row["episode_id"] == "episode-1"
+    assert row["schedule_generation_id"].startswith("shadow-generation-")
+    assert len(row["schedule_generation_id"].removeprefix("shadow-generation-")) == 64
+    assert row["tape_evidence_path"] == "market_microstructure_1s.jsonl"
     assert state["expires_ts"] == 1780
 
 
@@ -105,3 +112,16 @@ def test_restart_recovery_does_not_duplicate_stages_or_terminal():
     assert [row["event"] for row in final_rows].count("EXPIRED") == 1
     terminal = final_rows[-1]
     assert recover_compressed_shadow_states([first, stage1, terminal], now_ts=1800) == {}
+
+
+def test_canonical_bot_signal_engine_and_manifest_are_in_parity():
+    root = Path(__file__).resolve().parents[2]
+    bot = (root / "services/btc-conservative-agent/bot.py").read_text(encoding="utf-8")
+    engine = (root / "services/btc-signal-engine/engine.py").read_text(encoding="utf-8")
+    assert bot.replace("\r\n", "\n") == engine.replace("\r\n", "\n")
+    manifest = json.loads(
+        (root / "services/btc-signal-engine/manifest.json").read_text(encoding="utf-8")
+    )
+    expected = hashlib.sha256(bot.replace("\r\n", "\n").encode("utf-8")).hexdigest()[:12]
+    assert manifest["source"] == "services/btc-conservative-agent/bot.py"
+    assert manifest["signal_hash"] == expected

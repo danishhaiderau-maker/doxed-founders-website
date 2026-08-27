@@ -38,6 +38,7 @@ import signal
 import ssl
 import hashlib
 import hmac
+import sqlite3
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
@@ -180,7 +181,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -956,8 +957,10 @@ def _finalize_archive_deletion_receipt(archive_path: str, inventory: list, delet
     with open(receipt_path, "r", encoding="utf-8") as handle:
         receipt = json.load(handle)
     receipt.update({
-        "deleted_files": len(deleted_abs), "deleted_bytes": deleted_bytes,
-        "deletion_verified": True, "raw_payloads_retained": True,
+        "deleted_files": len(deleted_abs),
+        "deleted_bytes": deleted_bytes,
+        "deletion_verified": True,
+        "raw_payloads_retained": True,
     })
     temporary = receipt_path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -3123,6 +3126,44 @@ def _ensure_lane_bucket(lane: str) -> str:
 LANE_MEMORY_CHECK_INTERVAL_SEC = 600
 _last_lane_memory_check_ts = 0.0
 _PATHWAY_STARTUP_SNAPSHOT = {}
+_pathway_receipt_lock = threading.RLock()
+
+
+def _pathway_receipt_identity() -> dict:
+    """Identity binding shared by every current runtime pathway receipt."""
+    return {
+        "source_git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "fresh_epoch_id": _collector_v22_epoch_id(),
+        "tile_registry_signature": active_tile_registry_signature(),
+        "analyzer_sync_id": COMBO_ANALYZER_SYNC_ID,
+    }
+
+
+def _publish_pathway_receipt(name: str, payload: dict) -> bool:
+    """Atomically publish one receipt into the canonical Fly data directory."""
+    root = _data_sync_volume_root()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / Path(name).name
+    return _atomic_file_replace(
+        str(target),
+        lambda handle: json.dump(payload, handle, indent=2, sort_keys=True),
+        _pathway_receipt_lock,
+        label="PATHWAY RECEIPT",
+    )
+
+
+def publish_startup_pathway_receipts() -> dict:
+    from pathway_lab_validation import build_startup_contract_receipts
+    receipts = build_startup_contract_receipts(
+        _pathway_receipt_identity(),
+        research_spawn_lanes=tuple(RESEARCH_SPAWN_LANES),
+        ai_scan_orders_allowed=lane_orders_allowed(RESEARCH_LANE_AI_SCAN),
+    )
+    return {
+        name: _publish_pathway_receipt(name, payload)
+        for name, payload in receipts.items()
+    }
 
 
 def capture_pathway_startup_snapshot() -> dict:
@@ -3149,9 +3190,18 @@ def validate_lane_memory() -> dict:
     open_counts = {ln: len(get_lane_open_positions(ln)) for ln in LANE_TRACKING_LANES}
     try:
         from pathway_lab_validation import validate_lane_memory_runtime
-        payload = validate_lane_memory_runtime(pending_counts, open_counts, tuple(retired))
+        payload = validate_lane_memory_runtime(
+            pending_counts, open_counts, tuple(retired),
+            identity=_pathway_receipt_identity(),
+        )
     except Exception as exc:
-        payload = {"verdict": "ERROR", "error": str(exc)}
+        payload = {
+            **_pathway_receipt_identity(),
+            "schema": "lane_memory_validation_v3",
+            "generated_at": utc_iso(),
+            "verdict": "ERROR",
+            "error": str(exc),
+        }
     verdict = payload.get("verdict")
     if verdict == "CRITICAL":
         logger.critical(
@@ -3161,6 +3211,18 @@ def validate_lane_memory() -> dict:
         logger.warning(
             f"[LANE MEMORY] WARN — {payload.get('warn_issues')} [PIPELINE ENFORCEMENT]"
         )
+    _publish_pathway_receipt("lane_memory_validation.json", payload)
+    if verdict == "CRITICAL":
+        _publish_pathway_receipt("lane_memory_violation.json", payload)
+    else:
+        _publish_pathway_receipt("lane_memory_violation.json", {
+            **_pathway_receipt_identity(),
+            "schema": "lane_memory_violation_v1",
+            "generated_at": utc_iso(),
+            "active": False,
+            "verdict": None,
+            "detail": "No active lane-memory violation; see lane_memory_validation.json",
+        })
     return payload
 
 
@@ -3177,9 +3239,16 @@ def validate_runtime_pathway_integrity() -> dict:
             ai_direct_research_lanes=AI_DIRECT_RESEARCH_LANES,
             research_spawn_lanes=tuple(RESEARCH_SPAWN_LANES),
             ai_scan_orders_allowed=lane_orders_allowed(RESEARCH_LANE_AI_SCAN),
+            identity=_pathway_receipt_identity(),
         )
     except Exception as exc:
-        payload = {"verdict": "ERROR", "error": str(exc)}
+        payload = {
+            **_pathway_receipt_identity(),
+            "schema": "runtime_pathway_integrity_v2",
+            "generated_at": utc_iso(),
+            "verdict": "ERROR",
+            "error": str(exc),
+        }
     verdict = payload.get("verdict")
     if verdict == "CRITICAL":
         logger.critical(
@@ -3189,6 +3258,7 @@ def validate_runtime_pathway_integrity() -> dict:
         logger.warning(
             f"[PATHWAY INTEGRITY] WARN — {payload.get('issues')} [PIPELINE ENFORCEMENT]"
         )
+    _publish_pathway_receipt("runtime_pathway_integrity.json", payload)
     return payload
 
 
@@ -3245,10 +3315,16 @@ def _write_pending_order_evidence(job: dict) -> None:
     if callable(collector_bridge):
         collector_bridge(order, master_signal)
     if payload.get("is_paper_entry"):
-        dual_write_paper_order_intent(
+        identity_receipt = dual_write_paper_order_intent(
             order, master_signal,
             epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
         )
+        for key in (
+            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+            "schedule_id", "fill_id", "tape_id",
+        ):
+            if identity_receipt.get(key):
+                order[key] = identity_receipt[key]
     _emit_genome_execution_event("LIMIT_CREATED", {
         "trade_id": order.get("trade_id"),
         "limit_price": order.get("limit_price") or order.get("price"),
@@ -4006,7 +4082,8 @@ def restore_last_ai_payload_from_log(path: str = None) -> bool:
                     last = row
         if not last:
             return False
-        payload = copy.deepcopy(last.get("context") or {})
+        full_context = copy.deepcopy(last.get("context") or {})
+        payload = build_shared_direction_prompt_context(full_context)
         payload = json.loads(json.dumps(payload, default=str))
         payload["_dashboard_restore"] = {
             "status": "RESTORED_AFTER_RESTART",
@@ -4423,16 +4500,23 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     close_qty = max(0.0, original_qty * close_fraction) if remaining_after > 0 else 0.0
     dir_factor = 1.0 if direction == "LONG" else -1.0
     realized_gross = (float(price) - entry) * dir_factor * close_qty
-    pos["policy_partial_realized_gross_usd"] = round(
-        _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0) + realized_gross, 8
-    )
-    pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
+    # Only genuine reductions belong in the partial-realized accumulator.
+    # A terminal family action is priced once by close_position's remaining
+    # runner calculation. Recording it here as a partial and then closing the
+    # still-full position doubled both PnL USD and margin-return percentage.
+    if remaining_after > 0:
+        pos["policy_partial_realized_gross_usd"] = round(
+            _buf_float(pos.get("policy_partial_realized_gross_usd"), 0.0) + realized_gross, 8
+        )
+        pos["policy_partial_realized_net_usd"] = pos["policy_partial_realized_gross_usd"]
     receipt = {
         "ts": utc_iso(), "reason": reason, "close_fraction": close_fraction,
         "remaining_fraction": remaining_after, "price": float(price), "policy_id": pos.get("policy_id"),
         "closed_qty": close_qty if remaining_after > 0 else float(pos.get("qty") or 0),
         "realized_gross_usd": round(realized_gross, 8) if remaining_after > 0 else None,
-        "cumulative_realized_net_usd": pos["policy_partial_realized_net_usd"],
+        "cumulative_realized_net_usd": _buf_float(
+            pos.get("policy_partial_realized_net_usd"), 0.0
+        ),
     }
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
@@ -5837,18 +5921,29 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
         # a worse price than its limit.  Walking the unrestricted market book
         # here previously produced impossible fills (for example a SHORT sell
         # below its sell limit) and broke paper-to-Bitfinex lifecycle fidelity.
-        fill_px = round(limit, 2)
+        sim = simulate_market_fill(side, qty) if qty > 0 else {}
+        book_vwap = float(sim.get("avg_price") or 0)
+        # Marketable limits receive available price improvement while the
+        # limit remains the hard worst-price boundary.
+        if side == "buy":
+            fill_px = min(book_vwap or ask or limit, limit)
+        else:
+            fill_px = max(book_vwap or bid or limit, limit)
+        filled_qty = float(sim.get("filled_qty") or qty)
+        if filled_qty <= 0:
+            filled_qty = qty
+        fill_px = round(fill_px, 2)
         return {
             "fill_price": fill_px,
-            "filled_qty": qty,
+            "filled_qty": filled_qty,
             "is_taker": True,
             "avg_price": fill_px,
             "best_price": ask if side == "buy" else bid,
-            "slippage_usd": 0.0,
-            "fully_filled": True,
-            "partial_fill": False,
-            "levels_consumed": 1,
-            "unfilled_qty": 0.0,
+            "slippage_usd": float(sim.get("slippage_usd") or 0),
+            "fully_filled": bool(sim.get("fully_filled", True)),
+            "partial_fill": bool(sim.get("partial_fill", False)),
+            "levels_consumed": int(sim.get("levels_consumed") or 1),
+            "unfilled_qty": float(sim.get("unfilled_qty") or 0),
         }
     fill_px = round(limit, 2) if limit > 0 else last
     return {
@@ -5881,6 +5976,14 @@ _TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
     "PROFIT_LOCK_LADDER",
     "THESIS_FAST_CUT",
     "THESIS_INVALIDATED",
+    # Registry-owned family policies are evaluated from the fresh side-correct
+    # tick in _apply_position_exits.  Booking a second, independently refreshed
+    # book walk after the trigger can turn a 30% paper hard stop into a much
+    # larger reported loss and make the dashboard exit disagree with its PnL.
+    "PHYSICAL_HARD_STOP_30PCT",
+    "INITIAL_ATR_STOP",
+    "PROFIT_PROTECTION_STOP",
+    "PATH_END_120M",
 })
 
 
@@ -9529,6 +9632,7 @@ def _defer_signal_min_age(signal: dict) -> bool:
         f"[PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
+    save_paper_lifecycle(reason="awaiting_min_age")
     return True
 
 
@@ -9651,6 +9755,7 @@ def _defer_dashboard_virtual_chase(signal: dict) -> bool:
         f"enabled={get_chase_execution_buckets()} [PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
+    save_paper_lifecycle(reason="awaiting_dashboard_chase")
     return True
 
 
@@ -10940,6 +11045,63 @@ def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED"
         pass
 
 
+_v3_expected_order_reconcile_lock = threading.Lock()
+_v3_expected_order_reconcile_last_ts = 0.0
+V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC = 30.0
+
+
+def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
+    """Resolve overdue pre-order expectations that have no durable exposure."""
+    global _v3_expected_order_reconcile_last_ts
+    now = time.time()
+    if (
+        not force
+        and now - _v3_expected_order_reconcile_last_ts
+        < V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC
+    ):
+        return {"skipped": 1}
+    if not _v3_expected_order_reconcile_lock.acquire(blocking=False):
+        return {"skipped": 1}
+    try:
+        now = time.time()
+        if (
+            not force
+            and now - _v3_expected_order_reconcile_last_ts
+            < V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC
+        ):
+            return {"skipped": 1}
+        # Only durable pending/open exposure protects an overdue expectation.
+        # A volatile AWAITING signal is not an order and must not remain an
+        # immortal active key after its signed resolution deadline.
+        with trade_lock:
+            active_exposure_rows = [
+                copy.deepcopy(row)
+                for row in [*open_positions, *pending_orders]
+                if isinstance(row, dict)
+            ]
+        result = reconcile_overdue_expected_order_decisions(
+            epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            active_rows=active_exposure_rows, observed_ts=now,
+            runtime_revision=_runtime_git_rev(),
+        )
+        _v3_expected_order_reconcile_last_ts = now
+        if result.get("reconciled"):
+            logger.warning(
+                f"[COLLECTOR_V3] reconciled overdue lost pre-order "
+                f"expectations={result['reconciled']} [PIPELINE ENFORCEMENT]"
+            )
+        return result
+    except Exception as exc:
+        # Ledger uncertainty is fail closed: never infer that an order was absent.
+        logger.error(
+            f"[COLLECTOR_V3] ledger reconciliation refused: {exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return {"error": 1}
+    finally:
+        _v3_expected_order_reconcile_lock.release()
+
+
 def reconcile_stale_signals():
     pending_ids = _pending_trade_ids()
     open_ids = _open_trade_ids()
@@ -11044,6 +11206,9 @@ def reconcile_stale_signals():
     if fixed or orphans_removed:
         logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] reconciled {fixed} stale signals, removed {orphans_removed} orphan pending orders")
         _agent_dbg("H1", "reconcile_stale_signals", "reconciled", {"count": fixed, "orphans_removed": orphans_removed, "pending_ids": len(_pending_trade_ids()), "open_ids": len(_open_trade_ids())})
+    # Converge the immutable decision/lifecycle ledgers even if the volatile
+    # pre-order signal disappeared before its normal TTL callback.
+    _reconcile_overdue_v3_expected_orders()
     return fixed
 
 def sync_signal_info_registry():
@@ -12005,6 +12170,68 @@ def build_pure_ai_context(state_snapshot, buffers):
     return sanitize_ai_inputs(ctx)
 
 
+def build_shared_direction_prompt_context(ctx: dict) -> dict:
+    """Build the compact, timestamped raw/derived payload used by the AI.
+
+    The durable collector retains the full context.  The model receives only
+    causal decision inputs, with raw observations separated from derived
+    labels so repeated labels cannot overpower the underlying measurements.
+    """
+    source = ctx or {}
+    mc = source.get("market_context") or {}
+    cycle = source.get("cycle_3m_universe") or source.get("exhaustion_3m") or {}
+    upgrade = source.get("ai_input_upgrade") or {}
+    raw = {
+        "price": source.get("price"),
+        "closed_3m_ts": cycle.get("closed_3m_ts") or cycle.get("candle_ts") or cycle.get("bucket_ts"),
+        "rsi_3m": cycle.get("rsi_3m") or cycle.get("rsi14_3m"),
+        "stoch_rsi_k_3m": cycle.get("stoch_rsi_k_3m"),
+        "stoch_rsi_d_3m": cycle.get("stoch_rsi_d_3m"),
+        "atr14_pct_3m": cycle.get("atr14_pct_3m"),
+        "donchian_loc_3m": cycle.get("donchian_loc_3m"),
+        "bb_width_3m": cycle.get("bb_width_3m"),
+        "ret_1m": source.get("ret_1m"),
+        "ret_5m": source.get("ret_5m"),
+        "ema9": source.get("ema9"),
+        "ema21": source.get("ema21"),
+        "ema200": source.get("ema200"),
+        "ema_alignment": mc.get("ema_alignment") or {},
+        "multi_tf": mc.get("multi_tf") or {},
+        "adx": (mc.get("trend_strength") or {}).get("adx") or source.get("adx"),
+        "delta": source.get("delta"),
+        "imbalance": source.get("imbalance"),
+        "volume_ratio": source.get("volume_ratio"),
+        "velocity": source.get("velocity"),
+        "dist_to_support": source.get("dist_to_support"),
+        "dist_to_resistance": source.get("dist_to_resistance"),
+        "sr_bias": source.get("sr_bias"),
+    }
+    derived = {
+        "market_structure": mc.get("market_structure") or {},
+        "market_structure_shift": upgrade.get("market_structure_shift") or source.get("market_structure_shift"),
+        "trend_health_state": upgrade.get("trend_health_state") or source.get("trend_health_state"),
+        "micro_structure_confirmed": upgrade.get("micro_structure_confirmed", source.get("micro_structure_confirmed")),
+        "higher_low_detected": upgrade.get("higher_low_detected", source.get("higher_low_detected")),
+        "lower_high_detected": upgrade.get("lower_high_detected", source.get("lower_high_detected")),
+        "reversal_risk_score": upgrade.get("reversal_risk_score", source.get("reversal_risk_score")),
+    }
+    conflicts = [
+        reason for reason in (
+            weak_countertrend_conflict(source, "LONG"),
+            weak_countertrend_conflict(source, "SHORT"),
+        ) if reason and reason != "NO_EXECUTABLE_DIRECTION"
+    ]
+    return sanitize_ai_inputs({
+        "schema": "shared_direction_prompt_v4",
+        "as_of_utc": utc_iso(),
+        "shared_ai_call_id": source.get("trade_id"),
+        "data_quality": source.get("data_quality"),
+        "raw": raw,
+        "derived": derived,
+        "contraindications": conflicts,
+    })
+
+
 def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
     """Freeze fill-time 3m ATR / Donchian / S-R so offline TPs do not chase ATR."""
     ctx = context or (signal or {}).get("context") or {}
@@ -12307,28 +12534,15 @@ def _arm_chase_offset_touch_grid(signal: dict):
             signal.get("shared_ai_call_id") or signal.get("ai_call_id")
             or signal.get("source_ai_trade_id") or ""
         )
-        opportunity_id = str(
-            signal.get("opportunity_id") or signal.get("event_id") or ""
-        )
-        episode_id = str(
-            signal.get("event_episode_id") or signal.get("episode_id") or ""
-        )
-        epoch_id = str(
-            signal.get("epoch_id") or signal.get("collection_epoch_id")
-            or ""
-        )
         shadow_state, stage_zero = arm_compressed_shadow_chase(
-            trade_id=tid,
-            direction=direction,
-            signal_price=price,
-            signal_ts=ts,
+            trade_id=tid, direction=direction, signal_price=price, signal_ts=ts,
             initial_limit_price=orig_limit_price(
                 price, direction, DETERMINISTIC_ENTRY_OFFSET_PCT * 100.0,
             ),
             shared_ai_call_id=shared_ai_call_id,
-            opportunity_id=opportunity_id,
-            episode_id=episode_id,
-            epoch_id=epoch_id,
+            opportunity_id=str(signal.get("opportunity_id") or signal.get("event_id") or ""),
+            episode_id=str(signal.get("event_episode_id") or signal.get("episode_id") or ""),
+            epoch_id=str(signal.get("epoch_id") or signal.get("collection_epoch_id") or ""),
             bid=signal.get("best_bid") or signal.get("bid"),
             ask=signal.get("best_ask") or signal.get("ask"),
             last=signal.get("last") or price,
@@ -12342,6 +12556,36 @@ def _arm_chase_offset_touch_grid(signal: dict):
         )
     except Exception as exc:
         logger.warning(f"[TOUCH GRID] arm failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str, str]:
+    """Reuse the current fill-time direction semantics without enabling execution."""
+    with state_lock:
+        latest_ai = copy.deepcopy(state.get("last_ai") or {})
+        latest_ai_ts = float(state.get("last_ai_ts") or 0)
+        current_context = copy.deepcopy(
+            state.get("last_ai_context") or state.get("last_cycle_3m_universe") or {}
+        )
+    signal_ts = float(shadow.get("signal_ts") or 0)
+    if latest_ai_ts <= signal_ts:
+        return "NOT_REVALIDATED", "NO_NEWER_AI_DECISION"
+    if now - latest_ai_ts > get_effective_ai_cooldown_sec() + 120:
+        return "NOT_REVALIDATED", "LATEST_AI_DECISION_STALE"
+    direction = str(shadow.get("direction") or "").upper()
+    conflict = weak_countertrend_conflict(current_context, direction)
+    if conflict and conflict != "NO_EXECUTABLE_DIRECTION":
+        return "INVALID", f"FILL_REVALIDATION_{conflict}"
+    current = str(
+        latest_ai.get("direction") or latest_ai.get("candidate_direction") or ""
+    ).upper()
+    decision = str(latest_ai.get("decision") or "").upper()
+    if current not in ("LONG", "SHORT") or decision in (
+        "REJECT", "SOFT_REJECT", "NO_TRADE", "CONFLICTED",
+    ):
+        return "INVALID", "FILL_REVALIDATION_NO_TRADE"
+    if current != direction:
+        return "INVALID", f"FILL_REVALIDATION_REVERSED_{direction}_TO_{current}"
+    return "VALID", f"FILL_REVALIDATION_SAME_{direction}"
 
 
 def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
@@ -12383,19 +12627,20 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
                             continue
             except OSError:
                 continue
-        recovered = recover_compressed_shadow_states(durable_rows, now_ts=now)
-        for tid, recovered_state in recovered.items():
-            _compressed_shadow_chase_book.setdefault(tid, recovered_state)
+        for tid, recovered in recover_compressed_shadow_states(
+            durable_rows, now_ts=now,
+        ).items():
+            _compressed_shadow_chase_book.setdefault(tid, recovered)
     shadow_dead = []
     for tid, shadow in list(_compressed_shadow_chase_book.items()):
         try:
+            revalidation, revalidation_reason = _shadow_stage_direction_revalidation(shadow, now)
             for row in poll_compressed_shadow_chase(
                 shadow, now_ts=now, last=float(price),
                 bid=None if not bid else float(bid),
-                ask=None if not ask else float(ask),
-                bbo_fresh=bool(bid and ask),
-                direction_revalidation_result="NOT_REVALIDATED",
-                direction_revalidation_reason="NO_FILL_TIME_DIRECTION_RECEIPT",
+                ask=None if not ask else float(ask), bbo_fresh=bool(bid and ask),
+                direction_revalidation_result=revalidation,
+                direction_revalidation_reason=revalidation_reason,
             ):
                 _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="SHADOW_CHASE")
             if shadow.get("terminal_emitted"):
@@ -12744,6 +12989,8 @@ def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict =
     refreshed["last_chase_ts"] = order.get("last_chase_ts", refreshed.get("last_chase_ts"))
     refreshed["fill_ts"] = order.get("fill_ts", refreshed.get("fill_ts"))
     refreshed["fill_price"] = order.get("fill_price", refreshed.get("fill_price"))
+    if isinstance(order.get("fill_time_revalidation"), dict):
+        refreshed["fill_time_revalidation"] = copy.deepcopy(order["fill_time_revalidation"])
     refreshed["research_chase_schedule"] = copy.deepcopy(schedule)
     refreshed["chase_schedule_authoritative"] = True
     _order_multiverse_pending_src[tid] = refreshed
@@ -13187,7 +13434,7 @@ def derive_research_decision_tier(win_prob: int, long_score: int, short_score: i
 
 
 def derive_candidate_direction(long_score: int, short_score: int, raw_direction: str = "") -> str:
-    """Return one deterministic candidate side; NO_TRADE is never a lane gate."""
+    """Return a deterministic side, or NO_TRADE when evidence is tied/abstained."""
     try:
         long_value = int(long_score or 0)
     except (TypeError, ValueError):
@@ -13200,12 +13447,7 @@ def derive_candidate_direction(long_score: int, short_score: int, raw_direction:
         return "LONG"
     if short_value > long_value:
         return "SHORT"
-    raw = str(raw_direction or "").upper()
-    if raw in ("LONG", "SHORT"):
-        return raw
-    # Stable tie-break only supplies a candidate for lane evaluation. Continuous
-    # still rejects a zero score gap; each current lane applies its registered policy.
-    return "LONG"
+    return "NO_TRADE"
 
 
 def parse_ai_response_fields(text: str) -> dict:
@@ -13219,15 +13461,25 @@ def parse_ai_response_fields(text: str) -> dict:
     # zeros). This keeps the continuous_shared_direction_gap_v1 policy honest.
     zero_score_reject = bool(factors.get("zero_score_reject"))
 
-    dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE)", text, re.IGNORECASE)
+    dir_match = re.search(r"Direction:\s*(LONG|SHORT|NO_TRADE|CONFLICTED)", text, re.IGNORECASE)
     raw_direction = dir_match.group(1).upper() if dir_match else None
     if raw_direction not in ("LONG", "SHORT"):
         jd = json_blob.get("direction") or json_blob.get("preferred_direction") or factors.get("preferred_direction")
         if jd:
             raw_direction = str(jd).upper()
+    if raw_direction == "CONFLICTED":
+        raw_direction = "NO_TRADE"
     if raw_direction not in ("LONG", "SHORT", "NO_TRADE"):
         raw_direction = "NO_TRADE"
-    if zero_score_reject:
+    long_score = int(factors.get("long_score") or 0)
+    short_score = int(factors.get("short_score") or 0)
+    score_direction_mismatch = (
+        (raw_direction == "LONG" and short_score > long_score)
+        or (raw_direction == "SHORT" and long_score > short_score)
+    )
+    score_tie = long_score == short_score
+    explicit_abstain = raw_direction == "NO_TRADE"
+    if zero_score_reject or explicit_abstain or score_direction_mismatch or score_tie:
         # Preserve raw_direction for telemetry but do not derive a candidate
         # side from inert zeros. direction stays NO_TRADE so no lane can spawn.
         direction = "NO_TRADE"
@@ -13263,7 +13515,7 @@ def parse_ai_response_fields(text: str) -> dict:
         if jd:
             decision = str(jd).upper()
     parsed_from_json = False
-    if zero_score_reject:
+    if zero_score_reject or explicit_abstain or score_direction_mismatch or score_tie:
         # Hard override: bypass derive_research_decision_tier so the gap policy
         # never operates on the inert zeros. Reason is propagated via comment
         # so downstream tranche logs capture the root cause.
@@ -13295,6 +13547,9 @@ def parse_ai_response_fields(text: str) -> dict:
         "json_blob": json_blob,
         "parsed_decision_from_json": parsed_from_json,
         "zero_score_reject": zero_score_reject,
+        "explicit_abstain": explicit_abstain,
+        "score_direction_mismatch": score_direction_mismatch,
+        "score_tie": score_tie,
     }
 
 
@@ -13384,10 +13639,20 @@ def parse_ai_factor_block(text: str) -> dict:
         reason = json_blob.get("reason")
         factors["reasons_for"] = json_blob.get("reasons_for_trade") or json_blob.get("reasons_for") or ([reason] if reason else [])
         factors["reasons_against"] = json_blob.get("reasons_against_trade") or json_blob.get("reasons_against") or []
-        factors["bull_score"] = int(json_blob.get("bull_score", 0) or 0)
-        factors["bear_score"] = int(json_blob.get("bear_score", 0) or 0)
-        factors["long_score"] = int(json_blob.get("long_score", 0) or 0)
-        factors["short_score"] = int(json_blob.get("short_score", 0) or 0)
+        def safe_score(name):
+            try:
+                value = int(float(json_blob.get(name, 0) or 0))
+            except (TypeError, ValueError):
+                factors["score_parse_error"] = f"INVALID_{name.upper()}"
+                return 0
+            if value < 0 or value > 100:
+                factors["score_parse_error"] = f"OUT_OF_RANGE_{name.upper()}"
+                return 0
+            return value
+        factors["bull_score"] = safe_score("bull_score")
+        factors["bear_score"] = safe_score("bear_score")
+        factors["long_score"] = safe_score("long_score")
+        factors["short_score"] = safe_score("short_score")
         if factors["long_score"] <= 0 and factors["bull_score"] > 0:
             factors["long_score"] = factors["bull_score"] * 10
         if factors["short_score"] <= 0 and factors["bear_score"] > 0:
@@ -13397,6 +13662,8 @@ def parse_ai_factor_block(text: str) -> dict:
             factors["preferred_direction"] = str(pref).upper()
         factors["factor_parse_ok"] = True
         _apply_zero_score_reject_check(factors)
+        if factors.get("score_parse_error"):
+            factors["zero_score_reject"] = True
         return factors
     bull_m = re.search(r"Bull\s*score:\s*(\d+)", text, re.IGNORECASE)
     bear_m = re.search(r"Bear\s*score:\s*(\d+)", text, re.IGNORECASE)
@@ -13460,13 +13727,28 @@ def ai_decision_should_execute(ai: dict) -> bool:
 def continuous_score_gap_execution_tier(ai: dict) -> str:
     """Derive the Continuous lane verdict from directional scores only.
 
-    The shared direction prompt may still emit a textual ``decision`` field,
-    but the Continuous contract is deliberately deterministic: the higher
-    LONG/SHORT score selects the side and its raw gap selects the execution
-    tier.  Trusting the model's textual decision here can silently reject an
-    otherwise executable score pair (for example SHORT 65 vs LONG 35).
+    The score gap may refine an already executable shared verdict, but it may
+    never manufacture one.  In particular, an explicit NO_TRADE/CONFLICTED
+    direction or a rejected shared decision must remain non-executable for
+    every child lane, including the Continuous benchmark.
     """
     if not ai or ai.get("ai_error") or ai.get("zero_score_reject"):
+        return "REJECT"
+    shared_direction = str(
+        ai.get("candidate_direction")
+        or ai.get("direction")
+        or ai.get("raw_direction")
+        or ""
+    ).upper()
+    shared_decision = str(ai.get("decision") or "").upper()
+    raw_decision = str(ai.get("raw_decision") or shared_decision).upper()
+    if (
+        bool(ai.get("explicit_abstain"))
+        or shared_direction not in ("LONG", "SHORT")
+        or shared_decision not in AI_EXECUTE_TIERS | {"APPROVE"}
+        or raw_decision in {"REJECT", "SOFT_REJECT", "AI_ERROR"}
+        or ai.get("approved") is False
+    ):
         return "REJECT"
     try:
         long_score = int(ai.get("long_score", 0) or 0)
@@ -13477,11 +13759,7 @@ def continuous_score_gap_execution_tier(ai: dict) -> str:
     # that construct an AI record without the parser's zero_score_reject flag.
     if long_score + short_score < 50:
         return "REJECT"
-    direction = derive_candidate_direction(
-        long_score,
-        short_score,
-        ai.get("direction") or ai.get("candidate_direction") or ai.get("raw_direction"),
-    )
+    direction = derive_candidate_direction(long_score, short_score, shared_direction)
     return derive_research_decision_tier(0, long_score, short_score, direction)
 
 
@@ -13663,6 +13941,64 @@ def apply_structure_agreement_gate(ctx: dict, ai_result: dict) -> dict:
         ai_result["approved"] = False
         ai_result["research_soft"] = "REJECT"
         ai_result["execution_tier"] = "REJECT"
+    return ai_result
+
+
+def weak_countertrend_conflict(ctx: dict, direction: str) -> str:
+    """Return a low-ADX contradiction code, otherwise an empty string."""
+    direction = str(direction or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return "NO_EXECUTABLE_DIRECTION"
+    mc = ctx.get("market_context") or {}
+    trend = mc.get("trend_strength") or {}
+    ema = mc.get("ema_alignment") or {}
+    structure = mc.get("market_structure") or {}
+    mtf = mc.get("multi_tf") or {}
+    upgrade = ctx.get("ai_input_upgrade") or {}
+    try:
+        adx = float(trend.get("adx") or ctx.get("adx") or 0)
+    except (TypeError, ValueError):
+        adx = 0.0
+    if adx >= 20:
+        return ""
+    stack = str(ema.get("stack") or "").upper()
+    ema_bull = bool(ema.get("stack_bull")) or stack in ("BULL", "BULLISH")
+    ema_bear = bool(ema.get("stack_bear")) or stack in ("BEAR", "BEARISH")
+    structure_score = float(structure.get("structure_score") or 0)
+    agreement = str(mtf.get("agreement") or "").upper()
+    sr_bias = str(ctx.get("sr_bias") or "").upper()
+    micro_confirmed = bool(upgrade.get("micro_structure_confirmed", ctx.get("micro_structure_confirmed")))
+    higher_low = bool(upgrade.get("higher_low_detected", ctx.get("higher_low_detected")))
+    lower_high = bool(upgrade.get("lower_high_detected", ctx.get("lower_high_detected")))
+    if direction == "SHORT":
+        conflicts = ema_bull or structure_score >= 2 or sr_bias == "LONG_PREFERRED" or higher_low
+        confirmed = agreement == "BEAR_ALIGNED" and (ema_bear or structure_score <= -2) and micro_confirmed
+        if conflicts and not confirmed:
+            return f"WEAK_COUNTERTREND_SHORT_ADX_{adx:.1f}"
+    else:
+        conflicts = ema_bear or structure_score <= -2 or sr_bias == "SHORT_PREFERRED" or lower_high
+        confirmed = agreement == "BULL_ALIGNED" and (ema_bull or structure_score >= 2) and micro_confirmed
+        if conflicts and not confirmed:
+            return f"WEAK_COUNTERTREND_LONG_ADX_{adx:.1f}"
+    return ""
+
+
+def apply_weak_countertrend_gate(ctx: dict, ai_result: dict) -> dict:
+    """Fail closed on weak countertrend entries while preserving shadow evidence."""
+    if ai_result.get("ai_error"):
+        return ai_result
+    tier = str(ai_result.get("execution_tier") or ai_result.get("research_soft") or ai_result.get("decision") or "").upper()
+    if tier not in AI_EXECUTE_TIERS:
+        return ai_result
+    reason = weak_countertrend_conflict(ctx, ai_result.get("direction"))
+    if reason:
+        ai_result["pre_weak_countertrend_decision"] = ai_result.get("decision")
+        ai_result["weak_countertrend_gate"] = reason
+        ai_result["decision"] = "REJECT"
+        ai_result["approved"] = False
+        ai_result["research_soft"] = "REJECT"
+        ai_result["execution_tier"] = "REJECT"
+        logger.warning(f"[WEAK COUNTERTREND] {reason} - hard REJECT [PIPELINE ENFORCEMENT]")
     return ai_result
 
 
@@ -14380,7 +14716,14 @@ def _v3_record_preorder_terminal_if_needed(
     )
     lane = str(row.get("research_lane") or "")
     if (
-        reason_upper not in {"SIGNAL_TTL_EXPIRED", "TTL_EXPIRED", "DUPLICATE_LIMIT_PRICE"}
+        reason_upper not in {
+            "SIGNAL_TTL_EXPIRED",
+            "TTL_EXPIRED",
+            "DUPLICATE_LIMIT_PRICE",
+            "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY",
+            "STALE_NO_EXPOSURE",
+            "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED",
+        }
         or had_submitted_order or not lane
     ):
         return False
@@ -15770,6 +16113,23 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         else:
             disposition = "ORDER_ELIGIBLE"
             decision_reason = "SHARED_AI_APPROVE_AND_POLICY_PASS"
+        # Keep the operator-facing AI History joined to the same signed
+        # per-family decision that is written to the V3 ledger below.  The
+        # ledger was complete, but without this stamp genuine family
+        # evaluations rendered as "not evaluated" even while their paper
+        # workers and orders were advancing.
+        _stamp_shared_ai_lane_verdict(
+            _shared_ai_call_id(ai_result=ai, ctx=ctx),
+            lane,
+            policy_accepted,
+            decision_reason,
+            score=spread,
+            policy_version=str(
+                (_v3_lane_policy_material(lane) or {}).get("policy_signature")
+                or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
+                or lane
+            ),
+        )
         _write_v3_shared_lane_decision(
             lane, ai, ctx, enriched,
             policy_decision="ACCEPT" if policy_accepted else "REJECT",
@@ -15808,6 +16168,13 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     # Honour explicit cancel before simulate (CANCELLED > TTL).
     explicit = str(buf.get("exit_outcome") or buf.get("block_reason") or "").upper()
     outcome = simulate_replay_outcome(buf)
+    shared_call_id = str(buf.get("shared_ai_call_id") or buf.get("source_trade_id") or "").strip()
+    opportunity_id = None
+    if shared_call_id:
+        episode_id = "episode-" + hashlib.sha256(
+            f"shared:{shared_call_id}".encode("utf-8")
+        ).hexdigest()[:20]
+        opportunity_id = f"opportunity:{episode_id}"
     if explicit == "CANCELLED" and not outcome.get("filled"):
         outcome["exit_reason"] = "CANCELLED"
         outcome["entry_outcome"] = "CANCELLED"
@@ -15826,6 +16193,7 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "research_lane": lane,
         "source_trade_id": buf.get("source_trade_id"),
         "shared_ai_call_id": buf.get("shared_ai_call_id") or buf.get("source_trade_id"),
+        "opportunity_id": opportunity_id,
         "shared_ai_call_ts": buf.get("shared_ai_call_ts"),
         "lane_recorded_ts": utc_iso(
             datetime.fromtimestamp(float(buf.get("start_ts") or time.time()), tz=timezone.utc)
@@ -15908,12 +16276,16 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     continuous_ai["raw_decision"] = str(
         continuous_ai.get("raw_decision") or continuous_ai.get("decision") or ""
     ).upper()
-    continuous_ai["direction"] = derive_candidate_direction(
-        long_score,
-        short_score,
-        continuous_ai.get("direction")
-        or continuous_ai.get("candidate_direction")
-        or continuous_ai.get("raw_direction"),
+    shared_direction = str(
+        continuous_ai.get("candidate_direction")
+        or continuous_ai.get("direction")
+        or continuous_ai.get("raw_direction")
+        or ""
+    ).upper()
+    continuous_ai["direction"] = (
+        derive_candidate_direction(long_score, short_score, shared_direction)
+        if shared_direction in ("LONG", "SHORT")
+        else "NO_TRADE"
     )
     continuous_ai["candidate_direction"] = continuous_ai["direction"]
     continuous_ai["execution_tier"] = continuous_tier
@@ -16035,16 +16407,20 @@ def evaluate_signal_with_ai(
             logger.warning(f"[AI] Feature validation failed: {reason} - reject without API call [PIPELINE ENFORCEMENT]")
             return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"FEATURE_VALIDATION:{reason}", "ai_error": True, "factors": {}, "source": "VALIDATION", "approved": False, "trade_id": raw_context.get("trade_id")}
         global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
-        if not shadow_only:
-            LAST_AI_PAYLOAD = copy.deepcopy(ctx)
-            LAST_AI_TIMESTAMP = utc_iso()
         logger.info(f"[AI PAYLOAD SNAPSHOT] lane={research_lane} {ctx} [PIPELINE ENFORCEMENT]")
         temperature = research_ai_temperature()
         replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
         # One shared direction prompt is the only runtime AI layer.
-        prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(ctx, indent=2))
+        prompt_context = build_shared_direction_prompt_context(ctx)
+        if not shadow_only:
+            # The dashboard label promises the exact model payload.  Keep the
+            # full research context in ai_input_log.jsonl, but expose only the
+            # compact context actually serialized into the DeepSeek prompt.
+            LAST_AI_PAYLOAD = copy.deepcopy(prompt_context)
+            LAST_AI_TIMESTAMP = utc_iso()
+        prompt = AI_PROMPT_TEMPLATE.format(context=json.dumps(prompt_context, indent=2))
         if is_research_data_collection() and AI_RESEARCH_MODE_ENABLED:
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
@@ -16125,6 +16501,8 @@ def evaluate_signal_with_ai(
         # weak counter-trend verdicts) so the worst-case LONG-vs-BEAR_CONTINUATION
         # pattern is blocked even when trend continuation does not hold.
         ai_result = apply_structure_agreement_gate(ctx, ai_result)
+        ai_result = normalize_research_ai_decision(ai_result)
+        ai_result = apply_weak_countertrend_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
         if not shadow_only:
             ai_result = apply_phase_c_factor_gate(ai_result)
@@ -16430,11 +16808,14 @@ def _order_signal_age_sec(order: dict, signal: dict, now: float) -> float:
 
 
 def chase_age_window_should_cancel(age_sec) -> bool:
-    """Cancel only when every chase window is off.
+    """Pull a resting order out of any currently disabled active window.
 
-    Early disabled windows (0/1 OFF) wait to submit; they must not kill a
-    resting order just because count ticked to 5+ at ~9 min. After the last
-    enabled window (5+ OFF), rest until 30 min TTL.
+    Signals that have not submitted yet remain virtual until the first enabled
+    bucket.  A pre-existing resting order is different: after the operator
+    disables its current bucket it must be cancelled and returned to virtual
+    wait, otherwise it could still fill through a disabled execution gate.
+    After the last enabled window, retain the existing order until TTL so a
+    late disabled bucket does not erase an order created by an allowed stage.
     """
     last = last_enabled_chase_count()
     if last is None:
@@ -16444,12 +16825,22 @@ def chase_age_window_should_cancel(age_sec) -> bool:
         return False
     mn = min_enabled_chase_count()
     if mn is not None and idx < mn:
-        return False
+        return True
     return not chase_bucket_allowed(idx)
 
 
 def chase_age_window_may_reprice(age_sec) -> bool:
-    idx = chase_age_window_index(age_sec)
+    try:
+        age = max(0.0, float(age_sec or 0))
+    except (TypeError, ValueError):
+        age = 0.0
+    # ``chase_age_window_index`` deliberately clamps everything at 5+ for
+    # display and attribution.  Repricing permission is narrower: the final
+    # 25-30 minute window ends at 30 minutes, after which the order may rest
+    # until its TTL but must hold the last operator-authorized limit.
+    if age >= (CHASE_WINDOW_MAX_INDEX + 1) * CHASE_WINDOW_SEC:
+        return False
+    idx = chase_age_window_index(age)
     last = last_enabled_chase_count()
     if last is None:
         return False
@@ -16937,27 +17328,22 @@ def evaluate_dashboard_execution_gate(
     ):
         return False, str(signal.get("entry_reason") or "STRUCTURAL_LIMIT_UNAVAILABLE"), False
 
-    if is_patient_chase_lane(lane):
-        # Registered paper policy: shared AI APPROVE places its exact 0.29%
-        # resting limit immediately. Global spread/AI-band/chase-bucket gates
-        # belong to Continuous experiments and must not rewrite this cohort.
-        if not ensure_signal_capacity():
-            return False, "MAX_ACTIVE_SIGNALS", False
-        if lev < 1 or lev > MAX_RESEARCH_LEVERAGE:
-            return False, "LEVERAGE_OUT_OF_RANGE", False
-        return True, "OK_OFFSET029_REGISTERED_POLICY", False
+    registered_family = is_patient_chase_lane(lane)
+    if not registered_family:
+        # Spread and advisory AI-band controls remain Continuous-only. Registered
+        # families retain their signed entry policy, but the operator's exact
+        # chase-window selector below is a global paper-order timing gate.
+        sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
+        if sg_blocked:
+            logger.info(
+                f"[SPREAD GATE] spread_bucket={sg_bucket} spread={sg_spread} blocked "
+                f"trade_id={signal.get('trade_id')} — skipping limit order [PIPELINE ENFORCEMENT]"
+            )
+            return False, "SPREAD_BUCKET_BLOCKED", False
 
-    sg_blocked, sg_bucket, sg_spread = _signal_spread_gate_blocked(signal, ai)
-    if sg_blocked:
-        logger.info(
-            f"[SPREAD GATE] spread_bucket={sg_bucket} spread={sg_spread} blocked "
-            f"trade_id={signal.get('trade_id')} — skipping limit order [PIPELINE ENFORCEMENT]"
-        )
-        return False, "SPREAD_BUCKET_BLOCKED", False
-
-    win_prob = _signal_ai_win_prob(signal, ai)
-    if dashboard_ai_band_blocks(win_prob):
-        return False, "AI_BAND_BLOCKED", False
+        win_prob = _signal_ai_win_prob(signal, ai)
+        if dashboard_ai_band_blocks(win_prob):
+            return False, "AI_BAND_BLOCKED", False
 
     if not ensure_signal_capacity():
         return False, "MAX_ACTIVE_SIGNALS", False
@@ -17069,17 +17455,16 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
 
 
 def enforce_dashboard_chase_gates_on_pending() -> None:
-    """Cancel pending only when the current 5-minute age window is an early disabled bucket.
+    """Reconcile resting orders with the current global age-window selector.
 
-    After the last enabled window (e.g. 5+ OFF while 2/3/4 ON), rest until TTL.
-    Do not cancel at ~9 min just because chase-count ticked to 5+.
+    Disabled windows before or between enabled stages are pulled back into
+    virtual wait.  A disabled window after the last enabled stage holds the
+    already-valid order until TTL.
     """
     now = time.time()
     with trade_lock:
         pending = [o for o in list(pending_orders) if isinstance(o, dict) and o.get("status") == "PENDING"]
     for order in pending:
-        if is_patient_chase_lane(order.get("research_lane")):
-            continue
         tid = order.get("trade_id")
         signal = trades_map.get(tid, {}).get("signal_ref") if tid else {}
         age_sec = _order_signal_age_sec(order, signal or {}, now)
@@ -20021,6 +20406,36 @@ def _pending_limit_ready_for_fill(
         return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
 
+
+FILL_DIRECTION_REVALIDATE_AFTER_SEC = float(os.getenv("FILL_DIRECTION_REVALIDATE_AFTER_SEC", "180"))
+
+
+def stale_fill_direction_conflict(order: dict, signal: dict, *, now: float, latest_ai: dict, latest_ai_ts: float, current_context: dict = None) -> str:
+    """Cancel an aged order when a newer shared decision withdrew/reversed it."""
+    age_sec = _order_signal_age_sec(order, signal, now)
+    if age_sec < FILL_DIRECTION_REVALIDATE_AFTER_SEC:
+        return ""
+    signal_ts = float(
+        (signal.get("timing") or {}).get("signal_ts")
+        or signal.get("created_ts_ts")
+        or order.get("signal_created_ts")
+        or order.get("created_ts")
+        or 0
+    )
+    original = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("dir") or order.get("side"))
+    current_conflict = weak_countertrend_conflict(current_context or {}, original)
+    if current_conflict and current_conflict != "NO_EXECUTABLE_DIRECTION":
+        return f"FILL_REVALIDATION_{current_conflict}"
+    if latest_ai_ts <= signal_ts or now - latest_ai_ts > get_effective_ai_cooldown_sec() + 120:
+        return ""
+    current = str((latest_ai or {}).get("direction") or (latest_ai or {}).get("candidate_direction") or "").upper()
+    current_decision = str((latest_ai or {}).get("decision") or "").upper()
+    if current not in ("LONG", "SHORT") or current_decision in ("REJECT", "SOFT_REJECT", "NO_TRADE", "CONFLICTED"):
+        return "FILL_REVALIDATION_NO_TRADE"
+    if original in ("LONG", "SHORT") and current != original:
+        return f"FILL_REVALIDATION_REVERSED_{original}_TO_{current}"
+    return ""
+
 def process_pending_orders():
     if manual_admin_pause_active():
         circuit_breaker_cancel_pending("ADMIN_MANUAL")
@@ -20064,6 +20479,7 @@ def process_pending_orders():
     process_limit_chase(price)
     process_virtual_chase_chase6_market_conversions(price)
     fills = []
+    cancelled_at_fill = []
     # Preserve the global state->trade lock order.  The previous implementation
     # called _pending_limit_touched under trade_lock and acquired state_lock
     # there, producing intermittent relay snapshot timeouts at a natural fill.
@@ -20083,6 +20499,14 @@ def process_pending_orders():
     # section below revalidates identity/status before committing FILLED.
     with trade_lock:
         pending_snapshot = list(pending_orders)
+    with state_lock:
+        latest_ai_for_fill = copy.deepcopy(state.get("last_ai") or {})
+        latest_ai_ts_for_fill = float(state.get("last_ai_ts") or 0)
+        fill_context_for_revalidation = {
+            "market_context": copy.deepcopy(state.get("market_context") or {}),
+            "sr_bias": (state.get("support_resistance") or {}).get("sr_bias"),
+            "adx": ((state.get("market_context") or {}).get("trend_strength") or {}).get("adx"),
+        }
     ready_orders = []
     for order in pending_snapshot:
         if order.get("status") != "PENDING":
@@ -20118,6 +20542,27 @@ def process_pending_orders():
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
                 continue
+            revalidation_reason = stale_fill_direction_conflict(
+                order,
+                fill_signal,
+                now=time.time(),
+                latest_ai=latest_ai_for_fill,
+                latest_ai_ts=latest_ai_ts_for_fill,
+                current_context=fill_context_for_revalidation,
+            )
+            order["fill_time_revalidation"] = {
+                "performed": True, "checked_ts": utc_iso(),
+                "signal_age_sec": round(float(fill_age_sec), 3),
+                "latest_ai_ts": latest_ai_ts_for_fill or None,
+                "result": "BLOCKED" if revalidation_reason else "PASSED",
+                "reason": revalidation_reason,
+                "context": copy.deepcopy(fill_context_for_revalidation),
+            }
+            if revalidation_reason:
+                order["status"] = "CANCELLED"
+                order["fill_revalidation_reason"] = revalidation_reason
+                cancelled_at_fill.append((order, fill_signal, revalidation_reason))
+                continue
             if order.pop("await_confirm", None):
                 logger.debug(
                     f"[SIM] limit touched - filling despite prior await_confirm "
@@ -20131,6 +20576,17 @@ def process_pending_orders():
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal))
+    for order, fill_signal, reason in cancelled_at_fill:
+        lane_unregister_pending_order(order)
+        schedule_close = globals().get("close_research_order_schedule")
+        if callable(schedule_close):
+            schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
+        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+        if callable(collector_refresh):
+            collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
+        _record_expired_order(order, reason)
+        expire_signal_for_order(order, reason)
+        logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
     for order, fill_signal in fills:
         schedule_close = globals().get("close_research_order_schedule")
         if callable(schedule_close):
@@ -20245,13 +20701,19 @@ def fill_order(order):
     # slower persistence/analytics callback below.
     position_opened_relay_ts = utc_iso()
     try:
-        dual_write_paper_fill(
+        fill_identity_receipt = dual_write_paper_fill(
             order,
             signal if isinstance(signal, dict) else {},
             pos,
             epoch_id=_collector_v22_epoch_id(),
             data_dir=os.getcwd(),
         )
+        for key in (
+            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+            "schedule_id", "fill_id", "tape_id",
+        ):
+            if fill_identity_receipt.get(key):
+                pos[key] = fill_identity_receipt[key]
     except Exception as exc:
         logger.error(
             f"[COLLECTOR_V3] paper fill write failed "
@@ -20802,8 +21264,14 @@ def process_signal(event: dict):
                     }
                 if is_ai_scan_lane(research_lane) and ai:
                     # Fan out five independent paper-only family lifecycles
-                    # directly from the completed shared-AI result.
+                    # and the Continuous benchmark directly from the completed
+                    # shared-AI result.  Continuous owns an independent verdict,
+                    # order ID, and lifecycle; omitting this call leaves the
+                    # benchmark tile evaluation-only even while its toggle is ON.
                     spawn_combo_lanes_from_ai_scan(
+                        ctx, ai, edge_score, features, research_lane,
+                    )
+                    spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
 
@@ -21523,6 +21991,7 @@ def process_signal(event: dict):
                 SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MICRO,
                 SIGNAL_STATUS_AWAITING_MIN_AGE,
             ) or signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES:
+                save_paper_lifecycle(reason="preorder_awaiting_finalized")
                 return {
                     "entry_resolution": "AWAITING",
                     "exact_reason": str(signal.get("status") or "AWAITING_ENTRY"),
@@ -21774,6 +22243,14 @@ def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: flo
     ):
         return False
     age_sec = now - created
+    # The operator's global age-window selector is the final authority for
+    # every family order, including a tile's own post-submit schedule.  The
+    # outer pending-order reconciliation normally enforces this first, but the
+    # family helper must also fail closed when called independently or after
+    # the last enabled window.  In the latter case the resting order remains on
+    # the book until TTL; it simply holds its last permitted limit.
+    if not chase_age_window_may_reprice(age_sec):
+        return False
     direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
     old_limit = float(order.get("limit_price") or 0)
     original = float(order.get("original_limit_price") or order.get("planned_limit_price") or old_limit)
@@ -23556,7 +24033,11 @@ def _paper_terminal_pnl_components(
         remaining_qty,
         _buf_float(pos.get("policy_original_qty"), remaining_qty),
     )
-    partial_receipts = list(pos.get("partial_exit_receipts") or [])
+    partial_receipts = [
+        receipt for receipt in (pos.get("partial_exit_receipts") or [])
+        if receipt.get("remaining_fraction") is None
+        or _buf_float(receipt.get("remaining_fraction"), 0.0) > 0
+    ]
     partial_gross = 0.0
     partial_exit_fees = 0.0
     for receipt in partial_receipts:
@@ -23724,6 +24205,12 @@ def close_position(pos: dict, exit_reason: str):
             "ts_melbourne": close_mel,
             "close_ts_melbourne": close_mel,
             "trade_id": trade_id,
+            "epoch_id": pos.get("epoch_id") or _collector_v22_epoch_id(),
+            "opportunity_id": pos.get("opportunity_id"),
+            "policy_signature": pos.get("policy_signature"),
+            "schedule_id": pos.get("schedule_id"),
+            "fill_id": pos.get("fill_id"),
+            "tape_id": pos.get("tape_id"),
             "research_lane": pos.get("research_lane") or master.get("research_lane"),
             "shared_ai_call_id": (
                 master.get("shared_ai_call_id")
@@ -23878,16 +24365,51 @@ def close_position(pos: dict, exit_reason: str):
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
             "experiment_tag": f"INV_{_coerce_invert_on(pos, master)}_EF_{state.get('early_fail_enabled', True)}",
             "final_direction": pos.get("dir"),
+            "entry_context": {
+                "regime": pos.get("context_regime") or pos.get("signal_regime"),
+                "adx": pos.get("adx_at_entry") or ts_entry.get("adx"),
+                "sr_state": entry_sr_state, "dist_to_support": dist_sup,
+                "dist_to_resistance": dist_res,
+                "ema9": pos.get("context_ema9") or pos.get("ema9_at_entry"),
+                "ema21": pos.get("context_ema21") or pos.get("ema21_at_entry"),
+                "ema200": pos.get("context_ema200"),
+                "atr14_pct_3m": pos.get("atr14_pct_at_fill") or pos.get("atr14_pct_3m"),
+            },
+            "exit_context": {
+                "observed_ts": close_iso, "regime": state.get("regime"),
+                "adx": ((state.get("market_context") or {}).get("trend_strength") or {}).get("adx"),
+                "sr_state": (state.get("support_resistance") or {}).get("sr_state"),
+                "dist_to_support": (state.get("support_resistance") or {}).get("dist_to_support"),
+                "dist_to_resistance": (state.get("support_resistance") or {}).get("dist_to_resistance"),
+                "ema9": (state.get("ema_status") or {}).get("ema9"),
+                "ema21": (state.get("ema_status") or {}).get("ema21"),
+                "ema200": (state.get("ema_status") or {}).get("ema200"),
+                "atr14_pct_3m": ((state.get("cycle_3m_universe") or {}).get("atr14_pct_3m")),
+            },
+            "exit_market_receipt": {
+                "basis": "SIDE_CORRECT_BBO_DEPTH" if exit_sim else "UNAVAILABLE",
+                "observed_ts": close_iso, "best_bid": (exit_sim or {}).get("best_bid"),
+                "best_ask": (exit_sim or {}).get("best_ask"),
+                "visible_executable_qty": (exit_sim or {}).get("available_qty"),
+                "levels_consumed": (exit_sim or {}).get("levels_consumed"),
+                "slippage_usd": (exit_sim or {}).get("slippage_usd"),
+            },
             **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
             "exit_config_json": json.dumps(get_exit_config_snapshot(pos.get("research_lane"))),
         }
     if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
         try:
-            dual_write_paper_close(
+            close_identity_receipt = dual_write_paper_close(
                 pos, master if isinstance(master, dict) else {}, trade_row,
                 epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
             )
+            for key in (
+                "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+                "schedule_id", "fill_id", "tape_id",
+            ):
+                if close_identity_receipt.get(key):
+                    trade_row[key] = close_identity_receipt[key]
         except Exception as exc:
             logger.error(
                 f"[COLLECTOR_V3] paper close write failed "
@@ -24033,11 +24555,12 @@ def close_position(pos: dict, exit_reason: str):
     clear_pending_trade()
     pipeline_state_sync()
 
-SHARED_DIRECTION_PROMPT_ID = "shared_direction_adx_evidence_v3_20260721"
+SHARED_DIRECTION_PROMPT_ID = "shared_direction_conflict_abstain_v4_20260826"
 
 AI_PROMPT_TEMPLATE = """
 You are a direction classifier for short-duration BTC perpetual research.
-Choose exactly one candidate side: LONG or SHORT. Never return NO_TRADE.
+Choose LONG, SHORT, or NO_TRADE. Use NO_TRADE when evidence is conflicted,
+stale, insufficient, or does not support a direction without forcing a tie.
 Do not estimate win probability, confidence, entries, exits, targets, or order prices.
 
 Given the following market data:
@@ -24059,17 +24582,18 @@ ADX measures trend strength, not direction. Apply it non-monotonically:
   gap unless multi-timeframe structure, EMA alignment, and order flow all agree.
 - ADX 30-35 is usable but can be late-cycle; require structure/order-flow support.
 - ADX 40+ confirms strength but still cannot choose LONG versus SHORT by itself.
-- ADX below 25 is not an automatic direction rejection; use the supplied
-  structure and order flow to decide the higher-scoring candidate.
+- ADX below 20 is not an automatic rejection, but a weak counter-trend side
+  must be NO_TRADE unless structure and order flow clearly confirm reversal.
 
-Score LONG and SHORT independently from 0 to 100. The direction must match the
-higher score. Support alone is not a LONG reason and resistance alone is not a
-SHORT reason. Strong counter-trend candidates require confirmed structure shift
-and order-flow expansion. Use only supplied facts.
+Score LONG and SHORT independently from 0 to 100. LONG/SHORT must match the
+higher score; tied or materially conflicted evidence is NO_TRADE. Support alone
+is not a LONG reason and resistance alone is not a SHORT reason. Strong
+counter-trend candidates require confirmed structure shift and order-flow
+expansion. Use only supplied facts and honor listed contraindications.
 
 Return exactly one JSON object:
 {{
-  "direction": "LONG or SHORT",
+  "direction": "LONG or SHORT or NO_TRADE",
   "long_score": 0,
   "short_score": 0,
   "reason": "One short sentence naming the decisive evidence"
@@ -24080,7 +24604,8 @@ RESEARCH_AI_PROMPT_ADDENDUM = """
 
 RESEARCH DATA COLLECTION MODE (active):
 - This is the one shared call made on the three-minute AI_SCAN cadence.
-- Patient Chase and CONTINUOUS independently accept or reject the candidate afterward.
+- Every enabled family tile and the CONTINUOUS benchmark independently accepts
+  or rejects the same shared candidate afterward.
 - Do not decide either tile's verdict and do not return any field beyond direction,
   long_score, short_score, and one short reason.
 - exhaustion_3m / exhaustion_3m_line is the cycle-aligned oscillator block
@@ -24746,6 +25271,10 @@ def research_wipe_file_paths():
         CSV_DECISIONS, CSV_TRADES, CSV_EXPIRED, CSV_BLOCKS, CSV_AI_TRANCHE, CSV_SETUP_LOG, CSV_CANDLES,
         CSV_PIPELINE_EVENTS, CSV_AI_ERRORS,
         "signal_snapshot.jsonl", "signal_replay.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        # Cleanup-only literals for physically retired Type-B writers.  Keep
+        # these names here so a fresh epoch removes stale active files without
+        # restoring any runtime constant or writer that could recreate them.
+        "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE,
         COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         COLLECTOR_V22_EVENT_INDEX_FILE,
@@ -24802,6 +25331,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
     """Rotated JSONL siblings (signal_replay.jsonl.1 …) missed by single-path delete."""
     bases = [
         "signal_replay.jsonl", "signal_snapshot.jsonl", "trade_outcome.jsonl", "shadow_outcome.jsonl",
+        "type_b_adx_v3_shadow_decisions.jsonl", "type_b_research_v2.jsonl",
         PATH_REPLAY_FILE, POST_EXIT_REPLAY_FILE, COLLECTOR_V22_RESEARCH_EVENTS_FILE,
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
@@ -24894,9 +25424,11 @@ def reset_all_research_files(*, archive_path: str = None) -> dict:
         inventoried = {os.path.abspath(str(row["path"])) for row in inventory}
         actual = {os.path.abspath(path) for path in live_paths if path and os.path.isfile(path)}
         if inventoried != actual:
-            return {"wipe_aborted": True, "deleted": [], "errors": [
-                f"planned deletion set changed expected={len(inventoried)} actual={len(actual)}"
-            ]}
+            return {
+                "wipe_aborted": True, "deleted": [], "errors": [
+                    f"planned deletion set changed expected={len(inventoried)} actual={len(actual)}"
+                ],
+            }
     deleted, errors = _delete_paths(live_paths)
     purge = purge_quarantine_archives(os.getcwd(), preserve_research_archive=True)
     errors.extend(purge.get("errors") or [])
@@ -25309,6 +25841,24 @@ def _annotate_lanes_with_exec_mode(lanes: list) -> list:
             spec["exec_mode"] = mode
             spec["exec_block_reason"] = block
             spec["exec_banner"] = _exec_mode_banner_text(mode, block, lane_id)
+            selected = [
+                chase_count_bucket(n).replace("_chases", "").replace("_chase", "")
+                for n in range(0, CHASE_WINDOW_MAX_INDEX + 1)
+                if chase_bucket_allowed(n)
+            ]
+            policy_module = TILE_POLICY_MODULES.get(lane_id)
+            template = list(getattr(getattr(policy_module, "SPEC", None), "chase_windows", ()))
+            spec["chase_timing"] = {
+                "global_submit_buckets": selected,
+                "global_submit_label": ", ".join(selected) if selected else "none",
+                "template_reprice_buckets": template,
+                "template_reprice_label": ", ".join(str(n) for n in template) if template else "continuous/global",
+                "contract": (
+                    "A paper order may first appear only inside a globally selected bucket. "
+                    "The tile Reprice template label is its post-submit schedule, not permission "
+                    "to bypass the global selector."
+                ),
+            }
             spec["platform_relay_eligible"] = (
                 lane_id in PLATFORM_RELAY_ELIGIBLE_LANES
             )
@@ -25338,10 +25888,19 @@ def _exec_mode_banner_text(mode: str, block: str | None, lane_id: str) -> str:
         if lane_id in PLATFORM_RELAY_ELIGIBLE_LANES:
             return "LOCAL PAPER ORDERS ENABLED — live copy requires platform relay ON"
         if lane_id in PLATFORM_RELAY_CONFIGURED_LANES:
-            return (
-                "LOCAL PAPER ORDERS ENABLED — live copy blocked until partial-close "
-                "relay support is verified"
-            )
+            capability = str(
+                (COMBO_LANE_SPECS.get(lane_id) or {}).get("relay_capability") or ""
+            ).upper()
+            blocker_text = {
+                "BLOCKED_UNQUALIFIED": "strategy is not qualified",
+                "BLOCKED_PARTIAL_REDUCTION_UNPROVEN": (
+                    "partial-close relay support is not verified"
+                ),
+                "BLOCKED_INITIAL_STOP_SWEEP_REQUIRED": (
+                    "initial-stop evidence is still required"
+                ),
+            }.get(capability, "relay capability is not proven")
+            return f"LOCAL PAPER ORDERS ENABLED — live copy blocked: {blocker_text}"
         return "PAPER ORDERS ENABLED — not eligible for live copy"
     if mode == EXEC_MODE_EXIT_ONLY:
         return "OFF — no new entries; existing positions still managed"
@@ -25518,189 +26077,6 @@ def build_static_pathway_lane_specs() -> dict:
         "legacy_lanes_retired": sorted(RETIRED_TILE_LANES),
         "lanes": _annotate_lanes_with_exec_mode(lanes),
     }
-
-    # Legacy construction below is intentionally unreachable during the
-    # registry migration and is removed by the retirement cleanup audit.
-    patient_spec = COMBO_LANE_SPECS[COMBO_EXECUTION_LANES[0]]
-    patient_view = _patient_chase_policy(COMBO_EXECUTION_LANES[0]).dashboard_policy()
-    patient_exit = patient_view["exit"]
-    patient_lane = {
-        "lane": COMBO_EXECUTION_LANES[0],
-        "label": patient_spec.get("label") or "0.29% Patient Chase - ATR 2.5x",
-        "subtitle": patient_spec.get("subtitle", "RESEARCH_CANDIDATE"),
-        "role": patient_spec.get("role", RESEARCH_CANDIDATE_ROLE),
-        "status": RESEARCH_CANDIDATE_ROLE,
-        "is_benchmark": False,
-        "is_primary_production": False,
-        "is_research_candidate": True,
-        "is_shadow_only": False,
-        "is_independent_ai": False,
-        "is_deterministic_bracket": False,
-        "badge": "RESEARCH_CANDIDATE",
-        "tile_number": 1,
-        "entry_mode_label": "0.29% Patient Chase",
-        "filter_chips": patient_view["filter_chips"],
-        "toggle_key": "research_lane_enabled",
-        "hypothesis": patient_spec.get("hypothesis", ""),
-        "research_question": patient_spec.get("research_question", ""),
-        "entry": {
-            **patient_view["entry"],
-            "ai_cadence": ai_cadence,
-            "margin_usd": float(patient_spec.get("margin_usd", shared["margin_usd"])),
-            "filters": patient_spec,
-            "execution": "Tile ON creates an independent local paper lifecycle; relay remains separately user-armed",
-        },
-        "exit": patient_exit,
-        "exit_path": "Frozen 3m ATR(14) x 2.5 target; otherwise 120m path end",
-        "promotion_criteria": patient_spec.get("promotion_criteria", ""),
-        "kill_criteria": patient_spec.get("kill_criteria", ""),
-        "expected_advantage": "Tests patient entry quality and ATR-normalized profit capture",
-        "expected_risk": "Paper research only until qualified; path-end and execution risk remain explicit",
-        "benchmark_comparison": "Compare with Continuous on the same shared AI directions",
-        "diff_vs_benchmark": [
-            "Entry: 0.29% patient maker anchor vs Continuous 0.10% benchmark",
-            "Chase: rest 10m, then move 25% of remaining gap every 60s during 10-25m",
-            "Exit: 2.5x frozen 3m ATR target; otherwise 120m path end",
-        ],
-        "strategy_detail": patient_view["strategy_detail"],
-    }
-    continuous_exit = _scenario_c_exit_spec(RESEARCH_LANE_CONTINUOUS)
-    continuous_policy_id = "continuous_shared_direction_gap_structural_v2"
-    continuous_lane = {
-        "lane": RESEARCH_LANE_CONTINUOUS,
-        "label": "Continuous Benchmark - Paper Orders",
-        "subtitle": "BENCHMARK - shared direction call, independent verdict and orders",
-        "role": "continuous_direct_benchmark",
-        "status": "BENCHMARK",
-        "is_benchmark": True,
-        "is_primary_production": False,
-        "is_research_candidate": False,
-        "is_shadow_only": False,
-        "is_independent_ai": False,
-        "is_deterministic_bracket": False,
-        "badge": "BENCHMARK",
-        "tile_number": 2,
-        "entry_mode_label": "Continuous",
-        "filter_chips": [
-            f"One AI call ~{shared['ai_scan_cadence_sec']}s",
-            "Higher LONG/SHORT score picks side",
-            "Raw score gap >=5/100",
-            "Gap 5-9 SOFT APPROVE",
-            "Gap 10-14 APPROVE",
-            "Gap >=15 STRONG APPROVE",
-            "AI confidence not requested",
-            f"Ladder {get_lane_ladder(RESEARCH_LANE_CONTINUOUS)[1]}",
-            "25% chase",
-            continuous_policy_id,
-        ],
-        "toggle_key": "continuous_ai_research_enabled",
-        "hypothesis": "Yardstick lane - every candidate must beat Continuous on qualified OOS evidence.",
-        "research_question": "Does Patient Chase beat the Continuous benchmark?",
-        "entry": {
-            "spawn": "Evaluate every shared direction result",
-            "trigger": "Higher LONG/SHORT score + raw score gap >=5",
-            "entry_path": "LOCAL_SR_DIRECT",
-            "fill_path": "AI_DIRECT_CHASE",
-            "ai_path": "One shared direction-only AI call",
-            "ai_cadence": ai_cadence,
-            "chase_detail": chase_detail,
-            "post_ai_gates": "Continuous raw-score-gap tiers only",
-            "margin_usd": shared["margin_usd"],
-            "execution": "Immediate deterministic 0.1% limit + bounded 25% chase",
-            "orders": "Toggle ON creates paper orders; OFF records evaluation only",
-            "filters": {
-                "entry_mode": "SHARED_DIRECTION_IMMEDIATE_LIMIT",
-                "policy_version": continuous_policy_id,
-                "raw_score_gap_min": 5,
-                "confidence_weight": 0.0,
-                "shared_call_consumers": [
-                    RESEARCH_LANE_CONTINUOUS,
-                    *COMBO_EXECUTION_LANES,
-                ],
-            },
-        },
-        "exit": continuous_exit,
-        "exit_path": "Scenario C frozen - ladder, thesis and MFE protection",
-        "promotion_criteria": "N/A - benchmark",
-        "kill_criteria": "N/A - benchmark",
-        "expected_advantage": "Continuous shared-AI baseline",
-        "expected_risk": "Benchmark execution and drawdown remain fully reported",
-        "benchmark_comparison": "BENCHMARK",
-        "diff_vs_benchmark": [],
-        "strategy_detail": _strategy_detail_lines({
-            "spawn": "Evaluate every shared direction call",
-            "execution": "Immediate deterministic limit + bounded chase",
-            "ai_path": "One shared direction-only call",
-            "ai_cadence": ai_cadence,
-            "chase_detail": chase_detail,
-            "margin_usd": shared["margin_usd"],
-            "post_ai_gates": "gap <5 reject; 5-9 soft; 10-14 approve; >=15 strong",
-        }, continuous_exit, [f"Policy: {continuous_policy_id}", f"Independence: {shared['independence']}"]),
-    }
-    protected_lanes = []
-    for tile_number, lane_id, entry_label in (
-        (3, COMBO_EXECUTION_LANES[1], "Legacy unreachable family"),
-        (4, COMBO_EXECUTION_LANES[2], "Legacy unreachable family"),
-    ):
-        protected_spec = COMBO_LANE_SPECS[lane_id]
-        protected_view = _patient_chase_policy(lane_id).dashboard_policy()
-        protected_lanes.append({
-            "lane": lane_id,
-            "label": protected_spec["label"],
-            "subtitle": protected_spec["subtitle"],
-            "role": RESEARCH_CANDIDATE_ROLE,
-            "status": RESEARCH_CANDIDATE_ROLE,
-            "is_benchmark": False,
-            "is_primary_production": False,
-            "is_research_candidate": True,
-            "is_shadow_only": False,
-            "is_independent_ai": False,
-            "is_deterministic_bracket": False,
-            "badge": "PAPER_ONLY_CANDIDATE",
-            "tile_number": tile_number,
-            "entry_mode_label": entry_label,
-            "filter_chips": protected_view["filter_chips"],
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": protected_spec["hypothesis"],
-            "research_question": protected_spec["research_question"],
-            "entry": {
-                **protected_view["entry"],
-                "ai_cadence": ai_cadence,
-                "margin_usd": float(protected_spec["margin_usd"]),
-                "notional_usd_at_100x": round(float(protected_spec["margin_usd"]) * 100.0, 2),
-                "filters": protected_spec,
-            },
-            "exit": protected_view["exit"],
-            "exit_path": protected_view["exit"]["profile"],
-            "promotion_criteria": protected_spec["promotion_criteria"],
-            "kill_criteria": protected_spec["kill_criteria"],
-            "expected_advantage": "Tests explicit ATR protection and profit retention",
-            "expected_risk": "Unqualified descriptive candidate; paper-only and relay-blocked",
-            "benchmark_comparison": "Compare with Patient Chase and Continuous on the same shared AI call",
-            "diff_vs_benchmark": list(protected_view["strategy_detail"]),
-            "strategy_detail": protected_view["strategy_detail"],
-        })
-    lanes = [patient_lane, continuous_lane, *protected_lanes]
-    return {
-        "architecture_frozen": True,
-        "architecture_freeze_note": "Registry-owned four-tile roster; add/remove via TILE_LIFECYCLE.md contract",
-        "architecture_doc": "TILE_LIFECYCLE.md",
-        "genome_schema_version": "1.0.0",
-        "shared_execution": shared,
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": "v3.1-four-tile-protected-patient-chase",
-        "bot_version": EXECUTION_FIX_VERSION,
-        "benchmark_lane": RESEARCH_LANE_CONTINUOUS,
-        "primary_production_lane": RESEARCH_LANE_CONTINUOUS,
-        "benchmark_role": COMBO_BENCHMARK_ROLE,
-        "primary_production_role": COMBO_BENCHMARK_ROLE,
-        "research_candidate_lane": RESEARCH_CANDIDATE_LANE,
-        "benchmark_profile_id": COMBO_BENCHMARK_PROFILE_ID,
-        "legacy_lanes_retired": sorted(RETIRED_TILE_LANES),
-        "lanes": _annotate_lanes_with_exec_mode(lanes),
-    }
-
-
 
 def _truthful_approve_to_fill_pct(approves: int, fills: int, reported) -> float:
     """Prefer lifecycle arithmetic when a cached analyzer percentage disagrees.
@@ -27272,7 +27648,7 @@ __ADMIN_ACCESS_CONTROLS__
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
-    Local mirror at <code>services/btc-conservative-agent/fly-data-mirror/</code> syncs on growth
+  Local mirror at <code>C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror</code> syncs on growth
     (≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code>, default 50 MB) or every 3 min — then ACK-prunes rotated shards only.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
@@ -27301,7 +27677,7 @@ __ADMIN_ACCESS_CONTROLS__
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
-    Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
+    Local mirror: <code>C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
 
@@ -27864,7 +28240,10 @@ DASHBOARD_JS = """(function () {
       const key = spec.toggle_key;
       if (key === 'research_lane_enabled') {
         const m = d.research_lane_enabled || {};
-        return m[spec.lane] !== false;
+        if (!Object.prototype.hasOwnProperty.call(m, spec.lane)) {
+          return spec.default_enabled === true;
+        }
+        return m[spec.lane] === true;
       }
       return null;
     }
@@ -27917,9 +28296,16 @@ DASHBOARD_JS = """(function () {
           const headlineClosed = currentSettingsPeriod ? Number(currentSettingsPeriod.executed || 0) : Number(stats.real_fills || 0);
           const headlinePnl = currentSettingsPeriod ? Number(currentSettingsPeriod.pnl_usd || 0) : Number(pnl || 0);
           const headlineApprovals = currentSettingsPeriod ? Number(currentSettingsPeriod.approvals || 0) : Number(stats.approves || 0);
-          const headlineEv = currentSettingsPeriod
-            ? (currentSettingsPeriod.ev_per_approval == null ? (headlineApprovals ? headlinePnl / headlineApprovals : 0) : Number(currentSettingsPeriod.ev_per_approval))
-            : Number(stats.per_approve_ev || 0);
+          const explicitHeadlineEv = currentSettingsPeriod
+            ? currentSettingsPeriod.ev_per_approval
+            : stats.per_approve_ev;
+          const parsedHeadlineEv = Number(explicitHeadlineEv);
+          const headlineEv = headlineApprovals > 0
+            ? ((explicitHeadlineEv != null && Number.isFinite(parsedHeadlineEv))
+              ? parsedHeadlineEv
+              : headlinePnl / headlineApprovals)
+            : null;
+          const headlineEvLabel = headlineEv == null ? '—' : ('$' + headlineEv.toFixed(2));
           const headlinePnlCol = headlinePnl >= 0 ? '#3fb950' : '#f85149';
           const formatPeriodTime = function (epoch) {
             if (!epoch) return '—';
@@ -27960,7 +28346,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the ' + statsScope + '</div>'
             + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
             + '<thead><tr style="color:#8b949e;background:#101820;">'
-            + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Chase</th>'
+            + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Global submit windows</th>'
             + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Closed</th>'
             + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th>'
             + '</tr></thead><tbody>'
@@ -27972,15 +28358,24 @@ DASHBOARD_JS = """(function () {
             + statRow('Open', laneNow.open || 0)
             + statRow('Closed', headlineClosed)
             + statRow('PnL', '$' + headlinePnl.toFixed(2), headlinePnlCol)
-            + statRow('EV/appr', '$' + headlineEv.toFixed(2))
+            + statRow('EV/appr', headlineEvLabel)
             + '</div>'
             + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
-            return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + c + '</span>';
+            const chip = /^Chase\b/i.test(String(c || ''))
+              ? String(c).replace(/^Chase\b/i, 'Reprice template')
+              : c;
+            return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + chip + '</span>';
           }).join('');
           const badge = spec.badge
             ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#3d2e00;border:1px solid #d4a72c;border-radius:4px;color:#f0c14b;font-size:0.72em;font-weight:700;">' + spec.badge + '</span>')
             : '';
+          const chaseTiming = spec.chase_timing || {};
+          const chaseTruth = '<div style="margin-top:8px;padding:7px 9px;background:#132033;border:1px solid #1f6feb;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+            + '<strong style="color:#58a6ff;">Effective order timing:</strong> global submit buckets '
+            + (chaseTiming.global_submit_label || 'none')
+            + ' · tile reprice template ' + (chaseTiming.template_reprice_label || 'continuous/global')
+            + '<div style="color:#8b949e;">' + (chaseTiming.contract || 'Global chase selection controls first paper-order creation.') + '</div></div>';
           const tileNum = spec.tile_number ? ('<span style="color:#6e7681;font-size:0.78em;margin-right:6px;">Tile ' + spec.tile_number + '</span>') : '';
           let orderBanner = '';
           // Pt 5 (toggle contract): prefer the dynamic exec_banner driven by
@@ -28039,6 +28434,7 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
+            + chaseTruth
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
@@ -28057,7 +28453,7 @@ DASHBOARD_JS = """(function () {
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
             + (spec.is_independent_ai
-              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">Patient Chase and Continuous share one direction call while keeping independent policies, orders, chase, and P&amp;L.</div>'
+              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">All enabled family tiles and Continuous share one direction call while keeping separate policies, orders, chase, and P&amp;L; their child outcomes remain one correlated AI cluster.</div>'
               : '')
             + (function () {
               const prom = spec.promotion_criteria;
@@ -28068,7 +28464,7 @@ DASHBOARD_JS = """(function () {
               if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
               return html + '</div>';
             })()
-            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Current settings period: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV $' + headlineEv.toFixed(2) + '/approve</div>'
+            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Current settings period: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
@@ -28084,7 +28480,7 @@ DASHBOARD_JS = """(function () {
             + '</div>';
         }).join('');
       } else if (tiles) {
-        tiles.innerHTML = '<p style="color:#8b949e;font-size:0.85em;">Pathway specs loading — restart bot on ' + (d.bot_version || 'latest') + '</p>';
+        tiles.innerHTML = '<p style="color:#fbbf24;font-size:0.85em;">Owner-only tile details are unavailable in this view. Sign in as admin or refresh authenticated state; no tile status is inferred.</p>';
       }
     }
     function renderPathwayScorecard(d) {
@@ -28465,7 +28861,7 @@ DASHBOARD_JS = """(function () {
         let wsAgeText = wsAgeSec != null ? wsAgeSec + ' s' : '-';
         const wsStaleSec = d.dashboard_ws_stale_sec != null ? Number(d.dashboard_ws_stale_sec) : 30;
         const wsConnected = d.ws_transport_connected === true || d.ws_ready === true;
-        const wsStale = wsAgeSec != null && wsAgeSec > wsStaleSec && !wsConnected;
+        const wsStale = wsAgeSec != null && wsAgeSec > wsStaleSec;
         if (wsStale) wsAgeText += ' (STALE!)';
         safeText('ws_age', wsAgeText);
         const wsBadge = document.getElementById('wsStaleBadge');
@@ -28655,7 +29051,7 @@ DASHBOARD_JS = """(function () {
             'Cooldown ~' + (d.ai_cooldown_sec || 300) + 's between continuous calls',
             'Triggers on edge &gt; 0 (PERIODIC_RESEARCH_AI)',
             'Lane tag: CONTINUOUS in ai_tranche + ai_input_log.jsonl',
-            'Spawns 7 experiment lanes on CONTINUOUS APPROVE',
+            'Fans one shared candidate into the enabled five-family registry plus Continuous benchmark; child outcomes are correlated',
           ];
           contAiList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
@@ -32911,8 +33307,15 @@ def _api_state_cache_refresher_loop():
                         pending=snap.get("orders") or [], positions=snap.get("positions") or [],
                         closed=snap.get("trades") or [], expired=snap.get("expired_orders") or [],
                     )
-                snap["pathway_lane_specs"] = get_pathway_lane_specs_cached(
-                    for_api=True
+                # Keep tile summaries on the same live signed-epoch overlay as
+                # positions/orders.  Reusing the cached heavy presentation here
+                # made approvals/fills stay at their pre-resume zero values even
+                # while the tile headline correctly showed live lifecycles.
+                snap["pathway_lane_specs"] = _scope_pathway_specs_to_signed_epoch(
+                    get_pathway_lane_specs_cached(for_api=True),
+                    snap.get("trades") or [],
+                    snap.get("lane_opportunity_counters") or {},
+                    snap.get("fresh_epoch_cutoff_utc") or "",
                 )
                 paused_shadow_stats = snap.get("paused_shadow_stats")
                 if isinstance(paused_shadow_stats, dict):
@@ -33293,7 +33696,13 @@ def health():
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "path_schema_version": PATH_SCHEMA_VERSION,
             "replay_version": REPLAY_VERSION,
-            "fill_model": FILL_MODEL_IDEAL_TOUCH,
+            # The collector deliberately preserves ideal-touch replay as a
+            # diagnostic world, while qualification uses pinned BBO/depth
+            # receipts.  A single IDEAL_TOUCH label here made the separated
+            # evidence contract look contradictory to operators.
+            "fill_model": "SEPARATED_EVIDENCE_WORLDS",
+            "diagnostic_fill_model": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "qualification_fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
             "microstructure_tape": {
                 "schema": MICROSTRUCTURE_TAPE_SCHEMA,
                 "file": MICROSTRUCTURE_TAPE_FILE,
@@ -34937,6 +35346,24 @@ def download_debug_config():
 _DATA_SYNC_EXTENSIONS = frozenset({
     ".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt",
 })
+_DATA_SYNC_OPTIONAL_FILES = ({
+    "path": "open_positions.json",
+    "classification": "OPTIONAL_OPERATIONAL_PROJECTION",
+    "reason": (
+        "Ephemeral in-memory paper-position projection; it may disappear at an "
+        "epoch reset and is not analyzer evidence."
+    ),
+    "canonical_replacement": "paper_lifecycle_v1.json",
+},)
+_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES = frozenset({
+    "tile_independence_report.json",
+    "ai_scan_independence_report.json",
+    "ai_scan_role_validation.json",
+    "exit_reports_validation.json",
+    "lane_memory_validation.json",
+    "lane_memory_violation.json",
+    "runtime_pathway_integrity.json",
+})
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
     # Mutable crash-recovery state belongs only to the Fly collector. It can
@@ -34946,8 +35373,12 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     # status API; it is not research evidence and is replaced too frequently
     # to belong to a generation-consistent evidence mirror.
     "collector_storage_state.json",
+    # Optional operational projection, explicitly audited in the manifest.
+    # It is intentionally not advertised as a required/retrievable file.
+    "open_positions.json",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
+    ".data-sync-snapshots",
     "research_epoch_quarantine",
     "research_archive",
     "research_session_archives",
@@ -34991,6 +35422,9 @@ def _data_sync_rotation_parts(raw_name: str):
 
 
 def _data_sync_runtime_root() -> Path:
+    volume_raw = (os.getenv("BOT_DATA_DIR") or "").strip()
+    if volume_raw:
+        return (Path(volume_raw) / "runtime").resolve()
     return Path.cwd().resolve()
 
 
@@ -35013,8 +35447,12 @@ def _data_sync_allowed_roots() -> list:
 
 def _data_sync_relpath(path: Path) -> str:
     runtime = _data_sync_runtime_root()
+    volume = _data_sync_volume_root()
+    resolved = path.resolve()
+    if resolved.parent == volume and resolved.name in _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES:
+        return resolved.name
     try:
-        return path.resolve().relative_to(runtime).as_posix()
+        return resolved.relative_to(runtime).as_posix()
     except ValueError:
         # Volume-backed research directories can be symlinked beside runtime.
         for name in ("research", "research_accumulator", "research_archive"):
@@ -35053,7 +35491,11 @@ def _data_sync_resolve_relpath(raw_rel: str) -> Path:
     if not rel or rel.startswith(".") or ".." in rel.split("/"):
         raise ValueError("invalid relative path")
     runtime = _data_sync_runtime_root()
-    candidate = runtime.joinpath(*rel.split("/"))
+    parts = rel.split("/")
+    if len(parts) == 1 and parts[0] in _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES:
+        candidate = _data_sync_volume_root() / parts[0]
+    else:
+        candidate = runtime.joinpath(*parts)
     if not _data_sync_path_allowed(candidate):
         raise ValueError("path is not an allowed runtime data file")
     return candidate.resolve()
@@ -35092,6 +35534,8 @@ def _data_sync_consistency_mode(path: Path) -> str:
     rewrite those files in place. Runtime .log files are logging-handler-owned
     append streams; rotation changes the inode and is therefore still fenced.
     """
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        return "sqlite_snapshot_v1"
     # Some ledgers use the serialized append helper for new rows but are also
     # atomically rewritten when an outcome is patched.  They are not true
     # append-only generations and must retain the full inode/mtime/size fence.
@@ -35116,6 +35560,48 @@ def _data_sync_consistency_mode(path: Path) -> str:
     return "append_prefix_v1" if append_prefix else "strict_generation_v1"
 
 
+def _data_sync_sqlite_snapshot(path: Path) -> dict:
+    """Create one integrity-checked online backup for a complete sync run."""
+    snapshot_root = _data_sync_volume_root() / ".data-sync-snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - (15 * 60)
+    for stale in snapshot_root.glob("*.db"):
+        try:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
+        except OSError:
+            pass
+    token = uuid.uuid4().hex
+    snapshot = snapshot_root / f"{token}.db"
+    source = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
+    destination = sqlite3.connect(str(snapshot), timeout=15)
+    try:
+        source.backup(destination)
+        result = destination.execute("PRAGMA integrity_check").fetchone()
+        if not result or str(result[0]).lower() != "ok":
+            raise sqlite3.DatabaseError("online backup failed integrity_check")
+    finally:
+        destination.close()
+        source.close()
+    payload = snapshot.read_bytes()
+    return {
+        "snapshot_id": token,
+        "snapshot_size": len(payload),
+        "snapshot_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _data_sync_resolve_sqlite_snapshot(snapshot_id: str) -> Path:
+    token = str(snapshot_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("invalid sqlite snapshot identity")
+    path = (_data_sync_volume_root() / ".data-sync-snapshots" / f"{token}.db").resolve()
+    path.relative_to(_data_sync_volume_root())
+    if not path.is_file():
+        raise ValueError("sqlite snapshot is unavailable or expired")
+    return path
+
+
 def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> bool:
     return bool(
         int(getattr(stat, "st_ino", 0) or 0) == int(inode)
@@ -35124,9 +35610,47 @@ def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> 
 
 
 def _data_sync_inventory() -> list:
-    runtime = _data_sync_runtime_root()
     seen = set()
+    seen_relpaths = set()
     rows = []
+
+    def append_path(path: Path) -> None:
+        try:
+            resolved = path.resolve(strict=True)
+            relpath = _data_sync_relpath(path)
+            if (
+                resolved in seen
+                or relpath in seen_relpaths
+                or not _data_sync_path_allowed(path)
+            ):
+                return
+            stat = resolved.stat()
+            published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
+            seen.add(resolved)
+            seen_relpaths.add(relpath)
+            rows.append({
+                "path": relpath,
+                "size": published_size,
+                "physical_size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "inode": int(getattr(stat, "st_ino", 0) or 0),
+                "consistency_mode": _data_sync_consistency_mode(resolved),
+            })
+            if rows[-1]["consistency_mode"] == "sqlite_snapshot_v1":
+                snapshot = _data_sync_sqlite_snapshot(resolved)
+                rows[-1].update(snapshot)
+                rows[-1]["size"] = snapshot["snapshot_size"]
+                rows[-1]["physical_size"] = snapshot["snapshot_size"]
+        except (OSError, ValueError):
+            return
+
+    # Runtime executes from BOT_DATA_DIR/runtime on Fly, while current pathway
+    # receipts are atomically published at BOT_DATA_DIR itself. Advertise only
+    # the explicit receipt allowlist from that parent boundary.
+    volume = _data_sync_volume_root()
+    for name in sorted(_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES):
+        append_path(volume / name)
+
     for root in _data_sync_allowed_roots():
         for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
             _dirnames[:] = [
@@ -35134,24 +35658,7 @@ def _data_sync_inventory() -> list:
                 if name.lower() not in _DATA_SYNC_EXCLUDED_DIR_NAMES
             ]
             for filename in filenames:
-                path = Path(dirpath) / filename
-                try:
-                    resolved = path.resolve(strict=True)
-                    if resolved in seen or not _data_sync_path_allowed(path):
-                        continue
-                    seen.add(resolved)
-                    stat = resolved.stat()
-                    published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
-                    rows.append({
-                        "path": _data_sync_relpath(path),
-                        "size": published_size,
-                        "physical_size": int(stat.st_size),
-                        "mtime_ns": int(stat.st_mtime_ns),
-                        "inode": int(getattr(stat, "st_ino", 0) or 0),
-                        "consistency_mode": _data_sync_consistency_mode(resolved),
-                    })
-                except (OSError, ValueError):
-                    continue
+                append_path(Path(dirpath) / filename)
                 if len(rows) >= 5000:
                     break
             if len(rows) >= 5000:
@@ -35160,6 +35667,11 @@ def _data_sync_inventory() -> list:
             break
     rows.sort(key=lambda row: row["path"])
     return rows
+
+
+def _data_sync_optional_file_audit() -> list:
+    """Describe files intentionally excluded from the required sync contract."""
+    return [dict(row) for row in _DATA_SYNC_OPTIONAL_FILES]
 
 
 def _data_sync_ack_path() -> Path:
@@ -35266,6 +35778,7 @@ def api_data_sync_manifest():
         "tile_registry_signature": active_tile_registry_signature(),
         "active_tiles": tile_registry,
         "files": files,
+        "optional_files": _data_sync_optional_file_audit(),
         "file_count": len(files),
         "total_bytes": sum(row["size"] for row in files),
         "acknowledged_files": len(ack),
@@ -35300,6 +35813,31 @@ def api_data_sync_file():
         server_mode = _data_sync_consistency_mode(path)
         if requested_mode != server_mode:
             return jsonify({"error": "file consistency mode mismatch"}), 409
+        if requested_mode == "sqlite_snapshot_v1":
+            snapshot = _data_sync_resolve_sqlite_snapshot(request.args.get("snapshot_id"))
+            expected_snapshot_size = int(request.args.get("expected_snapshot_size") or -1)
+            expected_snapshot_sha = str(request.args.get("expected_snapshot_sha256") or "").lower()
+            snapshot_size = snapshot.stat().st_size
+            if snapshot_size != expected_snapshot_size:
+                return jsonify({"error": "sqlite snapshot size mismatch"}), 409
+            if offset > snapshot_size:
+                return jsonify({"error": "offset beyond sqlite snapshot", "size": snapshot_size}), 416
+            with snapshot.open("rb") as handle:
+                handle.seek(offset)
+                payload = handle.read(min(limit, snapshot_size - offset))
+            if hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_snapshot_sha:
+                return jsonify({"error": "sqlite snapshot identity mismatch"}), 409
+            response = make_response(payload)
+            response.headers["Content-Type"] = "application/octet-stream"
+            response.headers["X-Data-Path"] = _data_sync_relpath(path)
+            response.headers["X-Data-Offset"] = str(offset)
+            response.headers["X-Data-Size"] = str(snapshot_size)
+            response.headers["X-Data-Published-Size"] = str(snapshot_size)
+            response.headers["X-Data-Snapshot-Id"] = str(request.args.get("snapshot_id"))
+            response.headers["X-Data-Snapshot-Sha256"] = expected_snapshot_sha
+            response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
+            response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= snapshot_size else "0"
+            return response
         append_prefix = requested_mode == "append_prefix_v1"
         if append_prefix:
             if None in (expected_size, expected_inode, expected_published_size):
@@ -36527,6 +37065,28 @@ def _paper_lifecycle_row_valid(row: dict, kind: str) -> bool:
     return status == "PENDING" and float(row.get("limit_price") or 0) > 0
 
 
+def _stable_paper_lifecycle_copy(row: dict, attempts: int = 3) -> dict:
+    """Copy a live lifecycle row without turning a transient writer race into a crash.
+
+    Position metrics are updated by the market/exit workers at tick frequency.  A
+    nested mapping can therefore change while ``deepcopy`` is walking it even
+    though the top-level lifecycle list is protected by ``trade_lock``.  Retry a
+    bounded number of times and let the caller preserve the last good snapshot
+    when the row never becomes stable.
+    """
+    last_error = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            return copy.deepcopy(row) if isinstance(row, dict) else {}
+        except RuntimeError as exc:
+            if "changed size during iteration" not in str(exc).lower():
+                raise
+            last_error = exc
+            if attempt + 1 < max(1, int(attempts)):
+                time.sleep(0)
+    raise RuntimeError("paper lifecycle row remained mutable during snapshot") from last_error
+
+
 def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     """Persist the protection fields enforced by the position's frozen policy.
 
@@ -36538,7 +37098,7 @@ def _canonicalize_paper_position_snapshot(row: dict) -> dict:
     execution and V3.1 policy identity.  Normalize only the copied snapshot so
     the in-memory accounting object remains untouched.
     """
-    snapshot = copy.deepcopy(row) if isinstance(row, dict) else {}
+    snapshot = _stable_paper_lifecycle_copy(row)
     lane = str(snapshot.get("research_lane") or "").upper()
     if not is_patient_chase_lane(lane):
         return snapshot
@@ -36563,18 +37123,73 @@ def _canonicalize_paper_lifecycle_identity(row: dict) -> dict:
     return row
 
 
+def _v3_matching_order_intent_exists(signal: dict) -> bool:
+    """Fail closed when an immutable order intent matches an awaiting snapshot."""
+    call_id = str(signal.get("shared_ai_call_id") or signal.get("source_trade_id") or "")
+    lane = _normalize_lane_key(signal)
+    if not call_id or not lane:
+        return True
+    path = Path("v3") / "ledgers" / "order_intent.jsonl"
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if (
+                    str(row.get("shared_ai_call_id") or "") == call_id
+                    and _normalize_lane_key(row) == lane
+                ):
+                    return True
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.error(
+            f"[PAPER_LIFECYCLE] refusing awaiting recovery because V3 order-intent "
+            f"ledger is unreadable: {exc} [PIPELINE ENFORCEMENT]"
+        )
+        return True
+    return False
+
+
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
     """Atomically persist every paper lane's executable lifecycle."""
-    with trade_lock:
-        positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
-                     if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
-        orders = [_canonicalize_paper_lifecycle_identity(copy.deepcopy(row)) for row in pending_orders
-                  if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
+    try:
+        with trade_lock:
+            positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
+                         if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
+            orders = [_canonicalize_paper_lifecycle_identity(_stable_paper_lifecycle_copy(row)) for row in pending_orders
+                      if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
+            awaiting_signals = [
+                _stable_paper_lifecycle_copy(row.get("signal_ref") or {})
+                for row in trades_map.values()
+                if isinstance(row, dict)
+                and isinstance(row.get("signal_ref"), dict)
+                and str((row.get("signal_ref") or {}).get("status") or "").upper()
+                in {
+                    SIGNAL_STATUS_AWAITING_MICRO,
+                    SIGNAL_STATUS_AWAITING_5M,
+                    SIGNAL_STATUS_AWAITING_MIN_AGE,
+                    SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+                    SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
+                }
+                and not is_terminal_signal(row.get("signal_ref") or {})
+                and not (row.get("signal_ref") or {}).get("order_placed")
+                and not (row.get("signal_ref") or {}).get("bitfinex_order_id")
+            ]
+    except RuntimeError as exc:
+        # Keep the prior atomic file rather than killing the position manager or
+        # publishing a partial lifecycle.  The next tick retries naturally.
+        logger.warning(
+            f"[PAPER_LIFECYCLE] snapshot deferred reason={reason} error={exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return False
     payload = {
         "schema": "paper_lifecycle_v1", "saved_at": utc_iso(), "git_rev": _runtime_git_rev(),
         "reason": reason, "paper_only": bool(_force_paper_mode_active()),
         "live_armed": bool(state.get("live_armed")), "positions": positions,
-        "pending_orders": orders,
+        "pending_orders": orders, "awaiting_signals": awaiting_signals,
     }
     return _atomic_file_replace(PAPER_LIFECYCLE_FILE,
         lambda f: json.dump(payload, f, default=str, sort_keys=True),
@@ -36583,7 +37198,9 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
 
 def load_paper_lifecycle() -> dict:
     """Idempotently restore all paper positions and pending limits by trade ID."""
-    result = {"positions": 0, "pending_orders": 0, "duplicates": 0, "invalid": 0}
+    result = {"positions": 0, "pending_orders": 0, "awaiting_signals": 0,
+              "overdue_reconciled": 0, "intent_conflicts": 0,
+              "duplicates": 0, "invalid": 0}
     if not os.path.exists(PAPER_LIFECYCLE_FILE):
         return result
     with paper_lifecycle_file_lock:
@@ -36620,6 +37237,47 @@ def load_paper_lifecycle() -> dict:
             row["exchange_submission_blocked"] = True
             lane_register_pending_order(row)
             known_orders.add(tid); result["pending_orders"] += 1
+        known_signals = {
+            str((entry.get("signal_ref") or {}).get("trade_id"))
+            for entry in trades_map.values() if isinstance(entry, dict)
+        }
+        for raw in payload.get("awaiting_signals") or []:
+            if not isinstance(raw, dict) or not raw.get("trade_id"):
+                result["invalid"] += 1; continue
+            row = _stable_paper_lifecycle_copy(raw)
+            tid = str(row["trade_id"])
+            status = str(row.get("status") or "").upper()
+            if status not in VIRTUAL_CHASE_AWAITING_STATUSES | {
+                SIGNAL_STATUS_AWAITING_MICRO,
+                SIGNAL_STATUS_AWAITING_5M,
+                SIGNAL_STATUS_AWAITING_MIN_AGE,
+            } or is_terminal_signal(row) or row.get("order_placed"):
+                result["invalid"] += 1; continue
+            if tid in known_positions or tid in known_orders or tid in known_signals:
+                result["duplicates"] += 1; continue
+            if _v3_matching_order_intent_exists(row):
+                # A durable submit ledger outranks an older pre-submit snapshot.
+                result["intent_conflicts"] += 1; continue
+            row["_restart_recovery_provenance"] = {
+                "schema": "paper_awaiting_restart_provenance_v1",
+                "snapshot_file": PAPER_LIFECYCLE_FILE,
+                "snapshot_saved_at": payload.get("saved_at"),
+                "snapshot_git_rev": payload.get("git_rev"),
+                "restored_at": utc_iso(),
+                "restored_git_rev": _runtime_git_rev(),
+            }
+            trades_map[tid] = {"signal_ref": row, "ai": copy.deepcopy(row.get("ai") or {})}
+            known_signals.add(tid); result["awaiting_signals"] += 1
+            expires = float(row.get("expires_ts") or 0)
+            if expires and expires <= now:
+                row["status"] = "EXPIRED"
+                row["outcome"] = "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED"
+                row["exit_reason"] = row["outcome"]
+                # Deferred until after trade_lock is released below.
+                result.setdefault("_overdue", []).append(row)
+    for row in result.pop("_overdue", []):
+        if _record_expired_order(row, "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED") is not None:
+            result["overdue_reconciled"] += 1
     logger.warning(f"[PAPER_LIFECYCLE] restart restored positions={result['positions']} "
                    f"pending={result['pending_orders']} duplicates={result['duplicates']} "
                    f"invalid={result['invalid']} [PIPELINE ENFORCEMENT]")
@@ -38929,6 +39587,46 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
     bitfinex_evidence = _counterfactual_bitfinex_evidence(buf, snapshot, replay, outcome)
     post_exit_horizons = _counterfactual_post_exit_horizons(replay)
     entry_horizons = _counterfactual_entry_horizons(replay)
+    # Preserve only identities owned by the immutable source records.  A shared
+    # AI call is the causal owner of an opportunity, so that ID can be derived
+    # deterministically.  Schedule, tape and fill IDs are copied only when an
+    # upstream writer explicitly supplied them; absence must remain visible to
+    # the cross-world analyzer rather than being papered over by a fuzzy join.
+    epoch_id = (
+        snapshot.get("epoch_id")
+        or snapshot.get("collection_epoch_id")
+        or replay.get("epoch_id")
+        or replay.get("collection_epoch_id")
+        or buf.get("epoch_id")
+        or buf.get("collection_epoch_id")
+    )
+    shared_ai_call_id = (
+        snapshot.get("shared_ai_call_id")
+        or replay.get("shared_ai_call_id")
+        or buf.get("shared_ai_call_id")
+    )
+    opportunity_id = (
+        "opportunity:episode-"
+        + hashlib.sha256(('shared:' + str(shared_ai_call_id)).encode('utf-8')).hexdigest()[:20]
+        if shared_ai_call_id else None
+    )
+    policy_identity = next((
+        source.get("policy_identity") for source in (snapshot, replay, buf)
+        if isinstance(source, dict)
+        and isinstance(source.get("policy_identity"), dict)
+        and source.get("policy_identity")
+    ), {})
+    policy_signature = (
+        snapshot.get("policy_signature")
+        or replay.get("policy_signature")
+        or buf.get("policy_signature")
+        or policy_identity.get("policy_signature")
+    )
+    explicit_causal_ids = {
+        key: next((source.get(key) for source in (snapshot, replay, buf)
+                   if isinstance(source, dict) and source.get(key)), None)
+        for key in ("schedule_id", "tape_id", "fill_id")
+    }
     exclusion_reasons = []
     if missing_policy:
         exclusion_reasons.append("POLICY_SNAPSHOT_INCOMPLETE")
@@ -38954,6 +39652,10 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
         exclusion_reasons.append("REQUIRED_POST_EXIT_HORIZON_INCOMPLETE")
     fields = {
         "evidence_schema": "counterfactual_evidence_v1",
+        "epoch_id": epoch_id,
+        "opportunity_id": opportunity_id,
+        "policy_signature": policy_signature,
+        **{key: value for key, value in explicit_causal_ids.items() if value},
         "policy_snapshot": policy_snapshot,
         "policy_version": policy_snapshot.get("policy_version"),
         "policy_comparability_key": policy_key,
@@ -40088,6 +40790,11 @@ def ttl_monitor():
                 _last_lane_memory_check_ts = now
                 lm = validate_lane_memory()
                 ri = validate_runtime_pathway_integrity()
+                # The dashboard intentionally rejects contract receipts older
+                # than one hour. Re-evaluate immutable startup invariants on the
+                # same ten-minute cadence so a healthy long-running process does
+                # not regress to a stale receipt solely because it stayed up.
+                publish_startup_pathway_receipts()
                 apply_pathway_safety_block(lm, ri)
             if state.get("fresh_collection_mode"):
                 if now - _last_fresh_maintain_ts >= FRESH_COLLECTION_MAINTAIN_INTERVAL_SEC:
@@ -40579,6 +41286,7 @@ def main():
         set_execution_paused("SIMULATION_ONLY")
     load_positions()
     load_paper_lifecycle()
+    _reconcile_overdue_v3_expected_orders(force=True)
     rebuild_state_from_snapshots()
     reconcile_restored_paper_terminal_conflicts()
     reconcile_stale_signals()
@@ -40737,10 +41445,12 @@ def main():
             live_trading_enabled=bool(LIVE_TRADING_ENABLED),
         )
         capture_pathway_startup_snapshot()
+        receipt_writes = publish_startup_pathway_receipts()
         logger.info(
             f"[PATHWAY VALIDATION] {v['verdict']} "
             f"tiles={v.get('tile_independence')} ai_scan={v.get('ai_scan_independence')} "
             f"ai_scan_role={v.get('ai_scan_role')} sync={v.get('bot_analyzer_sync')} "
+            f"receipts={receipt_writes} "
             f"[PIPELINE ENFORCEMENT]"
         )
     except SystemExit:

@@ -73,6 +73,13 @@ def arm_compressed_shadow_chase(
     missing = [key for key in (
         "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
     ) if not identities[key]]
+    generation_material = (
+        f"{COMPRESSED_SHADOW_POLICY_SIGNATURE}|{trade_id}|{float(signal_ts):.6f}|"
+        f"{str(direction or '').upper()}"
+    )
+    schedule_generation_id = "shadow-generation-" + hashlib.sha256(
+        generation_material.encode("utf-8")
+    ).hexdigest()
     state = {
         "schema": COMPRESSED_SHADOW_SCHEMA,
         "execution_class": "SHADOW_ONLY",
@@ -89,6 +96,8 @@ def arm_compressed_shadow_chase(
         "seen_stage_indexes": {0},
         "identity_complete": not missing,
         "missing_identity_fields": missing,
+        "schedule_generation_id": schedule_generation_id,
+        "tape_evidence_path": "market_microstructure_1s.jsonl",
         **identities,
     }
     return state, _compressed_shadow_receipt(
@@ -134,11 +143,15 @@ def _compressed_shadow_receipt(
         "epoch_id": state["epoch_id"],
         "policy_id": state["policy_id"],
         "policy_signature": state["policy_signature"],
+        "schedule_generation_id": state["schedule_generation_id"],
         "identity_complete": bool(state.get("identity_complete")),
         "missing_identity_fields": list(state.get("missing_identity_fields") or []),
         "signal_price": float(state["signal_price"]),
         "signal_ts": float(state["signal_ts"]),
         "expires_ts": float(state["expires_ts"]),
+        "tape_evidence_path": state.get("tape_evidence_path"),
+        "tape_window_start_ts": float(state["signal_ts"]),
+        "tape_window_end_ts": float(state["expires_ts"]),
         "stage_index": stage_index,
         "stage_due_sec": None if stage_index is None else COMPRESSED_SHADOW_STAGE_SECONDS[stage_index],
         "observed_ts": float(observed_ts),
@@ -250,6 +263,8 @@ def recover_compressed_shadow_states(
             "terminal_emitted": False,
             "identity_complete": not missing,
             "missing_identity_fields": missing,
+            "schedule_generation_id": latest.get("schedule_generation_id") or "",
+            "tape_evidence_path": latest.get("tape_evidence_path") or "",
             **{key: latest.get(key) or "" for key in (
                 "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
                 "policy_id", "policy_signature",

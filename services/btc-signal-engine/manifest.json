@@ -1,9 +1,9 @@
 {
   "engine_version": "v31-five-family-atomic-paper",
-  "combo_version": "2026-08-25",
+  "combo_version": "2026-08-27",
   "exit_version": "five-family-exits-v1",
   "benchmark_lane": "CONTINUOUS_ANALYTICAL_ONLY",
-  "signal_hash": "b4655a4b22c1",
+  "signal_hash": "11fd91ca0148",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-25T23:45:01.504Z"
+  "updated_at": "2026-08-27T12:38:46.448Z"
 }

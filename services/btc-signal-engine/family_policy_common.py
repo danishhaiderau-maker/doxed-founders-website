@@ -262,7 +262,7 @@ def exit_config(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]:
 def dashboard_policy(spec: PolicySpec) -> dict[str, Any]:
     chips = [
         "PAPER ONLY", f"Offset {spec.entry_offset_pct:g}%",
-        f"Chase {','.join(map(str, spec.chase_windows))}",
+        f"Reprice template {','.join(map(str, spec.chase_windows))}",
         f"Every {spec.chase_interval_sec}s", f"Move {spec.chase_step * 100:g}% gap",
         f"Hard stop {spec.hard_stop_margin_pct:g}%", "120m cap",
     ]

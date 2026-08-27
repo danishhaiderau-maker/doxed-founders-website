@@ -19,19 +19,26 @@ RESEARCH_LANE_FAMILY_ATR_TRAIL = "FAMILY_ATR_TRAIL"
 RESEARCH_LANE_FAMILY_HYBRID_RUNNER = "FAMILY_HYBRID_RUNNER"
 RESEARCH_LANE_FAMILY_MFE_GIVEBACK = "FAMILY_MFE_GIVEBACK"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
-TILE_ARCHITECTURE_VERSION = 2
+TILE_ARCHITECTURE_VERSION = 3
+# Complete atomic add/retire contract from the V3.1 objective.  Every active
+# tile declares this same surface roster, so a registry consumer can prove it
+# has handled the whole lifecycle rather than treating a dashboard card as the
+# tile boundary.
 TILE_COMPONENT_SURFACES = (
-    "runtime",
-    "authenticated_api",
+    "runtime_evaluation",
+    "paper_routing",
+    "relay_allowlist",
+    "policy_identity_signatures",
+    "api_payloads",
     "production_dashboard",
-    "collector",
-    "mirror_manifest",
-    "analyzer_loader",
+    "mirror_manifests",
+    "analyzer_loaders",
     "analyzer_reports",
     "analyzer_api",
     "analyzer_dashboard",
     "monitoring",
     "regression_tests",
+    "documentation",
 )
 TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
@@ -70,6 +77,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "analyzer_cohort": raw_policy_id,
         "presentation": {"family": exit_policy["family"], "evidence": "CONSERVATIVE_BBO_DEPTH_REQUIRED"},
         "retirement_status": "ACTIVE_RESEARCH",
+        "component_surfaces": TILE_COMPONENT_SURFACES,
         "entry_policy": entry,
         "exit_policy": exit_policy,
         "ai_min": 0, "ai_max": 101, "spread_min": -99, "spread_max": 99,
@@ -185,6 +193,7 @@ def validate_tile_registry() -> tuple[str, ...]:
         "presentation", "retirement_status", "entry_policy", "exit_policy",
         "id_prefix", "toggle_key", "lifecycle_state", "implementation_modules",
         "dedicated_test_modules",
+        "component_surfaces",
     }
     prefixes = {}
     for lane, spec in ACTIVE_TILE_REGISTRY.items():
@@ -210,6 +219,15 @@ def validate_tile_registry() -> tuple[str, ...]:
             defects.append(f"{lane}:PAPER_ONLY_STATE_WITHOUT_GATE")
         if state == "BENCHMARK" and not spec.get("is_benchmark"):
             defects.append(f"{lane}:BENCHMARK_STATE_WITHOUT_ROLE")
+        surfaces = tuple(spec.get("component_surfaces") or ())
+        if surfaces != TILE_COMPONENT_SURFACES:
+            missing_surfaces = sorted(set(TILE_COMPONENT_SURFACES).difference(surfaces))
+            extra_surfaces = sorted(set(surfaces).difference(TILE_COMPONENT_SURFACES))
+            defects.append(
+                f"{lane}:COMPONENT_SURFACE_CONTRACT_MISMATCH:"
+                f"missing={','.join(missing_surfaces) or '-'}:"
+                f"extra={','.join(extra_surfaces) or '-'}"
+            )
     overlap = set(lanes).intersection(RETIRED_TILE_LANES)
     if overlap:
         defects.append("ACTIVE_RETIRED_OVERLAP:" + ",".join(sorted(overlap)))
@@ -239,6 +257,7 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
             "exit_policy": ACTIVE_TILE_REGISTRY[lane]["exit_policy"],
             "implementation_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["implementation_modules"]),
             "dedicated_test_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["dedicated_test_modules"]),
+            "component_surfaces": tuple(ACTIVE_TILE_REGISTRY[lane]["component_surfaces"]),
         }
         for index, lane in enumerate(ACTIVE_TILE_ORDER, start=1)
     )
