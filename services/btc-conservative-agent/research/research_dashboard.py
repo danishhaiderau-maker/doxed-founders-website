@@ -143,6 +143,7 @@ CURRENT_PATHWAY_RECEIPTS = (
 )
 REQUIRED_ANALYZER_RAW_INPUTS = (
     "research.db",
+    "trades_3factor.csv",
     "decisions_3factor.csv",
     "pipeline_events_3factor.csv",
     "ai_input_log.jsonl",
@@ -159,6 +160,23 @@ REQUIRED_ANALYZER_RAW_INPUTS = (
     "lane_opportunity_capture.jsonl",
     "execution_settings_history.jsonl",
     "trend_health.csv",
+)
+OPTIONAL_ANALYZER_RAW_INPUTS = (
+    "blocked_signals_3factor.csv",
+    "expired_orders_3factor.csv",
+    "execution_funnel.jsonl",
+    "trade_lifecycle.jsonl",
+    "trade_outcome.jsonl",
+    "shadow_outcome.jsonl",
+    "shadow_lane_outcome.jsonl",
+    "signal_snapshot.jsonl",
+    "counterfactual.jsonl",
+    "fill_quality.jsonl",
+    "source_order_market_evidence.jsonl",
+    "edge_census.jsonl",
+    "duplicate_intent_audit.jsonl",
+    "signal_persist.log",
+    "near_edge.log",
 )
 _APPEND_PREFIX_SNAPSHOT_NAMES = frozenset({
     "research_events_v22.jsonl",
@@ -3958,7 +3976,7 @@ def download_everything():
 
     # Keep the synchronized Fly data and any longer desktop research history
     # explicitly separated. The configured data root is the current source.
-    for pattern in ("*.csv", "*.jsonl", "*.db"):
+    for pattern in ("*.csv", "*.jsonl", "*.db", "*.log"):
         for path in sorted(DATA_ROOT.glob(pattern)):
             candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
         if agent_root.resolve() != DATA_ROOT.resolve():
@@ -3987,6 +4005,11 @@ def download_everything():
     for path in sorted(DATA_ROOT.glob("signal_replay.jsonl.*")):
         if path.is_file():
             candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
+    # Preserve rotations for every analyzer input, not only signal replay.
+    for pattern in ("*.jsonl.*", "*.csv.*", "*.log.*"):
+        for path in sorted(DATA_ROOT.glob(pattern)):
+            if path.is_file():
+                candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
 
     # Pathway receipts are a required, named evidence component. Runtime
     # contracts come from the synchronized Fly mirror. Exit validation is an
@@ -4005,6 +4028,7 @@ def download_everything():
     # market segments are content-addressed below a nested directory tree.
     v3_ledgers = (
         "decision.jsonl",
+        "execution.jsonl",
         "lifecycle.jsonl",
         "market_segment.jsonl",
         "opportunity.jsonl",
@@ -4070,6 +4094,19 @@ def download_everything():
                 "artifacts are missing: " + ", ".join(missing_required_raw)
             ),
         )
+    accumulator_db_members = sorted(
+        name for name in member_names
+        if name.startswith("accumulator/")
+        and Path(name).suffix.lower() in {".db", ".sqlite", ".sqlite3"}
+    )
+    if not accumulator_db_members:
+        abort(
+            500,
+            description=(
+                "complete research download refused: required accumulator "
+                "SQLite database is missing"
+            ),
+        )
     required_current_receipts = {
         f"current_receipts/{name}" for name in CURRENT_PATHWAY_RECEIPTS
     }
@@ -4109,6 +4146,82 @@ def download_everything():
         or os.getenv("SOURCE_GIT_REV")
         or "UNKNOWN"
     )
+    declared_report_files = sorted({
+        str(entry.get("file") if isinstance(entry, dict) else entry).strip()
+        for entry in (current_report_manifest.get("reports") or [])
+        if str(entry.get("file") if isinstance(entry, dict) else entry).strip()
+    })
+    required_current_reports = {
+        f"current_reports/{name}" for name in BUNDLE_FILES
+    } | {
+        f"current_reports/{REPORTS_DIR}/{name}" for name in declared_report_files
+        if name not in BUNDLE_FILES
+    }
+    missing_current_reports = sorted(required_current_reports - member_names)
+    if missing_current_reports:
+        abort(
+            500,
+            description=(
+                "complete research download refused: required current analyzer "
+                "reports are missing: " + ", ".join(missing_current_reports)
+            ),
+        )
+
+    sync_identity = _read_json(DATA_ROOT / ".fly-sync-state.json") or {}
+    session_identity = _read_json(DATA_ROOT / "research_session.json") or {}
+    identity_sources = {
+        "report_manifest": {
+            "revision": current_generation_revision,
+            "source_data_revision": current_report_manifest.get("source_data_revision"),
+            "epoch_id": current_report_manifest.get("epoch_id"),
+        },
+        "safe_policy_genome": {
+            "revision": current_safe_genome.get("generation_revision"),
+            "epoch_id": current_epoch_id,
+        },
+        "mirror_sync": {
+            "revision": sync_identity.get("source_git_rev") or sync_identity.get("revision"),
+            "epoch_id": sync_identity.get("epoch_id"),
+        },
+        "research_session": {
+            "revision": session_identity.get("source_git_rev") or session_identity.get("revision"),
+            "epoch_id": (
+                session_identity.get("epoch_id")
+                or session_identity.get("collection_epoch")
+                or session_identity.get("collector_v22_epoch_id")
+            ),
+        },
+    }
+    for field in ("revision", "epoch_id"):
+        values = {
+            str(identity.get(field)).strip()
+            for identity in identity_sources.values()
+            if identity.get(field) not in (None, "", "UNKNOWN", "UNAVAILABLE")
+        }
+        if len(values) > 1:
+            abort(
+                500,
+                description=(
+                    "complete research download refused: incoherent "
+                    f"{field} provenance across sources: {sorted(values)}"
+                ),
+            )
+    optional_presence = {
+        name: f"raw/current_fly_mirror/{name}" in member_names
+        for name in OPTIONAL_ANALYZER_RAW_INPUTS
+    }
+    capture_started_at = datetime.now(timezone.utc).isoformat()
+    coherence_anchor_paths = {
+        "report_manifest": ROOT / REPORT_MANIFEST_FILE,
+        "safe_policy_genome": ROOT / SAFE_POLICY_GENOME_V3_REPORT_FILE,
+        "mirror_sync": DATA_ROOT / ".fly-sync-state.json",
+        "research_session": DATA_ROOT / "research_session.json",
+    }
+    coherence_before = {
+        name: _snapshot_generation(path)
+        for name, path in coherence_anchor_paths.items()
+        if path.is_file()
+    }
     manifest = {
         "schema": "doxxed_everything_bundle_v2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -4121,11 +4234,15 @@ def download_everything():
         "policy_signatures": current_policy_signatures,
         "files": [],
         "capture_contract": {
-            "schema": "generation_fenced_bundle_capture_v1",
+            "schema": "generation_fenced_bundle_capture_v2",
             "sqlite": "sqlite_online_backup_v1",
             "hot_files": "append_prefix_or_strict_generation_fence_v1",
             "required_analyzer_raw_inputs": list(REQUIRED_ANALYZER_RAW_INPUTS),
+            "optional_analyzer_raw_inputs": list(OPTIONAL_ANALYZER_RAW_INPUTS),
+            "capture_started_at": capture_started_at,
+            "coherence_anchors": sorted(coherence_before),
         },
+        "provenance": identity_sources,
         "notes": {
             "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
             and any((ROOT / PAST_ANALYSIS_DIR).iterdir()),
@@ -4138,6 +4255,13 @@ def download_everything():
             "missing_required_raw_members": missing_required_raw,
             "required_current_receipts": sorted(required_current_receipts),
             "missing_current_receipts": missing_current_receipts,
+            "required_current_reports": sorted(required_current_reports),
+            "missing_current_reports": missing_current_reports,
+            "accumulator_db_members": accumulator_db_members,
+            "optional_analyzer_raw_presence": optional_presence,
+            "missing_optional_analyzer_raw_inputs": sorted(
+                name for name, present in optional_presence.items() if not present
+            ),
             "component_coverage": {
                 "relay_lifecycle_evidence_v1": any(
                     name.endswith("/relay_lifecycle_evidence_v1.json")
@@ -4213,6 +4337,23 @@ def download_everything():
                 }
             )
             zf.writestr(arcname, data)
+        coherence_after = {
+            name: _snapshot_generation(path)
+            for name, path in coherence_anchor_paths.items()
+            if path.is_file()
+        }
+        if coherence_after != coherence_before:
+            abort(
+                500,
+                description=(
+                    "complete research download refused: source/report identity "
+                    "anchors changed during capture"
+                ),
+            )
+        manifest["capture_contract"]["capture_completed_at"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+        manifest["capture_contract"]["coherence_verified"] = True
         zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
         zf.writestr(
             "README.txt",

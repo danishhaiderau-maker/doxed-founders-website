@@ -387,6 +387,7 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         )
         for name in (
             "decision.jsonl",
+            "execution.jsonl",
             "lifecycle.jsonl",
             "market_segment.jsonl",
             "opportunity.jsonl",
@@ -400,6 +401,10 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             {"segment": "aa"},
         )
         (mirror / "signal_replay.jsonl.1").write_text("{}\n", encoding="utf-8")
+        (mirror / "market_microstructure_1s.jsonl.2").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        (mirror / "signal_persist.log").write_text("stage=kept\n", encoding="utf-8")
         (mirror / "counterfactual.jsonl").write_text("{}\n", encoding="utf-8")
         _write_csv(root / "trades_3factor.csv", [{"trade_id": "history"}])
         _write_json(root / "historical_trade_cohort_report.json", {"cohorts": {}})
@@ -448,6 +453,14 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 },
             },
         )
+        for name in dashboard.BUNDLE_FILES:
+            path = root / name
+            if path.is_file():
+                continue
+            if path.suffix == ".json":
+                _write_json(path, {"generated_at": "now"})
+            else:
+                path.write_text("current analyzer artifact\n", encoding="utf-8")
         (root / "research" / "genome" / "__pycache__" / "bad.pyc").write_bytes(b"x")
         audit = root / "audit.zip"
         with zipfile.ZipFile(audit, "w") as zf:
@@ -459,7 +472,9 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         try:
             with dashboard.app.test_client() as client:
                 response = client.get("/download/everything")
-                assert response.status_code == 200
+                assert response.status_code == 200, response.data.decode(
+                    "utf-8", errors="replace"
+                )
                 assert "complete_research_evidence_bundle_" in response.headers[
                     "Content-Disposition"
                 ]
@@ -475,6 +490,11 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert "raw/current_fly_mirror/paper_lifecycle_v1.json" in names
                     assert "raw/current_fly_mirror/.fly-sync-state.json" in names
                     assert "raw/current_fly_mirror/signal_replay.jsonl.1" in names
+                    assert (
+                        "raw/current_fly_mirror/market_microstructure_1s.jsonl.2"
+                        in names
+                    )
+                    assert "raw/current_fly_mirror/signal_persist.log" in names
                     assert "genome/research.db" in names
                     assert "accumulator/research_trades.db" in names
                     for receipt_name in dashboard.CURRENT_PATHWAY_RECEIPTS:
@@ -485,6 +505,10 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert exit_receipt["schema"] == "exit_reports_validation_v2"
                     assert (
                         "raw/current_fly_mirror/v3/ledgers/decision.jsonl"
+                        in names
+                    )
+                    assert (
+                        "raw/current_fly_mirror/v3/ledgers/execution.jsonl"
                         in names
                     )
                     assert (
@@ -525,8 +549,19 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     }
                     indexed = {item["path"]: item for item in manifest["files"]}
                     assert manifest["capture_contract"]["schema"] == (
-                        "generation_fenced_bundle_capture_v1"
+                        "generation_fenced_bundle_capture_v2"
                     )
+                    assert manifest["capture_contract"]["coherence_verified"] is True
+                    assert manifest["notes"]["missing_current_reports"] == []
+                    assert manifest["notes"]["accumulator_db_members"] == [
+                        "accumulator/research_trades.db"
+                    ]
+                    assert manifest["notes"]["optional_analyzer_raw_presence"][
+                        "signal_persist.log"
+                    ] is True
+                    assert manifest["notes"]["optional_analyzer_raw_presence"][
+                        "near_edge.log"
+                    ] is False
                     assert indexed["genome/research.db"]["capture_mode"] == (
                         "sqlite_online_backup_v1"
                     )
@@ -538,11 +573,11 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         payload = zf.read(name)
                         assert record["bytes"] == len(payload)
                         assert record["sha256"] == hashlib.sha256(payload).hexdigest()
-                (mirror / "v3" / "ledgers" / "decision.jsonl").unlink()
+                (mirror / "v3" / "ledgers" / "execution.jsonl").unlink()
                 refused = client.get("/download/everything")
                 assert refused.status_code == 500
-                assert b"decision.jsonl" in refused.data
-                (mirror / "v3" / "ledgers" / "decision.jsonl").write_text(
+                assert b"execution.jsonl" in refused.data
+                (mirror / "v3" / "ledgers" / "execution.jsonl").write_text(
                     "{}\n", encoding="utf-8"
                 )
                 (mirror / "ai_scan_role_validation.json").unlink()
@@ -552,12 +587,58 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 (mirror / "ai_scan_role_validation.json").write_text(
                     "{}", encoding="utf-8"
                 )
+                accumulator_db = root / "research_accumulator" / "research_trades.db"
+                accumulator_bytes = accumulator_db.read_bytes()
+                accumulator_db.unlink()
+                refused_accumulator = client.get("/download/everything")
+                assert refused_accumulator.status_code == 500
+                assert b"accumulator SQLite database" in refused_accumulator.data
+                accumulator_db.write_bytes(accumulator_bytes)
+                missing_report = root / dashboard.EXECUTIVE_SUMMARY_FILE
+                report_text = missing_report.read_text(encoding="utf-8")
+                missing_report.unlink()
+                refused_report = client.get("/download/everything")
+                assert refused_report.status_code == 500
+                assert dashboard.EXECUTIVE_SUMMARY_FILE.encode() in refused_report.data
+                missing_report.write_text(report_text, encoding="utf-8")
+                _write_json(
+                    mirror / "research_session.json",
+                    {"collector_v22_epoch_id": "epoch-conflict"},
+                )
+                refused_identity = client.get("/download/everything")
+                assert refused_identity.status_code == 500
+                assert b"incoherent epoch_id provenance" in refused_identity.data
+                _write_json(mirror / "research_session.json", {"name": "research_session.json"})
                 (mirror / dashboard.REQUIRED_ANALYZER_RAW_INPUTS[0]).unlink()
                 refused_input = client.get("/download/everything")
                 assert refused_input.status_code == 500
                 assert dashboard.REQUIRED_ANALYZER_RAW_INPUTS[0].encode() in refused_input.data
         finally:
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
+
+
+def test_sqlite_online_snapshot_includes_uncheckpointed_wal_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "live.db"
+        writer = sqlite3.connect(db)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("CREATE TABLE evidence (value TEXT)")
+            writer.execute("INSERT INTO evidence(value) VALUES ('visible-in-backup')")
+            writer.commit()
+            payload, provenance = dashboard._sqlite_online_snapshot(db)
+            snapshot = Path(tmp) / "snapshot.db"
+            snapshot.write_bytes(payload)
+            reader = sqlite3.connect(snapshot)
+            try:
+                values = [row[0] for row in reader.execute("SELECT value FROM evidence")]
+            finally:
+                reader.close()
+            assert values == ["visible-in-backup"]
+            assert provenance["capture_mode"] == "sqlite_online_backup_v1"
+            assert provenance["integrity_check"] == "ok"
+        finally:
+            writer.close()
 
 
 def test_single_loopback_dashboard_contract() -> None:
