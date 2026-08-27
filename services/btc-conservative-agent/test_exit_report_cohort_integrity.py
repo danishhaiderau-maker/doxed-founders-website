@@ -295,12 +295,33 @@ def test_dashboard_renders_all_four_exit_worlds_and_null_kpis_as_na():
         "exit-causal-risk-body",
         "exit-causal-market-body",
         "exit-causal-entry-body",
+        "exit-causal-direction-quality-body",
+        "exit-causal-sr-geometry-body",
+        "exit-causal-execution-quality-body",
+        "exit-causal-partial-profit-body",
+        "exit-causal-chase-detail-body",
+        "exit-causal-excursion-timing-body",
+        "exit-causal-regime-transition-body",
+        "exit-causal-fill-revalidation-body",
+        "exit-causal-terminal-order-body",
     ):
         assert element_id in DASHBOARD
     assert "renderCausalView('exit_policy')" in DASHBOARD
     assert "renderCausalView('risk_and_chase')" in DASHBOARD
     assert "renderCausalView('market_context')" in DASHBOARD
     assert "renderCausalView('entry_execution')" in DASHBOARD
+    assert "renderCausalView('direction_quality')" in DASHBOARD
+    assert "renderCausalView('sr_geometry')" in DASHBOARD
+    assert "renderCausalView('execution_quality')" in DASHBOARD
+    assert "renderCausalView('partial_profit_path')" in DASHBOARD
+    assert "renderCausalView('chase_detail')" in DASHBOARD
+    assert "renderCausalView('excursion_timing')" in DASHBOARD
+    assert "renderCausalView('regime_transition')" in DASHBOARD
+    assert "renderCausalView('fill_revalidation')" in DASHBOARD
+    assert "renderCausalView('terminal_order_outcome')" in DASHBOARD
+    assert "coverage ${coverage}%" in DASHBOARD
+    assert "['CONSERVATIVE BBO/DEPTH', conservative]" in DASHBOARD
+    assert "['IDEAL TOUCH DIAGNOSTIC', idealTouch]" in DASHBOARD
 
 
 def test_causal_exit_views_use_only_explicit_available_dimensions():
@@ -328,11 +349,98 @@ def test_causal_exit_views_use_only_explicit_available_dimensions():
     assert set(views) == {
         "exit_policy", "risk_and_chase", "market_context", "entry_execution",
         "market_microstructure", "profit_path", "cost_and_fill",
+        "direction_quality", "sr_geometry", "execution_quality",
+        "partial_profit_path", "chase_detail", "excursion_timing",
+        "regime_transition",
+        "fill_revalidation", "terminal_order_outcome",
     }
     assert views["exit_policy"]["rows"]
     assert views["market_context"]["rows"]
     assert views["entry_execution"]["rows"]
+    assert views["direction_quality"]["empty_reason"] == "INSUFFICIENT_EXPLICIT_DIMENSIONS"
+    assert views["exit_policy"]["coverage_pct"] == 100.0
     assert all(row["qualification_eligible"] is False for row in views["risk_and_chase"]["rows"])
+
+
+def test_high_value_exit_views_use_collected_v31_fields_and_report_coverage():
+    row = {
+        "trade_id": "paper-rich", "opportunity_id": "opp-rich",
+        "exit_reason": "ATR_TARGET", "cfg_family": "FIXED_TARGET",
+        "cfg_exit_profile_id": "ATR_TP_2_5", "final_direction": "LONG",
+        "adx_at_entry": 24, "mtf_agreement_at_entry": .8,
+        "structure_bias_at_entry": "BULLISH", "sr_state": "NEAR_SUPPORT",
+        "distance_to_support": .2, "distance_to_resistance": 1.2,
+        "execution_entry_type": "MAKER", "execution_exit_type": "TAKER",
+        "entry_partial_fill": True, "fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
+        "book_slippage_usd_total": .001, "limit_chase_count": 4,
+        "urgent_chase_tier": "NORMAL", "entry_delay_sec": 900,
+        "cfg_entry_offset_fraction": .0003,
+        "partial_exit_receipts": [{"fraction": .25}],
+        "policy_remaining_fraction": 0, "net_pnl_usd": .2,
+        "path_extrema": {"mae_pct": -.2, "mfe_pct": .8,
+                         "time_to_mae_sec": 30, "time_to_mfe_sec": 420},
+        "exit_context": {"regime": "SIDEWAYS", "adx": 16},
+        "fill_time_revalidation": {"result": "PASSED", "reason": "CURRENT",
+                                   "signal_age_sec": 900},
+        "terminal_no_fill": False, "terminal_ttl_expired": False,
+        "terminal_reason": "ATR_TARGET",
+    }
+    views = analyzer._exit_causal_combination_views(
+        pd.DataFrame([row]), "EXECUTED_PAPER_DESCRIPTIVE"
+    )
+    for name in (
+        "direction_quality", "sr_geometry", "execution_quality",
+        "partial_profit_path", "chase_detail",
+        "excursion_timing", "regime_transition",
+        "fill_revalidation", "terminal_order_outcome",
+    ):
+        assert views[name]["rows"], name
+        assert views[name]["source_terminal_rows"] == 1
+        assert views[name]["eligible_rows"] == 1
+        assert views[name]["coverage_pct"] == 100.0
+        assert views[name]["rows"][0]["evidence_class"] == "EXECUTED_PAPER_DESCRIPTIVE"
+
+
+def test_execution_quality_does_not_treat_string_false_as_partial_fill():
+    row = {
+        "trade_id": "paper-full", "opportunity_id": "opp-full",
+        "exit_reason": "ATR_TARGET", "execution_entry_type": "MAKER",
+        "entry_partial_fill": "false", "net_pnl_usd": .1,
+    }
+    view = analyzer._exit_causal_combination_views(
+        pd.DataFrame([row]), "EXECUTED_PAPER_DESCRIPTIVE"
+    )["execution_quality"]
+    assert view["rows"]
+    assert "FULL" in view["rows"][0]["combination"]
+    assert "PARTIAL" not in view["rows"][0]["combination"]
+
+
+def test_exit_views_consume_nested_v31_execution_receipts_without_inference():
+    row = {
+        "trade_id": "paper-nested", "opportunity_id": "opp-nested",
+        "exit_reason": "TIME_EXIT", "cfg_family": "ATR_TRAIL",
+        "final_direction": "SHORT", "net_pnl_usd": -.1,
+        "entry_context": {"regime": "BEAR", "adx": 34,
+                          "sr_state": "AT_RESISTANCE",
+                          "dist_to_support": 1.4, "dist_to_resistance": .1},
+        "exit_context": {"regime": "SIDEWAYS", "adx": 17},
+        "path_extrema": {"mae_pct": -.4, "mfe_pct": .6,
+                         "time_to_mae_sec": 120, "time_to_mfe_sec": 600},
+        "protection_trajectory": {"terminal_remaining_fraction": 0,
+                                  "partial_exit_count": 2},
+        "partial_exits": [{"sequence": 1}, {"sequence": 2}],
+        "fill_time_revalidation": {"result": "PASSED", "reason": "CURRENT",
+                                   "signal_age_sec": 120},
+        "terminal_no_fill": False, "terminal_ttl_expired": False,
+        "terminal_reason": "TIME_EXIT",
+    }
+    views = analyzer._exit_causal_combination_views(
+        pd.DataFrame([row]), "EXECUTED_PAPER_DESCRIPTIVE"
+    )
+    for name in ("direction_quality", "sr_geometry", "partial_profit_path",
+                 "excursion_timing", "regime_transition"):
+        assert views[name]["rows"], name
+        assert views[name]["coverage_pct"] == 100.0
 
 
 def test_causal_exit_views_do_not_rank_unknown_or_missing_dimensions():

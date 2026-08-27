@@ -15049,11 +15049,43 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
                 return pd.to_numeric(series, errors="coerce") if numeric else series
         return pd.Series(np.nan if numeric else None, index=frame.index)
 
+    def nested_series(parents, keys, *, numeric=False):
+        def value_at(raw):
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return np.nan if numeric else None
+            if not isinstance(raw, dict):
+                return np.nan if numeric else None
+            for key in keys:
+                value = raw.get(key)
+                if value is not None:
+                    return value
+            return np.nan if numeric else None
+
+        result = pd.Series(np.nan if numeric else None, index=frame.index)
+        for parent in parents:
+            if parent not in frame.columns:
+                continue
+            candidate = frame[parent].apply(value_at)
+            result = result.where(result.notna(), candidate)
+        return pd.to_numeric(result, errors="coerce") if numeric else result
+
+    def prefer_observed(primary, fallback):
+        return primary.where(primary.notna(), fallback)
+
     family = first_series(("cfg_family", "exit_family", "research_lane")).fillna("").astype(str).str.upper()
     profile = first_series(("cfg_exit_profile_id", "exit_profile_id", "cfg_raw_policy_id", "policy_id")).fillna("").astype(str)
-    reason = first_series(("exit_reason", "close_reason")).fillna("").astype(str).str.upper()
+    reason = prefer_observed(
+        first_series(("exit_reason", "close_reason")), first_series(("terminal_reason",))
+    ).fillna("").astype(str).str.upper()
     direction = first_series(("final_direction", "dir", "direction")).fillna("").astype(str).str.upper()
-    regime = first_series(("regime", "market_regime", "regime_at_entry")).fillna("").astype(str).str.upper()
+    regime = prefer_observed(
+        first_series(("regime", "market_regime", "regime_at_entry")),
+        nested_series(("entry_context",), ("regime",)),
+    ).fillna("").astype(str).str.upper()
+    exit_regime = nested_series(("exit_context",), ("regime",)).fillna("").astype(str).str.upper()
     fill_status = first_series(("source_fill_status", "fill_status", "outcome_state")).fillna("").astype(str).str.upper()
     chase = first_series(("limit_chase_count", "chase_count"), numeric=True)
     stop_atr = first_series(("cfg_initial_stop_atr_k", "initial_stop_atr_k"), numeric=True)
@@ -15066,16 +15098,61 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
         delay = first_series(("signal_age_sec", "entry_delay_sec"), numeric=True) / 60.0
     volatility = first_series(("volatility_percentile", "atr_percentile"), numeric=True)
     session_bucket = first_series(("session_bucket", "market_session")).fillna("").astype(str).str.upper()
-    sr_state = first_series(("sr_state", "support_resistance_state")).fillna("").astype(str).str.upper()
+    sr_state = prefer_observed(
+        first_series(("sr_state", "support_resistance_state")),
+        nested_series(("entry_context",), ("sr_state",)),
+    ).fillna("").astype(str).str.upper()
     mae = first_series(("mae_margin_pct", "max_drawdown"), numeric=True).abs()
-    slippage = first_series(("book_slippage_usd_total", "execution_slippage", "slippage"), numeric=True).abs()
+    path_mae = nested_series(("path_extrema",), ("mae_pct",), numeric=True).abs()
+    path_mfe = nested_series(("path_extrema",), ("mfe_pct",), numeric=True)
+    time_to_mae = nested_series(("path_extrema",), ("time_to_mae_sec",), numeric=True) / 60.0
+    time_to_mfe = nested_series(("path_extrema",), ("time_to_mfe_sec",), numeric=True) / 60.0
+    slippage = prefer_observed(
+        first_series(("book_slippage_usd_total", "execution_slippage", "slippage"), numeric=True),
+        nested_series(("exit_market_receipt",), ("slippage_usd",), numeric=True),
+    ).abs()
     fees = first_series(("trading_fees_usd", "outcome_trading_fees_usd", "fees_usd"), numeric=True).abs()
+    adx = prefer_observed(
+        first_series(("adx_at_entry", "adx"), numeric=True),
+        nested_series(("entry_context",), ("adx",), numeric=True),
+    )
+    exit_adx = nested_series(("exit_context",), ("adx",), numeric=True)
+    mtf = first_series(("mtf_agreement_at_entry", "mtf_agreement"), numeric=True)
+    structure = first_series(("structure_bias_at_entry", "structure_bias")).fillna("").astype(str).str.upper()
+    distance_support = prefer_observed(
+        first_series(("distance_to_support", "context_dist_to_support"), numeric=True),
+        nested_series(("entry_context",), ("dist_to_support",), numeric=True),
+    ).abs()
+    distance_resistance = prefer_observed(
+        first_series(("distance_to_resistance", "context_dist_to_resistance"), numeric=True),
+        nested_series(("entry_context",), ("dist_to_resistance",), numeric=True),
+    ).abs()
+    entry_type = first_series(("execution_entry_type",)).fillna("").astype(str).str.upper()
+    exit_type = first_series(("execution_exit_type",)).fillna("").astype(str).str.upper()
+    fill_model = first_series(("fill_model",)).fillna("").astype(str).str.upper()
+    urgent_tier = first_series(("urgent_chase_tier",)).fillna("").astype(str).str.upper()
+    partial_fill = first_series(("entry_partial_fill", "partial_fill"))
+    remaining_fraction = prefer_observed(
+        first_series(("policy_remaining_fraction",), numeric=True),
+        nested_series(("protection_trajectory",), ("terminal_remaining_fraction",), numeric=True),
+    )
+    partial_receipts = prefer_observed(
+        first_series(("partial_exit_receipts",)), first_series(("partial_exits",))
+    )
+    partial_count = nested_series(("protection_trajectory",), ("partial_exit_count",), numeric=True)
+    revalidation_result = nested_series(("fill_time_revalidation",), ("result",)).fillna("").astype(str).str.upper()
+    revalidation_reason = nested_series(("fill_time_revalidation",), ("reason",)).fillna("").astype(str).str.upper()
+    revalidation_age = nested_series(("fill_time_revalidation",), ("signal_age_sec",), numeric=True) / 60.0
+    terminal_no_fill = first_series(("terminal_no_fill",))
+    terminal_ttl = first_series(("terminal_ttl_expired",))
+    terminal_reason = first_series(("terminal_reason",)).fillna("").astype(str).str.upper()
 
     frame["_exit_family_view"] = family.replace("", np.nan)
     frame["_exit_profile_view"] = profile.replace("", np.nan)
     frame["_exit_reason_view"] = reason.replace("", np.nan)
     frame["_direction_view"] = direction.replace("", np.nan)
     frame["_regime_view"] = regime.replace("", np.nan)
+    frame["_exit_regime_view"] = exit_regime.replace("", np.nan)
     frame["_fill_status_view"] = fill_status.replace("", np.nan)
     frame["_chase_view"] = chase.apply(lambda value: "5+" if pd.notna(value) and value >= 5 else (str(int(value)) if pd.notna(value) else np.nan))
     frame["_stop_atr_view"] = stop_atr.round(3)
@@ -15086,8 +15163,48 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
     frame["_session_view"] = session_bucket.replace("", np.nan)
     frame["_sr_state_view"] = sr_state.replace("", np.nan)
     frame["_mae_view"] = pd.cut(mae, [-np.inf, 10, 30, 60, np.inf], labels=["<=10%", "10-30%", "30-60%", "60%+"])
+    frame["_path_mae_view"] = pd.cut(path_mae, [-np.inf, .1, .3, 1, np.inf], labels=["<=0.1%", "0.1-0.3%", "0.3-1%", "1%+"])
+    frame["_path_mfe_view"] = pd.cut(path_mfe, [-np.inf, .1, .3, 1, np.inf], labels=["<=0.1%", "0.1-0.3%", "0.3-1%", "1%+"])
+    frame["_time_to_mae_view"] = pd.cut(time_to_mae, [-np.inf, 1, 5, 15, 30, np.inf], labels=["<=1m", "1-5m", "5-15m", "15-30m", "30m+"])
+    frame["_time_to_mfe_view"] = pd.cut(time_to_mfe, [-np.inf, 1, 5, 15, 30, np.inf], labels=["<=1m", "1-5m", "5-15m", "15-30m", "30m+"])
     frame["_slippage_view"] = pd.cut(slippage, [-np.inf, 0, .0025, .01, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH"])
     frame["_fee_view"] = pd.cut(fees, [-np.inf, 0, .0025, .01, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH"])
+    frame["_adx_entry_view"] = pd.cut(adx, [-np.inf, 18, 30, np.inf], labels=["LT18", "18-30", "30+"])
+    frame["_adx_exit_view"] = pd.cut(exit_adx, [-np.inf, 18, 30, np.inf], labels=["LT18", "18-30", "30+"])
+    frame["_mtf_view"] = pd.cut(mtf, [-np.inf, .34, .67, np.inf], labels=["LOW", "MIXED", "HIGH"])
+    frame["_structure_view"] = structure.replace("", np.nan)
+    frame["_distance_support_view"] = pd.cut(distance_support, [-np.inf, .25, .75, 1.5, np.inf], labels=["<=0.25%", "0.25-0.75%", "0.75-1.5%", "1.5%+"])
+    frame["_distance_resistance_view"] = pd.cut(distance_resistance, [-np.inf, .25, .75, 1.5, np.inf], labels=["<=0.25%", "0.25-0.75%", "0.75-1.5%", "1.5%+"])
+    frame["_entry_type_view"] = entry_type.replace("", np.nan)
+    frame["_exit_type_view"] = exit_type.replace("", np.nan)
+    frame["_fill_model_view"] = fill_model.replace("", np.nan)
+    frame["_urgent_tier_view"] = urgent_tier.replace("", np.nan)
+    def explicit_partial_bucket(value):
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return np.nan
+        if isinstance(value, str):
+            normalized = value.strip().upper()
+            if normalized in {"TRUE", "1", "YES", "PARTIAL", "PARTIALLY_FILLED"}:
+                return "PARTIAL"
+            if normalized in {"FALSE", "0", "NO", "FULL", "FILLED"}:
+                return "FULL"
+            return np.nan
+        if isinstance(value, (bool, np.bool_)):
+            return "PARTIAL" if bool(value) else "FULL"
+        return np.nan
+
+    frame["_partial_fill_view"] = partial_fill.apply(explicit_partial_bucket)
+    frame["_remaining_fraction_view"] = pd.cut(remaining_fraction, [-np.inf, 0, .25, .75, .999999, np.inf], labels=["CLOSED", "<=25%", "25-75%", "75-99%", "100%+"])
+    frame["_partial_exit_count_view"] = prefer_observed(
+        partial_receipts.apply(lambda value: len(value) if isinstance(value, list) else np.nan),
+        partial_count,
+    )
+    frame["_revalidation_result_view"] = revalidation_result.replace("", np.nan)
+    frame["_revalidation_reason_view"] = revalidation_reason.replace("", np.nan)
+    frame["_revalidation_age_view"] = pd.cut(revalidation_age, [-np.inf, 5, 15, 30, np.inf], labels=["0-5m", "5-15m", "15-30m", "30m+"])
+    frame["_terminal_no_fill_view"] = terminal_no_fill.apply(explicit_partial_bucket).map({"PARTIAL": "YES", "FULL": "NO"})
+    frame["_terminal_ttl_view"] = terminal_ttl.apply(explicit_partial_bucket).map({"PARTIAL": "YES", "FULL": "NO"})
+    frame["_terminal_reason_view"] = terminal_reason.replace("", np.nan)
 
     definitions = {
         "exit_policy": ["_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
@@ -15097,16 +15214,41 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
         "market_microstructure": ["_regime_view", "_volatility_view", "_session_view", "_sr_state_view", "_direction_view", "_exit_reason_view"],
         "profit_path": ["_exit_profile_view", "_mae_view", "_delay_view", "_exit_reason_view"],
         "cost_and_fill": ["_fill_status_view", "_slippage_view", "_fee_view", "_exit_reason_view"],
+        "direction_quality": ["_adx_entry_view", "_mtf_view", "_structure_view", "_direction_view", "_exit_reason_view"],
+        "sr_geometry": ["_sr_state_view", "_distance_support_view", "_distance_resistance_view", "_direction_view", "_exit_family_view", "_exit_reason_view"],
+        "execution_quality": ["_entry_type_view", "_exit_type_view", "_partial_fill_view", "_fill_model_view", "_slippage_view", "_exit_reason_view"],
+        "partial_profit_path": ["_partial_exit_count_view", "_remaining_fraction_view", "_exit_family_view", "_exit_reason_view"],
+        "chase_detail": ["_chase_view", "_urgent_tier_view", "_delay_view", "_offset_view", "_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
+        "excursion_timing": ["_path_mae_view", "_path_mfe_view", "_time_to_mae_view", "_time_to_mfe_view", "_exit_family_view", "_exit_reason_view"],
+        "regime_transition": ["_regime_view", "_exit_regime_view", "_adx_entry_view", "_adx_exit_view", "_direction_view", "_exit_reason_view"],
+        "fill_revalidation": ["_revalidation_result_view", "_revalidation_reason_view", "_revalidation_age_view", "_chase_view", "_exit_reason_view"],
+        "terminal_order_outcome": ["_terminal_no_fill_view", "_terminal_ttl_view", "_terminal_reason_view", "_chase_view", "_exit_reason_view"],
+    }
+    required_any = {
+        "direction_quality": {"_adx_entry_view", "_mtf_view", "_structure_view"},
+        "sr_geometry": {"_sr_state_view", "_distance_support_view", "_distance_resistance_view"},
+        "execution_quality": {"_entry_type_view", "_exit_type_view", "_partial_fill_view", "_fill_model_view", "_slippage_view"},
+        "partial_profit_path": {"_partial_exit_count_view", "_remaining_fraction_view"},
+        "chase_detail": {"_chase_view", "_urgent_tier_view", "_delay_view", "_offset_view"},
+        "excursion_timing": {"_path_mae_view", "_path_mfe_view", "_time_to_mae_view", "_time_to_mfe_view"},
+        "regime_transition": {"_regime_view", "_exit_regime_view", "_adx_entry_view", "_adx_exit_view"},
+        "fill_revalidation": {"_revalidation_result_view", "_revalidation_reason_view", "_revalidation_age_view"},
+        "terminal_order_outcome": {"_terminal_no_fill_view", "_terminal_ttl_view", "_terminal_reason_view"},
     }
     views = {}
     for view_name, dimensions in definitions.items():
         available = [name for name in dimensions if frame[name].notna().any()]
         missing = [name for name in dimensions if name not in available]
         # Exit reason is causal terminal metadata and mandatory for every view.
-        if "_exit_reason_view" not in available or len(available) < 2:
+        has_required_detail = not required_any.get(view_name) or bool(
+            set(available).intersection(required_any[view_name])
+        )
+        if "_exit_reason_view" not in available or len(available) < 2 or not has_required_detail:
             views[view_name] = {
                 "rows": [], "available_dimensions": available,
                 "missing_dimensions": missing, "empty_reason": "INSUFFICIENT_EXPLICIT_DIMENSIONS",
+                "source_terminal_rows": int(len(frame)), "eligible_rows": 0,
+                "coverage_pct": 0.0,
             }
             continue
         rows = []
@@ -15125,6 +15267,8 @@ def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_
             "rows": rows[:top_n], "available_dimensions": available,
             "missing_dimensions": missing,
             "empty_reason": None if rows else "NO_ROWS_WITH_COMPLETE_VIEW_DIMENSIONS",
+            "source_terminal_rows": int(len(frame)), "eligible_rows": int(len(eligible)),
+            "coverage_pct": round(100.0 * len(eligible) / len(frame), 1) if len(frame) else 0.0,
         }
     return views
 

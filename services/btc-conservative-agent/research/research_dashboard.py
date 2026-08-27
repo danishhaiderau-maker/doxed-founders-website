@@ -4590,6 +4590,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Cost and fill exit combinations</h3>
     <p class="note">Fill status × slippage band × fee band × terminal reason. Diagnostic and execution costs remain in separate evidence worlds.</p>
     <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-cost-body"></tbody></table>
+    <h3>Direction-quality exit combinations</h3>
+    <p class="note">Entry ADX × multi-timeframe agreement × recorded structure bias × direction × terminal reason. Missing entry-state fields remain explicit.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-direction-quality-body"></tbody></table>
+    <h3>Support/resistance geometry exit combinations</h3>
+    <p class="note">Support/resistance state and recorded distances × direction × family × terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-sr-geometry-body"></tbody></table>
+    <h3>Execution-quality exit combinations</h3>
+    <p class="note">Maker/taker entry and exit × partial/full entry × fill model × slippage × terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-execution-quality-body"></tbody></table>
+    <h3>Partial-profit path combinations</h3>
+    <p class="note">Normalized partial-exit receipt count × remaining-position band × family × terminal reason.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-partial-profit-body"></tbody></table>
+    <h3>Exact chase-detail exit combinations</h3>
+    <p class="note">Exact chase bucket × urgent tier × delay × offset × family/profile × terminal reason. Global submission permission and tile-local repricing remain distinct.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-chase-detail-body"></tbody></table>
+    <h3>Observed excursion-timing combinations</h3>
+    <p class="note">One-second path MAE/MFE bands × time-to-MAE/time-to-MFE × family × terminal reason. Unavailable tape paths are excluded and reported.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-excursion-timing-body"></tbody></table>
+    <h3>Regime-transition exit combinations</h3>
+    <p class="note">Entry regime/ADX × exit regime/ADX × direction × terminal reason. This describes observed transitions and does not use hindsight to switch policies.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-regime-transition-body"></tbody></table>
+    <h3>Fill-time direction revalidation outcomes</h3>
+    <p class="note">Revalidation result/reason × signal-age band × exact chase × terminal reason. Blocked fills remain terminal no-fill evidence, not losing trades.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-fill-revalidation-body"></tbody></table>
+    <h3>Terminal order outcomes</h3>
+    <p class="note">No-fill and TTL classification × terminal reason × exact chase. Missing results are unavailable rather than zero PnL.</p>
+    <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-terminal-order-body"></tbody></table>
     <h3>Family-balanced descriptive exit-combo EV — unqualified</h3>
     <p class="note">Observed cohorts only. Small or unmatched samples are not evidence that an exit caused the result and cannot qualify a policy.</p>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>AI</th><th>Spread</th><th>MFE</th><th>Time</th><th>Type</th><th>Lane</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Left</th></tr></thead><tbody id="exit-combos-body"></tbody></table>
@@ -5191,7 +5218,12 @@ async function loadExitCombos() {
   document.getElementById('exit-family-scorecard-shadow-body').innerHTML = renderFamilies(shadow.exit_family_scorecard);
   document.getElementById('stop-effectiveness-body').innerHTML = renderStops(executed.stop_effectiveness_matrix);
   document.getElementById('stop-effectiveness-shadow-body').innerHTML = renderStops(shadow.stop_effectiveness_matrix);
-  const causalWorlds = [['PAPER', executed], ['SHADOW/LAB', shadow]];
+  const causalWorlds = [
+    ['PAPER', executed],
+    ['SHADOW/LAB', shadow],
+    ['CONSERVATIVE BBO/DEPTH', conservative],
+    ['IDEAL TOUCH DIAGNOSTIC', idealTouch],
+  ];
   const renderCausalView = key => {
     const rows = [];
     const reasons = [];
@@ -5200,7 +5232,13 @@ async function loadExitCombos() {
       (view.rows||[]).forEach(row => rows.push(
         `<tr><td>${label}</td><td>${row.combination||'—'}</td><td>${row.trades??0}</td><td>${row.wr_pct??'n/a'}%</td><td>${money(row.pnl_usd)}</td><td>${money(row.ev_usd)}</td><td>${row.identity_status||row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
       ));
-      if (!(view.rows||[]).length) reasons.push(`${label}: ${view.empty_reason||world.empty_reason||'NO TERMINAL EVIDENCE'}`);
+      if (!(view.rows||[]).length) {
+        const sourceRows = view.source_terminal_rows ?? 0;
+        const eligibleRows = view.eligible_rows ?? 0;
+        const coverage = view.coverage_pct ?? 0;
+        const missing = (view.missing_dimensions||[]).join(', ') || 'none recorded';
+        reasons.push(`${label}: ${view.empty_reason||world.empty_reason||'NO TERMINAL EVIDENCE'} · source ${sourceRows}, eligible ${eligibleRows}, coverage ${coverage}% · missing ${missing}`);
+      }
     });
     return rows.join('') || `<tr><td colspan="7">${reasons.join(' · ')}</td></tr>`;
   };
@@ -5211,6 +5249,15 @@ async function loadExitCombos() {
   document.getElementById('exit-causal-microstructure-body').innerHTML = renderCausalView('market_microstructure');
   document.getElementById('exit-causal-profit-path-body').innerHTML = renderCausalView('profit_path');
   document.getElementById('exit-causal-cost-body').innerHTML = renderCausalView('cost_and_fill');
+  document.getElementById('exit-causal-direction-quality-body').innerHTML = renderCausalView('direction_quality');
+  document.getElementById('exit-causal-sr-geometry-body').innerHTML = renderCausalView('sr_geometry');
+  document.getElementById('exit-causal-execution-quality-body').innerHTML = renderCausalView('execution_quality');
+  document.getElementById('exit-causal-partial-profit-body').innerHTML = renderCausalView('partial_profit_path');
+  document.getElementById('exit-causal-chase-detail-body').innerHTML = renderCausalView('chase_detail');
+  document.getElementById('exit-causal-excursion-timing-body').innerHTML = renderCausalView('excursion_timing');
+  document.getElementById('exit-causal-regime-transition-body').innerHTML = renderCausalView('regime_transition');
+  document.getElementById('exit-causal-fill-revalidation-body').innerHTML = renderCausalView('fill_revalidation');
+  document.getElementById('exit-causal-terminal-order-body').innerHTML = renderCausalView('terminal_order_outcome');
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Analyzer completed: no current-epoch terminal exit paths exist yet, so exit-combo EV is unavailable.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>

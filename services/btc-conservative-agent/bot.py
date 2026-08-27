@@ -12763,6 +12763,8 @@ def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict =
     refreshed["last_chase_ts"] = order.get("last_chase_ts", refreshed.get("last_chase_ts"))
     refreshed["fill_ts"] = order.get("fill_ts", refreshed.get("fill_ts"))
     refreshed["fill_price"] = order.get("fill_price", refreshed.get("fill_price"))
+    if isinstance(order.get("fill_time_revalidation"), dict):
+        refreshed["fill_time_revalidation"] = copy.deepcopy(order["fill_time_revalidation"])
     refreshed["research_chase_schedule"] = copy.deepcopy(schedule)
     refreshed["chase_schedule_authoritative"] = True
     _order_multiverse_pending_src[tid] = refreshed
@@ -20321,6 +20323,14 @@ def process_pending_orders():
                 latest_ai_ts=latest_ai_ts_for_fill,
                 current_context=fill_context_for_revalidation,
             )
+            order["fill_time_revalidation"] = {
+                "performed": True, "checked_ts": utc_iso(),
+                "signal_age_sec": round(float(fill_age_sec), 3),
+                "latest_ai_ts": latest_ai_ts_for_fill or None,
+                "result": "BLOCKED" if revalidation_reason else "PASSED",
+                "reason": revalidation_reason,
+                "context": copy.deepcopy(fill_context_for_revalidation),
+            }
             if revalidation_reason:
                 order["status"] = "CANCELLED"
                 order["fill_revalidation_reason"] = revalidation_reason
@@ -24127,6 +24137,35 @@ def close_position(pos: dict, exit_reason: str):
             "early_fail_enabled_global": state.get("early_fail_enabled", True),
             "experiment_tag": f"INV_{_coerce_invert_on(pos, master)}_EF_{state.get('early_fail_enabled', True)}",
             "final_direction": pos.get("dir"),
+            "entry_context": {
+                "regime": pos.get("context_regime") or pos.get("signal_regime"),
+                "adx": pos.get("adx_at_entry") or ts_entry.get("adx"),
+                "sr_state": entry_sr_state, "dist_to_support": dist_sup,
+                "dist_to_resistance": dist_res,
+                "ema9": pos.get("context_ema9") or pos.get("ema9_at_entry"),
+                "ema21": pos.get("context_ema21") or pos.get("ema21_at_entry"),
+                "ema200": pos.get("context_ema200"),
+                "atr14_pct_3m": pos.get("atr14_pct_at_fill") or pos.get("atr14_pct_3m"),
+            },
+            "exit_context": {
+                "observed_ts": close_iso, "regime": state.get("regime"),
+                "adx": ((state.get("market_context") or {}).get("trend_strength") or {}).get("adx"),
+                "sr_state": (state.get("support_resistance") or {}).get("sr_state"),
+                "dist_to_support": (state.get("support_resistance") or {}).get("dist_to_support"),
+                "dist_to_resistance": (state.get("support_resistance") or {}).get("dist_to_resistance"),
+                "ema9": (state.get("ema_status") or {}).get("ema9"),
+                "ema21": (state.get("ema_status") or {}).get("ema21"),
+                "ema200": (state.get("ema_status") or {}).get("ema200"),
+                "atr14_pct_3m": ((state.get("cycle_3m_universe") or {}).get("atr14_pct_3m")),
+            },
+            "exit_market_receipt": {
+                "basis": "SIDE_CORRECT_BBO_DEPTH" if exit_sim else "UNAVAILABLE",
+                "observed_ts": close_iso, "best_bid": (exit_sim or {}).get("best_bid"),
+                "best_ask": (exit_sim or {}).get("best_ask"),
+                "visible_executable_qty": (exit_sim or {}).get("available_qty"),
+                "levels_consumed": (exit_sim or {}).get("levels_consumed"),
+                "slippage_usd": (exit_sim or {}).get("slippage_usd"),
+            },
             **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
             "exit_config_json": json.dumps(get_exit_config_snapshot(pos.get("research_lane"))),

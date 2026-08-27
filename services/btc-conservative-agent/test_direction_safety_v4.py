@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import time
 
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
@@ -125,3 +126,12 @@ def test_aged_order_cancels_on_current_structure_conflict_without_new_ai():
         current_context=_ctx(adx=15, stack_bull=True, score=3, sr_bias="LONG_PREFERRED"),
     )
     assert reason.startswith("FILL_REVALIDATION_WEAK_COUNTERTREND_SHORT")
+
+
+def test_fill_revalidation_result_is_persisted_for_pass_and_block_paths():
+    source = inspect.getsource(bot.process_pending_orders)
+    assert 'order["fill_time_revalidation"]' in source
+    assert '"result": "BLOCKED" if revalidation_reason else "PASSED"' in source
+    assert '"context": copy.deepcopy(fill_context_for_revalidation)' in source
+    refresh_source = inspect.getsource(bot._refresh_collector_v22_registered_order_evidence)
+    assert 'refreshed["fill_time_revalidation"]' in refresh_source

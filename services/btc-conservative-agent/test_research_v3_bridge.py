@@ -419,6 +419,10 @@ class V3BridgeTests(unittest.TestCase):
                     "side_correct_executable_quote": 100.71,
                     "visible_executable_qty": 4.0, "recent_aggressor_qty": 1.0,
                 }},
+                "fill_time_revalidation": {
+                    "performed": True, "checked_ts": "1970-01-01T00:16:49Z",
+                    "signal_age_sec": 9.0, "result": "PASSED", "reason": None,
+                },
             }
             submit = dual_write_paper_order_intent(order, signal, epoch_id="epoch-v3-test", data_dir=tmp)
             position = {"trade_id": "o29atr-1", "entry_ts": 1010, "entry": 100.7071, "qty": 0.2,
@@ -453,6 +457,8 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(execution["partial_fill"])
             self.assertEqual(execution["atr14_pct_at_fill"], 0.083)
             self.assertEqual(execution["atr14_pct_basis"], "FILL_TIME_3M_ATR14")
+            self.assertEqual(execution["fill_time_revalidation"]["result"], "PASSED")
+            self.assertTrue(execution["fill_time_revalidation"]["performed"])
             self.assertEqual(intent["episode_id"], execution["episode_id"])
             self.assertEqual(intent["opportunity_id"], f"opportunity:{intent['episode_id']}")
             self.assertEqual(execution["opportunity_id"], intent["opportunity_id"])
@@ -655,6 +661,12 @@ class V3BridgeTests(unittest.TestCase):
             outcome = {
                 "trade_id": "p-path", "close_ts": 1004, "exit": 104,
                 "net_pnl_usd": 4.0, "exit_reason": "ATR_TP_2_5",
+                "entry_context": {"regime": "BULL", "adx": 28.0, "sr_state": "FREE_RANGE", "ema9": 99.0},
+                "exit_context": {"regime": "BULL", "adx": 31.0, "sr_state": "AT_RESISTANCE", "ema9": 103.0},
+                "exit_market_receipt": {"basis": "SIDE_CORRECT_BBO_DEPTH", "best_bid": 103.9, "best_ask": 104.0},
+                "partial_exit_receipts": [{"ts": 1003, "action": "TP1", "price": 103,
+                                             "closed_qty": 0.025, "remaining_fraction": 0.75,
+                                             "realized_gross_usd": 0.075}],
             }
 
             receipt = dual_write_paper_close(
@@ -663,6 +675,7 @@ class V3BridgeTests(unittest.TestCase):
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
             market_row = json.loads(store.ledger_path("market_segment").read_text().strip())
+            execution = json.loads(store.ledger_path("execution").read_text().strip())
             ref = lifecycle["market_segment_refs"][0]
             envelope = json.loads((Path(tmp) / ref["relative_path"]).read_text())
 
@@ -678,6 +691,16 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(lifecycle["opportunity_id"], f"opportunity:{receipt['episode_id']}")
             self.assertEqual(lifecycle["tape_id"], f"tape:{ref['sha256']}")
             self.assertEqual(market_row["tape_id"], lifecycle["tape_id"])
+            self.assertEqual(execution["entry_context"]["regime"], "BULL")
+            self.assertEqual(execution["exit_context"]["sr_state"], "AT_RESISTANCE")
+            self.assertEqual(execution["exit_market_receipt"]["basis"], "SIDE_CORRECT_BBO_DEPTH")
+            self.assertEqual(execution["partial_exits"][0]["closed_qty"], 0.025)
+            self.assertEqual(execution["protection_trajectory"]["partial_exit_count"], 1)
+            self.assertEqual(execution["path_extrema"]["basis"], "OBSERVED_1S_PRICE_PATH")
+            self.assertEqual(execution["path_extrema"]["mfe_pct"], 4.0)
+            self.assertEqual(execution["path_extrema"]["mae_pct"], 1.0)
+            self.assertEqual(execution["path_extrema"]["time_to_mfe_sec"], 3.0)
+            self.assertEqual(execution["path_extrema"]["time_to_mae_sec"], 0.0)
 
     def test_paper_close_fails_path_qualification_when_tape_has_large_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -842,11 +865,21 @@ class V3BridgeTests(unittest.TestCase):
 
     def test_unfilled_is_not_realized_zero_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dual_write_v22_record(_event(), data_dir=tmp)
+            event = _event()
+            event["exact_reason"] = "SIGNAL_TTL_EXPIRED"
+            event["fill_time_revalidation"] = {
+                "performed": True, "result": "BLOCKED",
+                "reason": "FILL_REVALIDATION_DIRECTION_CHANGED",
+            }
+            dual_write_v22_record(event, data_dir=tmp)
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
             self.assertEqual(lifecycle["outcome_state"], "NO_FILL")
             self.assertNotEqual(lifecycle["outcome_state"], "REALIZED_ZERO_PNL")
+            self.assertTrue(lifecycle["terminal_no_fill"])
+            self.assertTrue(lifecycle["terminal_ttl_expired"])
+            self.assertEqual(lifecycle["terminal_reason"], "SIGNAL_TTL_EXPIRED")
+            self.assertEqual(lifecycle["fill_time_revalidation"]["result"], "BLOCKED")
 
     def test_source_fill_without_shared_ai_identity_is_not_normalized_as_execution(self):
         with tempfile.TemporaryDirectory() as tmp:

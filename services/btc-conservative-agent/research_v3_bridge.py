@@ -145,7 +145,78 @@ def _paper_fill_execution_receipt(
             position.get("entry_slippage"), order.get("entry_slippage")
         ),
         "book_walk_slippage_usd": number(fill_sim.get("slippage_usd"), order.get("book_slippage_usd")),
+        "fill_time_revalidation": copy.deepcopy(
+            order.get("fill_time_revalidation")
+            if isinstance(order.get("fill_time_revalidation"), Mapping)
+            else {"performed": False, "result": "UNAVAILABLE"}
+        ),
     }
+
+
+def _normalized_partial_exits(outcome: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Keep reduce-only legs comparable without guessing missing quantities/PnL."""
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(outcome.get("partial_exit_receipts") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        rows.append({
+            "sequence": index + 1, "ts": _first(raw.get("ts"), raw.get("observed_ts")),
+            "reason": _first(raw.get("reason"), raw.get("exit_reason"), raw.get("action")),
+            "price": raw.get("price"), "closed_qty": raw.get("closed_qty"),
+            "remaining_fraction": raw.get("remaining_fraction"),
+            "realized_gross_usd": raw.get("realized_gross_usd"),
+            "realized_net_usd": raw.get("realized_net_usd"),
+        })
+    return rows
+
+
+def _observed_context(source: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
+    """Normalize already-observed context; unavailable values remain null."""
+    prefix = "entry" if phase == "ENTRY" else "exit"
+    nested = source.get(f"{prefix}_context")
+    nested = nested if isinstance(nested, Mapping) else {}
+    return {
+        "phase": phase,
+        "observed_ts": _first(nested.get("observed_ts"), source.get(f"{prefix}_context_ts")),
+        "atr14_pct_3m": _first(nested.get("atr14_pct_3m"), source.get(f"atr14_pct_at_{prefix}")),
+        "regime": _first(nested.get("regime"), source.get(f"{prefix}_regime"), source.get("regime") if phase == "ENTRY" else None),
+        "adx": _first(nested.get("adx"), source.get(f"adx_at_{prefix}")),
+        "sr_state": _first(nested.get("sr_state"), source.get(f"sr_state_at_{prefix}"), source.get("sr_state") if phase == "ENTRY" else None),
+        "dist_to_support": _first(nested.get("dist_to_support"), source.get(f"distance_to_support_at_{prefix}"), source.get("distance_to_support") if phase == "ENTRY" else None),
+        "dist_to_resistance": _first(nested.get("dist_to_resistance"), source.get(f"distance_to_resistance_at_{prefix}"), source.get("distance_to_resistance") if phase == "ENTRY" else None),
+        "ema9": _first(nested.get("ema9"), source.get(f"ema9_at_{prefix}")),
+        "ema21": _first(nested.get("ema21"), source.get(f"ema21_at_{prefix}")),
+        "ema200": _first(nested.get("ema200"), source.get(f"ema200_at_{prefix}")),
+    }
+
+
+def _paper_path_receipt(rows: list[Mapping[str, Any]], *, direction: str, entry_price: Any, fill_ts: Any) -> dict[str, Any]:
+    """Derive extrema timing only from the frozen observed path."""
+    empty = {"basis": "UNAVAILABLE", "mfe_pct": None, "mae_pct": None,
+             "time_to_mfe_sec": None, "time_to_mae_sec": None}
+    try:
+        entry, start = float(entry_price), float(fill_ts)
+    except (TypeError, ValueError):
+        return empty
+    if entry <= 0 or not rows:
+        return empty
+    sign = 1.0 if str(direction).upper() == "LONG" else -1.0
+    samples = []
+    for row in rows:
+        ts = _timestamp(_first(row.get("ts"), row.get("bucket_ts")))
+        try:
+            price = float(_first(row.get("price"), row.get("last")))
+        except (TypeError, ValueError):
+            continue
+        if ts is not None and ts >= start:
+            samples.append((ts, ((price - entry) / entry) * 100.0 * sign))
+    if not samples:
+        return empty
+    mfe_ts, mfe = max(samples, key=lambda item: item[1])
+    mae_ts, mae = min(samples, key=lambda item: item[1])
+    return {"basis": "OBSERVED_1S_PRICE_PATH", "mfe_pct": round(mfe, 6),
+            "mae_pct": round(mae, 6), "time_to_mfe_sec": round(mfe_ts - start, 3),
+            "time_to_mae_sec": round(mae_ts - start, 3)}
 
 
 def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -746,6 +817,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     close_ts = _timestamp(_first(outcome.get("close_ts"), outcome.get("ts")))
     segment_refs = []
     segment_writes = []
+    segment_rows = []
     segment_coverage = {
         "schema": "paper_market_segment_coverage_v1",
         "row_count": 0,
@@ -796,13 +868,42 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
             "research_lane": policy["paper_policy_spec"].get("research_lane"),
             **causal_ids, **policy,
         }
+    entry_price = _first(outcome.get("entry"), position.get("entry"))
+    fill_ts = _first(position.get("entry_ts"), outcome.get("entry_ts"))
+    path_receipt = _paper_path_receipt(
+        segment_rows, direction=identity["executed_direction"],
+        entry_price=entry_price, fill_ts=fill_ts,
+    )
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
-        "entry_price": _first(outcome.get("entry"), position.get("entry")), "exit_price": outcome.get("exit"),
+        "entry_price": entry_price, "exit_price": outcome.get("exit"),
         "filled_qty": _first(outcome.get("execution_qty"), position.get("qty")), "net_pnl_usd": outcome.get("net_pnl_usd"),
         "gross_pnl_usd": outcome.get("gross_pnl_usd"), "trading_fees_usd": outcome.get("trading_fees_usd"),
         "funding_fees_usd": outcome.get("funding_fees_usd"), "exit_reason": outcome.get("exit_reason"),
+        "entry_context": _observed_context(outcome, phase="ENTRY"),
+        "exit_context": _observed_context(outcome, phase="EXIT"),
+        "path_extrema": path_receipt,
+        "protection_trajectory": {
+            "basis": "TERMINAL_STATE_PLUS_PARTIAL_RECEIPTS",
+            "exit_config": copy.deepcopy(_first(position.get("exit_config"), signal.get("exit_config"))),
+            "initial_stop_price": _first(position.get("initial_sl"), position.get("sl_at_entry")),
+            "terminal_stop_price": position.get("sl"),
+            "terminal_target_price": position.get("tp"),
+            "terminal_trailing_stop_price": _first(position.get("trailing_stop"), position.get("trail_stop")),
+            "terminal_peak_margin_pct": _first(outcome.get("max_profit"), position.get("max_pnl_pct")),
+            "terminal_mae_margin_pct": _first(outcome.get("max_drawdown"), position.get("max_drawdown")),
+            "terminal_tp_stage": _first(outcome.get("tp_stage"), position.get("tp_stage")),
+            "terminal_remaining_fraction": _first(outcome.get("policy_remaining_fraction"), position.get("policy_remaining_fraction")),
+            "partial_exit_count": len(outcome.get("partial_exit_receipts") or []),
+            "terminal_exit_reason": outcome.get("exit_reason"),
+        },
+        "partial_exits": _normalized_partial_exits(outcome),
+        "exit_market_receipt": copy.deepcopy(
+            outcome.get("exit_market_receipt")
+            if isinstance(outcome.get("exit_market_receipt"), Mapping)
+            else {"basis": "UNAVAILABLE"}
+        ),
         "authenticated_exchange_actual": False, "paper_observation": True, **lifecycle_identity,
     })
     lifecycle = store.append("lifecycle", {
@@ -1032,6 +1133,19 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "episode_id": episode_id,
         "event_id": event_id,
         "observation_status": record.get("observation_status"),
+        "terminal_reason": _first(
+            record.get("exact_reason"), record.get("terminal_provenance"),
+            record.get("primary_outcome"),
+        ),
+        "terminal_no_fill": record.get("primary_outcome") == "ACCEPTED_UNFILLED",
+        "terminal_ttl_expired": "TTL_EXPIRED" in str(_first(
+            record.get("exact_reason"), record.get("terminal_provenance"), "",
+        )).upper(),
+        "fill_time_revalidation": copy.deepcopy(
+            record.get("fill_time_revalidation")
+            if isinstance(record.get("fill_time_revalidation"), Mapping)
+            else {"performed": False, "result": "UNAVAILABLE"}
+        ),
         "terminal": True,
         "outcome_state": (
             "DATA_ERROR" if record.get("observation_status") == "DATA_ERROR"
