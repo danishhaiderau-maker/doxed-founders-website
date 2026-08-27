@@ -5583,9 +5583,11 @@ def refresh_bbo_state(force: bool = False):
     finally:
         _bbo_refresh_lock.release()
 
+    request_started_at = time.time()
     try:
         ticker = _fetch_bitfinex_ticker_rest_hot()
         completed_at = time.time()
+        duration_sec = max(0.0, completed_at - request_started_at)
         with _bbo_refresh_lock:
             if _bbo_refresh_claim_token != token:
                 return False
@@ -5600,6 +5602,11 @@ def refresh_bbo_state(force: bool = False):
                 state["rest_price"] = ticker["last"]
                 state["rest_price_ts"] = completed_at
                 state["bbo_refresh_last_success_ts"] = completed_at
+                state["bbo_refresh_last_duration_sec"] = duration_sec
+                state["bbo_refresh_max_duration_sec"] = max(
+                    float(state.get("bbo_refresh_max_duration_sec") or 0),
+                    duration_sec,
+                )
                 state["bbo_refresh_last_error"] = None
                 state["bbo_refresh_consecutive_failures"] = 0
                 ws_age = completed_at - float(state.get("ws_last_tick") or 0)
@@ -5610,8 +5617,19 @@ def refresh_bbo_state(force: bool = False):
             _last_bbo_refresh_ts = completed_at
         return True
     except Exception as exc:
+        failed_at = time.time()
+        duration_sec = max(0.0, failed_at - request_started_at)
         with state_lock:
             state["bbo_refresh_last_error"] = f"{type(exc).__name__}: {exc}"[:240]
+            state["bbo_refresh_last_failure_ts"] = failed_at
+            state["bbo_refresh_last_duration_sec"] = duration_sec
+            state["bbo_refresh_max_duration_sec"] = max(
+                float(state.get("bbo_refresh_max_duration_sec") or 0),
+                duration_sec,
+            )
+            state["bbo_refresh_total_failures"] = int(
+                state.get("bbo_refresh_total_failures") or 0
+            ) + 1
             state["bbo_refresh_consecutive_failures"] = int(
                 state.get("bbo_refresh_consecutive_failures") or 0
             ) + 1
@@ -8300,6 +8318,15 @@ state = {
     "spread_usd": None,
     "spread_pct": None,
     "bbo_ts": None,
+    "bbo_refresh_last_duration_sec": None,
+    "bbo_refresh_max_duration_sec": 0.0,
+    "bbo_refresh_total_failures": 0,
+    "rest_quote_stale": True,
+    "rest_quote_stale_count": 0,
+    "rest_quote_last_stale_ts": None,
+    "rest_quote_last_recovered_ts": None,
+    "rest_quote_last_transition_reason": "BOOTSTRAP_NO_REST_ENTRY_QUOTE",
+    "rest_quote_last_transition_ts": None,
     "order_book": None,
     "book_ts": None,
     "bid_size_btc": None,
@@ -8312,6 +8339,11 @@ state = {
     "execution_paused": False,
     "execution_reason": "",
     "ws_ready": False,
+    "ws_connection_generation": 0,
+    "ws_reconnect_count": 0,
+    "ws_last_disconnect_ts": None,
+    "ws_last_disconnect_reason": None,
+    "ws_channel_ids": {},
     "ohlcv_ready": False,
     "data_error": None,
     "system_ready": False,
@@ -17971,6 +18003,12 @@ def _runtime_readiness_components(now: float = None) -> dict:
         last_ready_ts = float(state.get("last_ready_ts") or 0)
         paused = bool(state.get("execution_paused", False))
         manual_paused = bool(state.get("manual_admin_pause", False))
+        rest_quote_ts = float(
+            state.get("rest_price_ts")
+            or state.get("rest_last_tick")
+            or state.get("bbo_ts")
+            or 0
+        )
     ws_ok = _genuine_ws_transport_ready(now)
     rest_entry_quote_ok = _fresh_rest_entry_quote_ready(now)
     ohlcv_age = (
@@ -17993,24 +18031,33 @@ def _runtime_readiness_components(now: float = None) -> dict:
         and len(price_buffer) >= WINDOW_SIZE
         and len(delta_buffer) >= WINDOW_SIZE
     )
-    prerequisites_ready = bool(
+    structural_prerequisites_ready = bool(
         price_ok
         and ws_ok
-        and rest_entry_quote_ok
         and ohlcv_ok
         and ema_ok
         and candle_ok
         and buffer_ready
         and pathway_ok
     )
+    # REST BBO freshness is an ephemeral entry prerequisite. It remains a
+    # strict fail-closed gate, but losing it must not erase the five-second
+    # stability proof already earned by the structural market-data pipeline.
+    prerequisites_ready = bool(
+        structural_prerequisites_ready and rest_entry_quote_ok
+    )
     stable_for_sec = max(0.0, now - last_ready_ts) if last_ready_ts else 0.0
-    system_ready = bool(
-        prerequisites_ready
+    structural_stable = bool(
+        structural_prerequisites_ready
         and last_ready_ts
         and stable_for_sec >= READY_STABLE_SEC
     )
+    system_ready = bool(structural_stable and rest_entry_quote_ok)
     signal_generation_ready = bool(
-        system_ready and not paused and not manual_paused
+        system_ready
+        and rest_entry_quote_ok
+        and not paused
+        and not manual_paused
     )
     reasons = []
     if not price_ok:
@@ -18029,7 +18076,7 @@ def _runtime_readiness_components(now: float = None) -> dict:
         reasons.append("BUFFERS_NOT_READY")
     if not pathway_ok:
         reasons.append("PATHWAY_SAFETY_BLOCK")
-    if prerequisites_ready and not system_ready:
+    if structural_prerequisites_ready and not structural_stable:
         reasons.append("READINESS_STABILIZING")
     if manual_paused:
         reasons.append("ADMIN_MANUAL_PAUSE")
@@ -18039,6 +18086,9 @@ def _runtime_readiness_components(now: float = None) -> dict:
         "price_ready": price_ok,
         "ws_transport_ready": ws_ok,
         "rest_entry_quote_ready": rest_entry_quote_ok,
+        "rest_quote_age_sec": (
+            max(0.0, now - rest_quote_ts) if rest_quote_ts else None
+        ),
         "ohlcv_ready": ohlcv_ok,
         "ohlcv_age_sec": ohlcv_age if math.isfinite(ohlcv_age) else None,
         "ema_ready": ema_ok,
@@ -18046,6 +18096,8 @@ def _runtime_readiness_components(now: float = None) -> dict:
         "buffers_ready": buffer_ready,
         "pathway_ready": pathway_ok,
         "prerequisites_ready": prerequisites_ready,
+        "structural_prerequisites_ready": structural_prerequisites_ready,
+        "structural_stable": structural_stable,
         "stable_for_sec": stable_for_sec,
         "system_ready": system_ready,
         "signal_generation_ready": signal_generation_ready,
@@ -18058,7 +18110,7 @@ def _recompute_system_readiness(now: float = None) -> dict:
     now = float(now or time.time())
     components = _runtime_readiness_components(now)
     with state_lock:
-        if components["prerequisites_ready"]:
+        if components["structural_prerequisites_ready"]:
             if not state.get("last_ready_ts"):
                 state["last_ready_ts"] = now
         else:
@@ -18066,20 +18118,46 @@ def _recompute_system_readiness(now: float = None) -> dict:
         # Re-read after initializing/resetting the stability epoch.
         ready_since = float(state.get("last_ready_ts") or 0)
         stable_for = max(0.0, now - ready_since) if ready_since else 0.0
-        system_ready = bool(
-            components["prerequisites_ready"]
+        structural_stable = bool(
+            components["structural_prerequisites_ready"]
             and ready_since
             and stable_for >= READY_STABLE_SEC
         )
+        system_ready = bool(
+            structural_stable and components["rest_entry_quote_ready"]
+        )
         state["system_ready"] = system_ready
-        state["warmup_mode"] = not system_ready
+        # A transient REST quote miss blocks readiness and all entries without
+        # falsely returning the structurally warmed runtime to startup mode.
+        state["warmup_mode"] = not structural_stable
         state["allow_rest_price"] = not components["ws_transport_ready"]
         execution_paused = bool(state.get("execution_paused", False))
         manual_admin_pause = bool(state.get("manual_admin_pause", False))
+        rest_quote_was_stale = bool(state.get("rest_quote_stale", True))
+        rest_quote_is_stale = not bool(components["rest_entry_quote_ready"])
+        if rest_quote_is_stale and not rest_quote_was_stale:
+            state["rest_quote_stale"] = True
+            state["rest_quote_stale_count"] = int(
+                state.get("rest_quote_stale_count") or 0
+            ) + 1
+            state["rest_quote_last_stale_ts"] = now
+            state["rest_quote_last_transition_ts"] = now
+            state["rest_quote_last_transition_reason"] = (
+                "REST_ENTRY_QUOTE_NOT_READY"
+            )
+        elif not rest_quote_is_stale and rest_quote_was_stale:
+            state["rest_quote_stale"] = False
+            state["rest_quote_last_recovered_ts"] = now
+            state["rest_quote_last_transition_ts"] = now
+            state["rest_quote_last_transition_reason"] = (
+                "REST_ENTRY_QUOTE_RECOVERED"
+            )
     components["stable_for_sec"] = stable_for
+    components["structural_stable"] = structural_stable
     components["system_ready"] = system_ready
     components["signal_generation_ready"] = bool(
         system_ready
+        and components["rest_entry_quote_ready"]
         and not execution_paused
         and not manual_admin_pause
     )
@@ -18088,7 +18166,7 @@ def _recompute_system_readiness(now: float = None) -> dict:
         for reason in components["readiness_reasons"]
         if reason != "READINESS_STABILIZING"
     ]
-    if components["prerequisites_ready"] and not system_ready:
+    if components["structural_prerequisites_ready"] and not structural_stable:
         components["readiness_reasons"].append("READINESS_STABILIZING")
     return components
 
@@ -18146,6 +18224,10 @@ def can_run_ai_recovery_observation(now: float = None) -> tuple:
 
 
 def is_system_ready():
+    # Preserve the historical fail-closed execution meaning of this helper.
+    # The separate structural latch retains its five-second epoch across an
+    # ephemeral REST quote miss, while exported system readiness remains strict
+    # about quote freshness. Execution pauses are checked by its callers.
     return bool(_recompute_system_readiness()["system_ready"])
 
 def pipeline_guard(stage: str, signal: dict) -> bool:
@@ -18191,6 +18273,8 @@ def can_open_live_entry(
     runtime = _recompute_system_readiness(now)
     if not runtime["ws_transport_ready"]:
         return False, "WS_NOT_READY", runtime
+    if not runtime["rest_entry_quote_ready"]:
+        return False, "REST_ENTRY_QUOTE_NOT_READY", runtime
     if not runtime["system_ready"]:
         reason = (
             runtime["readiness_reasons"][0]
@@ -22453,6 +22537,8 @@ def safe_ws_handler(message):
                     ws_channel_types[int(data.get("chanId"))] = str(data.get("channel"))
                     with state_lock:
                         state["ws_connected_ts"] = time.time()
+                        channel_ids = state.setdefault("ws_channel_ids", {})
+                        channel_ids[str(data.get("channel"))] = int(data.get("chanId"))
                     logger.info(
                         f"[WS] Subscribed {data.get('channel')} "
                         f"chanId={data.get('chanId')} symbol={data.get('symbol')}"
@@ -22532,6 +22618,8 @@ def _mark_ws_transport_disconnected(status: str = "DISCONNECTED") -> None:
         state["ws_last_hb_ts"] = None
         state["last_ready_ts"] = 0
         state["system_ready"] = False
+        state["ws_last_disconnect_ts"] = time.time()
+        state["ws_last_disconnect_reason"] = str(status or "DISCONNECTED")
         state["allow_rest_price"] = True
         state.setdefault("diag", {})["ws_status"] = status
 
@@ -22550,6 +22638,10 @@ def on_open(ws):
     ws.send(json.dumps({"event": "subscribe", "channel": "trades", "symbol": BITFINEX_WS_SYMBOL}))
     ws.send(json.dumps({"event": "subscribe", "channel": "ticker", "symbol": BITFINEX_WS_SYMBOL}))
     with state_lock:
+        generation = int(state.get("ws_connection_generation") or 0) + 1
+        state["ws_connection_generation"] = generation
+        state["ws_reconnect_count"] = max(0, generation - 1)
+        state["ws_channel_ids"] = {}
         state["ws_connected_ts"] = time.time()
         state["ws_transport_connected"] = True
         # A connected socket is not trading-ready until this new session emits
@@ -33576,16 +33668,70 @@ def _bbo_refresh_telemetry_snapshot(now: float = None) -> dict:
             else 0.0
         )
     with state_lock:
+        rest_quote_ts = float(
+            state.get("rest_price_ts")
+            or state.get("rest_last_tick")
+            or state.get("bbo_ts")
+            or 0
+        )
+        last_success_ts = float(state.get("bbo_refresh_last_success_ts") or 0)
         return {
             "inflight": inflight,
             "inflight_age_sec": inflight_age,
             "last_attempt_ts": state.get("bbo_refresh_last_attempt_ts"),
             "last_success_ts": state.get("bbo_refresh_last_success_ts"),
+            "last_success_age_sec": (
+                max(0.0, now - last_success_ts) if last_success_ts else None
+            ),
+            "rest_quote_age_sec": (
+                max(0.0, now - rest_quote_ts) if rest_quote_ts else None
+            ),
+            "last_duration_sec": state.get("bbo_refresh_last_duration_sec"),
+            "max_duration_sec": float(
+                state.get("bbo_refresh_max_duration_sec") or 0
+            ),
             "last_error": state.get("bbo_refresh_last_error"),
+            "last_failure_ts": state.get("bbo_refresh_last_failure_ts"),
+            "total_failures": int(state.get("bbo_refresh_total_failures") or 0),
             "consecutive_failures": int(
                 state.get("bbo_refresh_consecutive_failures") or 0
             ),
             "stale_claims": int(state.get("bbo_refresh_stale_claims") or 0),
+            "rest_quote_stale": bool(state.get("rest_quote_stale", True)),
+            "rest_quote_stale_count": int(
+                state.get("rest_quote_stale_count") or 0
+            ),
+            "rest_quote_last_stale_ts": state.get("rest_quote_last_stale_ts"),
+            "rest_quote_last_recovered_ts": state.get(
+                "rest_quote_last_recovered_ts"
+            ),
+            "rest_quote_last_transition_ts": state.get(
+                "rest_quote_last_transition_ts"
+            ),
+            "rest_quote_last_transition_reason": state.get(
+                "rest_quote_last_transition_reason"
+            ),
+        }
+
+
+def _ws_connection_telemetry_snapshot(now: float = None) -> dict:
+    now = float(now or time.time())
+    with state_lock:
+        connected_ts = float(state.get("ws_connected_ts") or 0)
+        disconnect_ts = float(state.get("ws_last_disconnect_ts") or 0)
+        return {
+            "generation": int(state.get("ws_connection_generation") or 0),
+            "reconnect_count": int(state.get("ws_reconnect_count") or 0),
+            "connected_ts": connected_ts or None,
+            "connected_age_sec": (
+                max(0.0, now - connected_ts) if connected_ts else None
+            ),
+            "last_disconnect_ts": disconnect_ts or None,
+            "last_disconnect_age_sec": (
+                max(0.0, now - disconnect_ts) if disconnect_ts else None
+            ),
+            "last_disconnect_reason": state.get("ws_last_disconnect_reason"),
+            "channel_ids": dict(state.get("ws_channel_ids") or {}),
         }
 
 
@@ -33664,6 +33810,7 @@ def health():
         "signal_generation_ready": runtime["signal_generation_ready"],
         "runtime_readiness": runtime,
         "bbo_refresh": _bbo_refresh_telemetry_snapshot(now),
+        "ws_connection": _ws_connection_telemetry_snapshot(now),
         "book_refresh": _book_refresh_telemetry_snapshot(now),
         **market_health,
         "live_entry_armable": armable,
@@ -33756,7 +33903,11 @@ def ready():
     # or remove the sole risk manager from service. Readiness proves that the
     # canonical owner is alive, warmed and receiving genuine market data;
     # signal_generation_ready separately proves whether new entries may run.
-    ready_ok = bool(process_ready and runtime["system_ready"])
+    ready_ok = bool(
+        process_ready
+        and runtime["system_ready"]
+        and runtime["rest_entry_quote_ready"]
+    )
     tile_registry = active_tile_lifecycle_manifest()
     return jsonify({
         "ok": ready_ok,
@@ -33778,6 +33929,8 @@ def ready():
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
         "runtime_readiness": runtime,
+        "bbo_refresh": _bbo_refresh_telemetry_snapshot(now),
+        "ws_connection": _ws_connection_telemetry_snapshot(now),
         "live_entry_armable": armable,
         "live_entry_arm_block_reason": None if armable else arm_block_reason,
         "trading_ready": trading_ready,

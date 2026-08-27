@@ -69,6 +69,8 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
             "ema_status": {"ema9": 1.0, "ema21": 1.0, "ema200": 1.0},
             "pathway_safety_block": False,
             "last_ready_ts": 0.0,
+            "rest_quote_stale": False,
+            "rest_quote_stale_count": 0,
             "execution_paused": False,
             "execution_reason": "",
             "_pause_priority": 0,
@@ -277,9 +279,99 @@ class WsLiveReadinessBehaviorTest(unittest.TestCase):
         self.state["bbo_ts"] = self.now - 11.0
         runtime = self.namespace["_runtime_readiness_components"](self.now)
         self.assertTrue(runtime["ws_transport_ready"])
+        self.assertTrue(runtime["structural_prerequisites_ready"])
+        self.assertTrue(runtime["structural_stable"])
+        self.assertFalse(runtime["system_ready"])
         self.assertFalse(runtime["rest_entry_quote_ready"])
         self.assertFalse(runtime["prerequisites_ready"])
+        self.assertFalse(runtime["signal_generation_ready"])
         self.assertIn("REST_ENTRY_QUOTE_NOT_READY", runtime["readiness_reasons"])
+
+        allowed, reason, _ = self.namespace["can_progress_new_entry"](self.now)
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "REST_ENTRY_QUOTE_NOT_READY")
+
+    def test_fresh_rest_recovery_preserves_structural_epoch_without_blackout(self):
+        self._make_ws_ready()
+        original_ready_ts = self.state["last_ready_ts"]
+
+        stale_now = self.now + 11.0
+        stale = self.namespace["_recompute_system_readiness"](stale_now)
+        self.assertTrue(stale["structural_prerequisites_ready"])
+        self.assertTrue(stale["structural_stable"])
+        self.assertFalse(stale["system_ready"])
+        self.assertFalse(stale["rest_entry_quote_ready"])
+        self.assertFalse(stale["signal_generation_ready"])
+        self.assertEqual(self.state["last_ready_ts"], original_ready_ts)
+        self.assertTrue(self.state["rest_quote_stale"])
+        self.assertEqual(self.state["rest_quote_stale_count"], 1)
+        self.assertEqual(self.state["rest_quote_last_stale_ts"], stale_now)
+
+        recovered_now = stale_now + 0.25
+        self.state.update(
+            {
+                "rest_price_ts": recovered_now,
+                "rest_last_tick": recovered_now,
+                "bbo_ts": recovered_now,
+            }
+        )
+        recovered = self.namespace["_recompute_system_readiness"](recovered_now)
+        self.assertTrue(recovered["system_ready"])
+        self.assertTrue(recovered["rest_entry_quote_ready"])
+        self.assertTrue(recovered["signal_generation_ready"])
+        self.assertEqual(self.state["last_ready_ts"], original_ready_ts)
+        self.assertFalse(self.state["rest_quote_stale"])
+        self.assertEqual(self.state["rest_quote_last_recovered_ts"], recovered_now)
+        self.assertEqual(
+            self.state["rest_quote_last_transition_reason"],
+            "REST_ENTRY_QUOTE_RECOVERED",
+        )
+
+    def test_structural_ws_reconnect_still_requires_full_stabilization(self):
+        self._make_ws_ready()
+        lost_at = self.now + 1.0
+        self.state.update(
+            {
+                "ws_transport_connected": False,
+                "ws_ready": False,
+                "ws_last_tick": self.now - 500.0,
+            }
+        )
+        lost = self.namespace["_recompute_system_readiness"](lost_at)
+        self.assertFalse(lost["structural_prerequisites_ready"])
+        self.assertFalse(lost["system_ready"])
+        self.assertEqual(self.state["last_ready_ts"], 0.0)
+
+        reconnected_at = lost_at + 1.0
+        self.state.update(
+            {
+                "ws_transport_connected": True,
+                "ws_ready": True,
+                "ws_last_tick": reconnected_at,
+                "price_ts": reconnected_at,
+                "rest_price_ts": reconnected_at,
+                "rest_last_tick": reconnected_at,
+                "bbo_ts": reconnected_at,
+            }
+        )
+        rewarming = self.namespace["_recompute_system_readiness"](reconnected_at)
+        self.assertTrue(rewarming["structural_prerequisites_ready"])
+        self.assertFalse(rewarming["system_ready"])
+        self.assertIn("READINESS_STABILIZING", rewarming["readiness_reasons"])
+        stable = self.namespace["_recompute_system_readiness"](
+            reconnected_at + self.namespace["READY_STABLE_SEC"]
+        )
+        self.assertTrue(stable["system_ready"])
+        self.assertTrue(stable["signal_generation_ready"])
+
+    def test_force_paper_boundary_is_unchanged_after_quote_recovery(self):
+        self._make_ws_ready()
+        self.namespace["_force_paper_mode_active"] = lambda: True
+        allowed, reason, _ = self.namespace["can_open_live_entry"](
+            require_armed=False, now=self.now
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "FORCE_PAPER_MODE")
 
     def test_stale_ohlcv_blocks_new_entry_even_with_fresh_ws(self):
         self._make_ws_ready()
@@ -1122,8 +1214,16 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
             self.assertIn('"trading_ready"', route)
             self.assertIn('"trading_block_reason"', route)
         ready = function_source("ready")
+        runtime = function_source("_runtime_readiness_components")
+        self.assertIn(
+            "system_ready = bool(structural_stable and rest_entry_quote_ok)",
+            runtime,
+        )
         self.assertIn("ready_ok", ready)
         self.assertIn('runtime["system_ready"]', ready)
+        self.assertIn('runtime["rest_entry_quote_ready"]', ready)
+        self.assertIn('"bbo_refresh"', ready)
+        self.assertIn('"ws_connection"', ready)
         self.assertNotIn('ready_ok = bool(process_ready and runtime["signal_generation_ready"])', ready)
         self.assertIn("(200 if ready_ok else 503)", ready)
         resume = function_source("api_resume")
