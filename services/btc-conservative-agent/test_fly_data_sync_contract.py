@@ -157,6 +157,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
                 "research_session_archives", "archive-v2", "object-store", "object_store",
                 "corrupt_evidence_quarantine",
             }),
+            "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
             "_data_sync_volume_root": lambda: root,
             "_data_sync_runtime_root": lambda: root,
             "_data_sync_allowed_roots": lambda: [root],
@@ -196,6 +197,7 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
             "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset({"pipeline_events_3factor.csv"}),
             "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
             "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+            "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
             "_data_sync_volume_root": lambda: root,
             "_data_sync_runtime_root": lambda: root,
             "_data_sync_allowed_roots": lambda: [root],
@@ -209,6 +211,67 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
             handle.write(b'}\n')
         rows = namespace["_data_sync_inventory"]()
         assert rows[0]["size"] == target.stat().st_size
+
+
+def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monkeypatch, tmp_path):
+    receipt_names = {
+        "tile_independence_report.json",
+        "ai_scan_independence_report.json",
+        "ai_scan_role_validation.json",
+        "exit_reports_validation.json",
+        "lane_memory_validation.json",
+        "lane_memory_violation.json",
+        "runtime_pathway_integrity.json",
+    }
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in receipt_names:
+        (tmp_path / name).write_text('{"canonical":true}\n', encoding="utf-8")
+    # A same-named runtime artifact must not create a duplicate manifest path
+    # or override the canonical top-level download target.
+    (runtime / "tile_independence_report.json").write_text(
+        '{"canonical":false}\n', encoding="utf-8"
+    )
+    (runtime / "ordinary.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+    monkeypatch.chdir(runtime)
+
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_rotation_parts", "_data_sync_runtime_root",
+        "_data_sync_volume_root", "_data_sync_allowed_roots",
+        "_data_sync_relpath", "_data_sync_path_allowed",
+        "_data_sync_resolve_relpath", "_data_sync_complete_record_size",
+        "_data_sync_consistency_mode", "_data_sync_inventory",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path,
+        "os": os,
+        "_DATA_SYNC_EXTENSIONS": frozenset({".json"}),
+        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+        "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(receipt_names),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+
+    rows = namespace["_data_sync_inventory"]()
+    paths = [row["path"] for row in rows]
+    assert receipt_names.issubset(paths)
+    assert paths.count("tile_independence_report.json") == 1
+    assert "ordinary.json" in paths
+    resolved = namespace["_data_sync_resolve_relpath"]("tile_independence_report.json")
+    assert resolved == (tmp_path / "tile_independence_report.json").resolve()
+    try:
+        namespace["_data_sync_resolve_relpath"]("../lane_memory_validation.json")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("path traversal must be rejected")
 
 
 def test_ephemeral_open_positions_is_explicitly_optional_not_required():

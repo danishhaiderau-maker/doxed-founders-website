@@ -35194,6 +35194,15 @@ _DATA_SYNC_OPTIONAL_FILES = ({
     ),
     "canonical_replacement": "paper_lifecycle_v1.json",
 },)
+_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES = frozenset({
+    "tile_independence_report.json",
+    "ai_scan_independence_report.json",
+    "ai_scan_role_validation.json",
+    "exit_reports_validation.json",
+    "lane_memory_validation.json",
+    "lane_memory_violation.json",
+    "runtime_pathway_integrity.json",
+})
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
     # Mutable crash-recovery state belongs only to the Fly collector. It can
@@ -35273,8 +35282,12 @@ def _data_sync_allowed_roots() -> list:
 
 def _data_sync_relpath(path: Path) -> str:
     runtime = _data_sync_runtime_root()
+    volume = _data_sync_volume_root()
+    resolved = path.resolve()
+    if resolved.parent == volume and resolved.name in _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES:
+        return resolved.name
     try:
-        return path.resolve().relative_to(runtime).as_posix()
+        return resolved.relative_to(runtime).as_posix()
     except ValueError:
         # Volume-backed research directories can be symlinked beside runtime.
         for name in ("research", "research_accumulator", "research_archive"):
@@ -35313,7 +35326,11 @@ def _data_sync_resolve_relpath(raw_rel: str) -> Path:
     if not rel or rel.startswith(".") or ".." in rel.split("/"):
         raise ValueError("invalid relative path")
     runtime = _data_sync_runtime_root()
-    candidate = runtime.joinpath(*rel.split("/"))
+    parts = rel.split("/")
+    if len(parts) == 1 and parts[0] in _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES:
+        candidate = _data_sync_volume_root() / parts[0]
+    else:
+        candidate = runtime.joinpath(*parts)
     if not _data_sync_path_allowed(candidate):
         raise ValueError("path is not an allowed runtime data file")
     return candidate.resolve()
@@ -35384,9 +35401,42 @@ def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> 
 
 
 def _data_sync_inventory() -> list:
-    runtime = _data_sync_runtime_root()
     seen = set()
+    seen_relpaths = set()
     rows = []
+
+    def append_path(path: Path) -> None:
+        try:
+            resolved = path.resolve(strict=True)
+            relpath = _data_sync_relpath(path)
+            if (
+                resolved in seen
+                or relpath in seen_relpaths
+                or not _data_sync_path_allowed(path)
+            ):
+                return
+            stat = resolved.stat()
+            published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
+            seen.add(resolved)
+            seen_relpaths.add(relpath)
+            rows.append({
+                "path": relpath,
+                "size": published_size,
+                "physical_size": int(stat.st_size),
+                "mtime_ns": int(stat.st_mtime_ns),
+                "inode": int(getattr(stat, "st_ino", 0) or 0),
+                "consistency_mode": _data_sync_consistency_mode(resolved),
+            })
+        except (OSError, ValueError):
+            return
+
+    # Runtime executes from BOT_DATA_DIR/runtime on Fly, while current pathway
+    # receipts are atomically published at BOT_DATA_DIR itself. Advertise only
+    # the explicit receipt allowlist from that parent boundary.
+    volume = _data_sync_volume_root()
+    for name in sorted(_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES):
+        append_path(volume / name)
+
     for root in _data_sync_allowed_roots():
         for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
             _dirnames[:] = [
@@ -35394,24 +35444,7 @@ def _data_sync_inventory() -> list:
                 if name.lower() not in _DATA_SYNC_EXCLUDED_DIR_NAMES
             ]
             for filename in filenames:
-                path = Path(dirpath) / filename
-                try:
-                    resolved = path.resolve(strict=True)
-                    if resolved in seen or not _data_sync_path_allowed(path):
-                        continue
-                    seen.add(resolved)
-                    stat = resolved.stat()
-                    published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
-                    rows.append({
-                        "path": _data_sync_relpath(path),
-                        "size": published_size,
-                        "physical_size": int(stat.st_size),
-                        "mtime_ns": int(stat.st_mtime_ns),
-                        "inode": int(getattr(stat, "st_ino", 0) or 0),
-                        "consistency_mode": _data_sync_consistency_mode(resolved),
-                    })
-                except (OSError, ValueError):
-                    continue
+                append_path(Path(dirpath) / filename)
                 if len(rows) >= 5000:
                     break
             if len(rows) >= 5000:
