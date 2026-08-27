@@ -27448,6 +27448,7 @@ HTML = """<!DOCTYPE html>
         .section-nav { position:sticky; top:0; z-index:20; display:flex; gap:6px; overflow-x:auto; margin:0 0 14px; padding:8px; background:rgba(11,15,20,.94); border:1px solid var(--line); border-radius:8px; backdrop-filter:blur(16px); }
         .section-nav a { flex:0 0 auto; padding:7px 10px; border-radius:6px; color:#c9d1d9; text-decoration:none; font-weight:600; }
         .section-nav a:hover { background:var(--surface-2); color:white; }
+        #marketOverview, #pathwayLab, #activityTables { scroll-margin-top:72px; }
         #tradingParamsPanel > summary { cursor:pointer; list-style:none; padding:12px 14px; color:var(--text); font-weight:700; }
         #tradingParamsPanel > summary::-webkit-details-marker { display:none; }
         #tradingParamsPanel > summary::after { content:'Show'; float:right; color:var(--muted); font-weight:500; }

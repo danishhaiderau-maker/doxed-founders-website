@@ -29,3 +29,14 @@ def test_activity_tables_keep_mobile_horizontal_scroll_contract():
     assert "display:block; overflow-x:auto;" in source
     assert "overscroll-behavior-inline:contain;" in source
     assert "-webkit-overflow-scrolling:touch;" in source
+
+
+def test_sticky_navigation_does_not_cover_section_headings():
+    """Anchor destinations must remain visible below the sticky section nav."""
+
+    source = bot.HTML
+    assert ".section-nav { position:sticky; top:0;" in source
+    assert (
+        "#marketOverview, #pathwayLab, #activityTables { scroll-margin-top:72px; }"
+        in source
+    )
