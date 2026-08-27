@@ -104,6 +104,21 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
 
 
+def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
+    assert "$preflightManifestAttempts = 5" in SYNC_LOOP
+    assert "$preflightManifestTimeoutSec = 90" in SYNC_LOOP
+    assert "function Get-FlySyncPreflightManifest" in SYNC_LOOP
+    assert "stage=loop_manifest_preflight failed after" in SYNC_LOOP
+    assert "Get-FlySyncPreflightManifest `" in SYNC_LOOP
+    assert "$relaySyncAttempts = 2" in SYNC_LOOP
+    assert "function Invoke-OptionalRelayEvidenceSync" in SYNC_LOOP
+    assert "stage=optional_relay_evidence failed after" in SYNC_LOOP
+    relay_call = SYNC_LOOP.index("$relayEvidencePath = Invoke-OptionalRelayEvidenceSync")
+    relay_catch = SYNC_LOOP.index("} catch {", relay_call)
+    manifest_call = SYNC_LOOP.index("$manifest = Get-FlySyncPreflightManifest", relay_catch)
+    assert relay_call < relay_catch < manifest_call
+
+
 def _load_bot_functions(*names):
     tree = ast.parse(BOT)
     selected = [

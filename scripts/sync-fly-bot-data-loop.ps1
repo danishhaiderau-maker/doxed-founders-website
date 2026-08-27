@@ -243,6 +243,48 @@ if (-not $env:BOT_ADMIN_TOKEN) {
   throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }
 
+$preflightManifestAttempts = 5
+$preflightManifestTimeoutSec = 90
+$relaySyncAttempts = 2
+
+function Get-FlySyncPreflightManifest {
+  param([Parameter(Mandatory = $true)][string]$ManifestUri)
+  $preflightHeaders = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
+  for ($attempt = 1; $attempt -le $preflightManifestAttempts; $attempt++) {
+    try {
+      return Invoke-RestMethod `
+        -Uri $ManifestUri `
+        -Headers $preflightHeaders `
+        -TimeoutSec $preflightManifestTimeoutSec `
+        -ErrorAction Stop
+    } catch {
+      if ($attempt -ge $preflightManifestAttempts) {
+        throw (
+          "Fly data-sync stage=loop_manifest_preflight failed after " +
+          "$attempt/$preflightManifestAttempts attempt(s): $($_.Exception.Message)"
+        )
+      }
+      Start-Sleep -Seconds ([Math]::Min(15, 2 * $attempt))
+    }
+  }
+}
+
+function Invoke-OptionalRelayEvidenceSync {
+  $lastRelayError = $null
+  for ($attempt = 1; $attempt -le $relaySyncAttempts; $attempt++) {
+    try {
+      return & (Join-Path $scriptDir "sync-platform-relay-evidence.ps1")
+    } catch {
+      $lastRelayError = $_
+      if ($attempt -lt $relaySyncAttempts) { Start-Sleep -Seconds 2 }
+    }
+  }
+  throw (
+    "Fly data-sync stage=optional_relay_evidence failed after " +
+    "$relaySyncAttempts/$relaySyncAttempts attempt(s): $($lastRelayError.Exception.Message)"
+  )
+}
+
 $lastSyncedTotalBytes = [int64]0
 $lastSyncAt = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
 $lastSyncedSourceRevision = $null
@@ -285,7 +327,7 @@ try {
       # previous qualified artifact and never blocks the canonical Fly mirror.
       if ($env:PLATFORM_API_BASE_URL -and $env:PLATFORM_RELAY_AGENT_SLUG -and $env:PLATFORM_RELAY_USER_ID) {
         try {
-          $relayEvidencePath = & (Join-Path $scriptDir "sync-platform-relay-evidence.ps1")
+          $relayEvidencePath = Invoke-OptionalRelayEvidenceSync
           if ($relayEvidencePath -and (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf)) {
             $relayEvidenceLastSuccessAt = [DateTimeOffset]::UtcNow.ToString("o")
             $relayEvidenceStatus = [ordered]@{
@@ -305,11 +347,8 @@ try {
           )
         }
       }
-      $headers = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
-      $manifest = Invoke-RestMethod `
-        -Uri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest") `
-        -Headers $headers `
-        -TimeoutSec 45
+      $manifest = Get-FlySyncPreflightManifest `
+        -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")
       if ($manifest.PSObject.Properties.Name -contains "source_git_rev") {
         $observedSourceRevision = [string]$manifest.source_git_rev
         if (-not $observedSourceRevision) { $observedSourceRevision = $null }
