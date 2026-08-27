@@ -22,7 +22,6 @@ def main():
         bot.LANE_OPPORTUNITY_CAPTURE_FILE,
         bot.LANE_PNL_LEDGER_FILE,
         bot.LANE_LAB_PNL_LEDGER_FILE,
-        bot.TILE2_COUNTERS_FILE,
         bot.PATHWAY_LANE_SPECS_FILE,
         bot.TRADE_OUTCOME_FILE,
         bot.PATH_REPLAY_FILE,

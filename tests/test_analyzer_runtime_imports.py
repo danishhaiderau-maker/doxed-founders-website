@@ -21,5 +21,6 @@ def test_pathway_trade_count_never_coerces_dataframe_to_bool() -> None:
     source = ANALYZER.read_text(encoding="utf-8")
 
     assert "len(trades or [])" not in source
-    assert 'elif "trade_id" in trades.columns:' in source
-    assert "trade_n = len(trades)" in source
+    assert "if trades is not None and not trades.empty:" in source
+    assert 'if "trade_id" in trades.columns:' in source
+    assert "stc = len(trades)" in source
