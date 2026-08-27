@@ -1220,33 +1220,106 @@ def prime_dashboard_caches() -> None:
     _opportunity_lane_stats()
 
 
-def _lane_rows():
-    bench = _read_json("benchmark_vs_lanes_report.json")
-    all_data_bench_path = ROOT / ALL_DATA_REPORTS_DIR / "benchmark_vs_lanes_report.json"
-    all_data_bench = {}
-    if all_data_bench_path.is_file():
-        try:
-            all_data_bench = (json.loads(all_data_bench_path.read_text(encoding="utf-8")) or {}).get("lanes") or {}
-        except Exception:
-            all_data_bench = {}
+def _lane_report_identity(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    provenance = payload.get("analysis_provenance") or {}
+    epoch_scope = payload.get("epoch_scope") or {}
+    revision = payload.get("generation_revision") or provenance.get("generation_revision")
+    source_revision = payload.get("source_data_revision") or provenance.get("source_data_revision")
+    epoch = (
+        payload.get("epoch_id")
+        or (payload.get("fresh_epoch") or {}).get("epoch_id")
+        or provenance.get("fresh_epoch_id")
+        or epoch_scope.get("selected_epoch_id")
+    )
+    raw_scope = str(
+        payload.get("session_scope")
+        or payload.get("data_scope")
+        or payload.get("scope")
+        or ""
+    ).strip().upper()
+    if "FRESH" in raw_scope or raw_scope == "SESSION":
+        scope = "CURRENT_SESSION"
+    elif raw_scope in {"ALL", "ALL-DATA", "ALL-TIME", "HISTORICAL"}:
+        scope = "HISTORICAL_ALL_DATA"
+    else:
+        scope = raw_scope
+    return {
+        "generation_revision": str(revision or "").strip(),
+        "source_data_revision": str(source_revision or "").strip(),
+        "epoch_id": str(epoch or "").strip(),
+        "scope": scope,
+    }
+
+
+def _current_lane_artifact(name: str) -> tuple[dict, dict]:
+    """Return lane evidence only when it belongs to the atomic current generation.
+
+    The Current Lanes page is a current-epoch surface.  Historical/all-data
+    reports remain downloadable elsewhere, but they must never backfill current
+    closes or PnL when a fresh generation intentionally has no executed rows.
+    """
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    expected = _lane_report_identity(manifest)
+    declared = {
+        str(row.get("file"))
+        for row in (manifest.get("reports") or [])
+        if isinstance(row, dict) and row.get("file")
+    }
+    candidate = {}
+    candidate_mtime = -1.0
+    if name in declared:
+        for path, payload, mtime in _iter_data_payloads(name):
+            parts = tuple(part.casefold() for part in path.parts)
+            # Current Lanes is deliberately not an all-data/historical view,
+            # even if an old fallback happens to carry plausible identity.
+            if len(parts) >= 2 and parts[-2:] == ("all_data", name.casefold()):
+                continue
+            if isinstance(payload, dict) and mtime > candidate_mtime:
+                candidate = payload
+                candidate_mtime = mtime
+    observed = _lane_report_identity(candidate)
+    mismatches = []
+    required = (
+        "generation_revision",
+        "source_data_revision",
+        "epoch_id",
+        "scope",
+    )
+    for field in required:
+        if not expected.get(field):
+            mismatches.append(f"CURRENT_MANIFEST_{field.upper()}_MISSING")
+        elif observed.get(field) != expected.get(field):
+            mismatches.append(f"{field.upper()}_MISMATCH")
+    if not candidate:
+        mismatches.append(
+            "CURRENT_REPORT_MISSING"
+            if name in declared
+            else "REPORT_NOT_IN_CURRENT_GENERATION"
+        )
+    if mismatches:
+        return {}, {
+            "status": "UNAVAILABLE_CURRENT_GENERATION",
+            "report": name,
+            "expected": expected,
+            "observed": observed,
+            "blockers": sorted(set(mismatches)),
+        }
+    return candidate, {
+        "status": "CURRENT_GENERATION",
+        "report": name,
+        "expected": expected,
+        "observed": observed,
+        "blockers": [],
+    }
+
+
+def _lane_rows(*, include_evidence: bool = False):
+    bench, bench_evidence = _current_lane_artifact("benchmark_vs_lanes_report.json")
     lanes = dict(bench.get("lanes") or {})
-    for lane_key, metrics in all_data_bench.items():
-        cur = lanes.get(lane_key) or {}
-        if not cur.get("all_time"):
-            at = metrics.get("all_time") or {}
-            if not at and (metrics.get("real_fills") or metrics.get("net_pnl_real")):
-                at = {
-                    "real_fills": metrics.get("real_fills"),
-                    "net_pnl_real": metrics.get("net_pnl_real"),
-                    "ev_usd": metrics.get("per_approve_ev"),
-                }
-            if at:
-                cur = dict(cur)
-                cur["all_time"] = at
-                lanes[lane_key] = cur
-    ledger_file = _read_json("lane_pnl_ledger.json")
+    ledger_file, ledger_evidence = _current_lane_artifact("lane_pnl_ledger.json")
     ledger = ledger_file.get("lanes") or {}
-    lab_ledger_file = _read_json("lane_lab_pnl_ledger.json")
+    lab_ledger_file, lab_evidence = _current_lane_artifact("lane_lab_pnl_ledger.json")
     lab_ledger = lab_ledger_file.get("lanes") or {}
     opp_stats = _opportunity_lane_stats()
     benchmark_lane = str(bench.get("benchmark_lane") or COMPARISON_BENCHMARK_LANE or BENCHMARK_LANE)
@@ -1264,15 +1337,6 @@ def _lane_rows():
         m = lanes.get(lane) or {}
         lb = ledger.get(lane) or {}
         all_time = m.get("all_time") or {}
-        if not all_time:
-            ad = all_data_bench.get(lane) or {}
-            all_time = ad.get("all_time") or {}
-            if not all_time and (ad.get("real_fills") or ad.get("net_pnl_real")):
-                all_time = {
-                    "real_fills": ad.get("real_fills"),
-                    "net_pnl_real": ad.get("net_pnl_real"),
-                    "ev_usd": ad.get("per_approve_ev"),
-                }
         lab = lab_ledger.get(lane) or {}
         opp = opp_stats.get(lane) or {}
         # Executed paper closes and lab/counterfactual terminals are different
@@ -1383,6 +1447,19 @@ def _lane_rows():
             "retired": is_retired,
         })
     rows.sort(key=lambda x: (-(x["all_time_pnl"] if x["all_time_fills"] else x["pnl"]), x["lane"]))
+    evidence = {
+        "status": (
+            "CURRENT_GENERATION"
+            if bench_evidence.get("status") == "CURRENT_GENERATION"
+            else "UNAVAILABLE_CURRENT_GENERATION"
+        ),
+        "benchmark": bench_evidence,
+        "executed_ledger": ledger_evidence,
+        "counterfactual_ledger": lab_evidence,
+        "historical_fallback_used": False,
+    }
+    if include_evidence:
+        return rows, benchmark_pnl, evidence
     return rows, benchmark_pnl
 
 
@@ -3331,7 +3408,7 @@ def _filter_lane_rows(rows, *, all_lanes: bool = False):
 
 @app.route("/api/lanes")
 def api_lanes():
-    rows, bench_pnl = _lane_rows()
+    rows, bench_pnl, evidence = _lane_rows(include_evidence=True)
     all_lanes = _wants_all_lanes()
     filtered = _filter_lane_rows(rows, all_lanes=all_lanes)
     return jsonify({
@@ -3344,6 +3421,8 @@ def api_lanes():
             else "Current active research stack is derived from the canonical tile registry."
         ),
         "primary_lanes": list(DASHBOARD_PRIMARY_LANES),
+        "evidence_status": evidence["status"],
+        "evidence": evidence,
     })
 
 
@@ -3753,15 +3832,51 @@ def download_everything():
         if agent_root.resolve() != DATA_ROOT.resolve():
             for path in sorted(agent_root.glob(pattern)):
                 candidates.append((path, f"raw/research_history/{path.name}"))
-    # JSON reports are manifest-owned below. The immutable cross-service relay
-    # export is raw evidence, so include that one explicitly without sweeping
-    # unrelated runtime/config JSON into the downloadable archive.
-    relay_evidence = DATA_ROOT / "relay_lifecycle_evidence_v1.json"
-    if relay_evidence.is_file():
-        candidates.append((
-            relay_evidence,
-            "raw/current_fly_mirror/relay_lifecycle_evidence_v1.json",
-        ))
+    # Reproducibility receipts are explicitly allowlisted. They are raw source
+    # inputs, not analyzer reports, and therefore must travel with the mirror.
+    current_receipts = (
+        "relay_lifecycle_evidence_v1.json",
+        "research_session.json",
+        "pathway_lane_specs.json",
+        "research_events_v22.index.json",
+        "paper_lifecycle_v1.json",
+        "lane_lab_pnl_ledger.json",
+        ".fly-sync-state.json",
+        ".fly-sync-growth-state.json",
+        "_size_report.json",
+    )
+    for name in current_receipts:
+        path = DATA_ROOT / name
+        if path.is_file():
+            candidates.append((path, f"raw/current_fly_mirror/{name}"))
+    for pattern in ("paper_lifecycle_emergency_*.json", "config-*.json"):
+        for path in sorted(DATA_ROOT.glob(pattern)):
+            candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
+    for path in sorted(DATA_ROOT.glob("signal_replay.jsonl.*")):
+        if path.is_file():
+            candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
+
+    # Canonical V3 evidence is recursive by design: ledgers are append-only and
+    # market segments are content-addressed below a nested directory tree.
+    v3_ledgers = (
+        "decision.jsonl",
+        "lifecycle.jsonl",
+        "market_segment.jsonl",
+        "opportunity.jsonl",
+        "order_intent.jsonl",
+    )
+    for name in v3_ledgers:
+        path = DATA_ROOT / "v3" / "ledgers" / name
+        if path.is_file():
+            candidates.append((
+                path,
+                f"raw/current_fly_mirror/v3/ledgers/{name}",
+            ))
+    add_tree(
+        DATA_ROOT / "v3" / "market_segments",
+        "raw/current_fly_mirror/v3/market_segments",
+        patterns=("*.json", "*.jsonl"),
+    )
 
     # Exactly one scope-aware copy of each current report. Historical/all-data
     # reports remain available under an explicitly named directory.
@@ -3785,6 +3900,27 @@ def download_everything():
     for path, arcname in candidates:
         unique.setdefault(arcname, path)
     member_names = set(unique)
+    required_raw_members = {
+        "raw/current_fly_mirror/relay_lifecycle_evidence_v1.json",
+        "raw/current_fly_mirror/research_session.json",
+        "raw/current_fly_mirror/pathway_lane_specs.json",
+        "raw/current_fly_mirror/research_events_v22.index.json",
+        "raw/current_fly_mirror/paper_lifecycle_v1.json",
+        "raw/current_fly_mirror/.fly-sync-state.json",
+        *{
+            f"raw/current_fly_mirror/v3/ledgers/{name}"
+            for name in v3_ledgers
+        },
+    }
+    missing_required_raw = sorted(required_raw_members - member_names)
+    if missing_required_raw:
+        abort(
+            500,
+            description=(
+                "complete research download refused: required current mirror "
+                "artifacts are missing: " + ", ".join(missing_required_raw)
+            ),
+        )
     current_report_manifest = _read_json(REPORT_MANIFEST_FILE) or {}
     current_safe_genome = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
     current_epoch_id = current_safe_genome.get("epoch_id") or (
@@ -3831,6 +3967,8 @@ def download_everything():
             "live_trading_data": False,
             "purpose": "research audit and offline analysis",
             "source_revision": current_generation_revision,
+            "required_raw_members": sorted(required_raw_members),
+            "missing_required_raw_members": missing_required_raw,
             "component_coverage": {
                 "relay_lifecycle_evidence_v1": any(
                     name.endswith("/relay_lifecycle_evidence_v1.json")
@@ -3843,6 +3981,35 @@ def download_everything():
                 "genome_and_dna": any(name.startswith("genome/") for name in member_names),
                 "report_manifest": any(
                     name.endswith("/report_manifest.json") for name in member_names
+                ),
+                "canonical_v3_ledgers": all(
+                    f"raw/current_fly_mirror/v3/ledgers/{name}" in member_names
+                    for name in v3_ledgers
+                ),
+                "canonical_v3_market_segments": any(
+                    name.startswith("raw/current_fly_mirror/v3/market_segments/")
+                    for name in member_names
+                ),
+                "replay_rotations": any(
+                    name.startswith("raw/current_fly_mirror/signal_replay.jsonl.")
+                    for name in member_names
+                ),
+                "session_spec_index_receipts": all(
+                    f"raw/current_fly_mirror/{name}" in member_names
+                    for name in (
+                        "research_session.json",
+                        "pathway_lane_specs.json",
+                        "research_events_v22.index.json",
+                    )
+                ),
+                "paper_lifecycle_receipt": (
+                    "raw/current_fly_mirror/paper_lifecycle_v1.json" in member_names
+                ),
+                "mirror_sync_receipt": (
+                    "raw/current_fly_mirror/.fly-sync-state.json" in member_names
+                ),
+                "gpt_audit_source_bundle": (
+                    "audit/gpt_audit_bundle.zip" in member_names
                 ),
             },
         },
@@ -4081,7 +4248,19 @@ def _gpt_audit_bundle_is_current(
                 if str(record.get("path") or "").startswith("source/")
             ]
             source_members = set(zf.namelist())
-            if not source_records or "source/bot.py" not in source_members:
+            required_members = set(meta.get("required_members") or [])
+            promised_members = set(meta.get("start_here") or [])
+            mandatory_source_members = {
+                "source/bot.py",
+                "source/analyzer_research_engine_v62.py",
+                "source/research/research_dashboard.py",
+            }
+            if (
+                not source_records
+                or not mandatory_source_members.issubset(source_members)
+                or not required_members.issubset(source_members)
+                or not promised_members.issubset(source_members)
+            ):
                 return False
             for record in source_records:
                 rel = str(record.get("path") or "")

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -61,8 +62,15 @@ def test_current_lane_table_separates_executed_and_counterfactual_evidence():
 
 
 def test_lab_ledger_cannot_be_promoted_to_executed_lane_results(monkeypatch, tmp_path):
+    identity = {
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "session_scope": "FRESH-COLLECTION",
+        "analysis_provenance": {"fresh_epoch_id": "epoch-current"},
+    }
     reports = {
         "benchmark_vs_lanes_report.json": {
+            **identity,
             "benchmark_lane": "CONTINUOUS",
             "lanes": {
                 "CONTINUOUS": {
@@ -73,8 +81,9 @@ def test_lab_ledger_cannot_be_promoted_to_executed_lane_results(monkeypatch, tmp
                 }
             },
         },
-        "lane_pnl_ledger.json": {"lanes": {}},
+        "lane_pnl_ledger.json": {**identity, "lanes": {}},
         "lane_lab_pnl_ledger.json": {
+            **identity,
             "lanes": {
                 "CONTINUOUS": {
                     "closes": 9,
@@ -83,8 +92,26 @@ def test_lab_ledger_cannot_be_promoted_to_executed_lane_results(monkeypatch, tmp
             }
         },
     }
+    manifest = {
+        **identity,
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "reports": [{"file": name} for name in reports],
+    }
     monkeypatch.setattr(dashboard, "ROOT", tmp_path)
-    monkeypatch.setattr(dashboard, "_read_json", lambda name: reports.get(name, {}))
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, default=None: (
+            manifest
+            if name == dashboard.REPORT_MANIFEST_FILE
+            else reports.get(name, default or {})
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_iter_data_payloads",
+        lambda name: iter([(tmp_path / name, reports[name], 1.0)]) if name in reports else iter(()),
+    )
     monkeypatch.setattr(dashboard, "_opportunity_lane_stats", lambda: {})
 
     rows, _ = dashboard._lane_rows()
@@ -94,6 +121,101 @@ def test_lab_ledger_cannot_be_promoted_to_executed_lane_results(monkeypatch, tmp
     assert continuous["pnl"] == 0.0
     assert continuous["counterfactual_closes"] == 9
     assert continuous["counterfactual_pnl"] == 3.75
+
+
+def test_current_lanes_fail_closed_on_stale_revision_epoch_and_scope(monkeypatch):
+    manifest = {
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "session_scope": "FRESH-COLLECTION",
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "reports": [
+            {"file": "benchmark_vs_lanes_report.json"},
+            {"file": "lane_pnl_ledger.json"},
+            {"file": "lane_lab_pnl_ledger.json"},
+        ],
+    }
+    stale = {
+        "generation_revision": "revision-old",
+        "source_data_revision": "source-old",
+        "session_scope": "ALL-TIME",
+        "analysis_provenance": {"fresh_epoch_id": "epoch-old"},
+        "benchmark_lane": "CONTINUOUS",
+        "lanes": {
+            ACTIVE_TILE_ORDER[0]: {
+                "approves": 9,
+                "real_fills": 7,
+                "net_pnl_real": -5.25,
+                "per_approve_ev": -0.58,
+            }
+        },
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_iter_data_payloads",
+        lambda name: iter([(Path("published_reports") / name, stale, 1.0)]),
+    )
+    monkeypatch.setattr(dashboard, "_opportunity_lane_stats", lambda: {})
+
+    payload = dashboard.app.test_client().get("/api/lanes").get_json()
+    lane = next(row for row in payload["lanes"] if row["lane"] == ACTIVE_TILE_ORDER[0])
+
+    assert payload["evidence_status"] == "UNAVAILABLE_CURRENT_GENERATION"
+    assert payload["evidence"]["historical_fallback_used"] is False
+    assert {
+        "GENERATION_REVISION_MISMATCH",
+        "SOURCE_DATA_REVISION_MISMATCH",
+        "EPOCH_ID_MISMATCH",
+        "SCOPE_MISMATCH",
+    }.issubset(set(payload["evidence"]["benchmark"]["blockers"]))
+    assert lane["executed_closes"] == 0
+    assert lane["pnl"] == 0.0
+    assert lane["all_time_fills"] == 0
+    assert lane["all_time_pnl"] == 0.0
+
+
+def test_current_lanes_never_reads_all_data_fallback(monkeypatch, tmp_path):
+    manifest = {
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "session_scope": "FRESH-COLLECTION",
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "reports": [{"file": "benchmark_vs_lanes_report.json"}],
+    }
+    all_data = tmp_path / dashboard.ALL_DATA_REPORTS_DIR
+    all_data.mkdir(parents=True)
+    (all_data / "benchmark_vs_lanes_report.json").write_text(
+        '{"lanes":{"%s":{"real_fills":99,"net_pnl_real":42.0}}}'
+        % ACTIVE_TILE_ORDER[0],
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}),
+    )
+    def all_data_only(name):
+        path = all_data / name
+        if path.is_file():
+            return iter([(path, json.loads(path.read_text(encoding="utf-8")), 1.0)])
+        return iter(())
+
+    monkeypatch.setattr(dashboard, "_iter_data_payloads", all_data_only)
+    monkeypatch.setattr(dashboard, "_opportunity_lane_stats", lambda: {})
+
+    payload = dashboard.app.test_client().get("/api/lanes").get_json()
+    lane = next(row for row in payload["lanes"] if row["lane"] == ACTIVE_TILE_ORDER[0])
+
+    assert payload["evidence_status"] == "UNAVAILABLE_CURRENT_GENERATION"
+    assert payload["evidence"]["historical_fallback_used"] is False
+    assert lane["executed_closes"] == 0
+    assert lane["pnl"] == 0.0
 
 
 def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():

@@ -2,8 +2,8 @@
 """
 GPT Audit Bundle — one-click export for ChatGPT review.
 
-Includes main bot script, legacy + genome analyzers, recorder modules,
-latest genome report, version sync, and implementation checklist.
+Includes the production bot/analyzer source closure, genome/recorder modules,
+available provenance reports, and an implementation checklist.
 
 Output: research/downloads/gpt_audit_bundle.zip
         research/downloads/GPT_AUDIT_MANIFEST.json
@@ -31,24 +31,37 @@ ZIP_NAME = "gpt_audit_bundle.zip"
 MANIFEST_NAME = "GPT_AUDIT_MANIFEST.json"
 ARCHITECTURE_VERSION = "v11.0-genome-architecture-v1"
 
-SOURCE_FILES = (
+REQUIRED_SOURCE_FILES = (
     "bot.py",
+    "analyzer_research_engine_v62.py",
     "btc_conservative_agent.py",
-    "pathway_lab_validation.py",
-    "scenario_c_config.py",
-    "research/analyzer_research_engine_v62.py",
+    "combo_pathway_config.py",
+    "pathway_lane_roster.py",
+    "policy_research_engine.py",
+    "research_v3_bridge.py",
+    "research_v3_candidates.py",
+    "research_v3_contract.py",
+    "research/analysis_eligibility.py",
+    "research/counterfactual_normalization.py",
+    "research/platform_relay_evidence.py",
     "research/research_dashboard.py",
+    "research/genome/run_analyzer.py",
+    "research/shadow_outcome_reconstruction.py",
+    "research/source_market_evidence.py",
 )
 
-GENOME_GLOB = "research/genome/*.py"
-RECORDER_GLOB = "research_genome/*.py"
+# Production Python is intentionally allowlisted by location and excludes tests.
+# This captures modules reached through dynamic loaders as well as normal imports.
+SOURCE_TREES = ("research", "research_genome")
 
 DATA_FILES = (
     "research/genome/genome_analysis_report.json",
     "research/genome/genome_library.json",
     "research/genome/genome_discoveries.json",
     "bot_analyzer_sync.json",
-    "repo_version_sync.json",
+    "report_manifest.json",
+    "research_session.json",
+    "pathway_lane_specs.json",
     "research/schema/genome_v1.json",
 )
 
@@ -63,6 +76,43 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()[:16]
+
+
+def _production_source_files() -> List[Path]:
+    """Return the deterministic production source closure for the audit."""
+    candidates = {AGENT_ROOT / rel for rel in REQUIRED_SOURCE_FILES}
+    candidates.update(
+        path for path in AGENT_ROOT.glob("*.py")
+        if path.is_file() and not path.name.startswith("test_")
+    )
+    for tree in SOURCE_TREES:
+        root = AGENT_ROOT / tree
+        if not root.is_dir():
+            continue
+        candidates.update(
+            path for path in root.rglob("*.py")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and not path.name.startswith("test_")
+        )
+    return sorted(candidates, key=lambda path: path.relative_to(AGENT_ROOT).as_posix())
+
+
+def _validate_required_and_promised_members(
+    files: List[Tuple[Path, str]], manifest: Dict[str, Any]
+) -> None:
+    members = {arc for _src, arc in files}
+    required = set(manifest.get("required_members") or [])
+    promised = set(manifest.get("start_here") or [])
+    missing_required = sorted(required - members)
+    missing_promised = sorted(promised - members)
+    if missing_required or missing_promised:
+        details = []
+        if missing_required:
+            details.append(f"required={missing_required}")
+        if missing_promised:
+            details.append(f"start_here={missing_promised}")
+        raise FileNotFoundError("audit bundle incomplete: " + "; ".join(details))
 
 
 def _db_stats(db_path: Path) -> Dict[str, Any]:
@@ -152,38 +202,34 @@ def build(agent_root: Path | None = None) -> Tuple[Path, dict]:
     to_pack: List[Tuple[Path, str]] = []
     file_index: List[Dict[str, Any]] = []
 
-    for rel in SOURCE_FILES:
-        src = AGENT_ROOT / rel
-        if src.is_file():
-            arc = f"source/{rel.replace(chr(92), '/')}"
-            to_pack.append((src, arc))
-            file_index.append({
-                "path": arc,
-                "bytes": src.stat().st_size,
-                "sha256_prefix": _file_sha256(src),
-            })
+    missing_source = [
+        rel for rel in REQUIRED_SOURCE_FILES if not (AGENT_ROOT / rel).is_file()
+    ]
+    if missing_source:
+        raise FileNotFoundError(
+            "required production audit source missing: " + ", ".join(missing_source)
+        )
 
-    for pattern in (GENOME_GLOB, RECORDER_GLOB):
-        base = AGENT_ROOT / pattern.split("/")[0]
-        sub = pattern.split("/", 1)[1] if "/" in pattern else "*.py"
-        for src in sorted(base.glob(sub)):
-            if not src.is_file() or src.suffix != ".py":
-                continue
-            rel = src.relative_to(AGENT_ROOT).as_posix()
-            arc = f"source/{rel}"
-            to_pack.append((src, arc))
-            file_index.append({
-                "path": arc,
-                "bytes": src.stat().st_size,
-                "sha256_prefix": _file_sha256(src),
-            })
+    for src in _production_source_files():
+        rel = src.relative_to(AGENT_ROOT).as_posix()
+        arc = f"source/{rel}"
+        to_pack.append((src, arc))
+        file_index.append({
+            "path": arc,
+            "bytes": src.stat().st_size,
+            "sha256_prefix": _file_sha256(src),
+        })
 
     for rel in DATA_FILES:
         src = AGENT_ROOT / rel
         if src.is_file():
             arc = f"data/{Path(rel).name}"
             to_pack.append((src, arc))
-            file_index.append({"path": arc, "bytes": src.stat().st_size})
+            file_index.append({
+                "path": arc,
+                "bytes": src.stat().st_size,
+                "sha256_prefix": _file_sha256(src),
+            })
 
     repo_root = AGENT_ROOT.parent.parent
     for src_rel, arc in DOC_FILES:
@@ -192,6 +238,11 @@ def build(agent_root: Path | None = None) -> Tuple[Path, dict]:
             src = repo_root / "docs" / Path(arc).name
         if src.is_file():
             to_pack.append((src, arc))
+            file_index.append({
+                "path": arc,
+                "bytes": src.stat().st_size,
+                "sha256_prefix": _file_sha256(src),
+            })
 
     report_path = RESEARCH_ROOT / "genome" / "genome_analysis_report.json"
     report_summary: Dict[str, Any] = {}
@@ -209,20 +260,25 @@ def build(agent_root: Path | None = None) -> Tuple[Path, dict]:
         except (json.JSONDecodeError, OSError):
             pass
 
+    start_here = [
+        "GPT_AUDIT_MANIFEST.json",
+        "README.txt",
+        "IMPLEMENTATION_STATUS.json",
+        "source/bot.py",
+        "source/analyzer_research_engine_v62.py",
+        "source/research/research_dashboard.py",
+        "source/research/genome/run_analyzer.py",
+    ]
+    if report_path.is_file():
+        start_here.append("data/genome_analysis_report.json")
+
     manifest: Dict[str, Any] = {
         "schema": "gpt_audit_bundle_manifest_v1",
         "generated_at": stamp,
         "architecture_version": ARCHITECTURE_VERSION,
         "purpose": "Upload to ChatGPT for full-stack genome architecture audit",
-        "start_here": [
-            "GPT_AUDIT_MANIFEST.json",
-            "README.txt",
-            "IMPLEMENTATION_STATUS.json",
-            "source/bot.py",
-            "source/research/analyzer_research_engine_v62.py",
-            "source/research/genome/run_analyzer.py",
-            "data/genome_analysis_report.json",
-        ],
+        "start_here": start_here,
+        "required_members": start_here,
         "files_included": [f["path"] for f in file_index],
         "file_index": file_index,
         "research_db": _db_stats(AGENT_ROOT / "research.db"),
@@ -233,7 +289,17 @@ def build(agent_root: Path | None = None) -> Tuple[Path, dict]:
     status_path = OUT_DIR / "_temp_implementation_status.json"
     status_path.write_text(json.dumps(manifest["implementation_status"], indent=2), encoding="utf-8")
     to_pack.append((status_path, "IMPLEMENTATION_STATUS.json"))
+    file_index.append({
+        "path": "IMPLEMENTATION_STATUS.json",
+        "bytes": status_path.stat().st_size,
+        "sha256_prefix": _file_sha256(status_path),
+    })
 
+    genome_line = (
+        "  7. data/genome_analysis_report.json — latest genome analysis"
+        if report_path.is_file()
+        else "  7. Genome report unavailable in this generation; see manifest summary."
+    )
     readme = f"""GPT Audit Bundle — Trading Genome v11
 Generated: {stamp}
 Architecture: {ARCHITECTURE_VERSION}
@@ -244,10 +310,10 @@ Start with:
   1. GPT_AUDIT_MANIFEST.json — versions, file list, DB stats
   2. IMPLEMENTATION_STATUS.json — what's implemented vs pending
   3. source/bot.py — main execution engine (Scenario C)
-  4. source/research/analyzer_research_engine_v62.py — legacy analyzer loop
+  4. source/analyzer_research_engine_v62.py — production analyzer loop
   5. source/research/genome/ — DNA-first persistent genome pipeline
   6. source/research_genome/ — bot-side recorders
-  7. data/genome_analysis_report.json — latest genome analysis
+{genome_line}
 
 Key philosophy:
   Bot records facts → research.db → Genome Memory → Discoveries → Recommendations → Human decides
@@ -258,13 +324,20 @@ This bundle auto-regenerates every analyzer cycle (~30 min).
     readme_path = OUT_DIR / "_temp_readme.txt"
     readme_path.write_text(readme, encoding="utf-8")
     to_pack.append((readme_path, "README.txt"))
+    file_index.append({
+        "path": "README.txt",
+        "bytes": readme_path.stat().st_size,
+        "sha256_prefix": _file_sha256(readme_path),
+    })
 
     manifest_path = OUT_DIR / MANIFEST_NAME
+    manifest["files_included"] = sorted(
+        {record["path"] for record in file_index} | {MANIFEST_NAME}
+    )
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     to_pack.append((manifest_path, MANIFEST_NAME))
 
-    if not any(f[1].startswith("source/bot.py") for f in to_pack):
-        raise FileNotFoundError("bot.py missing — run from btc-conservative-agent root")
+    _validate_required_and_promised_members(to_pack, manifest)
 
     out_zip = OUT_DIR / ZIP_NAME
     _atomic_zip_build(to_pack, out_zip)

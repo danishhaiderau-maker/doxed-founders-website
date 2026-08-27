@@ -34,6 +34,9 @@ build_chatgpt = _load_agent_module(
 build_bundle = _load_agent_module(
     "_test_complete_builder", "build_complete_session_bundle.py"
 ).build_bundle
+gpt_audit_builder = _load_agent_module(
+    "_test_gpt_audit_builder", "build_gpt_audit_bundle.py"
+)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -233,6 +236,11 @@ def test_gpt_audit_source_hash_validation() -> None:
         source.write_text("print('current')\n", encoding="utf-8")
         bot_source = root / "bot.py"
         bot_source.write_text("print('bot')\n", encoding="utf-8")
+        analyzer_source = root / "analyzer_research_engine_v62.py"
+        analyzer_source.write_text("print('analyzer')\n", encoding="utf-8")
+        dashboard_source = root / "research" / "research_dashboard.py"
+        dashboard_source.parent.mkdir(parents=True)
+        dashboard_source.write_text("print('dashboard')\n", encoding="utf-8")
         record = {
             "path": "source/sample.py",
             "bytes": source.stat().st_size,
@@ -248,17 +256,62 @@ def test_gpt_audit_source_hash_validation() -> None:
             zf.writestr("README.txt", "audit")
             zf.write(source, "source/sample.py")
             zf.write(bot_source, "source/bot.py")
-        bot_record = {
-            "path": "source/bot.py",
-            "bytes": bot_source.stat().st_size,
-            "sha256_prefix": _sha(bot_source)[:16],
-        }
+            zf.write(analyzer_source, "source/analyzer_research_engine_v62.py")
+            zf.write(dashboard_source, "source/research/research_dashboard.py")
         payload = json.loads(manifest.read_text(encoding="utf-8"))
-        payload["file_index"].append(bot_record)
+        for path, member in (
+            (bot_source, "source/bot.py"),
+            (analyzer_source, "source/analyzer_research_engine_v62.py"),
+            (dashboard_source, "source/research/research_dashboard.py"),
+        ):
+            payload["file_index"].append({
+                "path": member,
+                "bytes": path.stat().st_size,
+                "sha256_prefix": _sha(path)[:16],
+            })
         _write_json(manifest, payload)
         assert dashboard._gpt_audit_bundle_is_current(bundle, manifest, root)
         source.write_text("print('changed')\n", encoding="utf-8")
         assert not dashboard._gpt_audit_bundle_is_current(bundle, manifest, root)
+
+
+def test_gpt_audit_builder_uses_real_analyzer_and_fails_closed() -> None:
+    saved_roots = (
+        gpt_audit_builder.AGENT_ROOT,
+        gpt_audit_builder.RESEARCH_ROOT,
+        gpt_audit_builder.OUT_DIR,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "agent"
+        for rel in gpt_audit_builder.REQUIRED_SOURCE_FILES:
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# {rel}\n", encoding="utf-8")
+        try:
+            bundle, manifest = gpt_audit_builder.build(agent_root=root)
+            with zipfile.ZipFile(bundle) as zf:
+                names = set(zf.namelist())
+                assert zf.testzip() is None
+                assert "source/analyzer_research_engine_v62.py" in names
+                assert "source/research/analyzer_research_engine_v62.py" not in names
+                assert set(manifest["required_members"]).issubset(names)
+                assert set(manifest["start_here"]).issubset(names)
+                assert "data/genome_analysis_report.json" not in manifest["start_here"]
+
+            missing = root / "research_v3_contract.py"
+            missing.unlink()
+            try:
+                gpt_audit_builder.build(agent_root=root)
+            except FileNotFoundError as exc:
+                assert "research_v3_contract.py" in str(exc)
+            else:
+                raise AssertionError("missing required audit source did not fail closed")
+        finally:
+            (
+                gpt_audit_builder.AGENT_ROOT,
+                gpt_audit_builder.RESEARCH_ROOT,
+                gpt_audit_builder.OUT_DIR,
+            ) = saved_roots
 
 
 def test_everything_includes_current_mirror_without_cache_files() -> None:
@@ -276,6 +329,34 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         _write_json(mirror / "relay_lifecycle_evidence_v1.json", {
             "schema": "relay_lifecycle_evidence_v1", "records": []
         })
+        for name in (
+            "research_session.json",
+            "pathway_lane_specs.json",
+            "research_events_v22.index.json",
+            "paper_lifecycle_v1.json",
+            "lane_lab_pnl_ledger.json",
+            ".fly-sync-state.json",
+            ".fly-sync-growth-state.json",
+            "_size_report.json",
+            "config-7002.json",
+            "paper_lifecycle_emergency_test.json",
+        ):
+            _write_json(mirror / name, {"name": name})
+        for name in (
+            "decision.jsonl",
+            "lifecycle.jsonl",
+            "market_segment.jsonl",
+            "opportunity.jsonl",
+            "order_intent.jsonl",
+        ):
+            path = mirror / "v3" / "ledgers" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+        _write_json(
+            mirror / "v3" / "market_segments" / "aa" / "segment.json",
+            {"segment": "aa"},
+        )
+        (mirror / "signal_replay.jsonl.1").write_text("{}\n", encoding="utf-8")
         (mirror / "counterfactual.jsonl").write_text("{}\n", encoding="utf-8")
         _write_csv(root / "trades_3factor.csv", [{"trade_id": "history"}])
         _write_json(root / "historical_trade_cohort_report.json", {"cohorts": {}})
@@ -323,6 +404,20 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert "raw/current_fly_mirror/trades_3factor.csv" in names
                     assert "raw/current_fly_mirror/relay_lifecycle_evidence_v1.json" in names
                     assert "raw/current_fly_mirror/counterfactual.jsonl" in names
+                    assert "raw/current_fly_mirror/research_session.json" in names
+                    assert "raw/current_fly_mirror/pathway_lane_specs.json" in names
+                    assert "raw/current_fly_mirror/research_events_v22.index.json" in names
+                    assert "raw/current_fly_mirror/paper_lifecycle_v1.json" in names
+                    assert "raw/current_fly_mirror/.fly-sync-state.json" in names
+                    assert "raw/current_fly_mirror/signal_replay.jsonl.1" in names
+                    assert (
+                        "raw/current_fly_mirror/v3/ledgers/decision.jsonl"
+                        in names
+                    )
+                    assert (
+                        "raw/current_fly_mirror/v3/market_segments/aa/segment.json"
+                        in names
+                    )
                     assert "raw/research_history/trades_3factor.csv" in names
                     assert not any("__pycache__" in name or name.endswith(".pyc") for name in names)
                     manifest = json.loads(zf.read("MANIFEST.json"))
@@ -341,6 +436,22 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                     assert coverage["cohort_reports"] is True
                     assert coverage["genome_and_dna"] is True
                     assert coverage["report_manifest"] is True
+                    assert coverage["canonical_v3_ledgers"] is True
+                    assert coverage["canonical_v3_market_segments"] is True
+                    assert coverage["replay_rotations"] is True
+                    assert coverage["session_spec_index_receipts"] is True
+                    assert coverage["paper_lifecycle_receipt"] is True
+                    assert coverage["mirror_sync_receipt"] is True
+                    assert coverage["gpt_audit_source_bundle"] is True
+                    indexed = {item["path"]: item for item in manifest["files"]}
+                    for name, record in indexed.items():
+                        payload = zf.read(name)
+                        assert record["bytes"] == len(payload)
+                        assert record["sha256"] == hashlib.sha256(payload).hexdigest()
+                (mirror / "v3" / "ledgers" / "decision.jsonl").unlink()
+                refused = client.get("/download/everything")
+                assert refused.status_code == 500
+                assert b"decision.jsonl" in refused.data
         finally:
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
 
@@ -377,6 +488,7 @@ def main() -> None:
         test_complete_bundle_split_roots_and_freshness,
         test_chatgpt_bundle_split_roots_and_record_count,
         test_gpt_audit_source_hash_validation,
+        test_gpt_audit_builder_uses_real_analyzer_and_fails_closed,
         test_everything_includes_current_mirror_without_cache_files,
         test_single_loopback_dashboard_contract,
     )
