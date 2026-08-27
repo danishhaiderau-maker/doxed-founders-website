@@ -457,22 +457,37 @@ def get_weak_setup_min_edge() -> float:
     return get_edge_threshold()
 _last_ws_trade_fp = None
 _last_ws_trade_fp_ts = 0.0
+_agent_debug_log_lock = threading.Lock()
+_agent_debug_writes_paused = False
+
+def _pause_agent_debug_writes() -> None:
+    global _agent_debug_writes_paused
+    with _agent_debug_log_lock:
+        _agent_debug_writes_paused = True
+
+def _resume_agent_debug_writes() -> None:
+    global _agent_debug_writes_paused
+    with _agent_debug_log_lock:
+        _agent_debug_writes_paused = False
 
 def _agent_dbg(hypothesis_id, location, message, data=None, run_id="post-fix"):
     if os.getenv("DISABLE_AGENT_DEBUG_LOG", "").lower() in ("1", "true", "yes"):
         return
     try:
-        payload = {"sessionId": "43f630", "runId": run_id, "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "timestamp": int(time.time() * 1000)}
-        line = json.dumps(payload) + "\n"
-        for path in (_AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT):
-            try:
-                if os.path.exists(path) and os.path.getsize(path) > AGENT_DEBUG_LOG_MAX_BYTES:
+        with _agent_debug_log_lock:
+            if _agent_debug_writes_paused:
+                return
+            payload = {"sessionId": "43f630", "runId": run_id, "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "timestamp": int(time.time() * 1000)}
+            line = json.dumps(payload) + "\n"
+            for path in (_AGENT_DEBUG_LOG, _AGENT_DEBUG_LOG_ALT):
+                try:
+                    if os.path.exists(path) and os.path.getsize(path) > AGENT_DEBUG_LOG_MAX_BYTES:
+                        continue
+                    with open(path, "a", encoding="utf-8") as f:
+                        f.write(line)
+                    break
+                except Exception:
                     continue
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write(line)
-                break
-            except Exception:
-                continue
     except Exception:
         pass
 # #endregion
@@ -25768,41 +25783,45 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
             "open_position_count": open_count,
             "summary": "Pause and disarm execution, then reach a flat order/position boundary",
         }
+    _pause_agent_debug_writes()
     try:
-        # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
-        past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
-        past_analysis_id = str(past_analysis.get("archive_id") or "")
-        planned_delete_paths = all_research_wipe_paths(
-            include_validation_artifacts=True, include_legacy_logs=True,
-        )
-        archive_path = create_research_archive_receipt(
-            past_analysis,
-            reason="fresh_collection_dashboard",
-            source_paths=planned_delete_paths,
-        )
-    except (ArchiveIntegrityError, ImportError, OSError, RuntimeError, ValueError) as exc:
-        logger.error(f"[FRESH COLLECTION] ABORT WIPE — preservation failed: {exc} [PIPELINE ENFORCEMENT]")
-        return {
-            "ok": False,
-            "wipe_aborted": True,
-            "error": str(exc),
-            "summary": "ABORT WIPE — final analysis preservation failed",
-        }
-    logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, verifying deletion set")
-    try:
-        quarantine = reset_all_research_files(archive_path=archive_path)
-    except (ArchiveIntegrityError, OSError, RuntimeError, ValueError) as exc:
-        quarantine = {"wipe_aborted": True, "errors": [str(exc)], "deleted": []}
-    if quarantine.get("wipe_aborted") or quarantine.get("errors"):
-        errors = list(quarantine.get("errors") or [])
-        logger.error(f"[FRESH COLLECTION] ABORT WIPE — deletion verification failed: {errors} [PIPELINE ENFORCEMENT]")
-        return {
-            "ok": False, "wipe_aborted": True,
-            "error": "archive_or_deletion_verification_failed",
-            "errors": errors, "archive_path": archive_path,
-            "past_analysis_id": past_analysis_id,
-            "summary": "ABORT WIPE — exact deletion set was not verified",
-        }
+        try:
+            # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
+            past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
+            past_analysis_id = str(past_analysis.get("archive_id") or "")
+            planned_delete_paths = all_research_wipe_paths(
+                include_validation_artifacts=True, include_legacy_logs=True,
+            )
+            archive_path = create_research_archive_receipt(
+                past_analysis,
+                reason="fresh_collection_dashboard",
+                source_paths=planned_delete_paths,
+            )
+        except (ArchiveIntegrityError, ImportError, OSError, RuntimeError, ValueError) as exc:
+            logger.error(f"[FRESH COLLECTION] ABORT WIPE — preservation failed: {exc} [PIPELINE ENFORCEMENT]")
+            return {
+                "ok": False,
+                "wipe_aborted": True,
+                "error": str(exc),
+                "summary": "ABORT WIPE — final analysis preservation failed",
+            }
+        logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, verifying deletion set")
+        try:
+            quarantine = reset_all_research_files(archive_path=archive_path)
+        except (ArchiveIntegrityError, OSError, RuntimeError, ValueError) as exc:
+            quarantine = {"wipe_aborted": True, "errors": [str(exc)], "deleted": []}
+        if quarantine.get("wipe_aborted") or quarantine.get("errors"):
+            errors = list(quarantine.get("errors") or [])
+            logger.error(f"[FRESH COLLECTION] ABORT WIPE — deletion verification failed: {errors} [PIPELINE ENFORCEMENT]")
+            return {
+                "ok": False, "wipe_aborted": True,
+                "error": "archive_or_deletion_verification_failed",
+                "errors": errors, "archive_path": archive_path,
+                "past_analysis_id": past_analysis_id,
+                "summary": "ABORT WIPE — exact deletion set was not verified",
+            }
+    finally:
+        _resume_agent_debug_writes()
     logger.warning(f"[FRESH COLLECTION] Verified archive and deletion; resetting session state")
     genome_reset = {}
     bridge = get_genome_bridge()

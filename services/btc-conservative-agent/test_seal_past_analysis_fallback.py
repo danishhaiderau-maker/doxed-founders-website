@@ -249,6 +249,17 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
             self.assertTrue(os.path.isfile(source))
             self.assertIn("verified archive_path is required", result["errors"][0])
 
+    def test_agent_debug_writes_pause_and_resume_around_epoch_reset(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(bot, "_AGENT_DEBUG_LOG", os.path.join(tmp, "agent-debug.log")), \
+             mock.patch.object(bot, "_AGENT_DEBUG_LOG_ALT", os.path.join(tmp, "agent-debug-alt.log")):
+            bot._pause_agent_debug_writes()
+            bot._agent_dbg("test", "paused", "must not write")
+            self.assertFalse(os.path.exists(bot._AGENT_DEBUG_LOG))
+            bot._resume_agent_debug_writes()
+            bot._agent_dbg("test", "resumed", "must write")
+            self.assertTrue(os.path.isfile(bot._AGENT_DEBUG_LOG))
+
         with bot.state_lock:
             bot.state["execution_paused"] = True
         with bot.trade_lock:
