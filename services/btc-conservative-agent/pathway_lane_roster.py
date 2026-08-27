@@ -20,7 +20,7 @@ RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 DATA_RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v31-five-family-atomic-paper"
+ROSTER_PHASE = "v31-five-family-analyzer-hypothesis-paper"
 ROSTER_NOTES = (
     "Active stack is derived exclusively from ACTIVE_TILE_REGISTRY: Chandelier, fixed "
     "ATR target, ATR trail, Hybrid Runner, and MFE Giveback; one shared direction call "

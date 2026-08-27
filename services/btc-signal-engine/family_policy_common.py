@@ -26,11 +26,16 @@ class PolicySpec:
     max_duration_sec: int = 7200
     initial_stop_atr_k: float | None = None
     hard_stop_margin_pct: float = 30.0
+    thesis_cut_margin_pct: float | None = None
+    thesis_window_sec: int = 0
     atr_target_k: float | None = None
     chandelier_atr_k: float | None = None
     trail_activation_atr_k: float | None = None
     trail_atr_k: float | None = None
     partial_targets: tuple[tuple[float, float], ...] = ()
+    trail_ladder: tuple[tuple[float, float], ...] = ()
+    ladder_label: str | None = None
+    ladder_profile_id: str | None = None
     mfe_giveback_fraction: float | None = None
     margin_cap_usd: float = 0.25
     account_risk_pct: float = 0.5
@@ -82,6 +87,15 @@ def _adverse_hit(sign: int, price: float, level: float) -> bool:
 
 def _margin_return_pct(entry: float, sign: int, price: float, leverage: float) -> float:
     return sign * (float(price) - float(entry)) / float(entry) * float(leverage) * 100.0
+
+
+def _ladder_lock_floor(peak_margin_pct: float,
+                       ladder: tuple[tuple[float, float], ...]) -> float | None:
+    floor = None
+    for trigger_pct, lock_pct in ladder:
+        if float(peak_margin_pct) >= float(trigger_pct):
+            floor = float(lock_pct)
+    return floor
 
 
 def initial_limit(spec: PolicySpec, direction: str, reference_price: float) -> float | None:
@@ -186,38 +200,54 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
     sign = _direction_sign(direction)
     atr = _atr_abs(entry, atr_abs, atr_pct)
     remaining = max(0.0, min(1.0, float(remaining_fraction or 0)))
-    if entry <= 0 or price <= 0 or atr <= 0 or not sign or remaining <= 0:
+    if entry <= 0 or price <= 0 or not sign or remaining <= 0:
         return None
     previous_peak = float(peak_price if peak_price is not None else entry)
     peak = max(previous_peak, price) if sign > 0 else min(previous_peak, price)
     hard_hit = _margin_return_pct(entry, sign, price, leverage) <= -abs(spec.hard_stop_margin_pct)
+    if hard_hit:
+        return ExitAction("PHYSICAL_HARD_STOP_30PCT", remaining, price, None, 0.0, peak)
     stop_price = None
     dynamic_stop_active = False
-    if spec.initial_stop_atr_k is not None:
+    if atr > 0 and spec.initial_stop_atr_k is not None:
         stop_price = _level(entry, sign, atr, -float(spec.initial_stop_atr_k))
 
-    favorable_atr = sign * (peak - entry) / atr
-    if spec.chandelier_atr_k is not None and favorable_atr >= float(spec.trail_activation_atr_k or 0):
+    favorable_atr = sign * (peak - entry) / atr if atr > 0 else 0.0
+    if atr > 0 and spec.chandelier_atr_k is not None and favorable_atr >= float(spec.trail_activation_atr_k or 0):
         candidate = peak - sign * atr * float(spec.chandelier_atr_k)
         stop_price = candidate if stop_price is None else (max(stop_price, candidate) if sign > 0 else min(stop_price, candidate))
         dynamic_stop_active = True
-    if spec.trail_atr_k is not None and favorable_atr >= float(spec.trail_activation_atr_k or 0):
+    if atr > 0 and spec.trail_atr_k is not None and favorable_atr >= float(spec.trail_activation_atr_k or 0):
         candidate = peak - sign * atr * float(spec.trail_atr_k)
         stop_price = candidate if stop_price is None else (max(stop_price, candidate) if sign > 0 else min(stop_price, candidate))
         dynamic_stop_active = True
-    if spec.mfe_giveback_fraction is not None and favorable_atr > 0:
+    if atr > 0 and spec.mfe_giveback_fraction is not None and favorable_atr > 0:
         candidate = entry + (peak - entry) * (1.0 - float(spec.mfe_giveback_fraction))
         stop_price = candidate if stop_price is None else (max(stop_price, candidate) if sign > 0 else min(stop_price, candidate))
         dynamic_stop_active = True
 
-    if hard_hit:
-        return ExitAction("PHYSICAL_HARD_STOP_30PCT", remaining, price, stop_price, 0.0, peak)
     if stop_price is not None and _adverse_hit(sign, price, stop_price):
         reason = "PROFIT_PROTECTION_STOP" if dynamic_stop_active else "INITIAL_ATR_STOP"
         return ExitAction(reason, remaining, stop_price, stop_price, 0.0, peak)
+    current_margin_pct = _margin_return_pct(entry, sign, price, leverage)
+    if (
+        spec.thesis_cut_margin_pct is not None
+        and float(age_sec or 0) <= float(spec.thesis_window_sec)
+        and current_margin_pct <= float(spec.thesis_cut_margin_pct)
+    ):
+        return ExitAction("THESIS_FAST_CUT", remaining, price, stop_price, 0.0, peak)
+
+    if spec.trail_ladder:
+        peak_margin_pct = _margin_return_pct(entry, sign, peak, leverage)
+        lock_floor = _ladder_lock_floor(peak_margin_pct, spec.trail_ladder)
+        if lock_floor is not None and current_margin_pct <= lock_floor:
+            lock_price = entry * (1.0 + sign * lock_floor / (float(leverage) * 100.0))
+            return ExitAction(
+                "PROFIT_LOCK_LADDER", remaining, lock_price, stop_price, 0.0, peak,
+            )
 
     completed = set(completed_partials or ())
-    for index, (trigger_atr, fraction) in enumerate(spec.partial_targets):
+    for index, (trigger_atr, fraction) in enumerate(spec.partial_targets if atr > 0 else ()):
         key = f"partial_{index}_{trigger_atr:g}atr"
         target = _level(entry, sign, atr, trigger_atr)
         if key not in completed and _favorable_hit(sign, price, target):
@@ -227,7 +257,7 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
                 remaining - close, peak, partial_key=key,
             )
 
-    if spec.atr_target_k is not None:
+    if atr > 0 and spec.atr_target_k is not None:
         target = _level(entry, sign, atr, float(spec.atr_target_k))
         if _favorable_hit(sign, price, target):
             return ExitAction("ATR_TP", remaining, target, stop_price, 0.0, peak)
@@ -248,11 +278,18 @@ def exit_config(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]:
         "atr_source": "FILL_TIME_3M_ATR14",
         "initial_stop_atr_k": spec.initial_stop_atr_k,
         "hard_stop_margin_pct": spec.hard_stop_margin_pct,
+        "thesis_cut_margin_pct": spec.thesis_cut_margin_pct,
+        "thesis_window_sec": spec.thesis_window_sec,
         "atr_tp_multiple": spec.atr_target_k,
         "chandelier_atr_k": spec.chandelier_atr_k,
         "trail_activation_atr_k": spec.trail_activation_atr_k,
         "trailing_stop_atr_k": spec.trail_atr_k,
         "partial_take_profits": [list(row) for row in spec.partial_targets],
+        "trail_ladder": [list(row) for row in spec.trail_ladder],
+        "ladder_first_trigger_pct": spec.trail_ladder[0][0] if spec.trail_ladder else None,
+        "ladder_first_lock_pct": spec.trail_ladder[0][1] if spec.trail_ladder else None,
+        "ladder_label": spec.ladder_label,
+        "ladder_profile_id": spec.ladder_profile_id,
         "mfe_giveback_fraction": spec.mfe_giveback_fraction,
         "path_end_sec": spec.max_duration_sec,
         "partial_reduction_required": bool(spec.partial_targets),
@@ -282,11 +319,16 @@ def dashboard_policy(spec: PolicySpec) -> dict[str, Any]:
             "profile": spec.family,
             "initial_stop_atr_k": spec.initial_stop_atr_k,
             "hard_stop_margin_pct": spec.hard_stop_margin_pct,
+            "thesis_cut_margin_pct": spec.thesis_cut_margin_pct,
+            "thesis_window_sec": spec.thesis_window_sec,
             "atr_target_k": spec.atr_target_k,
             "chandelier_atr_k": spec.chandelier_atr_k,
             "trail_activation_atr_k": spec.trail_activation_atr_k,
             "trail_atr_k": spec.trail_atr_k,
             "partials": [list(row) for row in spec.partial_targets],
+            "trail_ladder": [list(row) for row in spec.trail_ladder],
+            "ladder_label": spec.ladder_label,
+            "ladder_profile_id": spec.ladder_profile_id,
             "mfe_giveback_fraction": spec.mfe_giveback_fraction,
             "fixed_time_exit": "120m",
         },

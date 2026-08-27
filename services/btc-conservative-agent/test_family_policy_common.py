@@ -34,6 +34,15 @@ def test_hard_stop_precedes_wider_atr_stop():
     assert action.remaining_fraction == 0
 
 
+def test_hard_stop_remains_active_when_fill_time_atr_is_missing():
+    action = exit_action(
+        spec(initial_stop_atr_k=2.0), entry=100, direction="LONG",
+        price=99.6, atr_abs=0.0, atr_pct=0.0, leverage=100,
+    )
+    assert action.reason == "PHYSICAL_HARD_STOP_30PCT"
+    assert action.remaining_fraction == 0
+
+
 def test_atr_target_and_stop_are_direction_symmetric():
     long_tp = exit_action(spec(), entry=100, direction="LONG", price=102.5, atr_abs=1)
     short_tp = exit_action(spec(), entry=100, direction="SHORT", price=97.5, atr_abs=1)
@@ -72,6 +81,44 @@ def test_mfe_giveback_and_time_cap_are_explicit():
     assert action.reason == "PROFIT_PROTECTION_STOP"
     timeout = exit_action(policy, entry=100, direction="LONG", price=100, atr_abs=1, age_sec=7200)
     assert timeout.reason == "PATH_END_120M"
+
+
+def test_scenario_c_ladder_locks_long_and_short_retracements():
+    ladder = ((8, 5), (12, 10), (19, 17))
+    policy = spec(
+        initial_stop_atr_k=None,
+        trail_ladder=ladder,
+    )
+    long_action = exit_action(
+        policy, entry=100, direction="LONG", price=100.09, atr_abs=1,
+        peak_price=100.12, leverage=100,
+    )
+    short_action = exit_action(
+        policy, entry=100, direction="SHORT", price=99.91, atr_abs=1,
+        peak_price=99.88, leverage=100,
+    )
+    assert long_action.reason == short_action.reason == "PROFIT_LOCK_LADDER"
+    assert round(long_action.trigger_price, 4) == 100.1
+    assert round(short_action.trigger_price, 4) == 99.9
+
+
+def test_thesis_fast_cut_applies_only_inside_its_window():
+    policy = spec(
+        initial_stop_atr_k=None,
+        atr_target_k=None,
+        thesis_cut_margin_pct=-12,
+        thesis_window_sec=300,
+    )
+    early = exit_action(
+        policy, entry=100, direction="LONG", price=99.87, atr_abs=1,
+        leverage=100, age_sec=299,
+    )
+    late = exit_action(
+        policy, entry=100, direction="LONG", price=99.87, atr_abs=1,
+        leverage=100, age_sec=301,
+    )
+    assert early.reason == "THESIS_FAST_CUT"
+    assert late is None
 
 
 def test_account_risk_sizing_never_exceeds_margin_cap():

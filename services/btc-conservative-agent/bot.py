@@ -4480,12 +4480,15 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
         atr_abs = entry * _buf_float(pos.get("atr14_pct_3m"), 0.0) / 100.0
     age = now - float(pos.get("entry_ts") or now)
     remaining = float(pos.get("policy_remaining_fraction", 1.0))
+    previous_peak = float(pos.get("policy_peak_price") or entry)
+    current_peak = max(previous_peak, float(price)) if direction == "LONG" else min(previous_peak, float(price))
+    pos["policy_peak_price"] = current_peak
     action = policy.exit_action(
         entry=entry, direction=direction, price=price, atr_abs=atr_abs,
         atr_pct=_buf_float(pos.get("atr14_pct_3m"), 0.0), age_sec=age,
         leverage=float(pos.get("leverage") or 100), remaining_fraction=remaining,
         completed_partials=pos.get("policy_completed_partials") or (),
-        peak_price=pos.get("policy_peak_price"),
+        peak_price=current_peak,
     )
     if not action:
         return False
@@ -26212,6 +26215,7 @@ def build_static_pathway_lane_specs() -> dict:
             "filter_chips": policy_view["filter_chips"],
             "toggle_key": lane_spec["toggle_key"],
             "hypothesis": lane_spec.get("hypothesis", ""),
+            "hypothesis_result": dict(lane_spec.get("presentation", {}).get("hypothesis_result") or {}),
             "research_question": lane_spec["research_question"],
             "entry": {
                 **policy_view["entry"], "ai_cadence": ai_cadence,
@@ -28064,11 +28068,11 @@ DASHBOARD_JS = """(function () {
       };
       const labels = {
         'CONTINUOUS': 'Continuous',
-        'FAMILY_CHANDELIER_3': 'Chandelier 3 ATR',
-        'FAMILY_ATR_TARGET_2_5': 'Fixed ATR 2.5 / 1.5',
-        'FAMILY_ATR_TRAIL': 'ATR Trail',
-        'FAMILY_HYBRID_RUNNER': 'Hybrid Runner',
-        'FAMILY_MFE_GIVEBACK': 'MFE Giveback',
+        'FAMILY_CHANDELIER_3': 'Chandelier 1.5 ATR Hypothesis',
+        'FAMILY_ATR_TARGET_2_5': 'Fixed TP 2.5 + Scenario C',
+        'FAMILY_ATR_TRAIL': 'ATR Trail 1.5 / 0.75 / 1',
+        'FAMILY_HYBRID_RUNNER': 'Hybrid 25% + 25% Runner',
+        'FAMILY_MFE_GIVEBACK': 'MFE Giveback 20% Hypothesis',
         'AI_SCAN': 'AI Scan',
       };
       const c = colors[lane] || '#8b949e';
@@ -28614,6 +28618,18 @@ DASHBOARD_JS = """(function () {
             + chaseTruth
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
+            + (function () {
+              const result = spec.hypothesis_result || {};
+              if (!result.status) return '';
+              return '<div style="margin-top:8px;padding:7px 8px;background:#14251b;border:1px solid #238636;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+                + '<strong style="color:#3fb950;">Analyzer hypothesis receipt:</strong> '
+                + (result.model || 'model unavailable')
+                + ' · OOS episodes ' + (result.oos_episodes ?? 'n/a')
+                + ' · touches ' + (result.touches ?? 'n/a')
+                + ' · wins/losses ' + (result.wins ?? 'n/a') + '/' + (result.losses ?? 'n/a')
+                + ' · diagnostic net $' + (Number(result.oos_net_usd || 0).toFixed(4))
+                + '<div style="margin-top:2px;color:#d29922;">Diagnostic promotion evidence only; this tile is the prospective paper execution test.</div></div>';
+            })()
             + '<div style="margin-top:8px;font-size:0.78em;color:#6e7681;">' + (spec.hypothesis || '') + '</div>'
             + (spec.research_question ? ('<div style="margin-top:4px;font-size:0.76em;color:#6e7681;"><strong style="color:#8b949e;">Question:</strong> ' + spec.research_question + '</div>') : '')
             + (function () {

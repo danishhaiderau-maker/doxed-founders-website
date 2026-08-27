@@ -52,21 +52,40 @@ COMBO_EXECUTION_LANES = (
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
 
-def _signature(raw_policy_id: str) -> str:
-    return hashlib.sha256(raw_policy_id.encode("utf-8")).hexdigest()
+def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
+                      ladder: tuple[tuple[float, float], ...] = ()) -> str:
+    """Bind causal identity to every execution-defining policy parameter."""
+    material = {
+        "raw_policy_id": raw_policy_id,
+        "entry_policy": entry,
+        "exit_policy": exit_policy,
+        "ladder": tuple(tuple(row) for row in ladder),
+        "entry_ttl_sec": 1800,
+        "path_end_sec": 7200,
+        "requested_margin_usd": 0.25,
+        "account_risk_pct": 0.5,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), default=list)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           module: str, test_module: str, entry: dict, exit_policy: dict,
-          relay_capability: str = "BLOCKED_UNQUALIFIED") -> dict:
-    return {
+          relay_capability: str = "BLOCKED_UNQUALIFIED",
+          ladder: tuple[tuple[float, float], ...] = (),
+          ladder_label: str = "", ladder_profile_id: str = "",
+          hypothesis_result: dict | None = None) -> dict:
+    tile = {
         "tile_id": lane,
         "label": label,
-        "subtitle": "PAPER ONLY — shared AI direction, independent signed lifecycle",
+        "subtitle": "ANALYZER-PROFITABLE HYPOTHESIS — PAPER ONLY — exact execution test",
         "combo_key": raw_policy_id,
         "raw_policy_id": raw_policy_id,
-        "policy_signature": _signature(raw_policy_id),
-        "policy_epoch": "v31-five-family-atomic-v1",
+        "policy_signature": _policy_signature(
+            raw_policy_id=raw_policy_id, entry=entry,
+            exit_policy=exit_policy, ladder=ladder,
+        ),
+        "policy_epoch": "v31-analyzer-hypothesis-paper-v1",
         "research_lane": lane,
         "execution_scope": "PAPER_ONLY",
         "paper_eligible": True,
@@ -75,7 +94,11 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "requested_margin_usd": 0.25,
         "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": 30.0},
         "analyzer_cohort": raw_policy_id,
-        "presentation": {"family": exit_policy["family"], "evidence": "CONSERVATIVE_BBO_DEPTH_REQUIRED"},
+        "presentation": {
+            "family": exit_policy["family"],
+            "evidence": "CONSERVATIVE_BBO_DEPTH_REQUIRED",
+            "hypothesis_result": dict(hypothesis_result or {}),
+        },
         "retirement_status": "ACTIVE_RESEARCH",
         "component_surfaces": TILE_COMPONENT_SURFACES,
         "entry_policy": entry,
@@ -101,45 +124,60 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "kill_criteria": "Stop new entries on identity, fill, lifecycle, protection, mirror, analyzer or dashboard contradiction",
         "research_question": f"Does {raw_policy_id} retain positive conservative OOS EV with bounded drawdown?",
     }
+    if ladder:
+        tile.update({
+            "ladder": tuple(tuple(row) for row in ladder),
+            "ladder_label": ladder_label,
+            "ladder_profile_id": ladder_profile_id,
+        })
+    return tile
 
 
 COMBO_LANE_SPECS = {
     RESEARCH_LANE_FAMILY_CHANDELIER: _tile(
-        lane=RESEARCH_LANE_FAMILY_CHANDELIER, label="Chandelier Family · 3 ATR",
-        raw_policy_id="OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3", id_prefix="fc3",
+        lane=RESEARCH_LANE_FAMILY_CHANDELIER, label="Chandelier Hypothesis · 1.5 ATR",
+        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5", id_prefix="fc3",
         module="paper_policy_family_chandelier.py", test_module="test_paper_policy_family_chandelier.py",
-        entry={"offset_pct": 0.03, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
-        exit_policy={"family": "CHANDELIER", "initial_stop_atr_k": 2.0, "chandelier_atr_k": 3.0, "trail_activation_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
+        exit_policy={"family": "CHANDELIER", "initial_stop_atr_k": 2.0, "chandelier_atr_k": 1.5, "trail_activation_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 14, "wins": 14, "losses": 0, "oos_net_usd": 1.849868},
     ),
     RESEARCH_LANE_FAMILY_ATR_TARGET: _tile(
-        lane=RESEARCH_LANE_FAMILY_ATR_TARGET, label="Fixed ATR Target · 2.5 / 1.5",
-        raw_policy_id="OFFSET_0.02_CHASE_w234_s25_i180|ATR_TP_2.5_ATR_SL_1.5", id_prefix="fat",
+        lane=RESEARCH_LANE_FAMILY_ATR_TARGET, label="Fixed Target Hypothesis · TP 2.5 + Scenario C",
+        raw_policy_id="OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C", id_prefix="fat",
         module="paper_policy_family_atr_target.py", test_module="test_paper_policy_family_atr_target.py",
-        entry={"offset_pct": 0.02, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
-        exit_policy={"family": "ATR_TARGET", "atr_tp_k": 2.5, "initial_stop_atr_k": 1.5, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        entry={"offset_pct": 0.27, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
+        exit_policy={"family": "ATR_TARGET", "atr_tp_k": 2.5, "initial_stop_atr_k": None, "thesis_cut_margin_pct": -12.0, "thesis_window_sec": 300, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        ladder=((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120)),
+        ladder_label="8→5, 12→10, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120",
+        ladder_profile_id="SCENARIO_C_RUNNER_8_v8_20260820",
+        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 15, "wins": 15, "losses": 0, "oos_net_usd": 2.339938},
     ),
     RESEARCH_LANE_FAMILY_ATR_TRAIL: _tile(
-        lane=RESEARCH_LANE_FAMILY_ATR_TRAIL, label="ATR Trail · arm 1.25 / trail 1",
-        raw_policy_id="OFFSET_0.04_CHASE_all_on_s50_i60|ATR_TRAIL_SL_2_ARM_1.25_TRAIL_1", id_prefix="ftr",
+        lane=RESEARCH_LANE_FAMILY_ATR_TRAIL, label="ATR Trail Hypothesis · SL 1.5 / arm 0.75 / trail 1",
+        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1", id_prefix="ftr",
         module="paper_policy_family_atr_trail.py", test_module="test_paper_policy_family_atr_trail.py",
-        entry={"offset_pct": 0.04, "chase_windows": (0, 1, 2, 3, 4, 5), "remaining_gap_step_pct": 50.0, "reprice_sec": 60},
-        exit_policy={"family": "ATR_TRAIL", "initial_stop_atr_k": 2.0, "trail_activation_atr_k": 1.25, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
+        exit_policy={"family": "ATR_TRAIL", "initial_stop_atr_k": 1.5, "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 15, "wins": 15, "losses": 0, "oos_net_usd": 2.132123},
     ),
     RESEARCH_LANE_FAMILY_HYBRID_RUNNER: _tile(
-        lane=RESEARCH_LANE_FAMILY_HYBRID_RUNNER, label="Hybrid Runner · secure 33%",
-        raw_policy_id="OFFSET_0.03_CHASE_w234_s25_i180|HYBRID_secure_33_runner_TRAIL_1", id_prefix="fhy",
+        lane=RESEARCH_LANE_FAMILY_HYBRID_RUNNER, label="Hybrid Runner Hypothesis · secure 25% + 25%",
+        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|HYBRID_secure_25_25_runner_TRAIL_1", id_prefix="fhy",
         module="paper_policy_family_hybrid_runner.py", test_module="test_paper_policy_family_hybrid_runner.py",
-        entry={"offset_pct": 0.03, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
-        exit_policy={"family": "HYBRID_RUNNER", "initial_stop_atr_k": 1.5, "partial_take_profits": ((1.0, 0.33),), "trail_activation_atr_k": 1.0, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
+        exit_policy={"family": "HYBRID_RUNNER", "initial_stop_atr_k": 1.5, "partial_take_profits": ((1.0, 0.25), (1.5, 0.25)), "trail_activation_atr_k": 1.0, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
         relay_capability="BLOCKED_PARTIAL_REDUCTION_UNPROVEN",
+        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 15, "wins": 15, "losses": 0, "oos_net_usd": 2.291095},
     ),
     RESEARCH_LANE_FAMILY_MFE_GIVEBACK: _tile(
         lane=RESEARCH_LANE_FAMILY_MFE_GIVEBACK, label="MFE Giveback · retain 80%",
-        raw_policy_id="OFFSET_0.03_CHASE_w234_s25_i180|ATR_TP_2.5_GIVEBACK_20PCT", id_prefix="fmg",
+        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT", id_prefix="fmg",
         module="paper_policy_family_mfe_giveback.py", test_module="test_paper_policy_family_mfe_giveback.py",
-        entry={"offset_pct": 0.03, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 25.0, "reprice_sec": 180},
+        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
         exit_policy={"family": "MFE_GIVEBACK", "initial_stop_atr_k": None, "mfe_giveback_fraction": 0.20, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
         relay_capability="BLOCKED_INITIAL_STOP_SWEEP_REQUIRED",
+        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 14, "wins": 14, "losses": 0, "oos_net_usd": 1.715658},
     ),
 }
 COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
@@ -152,7 +190,7 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_CHANDELIER
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-five-family-atomic-paper"
+RESEARCH_STACK_VERSION = "v31-five-family-analyzer-hypothesis-paper"
 RESEARCH_STACK_FEATURES = (
     "Five exit-family tiles share one direction-only three-minute AI call while retaining "
     "independent paper decisions, locks, capacity, orders, positions, ledgers and policy identities; "
@@ -175,6 +213,13 @@ ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
 RETIRED_TILE_LANES = frozenset({
     "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED",
     "OFFSET_029_ATR_REGIME", "PROTECTED_W234_SCENARIO_C",
+})
+RETIRED_POLICY_IDENTITIES = frozenset({
+    "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",
+    "OFFSET_0.02_CHASE_w234_s25_i180|ATR_TP_2.5_ATR_SL_1.5",
+    "OFFSET_0.04_CHASE_all_on_s50_i60|ATR_TRAIL_SL_2_ARM_1.25_TRAIL_1",
+    "OFFSET_0.03_CHASE_w234_s25_i180|HYBRID_secure_33_runner_TRAIL_1",
+    "OFFSET_0.03_CHASE_w234_s25_i180|ATR_TP_2.5_GIVEBACK_20PCT",
 })
 
 
@@ -231,6 +276,10 @@ def validate_tile_registry() -> tuple[str, ...]:
     overlap = set(lanes).intersection(RETIRED_TILE_LANES)
     if overlap:
         defects.append("ACTIVE_RETIRED_OVERLAP:" + ",".join(sorted(overlap)))
+    active_policy_ids = {str(spec.get("raw_policy_id") or "") for spec in ACTIVE_TILE_REGISTRY.values()}
+    policy_overlap = active_policy_ids.intersection(RETIRED_POLICY_IDENTITIES)
+    if policy_overlap:
+        defects.append("ACTIVE_RETIRED_POLICY_OVERLAP:" + ",".join(sorted(policy_overlap)))
     return tuple(defects)
 
 
@@ -255,6 +304,10 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
             "analyzer_cohort": ACTIVE_TILE_REGISTRY[lane]["analyzer_cohort"],
             "entry_policy": ACTIVE_TILE_REGISTRY[lane]["entry_policy"],
             "exit_policy": ACTIVE_TILE_REGISTRY[lane]["exit_policy"],
+            "presentation": ACTIVE_TILE_REGISTRY[lane]["presentation"],
+            "ladder": tuple(ACTIVE_TILE_REGISTRY[lane].get("ladder") or ()),
+            "ladder_label": ACTIVE_TILE_REGISTRY[lane].get("ladder_label"),
+            "ladder_profile_id": ACTIVE_TILE_REGISTRY[lane].get("ladder_profile_id"),
             "implementation_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["implementation_modules"]),
             "dedicated_test_modules": tuple(ACTIVE_TILE_REGISTRY[lane]["dedicated_test_modules"]),
             "component_surfaces": tuple(ACTIVE_TILE_REGISTRY[lane]["component_surfaces"]),

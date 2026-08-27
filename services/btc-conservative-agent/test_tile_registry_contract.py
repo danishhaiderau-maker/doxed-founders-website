@@ -4,10 +4,12 @@ from combo_pathway_config import (
     COMBO_EXECUTION_LANES,
     COMBO_TILE_DISPLAY_ORDER,
     RETIRED_TILE_LANES,
+    RETIRED_POLICY_IDENTITIES,
     TILE_COMPONENT_SURFACES,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
     validate_tile_registry,
+    _policy_signature,
 )
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES
 
@@ -27,6 +29,53 @@ def test_tile_registry_is_fail_closed_for_relay_and_retirement():
         assert spec["id_prefix"]
         assert spec["toggle_key"]
         assert not (spec.get("paper_only") and spec.get("platform_relay_eligible")), lane
+    assert not {
+        spec["raw_policy_id"] for spec in ACTIVE_TILE_REGISTRY.values()
+    }.intersection(RETIRED_POLICY_IDENTITIES)
+
+
+def test_active_registry_is_the_exact_analyzer_hypothesis_experiment():
+    expected = {
+        "FAMILY_ATR_TARGET_2_5": "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C",
+        "FAMILY_HYBRID_RUNNER": "OFFSET_0.30_CHASE_w234_s50_i180|HYBRID_secure_25_25_runner_TRAIL_1",
+        "FAMILY_ATR_TRAIL": "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1",
+        "FAMILY_CHANDELIER_3": "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5",
+        "FAMILY_MFE_GIVEBACK": "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT",
+    }
+    assert {lane: spec["raw_policy_id"] for lane, spec in ACTIVE_TILE_REGISTRY.items()} == expected
+    for spec in ACTIVE_TILE_REGISTRY.values():
+        assert spec["policy_epoch"] == "v31-analyzer-hypothesis-paper-v1"
+        assert spec["entry_policy"]["chase_windows"] == (2, 3, 4)
+        assert spec["entry_policy"]["remaining_gap_step_pct"] == 50.0
+        assert spec["entry_policy"]["reprice_sec"] == 180
+    fixed = ACTIVE_TILE_REGISTRY["FAMILY_ATR_TARGET_2_5"]
+    assert fixed["ladder"] == ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))
+    assert fixed["exit_policy"]["thesis_cut_margin_pct"] == -12.0
+    assert fixed["exit_policy"]["thesis_window_sec"] == 300
+    chandelier = ACTIVE_TILE_REGISTRY["FAMILY_CHANDELIER_3"]
+    assert chandelier["exit_policy"]["initial_stop_atr_k"] == 2.0
+    assert chandelier["exit_policy"]["trail_activation_atr_k"] == 1.0
+    hybrid = ACTIVE_TILE_REGISTRY["FAMILY_HYBRID_RUNNER"]
+    assert hybrid["exit_policy"]["partial_take_profits"] == ((1.0, 0.25), (1.5, 0.25))
+    manifest = {row["lane"]: row for row in active_tile_lifecycle_manifest()}
+    assert manifest["FAMILY_ATR_TARGET_2_5"]["ladder"] == fixed["ladder"]
+    for row in manifest.values():
+        result = row["presentation"]["hypothesis_result"]
+        assert result["status"] == "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL"
+        assert result["oos_net_usd"] > 0
+
+
+def test_policy_signature_binds_execution_parameters_not_just_display_id():
+    raw = "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5"
+    entry = {"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180}
+    exit_a = {"family": "CHANDELIER", "initial_stop_atr_k": 2.0, "chandelier_atr_k": 1.5}
+    exit_b = {**exit_a, "initial_stop_atr_k": 1.5}
+    assert _policy_signature(raw_policy_id=raw, entry=entry, exit_policy=exit_a) != _policy_signature(
+        raw_policy_id=raw, entry=entry, exit_policy=exit_b,
+    )
+    assert _policy_signature(raw_policy_id=raw, entry=entry, exit_policy=exit_a, ladder=((8, 5),)) != _policy_signature(
+        raw_policy_id=raw, entry=entry, exit_policy=exit_a, ladder=((12, 10),),
+    )
 
 
 def test_retirement_contract_covers_all_cross_layer_surfaces():

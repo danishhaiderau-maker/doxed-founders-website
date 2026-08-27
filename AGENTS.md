@@ -37,8 +37,12 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Current registered tiles are Chandelier 3 ATR, Fixed ATR Target 2.5/1.5,
-  ATR Trail, Hybrid Runner, and MFE Giveback. All five default OFF, are
+- Current registered tiles are the analyzer-hypothesis paper experiment:
+  Chandelier 1.5 ATR; Fixed ATR Target 2.5 with Scenario-C ladder; ATR Trail
+  SL 1.5 / arm 0.75 / trail 1; Hybrid Runner with 25% at 1 ATR plus 25% at
+  1.5 ATR; and MFE Giveback 20%. Their entry offsets are 0.27% for Fixed and
+  0.30% for the other four, with chase windows 2/3/4, 50% remaining-gap moves,
+  and 180-second repricing. All five default OFF, are
   paper-only, and are relay-ineligible; Continuous remains an analytical
   comparison label only and cannot create an order.
   The number of tiles is not an architecture constant; the frozen
