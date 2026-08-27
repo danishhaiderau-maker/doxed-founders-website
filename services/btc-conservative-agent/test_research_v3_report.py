@@ -4,12 +4,31 @@ import unittest
 import json
 from pathlib import Path
 
+from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 from research.research_v3_report import build_safe_policy_genome_v3_report
 from research import research_dashboard as dashboard
 from research_v3_store import V3EvidenceStore
 
 
 class V3ReportTests(unittest.TestCase):
+    def test_empty_epoch_reports_deployed_policies_as_collecting_not_qualified(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            report = build_safe_policy_genome_v3_report(data, reports, candidates=[])
+
+        deployed = report["deployed_policy_collection"]
+        self.assertEqual(deployed["policy_epoch"], "v31-analyzer-hypothesis-paper-v1")
+        self.assertEqual(deployed["policy_count"], 5)
+        self.assertFalse(deployed["qualification_allowed"])
+        self.assertEqual(
+            [row["policy_id"] for row in deployed["policies"]],
+            [ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"] for lane in ACTIVE_TILE_ORDER],
+        )
+        self.assertEqual(
+            [row["policy_signature"] for row in deployed["policies"]],
+            [ACTIVE_TILE_REGISTRY[lane]["policy_signature"] for lane in ACTIVE_TILE_ORDER],
+        )
+        self.assertTrue(all(row["qualification_status"] == "NOT_QUALIFIED" for row in deployed["policies"]))
+
     def test_persisted_ranking_is_bounded_and_summarizes_blocked_candidates(self):
         candidates = [
             {

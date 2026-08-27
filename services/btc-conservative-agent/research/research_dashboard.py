@@ -2874,6 +2874,22 @@ def _best_policy_research_payload():
     current_policy_signature = str(
         newest.get("policy_signature") or (newest.get("envelope") or {}).get("policy_signature") or ""
     )
+    deployed_policies = [
+        {
+            "lane": lane,
+            "policy_id": spec.get("raw_policy_id"),
+            "policy_signature": spec.get("policy_signature"),
+            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
+            "qualification_status": "NOT_QUALIFIED",
+        }
+        for lane, spec in ACTIVE_TILE_REGISTRY.items()
+    ]
+    deployed_epochs = {
+        str(spec.get("policy_epoch") or "")
+        for spec in ACTIVE_TILE_REGISTRY.values()
+        if spec.get("policy_epoch")
+    }
+    deployed_policy_epoch = next(iter(deployed_epochs)) if len(deployed_epochs) == 1 else None
     current = [row for row in events if str(
         row.get("epoch_id") or (row.get("envelope") or {}).get("epoch_id") or ""
     ) == current_epoch and str(
@@ -2960,8 +2976,14 @@ def _best_policy_research_payload():
         "current_candidate": candidate if qualified else None,
         "descriptive_challenger": policy_report.get("descriptive_challenger"),
         "epoch_id": current_epoch or None,
-        "policy_epoch_id": current_policy_epoch or None,
+        "policy_epoch_id": current_policy_epoch or deployed_policy_epoch,
         "evidence_policy_signature": current_policy_signature or None,
+        "deployed_policy_collection": {
+            "policy_epoch": deployed_policy_epoch,
+            "policies": deployed_policies,
+            "policy_count": len(deployed_policies),
+            "qualification_allowed": False,
+        },
         "last_analysis": last_analysis,
         "last_analysis_melbourne": format_melbourne_dt(last_analysis),
         "evidence": analyzed_evidence,
@@ -3210,6 +3232,24 @@ def _best_policy_research_v31_payload() -> dict:
     }
     execution_identities = collection.get("effective_paper_execution_identities") or []
     execution_identity = execution_identities[0] if len(execution_identities) == 1 else {}
+    deployed_policy_collection = report.get("deployed_policy_collection") or {
+        "policy_epoch": next(iter({
+            str(spec.get("policy_epoch")) for spec in ACTIVE_TILE_REGISTRY.values()
+            if spec.get("policy_epoch")
+        }), None),
+        "policies": [
+            {
+                "lane": lane,
+                "policy_id": spec.get("raw_policy_id"),
+                "policy_signature": spec.get("policy_signature"),
+                "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
+                "qualification_status": "NOT_QUALIFIED",
+            }
+            for lane, spec in ACTIVE_TILE_REGISTRY.items()
+        ],
+        "policy_count": len(ACTIVE_TILE_REGISTRY),
+        "qualification_allowed": False,
+    }
     descriptive = screen.get("descriptive_top_100") or []
     generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
     qualified = source["qualified"]
@@ -3236,8 +3276,12 @@ def _best_policy_research_v31_payload() -> dict:
         "current_candidate": ranking.get("number_one") if qualified else None,
         "descriptive_challenger": descriptive[0] if descriptive else None,
         "epoch_id": source["epoch_id"],
-        "policy_epoch_id": execution_identity.get("policy_epoch_id"),
+        "policy_epoch_id": (
+            execution_identity.get("policy_epoch_id")
+            or deployed_policy_collection.get("policy_epoch")
+        ),
         "evidence_policy_signature": execution_identity.get("policy_signature"),
+        "deployed_policy_collection": deployed_policy_collection,
         "last_analysis": generated_at,
         "last_analysis_melbourne": format_melbourne_dt(generated_at),
         "evidence": evidence,
@@ -5361,7 +5405,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .green { color: var(--green); font-weight: 600; }
   .red { color: var(--red); font-weight: 600; }
   .amber { color: var(--amber); }
-  pre { background: var(--panel); border: 1px solid var(--border); padding: 12px; border-radius: 8px; overflow: auto; font-size: 0.8rem; white-space: pre-wrap; }
+  pre { min-width: 0; max-width: 100%; background: var(--panel); border: 1px solid var(--border); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 0.8rem; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
   .btn { display: inline-block; background: var(--accent); color: #001018; padding: 12px 20px; border-radius: 8px; text-decoration: none; font-weight: 700; margin: 8px 8px 8px 0; }
   .btn.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
   .grid2 { display: grid; grid-template-columns: 280px 1fr; gap: 16px; }
@@ -5980,6 +6024,8 @@ async function loadDecisionReadiness() {
   const challenger = d.descriptive_challenger || {};
   const design = d.research_design || {};
   const searchCounts = design.counts || {};
+  const deployed = d.deployed_policy_collection || {};
+  const deployedPolicies = deployed.policies || [];
   const candidateName = candidate.policy_id || candidate.name || 'Hidden until qualified';
   const candidateKind = candidate.kind || '—';
   const dynamicSummary = candidate.kind === 'DYNAMIC'
@@ -5987,6 +6033,7 @@ async function loadDecisionReadiness() {
     : (candidate.kind === 'STATIC' ? (candidate.policy_signature || 'signature missing') : '—');
   const cards = [
     ['Research result', d.status || 'NO QUALIFIED POLICY', d.status === 'QUALIFIED' ? 'green' : 'amber'],
+    ['Deployed policies collecting', deployed.policy_count || deployedPolicies.length || 0, 'amber'],
     ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
     ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
     ['Policy design', dynamicSummary, ''],
@@ -6008,6 +6055,7 @@ async function loadDecisionReadiness() {
   document.getElementById('decision-readiness-provenance').textContent =
     `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
     + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
+    + `Collecting deployed identities (not qualified): ${deployedPolicies.map(x => `${x.policy_id} [${x.policy_signature}]`).join(' · ') || 'UNAVAILABLE'} · `
     + `Blockers: ${(d.blockers || []).join(', ') || 'none'} · ${d.note || ''}`;
 }
 

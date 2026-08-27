@@ -14,8 +14,30 @@ from research_v3_candidates import evaluate_protection_screen, load_candidate_in
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
+from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
 REPORT_FILE = "safe_policy_genome_v3_report.json"
+
+
+def _deployed_policy_collection() -> dict[str, Any]:
+    """Describe deployed paper policies independently of observed evidence."""
+    policies = [
+        {
+            "lane": lane,
+            "policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
+            "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
+            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
+            "qualification_status": "NOT_QUALIFIED",
+        }
+        for lane in ACTIVE_TILE_ORDER
+    ]
+    epochs = {ACTIVE_TILE_REGISTRY[lane]["policy_epoch"] for lane in ACTIVE_TILE_ORDER}
+    return {
+        "policy_epoch": next(iter(epochs)) if len(epochs) == 1 else None,
+        "policies": policies,
+        "policy_count": len(policies),
+        "qualification_allowed": False,
+    }
 
 
 def _read_ledger(path: Path) -> list[dict[str, Any]]:
@@ -460,6 +482,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "live_policy_change_allowed": False,
         "real_bitfinex_trading_allowed": False,
         "epoch_id": epoch_id,
+        "deployed_policy_collection": _deployed_policy_collection(),
         "contract": SAFE_POLICY_GENOME_CONTRACT,
         "integrity": verification,
         "epoch_scope": {

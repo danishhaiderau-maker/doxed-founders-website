@@ -1,5 +1,28 @@
 """Regression for V3.1 Best Policy Overview compatibility fields."""
+from pathlib import Path
+
 from research import research_dashboard as dashboard
+
+
+def test_empty_overview_shows_deployed_epoch_and_five_collecting_identities(monkeypatch):
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
+    monkeypatch.setattr(dashboard, "_read_report", lambda _name, default=None: default or {})
+
+    payload = dashboard._best_policy_research_v31_payload()
+
+    deployed = payload["deployed_policy_collection"]
+    assert payload["status"] == "NO QUALIFIED POLICY"
+    assert payload["policy_epoch_id"] == "v31-analyzer-hypothesis-paper-v1"
+    assert deployed["policy_count"] == 5
+    assert deployed["qualification_allowed"] is False
+    assert all(row["collection_status"] == "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE" for row in deployed["policies"])
+    assert all(row["policy_id"] and row["policy_signature"] for row in deployed["policies"])
+
+
+def test_executive_summary_pre_wraps_inside_narrow_viewport():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert "pre { min-width: 0; max-width: 100%;" in source
+    assert "overflow-wrap: anywhere; word-break: break-word;" in source
 
 
 def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypatch):
