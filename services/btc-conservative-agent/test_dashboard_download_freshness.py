@@ -104,6 +104,34 @@ def test_scope_aware_report_selection() -> None:
             assert response.get_json()["session_scope"] == "FRESH-COLLECTION"
 
 
+def test_download_everything_includes_compressed_chase_reports_from_manifest() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reports = root / "reports"
+        names = (
+            "chase_policy_lab_report.json",
+            "missed_opportunity_proof_report.json",
+        )
+        manifest_rows = []
+        for name in names:
+            path = reports / name
+            _write_json(path, {"schema": name.removesuffix(".json") + "_v1"})
+            manifest_rows.append({"file": name, "size_bytes": path.stat().st_size})
+        _write_json(
+            root / "report_manifest.json",
+            {
+                "generated_at": "2026-08-27T13:00:00+00:00",
+                "analyzer_sync_id": "compressed-chase-test",
+                "reports": manifest_rows,
+            },
+        )
+        _set_dashboard_roots(root, root)
+
+        members = dict(dashboard._bundle_members())
+        for name in names:
+            assert members[f"reports/{name}"] == reports / name
+
+
 def test_complete_bundle_split_roots_and_freshness() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "agent"

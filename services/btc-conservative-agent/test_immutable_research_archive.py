@@ -21,13 +21,23 @@ def _fixture(root: Path):
     (root / "executive_summary.txt").write_text("summary", encoding="utf-8")
     report = root / "reports" / "qualified_report.json"
     report.write_text('{"qualified":true}', encoding="utf-8")
+    chase_report = root / "reports" / "chase_policy_lab_report.json"
+    chase_report.write_text('{"schema":"chase_policy_lab_v1"}', encoding="utf-8")
+    proof_report = root / "reports" / "missed_opportunity_proof_report.json"
+    proof_report.write_text(
+        '{"schema":"missed_opportunity_proof_v1"}', encoding="utf-8"
+    )
     (root / "reports" / "stale_report.json").write_text("stale", encoding="utf-8")
     manifest = {
         "schema": "report_manifest_v1",
         "analyzer_sync_id": "test-run",
-        "report_count": 1,
+        "report_count": 3,
         "text_artifacts": ["analysis_dashboard.html", "executive_summary.txt"],
-        "reports": [{"file": report.name, "size_bytes": report.stat().st_size}],
+        "reports": [
+            {"file": report.name, "size_bytes": report.stat().st_size},
+            {"file": chase_report.name, "size_bytes": chase_report.stat().st_size},
+            {"file": proof_report.name, "size_bytes": proof_report.stat().st_size},
+        ],
         "analysis_provenance": {
             "generation_revision": "2" * 40,
             "source_data_revision": "3" * 64,
@@ -76,6 +86,8 @@ def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
     assert manifest["fresh_epoch"]["cutoff_utc"] == "2026-08-16T00:00:00+00:00"
     paths = {row["path"] for row in manifest["files"]}
     assert "reports/qualified_report.json" in paths
+    assert "reports/chase_policy_lab_report.json" in paths
+    assert "reports/missed_opportunity_proof_report.json" in paths
     assert "reports/stale_report.json" not in paths
     assert "evidence/relay_lifecycle_evidence_v1.json" in paths
     assert "evidence/counterfactual.jsonl" in paths
