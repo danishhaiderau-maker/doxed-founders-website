@@ -11041,6 +11041,63 @@ def _funnel_signal_expired(signal_or_order: dict, reason: str = "SIGNAL_EXPIRED"
         pass
 
 
+_v3_expected_order_reconcile_lock = threading.Lock()
+_v3_expected_order_reconcile_last_ts = 0.0
+V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC = 30.0
+
+
+def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
+    """Resolve overdue pre-order expectations that have no durable exposure."""
+    global _v3_expected_order_reconcile_last_ts
+    now = time.time()
+    if (
+        not force
+        and now - _v3_expected_order_reconcile_last_ts
+        < V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC
+    ):
+        return {"skipped": 1}
+    if not _v3_expected_order_reconcile_lock.acquire(blocking=False):
+        return {"skipped": 1}
+    try:
+        now = time.time()
+        if (
+            not force
+            and now - _v3_expected_order_reconcile_last_ts
+            < V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC
+        ):
+            return {"skipped": 1}
+        # Only durable pending/open exposure protects an overdue expectation.
+        # A volatile AWAITING signal is not an order and must not remain an
+        # immortal active key after its signed resolution deadline.
+        with trade_lock:
+            active_exposure_rows = [
+                copy.deepcopy(row)
+                for row in [*open_positions, *pending_orders]
+                if isinstance(row, dict)
+            ]
+        result = reconcile_overdue_expected_order_decisions(
+            epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            active_rows=active_exposure_rows, observed_ts=now,
+            runtime_revision=_runtime_git_rev(),
+        )
+        _v3_expected_order_reconcile_last_ts = now
+        if result.get("reconciled"):
+            logger.warning(
+                f"[COLLECTOR_V3] reconciled overdue lost pre-order "
+                f"expectations={result['reconciled']} [PIPELINE ENFORCEMENT]"
+            )
+        return result
+    except Exception as exc:
+        # Ledger uncertainty is fail closed: never infer that an order was absent.
+        logger.error(
+            f"[COLLECTOR_V3] ledger reconciliation refused: {exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return {"error": 1}
+    finally:
+        _v3_expected_order_reconcile_lock.release()
+
+
 def reconcile_stale_signals():
     pending_ids = _pending_trade_ids()
     open_ids = _open_trade_ids()
@@ -11145,6 +11202,9 @@ def reconcile_stale_signals():
     if fixed or orphans_removed:
         logger.info(f"[EXECUTION FIX {EXECUTION_FIX_VERSION}] reconciled {fixed} stale signals, removed {orphans_removed} orphan pending orders")
         _agent_dbg("H1", "reconcile_stale_signals", "reconciled", {"count": fixed, "orphans_removed": orphans_removed, "pending_ids": len(_pending_trade_ids()), "open_ids": len(_open_trade_ids())})
+    # Converge the immutable decision/lifecycle ledgers even if the volatile
+    # pre-order signal disappeared before its normal TTL callback.
+    _reconcile_overdue_v3_expected_orders()
     return fixed
 
 def sync_signal_info_registry():
@@ -41130,30 +41190,7 @@ def main():
         set_execution_paused("SIMULATION_ONLY")
     load_positions()
     load_paper_lifecycle()
-    try:
-        active_v3_rows = [
-            row for row in [*open_positions, *pending_orders]
-            if isinstance(row, dict)
-        ]
-        active_v3_rows.extend(
-            entry.get("signal_ref") for entry in trades_map.values()
-            if isinstance(entry, dict) and isinstance(entry.get("signal_ref"), dict)
-        )
-        recovery = reconcile_overdue_expected_order_decisions(
-            epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
-            active_rows=active_v3_rows, runtime_revision=_runtime_git_rev(),
-        )
-        if recovery.get("reconciled"):
-            logger.warning(
-                f"[COLLECTOR_V3] restart reconciled overdue lost pre-order "
-                f"expectations={recovery['reconciled']} [PIPELINE ENFORCEMENT]"
-            )
-    except Exception as exc:
-        # Ledger uncertainty is fail closed: never infer that an order was absent.
-        logger.error(
-            f"[COLLECTOR_V3] restart ledger reconciliation refused: {exc} "
-            "[PIPELINE ENFORCEMENT]"
-        )
+    _reconcile_overdue_v3_expected_orders(force=True)
     rebuild_state_from_snapshots()
     reconcile_restored_paper_terminal_conflicts()
     reconcile_stale_signals()

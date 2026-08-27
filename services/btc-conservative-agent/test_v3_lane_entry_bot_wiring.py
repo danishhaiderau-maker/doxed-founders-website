@@ -1,5 +1,6 @@
 import ast
 import copy
+import os
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,23 @@ class QuietLogger:
         pass
 
     def error(self, *_args, **_kwargs):
+        pass
+
+    def warning(self, *_args, **_kwargs):
+        pass
+
+
+class AvailableLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def acquire(self, blocking=False):
+        return True
+
+    def release(self):
         pass
 
 
@@ -89,6 +107,49 @@ def test_preorder_ttl_is_no_order_but_submitted_expiry_is_not():
     assert writes[-1][2:] == ("NO_ORDER", "SIGNAL_TTL_EXPIRED")
     assert resolve({"order_placed": True}, {}, row, "SIGNAL_TTL_EXPIRED") is False
     assert len(writes) == 1
+
+
+def test_periodic_ledger_reconciliation_protects_only_durable_exposure():
+    calls = []
+    namespace = {
+        "time": type("Clock", (), {"time": staticmethod(lambda: 2000.0)}),
+        "copy": copy,
+        "os": os,
+        "trade_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_last_ts": 0.0,
+        "V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC": 30.0,
+        "open_positions": [{"trade_id": "open-1"}],
+        "pending_orders": [{"trade_id": "pending-1"}],
+        # This pre-order wait must not suppress overdue ledger repair.
+        "trades_map": {"wait-1": {"signal_ref": {"trade_id": "wait-1"}}},
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "_runtime_git_rev": lambda: "rev-1",
+        "reconcile_overdue_expected_order_decisions": (
+            lambda **kwargs: calls.append(kwargs) or {"reconciled": 1}
+        ),
+        "logger": QuietLogger(),
+    }
+    reconcile = load_function("_reconcile_overdue_v3_expected_orders", namespace)
+    assert reconcile(force=True)["reconciled"] == 1
+    assert calls[0]["active_rows"] == [
+        {"trade_id": "open-1"}, {"trade_id": "pending-1"},
+    ]
+    assert calls[0]["observed_ts"] == 2000.0
+    assert calls[0]["runtime_revision"] == "rev-1"
+
+
+def test_stale_signal_reconciliation_also_runs_durable_v3_reconciliation():
+    reconcile = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "reconcile_stale_signals"),
+    )
+    assert "_reconcile_overdue_v3_expected_orders()" in reconcile
+
+
+def test_startup_forces_same_durable_v3_reconciliation_path():
+    assert "_reconcile_overdue_v3_expected_orders(force=True)" in SOURCE
+    assert "active_v3_rows.extend(" not in SOURCE
 
 
 @pytest.mark.parametrize(
