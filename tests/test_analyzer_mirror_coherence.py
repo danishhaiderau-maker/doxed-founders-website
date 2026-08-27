@@ -39,6 +39,28 @@ def _write_heartbeat(root: Path, **updates) -> Path:
     return path
 
 
+def _write_mirror_identity(mirror: Path) -> Path:
+    state_path = mirror / ".fly-sync-state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "research.db": {
+                    "inode": 17,
+                    "size": 4096,
+                    "mtime_ns": 123456789,
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (mirror / "research_session.json").write_text(
+        json.dumps({"collector_v22_epoch_id": "epoch-current"}),
+        encoding="utf-8",
+    )
+    return state_path
+
+
 def _check(repo: Path, mirror: Path, **kwargs):
     return mirror_coherence.assert_mirror_coherent(
         repo_root=repo,
@@ -60,6 +82,7 @@ def _check(repo: Path, mirror: Path, **kwargs):
 def test_preflight_fails_closed_for_incoherent_receipt(tmp_path, updates, reason):
     repo, mirror = tmp_path / "repo", tmp_path / "mirror"
     repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
     _write_heartbeat(repo, **updates)
     with pytest.raises(mirror_coherence.MirrorCoherenceError, match=reason):
         _check(repo, mirror)
@@ -68,20 +91,27 @@ def test_preflight_fails_closed_for_incoherent_receipt(tmp_path, updates, reason
 def test_preflight_rejects_stale_receipt(tmp_path):
     repo, mirror = tmp_path / "repo", tmp_path / "mirror"
     repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
     old = datetime.now(timezone.utc) - timedelta(minutes=11)
     _write_heartbeat(repo, syncedAt=old.isoformat())
     with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_RECEIPT_STALE"):
         _check(repo, mirror, max_age_seconds=600)
 
 
-def test_prepublication_rejects_sync_identity_change(tmp_path):
+def test_prepublication_accepts_timestamp_refresh_but_rejects_generation_change(tmp_path):
     repo, mirror = tmp_path / "repo", tmp_path / "mirror"
     repo.mkdir(); mirror.mkdir()
+    state_path = _write_mirror_identity(mirror)
     path = _write_heartbeat(repo)
     token = _check(repo, mirror)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["syncedAt"] = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
     path.write_text(json.dumps(payload), encoding="utf-8")
+    assert _check(repo, mirror, previous=token) == token
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["research.db"]["size"] += 1
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     with pytest.raises(
         mirror_coherence.MirrorCoherenceError,
         match="MIRROR_SYNC_IDENTITY_CHANGED_DURING_ANALYSIS",
@@ -92,6 +122,7 @@ def test_prepublication_rejects_sync_identity_change(tmp_path):
 def test_unchanged_coherent_receipt_passes_both_gates(tmp_path):
     repo, mirror = tmp_path / "repo", tmp_path / "mirror"
     repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
     _write_heartbeat(repo)
     token = _check(repo, mirror)
     assert _check(repo, mirror, previous=token) == token
