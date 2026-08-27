@@ -297,6 +297,25 @@ def test_gpt_audit_builder_uses_real_analyzer_and_fails_closed() -> None:
                 assert set(manifest["required_members"]).issubset(names)
                 assert set(manifest["start_here"]).issubset(names)
                 assert "data/genome_analysis_report.json" not in manifest["start_here"]
+                archived_manifest = json.loads(zf.read("GPT_AUDIT_MANIFEST.json"))
+                readme = zf.read("README.txt").decode("utf-8")
+                assert archived_manifest["bundle_type"] == "ARCHITECTURE_SOURCE_AUDIT"
+                assert archived_manifest["complete_research_evidence"] is False
+                assert "NOT the complete research-evidence download" in readme
+                assert "Download Everything" in readme
+
+            genome_report = root / "research" / "genome" / "genome_analysis_report.json"
+            genome_report.parent.mkdir(parents=True, exist_ok=True)
+            genome_report.write_text(
+                json.dumps({"schema": "trading_genome_analysis_v1"}),
+                encoding="utf-8",
+            )
+            bundle, manifest = gpt_audit_builder.build(agent_root=root)
+            with zipfile.ZipFile(bundle) as zf:
+                names = set(zf.namelist())
+                assert "data/genome_analysis_report.json" in names
+                assert "data/genome_analysis_report.json" in manifest["start_here"]
+                assert set(manifest["start_here"]).issubset(names)
 
             missing = root / "research_v3_contract.py"
             missing.unlink()

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-GPT Audit Bundle — one-click export for ChatGPT review.
+GPT Architecture Audit Bundle — one-click source review export.
 
 Includes the production bot/analyzer source closure, genome/recorder modules,
 available provenance reports, and an implementation checklist.
+
+This is deliberately not the complete research-evidence download. Raw market,
+order, fill, lifecycle, trade, shadow and full analyzer-report artifacts belong
+to the separately verified "Download Everything" export.
 
 Output: research/downloads/gpt_audit_bundle.zip
         research/downloads/GPT_AUDIT_MANIFEST.json
@@ -276,7 +280,17 @@ def build(agent_root: Path | None = None) -> Tuple[Path, dict]:
         "schema": "gpt_audit_bundle_manifest_v1",
         "generated_at": stamp,
         "architecture_version": ARCHITECTURE_VERSION,
-        "purpose": "Upload to ChatGPT for full-stack genome architecture audit",
+        "bundle_type": "ARCHITECTURE_SOURCE_AUDIT",
+        "purpose": "Source and architecture review of the trading and genome implementation",
+        "evidence_scope": "SOURCE_AND_OPTIONAL_DERIVED_GENOME_SUMMARY_ONLY",
+        "complete_research_evidence": False,
+        "complete_research_evidence_download": "Use the separate Download Everything export.",
+        "intentionally_excluded_evidence": [
+            "raw market and microstructure streams",
+            "complete order, fill, lifecycle and trade ledgers",
+            "complete shadow and counterfactual evidence",
+            "complete analyzer report set and historical archives",
+        ],
         "start_here": start_here,
         "required_members": start_here,
         "files_included": [f["path"] for f in file_index],
@@ -300,11 +314,19 @@ def build(agent_root: Path | None = None) -> Tuple[Path, dict]:
         if report_path.is_file()
         else "  7. Genome report unavailable in this generation; see manifest summary."
     )
-    readme = f"""GPT Audit Bundle — Trading Genome v11
+    readme = f"""GPT Architecture Audit Bundle — Trading Genome v11
 Generated: {stamp}
 Architecture: {ARCHITECTURE_VERSION}
 
-UPLOAD THIS ENTIRE ZIP TO CHATGPT.
+PURPOSE: SOURCE AND ARCHITECTURE REVIEW.
+
+This is NOT the complete research-evidence download. It may contain an optional
+derived genome summary when that artifact exists, but it does not promise the
+raw market, order, fill, lifecycle, trade, shadow, counterfactual, historical,
+or complete analyzer-report evidence needed to reproduce research conclusions.
+Use the separate Download Everything export for complete evidence analysis.
+
+Upload this ZIP when reviewing implementation architecture and source wiring.
 
 Start with:
   1. GPT_AUDIT_MANIFEST.json — versions, file list, DB stats
