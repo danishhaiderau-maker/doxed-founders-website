@@ -317,6 +317,7 @@ try {
     $started = Get-Date
     $didSync = $false
     $observedSourceRevision = $null
+    $currentStage = "loop_start"
     $relayEvidenceStatus = [ordered]@{
       ok = $false
       errorCode = "CONFIG_MISSING"
@@ -326,6 +327,7 @@ try {
       # This poll is independent of Fly volume growth. A failure preserves the
       # previous qualified artifact and never blocks the canonical Fly mirror.
       if ($env:PLATFORM_API_BASE_URL -and $env:PLATFORM_RELAY_AGENT_SLUG -and $env:PLATFORM_RELAY_USER_ID) {
+        $currentStage = "optional_relay_evidence"
         try {
           $relayEvidencePath = Invoke-OptionalRelayEvidenceSync
           if ($relayEvidencePath -and (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf)) {
@@ -347,6 +349,7 @@ try {
           )
         }
       }
+      $currentStage = "loop_manifest_preflight"
       $manifest = Get-FlySyncPreflightManifest `
         -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")
       if ($manifest.PSObject.Properties.Name -contains "source_git_rev") {
@@ -445,6 +448,7 @@ try {
           tileRegistrySignature = $(if ($manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
           activeTiles = $(if ($manifest.PSObject.Properties.Name -contains "active_tiles") { @($manifest.active_tiles) } else { @() })
           relayEvidence = $relayEvidenceStatus
+          pollOk = $true
         }
         $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
         Add-Content -LiteralPath $logFile -Value (
@@ -485,6 +489,7 @@ try {
         $syncArgs.PublishAnalyzerReport = $publishReport
       }
       $syncArgs.TargetDir = $mirrorDir
+      $currentStage = "atomic_mirror_sync"
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
       $didSync = $true
       $lastSyncedTotalBytes = $currentTotalBytes
@@ -521,29 +526,65 @@ try {
         thresholdMb = $thresholdMb
         trigger = $(if ($forceByRevision) { "revision" } elseif ($forceByGrowth) { "growth" } elseif ($forceFresh) { "fresh" } else { "interval" })
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
+        pollOk = $true
       }
       Add-Content -LiteralPath $logFile -Value (
         "$($heartbeat.syncedAt)`tOK`ttrigger=$($heartbeat.trigger)`trev=$($heartbeat.sourceRevision)`tfiles=$($heartbeat.files)`tpruned=$($heartbeat.prunedRotations)`telapsed=$($heartbeat.elapsedSec)s"
       )
     } catch {
-      $heartbeat = [ordered]@{
-        ok = $false
-        syncedAt = (Get-Date).ToUniversalTime().ToString("o")
-        source = $SourceUrl
-        error = $_.Exception.Message
-        sourceRevision = $lastSyncedSourceRevision
-        observedSourceRevision = $observedSourceRevision
-        mirroredSourceRevision = $lastSyncedSourceRevision
-        revisionParity = $(
-          if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
-          elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }
-          else { "MISMATCH" }
-        )
-        relayEvidence = $relayEvidenceStatus
-        elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
+      $failureAt = (Get-Date).ToUniversalTime().ToString("o")
+      $failureMessage = $_.Exception.Message
+      $retainedHeartbeat = $null
+      if (Test-Path -LiteralPath $heartbeatFile -PathType Leaf) {
+        try {
+          $candidateHeartbeat = Get-Content -LiteralPath $heartbeatFile -Raw | ConvertFrom-Json
+          if ($candidateHeartbeat.ok -eq $true -and
+              $candidateHeartbeat.inProgress -ne $true -and
+              [string]$candidateHeartbeat.revisionParity -eq "MATCH" -and
+              [string]$candidateHeartbeat.mirroredSourceRevision -eq $lastSyncedSourceRevision) {
+            $retainedHeartbeat = $candidateHeartbeat
+          }
+        } catch { $retainedHeartbeat = $null }
+      }
+      if ($retainedHeartbeat) {
+        # A failed observation does not invalidate or rewrite the immutable
+        # mirror generation that already committed successfully. Preserve its
+        # completion timestamp and MATCH receipt, while exposing the failed
+        # poll separately. Staleness checks still fail closed if polling does
+        # not recover; a transient timeout no longer fabricates mirror drift.
+        $heartbeat = [ordered]@{}
+        foreach ($property in $retainedHeartbeat.PSObject.Properties) {
+          $heartbeat[$property.Name] = $property.Value
+        }
+        $heartbeat["pollOk"] = $false
+        $heartbeat["pollFailedAt"] = $failureAt
+        $heartbeat["pollStage"] = $currentStage
+        $heartbeat["pollError"] = $failureMessage
+        $heartbeat["relayEvidence"] = $relayEvidenceStatus
+      } else {
+        $heartbeat = [ordered]@{
+          ok = $false
+          syncedAt = $failureAt
+          source = $SourceUrl
+          error = $failureMessage
+          pollOk = $false
+          pollFailedAt = $failureAt
+          pollStage = $currentStage
+          pollError = $failureMessage
+          sourceRevision = $lastSyncedSourceRevision
+          observedSourceRevision = $observedSourceRevision
+          mirroredSourceRevision = $lastSyncedSourceRevision
+          revisionParity = $(
+            if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
+            elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }
+            else { "MISMATCH" }
+          )
+          relayEvidence = $relayEvidenceStatus
+          elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
+        }
       }
       Add-Content -LiteralPath $logFile -Value (
-        "$($heartbeat.syncedAt)`tERROR`t$($heartbeat.error)"
+        "$failureAt`tERROR`tstage=$currentStage`t$failureMessage"
       )
     }
     $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
