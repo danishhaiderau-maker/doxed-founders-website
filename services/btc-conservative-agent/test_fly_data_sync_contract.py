@@ -86,6 +86,24 @@ def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
     assert "AdminToken" not in progress_function
 
 
+def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
+    assert "$transportAttempts = 5" in SYNC_SCRIPT
+    assert "$manifestTimeoutSec = 90" in SYNC_SCRIPT
+    assert "$chunkTimeoutSec = 120" in SYNC_SCRIPT
+    assert "$ackTimeoutSec = 60" in SYNC_SCRIPT
+    assert "[TimeSpan]::FromSeconds($chunkTimeoutSec)" in SYNC_SCRIPT
+    assert "function Invoke-DataSyncJsonRequest" in SYNC_SCRIPT
+    assert '-Stage "manifest_initial"' in SYNC_SCRIPT
+    assert '-Stage "manifest_refresh"' in SYNC_SCRIPT
+    assert '-Stage "acknowledgement"' in SYNC_SCRIPT
+    assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
+    assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
+    assert "$attempt/$transportAttempts attempt(s)" in SYNC_SCRIPT
+    # Retry hardening must not weaken the candidate/checksum/atomic contract.
+    assert "Get-FileHash -LiteralPath $tmp -Algorithm SHA256" in SYNC_SCRIPT
+    assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
+
+
 def _load_bot_functions(*names):
     tree = ast.parse(BOT)
     selected = [
@@ -342,7 +360,7 @@ def test_ephemeral_open_positions_is_explicitly_optional_not_required():
     # The client remains fail-closed for every row in the required file list;
     # optional classification is a server-manifest concern, not a skip rule.
     assert "$selectedFiles = @($manifest.files)" in SYNC_SCRIPT
-    assert "Fly sync chunk failed for $rel" in SYNC_SCRIPT
+    assert "Fly data-sync stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "optional_files" not in SYNC_SCRIPT
 
 
@@ -672,7 +690,8 @@ def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
     assert "$generationRefreshCount = 0" in SYNC_SCRIPT
     assert "$generationRefreshCount -lt 3" in SYNC_SCRIPT
     assert "-match 'generation changed'" in SYNC_SCRIPT
-    assert 'Invoke-RestMethod -Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
+    assert '-Stage "manifest_refresh"' in SYNC_SCRIPT
+    assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
     assert 'Where-Object { [string]$_.path -eq $rel }' in SYNC_SCRIPT
     assert "$sameGeneration = $false" in SYNC_SCRIPT
     assert "$fullReplaceRetry = $true" in SYNC_SCRIPT
@@ -712,8 +731,9 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "/api/data-sync/manifest" not in BOT[BOT.index("_READ_ONLY_GET_PATHS"):BOT.index("def _client_ip")]
     assert '"X-Bot-Admin-Token" = $AdminToken' in SYNC_SCRIPT
     assert "Chunk checksum mismatch" in SYNC_SCRIPT
-    assert "Fly sync chunk failed for $rel at offset $offset limit $limit" in SYNC_SCRIPT
-    assert "after $attempt/3 attempt(s): $($_.Exception.Message)" in SYNC_SCRIPT
+    assert "Fly data-sync stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
+    assert "offset=$offset" in SYNC_SCRIPT and "limit=$limit" in SYNC_SCRIPT
+    assert "$attempt/$transportAttempts attempt(s): $($_.Exception.Message)" in SYNC_SCRIPT
     assert "expected_physical_size=$expectedPhysicalSize" in SYNC_SCRIPT
     assert "expected_published_size=$expectedPublishedSize" in SYNC_SCRIPT
     assert "consistency_mode=$consistencyMode" in SYNC_SCRIPT
@@ -1372,7 +1392,7 @@ def test_optional_analyzer_publication_failure_does_not_invalidate_canonical_syn
     assert "canonical evidence sync remains valid" in sync
     assert "AnalyzerPublished = [bool]$analyzerPublished" in sync
     assert "AnalyzerPublished = [bool]$PublishAnalyzerReport" not in sync
-    ack_pos = sync.index('$ack = Invoke-RestMethod')
+    ack_pos = sync.index('$ack = Invoke-DataSyncJsonRequest')
     publication_try_pos = sync.index("if ($PublishAnalyzerReport)")
     assert ack_pos < publication_try_pos
 

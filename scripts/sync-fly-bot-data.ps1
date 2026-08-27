@@ -49,9 +49,46 @@ New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
 $statePath = Join-Path $targetRoot ".fly-sync-state.json"
 $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
 Add-Type -AssemblyName System.Net.Http
+$transportAttempts = 5
+$manifestTimeoutSec = 90
+$chunkTimeoutSec = 120
+$ackTimeoutSec = 60
 $downloadClient = [System.Net.Http.HttpClient]::new()
-$downloadClient.Timeout = [TimeSpan]::FromSeconds(45)
+$downloadClient.Timeout = [TimeSpan]::FromSeconds($chunkTimeoutSec)
 $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
+
+function Invoke-DataSyncJsonRequest {
+  param(
+    [Parameter(Mandatory = $true)][string]$Stage,
+    [Parameter(Mandatory = $true)][string]$Uri,
+    [ValidateSet("Get", "Post")][string]$Method = "Get",
+    [int]$TimeoutSec = $manifestTimeoutSec,
+    [string]$Body = ""
+  )
+  for ($attempt = 1; $attempt -le $transportAttempts; $attempt++) {
+    try {
+      $parameters = @{
+        Uri = $Uri
+        Method = $Method
+        Headers = $headers
+        TimeoutSec = $TimeoutSec
+      }
+      if ($Method -eq "Post") {
+        $parameters.ContentType = "application/json"
+        $parameters.Body = $Body
+      }
+      return Invoke-RestMethod @parameters
+    } catch {
+      if ($attempt -ge $transportAttempts) {
+        throw (
+          "Fly data-sync stage=$Stage failed after " +
+          "$attempt/$transportAttempts attempt(s): $($_.Exception.Message)"
+        )
+      }
+      Start-Sleep -Seconds ([Math]::Min(15, 2 * $attempt))
+    }
+  }
+}
 
 function Write-SyncProgressHeartbeat {
   param(
@@ -171,7 +208,10 @@ function Save-SyncState {
 }
 
 $base = $SourceUrl.TrimEnd("/")
-$manifest = Invoke-RestMethod -Uri "$base/api/data-sync/manifest" -Headers $headers -TimeoutSec 30
+$manifest = Invoke-DataSyncJsonRequest `
+  -Stage "manifest_initial" `
+  -Uri "$base/api/data-sync/manifest" `
+  -TimeoutSec $manifestTimeoutSec
 if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
   throw "Unexpected Fly sync manifest schema."
 }
@@ -320,7 +360,7 @@ foreach ($row in $selectedFiles) {
         [Math]::Min($chunkLimit, $remoteSize - $offset)
       }
       $chunkComplete = $false
-      for ($attempt = 1; $attempt -le 3 -and -not $chunkComplete; $attempt++) {
+      for ($attempt = 1; $attempt -le $transportAttempts -and -not $chunkComplete; $attempt++) {
         $tmp = Join-Path $env:TEMP ("fly-sync-" + [guid]::NewGuid().ToString("N") + ".part")
         try {
           $encoded = [uri]::EscapeDataString($rel)
@@ -420,10 +460,12 @@ foreach ($row in $selectedFiles) {
             $refreshGeneration = $true
             break
           }
-          if ($attempt -ge 3) {
+          if ($attempt -ge $transportAttempts) {
             throw (
-              "Fly sync chunk failed for $rel at offset $offset limit $limit " +
-              "after $attempt/3 attempt(s): $($_.Exception.Message)"
+              "Fly data-sync stage=file_chunk failed for path=$rel " +
+              "file=$selectedFileIndex/$selectedFileCount offset=$offset " +
+              "remote_size=$remoteSize limit=$limit after " +
+              "$attempt/$transportAttempts attempt(s): $($_.Exception.Message)"
             )
           }
           Start-Sleep -Seconds (2 * $attempt)
@@ -455,7 +497,10 @@ foreach ($row in $selectedFiles) {
           )
           continue
         }
-        $freshManifest = Invoke-RestMethod -Uri "$base/api/data-sync/manifest" -Headers $headers -TimeoutSec 30
+        $freshManifest = Invoke-DataSyncJsonRequest `
+          -Stage "manifest_refresh" `
+          -Uri "$base/api/data-sync/manifest" `
+          -TimeoutSec $manifestTimeoutSec
         if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
           throw "Unexpected Fly sync manifest schema during generation refresh."
         }
@@ -519,13 +564,12 @@ Save-SyncState
 $downloadClient.Dispose()
 
 $ackBody = @{ files = @($ackRows) } | ConvertTo-Json -Depth 5
-$ack = Invoke-RestMethod `
+$ack = Invoke-DataSyncJsonRequest `
+  -Stage "acknowledgement" `
   -Uri "$base/api/data-sync/ack" `
   -Method Post `
-  -Headers $headers `
-  -ContentType "application/json" `
   -Body $ackBody `
-  -TimeoutSec 30
+  -TimeoutSec $ackTimeoutSec
 
 $analyzerPublished = $false
 $analyzerPublishErrorCode = $null
