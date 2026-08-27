@@ -500,6 +500,11 @@ def dual_write_lane_entry_resolution(
         "terminal": terminal_no_order,
         "ranking_eligible": False,
         "ranking_blocker": "NO_ORDER" if terminal_no_order else "PATH_NOT_MATURED",
+        "restart_recovery_provenance": copy.deepcopy(
+            source.get("_restart_recovery_provenance")
+            or source.get("restart_recovery_provenance")
+            or {}
+        ),
         "market_context_segment_refs": segment_refs,
         "market_context_segment_coverage": segment_coverage,
         **causal_ids,

@@ -57,6 +57,17 @@ class PaperLifecycleRestartTests(unittest.TestCase):
             "exit_profile_id": "ATR_TP_2.5_ATR_SL_1.5",
         }
 
+    def _awaiting(self, *, expires_ts=9999999999.0):
+        return {
+            "trade_id": "family-await-1",
+            "status": self.bot.SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
+            "created_ts": 1000.0, "created_ts_ts": 1000.0,
+            "expires_ts": expires_ts,
+            "research_lane": self.bot.COMBO_EXECUTION_LANES[0],
+            "shared_ai_call_id": "scan-restart-1",
+            "final_direction": "LONG", "order_placed": False,
+        }
+
     def test_round_trip_restores_all_lanes_without_loss(self):
         with mock.patch.object(self.bot, "_get_pending_order_evidence_worker") as worker:
             worker.return_value.submit.return_value = True
@@ -145,6 +156,56 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertEqual(len(self.bot.open_positions), 1)
         self.assertEqual(len(self.bot.pending_orders), 1)
         self.assertEqual(result["duplicates"], 2)
+
+    def test_preorder_awaiting_signal_survives_restart_and_restore_is_idempotent(self):
+        signal = self._awaiting()
+        self.bot.trades_map[signal["trade_id"]] = {"signal_ref": signal, "ai": {}}
+        self.assertTrue(self.bot.save_paper_lifecycle(reason="preorder-awaiting"))
+        payload = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual([row["trade_id"] for row in payload["awaiting_signals"]], [signal["trade_id"]])
+        self.bot.trades_map.clear()
+        with mock.patch.object(self.bot, "_v3_matching_order_intent_exists", return_value=False):
+            first = self.bot.load_paper_lifecycle()
+            second = self.bot.load_paper_lifecycle()
+        self.assertEqual(first["awaiting_signals"], 1)
+        self.assertEqual(second["duplicates"], 1)
+        restored = self.bot.trades_map[signal["trade_id"]]["signal_ref"]
+        self.assertEqual(restored["status"], self.bot.SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE)
+        self.assertEqual(restored["_restart_recovery_provenance"]["schema"], "paper_awaiting_restart_provenance_v1")
+
+    def test_overdue_restart_signal_reconciles_once_with_restart_provenance(self):
+        payload = {
+            "schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
+            "saved_at": "2026-08-27T07:50:00+00:00", "git_rev": "abc123",
+            "positions": [], "pending_orders": [],
+            "awaiting_signals": [self._awaiting(expires_ts=1.0)],
+        }
+        Path(self.bot.PAPER_LIFECYCLE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+        recorded = []
+        with mock.patch.object(self.bot, "_v3_matching_order_intent_exists", return_value=False), \
+             mock.patch.object(self.bot, "_record_expired_order", side_effect=lambda row, reason: recorded.append((row, reason)) or {"ok": True}):
+            first = self.bot.load_paper_lifecycle()
+            second = self.bot.load_paper_lifecycle()
+        self.assertEqual(first["overdue_reconciled"], 1)
+        self.assertEqual(second["overdue_reconciled"], 0)
+        self.assertEqual(len(recorded), 1)
+        row, reason = recorded[0]
+        self.assertEqual(reason, "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED")
+        self.assertEqual(row["_restart_recovery_provenance"]["snapshot_git_rev"], "abc123")
+
+    def test_durable_order_intent_prevents_compensating_no_order(self):
+        payload = {
+            "schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
+            "positions": [], "pending_orders": [],
+            "awaiting_signals": [self._awaiting(expires_ts=1.0)],
+        }
+        Path(self.bot.PAPER_LIFECYCLE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+        with mock.patch.object(self.bot, "_v3_matching_order_intent_exists", return_value=True), \
+             mock.patch.object(self.bot, "_record_expired_order") as record:
+            result = self.bot.load_paper_lifecycle()
+        self.assertEqual(result["intent_conflicts"], 1)
+        self.assertNotIn("family-await-1", self.bot.trades_map)
+        record.assert_not_called()
 
     def test_restored_position_remains_visible_to_exit_engine(self):
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,

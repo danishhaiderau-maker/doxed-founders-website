@@ -55,8 +55,12 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(rows[0]["entry_resolution"], "AWAITING")
             self.assertEqual(rows[0]["resolution_deadline_ts"], 1780)
 
+            recovery_source = {**source, "_restart_recovery_provenance": {
+                "schema": "paper_awaiting_restart_provenance_v1",
+                "snapshot_git_rev": "abc123",
+            }}
             dual_write_lane_entry_resolution(
-                source, lane="CONTINUOUS", entry_resolution="NO_ORDER",
+                recovery_source, lane="CONTINUOUS", entry_resolution="NO_ORDER",
                 exact_reason="MAX_ACTIVE_SIGNALS", epoch_id="epoch-v3-test",
                 data_dir=tmp, lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
                 observed_ts=1001,
@@ -67,6 +71,10 @@ class V3BridgeTests(unittest.TestCase):
             terminal = next(row for row in rows if row["entry_resolution"] == "NO_ORDER")
             self.assertTrue(terminal["terminal"])
             self.assertEqual(terminal["outcome_state"], "NO_TRADE")
+            self.assertEqual(
+                terminal["restart_recovery_provenance"]["snapshot_git_rev"],
+                "abc123",
+            )
             self.assertFalse(any(key in terminal for key in ("pnl", "pnl_usd", "net_usd")))
 
     def test_shared_call_episode_is_stable_across_symbol_enrichment(self):

@@ -9627,6 +9627,7 @@ def _defer_signal_min_age(signal: dict) -> bool:
         f"[PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
+    save_paper_lifecycle(reason="awaiting_min_age")
     return True
 
 
@@ -9749,6 +9750,7 @@ def _defer_dashboard_virtual_chase(signal: dict) -> bool:
         f"enabled={get_chase_execution_buckets()} [PIPELINE ENFORCEMENT]"
     )
     pipeline_state_sync()
+    save_paper_lifecycle(reason="awaiting_dashboard_chase")
     return True
 
 
@@ -14563,6 +14565,7 @@ def _v3_record_preorder_terminal_if_needed(
             "DUPLICATE_LIMIT_PRICE",
             "VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY",
             "STALE_NO_EXPOSURE",
+            "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED",
         }
         or had_submitted_order or not lane
     ):
@@ -21831,6 +21834,7 @@ def process_signal(event: dict):
                 SIGNAL_STATUS_AWAITING_5M, SIGNAL_STATUS_AWAITING_MICRO,
                 SIGNAL_STATUS_AWAITING_MIN_AGE,
             ) or signal.get("status") in VIRTUAL_CHASE_AWAITING_STATUSES:
+                save_paper_lifecycle(reason="preorder_awaiting_finalized")
                 return {
                     "entry_resolution": "AWAITING",
                     "exact_reason": str(signal.get("status") or "AWAITING_ENTRY"),
@@ -36887,6 +36891,35 @@ def _canonicalize_paper_lifecycle_identity(row: dict) -> dict:
     return row
 
 
+def _v3_matching_order_intent_exists(signal: dict) -> bool:
+    """Fail closed when an immutable order intent matches an awaiting snapshot."""
+    call_id = str(signal.get("shared_ai_call_id") or signal.get("source_trade_id") or "")
+    lane = _normalize_lane_key(signal)
+    if not call_id or not lane:
+        return True
+    path = Path("v3") / "ledgers" / "order_intent.jsonl"
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if (
+                    str(row.get("shared_ai_call_id") or "") == call_id
+                    and _normalize_lane_key(row) == lane
+                ):
+                    return True
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.error(
+            f"[PAPER_LIFECYCLE] refusing awaiting recovery because V3 order-intent "
+            f"ledger is unreadable: {exc} [PIPELINE ENFORCEMENT]"
+        )
+        return True
+    return False
+
+
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
     """Atomically persist every paper lane's executable lifecycle."""
     try:
@@ -36895,6 +36928,23 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
                          if _paper_lifecycle_row_valid(row, "position") and not row.get("bitfinex_position_id")]
             orders = [_canonicalize_paper_lifecycle_identity(_stable_paper_lifecycle_copy(row)) for row in pending_orders
                       if _paper_lifecycle_row_valid(row, "order") and not row.get("bitfinex_order_id")]
+            awaiting_signals = [
+                _stable_paper_lifecycle_copy(row.get("signal_ref") or {})
+                for row in trades_map.values()
+                if isinstance(row, dict)
+                and isinstance(row.get("signal_ref"), dict)
+                and str((row.get("signal_ref") or {}).get("status") or "").upper()
+                in {
+                    SIGNAL_STATUS_AWAITING_MICRO,
+                    SIGNAL_STATUS_AWAITING_5M,
+                    SIGNAL_STATUS_AWAITING_MIN_AGE,
+                    SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+                    SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
+                }
+                and not is_terminal_signal(row.get("signal_ref") or {})
+                and not (row.get("signal_ref") or {}).get("order_placed")
+                and not (row.get("signal_ref") or {}).get("bitfinex_order_id")
+            ]
     except RuntimeError as exc:
         # Keep the prior atomic file rather than killing the position manager or
         # publishing a partial lifecycle.  The next tick retries naturally.
@@ -36907,7 +36957,7 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
         "schema": "paper_lifecycle_v1", "saved_at": utc_iso(), "git_rev": _runtime_git_rev(),
         "reason": reason, "paper_only": bool(_force_paper_mode_active()),
         "live_armed": bool(state.get("live_armed")), "positions": positions,
-        "pending_orders": orders,
+        "pending_orders": orders, "awaiting_signals": awaiting_signals,
     }
     return _atomic_file_replace(PAPER_LIFECYCLE_FILE,
         lambda f: json.dump(payload, f, default=str, sort_keys=True),
@@ -36916,7 +36966,9 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
 
 def load_paper_lifecycle() -> dict:
     """Idempotently restore all paper positions and pending limits by trade ID."""
-    result = {"positions": 0, "pending_orders": 0, "duplicates": 0, "invalid": 0}
+    result = {"positions": 0, "pending_orders": 0, "awaiting_signals": 0,
+              "overdue_reconciled": 0, "intent_conflicts": 0,
+              "duplicates": 0, "invalid": 0}
     if not os.path.exists(PAPER_LIFECYCLE_FILE):
         return result
     with paper_lifecycle_file_lock:
@@ -36953,6 +37005,47 @@ def load_paper_lifecycle() -> dict:
             row["exchange_submission_blocked"] = True
             lane_register_pending_order(row)
             known_orders.add(tid); result["pending_orders"] += 1
+        known_signals = {
+            str((entry.get("signal_ref") or {}).get("trade_id"))
+            for entry in trades_map.values() if isinstance(entry, dict)
+        }
+        for raw in payload.get("awaiting_signals") or []:
+            if not isinstance(raw, dict) or not raw.get("trade_id"):
+                result["invalid"] += 1; continue
+            row = _stable_paper_lifecycle_copy(raw)
+            tid = str(row["trade_id"])
+            status = str(row.get("status") or "").upper()
+            if status not in VIRTUAL_CHASE_AWAITING_STATUSES | {
+                SIGNAL_STATUS_AWAITING_MICRO,
+                SIGNAL_STATUS_AWAITING_5M,
+                SIGNAL_STATUS_AWAITING_MIN_AGE,
+            } or is_terminal_signal(row) or row.get("order_placed"):
+                result["invalid"] += 1; continue
+            if tid in known_positions or tid in known_orders or tid in known_signals:
+                result["duplicates"] += 1; continue
+            if _v3_matching_order_intent_exists(row):
+                # A durable submit ledger outranks an older pre-submit snapshot.
+                result["intent_conflicts"] += 1; continue
+            row["_restart_recovery_provenance"] = {
+                "schema": "paper_awaiting_restart_provenance_v1",
+                "snapshot_file": PAPER_LIFECYCLE_FILE,
+                "snapshot_saved_at": payload.get("saved_at"),
+                "snapshot_git_rev": payload.get("git_rev"),
+                "restored_at": utc_iso(),
+                "restored_git_rev": _runtime_git_rev(),
+            }
+            trades_map[tid] = {"signal_ref": row, "ai": copy.deepcopy(row.get("ai") or {})}
+            known_signals.add(tid); result["awaiting_signals"] += 1
+            expires = float(row.get("expires_ts") or 0)
+            if expires and expires <= now:
+                row["status"] = "EXPIRED"
+                row["outcome"] = "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED"
+                row["exit_reason"] = row["outcome"]
+                # Deferred until after trade_lock is released below.
+                result.setdefault("_overdue", []).append(row)
+    for row in result.pop("_overdue", []):
+        if _record_expired_order(row, "RUNTIME_RESTART_SIGNAL_TTL_EXPIRED") is not None:
+            result["overdue_reconciled"] += 1
     logger.warning(f"[PAPER_LIFECYCLE] restart restored positions={result['positions']} "
                    f"pending={result['pending_orders']} duplicates={result['duplicates']} "
                    f"invalid={result['invalid']} [PIPELINE ENFORCEMENT]")
