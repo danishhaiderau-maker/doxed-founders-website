@@ -28068,9 +28068,16 @@ DASHBOARD_JS = """(function () {
           const headlineClosed = currentSettingsPeriod ? Number(currentSettingsPeriod.executed || 0) : Number(stats.real_fills || 0);
           const headlinePnl = currentSettingsPeriod ? Number(currentSettingsPeriod.pnl_usd || 0) : Number(pnl || 0);
           const headlineApprovals = currentSettingsPeriod ? Number(currentSettingsPeriod.approvals || 0) : Number(stats.approves || 0);
-          const headlineEv = currentSettingsPeriod
-            ? (currentSettingsPeriod.ev_per_approval == null ? (headlineApprovals ? headlinePnl / headlineApprovals : 0) : Number(currentSettingsPeriod.ev_per_approval))
-            : Number(stats.per_approve_ev || 0);
+          const explicitHeadlineEv = currentSettingsPeriod
+            ? currentSettingsPeriod.ev_per_approval
+            : stats.per_approve_ev;
+          const parsedHeadlineEv = Number(explicitHeadlineEv);
+          const headlineEv = headlineApprovals > 0
+            ? ((explicitHeadlineEv != null && Number.isFinite(parsedHeadlineEv))
+              ? parsedHeadlineEv
+              : headlinePnl / headlineApprovals)
+            : null;
+          const headlineEvLabel = headlineEv == null ? '—' : ('$' + headlineEv.toFixed(2));
           const headlinePnlCol = headlinePnl >= 0 ? '#3fb950' : '#f85149';
           const formatPeriodTime = function (epoch) {
             if (!epoch) return '—';
@@ -28123,7 +28130,7 @@ DASHBOARD_JS = """(function () {
             + statRow('Open', laneNow.open || 0)
             + statRow('Closed', headlineClosed)
             + statRow('PnL', '$' + headlinePnl.toFixed(2), headlinePnlCol)
-            + statRow('EV/appr', '$' + headlineEv.toFixed(2))
+            + statRow('EV/appr', headlineEvLabel)
             + '</div>'
             + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
@@ -28229,7 +28236,7 @@ DASHBOARD_JS = """(function () {
               if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
               return html + '</div>';
             })()
-            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Current settings period: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV $' + headlineEv.toFixed(2) + '/approve</div>'
+            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Current settings period: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {

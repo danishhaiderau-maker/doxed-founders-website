@@ -33,6 +33,15 @@ def test_tile_headlines_always_use_executed_fresh_collection_metrics():
     assert "v2ChkPass" not in chunk
 
 
+def test_tile_ev_is_unavailable_when_there_are_no_approvals():
+    chunk = _render_chunk()
+    assert "const headlineEv = headlineApprovals > 0" in chunk
+    assert "const headlineEvLabel = headlineEv == null ? '—'" in chunk
+    assert "statRow('EV/appr', headlineEvLabel)" in chunk
+    assert "· EV ' + headlineEvLabel + '/approve" in chunk
+    assert "headlineApprovals ? headlinePnl / headlineApprovals : 0" not in chunk
+
+
 def test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference():
     assert "function tradeStopEvidence" in SOURCE
     assert "Observed PnL % of margin" in SOURCE
@@ -125,6 +134,7 @@ def test_settings_period_approvals_reconcile_to_analyzer_headline():
 if __name__ == "__main__":
     test_tile_headlines_use_one_identical_six_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
+    test_tile_ev_is_unavailable_when_there_are_no_approvals()
     test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference()
     test_settings_periods_are_durable_and_attached_to_both_payload_paths()
     test_server_is_authoritative_for_execution_gate_controls()
