@@ -118,6 +118,7 @@ CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
 CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
+EXIT_REPORTS_VALIDATION_FILE = "exit_reports_validation.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 CORRELATED_PRICE_CLUSTER_REPORT_FILE = "correlated_price_cluster_report.json"
 ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
@@ -695,7 +696,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),
     ("Bot↔Analyzer Sync", "bot_analyzer_sync.json", "SYSTEM_NOT_READY gate at startup"),
-    ("Exit Reports Validation", "exit_reports_validation.json", "Analyzer gate — exit reports populated"),
+    ("Exit Reports Validation", EXIT_REPORTS_VALIDATION_FILE, "Current-generation exit report identity and evidence status"),
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
     ("Historical Trade Cohort", HISTORICAL_COHORT_REPORT_FILE, "Deduplicated executed trades across downloaded 3factor archives; never mixed into current-session P&L"),
     ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Generic quarantined outcomes collected during administrative pauses; never mixed into current qualification"),
@@ -18166,6 +18167,151 @@ def fill_time_guard_counterfactual_report(trades=None):
     return report
 
 
+def _exit_report_identity(payload):
+    provenance = payload.get("analysis_provenance") or {}
+    fresh_epoch = payload.get("fresh_epoch") or {}
+    return {
+        "generation_revision": (
+            payload.get("generation_revision")
+            or provenance.get("generation_revision")
+        ),
+        "epoch_id": (
+            payload.get("epoch_id")
+            or fresh_epoch.get("epoch_id")
+            or provenance.get("fresh_epoch_id")
+            or provenance.get("epoch_id")
+        ),
+    }
+
+
+def _exit_report_evidence_counts(payload):
+    worlds = payload.get("evidence_worlds") or {}
+    source_rows = 0
+    terminal_rows = 0
+    if isinstance(worlds, dict):
+        for world in worlds.values():
+            if not isinstance(world, dict):
+                continue
+            source_rows += int(world.get("source_rows") or 0)
+            terminal_rows += int(world.get("terminal_rows") or 0)
+    result_rows = max(
+        int(payload.get("total_combos") or 0),
+        len(payload.get("reasons") or []),
+        len(payload.get("best_combos") or []),
+        len(payload.get("worst_leakage") or []),
+    )
+    return source_rows, terminal_rows, result_rows
+
+
+def build_exit_reports_validation(manifest, report_dir="."):
+    """Validate current exit artifacts without imposing a qualification sample gate."""
+    expected_revision = manifest.get("generation_revision")
+    expected_epoch = (manifest.get("fresh_epoch") or {}).get("epoch_id")
+    declared = {
+        str(row.get("file"))
+        for row in (manifest.get("reports") or [])
+        if isinstance(row, dict) and row.get("file")
+    }
+    rows = []
+    errors = []
+    maximum_source_rows = 0
+    maximum_terminal_rows = 0
+    maximum_result_rows = 0
+    for name in (EXIT_COMBINATIONS_REPORT_FILE, EXIT_LEAKAGE_BY_REASON_REPORT_FILE):
+        path = Path(report_dir) / name
+        row = {
+            "file": name,
+            "declared_in_manifest": name in declared,
+            "exists": path.is_file(),
+            "parseable": False,
+            "revision_match": False,
+            "epoch_match": False,
+            "source_rows": 0,
+            "terminal_rows": 0,
+            "result_rows": 0,
+        }
+        payload = None
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                row["parseable"] = isinstance(payload, dict)
+            except Exception as exc:
+                row["parse_error"] = f"{type(exc).__name__}: {exc}"
+        if isinstance(payload, dict):
+            identity = _exit_report_identity(payload)
+            row.update(identity)
+            row["revision_match"] = bool(expected_revision) and identity["generation_revision"] == expected_revision
+            row["epoch_match"] = bool(expected_epoch) and identity["epoch_id"] == expected_epoch
+            source_rows, terminal_rows, result_rows = _exit_report_evidence_counts(payload)
+            row.update({
+                "source_rows": source_rows,
+                "terminal_rows": terminal_rows,
+                "result_rows": result_rows,
+            })
+            maximum_source_rows = max(maximum_source_rows, source_rows)
+            maximum_terminal_rows = max(maximum_terminal_rows, terminal_rows)
+            maximum_result_rows = max(maximum_result_rows, result_rows)
+        row["identity_match"] = row["revision_match"] and row["epoch_match"]
+        row["valid"] = (
+            row["declared_in_manifest"]
+            and row["exists"]
+            and row["parseable"]
+            and row["identity_match"]
+        )
+        if not row["valid"]:
+            errors.append(f"{name}:CURRENT_GENERATION_VALIDATION_FAILED")
+        rows.append(row)
+
+    current_generation_valid = not errors
+    if not current_generation_valid:
+        status = "INSUFFICIENT"
+    elif maximum_source_rows == 0 and maximum_terminal_rows == 0 and maximum_result_rows == 0:
+        status = "EMPTY"
+    elif maximum_terminal_rows == 0 and maximum_result_rows == 0:
+        status = "INSUFFICIENT"
+    else:
+        status = "POPULATED"
+    return {
+        "schema": "exit_reports_validation_v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_id": manifest.get("generation_id"),
+        "generation_revision": expected_revision,
+        "epoch_id": expected_epoch,
+        "source_data_revision": manifest.get("source_data_revision"),
+        "analysis_provenance": manifest.get("analysis_provenance") or {},
+        "validation_basis": "CURRENT_GENERATION_MANIFEST",
+        "status": status,
+        "verdict": status,
+        "current_generation_valid": current_generation_valid,
+        "parseable": all(row["parseable"] for row in rows),
+        "identity_match": all(row["identity_match"] for row in rows),
+        "minimum_trade_gate_applied": False,
+        "qualification_eligible": False,
+        "counts": {
+            "maximum_report_source_rows": maximum_source_rows,
+            "maximum_report_terminal_rows": maximum_terminal_rows,
+            "maximum_report_result_rows": maximum_result_rows,
+        },
+        "reports": rows,
+        "errors": errors,
+        "status_definition": {
+            "EMPTY": "Current reports are parseable and identity-matched, with no exit evidence.",
+            "INSUFFICIENT": "Current reports are incomplete, invalid, or contain source evidence without terminal results.",
+            "POPULATED": "Current reports are parseable and identity-matched and contain terminal or result rows.",
+        },
+        "note": "POPULATED is an evidence-presence state only; it is not strategy qualification or live-trading approval.",
+    }
+
+
+def _write_current_exit_reports_validation(manifest):
+    receipt = build_exit_reports_validation(manifest)
+    target = Path(EXIT_REPORTS_VALIDATION_FILE)
+    temp = Path(f"{target}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    os.replace(temp, target)
+    return receipt
+
+
 def write_report_manifest(payload=None):
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = float(
@@ -18258,6 +18404,10 @@ def write_report_manifest(payload=None):
     }
     reports = []
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
+        if fname == EXIT_REPORTS_VALIDATION_FILE:
+            # This receipt is derived from the completed current manifest below;
+            # never publish a leftover receipt from an earlier analyzer pass.
+            continue
         # Catalog files can survive from an older iteration when current data
         # cannot regenerate that report. Keep them for local history, but do
         # not qualify them as members of this immutable generation.
@@ -18345,6 +18495,30 @@ def write_report_manifest(payload=None):
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()[:24]
+    try:
+        exit_validation = _write_current_exit_reports_validation(manifest)
+        reports.append({
+            "title": "Exit Reports Validation",
+            "file": EXIT_REPORTS_VALIDATION_FILE,
+            "category": "Exits",
+            "description": "Current-generation exit report identity and evidence status",
+            "size_bytes": os.path.getsize(EXIT_REPORTS_VALIDATION_FILE),
+            "modified_at": datetime.fromtimestamp(
+                os.path.getmtime(EXIT_REPORTS_VALIDATION_FILE), tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+        })
+        manifest["report_count"] = len(reports)
+        manifest["required_report_status"][EXIT_REPORTS_VALIDATION_FILE] = {
+            "available_in_generation": True,
+            "status": exit_validation["status"],
+            "current_generation_valid": exit_validation["current_generation_valid"],
+        }
+    except Exception as exc:
+        manifest["required_report_status"][EXIT_REPORTS_VALIDATION_FILE] = {
+            "available_in_generation": False,
+            "generation_error": f"{type(exc).__name__}: {exc}",
+        }
     try:
         _publish_completed_report_generation(manifest)
     except Exception as exc:
