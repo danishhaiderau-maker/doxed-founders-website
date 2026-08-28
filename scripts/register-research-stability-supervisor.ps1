@@ -19,7 +19,6 @@ $arguments = @(
   "-ExecutionPolicy", "Bypass",
   "-WindowStyle", "Hidden",
   "-File", ('"' + $launcher + '"'),
-  "-Once",
   "-RepairMissingLocal"
 )
 if ($VaultEnv) {
@@ -44,7 +43,9 @@ $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -RunOnlyIfNetworkAvailable `
   -MultipleInstances IgnoreNew `
-  -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
+  -RestartCount 3 `
+  -RestartInterval (New-TimeSpan -Minutes 1) `
+  -ExecutionTimeLimit ([TimeSpan]::Zero)
 $principal = New-ScheduledTaskPrincipal `
   -UserId "$env:USERDOMAIN\$env:USERNAME" `
   -LogonType Interactive `
@@ -82,5 +83,6 @@ $info = $registered | Get-ScheduledTaskInfo
   lastRunTime = $info.LastRunTime
   nextRunTime = $info.NextRunTime
   intervalMinutes = $IntervalMinutes
+  supervisionMode = "CONTINUOUS_LOOP_WITH_SCHEDULED_RESTART"
   repairAuthority = "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY"
 }

@@ -1575,9 +1575,12 @@ def test_optional_analyzer_publication_failure_does_not_invalidate_canonical_syn
 
 def test_unattended_research_supervisor_is_local_repair_only():
     assert "start-research-stability-supervisor.ps1" in RESEARCH_SUPERVISOR_TASK
-    assert '"-Once"' in RESEARCH_SUPERVISOR_TASK
+    assert '"-Once"' not in RESEARCH_SUPERVISOR_TASK
     assert '"-RepairMissingLocal"' in RESEARCH_SUPERVISOR_TASK
     assert "-MultipleInstances IgnoreNew" in RESEARCH_SUPERVISOR_TASK
+    assert "-RestartCount 3" in RESEARCH_SUPERVISOR_TASK
+    assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in RESEARCH_SUPERVISOR_TASK
+    assert 'supervisionMode = "CONTINUOUS_LOOP_WITH_SCHEDULED_RESTART"' in RESEARCH_SUPERVISOR_TASK
     assert 'repairAuthority = "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY"' in RESEARCH_SUPERVISOR_TASK
     for forbidden in ("fly deploy", "fly machine restart", "fresh-reset", "live-armed"):
         assert forbidden not in RESEARCH_SUPERVISOR_TASK.lower()
