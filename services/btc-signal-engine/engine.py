@@ -15583,15 +15583,13 @@ def log_pipeline_event(stage, outcome, reason="", trade_id=None, edge=None, extr
         if extra:
             for k, v in extra.items():
                 row[f"x_{k}"] = v
-        with csv_lock:
-            dynamic_csv_writer(CSV_PIPELINE_EVENTS, row)
+        dynamic_csv_writer(CSV_PIPELINE_EVENTS, row)
     except Exception as e:
         logger.debug(f"[PIPELINE EVENT] skip log: {e}")
 
 def log_ai_error_row(ai_result, ctx=None):
     try:
-        with csv_lock:
-            row = {
+        row = {
                 "ts": utc_iso(),
                 "trade_id": ai_result.get("trade_id") or "",
                 "error_type": ai_result.get("error_type"),
@@ -15604,16 +15602,15 @@ def log_ai_error_row(ai_result, ctx=None):
                 "price": state.get("price"),
                 "ctx_trade_id": (ctx or {}).get("trade_id"),
                 **csv_research_meta(),
-            }
-            dynamic_csv_writer(CSV_AI_ERRORS, row)
+        }
+        dynamic_csv_writer(CSV_AI_ERRORS, row)
     except Exception as e:
         logger.error(f"[AI ERROR CSV] {e}")
 
 def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
     try:
         configured_model, configured_thinking_mode = _deepseek_config_receipt()
-        with csv_lock:
-            row = {
+        row = {
                 "ts": utc_iso(),
                 "trade_id": ai_result.get("trade_id") or "",
                 "research_lane": ai_result.get("research_lane", RESEARCH_LANE_CONTINUOUS),
@@ -15647,7 +15644,7 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                 ),
                 **csv_research_meta(),
             }
-            dynamic_csv_writer(CSV_AI_TRANCHE, row)
+        dynamic_csv_writer(CSV_AI_TRANCHE, row)
     except Exception as e:
         logger.error(f"[AI TRANCHE] {e}")
 
@@ -17743,9 +17740,8 @@ def hash_context(ctx):
 def log_setup(signal):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_setup"
-        with csv_lock:
-            row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"price": signal.get("signal_price"),"ai_win_prob": signal.get("ai_win_prob", 0),"regime": signal.get("regime"),"direction": signal.get("final_direction"),"event": "BUILD","edge_score": signal.get("edge_score_at_entry"), **csv_research_meta(signal)}
-            dynamic_csv_writer(CSV_SETUP_LOG, row)
+        row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"price": signal.get("signal_price"),"ai_win_prob": signal.get("ai_win_prob", 0),"regime": signal.get("regime"),"direction": signal.get("final_direction"),"event": "BUILD","edge_score": signal.get("edge_score_at_entry"), **csv_research_meta(signal)}
+        dynamic_csv_writer(CSV_SETUP_LOG, row)
         logger.info(f"[LOG SETUP] trade_id={signal.get('trade_id')} ai_win_prob={signal.get('ai_win_prob',0)} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"SETUP LOG FAIL: {e} [PIPELINE ENFORCEMENT]")
@@ -17756,9 +17752,8 @@ def log_ai(signal, ai):
         if ai.get("_tranche_logged"):
             return
         signal["_ai_logged"] = True
-        with csv_lock:
-            row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": ai.get("win_prob"),"comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta(signal)}
-            dynamic_csv_writer(CSV_AI_TRANCHE, row)
+        row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": ai.get("win_prob"),"comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta(signal)}
+        dynamic_csv_writer(CSV_AI_TRANCHE, row)
         logger.info(f"[LOG AI] trade_id={signal.get('trade_id')} prob={ai.get('win_prob')} source={ai.get('source')} decision={ai.get('decision')} override={ai.get('override')} final_direction={signal.get('final_direction')} inverted={signal.get('inverted')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"AI LOG FAIL: {e} [PIPELINE ENFORCEMENT]")
@@ -17766,8 +17761,7 @@ def log_ai(signal, ai):
 def log_decision(signal, decision, reason, skip_stage=None, ai_extra=None):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_decision"
-        with csv_lock:
-            row = {
+        row = {
                 "ts": utc_iso(),
                 "trade_id": signal.get("trade_id"),
                 "decision": decision,
@@ -17793,9 +17787,9 @@ def log_decision(signal, decision, reason, skip_stage=None, ai_extra=None):
                 "edge_trigger_reason": state.get("debug_state", {}).get("edge_trigger_reason"),
                 **csv_research_meta(signal),
             }
-            if ai_extra and str(ai_extra).startswith("AI_ERROR"):
-                row["ai_error_detail"] = str(ai_extra)[:500]
-            dynamic_csv_writer(CSV_DECISIONS, row)
+        if ai_extra and str(ai_extra).startswith("AI_ERROR"):
+            row["ai_error_detail"] = str(ai_extra)[:500]
+        dynamic_csv_writer(CSV_DECISIONS, row)
         logger.info(f"[LOG DECISION] trade_id={signal.get('trade_id')} decision={decision} reason={reason} ai_decision_text={signal.get('ai_decision')} experiment={row.get('experiment_tag')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"DECISION LOG FAIL: {e} [PIPELINE ENFORCEMENT]")
@@ -17810,16 +17804,14 @@ def log_trade(trade):
                 return
         if "conf" in trade:
             trade.pop("conf", None)
-        with csv_lock:
-            dynamic_csv_writer(CSV_TRADES, trade)
+        dynamic_csv_writer(CSV_TRADES, trade)
         logger.info(f"[CSV] Trade logged trade_id={trade.get('trade_id')} exit={trade.get('exit_reason')} ai_source={trade.get('ai_source')} final_direction={trade.get('final_direction')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"CSV TRADE WRITE FAILED: {e} [PIPELINE ENFORCEMENT]")
 
 def log_expired_order(row):
     try:
-        with csv_lock:
-            dynamic_csv_writer(CSV_EXPIRED, row)
+        dynamic_csv_writer(CSV_EXPIRED, row)
     except Exception as e:
         logger.error(f"[CSV EXPIRED] write failed: {e} [PIPELINE ENFORCEMENT]")
 
@@ -17922,23 +17914,22 @@ def log_blocked_signal(signal, ai, reason):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_blocked_signal"
         sr = state.get("support_resistance", {})
-        with csv_lock:
-            row = {"ts": utc_iso(), "trade_id": signal.get("trade_id", "duplicate"), "dir": signal.get("final_direction", signal.get("dir", "UNKNOWN")), "ai_win_prob": ai.get("win_prob"), "ai_threshold": get_ai_threshold(), "ai_approved": ai.get("approved", False), "reason": reason, "ai_source": ai.get("source","UNKNOWN"),"structure": sr.get("sr_state", "UNKNOWN"),"participation": state.get("ema_status", {}).get("ema_spread", 0.0),"context": state.get("regime", "UNKNOWN"),"ai_decision_text": ai.get("decision"),"price": signal.get("price"),"edge_score": signal.get("edge_score_at_entry"),"final_direction": signal.get("final_direction")}
-            if "features" in signal:
-                row.update({f"features_{k}": v for k,v in signal["features"].items()})
-            if "context" in signal:
-                row.update({f"context_{k}": v for k,v in signal["context"].items()})
-            if "controls" in signal:
-                row.update({f"controls_{k}": v for k,v in signal["controls"].items()})
-            if "decision" in signal:
-                row.update({f"decision_{k}": v for k,v in signal["decision"].items()})
-            row["invert_signal"] = state.get("invert_signal", False)
-            row["early_fail_enabled"] = state.get("early_fail_enabled", True)
-            row["edge_threshold"] = get_edge_threshold()
-            row["effective_threshold"] = signal.get("effective_threshold_at_entry") or get_effective_edge_threshold()
-            row["experiment_tag"] = f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}"
-            row.update(csv_research_meta())
-            dynamic_csv_writer(CSV_BLOCKS, row)
+        row = {"ts": utc_iso(), "trade_id": signal.get("trade_id", "duplicate"), "dir": signal.get("final_direction", signal.get("dir", "UNKNOWN")), "ai_win_prob": ai.get("win_prob"), "ai_threshold": get_ai_threshold(), "ai_approved": ai.get("approved", False), "reason": reason, "ai_source": ai.get("source","UNKNOWN"),"structure": sr.get("sr_state", "UNKNOWN"),"participation": state.get("ema_status", {}).get("ema_spread", 0.0),"context": state.get("regime", "UNKNOWN"),"ai_decision_text": ai.get("decision"),"price": signal.get("price"),"edge_score": signal.get("edge_score_at_entry"),"final_direction": signal.get("final_direction")}
+        if "features" in signal:
+            row.update({f"features_{k}": v for k,v in signal["features"].items()})
+        if "context" in signal:
+            row.update({f"context_{k}": v for k,v in signal["context"].items()})
+        if "controls" in signal:
+            row.update({f"controls_{k}": v for k,v in signal["controls"].items()})
+        if "decision" in signal:
+            row.update({f"decision_{k}": v for k,v in signal["decision"].items()})
+        row["invert_signal"] = state.get("invert_signal", False)
+        row["early_fail_enabled"] = state.get("early_fail_enabled", True)
+        row["edge_threshold"] = get_edge_threshold()
+        row["effective_threshold"] = signal.get("effective_threshold_at_entry") or get_effective_edge_threshold()
+        row["experiment_tag"] = f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}"
+        row.update(csv_research_meta())
+        dynamic_csv_writer(CSV_BLOCKS, row)
         logger.info(f"[CSV] Blocked signal logged reason={reason} trade_id={signal.get('trade_id')} structure={sr.get('sr_state')} ai_decision={ai.get('decision')} experiment={row.get('experiment_tag')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
         patch_signal_snapshot_outcome(signal.get("trade_id"), executed=False, block_reason=reason)
     except Exception as e:
@@ -21104,8 +21095,7 @@ def log_edge_census(edge_score: float, stage: str, reason: str, features: dict =
 def log_near_edge(candidate, edge_score):
     try:
         edge_score = round(float(edge_score or 0), 2)
-        with csv_lock:
-            row = {
+        row = {
                 "ts": utc_iso(),
                 "edge_score": edge_score,
                 "edge_score_bucket": _edge_score_bucket(edge_score),
@@ -21121,7 +21111,7 @@ def log_near_edge(candidate, edge_score):
                 "experiment_tag": f"INV_{state.get('invert_signal',False)}_EF_{state.get('early_fail_enabled',True)}",
                 **csv_research_meta(),
             }
-            dynamic_csv_writer("near_edge.log", row)
+        dynamic_csv_writer("near_edge.log", row)
         logger.info(f"[NEAR_EDGE] edge={edge_score:.1f} logged for analysis [PIPELINE ENFORCEMENT]")
     except Exception as e:
         logger.error(f"[NEAR_EDGE LOG FAIL] {e} [PIPELINE ENFORCEMENT]")
@@ -27644,21 +27634,20 @@ def pipeline_heartbeat():
 def log_event_rejection(event):
     logger.info(f"[PIPELINE BLOCKED] edge={event.get('edge',0)} < threshold={event.get('threshold',2.9)} [PIPELINE ENFORCEMENT]")
     try:
-        with csv_lock:
-            row = {"ts": utc_iso(), "type": "REJECTED_SIGNAL", "edge": event.get("edge",0), "threshold": event.get("threshold",2.9), "reason": "EDGE_BELOW_THRESHOLD"}
-            dynamic_csv_writer(CSV_BLOCKS, row)
-            persist_rejected_opportunity(
-                {
-                    "trade_id": event.get("trade_id") or f"edge-{int(time.time())}",
-                    "price": event.get("price") or state.get("price"),
-                    "signal_price": event.get("price") or state.get("price"),
-                    "final_direction": event.get("direction") or event.get("dir"),
-                    "edge_score_at_entry": event.get("edge"),
-                    "created_ts_ts": time.time(),
-                },
-                {"decision": "REJECT"},
-                "EDGE_BELOW_THRESHOLD",
-            )
+        row = {"ts": utc_iso(), "type": "REJECTED_SIGNAL", "edge": event.get("edge",0), "threshold": event.get("threshold",2.9), "reason": "EDGE_BELOW_THRESHOLD"}
+        dynamic_csv_writer(CSV_BLOCKS, row)
+        persist_rejected_opportunity(
+            {
+                "trade_id": event.get("trade_id") or f"edge-{int(time.time())}",
+                "price": event.get("price") or state.get("price"),
+                "signal_price": event.get("price") or state.get("price"),
+                "final_direction": event.get("direction") or event.get("dir"),
+                "edge_score_at_entry": event.get("edge"),
+                "created_ts_ts": time.time(),
+            },
+            {"decision": "REJECT"},
+            "EDGE_BELOW_THRESHOLD",
+        )
     except:
         pass
 

@@ -45,6 +45,31 @@ RECOVERY_GATE_FUNCTION = next(
 )
 
 
+class CsvWriterLockOrderTests(unittest.TestCase):
+    def test_dynamic_csv_writer_is_never_called_under_outer_csv_lock(self):
+        """The writer owns research_gate -> csv_lock; callers must not invert it."""
+        violations = []
+        for node in ast.walk(TREE):
+            if not isinstance(node, ast.With):
+                continue
+            holds_csv_lock = any(
+                isinstance(item.context_expr, ast.Name)
+                and item.context_expr.id == "csv_lock"
+                for item in node.items
+            )
+            if not holds_csv_lock:
+                continue
+            calls_writer = any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "dynamic_csv_writer"
+                for child in ast.walk(node)
+            )
+            if calls_writer:
+                violations.append(node.lineno)
+        self.assertEqual([], violations)
+
+
 def compile_snapshot(namespace):
     # The production watchdog now includes bounded replay-lock and post-AI
     # worker diagnostics. Source-extracted tests supply lightweight defaults
