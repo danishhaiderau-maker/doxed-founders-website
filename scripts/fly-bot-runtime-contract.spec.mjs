@@ -387,6 +387,10 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
   assert.match(
     syncLoop,
+    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \$forceByRevision[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
+  );
+  assert.match(
+    syncLoop,
     /if \(-not \(\$forceByTime -or \$forceByGrowth -or \$forceFresh -or \$forceByRevision\)\)/,
   );
   assert.match(
@@ -408,11 +412,13 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   assert.match(syncLoop, /if \(\$forceByRevision\) \{ \$syncArgs\.ForceFullRefresh = \$true \}/);
   assert.match(syncLoop, /MirroredSourceRevision = \$\(if \(\$lastSyncedSourceRevision\)/);
   assert.match(sync, /\[switch\]\$ForceFullRefresh/);
-  assert.match(sync, /\$sameGeneration = if \(\$ForceFullRefresh\) \{\s*\$false/);
+  assert.match(sync, /revision refresh must walk and revalidate the entire manifest/);
+  assert.doesNotMatch(sync, /\$sameGeneration = if \(\$ForceFullRefresh\) \{\s*\$false/);
   assert.match(
     sync,
-    /sourceRevision = \$\(if \(\$MirroredSourceRevision\)[\s\S]*observedSourceRevision = \$\(if \(\$manifest[\s\S]*mirroredSourceRevision = \$\(if \(\$MirroredSourceRevision\)/,
+    /\$observedRevision = \$\(if \(\$manifest[\s\S]*sourceRevision = \$\(if \(\$MirroredSourceRevision\)[\s\S]*observedSourceRevision = \$\(if \(\$observedRevision\)[\s\S]*mirroredSourceRevision = \$\(if \(\$MirroredSourceRevision\)/,
   );
+  assert.match(sync, /\$chunkTimeoutSec\s*=\s*240/);
   assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
   assert.match(sync, /Invoke-MirrorAtomicReplace[\s\S]*-Candidate \$stateTmp[\s\S]*-Destination \$statePath/);
   assert.match(sync, /\$stateBackup\s*=\s*"\$stateTmp\.bak"/);

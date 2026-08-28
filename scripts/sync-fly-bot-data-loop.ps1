@@ -325,31 +325,6 @@ try {
       lastSuccessAt = $relayEvidenceLastSuccessAt
     }
     try {
-      # This poll is independent of Fly volume growth. A failure preserves the
-      # previous qualified artifact and never blocks the canonical Fly mirror.
-      if ($env:PLATFORM_API_BASE_URL -and $env:PLATFORM_RELAY_AGENT_SLUG -and $env:PLATFORM_RELAY_USER_ID) {
-        $currentStage = "optional_relay_evidence"
-        try {
-          $relayEvidencePath = Invoke-OptionalRelayEvidenceSync
-          if ($relayEvidencePath -and (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf)) {
-            $relayEvidenceLastSuccessAt = [DateTimeOffset]::UtcNow.ToString("o")
-            $relayEvidenceStatus = [ordered]@{
-              ok = $true
-              errorCode = $null
-              lastSuccessAt = $relayEvidenceLastSuccessAt
-            }
-          } else {
-            $relayEvidenceStatus.errorCode = "ARTIFACT_MISSING"
-          }
-        } catch {
-          $safeCode = "SYNC_FAILED"
-          if ($_.Exception.Message -match '^\[RELAY_EVIDENCE_([A-Z0-9_]+)\]$') { $safeCode = $matches[1] }
-          $relayEvidenceStatus.errorCode = $safeCode
-          Add-Content -LiteralPath $logFile -Value (
-            "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`trelay-evidence=$safeCode"
-          )
-        }
-      }
       $currentStage = "loop_manifest_preflight"
       $manifest = Get-FlySyncPreflightManifest `
         -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")
@@ -422,6 +397,40 @@ try {
         -not $lastSyncedSourceRevision -or
         -not $observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)
       )
+
+      # Relay evidence is optional and may consume two 90-second bounded
+      # attempts.  Never put it ahead of a required revision repair: first
+      # publish an exact Fly mirror, then refresh relay evidence on the next
+      # matched cycle.  This makes the earlier "never blocks the canonical
+      # mirror" contract true during deployments and recovery.
+      if (
+        -not $forceByRevision -and
+        $env:PLATFORM_API_BASE_URL -and
+        $env:PLATFORM_RELAY_AGENT_SLUG -and
+        $env:PLATFORM_RELAY_USER_ID
+      ) {
+        $currentStage = "optional_relay_evidence"
+        try {
+          $relayEvidencePath = Invoke-OptionalRelayEvidenceSync
+          if ($relayEvidencePath -and (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf)) {
+            $relayEvidenceLastSuccessAt = [DateTimeOffset]::UtcNow.ToString("o")
+            $relayEvidenceStatus = [ordered]@{
+              ok = $true
+              errorCode = $null
+              lastSuccessAt = $relayEvidenceLastSuccessAt
+            }
+          } else {
+            $relayEvidenceStatus.errorCode = "ARTIFACT_MISSING"
+          }
+        } catch {
+          $safeCode = "SYNC_FAILED"
+          if ($_.Exception.Message -match '^\[RELAY_EVIDENCE_([A-Z0-9_]+)\]$') { $safeCode = $matches[1] }
+          $relayEvidenceStatus.errorCode = $safeCode
+          Add-Content -LiteralPath $logFile -Value (
+            "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`trelay-evidence=$safeCode"
+          )
+        }
+      }
 
       if (-not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision)) {
         $revisionParity = $(

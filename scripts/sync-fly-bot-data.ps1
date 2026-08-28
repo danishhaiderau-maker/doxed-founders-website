@@ -51,7 +51,12 @@ $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
 Add-Type -AssemblyName System.Net.Http
 $transportAttempts = 5
 $manifestTimeoutSec = 90
-$chunkTimeoutSec = 120
+# A busy paper-runtime can take a little over two minutes to begin streaming a
+# checksum-fenced 4 MiB chunk.  The prior 120-second client deadline discarded
+# valid HTTP 200 responses observed at ~129 seconds and retried the same offset
+# indefinitely.  Keep the request bounded, but leave enough headroom for the
+# runtime's bounded worker queue to drain without weakening generation checks.
+$chunkTimeoutSec = 240
 $ackTimeoutSec = 60
 $downloadClient = [System.Net.Http.HttpClient]::new()
 $downloadClient.Timeout = [TimeSpan]::FromSeconds($chunkTimeoutSec)
@@ -329,9 +334,14 @@ foreach ($row in $selectedFiles) {
   } else { 0 }
   $extension = [System.IO.Path]::GetExtension($local).ToLowerInvariant()
   $appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")
-  $sameGeneration = if ($ForceFullRefresh) {
-    $false
-  } elseif ($appendOnly) {
+  # A revision refresh must walk and revalidate the entire manifest, but it
+  # must remain resumable.  Inode/mtime/size (or append-prefix inode/size)
+  # identifies the exact Fly volume generation independently of application
+  # code revision.  Discarding that proof when ForceFullRefresh was set made a
+  # restarted 300+ file refresh download every completed file again.  Reuse an
+  # already-verified generation; any changed generation still fails this test
+  # and is downloaded and atomically replaced below.
+  $sameGeneration = if ($appendOnly) {
     (
       $previous -and
       [int64]$previous.inode -eq $remoteInode -and
