@@ -4369,13 +4369,27 @@ def download_everything():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     candidates = []
 
+    def is_transient_sync_member(path: Path) -> bool:
+        """Exclude atomic mirror-sync working files from evidence bundles."""
+        name = path.name.lower()
+        return (
+            ".download" in name
+            or ".replace-backup" in name
+            or name.endswith(".tmp")
+            or ".tmp-" in name
+        )
+
     def add_tree(base: Path, prefix: str, patterns=("*",)):
         if not base.is_dir():
             return
         seen = set()
         for pattern in patterns:
             for path in sorted(base.rglob(pattern)):
-                if not path.is_file() or path in seen:
+                if (
+                    not path.is_file()
+                    or path in seen
+                    or is_transient_sync_member(path)
+                ):
                     continue
                 rel = path.relative_to(base)
                 if (
@@ -4391,6 +4405,8 @@ def download_everything():
     # explicitly separated. The configured data root is the current source.
     for pattern in ("*.csv", "*.jsonl", "*.db", "*.log"):
         for path in sorted(DATA_ROOT.glob(pattern)):
+            if is_transient_sync_member(path):
+                continue
             candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
         if agent_root.resolve() != DATA_ROOT.resolve():
             for path in sorted(agent_root.glob(pattern)):
@@ -4421,7 +4437,7 @@ def download_everything():
     # Preserve rotations for every analyzer input, not only signal replay.
     for pattern in ("*.jsonl.*", "*.csv.*", "*.log.*"):
         for path in sorted(DATA_ROOT.glob(pattern)):
-            if path.is_file():
+            if path.is_file() and not is_transient_sync_member(path):
                 candidates.append((path, f"raw/current_fly_mirror/{path.name}"))
 
     # Pathway receipts are a required, named evidence component. Runtime

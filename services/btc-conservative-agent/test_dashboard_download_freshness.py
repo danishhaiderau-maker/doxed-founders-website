@@ -505,6 +505,12 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         original_ensure = dashboard._ensure_current_gpt_audit_bundle
         dashboard._ensure_current_gpt_audit_bundle = lambda _root: audit
         try:
+            # Atomic mirror synchronization can create and rename these while
+            # a user requests the bundle. They are implementation details, not
+            # stable evidence members, and must never make the download fail.
+            (mirror / "execution_funnel.jsonl.13980.deadbeef.download").write_text(
+                "transient\n", encoding="utf-8"
+            )
             with dashboard.app.test_client() as client:
                 response = client.get("/download/everything")
                 assert response.status_code == 200, response.data.decode(
@@ -530,6 +536,7 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         in names
                     )
                     assert "raw/current_fly_mirror/signal_persist.log" in names
+                    assert not any(".download" in name for name in names)
                     assert "genome/research.db" in names
                     assert "accumulator/research_trades.db" in names
                     for receipt_name in dashboard.CURRENT_PATHWAY_RECEIPTS:
