@@ -30,6 +30,49 @@ from typing import Any, Callable
 
 REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
+
+
+class SupervisorLockUnavailable(RuntimeError):
+    """Raised only when another supervisor already owns the process lock."""
+
+
+@contextmanager
+def exclusive_process_lock(path: Path):
+    """Hold one cross-platform byte lock for the supervisor lifetime."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            raise SupervisorLockUnavailable(str(path)) from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()).encode("ascii"))
+        handle.flush()
+        yield handle
+    finally:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        handle.close()
 PARTIAL_ARTIFACT_STALE_SECONDS = SYNC_MAX_AGE_SECONDS
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
@@ -1399,6 +1442,7 @@ def main() -> int:
     repo = args.repo.resolve()
     mirror_default, report_default = default_paths(repo)
     status_file = args.status_file or repo / ".research-stability-supervisor.json"
+    process_lock = repo / ".research-stability-supervisor.lock"
     token = os.environ.get("BOT_ADMIN_TOKEN", "")
     if not token:
         raise SystemExit("BOT_ADMIN_TOKEN is required; load it through the existing vault launcher")
@@ -1408,12 +1452,18 @@ def main() -> int:
         runtime_repo=args.runtime_repo.resolve() if args.runtime_repo else None,
         require_loop_owner=args.loop,
     )
-    while True:
-        payload = supervisor.check()
-        atomic_json(status_file, payload)
-        if not args.loop:
-            return 0 if payload["healthy"] else 2
-        time.sleep(max(60, args.interval_seconds))
+    try:
+        with exclusive_process_lock(process_lock):
+            while True:
+                payload = supervisor.check()
+                atomic_json(status_file, payload)
+                if not args.loop:
+                    return 0 if payload["healthy"] else 2
+                time.sleep(max(60, args.interval_seconds))
+    except SupervisorLockUnavailable:
+        # Another verified owner already holds the lifetime lock.  Duplicate
+        # scheduled invocations are an expected no-op, not a repair failure.
+        return 0
 
 
 if __name__ == "__main__":
