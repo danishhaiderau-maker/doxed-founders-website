@@ -482,6 +482,25 @@ def test_process_classification_counts_launcher_and_child_as_one_sync_worker():
     assert module.classify_processes(rows)["sync"] == [10]
 
 
+def test_process_classification_collapses_sync_descendant_through_intermediary():
+    rows = processes() + [
+        {
+            "ProcessId": 10,
+            "ParentProcessId": 1,
+            "Name": "conhost.exe",
+            "CommandLine": "conhost.exe 0x4",
+        },
+        {
+            "ProcessId": 11,
+            "ParentProcessId": 10,
+            "Name": "powershell.exe",
+            "CommandLine": "powershell -File sync-fly-bot-data-loop.ps1 -ChildSnapshot",
+        },
+    ]
+
+    assert module.classify_processes(rows)["sync"] == [1]
+
+
 def test_healthy_separate_data_and_report_directories(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
@@ -490,6 +509,33 @@ def test_healthy_separate_data_and_report_directories(tmp_path):
     assert result["healthy"] is True
     fly_manifest = next(x for x in result["checks"] if x["name"] == "fly_collector_manifest")
     assert fly_manifest["detail"]["source_revision"] == "a" * 40
+
+
+def test_analyzer_revision_ignores_diagnostic_shell_text(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    rows = processes() + [
+        {
+            "ProcessId": 99,
+            "ParentProcessId": 0,
+            "Name": "pwsh.exe",
+            "CommandLine": "pwsh -Command inspect analyzer_research_engine_v62.py",
+        }
+    ]
+    checker = module.Supervisor(
+        repo,
+        mirror,
+        reports,
+        "https://fly.invalid",
+        "token",
+        now=lambda: NOW,
+        fetcher=fetcher,
+        process_reader=lambda: rows,
+    )
+
+    result = checker.check()
+    parity = next(x for x in result["checks"] if x["name"] == "analyzer_process_revision_parity")
+    assert parity["ok"] is True
+    assert parity["detail"]["analyzer_process_revisions"] == ["a" * 40]
 
 
 def test_manifest_fetch_allows_slow_bounded_production_snapshot(tmp_path):

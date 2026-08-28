@@ -420,7 +420,17 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
         # A pwsh launcher commonly starts powershell.exe with the same sync
         # script. They are one worker tree, not two independent sync loops.
         # Count only roots whose matched parent is not another member.
-        roots = [pid for pid in members if parent_by_pid.get(pid) not in members]
+        def has_member_ancestor(pid: int) -> bool:
+            seen: set[int] = set()
+            parent = parent_by_pid.get(pid, 0)
+            while parent > 0 and parent not in seen:
+                if parent in members:
+                    return True
+                seen.add(parent)
+                parent = parent_by_pid.get(parent, 0)
+            return False
+
+        roots = [pid for pid in members if not has_member_ancestor(pid)]
         logical_groups[key] = sorted(roots)
     return logical_groups
 
@@ -1178,10 +1188,12 @@ class Supervisor:
                 repairs.append(f"started_missing_{kind}_through_safe_launcher")
 
         analyzer_process_revisions = []
+        analyzer_pids = set(inventory["analyzer"])
         for row in process_rows:
-            command_line = str(row.get("CommandLine") or row.get("command_line") or "")
-            if "analyzer_research_engine_v62.py" not in command_line:
+            row_pid = int(row.get("ProcessId") or row.get("process_id") or 0)
+            if row_pid not in analyzer_pids:
                 continue
+            command_line = str(row.get("CommandLine") or row.get("command_line") or "")
             match = re.search(r"--source-revision=([0-9a-fA-F]{7,40})", command_line)
             analyzer_process_revisions.append(match.group(1).lower() if match else None)
         analyzer_revision_match = bool(
