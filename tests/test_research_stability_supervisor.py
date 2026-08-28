@@ -492,6 +492,30 @@ def test_healthy_separate_data_and_report_directories(tmp_path):
     assert fly_manifest["detail"]["source_revision"] == "a" * 40
 
 
+def test_manifest_fetch_allows_slow_bounded_production_snapshot(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    observed = []
+
+    def recording_fetcher(url, token, timeout):
+        observed.append((url, timeout))
+        return fetcher(url, token, timeout)
+
+    checker = module.Supervisor(
+        repo,
+        mirror,
+        reports,
+        "https://fly.invalid",
+        "token",
+        now=lambda: NOW,
+        fetcher=recording_fetcher,
+        process_reader=processes,
+    )
+    checker.check()
+
+    manifest_timeout = next(timeout for url, timeout in observed if url.endswith("manifest"))
+    assert manifest_timeout == module.FLY_MANIFEST_TIMEOUT_SECONDS == 60
+
+
 def test_v3_supervision_checks_normalized_counts_and_real_money_gate(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     ledgers = mirror / "v3" / "ledgers"

@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
+FLY_MANIFEST_TIMEOUT_SECONDS = 60
 
 
 class SupervisorLockUnavailable(RuntimeError):
@@ -1018,7 +1019,11 @@ class Supervisor:
         manifest_tile_lanes: list[str] = []
         manifest: dict[str, Any] = {}
         try:
-            manifest = self.fetcher(self.fly_url.rstrip("/") + "/api/data-sync/manifest", self.token, 20)
+            manifest = self.fetcher(
+                self.fly_url.rstrip("/") + "/api/data-sync/manifest",
+                self.token,
+                FLY_MANIFEST_TIMEOUT_SECONDS,
+            )
             source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
             manifest_registry_signature = manifest.get("tile_registry_signature")
             manifest_tile_lanes = [
