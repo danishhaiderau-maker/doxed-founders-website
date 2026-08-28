@@ -96,8 +96,13 @@ def run():
         "_dispatch_thread_cap = threading.BoundedSemaphore(32)" in server_source
         and "_canonical_thread_cap = threading.BoundedSemaphore(8)" in server_source
         and "_relay_state_thread_cap = threading.BoundedSemaphore(4)" in server_source
+        and "_data_sync_thread_cap = threading.BoundedSemaphore(2)" in server_source
         and "_control_thread_cap = threading.BoundedSemaphore(2)" in server_source
         and 'b"/api/relay-execution-state"' in server_source
+        and 'b"/api/data-sync/manifest"' in server_source
+        and 'b"/api/data-sync/file"' in server_source
+        and 'b"/api/data-sync/ack"' in server_source
+        and "return self._data_sync_thread_cap" in server_source
         and 'b"/api/pause"' in server_source
         and 'b"/api/resume"' in server_source
         and "socket.MSG_PEEK" in server_source

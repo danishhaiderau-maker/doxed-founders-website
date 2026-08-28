@@ -114,7 +114,7 @@ def test_sync_keeps_generation_lease_until_terminal_heartbeat_is_published():
 def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "$transportAttempts = 5" in SYNC_SCRIPT
     assert "$manifestTimeoutSec = 90" in SYNC_SCRIPT
-    assert "$chunkTimeoutSec = 120" in SYNC_SCRIPT
+    assert "$chunkTimeoutSec = 240" in SYNC_SCRIPT
     assert "$ackTimeoutSec = 60" in SYNC_SCRIPT
     assert "[TimeSpan]::FromSeconds($chunkTimeoutSec)" in SYNC_SCRIPT
     assert "function Invoke-DataSyncJsonRequest" in SYNC_SCRIPT
@@ -138,10 +138,11 @@ def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
     assert "$relaySyncAttempts = 2" in SYNC_LOOP
     assert "function Invoke-OptionalRelayEvidenceSync" in SYNC_LOOP
     assert "stage=optional_relay_evidence failed after" in SYNC_LOOP
+    manifest_call = SYNC_LOOP.index("$manifest = Get-FlySyncPreflightManifest")
+    revision_gate = SYNC_LOOP.index("-not $forceByRevision", manifest_call)
     relay_call = SYNC_LOOP.index("$relayEvidencePath = Invoke-OptionalRelayEvidenceSync")
     relay_catch = SYNC_LOOP.index("} catch {", relay_call)
-    manifest_call = SYNC_LOOP.index("$manifest = Get-FlySyncPreflightManifest", relay_catch)
-    assert relay_call < relay_catch < manifest_call
+    assert manifest_call < revision_gate < relay_call < relay_catch
 
 
 def _load_bot_functions(*names):
