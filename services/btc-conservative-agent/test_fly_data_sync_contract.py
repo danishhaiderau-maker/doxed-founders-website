@@ -135,6 +135,7 @@ def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
     assert '$atomicSnapshotFallback = (' in SYNC_SCRIPT
     assert '$ForceFullRefresh -and' in SYNC_SCRIPT
     assert 'The no-fence endpoint path already proves one exact before/after' in SYNC_SCRIPT
+    assert '-not $atomicSnapshotFallback -and' in SYNC_SCRIPT
 
 
 def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():

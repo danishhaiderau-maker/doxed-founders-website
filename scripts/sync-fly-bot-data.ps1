@@ -387,7 +387,12 @@ foreach ($row in $selectedFiles) {
     )
     while ($true) {
       $refreshGeneration = $false
-      if ($sameGeneration -and -not $fullReplaceRetry -and (Test-Path -LiteralPath $local)) {
+      if (
+        $sameGeneration -and
+        -not $fullReplaceRetry -and
+        -not $atomicSnapshotFallback -and
+        (Test-Path -LiteralPath $local)
+      ) {
         [System.IO.File]::Copy($local, $candidate, $true)
         $offset = $localSize
       } else {
