@@ -99,6 +99,18 @@ def test_successful_sync_commits_a_completed_revision_normalized_heartbeat():
     assert "-Completed" in SYNC_SCRIPT
 
 
+def test_sync_keeps_generation_lease_until_terminal_heartbeat_is_published():
+    sync_call = SYNC_LOOP.index('$result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1")')
+    publish = SYNC_LOOP.index(
+        '$heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile',
+        sync_call,
+    )
+    release = SYNC_LOOP.index("$generationLease.Dispose()", publish)
+
+    assert sync_call < publish < release
+    assert SYNC_LOOP.rfind("if ($generationLease) { $generationLease.Dispose() }") > release
+
+
 def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "$transportAttempts = 5" in SYNC_SCRIPT
     assert "$manifestTimeoutSec = 90" in SYNC_SCRIPT

@@ -508,12 +508,13 @@ try {
         Start-Sleep -Seconds $pollSec
         continue
       }
-      try {
-        $currentStage = "atomic_mirror_sync"
-        $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
-      } finally {
-        if ($generationLease) { $generationLease.Dispose() }
-      }
+      # Keep the generation lease until the completed/failed heartbeat is
+      # durably published below. Releasing it immediately after file copying
+      # let a waiting analyzer acquire the lease while the prior inProgress
+      # receipt was still visible, fail MIRROR_SYNC_IN_PROGRESS, and then
+      # collide with the next sync on its one-minute retry.
+      $currentStage = "atomic_mirror_sync"
+      $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
       $didSync = $true
       $lastSyncedTotalBytes = $currentTotalBytes
       $lastSyncAt = [datetime]::UtcNow
@@ -611,6 +612,10 @@ try {
       )
     }
     $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
+    if ($generationLease) {
+      $generationLease.Dispose()
+      $generationLease = $null
+    }
     try {
       Write-SizeReport -MirrorPath $mirrorDir -ReportFile $sizeReportFile -FlyApiUrl $SourceUrl -IntervalSec ([Math]::Max(15, $IntervalSec))
     } catch {
@@ -623,6 +628,7 @@ try {
     }
   }
 } finally {
+  if ($generationLease) { $generationLease.Dispose() }
   Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
   if ($guardStream) { $guardStream.Dispose() }
   Remove-Item -LiteralPath $guardFile -Force -ErrorAction SilentlyContinue
