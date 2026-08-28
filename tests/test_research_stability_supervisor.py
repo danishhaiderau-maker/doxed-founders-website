@@ -414,7 +414,7 @@ def fetcher(url, token, timeout):
 def processes():
     return [
         {"ProcessId": 1, "Name": "powershell.exe", "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
-        {"ProcessId": 2, "Name": "python.exe", "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},
+        {"ProcessId": 2, "Name": "python.exe", "CommandLine": f"python analyzer_research_engine_v62.py --owner-port=9001 --source-revision={'a' * 40}"},
         {"ProcessId": 3, "Name": "python.exe", "CommandLine": "python research_dashboard.py --standalone"},
         {"ProcessId": 4, "Name": "python.exe", "CommandLine": "python research-stability-supervisor.py --loop"},
     ]
@@ -1115,6 +1115,55 @@ def test_only_missing_sync_and_analyzer_use_safe_launchers(tmp_path):
     assert "start-home-analyzer.ps1" in flattened
     assert all(forbidden not in flattened.lower() for forbidden in ("bot.py", "fly deploy", "wipe", "toggle"))
     assert result["repairs"] == ["started_missing_sync_through_safe_launcher", "started_missing_analyzer_through_safe_launcher"]
+
+
+def test_exact_mirror_parity_refreshes_one_stale_analyzer_through_safe_launcher(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    (repo / "scripts").mkdir()
+    calls = []
+    rows = [
+        {"ProcessId": 1, "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
+        {"ProcessId": 2, "CommandLine": f"python analyzer_research_engine_v62.py --owner-port=9001 --source-revision={'b' * 40}"},
+        {"ProcessId": 3, "CommandLine": "python research_dashboard.py --standalone"},
+        {"ProcessId": 4, "CommandLine": "python research-stability-supervisor.py --loop"},
+    ]
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", repair=True,
+        now=lambda: NOW, fetcher=fetcher, process_reader=lambda: rows,
+        launcher=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = checker.check()
+
+    assert len(calls) == 1
+    assert "start-home-analyzer.ps1" in " ".join(calls[0][0][0])
+    assert result["repairs"] == ["refreshed_stale_analyzer_through_safe_launcher"]
+    parity = next(x for x in result["checks"] if x["name"] == "analyzer_process_revision_parity")
+    assert parity["ok"] is False
+
+
+def test_stale_analyzer_is_not_refreshed_before_mirror_revision_matches_fly(tmp_path):
+    repo, mirror, reports = make_fixture(tmp_path)
+    heartbeat = json.loads((repo / ".fly-data-sync-loop.heartbeat.json").read_text())
+    heartbeat["sourceRevision"] = "c" * 40
+    write_json(repo / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    calls = []
+    rows = [
+        {"ProcessId": 1, "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
+        {"ProcessId": 2, "CommandLine": f"python analyzer_research_engine_v62.py --owner-port=9001 --source-revision={'b' * 40}"},
+        {"ProcessId": 3, "CommandLine": "python research_dashboard.py --standalone"},
+        {"ProcessId": 4, "CommandLine": "python research-stability-supervisor.py --loop"},
+    ]
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", repair=True,
+        now=lambda: NOW, fetcher=fetcher, process_reader=lambda: rows,
+        launcher=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = checker.check()
+
+    assert calls == []
+    assert result["repairs"] == []
 
 
 def test_duplicate_process_is_reported_and_never_killed(tmp_path):

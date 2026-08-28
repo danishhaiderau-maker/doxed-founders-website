@@ -13,6 +13,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import os
+import re
 import runpy
 import shutil
 import subprocess
@@ -1102,8 +1103,10 @@ class Supervisor:
             "sync_signature": sync_registry_signature,
         })
 
+        process_rows: list[dict[str, Any]] = []
         try:
-            inventory = classify_processes(self.process_reader())
+            process_rows = self.process_reader()
+            inventory = classify_processes(process_rows)
         except Exception as exc:
             inventory = {"sync": [], "analyzer": [], "dashboard": [], "supervisor": []}
             add("process_inventory", False, type(exc).__name__)
@@ -1124,6 +1127,42 @@ class Supervisor:
             )
             if count == 0 and kind in {"sync", "analyzer"} and self.launch_missing(kind):
                 repairs.append(f"started_missing_{kind}_through_safe_launcher")
+
+        analyzer_process_revisions = []
+        for row in process_rows:
+            command_line = str(row.get("CommandLine") or row.get("command_line") or "")
+            if "analyzer_research_engine_v62.py" not in command_line:
+                continue
+            match = re.search(r"--source-revision=([0-9a-fA-F]{7,40})", command_line)
+            analyzer_process_revisions.append(match.group(1).lower() if match else None)
+        analyzer_revision_match = bool(
+            source_revision
+            and len(analyzer_process_revisions) == 1
+            and analyzer_process_revisions[0]
+            and (
+                str(source_revision).lower().startswith(analyzer_process_revisions[0])
+                or analyzer_process_revisions[0].startswith(str(source_revision).lower())
+            )
+        )
+        add("analyzer_process_revision_parity", analyzer_revision_match, {
+            "fly_source_revision": source_revision,
+            "analyzer_process_revisions": analyzer_process_revisions,
+        })
+        # A deployed revision can leave a healthy-looking long-lived analyzer
+        # pinned to the previous source marker.  Refresh it only after the
+        # completed mirror proves exact Fly parity and process ownership is
+        # singular.  The existing launcher performs the final owner/port
+        # validation and preserves the independent read-only dashboard.
+        if (
+            self.repair
+            and revision_match
+            and len(inventory["sync"]) == 1
+            and len(inventory["analyzer"]) == 1
+            and len(inventory["dashboard"]) <= 1
+            and not analyzer_revision_match
+            and self.launch_missing("analyzer")
+        ):
+            repairs.append("refreshed_stale_analyzer_through_safe_launcher")
 
         events_path = self.mirror / "research_events_v22.jsonl"
         event_summary: dict[str, Any] | None = None
