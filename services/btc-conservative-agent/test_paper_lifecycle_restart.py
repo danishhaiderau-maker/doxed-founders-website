@@ -207,6 +207,36 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertNotIn("family-await-1", self.bot.trades_map)
         record.assert_not_called()
 
+    def test_restart_indexes_order_intent_ledger_once_before_signal_checks(self):
+        awaiting = []
+        for index in range(20):
+            row = self._awaiting()
+            row["trade_id"] = f"family-await-{index}"
+            row["shared_ai_call_id"] = f"scan-restart-{index}"
+            awaiting.append(row)
+        payload = {
+            "schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
+            "positions": [], "pending_orders": [], "awaiting_signals": awaiting,
+        }
+        Path(self.bot.PAPER_LIFECYCLE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+
+        identities = {("scan-restart-3", self.bot.COMBO_EXECUTION_LANES[0])}
+        original_match = self.bot._v3_matching_order_intent_exists
+        with mock.patch.object(
+            self.bot, "_load_v3_order_intent_identities", return_value=(identities, True)
+        ) as load_index, mock.patch.object(
+            self.bot,
+            "_v3_matching_order_intent_exists",
+            wraps=original_match,
+        ) as match_intent:
+            result = self.bot.load_paper_lifecycle()
+
+        load_index.assert_called_once_with()
+        self.assertEqual(match_intent.call_count, 20)
+        self.assertTrue(all("order_intent_identities" in call.kwargs for call in match_intent.call_args_list))
+        self.assertEqual(result["intent_conflicts"], 1)
+        self.assertEqual(result["awaiting_signals"], 19)
+
     def test_restored_position_remains_visible_to_exit_engine(self):
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
                    "positions": [self._position()], "pending_orders": []}

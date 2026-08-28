@@ -37445,12 +37445,19 @@ def _canonicalize_paper_lifecycle_identity(row: dict) -> dict:
     return row
 
 
-def _v3_matching_order_intent_exists(signal: dict) -> bool:
+def _v3_matching_order_intent_exists(
+    signal: dict,
+    *,
+    order_intent_identities: set[tuple[str, str]] | None = None,
+    ledger_readable: bool = True,
+) -> bool:
     """Fail closed when an immutable order intent matches an awaiting snapshot."""
     call_id = str(signal.get("shared_ai_call_id") or signal.get("source_trade_id") or "")
     lane = _normalize_lane_key(signal)
     if not call_id or not lane:
         return True
+    if order_intent_identities is not None:
+        return (not ledger_readable) or (call_id, lane) in order_intent_identities
     path = Path("v3") / "ledgers" / "order_intent.jsonl"
     if not path.exists():
         return False
@@ -37472,6 +37479,39 @@ def _v3_matching_order_intent_exists(signal: dict) -> bool:
         )
         return True
     return False
+
+
+def _load_v3_order_intent_identities() -> tuple[set[tuple[str, str]], bool]:
+    """Read the durable order-intent ledger once for restart reconciliation.
+
+    ``load_paper_lifecycle`` may restore many awaiting signals.  Re-scanning the
+    complete JSONL ledger for every signal held ``trade_lock`` for minutes on a
+    mature volume, starving the API caches and triggering the runtime watchdog.
+    Build the immutable identity index before taking ``trade_lock`` instead.
+    The boolean is false when the ledger cannot be read so recovery still fails
+    closed rather than replaying an uncertain awaiting signal.
+    """
+    path = Path("v3") / "ledgers" / "order_intent.jsonl"
+    if not path.exists():
+        return set(), True
+    identities: set[tuple[str, str]] = set()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                call_id = str(row.get("shared_ai_call_id") or "")
+                lane = _normalize_lane_key(row)
+                if call_id and lane:
+                    identities.add((call_id, lane))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.error(
+            f"[PAPER_LIFECYCLE] refusing awaiting recovery because V3 order-intent "
+            f"ledger is unreadable: {exc} [PIPELINE ENFORCEMENT]"
+        )
+        return set(), False
+    return identities, True
 
 
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
@@ -37533,6 +37573,7 @@ def load_paper_lifecycle() -> dict:
         logger.error("[PAPER_LIFECYCLE] refused invalid, non-paper, or armed restart snapshot")
         result["invalid"] += 1
         return result
+    order_intent_identities, order_intent_ledger_readable = _load_v3_order_intent_identities()
     with trade_lock:
         known_positions = {str(x.get("trade_id")) for x in open_positions if isinstance(x, dict)}
         known_orders = {str(x.get("trade_id")) for x in pending_orders if isinstance(x, dict)}
@@ -37577,7 +37618,11 @@ def load_paper_lifecycle() -> dict:
                 result["invalid"] += 1; continue
             if tid in known_positions or tid in known_orders or tid in known_signals:
                 result["duplicates"] += 1; continue
-            if _v3_matching_order_intent_exists(row):
+            if _v3_matching_order_intent_exists(
+                row,
+                order_intent_identities=order_intent_identities,
+                ledger_readable=order_intent_ledger_readable,
+            ):
                 # A durable submit ledger outranks an older pre-submit snapshot.
                 result["intent_conflicts"] += 1; continue
             row["_restart_recovery_provenance"] = {
