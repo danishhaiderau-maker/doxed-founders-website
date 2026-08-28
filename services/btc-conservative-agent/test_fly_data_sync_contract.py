@@ -86,6 +86,16 @@ def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
     assert "AdminToken" not in progress_function
 
 
+def test_successful_sync_commits_a_completed_revision_normalized_heartbeat():
+    progress_function = SYNC_SCRIPT.split("function Write-SyncProgressHeartbeat", 1)[1]
+    progress_function = progress_function.split("$syncState = @{}", 1)[0]
+    assert "[switch]$Completed" in progress_function
+    assert "inProgress = -not [bool]$Completed" in progress_function
+    assert ".StartsWith($observedRevision" in progress_function
+    assert '-Phase "complete"' in SYNC_SCRIPT
+    assert "-Completed" in SYNC_SCRIPT
+
+
 def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "$transportAttempts = 5" in SYNC_SCRIPT
     assert "$manifestTimeoutSec = 90" in SYNC_SCRIPT

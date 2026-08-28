@@ -97,7 +97,8 @@ function Write-SyncProgressHeartbeat {
     [int]$FileIndex = 0,
     [int]$FileCount = 0,
     [int64]$FileBytes = 0,
-    [int64]$RemoteBytes = 0
+    [int64]$RemoteBytes = 0,
+    [switch]$Completed
   )
   if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) { return }
   $target = [System.IO.Path]::GetFullPath($ProgressHeartbeatFile)
@@ -113,9 +114,20 @@ function Write-SyncProgressHeartbeat {
       }
     } catch { $relayEvidence = $null }
   }
+  $observedRevision = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { "" })
+  $requestedRevision = [string]$MirroredSourceRevision
+  $revisionMatches = [bool](
+    $requestedRevision -and
+    $observedRevision -and
+    (
+      $requestedRevision.Equals($observedRevision, [StringComparison]::OrdinalIgnoreCase) -or
+      $requestedRevision.StartsWith($observedRevision, [StringComparison]::OrdinalIgnoreCase) -or
+      $observedRevision.StartsWith($requestedRevision, [StringComparison]::OrdinalIgnoreCase)
+    )
+  )
   $progress = [ordered]@{
     ok = $true
-    inProgress = $true
+    inProgress = -not [bool]$Completed
     phase = $Phase
     updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
     # Keep the canonical heartbeat timestamp populated while a long atomic
@@ -125,11 +137,11 @@ function Write-SyncProgressHeartbeat {
     syncedAt = [DateTimeOffset]::UtcNow.ToString("o")
     source = $SourceUrl
     sourceRevision = $(if ($MirroredSourceRevision) { $MirroredSourceRevision } else { $null })
-    observedSourceRevision = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "source_git_rev") { [string]$manifest.source_git_rev } else { $null })
+    observedSourceRevision = $(if ($observedRevision) { $observedRevision } else { $null })
     mirroredSourceRevision = $(if ($MirroredSourceRevision) { $MirroredSourceRevision } else { $null })
     revisionParity = $(
       if (-not $MirroredSourceRevision -or -not $manifest -or -not $manifest.source_git_rev) { "UNKNOWN" }
-      elseif ([string]$manifest.source_git_rev -ieq $MirroredSourceRevision) { "MATCH" }
+      elseif ($revisionMatches) { "MATCH" }
       else { "MISMATCH" }
     )
     tileRegistrySignature = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
@@ -792,6 +804,17 @@ if ($PublishAnalyzerReport) {
     Write-Warning "Optional analyzer publication failed; canonical evidence sync remains valid."
   }
 }
+
+# The child sync owns the atomic data download and ACK, so it must also commit
+# the progress receipt. Without this final marker a successful standalone sync
+# leaves the analyzer permanently fail-closed behind `inProgress: true`.
+Write-SyncProgressHeartbeat `
+  -Phase "complete" `
+  -FileIndex $selectedFiles.Count `
+  -FileCount $selectedFiles.Count `
+  -FileBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
+  -RemoteBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
+  -Completed
 
 [pscustomobject]@{
   Source = $base

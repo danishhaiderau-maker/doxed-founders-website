@@ -44,6 +44,28 @@ def test_ai_calibration_and_direction_empty_stats_are_unavailable(tmp_path, monk
     assert direction["short_pnl"] is None
 
 
+def test_direction_report_accepts_a_one_sided_trade_cohort(tmp_path, monkeypatch):
+    analyzer = _load_analyzer()
+    monkeypatch.setattr(analyzer, "DIRECTION_REPORT_FILE", str(tmp_path / "direction.json"))
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [])
+
+    report = analyzer.direction_attribution_report(
+        pd.DataFrame([{
+            "trade_id": "long-only",
+            "final_direction": "LONG",
+            "regime": "TREND",
+            "net_pnl_usd": 0.02,
+            "edge_score": 3.7,
+        }]),
+        session={},
+    )
+
+    assert report["long"]["trades"] == 1
+    assert report["short"]["trades"] == 0
+    assert report["short"]["win_rate_pct"] is None
+    assert report["short"]["sum_pnl_usd"] is None
+
+
 def test_pathway_empty_lanes_keep_counts_but_null_derived_metrics(tmp_path, monkeypatch):
     analyzer = _load_analyzer()
     monkeypatch.setattr(analyzer, "PATHWAY_SURVIVAL_REPORT_FILE", str(tmp_path / "pathway.json"))

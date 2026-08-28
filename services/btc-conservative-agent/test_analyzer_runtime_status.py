@@ -120,6 +120,12 @@ checks = {
         and "source_git_rev" in start_analyzer
         and "rev-parse $runtimeRevision" in start_analyzer
     ),
+    "bounded analyzer restart validates its exact owned process": (
+        "[switch]$Restart" in start_analyzer
+        and '$incumbentCommandLine.Contains("--owner-port=$AnalyzerPort")' in start_analyzer
+        and "$incumbentCommandLine.Contains($expectedRevisionMarker)" in start_analyzer
+        and "Stop-Process -Id $incumbentPid -Force -ErrorAction Stop" in start_analyzer
+    ),
     "dashboard refreshes only the active tab": (
         "const SECTION_LOADERS" in source
         and "refreshActiveSection" in source

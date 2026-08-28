@@ -10584,13 +10584,13 @@ def direction_attribution_report(trades=None, decisions=None, session=None):
             ai_call_stats["no_trade_calls"] += 1
 
     print(
-        f"  LONG: n={long_stats['trades']} WR={long_stats['win_rate_pct']:.1f}% "
-        f"net=${long_stats['sum_pnl_usd']:.2f} avg_edge={long_stats['avg_edge']} "
+        f"  LONG: n={long_stats['trades']} WR={_fmt_pct(long_stats['win_rate_pct'])} "
+        f"net={_fmt_usd(long_stats['sum_pnl_usd'])} avg_edge={long_stats['avg_edge']} "
         f"avg_ai={long_stats['avg_ai_confidence']} {PIPELINE_ENFORCEMENT_TAG}"
     )
     print(
-        f"  SHORT: n={short_stats['trades']} WR={short_stats['win_rate_pct']:.1f}% "
-        f"net=${short_stats['sum_pnl_usd']:.2f} avg_edge={short_stats['avg_edge']} "
+        f"  SHORT: n={short_stats['trades']} WR={_fmt_pct(short_stats['win_rate_pct'])} "
+        f"net={_fmt_usd(short_stats['sum_pnl_usd'])} avg_edge={short_stats['avg_edge']} "
         f"avg_ai={short_stats['avg_ai_confidence']} {PIPELINE_ENFORCEMENT_TAG}"
     )
     print(

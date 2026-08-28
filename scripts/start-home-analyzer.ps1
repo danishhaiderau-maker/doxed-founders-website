@@ -1,7 +1,7 @@
 # Run the read-only desktop analyzer (30-min loop, or --Once) against the
 # canonical Fly data mirror. It binds to loopback and receives no trading,
 # exchange, Fly, Railway, or AI credentials.
-param([switch]$Once, [switch]$NoWait, [int]$Port = 0)
+param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0)
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir "home-stack-mode.ps1") -ErrorAction SilentlyContinue 2>$null
@@ -201,6 +201,18 @@ if ($discoveredEnginePids.Count -gt 1) {
   exit 2
 }
 $expectedRevisionMarker = "--source-revision=$($sourceRevision.ToLowerInvariant())"
+if ($Restart -and $discoveredEnginePids.Count -eq 1 -and -not $Once) {
+  $incumbentPid = [int]$discoveredEnginePids[0]
+  $incumbentCommandLine = [string](Get-ProcessCommandLineFast -ProcessId $incumbentPid)
+  if (-not $incumbentCommandLine.Contains("--owner-port=$AnalyzerPort") -or
+      -not $incumbentCommandLine.Contains($expectedRevisionMarker)) {
+    throw "REFUSED: analyzer restart target does not match the owned port and source revision."
+  }
+  Write-Host "Restarting verified analyzer engine PID $incumbentPid; dashboard remains available." -ForegroundColor Yellow
+  Stop-Process -Id $incumbentPid -Force -ErrorAction Stop
+  Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer.pid") -Force -ErrorAction SilentlyContinue
+  $discoveredEnginePids = @()
+}
 if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
   $incumbentPid = [int]$discoveredEnginePids[0]
   $incumbentCommandLine = [string](Get-ProcessCommandLineFast -ProcessId $incumbentPid)
