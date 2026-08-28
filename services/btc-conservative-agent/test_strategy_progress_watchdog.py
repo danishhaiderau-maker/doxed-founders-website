@@ -54,6 +54,7 @@ def compile_snapshot(namespace):
     namespace.setdefault("sys", __import__("sys"))
     namespace.setdefault("traceback", __import__("traceback"))
     namespace.setdefault("Path", Path)
+    namespace.setdefault("WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC", 600.0)
     module = ast.Module(body=[FUNCTION], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
@@ -181,6 +182,39 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertTrue(result["ai_expected"])
         self.assertFalse(result["ai_progressing"])
         self.assertFalse(result["ok"])
+
+    def test_owned_scheduled_cycle_gets_separate_bounded_completion_window(self):
+        self.state["last_ai_call_ts"] = self.now - 501
+        self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
+            "owner": "periodic-ai",
+            "owner_ident": threading.get_ident(),
+            "started_ts": self.now - 320,
+            "stage": "PROCESS_SIGNAL",
+            "stage_started_ts": self.now - 320,
+        }
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertFalse(result["ai_expected"])
+        self.assertTrue(result["ai_progressing"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(320.0, result["scheduled_ai_cycle"]["cycle_age_sec"])
+        self.assertTrue(result["scheduled_ai_cycle"]["within_watchdog_bound"])
+
+    def test_owned_scheduled_cycle_still_fails_after_hard_bound(self):
+        self.state["last_ai_call_ts"] = self.now - 701
+        self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
+            "owner": "periodic-ai",
+            "owner_ident": threading.get_ident(),
+            "started_ts": self.now - 601,
+            "stage": "PROCESS_SIGNAL",
+            "stage_started_ts": self.now - 601,
+        }
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertTrue(result["ai_expected"])
+        self.assertFalse(result["ai_progressing"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["scheduled_ai_cycle"]["within_watchdog_bound"])
 
     def test_fresh_process_gets_bounded_ai_startup_grace_even_for_old_session(self):
         self.snapshot.__globals__["process_boot_time"] = self.now - 10

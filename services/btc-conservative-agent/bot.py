@@ -276,6 +276,15 @@ WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR = max(
     2,
     int(os.getenv("WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR", "3")),
 )
+# One scheduled AI cycle also records six independent paper routes and their
+# evidence.  On a growing append-only ledger that bounded post-decision work
+# can legitimately outlive the normal AI cadence.  Do not classify an owned,
+# observable cycle as "no AI progress" at the shorter cadence threshold; keep
+# a separate hard ceiling so a genuinely wedged owner still fails closed.
+WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC = max(
+    600.0,
+    float(os.getenv("WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC", "600")),
+)
 _strategy_progress_incident_lock = threading.Lock()
 _strategy_progress_incident = {
     "active": False,
@@ -27371,11 +27380,32 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     ai_age = max(0.0, now - ai_ts) if ai_ts else None
     startup_age = max(0.0, now - float(process_boot_time or now))
     ai_stale_sec = max(300.0, float(get_effective_ai_cooldown_sec()) + 120.0)
+    scheduled_snapshot = copy.deepcopy(scheduled_ai_cycle_state)
+    scheduled_started = float(scheduled_snapshot.get("started_ts") or 0)
+    scheduled_owner_ident = scheduled_snapshot.get("owner_ident")
+    scheduled_owner_frame = (
+        sys._current_frames().get(scheduled_owner_ident)
+        if scheduled_owner_ident else None
+    )
+    scheduled_cycle_age = (
+        max(0.0, now - scheduled_started) if scheduled_started else 0.0
+    )
+    scheduled_owner_active = bool(
+        scheduled_snapshot.get("owner")
+        and scheduled_owner_ident
+        and scheduled_owner_frame is not None
+        and scheduled_started
+    )
+    scheduled_cycle_within_bound = bool(
+        scheduled_owner_active
+        and scheduled_cycle_age <= WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC
+    )
     ai_expected = bool(
         not paused
         and not manual
         and (os.getenv("DEEPSEEK_API_KEY") or "").strip()
         and startup_age >= ai_stale_sec
+        and not scheduled_cycle_within_bound
     )
 
     lock_available = trade_lock.acquire(timeout=WATCHDOG_TRADE_LOCK_TIMEOUT_SEC)
@@ -27424,9 +27454,7 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         reasons.append("WS_TRADE_STREAM_STALLED")
     if not ai_progressing:
         reasons.append("AI_CADENCE_STALLED")
-    scheduled_snapshot = copy.deepcopy(scheduled_ai_cycle_state)
-    owner_ident = scheduled_snapshot.get("owner_ident")
-    owner_frame = sys._current_frames().get(owner_ident) if owner_ident else None
+    owner_frame = scheduled_owner_frame
     scheduled_snapshot["stack_tail"] = (
         [
             f"{Path(item.filename).name}:{item.lineno}:{item.name}"
@@ -27438,6 +27466,9 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     scheduled_snapshot["stage_age_sec"] = (
         max(0.0, now - stage_started) if stage_started else 0.0
     )
+    scheduled_snapshot["cycle_age_sec"] = scheduled_cycle_age
+    scheduled_snapshot["within_watchdog_bound"] = scheduled_cycle_within_bound
+    scheduled_snapshot["watchdog_bound_sec"] = WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC
     replay_available = replay_lock.acquire(timeout=0.05)
     if replay_available:
         replay_lock.release()
