@@ -231,6 +231,14 @@ if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
 $ackRows = [System.Collections.Generic.List[object]]::new()
 $chunkLimit = 4MB
 $selectedFiles = @($manifest.files)
+$selectedFiles = @(
+  $selectedFiles | Sort-Object `
+    @{ Expression = { if ([string]$_.consistency_mode -eq "sqlite_snapshot_v1") { 0 } else { 1 } } }, `
+    @{ Expression = { [string]$_.path } }
+)
+# SQLite snapshot rows are short-lived authenticated leases.  Download them
+# before ordinary files so a large revision refresh cannot consume the lease
+# while validating hundreds of unrelated hot documents.
 
 # Fly is the authoritative owner of raw research streams. Once a top-level raw
 # stream or closed rotation is no longer declared by its authenticated
@@ -464,11 +472,16 @@ foreach ($row in $selectedFiles) {
             -FileBytes $offset `
             -RemoteBytes $remoteSize
         } catch {
-          if (
+          $generationChanged = (
             $_.Exception.Message -match '^Fly sync HTTP 409 ' -and
-            $_.Exception.Message -match 'generation changed' -and
-            $generationRefreshCount -lt 3
-          ) {
+            $_.Exception.Message -match 'generation changed'
+          )
+          $sqliteLeaseExpired = (
+            $consistencyMode -eq "sqlite_snapshot_v1" -and
+            $_.Exception.Message -match '^Fly sync HTTP 400 ' -and
+            $_.Exception.Message -match 'sqlite snapshot is unavailable or expired'
+          )
+          if (($generationChanged -or $sqliteLeaseExpired) -and $generationRefreshCount -lt 3) {
             $refreshGeneration = $true
             break
           }
@@ -529,8 +542,9 @@ foreach ($row in $selectedFiles) {
         $sameGeneration = $false
         $fullReplaceRetry = $true
         Write-Host (
-          "Fly generation changed while downloading $rel; refreshed authenticated manifest " +
-          "and restarting the candidate from byte zero ($generationRefreshCount/3)."
+          "Fly generation or SQLite snapshot lease changed while downloading $rel; " +
+          "refreshed authenticated manifest and restarting the candidate from byte zero " +
+          "($generationRefreshCount/3)."
         )
         continue
       }
