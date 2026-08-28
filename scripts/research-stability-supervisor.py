@@ -379,6 +379,12 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
     return logical_groups
 
 
+def expected_process_count(kind: str, count: int, require_loop_owner: bool) -> tuple[bool, str]:
+    if kind == "supervisor" and not require_loop_owner:
+        return count <= 1, "zero_or_one_loop_owner"
+    return count == 1, "exactly_one"
+
+
 def read_current_events(path: Path) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     # Release the Windows mirror handle before schema validation/counting. A
@@ -940,6 +946,7 @@ class Supervisor:
     readiness_state_file: Path | None = None
     progress_state_file: Path | None = None
     storage_state_file: Path | None = None
+    require_loop_owner: bool = True
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -1104,7 +1111,17 @@ class Supervisor:
             add("process_inventory", True, inventory)
         for kind in ("sync", "analyzer", "dashboard", "supervisor"):
             count = len(inventory[kind])
-            add(f"unique_{kind}_process", count == 1, {"count": count, "pids": inventory[kind]})
+            # A Task Scheduler invocation is intentionally one-shot. It must
+            # reject duplicate long-running owners, but absence of a --loop
+            # owner is the expected topology rather than a fault.
+            process_ok, expected = expected_process_count(
+                kind, count, self.require_loop_owner
+            )
+            add(
+                f"unique_{kind}_process",
+                process_ok,
+                {"count": count, "pids": inventory[kind], "expected": expected},
+            )
             if count == 0 and kind in {"sync", "analyzer"} and self.launch_missing(kind):
                 repairs.append(f"started_missing_{kind}_through_safe_launcher")
 
@@ -1349,6 +1366,7 @@ def main() -> int:
         repo, args.mirror or mirror_default, args.report_dir or report_default,
         args.fly_url, token, repair=args.repair_missing_local,
         runtime_repo=args.runtime_repo.resolve() if args.runtime_repo else None,
+        require_loop_owner=args.loop,
     )
     while True:
         payload = supervisor.check()

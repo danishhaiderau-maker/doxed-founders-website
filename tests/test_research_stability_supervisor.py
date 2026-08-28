@@ -453,6 +453,15 @@ def test_process_classification_does_not_count_one_shot_audit_as_supervisor():
     assert module.classify_processes(rows)["supervisor"] == [4]
 
 
+def test_one_shot_supervisor_accepts_absent_loop_owner():
+    assert module.expected_process_count("supervisor", 0, False) == (
+        True,
+        "zero_or_one_loop_owner",
+    )
+    assert module.expected_process_count("supervisor", 2, False)[0] is False
+    assert module.expected_process_count("supervisor", 0, True)[0] is False
+
+
 def test_process_classification_counts_launcher_and_child_as_one_sync_worker():
     rows = processes() + [
         {
