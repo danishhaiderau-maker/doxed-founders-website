@@ -27379,6 +27379,17 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     ai_age = max(0.0, now - ai_ts) if ai_ts else None
     startup_age = max(0.0, now - float(process_boot_time or now))
     ai_stale_sec = max(300.0, float(get_effective_ai_cooldown_sec()) + 120.0)
+    # A completed market-assessment cycle may truthfully stop before provider
+    # egress (for example CTX_FAIL / invalid support-resistance input).  That
+    # is healthy decision progress, not a missing-AI stall.  The coordinator
+    # records ``last_pipeline_run`` when it begins each bounded assessment;
+    # treat a recent assessment as cadence evidence while retaining the same
+    # hard stale bound if the coordinator actually wedges.
+    evaluation_ts = float(globals().get("last_pipeline_run") or 0)
+    evaluation_age = max(0.0, now - evaluation_ts) if evaluation_ts else None
+    evaluation_progressing = bool(
+        evaluation_ts and evaluation_age <= ai_stale_sec
+    )
     scheduled_snapshot = copy.deepcopy(scheduled_ai_cycle_state)
     scheduled_started = float(scheduled_snapshot.get("started_ts") or 0)
     scheduled_owner_ident = scheduled_snapshot.get("owner_ident")
@@ -27404,6 +27415,7 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         and not manual
         and (os.getenv("DEEPSEEK_API_KEY") or "").strip()
         and startup_age >= ai_stale_sec
+        and not evaluation_progressing
         and not scheduled_cycle_within_bound
     )
 
@@ -27500,6 +27512,8 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
             lock_available and ws_progressing and ai_observed_progressing
         ),
         "ai_age_sec": ai_age,
+        "evaluation_age_sec": evaluation_age,
+        "evaluation_progressing": evaluation_progressing,
         "ai_stale_after_sec": ai_stale_sec,
         "process_startup_age_sec": startup_age,
         "ai_stall_latched": ai_stall_latched,

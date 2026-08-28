@@ -261,6 +261,17 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("AI_CADENCE_STALLED", result["reasons"])
 
+    def test_recent_pre_ai_rejection_is_healthy_decision_progress(self):
+        self.snapshot.__globals__["process_boot_time"] = self.now - 501
+        self.snapshot.__globals__["last_pipeline_run"] = self.now - 5
+        self.state["last_ai_call_ts"] = 0
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertFalse(result["ai_expected"])
+        self.assertTrue(result["evaluation_progressing"])
+        self.assertEqual(5.0, result["evaluation_age_sec"])
+        self.assertTrue(result["ok"])
+
     def test_manual_pause_cannot_hide_an_already_latched_ai_stall(self):
         self.state["execution_paused"] = True
         self.state["manual_admin_pause"] = True
