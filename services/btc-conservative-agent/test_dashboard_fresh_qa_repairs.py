@@ -160,6 +160,8 @@ def test_dashboard_labels_completion_units_and_family_cohorts_separately():
     assert "Conservative shortlist families" in html
     assert "Diagnostic families represented" in html
     assert "Policy families searched" not in html
+    assert "JSON.stringify(value)" in html
+    assert "expected ${c.expected}, found ${c.found}" not in html
 
     safe_html = dashboard.app.test_client().get(
         "/safe-policy-genome-v3.1"

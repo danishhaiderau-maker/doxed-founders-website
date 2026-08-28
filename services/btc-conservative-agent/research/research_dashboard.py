@@ -6010,7 +6010,12 @@ async function loadSummary() {
   if (iBanner) {
     if (integrity.valid === false || integrity.report_status === 'INVALID') {
       iBanner.style.display = 'block';
-      const fails = (integrity.failed_checks || []).map(c => `${c.check}: expected ${c.expected}, found ${c.found}`).join(' · ');
+      const integrityValue = value => (
+        value && typeof value === 'object' ? JSON.stringify(value) : String(value)
+      );
+      const fails = (integrity.failed_checks || []).map(c => (
+        `${c.check}: expected ${integrityValue(c.expected)}, found ${integrityValue(c.found)}`
+      )).join(' · ');
       iBanner.innerHTML = '<strong>' + (integrity.banner || '⚠ REPORT INVALID') + '</strong> ' + fails;
     } else {
       iBanner.style.display = 'none';
