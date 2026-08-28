@@ -70,3 +70,11 @@ def test_health_and_session_expose_v31_with_explicit_legacy_writer():
     for body in (session, health):
         assert "'collector_version': COLLECTOR_V31_VERSION" in body
         assert "'legacy_collector_version': COLLECTOR_V22_VERSION" in body
+
+
+def test_shared_ai_coordinator_bypasses_child_capacity_gate():
+    body = ast.unparse(_function("process_signal"))
+    assert (
+        "sole and is_research_data_collection() and "
+        "(not is_ai_scan_lane(research_lane))"
+    ) in body

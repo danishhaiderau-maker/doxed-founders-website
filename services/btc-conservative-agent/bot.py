@@ -21256,7 +21256,16 @@ def process_signal(event: dict):
             full_pipeline_trace("[PIPELINE]", "ENTER_process_signal", None)
 
             max_active = get_effective_max_active_signals()
-            if sole and is_research_data_collection():
+            # The shared AI_SCAN is a coordinator and creates no order of its
+            # own.  A saturated child-signal pool must not suppress the next
+            # market assessment: child lanes enforce the same global capacity
+            # independently during fan-out, while the coordinator continues
+            # collecting auditable decisions and keeps watchdog cadence true.
+            if (
+                sole
+                and is_research_data_collection()
+                and not is_ai_scan_lane(research_lane)
+            ):
                 if not ensure_lane_signal_capacity(research_lane):
                     active = get_active_signal_count()
                     logger.info(
