@@ -5506,7 +5506,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   h2 { font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   .note { max-width: 100%; overflow-wrap: anywhere; color: var(--muted); font-size: 0.8rem; }
   .empty-state { min-width: 0; max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
-  .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; }
+  .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; overflow-wrap: anywhere; word-break: break-word; }
 </style></head><body>
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
 <div id="stale-banner" class="stale-banner" style="display:none;"></div>
