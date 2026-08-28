@@ -990,6 +990,7 @@ def evaluate_protection_screen(
     """Evaluate exact policies; return descriptive rows and gated candidates."""
     episodes_by_policy: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     policy_specs: dict[str, dict[str, Any]] = {}
+    policy_signatures: dict[str, str] = {}
     protections = protection_screen()
     input_total = len(inputs)
     for source_index, source in enumerate(inputs, start=1):
@@ -1054,14 +1055,18 @@ def evaluate_protection_screen(
                     "fill": {
                         "execution_world": "CONSERVATIVE_BBO_DEPTH_V1",
                         "source_fill_model": conservative_receipt.get("evaluator_version"),
-                        "requested_qty": requested_qty,
                     },
                     "loss_protection": protection["loss_protection"],
                     "profit_protection": protection["profit_protection"],
                     "portfolio": {"concurrency_cap": 1, "size_scale": 1.0, "daily_loss_kill_pct": 3},
                 }
-                policy_specs[policy_id] = spec
-                candidate_policy_signature = canonical_hash("v3-policy", spec)
+                prior_spec = policy_specs.get(policy_id)
+                if prior_spec is not None and prior_spec != spec:
+                    raise ValueError(f"POLICY_ID_SPEC_COLLISION:{policy_id}")
+                if prior_spec is None:
+                    policy_specs[policy_id] = spec
+                    policy_signatures[policy_id] = canonical_hash("v3-policy", spec)
+                candidate_policy_signature = policy_signatures[policy_id]
                 policy_receipt = _bind_candidate_receipt_identity(
                     conservative_receipt,
                     source,
@@ -1290,7 +1295,7 @@ def evaluate_protection_screen(
             }
         assessed.append({
             "policy_id": policy_id,
-            "policy_signature": canonical_hash("v3-policy", policy_specs[policy_id]),
+            "policy_signature": policy_signatures[policy_id],
             "policy_spec": policy_specs[policy_id],
             "policy_family": next((p["policy_family"] for p in protections if policy_id.endswith("|" + p["protection_id"])), "UNKNOWN"),
             "episodes_total": len(rows),

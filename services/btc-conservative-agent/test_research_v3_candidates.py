@@ -1,6 +1,9 @@
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+
+import research_v3_candidates
 
 from research_v3_candidates import (
     _PolicyNeighborIndex,
@@ -539,6 +542,31 @@ class V3CandidateTests(unittest.TestCase):
         self.assertEqual(first["full_fills"], 0)
         self.assertEqual(first["partial_fills"], 1)
         self.assertEqual(first["conservative_fill_rate"], 1.0)
+
+    def test_policy_identity_excludes_trade_quantity_and_hashes_once(self):
+        first = conservative_source()
+        second = conservative_source()
+        second.update({"event_id": "event-2", "episode_id": "episode-2", "signal_ts": 1005})
+        second["opportunity_id"] = "opportunity:episode-2"
+        second["requested_qty"] = 0.25
+        real_hash = research_v3_candidates.canonical_hash
+        policy_hash_calls = []
+
+        def counted_hash(prefix, value, **kwargs):
+            if prefix == "v3-policy":
+                policy_hash_calls.append(value)
+            return real_hash(prefix, value, **kwargs)
+
+        with patch.object(research_v3_candidates, "canonical_hash", counted_hash):
+            report = evaluate_protection_screen([first, second])
+
+        self.assertEqual(len(policy_hash_calls), len(protection_screen()))
+        self.assertTrue(report["candidates"])
+        self.assertTrue(all(
+            "requested_qty" not in candidate["policy_spec"]["fill"]
+            for candidate in report["candidates"]
+        ))
+        self.assertTrue(all(candidate["episodes_total"] == 2 for candidate in report["candidates"]))
 
     def test_conservative_no_fill_contributes_no_execution_pnl(self):
         report = evaluate_protection_screen([conservative_source(crossed=False)])
