@@ -129,6 +129,14 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
 
 
+def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
+    assert '$consistencyMode -eq "strict_generation_v1"' in SYNC_SCRIPT
+    assert '$remoteSize -le $chunkLimit' in SYNC_SCRIPT
+    assert '$atomicSnapshotFallback = (' in SYNC_SCRIPT
+    assert '$ForceFullRefresh -and' in SYNC_SCRIPT
+    assert 'The no-fence endpoint path already proves one exact before/after' in SYNC_SCRIPT
+
+
 def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
     assert "$preflightManifestAttempts = 5" in SYNC_LOOP
     assert "$preflightManifestTimeoutSec = 90" in SYNC_LOOP
@@ -968,7 +976,8 @@ def test_local_mirror_download_is_validated_then_atomically_published():
 
 
 def test_hot_small_strict_document_uses_verified_single_read_snapshot_only():
-    assert '$atomicSnapshotFallback = $false' in SYNC_SCRIPT
+    assert '$atomicSnapshotFallback = (' in SYNC_SCRIPT
+    assert '$ForceFullRefresh -and' in SYNC_SCRIPT
     assert '$generationRefreshCount -ge 3' in SYNC_SCRIPT
     assert '$consistencyMode -eq "strict_generation_v1"' in SYNC_SCRIPT
     assert '$remoteSize -le $chunkLimit' in SYNC_SCRIPT

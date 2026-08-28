@@ -334,6 +334,7 @@ foreach ($row in $selectedFiles) {
   } else { 0 }
   $extension = [System.IO.Path]::GetExtension($local).ToLowerInvariant()
   $appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")
+  $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
   # A revision refresh must walk and revalidate the entire manifest, but it
   # must remain resumable.  Inode/mtime/size (or append-prefix inode/size)
   # identifies the exact Fly volume generation independently of application
@@ -373,7 +374,17 @@ foreach ($row in $selectedFiles) {
       -RemoteBytes $remoteSize
     $fullReplaceRetry = $false
     $generationRefreshCount = 0
-    $atomicSnapshotFallback = $false
+    # Revision refreshes frequently encounter small atomically-replaced JSON
+    # reports whose manifest generation is obsolete before the first request.
+    # The no-fence endpoint path already proves one exact before/after
+    # generation and returns its identity. Use that verified one-read path
+    # immediately for small strict files instead of spending three manifest
+    # refreshes discovering that the report is hot.
+    $atomicSnapshotFallback = (
+      $ForceFullRefresh -and
+      $consistencyMode -eq "strict_generation_v1" -and
+      $remoteSize -le $chunkLimit
+    )
     while ($true) {
       $refreshGeneration = $false
       if ($sameGeneration -and -not $fullReplaceRetry -and (Test-Path -LiteralPath $local)) {
@@ -398,7 +409,6 @@ foreach ($row in $selectedFiles) {
           $expectedMtime = [int64]$row.mtime_ns
           $expectedInode = [int64]$row.inode
           $expectedPublishedSize = [int64]$row.size
-          $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
           $requestUrl = "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
           if (-not $atomicSnapshotFallback) {
             $requestUrl += (
