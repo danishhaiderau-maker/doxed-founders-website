@@ -70,6 +70,11 @@ try {
 $expected = $revision.Substring(0, 12)
 $lastHealth = $null
 $lastReady = $null
+# Strict flatness is proved immediately before Fly replacement above. After
+# startup, paper-only research is expected to resume and may legitimately open
+# paper positions or orders before this readiness loop observes the runtime.
+# Post-deploy acceptance therefore verifies the live boundary and progressing
+# paper runtime, not a second flat snapshot.
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
   try {
     $lastHealth = Invoke-RestMethod `
@@ -91,8 +96,6 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
       $laneParity -and
       $lastHealth.strategy_progress.ok -eq $true -and
       $lastHealth.strategy_progress.trade_lock_available -eq $true -and
-      [int]$lastHealth.strategy_progress.open_positions -eq 0 -and
-      [int]$lastHealth.strategy_progress.pending_orders -eq 0 -and
       $lastHealth.live_armed -eq $false -and
       $lastHealth.bitfinex_live_enabled -eq $false -and
       $lastHealth.force_paper_mode -eq $true
@@ -107,6 +110,8 @@ for ($attempt = 0; $attempt -lt 60; $attempt++) {
         buildContext = $serviceRoot
         liveArmed = $lastHealth.live_armed
         forcePaperMode = $lastHealth.force_paper_mode
+        paperOpenPositions = [int]$lastHealth.strategy_progress.open_positions
+        paperPendingOrders = [int]$lastHealth.strategy_progress.pending_orders
       } | ConvertTo-Json
       exit 0
     }

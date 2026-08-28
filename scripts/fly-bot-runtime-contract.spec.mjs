@@ -120,6 +120,10 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
   assert.match(helper, /source_git_rev/);
   assert.match(helper, /live_armed -eq \$false/);
   assert.match(helper, /force_paper_mode -eq \$true/);
+  assert.doesNotMatch(helper, /strategy_progress\.open_positions -eq 0/);
+  assert.doesNotMatch(helper, /strategy_progress\.pending_orders -eq 0/);
+  assert.match(helper, /paperOpenPositions/);
+  assert.match(helper, /paperPendingOrders/);
   assert.doesNotMatch(helper, /Push-Location \$repoRoot/);
 });
 
