@@ -112,7 +112,9 @@ def run():
         check("blocked research purpose made no request", captured == blocked_snapshot)
         check(
             "retired V2 research AI cannot be environment-enabled",
-            bot.TRADING_AI_ONLY and not bot._v2_research_collection_active(),
+            bot.TRADING_AI_ONLY
+            and bot.TRADING_AI_ALLOWED_PURPOSES
+            == frozenset({"trading_direction", "trading_confirmation"}),
         )
         analyzer_source = (
             Path(__file__).with_name("analyzer_research_engine_v62.py")

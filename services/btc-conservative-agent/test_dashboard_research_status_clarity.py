@@ -23,7 +23,7 @@ def main() -> None:
     # Tile headlines deliberately show one comparable fresh-collection
     # accounting row only. Shadow/counterfactual results stay in analyzer
     # reports and must never be mixed into account-like tile PnL.
-    assert "statRow('Executed'" in source
+    assert "statRow('Closed'" in source
     assert "statRow('PnL'" in source
     assert "statRow('EV/appr'" in source
     assert "statRow('Shadow trades'" not in source

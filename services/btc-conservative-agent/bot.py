@@ -27964,7 +27964,7 @@ __ADMIN_ACCESS_CONTROLS__
 </table></div>
 
 <h2>AI History (Session)</h2>
-<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Raw AI verdict and each tile's evaluation/lifecycle are independent facts. Executable orders are only in Pending Orders.</p>
+<p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above.</p>
 <div class="activity-table-scroll" role="region" aria-label="AI history table" tabindex="0"><table>
     <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Five family tile evaluations / lifecycles</th><th>AI explanation / block reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
@@ -29737,7 +29737,7 @@ DASHBOARD_JS = """(function () {
             .filter(lane => lane.startsWith('FAMILY_'))
             .sort()
             .map(lane => `<div>${laneBadge(lane, lane)}: ${formatLaneVerdict(verdicts[lane], a)} · ${formatPatientRoute(a['tile_route_' + lane.toLowerCase()])}</div>`)
-            .join('') || '<span style="color:#8b949e">not evaluated</span>';
+            .join('') || '<span style="color:#8b949e">evaluation not reached</span>';
           const rawGap = a.score_gap != null
             ? Number(a.score_gap)
             : (a.long_score != null && a.short_score != null
