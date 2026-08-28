@@ -2725,6 +2725,16 @@ def api_status():
     mirror_source_revision = _mirror_source_revision()
     freshness = _generation_freshness_meta(manifest)
     source_revision_parity = freshness["revision_parity"]
+    required_report_status = manifest.get("required_report_status") or {}
+    required_report_failures = sorted(
+        str(name)
+        for name, status in required_report_status.items()
+        if not isinstance(status, dict)
+        or status.get("available_in_generation") is not True
+        or bool(status.get("generation_error"))
+        or status.get("current_generation_valid") is False
+    )
+    required_reports_ok = bool(required_report_status) and not required_report_failures
     dashboard_started_dt = _parse_utc_dt(_DASHBOARD_STARTED_AT.isoformat())
     report_generated_dt = _parse_utc_dt(previous_report_at)
     restart_observed = bool(
@@ -2737,12 +2747,14 @@ def api_status():
             runtime_sync_ok
             and (report_sync_ok is True or report_pending)
             and freshness["current"]
+            and required_reports_ok
         ),
         "alive": True,
         "ready": bool(
             runtime_sync_ok
             and report_sync_ok is True
             and freshness["current"]
+            and required_reports_ok
         ),
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
@@ -2754,6 +2766,9 @@ def api_status():
         "analyzer_sync_match": report_sync_ok,
         "report_sync_match": report_sync_ok,
         "report_sync_pending": report_pending,
+        "required_reports_ok": required_reports_ok,
+        "required_report_status": required_report_status,
+        "required_report_failures": required_report_failures,
         "analysis_in_progress": run_state.get("in_progress"),
         "analysis_run": run_state,
         "dashboard_started_at": _DASHBOARD_STARTED_AT.isoformat(),

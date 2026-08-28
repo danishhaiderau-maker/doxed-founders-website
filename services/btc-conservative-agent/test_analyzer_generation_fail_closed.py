@@ -14,6 +14,15 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
         "fresh_epoch": {"epoch_id": EPOCH},
         "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
         "active_tiles": [{"policy_signature": f"tile-{index}"} for index in range(5)],
+        "required_report_status": {
+            name: {"available_in_generation": True, "generation_error": None}
+            for name in (
+                dashboard.BEST_POLICY_RESEARCH_REPORT_FILE,
+                dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE,
+                "qualified_exit_policy_grid_report.json",
+                "exit_reports_validation.json",
+            )
+        },
     }
     compact = {
         "generated_at": manifest["generated_at"],

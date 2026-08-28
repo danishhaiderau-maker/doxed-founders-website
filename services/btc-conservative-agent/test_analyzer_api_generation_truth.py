@@ -140,3 +140,42 @@ def test_executive_summary_uses_manifest_report_count_over_disk_count():
     })
     assert "all 60 JSON reports" in text
     assert "all 62 JSON reports" not in text
+
+
+def test_status_fails_closed_when_a_required_core_report_is_missing(monkeypatch):
+    manifest = {
+        **GENERATION,
+        "analyzer_sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
+        "required_report_status": {
+            "best_policy_research_report.json": {
+                "available_in_generation": False,
+                "generation_error": "ValueError: collision",
+            },
+            "exit_reports_validation.json": {
+                "available_in_generation": True,
+                "current_generation_valid": True,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, default=None: manifest
+        if str(name).endswith("report_manifest.json")
+        else {},
+    )
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
+    monkeypatch.setattr(dashboard, "_manifest_reports", lambda: [])
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "rev-current")
+    monkeypatch.setattr(
+        dashboard,
+        "_analyzer_run_state",
+        lambda: {"in_progress": False, "last_completed_at": GENERATION["generated_at"]},
+    )
+
+    payload = dashboard.app.test_client().get("/api/status").get_json()
+
+    assert payload["ready"] is False
+    assert payload["ok"] is False
+    assert payload["required_reports_ok"] is False
+    assert payload["required_report_failures"] == ["best_policy_research_report.json"]
