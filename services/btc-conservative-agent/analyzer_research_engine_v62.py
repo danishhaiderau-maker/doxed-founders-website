@@ -19031,6 +19031,7 @@ def write_report_manifest(payload=None):
         or (manifest_started_at.timestamp() - (15 * 60))
     )
     """Manifest for research dashboard — no hardcoded report list in UI."""
+    policy_cycle_error = None
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
 
@@ -19073,6 +19074,7 @@ def write_report_manifest(payload=None):
         # A missing/corrupt v2.2 input must degrade to no report, never interrupt
         # the established analyzer cycle or leak a stale policy candidate.
         print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
+        policy_cycle_error = f"{type(exc).__name__}: {exc}"
     try:
         cross_world_evidence_report()
     except Exception as exc:
@@ -19170,6 +19172,20 @@ def write_report_manifest(payload=None):
             "kind": analysis_provenance["fresh_epoch_kind"],
         },
         "required_report_status": {
+            BEST_POLICY_RESEARCH_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == BEST_POLICY_RESEARCH_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_cycle_error,
+            },
+            SAFE_POLICY_GENOME_V3_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == SAFE_POLICY_GENOME_V3_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_cycle_error,
+            },
             QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE

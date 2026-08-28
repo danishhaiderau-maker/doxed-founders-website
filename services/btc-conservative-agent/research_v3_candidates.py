@@ -17,7 +17,7 @@ from typing import Any, Callable, Iterable, Mapping
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
 from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
 from research_v3_validation import validate_policy
-from research.conservative_limit_fill import evaluate_limit_fill
+from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
 
 
 def protection_screen() -> list[dict[str, Any]]:
@@ -1022,6 +1022,13 @@ def evaluate_protection_screen(
             # and duplicate policies that differed only by an irrelevant
             # source-tile exit.  Candidate identity is exactly ENTRY|EXIT.
             entry_id = source_policy_id.split("|", 1)[0]
+            # Actual paper children use the complete ``ENTRY|EXIT`` identity
+            # as their fallback chase_id, while counterfactual children carry
+            # only the chase suffix. Both describe the same entry policy.
+            canonical_chase_id = (
+                entry_id.split("_CHASE_", 1)[1]
+                if "_CHASE_" in entry_id else str(child.get("chase_id") or entry_id)
+            )
             conservative_receipt = _conservative_child_receipt(
                 source, child, microstructure_by_ts=microstructure_by_ts,
             )
@@ -1050,11 +1057,14 @@ def evaluate_protection_screen(
                     "entry": {
                         "entry_policy_id": entry_id,
                         "offset_pct": child.get("offset_pct"),
-                        "chase_id": child.get("chase_id"),
+                        "chase_id": canonical_chase_id,
                     },
                     "fill": {
                         "execution_world": "CONSERVATIVE_BBO_DEPTH_V1",
-                        "source_fill_model": conservative_receipt.get("evaluator_version"),
+                        # Evaluator identity belongs to the declared policy,
+                        # including when an individual episode is unsupported
+                        # before the evaluator can emit a full receipt.
+                        "source_fill_model": EVALUATOR_VERSION,
                     },
                     "loss_protection": protection["loss_protection"],
                     "profit_protection": protection["profit_protection"],

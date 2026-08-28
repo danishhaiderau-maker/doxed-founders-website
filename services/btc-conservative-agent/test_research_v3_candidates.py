@@ -523,6 +523,41 @@ class V3CandidateTests(unittest.TestCase):
         self.assertNotIn("global_rank", candidate)
         self.assertNotIn("family_rank", candidate)
 
+    def test_actual_and_counterfactual_share_canonical_chase_identity(self):
+        counterfactual = source("counterfactual-lane")
+        actual = source("actual-lane")
+        entry_id = "OFFSET_0.27_CHASE_w234_s50_i180"
+        counterfactual["entry_children"][0].update({
+            "entry_policy_id": entry_id,
+            "chase_id": "w234_s50_i180",
+        })
+        actual["entry_children"][0].update({
+            "entry_policy_id": f"{entry_id}|ATR_TP_2.5_SCENARIO_C",
+            "chase_id": f"{entry_id}|ATR_TP_2.5_SCENARIO_C",
+        })
+
+        report = evaluate_protection_screen([counterfactual, actual])
+
+        self.assertTrue(report["candidates"])
+        self.assertTrue(all(
+            candidate["policy_spec"]["entry"]["chase_id"] == "w234_s50_i180"
+            for candidate in report["candidates"]
+        ))
+
+    def test_supported_and_unsupported_episodes_share_declared_fill_model(self):
+        supported = source("supported-lane")
+        unsupported = source("unsupported-lane")
+        unsupported["entry_children"][0]["chase_schedule"] = []
+
+        report = evaluate_protection_screen([supported, unsupported])
+
+        self.assertTrue(report["candidates"])
+        self.assertTrue(all(
+            candidate["policy_spec"]["fill"]["source_fill_model"]
+            == "public-tape-conservative-v2"
+            for candidate in report["candidates"]
+        ))
+
     def test_conservative_full_fill_drives_execution_metrics(self):
         report = evaluate_protection_screen([conservative_source()])
         first = report["candidates"][0]
