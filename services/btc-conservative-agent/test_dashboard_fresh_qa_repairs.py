@@ -178,8 +178,41 @@ def test_status_labels_analyzer_and_mirror_revisions_separately(monkeypatch):
     monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: manifest if name == dashboard.REPORT_MANIFEST_FILE else (default or {}))
     monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
     monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "abc123")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "inProgress": False,
+        "revisionParity": "MATCH",
+        "observedSourceRevision": "abc123",
+    })
     payload = dashboard.app.test_client().get("/api/status").get_json()
     assert payload["generation_revision_label"] == "ANALYZER_SOURCE_REVISION"
     assert payload["analyzer_source_revision"] == "abc123full"
     assert payload["mirror_source_revision"] == "abc123"
     assert payload["source_revision_parity"] == "MATCH"
+
+
+def test_generation_is_stale_while_new_fly_revision_is_syncing(monkeypatch):
+    manifest = {
+        "generation_revision": "oldrev-full",
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {
+        "collector_v22_epoch_id": "epoch-clean",
+    })
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "oldrev")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "inProgress": True,
+        "revisionParity": "MISMATCH",
+        "observedSourceRevision": "newrev",
+        "mirroredSourceRevision": "oldrev",
+    })
+
+    freshness = dashboard._generation_freshness_meta(manifest)
+
+    assert freshness["current"] is False
+    assert freshness["stale"] is True
+    assert freshness["qualification_allowed"] is False
+    assert freshness["mirror_sync_in_progress"] is True
+    assert freshness["mirror_sync_revision_parity"] == "MISMATCH"
+    assert freshness["observed_source_revision"] == "newrev"
+    assert any("synchronization is in progress" in reason for reason in freshness["reasons"])
+    assert any("has not been promoted" in reason for reason in freshness["reasons"])

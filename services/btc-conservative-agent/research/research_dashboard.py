@@ -909,8 +909,8 @@ def _failed_gate_names(gates: dict | None) -> list[str]:
     return [str(name) for name, value in (gates or {}).items() if not _gate_passed(value)]
 
 
-def _mirror_source_revision() -> str | None:
-    """Return the Fly revision recorded by the canonical mirror loop receipt."""
+def _mirror_sync_receipt() -> dict:
+    """Return the canonical mirror-loop receipt, including in-flight state."""
     candidates = (
         _AGENT_ROOT.parents[1] / ".fly-data-sync-loop.heartbeat.json",
         DATA_ROOT / ".fly-data-sync-loop.heartbeat.json",
@@ -918,12 +918,22 @@ def _mirror_source_revision() -> str | None:
     for path in candidates:
         try:
             payload = json.loads(path.read_text(encoding="utf-8-sig"))
-            revision = payload.get("sourceRevision") or payload.get("source_revision")
-            if revision:
-                return str(revision)
+            if isinstance(payload, dict):
+                return payload
         except (OSError, ValueError, TypeError):
             continue
-    return None
+    return {}
+
+
+def _mirror_source_revision() -> str | None:
+    """Return the revision actually promoted into the canonical mirror."""
+    payload = _mirror_sync_receipt()
+    revision = (
+        payload.get("mirroredSourceRevision")
+        or payload.get("sourceRevision")
+        or payload.get("source_revision")
+    )
+    return str(revision) if revision else None
 
 
 def _identity_matches(left, right) -> bool:
@@ -944,7 +954,20 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
     )
     session = _load_bot_session() or {}
     generation_revision = manifest.get("generation_revision")
+    sync_receipt = _mirror_sync_receipt()
     mirror_revision = _mirror_source_revision()
+    observed_revision = (
+        sync_receipt.get("observedSourceRevision")
+        or sync_receipt.get("observed_source_revision")
+    )
+    sync_in_progress = bool(
+        sync_receipt.get("inProgress") or sync_receipt.get("in_progress")
+    )
+    sync_revision_parity = str(
+        sync_receipt.get("revisionParity")
+        or sync_receipt.get("revision_parity")
+        or "UNAVAILABLE"
+    ).upper()
     generation_epoch = (manifest.get("fresh_epoch") or {}).get("epoch_id")
     mirror_epoch = (
         session.get("collector_v22_epoch_id")
@@ -974,17 +997,40 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
             if epoch_parity == "MISMATCH"
             else "Analyzer or mirror epoch identity is unavailable"
         )
+    if sync_in_progress:
+        reasons.append("Canonical Fly mirror synchronization is in progress")
+    if sync_revision_parity == "MISMATCH" or (
+        observed_revision
+        and mirror_revision
+        and not _identity_matches(observed_revision, mirror_revision)
+    ):
+        reasons.append(
+            "Observed Fly revision has not been promoted into the canonical mirror"
+        )
+    sync_current = bool(
+        not sync_in_progress
+        and sync_revision_parity != "MISMATCH"
+        and (
+            not observed_revision
+            or not mirror_revision
+            or _identity_matches(observed_revision, mirror_revision)
+        )
+    )
+    current = revision_parity == "MATCH" and epoch_parity == "MATCH" and sync_current
     return {
-        "current": revision_parity == "MATCH" and epoch_parity == "MATCH",
-        "stale": revision_parity != "MATCH" or epoch_parity != "MATCH",
+        "current": current,
+        "stale": not current,
         "revision_parity": revision_parity,
         "epoch_parity": epoch_parity,
+        "mirror_sync_in_progress": sync_in_progress,
+        "mirror_sync_revision_parity": sync_revision_parity,
+        "observed_source_revision": observed_revision,
         "generation_revision": generation_revision,
         "mirror_source_revision": mirror_revision,
         "generation_epoch_id": generation_epoch,
         "mirror_epoch_id": mirror_epoch,
         "reasons": reasons,
-        "qualification_allowed": revision_parity == "MATCH" and epoch_parity == "MATCH",
+        "qualification_allowed": current,
     }
 
 
