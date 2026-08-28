@@ -2,9 +2,10 @@
 """Fail-closed supervisor for the desktop BTC research pipeline.
 
 This process has deliberately narrow authority.  It may start a missing Fly
-mirror loop or a missing desktop analyzer through their existing launchers.  It
-cannot stop/restart trading, call Fly mutation endpoints, wipe data, or change
-policy.  Every observation is written atomically for the dashboard/operator.
+mirror loop, start a missing desktop analyzer, or refresh one revision-stale
+analyzer after exact mirror parity through their existing launchers.  It cannot
+stop/restart trading, call Fly mutation endpoints, wipe data, or change policy.
+Every observation is written atomically for the dashboard/operator.
 """
 
 from __future__ import annotations
@@ -1371,7 +1372,7 @@ class Supervisor:
             "schema": "research_stability_supervisor_v1",
             "generated_at": self.now().isoformat(),
             "healthy": all(row["ok"] for row in checks),
-            "repair_authority": "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY",
+            "repair_authority": "LOCAL_SYNC_OR_MISSING_OR_REVISION_STALE_ANALYZER_ONLY",
             "forbidden_actions": ["TRADING_RESTART", "FLY_RESTART", "DATA_WIPE", "POLICY_CHANGE", "LIVE_TRADE_ARM"],
             "repairs": repairs,
             "checks": checks,

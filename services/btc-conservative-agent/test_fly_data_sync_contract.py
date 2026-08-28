@@ -1581,7 +1581,7 @@ def test_unattended_research_supervisor_is_local_repair_only():
     assert "-RestartCount 3" in RESEARCH_SUPERVISOR_TASK
     assert "-ExecutionTimeLimit ([TimeSpan]::Zero)" in RESEARCH_SUPERVISOR_TASK
     assert 'supervisionMode = "CONTINUOUS_LOOP_WITH_SCHEDULED_RESTART"' in RESEARCH_SUPERVISOR_TASK
-    assert 'repairAuthority = "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY"' in RESEARCH_SUPERVISOR_TASK
+    assert 'repairAuthority = "LOCAL_SYNC_OR_MISSING_OR_REVISION_STALE_ANALYZER_ONLY"' in RESEARCH_SUPERVISOR_TASK
     for forbidden in ("fly deploy", "fly machine restart", "fresh-reset", "live-armed"):
         assert forbidden not in RESEARCH_SUPERVISOR_TASK.lower()
 

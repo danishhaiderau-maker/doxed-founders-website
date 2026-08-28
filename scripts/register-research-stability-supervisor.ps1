@@ -53,7 +53,7 @@ $principal = New-ScheduledTaskPrincipal `
 
 $description = @(
   "DoxedCrypto read-only research recovery supervisor.",
-  "May restore only the local Fly mirror loop and analyzer.",
+  "May restore the local Fly mirror loop and refresh one revision-stale analyzer after exact parity.",
   "Cannot restart production trading, wipe evidence, change policies, or arm live execution."
 ) -join " "
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -84,5 +84,5 @@ $info = $registered | Get-ScheduledTaskInfo
   nextRunTime = $info.NextRunTime
   intervalMinutes = $IntervalMinutes
   supervisionMode = "CONTINUOUS_LOOP_WITH_SCHEDULED_RESTART"
-  repairAuthority = "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY"
+  repairAuthority = "LOCAL_SYNC_OR_MISSING_OR_REVISION_STALE_ANALYZER_ONLY"
 }
