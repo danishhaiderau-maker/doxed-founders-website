@@ -27,6 +27,9 @@ SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
 SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(
     encoding="utf-8"
 )
+RESEARCH_SUPERVISOR_TASK = (
+    ROOT.parents[1] / "scripts" / "register-research-stability-supervisor.ps1"
+).read_text(encoding="utf-8")
 RELAY_SYNC = (ROOT.parents[1] / "scripts" / "sync-platform-relay-evidence.ps1").read_text(
     encoding="utf-8"
 )
@@ -1568,6 +1571,16 @@ def test_optional_analyzer_publication_failure_does_not_invalidate_canonical_syn
     ack_pos = sync.index('$ack = Invoke-DataSyncJsonRequest')
     publication_try_pos = sync.index("if ($PublishAnalyzerReport)")
     assert ack_pos < publication_try_pos
+
+
+def test_unattended_research_supervisor_is_local_repair_only():
+    assert "start-research-stability-supervisor.ps1" in RESEARCH_SUPERVISOR_TASK
+    assert '"-Once"' in RESEARCH_SUPERVISOR_TASK
+    assert '"-RepairMissingLocal"' in RESEARCH_SUPERVISOR_TASK
+    assert "-MultipleInstances IgnoreNew" in RESEARCH_SUPERVISOR_TASK
+    assert 'repairAuthority = "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY"' in RESEARCH_SUPERVISOR_TASK
+    for forbidden in ("fly deploy", "fly machine restart", "fresh-reset", "live-armed"):
+        assert forbidden not in RESEARCH_SUPERVISOR_TASK.lower()
 
 
 if __name__ == "__main__":
