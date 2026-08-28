@@ -265,3 +265,26 @@ def test_empty_source_is_truthful_and_not_zero(tmp_path, monkeypatch):
     assert proof["proof_count"] == 0
     assert proof["empty_reason"].startswith("SOURCE_EMPTY_OR_UNAVAILABLE")
     assert proof["qualification_eligible"] is False
+
+
+def test_missed_opportunity_heatmap_writes_strict_json_for_nan_shadow_pnl(
+    tmp_path, monkeypatch,
+):
+    engine = _load_engine()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(engine, "MISSED_OPPORTUNITY_HEATMAP_FILE", str(tmp_path / "heatmap.json"))
+    monkeypatch.setattr(
+        engine,
+        "_load_jsonl_rows",
+        lambda path: [{
+            "event": "APPROVE_NOT_TRADED",
+            "block_reason": "POST_AI_GATE",
+            "trade_id": "trade-nan",
+            "shadow_pnl_usd": float("nan"),
+        }] if path == engine.LANE_OPPORTUNITY_CAPTURE_FILE else [],
+    )
+
+    payload = engine.missed_opportunity_heatmap_report(session={})
+
+    assert payload["heatmap"][0]["shadow_pnl_total_usd"] == 0.0
+    assert json.loads((tmp_path / "heatmap.json").read_text(encoding="utf-8")) == payload

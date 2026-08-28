@@ -11866,7 +11866,13 @@ def missed_opportunity_heatmap_report(trades=None, session=None):
         })
         rec["count"] += 1
         if pnl is not None:
-            pnl = float(pnl)
+            try:
+                pnl = float(pnl)
+            except (TypeError, ValueError):
+                pnl = None
+            if pnl is not None and not math.isfinite(pnl):
+                pnl = None
+        if pnl is not None:
             rec["shadow_pnl_total_usd"] = round(rec["shadow_pnl_total_usd"] + pnl, 2)
             if pnl > 0:
                 rec["missed_profit_usd"] = round(rec["missed_profit_usd"] + pnl, 2)
@@ -11930,7 +11936,7 @@ def missed_opportunity_heatmap_report(trades=None, session=None):
     }
     try:
         with open(MISSED_OPPORTUNITY_HEATMAP_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+            json.dump(payload, f, indent=2, allow_nan=False)
         print(f"  ✅ Wrote {MISSED_OPPORTUNITY_HEATMAP_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {MISSED_OPPORTUNITY_HEATMAP_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
