@@ -55,6 +55,11 @@ lane_roster = (
 ).read_text(encoding="utf-8")
 
 checks = {
+    "native analyzer faults persist outside Python exception handling": (
+        'ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"' in analyzer_engine
+        and "faulthandler.enable(file=handle, all_threads=True)" in analyzer_engine
+        and "_close_native_fault_log(_native_fault_handle)" in analyzer_engine
+    ),
     "analyzer fails closed without canonical mirror": (
         'BTC_AGENT_DATA_DIR is required and must point to the ' in analyzer_engine
         and 'refusing to generate reports from cwd' in analyzer_engine

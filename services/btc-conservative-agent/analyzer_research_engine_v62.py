@@ -54,6 +54,7 @@ import glob
 import shutil
 import sys
 import traceback
+import faulthandler
 import re
 import csv
 import io
@@ -89,6 +90,7 @@ except Exception:
     pass
 
 ANALYZER_RUN_LOG_FILE = "analyzer_run.log"
+ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"
 RESEARCH_COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
 RESEARCH_HIGHLIGHTS_FILE = "research_highlights.txt"
@@ -299,6 +301,33 @@ def _setup_analyzer_output(verbose_console=False, enable_log=True):
     tee.console_enabled = verbose_console
     sys.stdout = tee
     return tee, log_handle
+
+
+def _enable_native_fault_log():
+    """Persist native interpreter faults that bypass Python exception handling."""
+    try:
+        handle = open(ANALYZER_NATIVE_CRASH_LOG_FILE, "a", encoding="utf-8", buffering=1)
+        handle.write(
+            f"\n--- analyzer native fault tracing enabled {datetime.now(timezone.utc).isoformat()} ---\n"
+        )
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+        return handle
+    except Exception as exc:
+        print(f"  WARNING: native fault tracing unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        return None
+
+
+def _close_native_fault_log(handle):
+    try:
+        faulthandler.disable()
+    except Exception:
+        pass
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
 
 
 def _restore_analyzer_output(tee, log_handle):
@@ -20312,6 +20341,7 @@ if __name__ == "__main__":
 
     ANALYZER_CONSOLE_VERBOSE = True
     _tee, _log_handle = _setup_analyzer_output(verbose_console=True, enable_log=True)
+    _native_fault_handle = _enable_native_fault_log()
 
     if _once_mode:
         print(
@@ -20322,6 +20352,7 @@ if __name__ == "__main__":
         try:
             run(interval_min=interval_min, session_only=session_only, max_iterations=1)
         finally:
+            _close_native_fault_log(_native_fault_handle)
             _restore_analyzer_output(_tee, _log_handle)
         sys.exit(0)
 
@@ -20343,3 +20374,4 @@ if __name__ == "__main__":
             except Exception:
                 dashboard_process.kill()
         _restore_analyzer_output(_tee, _log_handle)
+        _close_native_fault_log(_native_fault_handle)
