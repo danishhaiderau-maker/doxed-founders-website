@@ -15225,7 +15225,13 @@ def _stamp_shared_ai_lane_verdict(
     """Attach one independent post-AI lane verdict and increment it once."""
     call_id = str(call_id or "")
     lane = str(lane or "").upper()
-    if not call_id or lane not in DASHBOARD_PRIMARY_LANES:
+    # Continuous is a benchmark tile rather than a registry-owned family, so
+    # it is intentionally absent from DASHBOARD_PRIMARY_LANES.  It still uses
+    # this shared-call funnel and must be counted beside the five families.
+    if not call_id or (
+        lane not in DASHBOARD_PRIMARY_LANES
+        and lane != RESEARCH_LANE_CONTINUOUS
+    ):
         return
     verdict = {
         "ok": bool(accepted),

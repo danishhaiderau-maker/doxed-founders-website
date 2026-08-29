@@ -248,6 +248,40 @@ def test_family_decision_stamps_dashboard_history_before_v3_ledger_write():
     assert "decision_reason" in fanout[stamp:ledger]
 
 
+def test_continuous_shared_ai_rejection_increments_benchmark_counter():
+    state = {
+        "shared_ai_lane_counters": {
+            "CONTINUOUS": {
+                "evaluated": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "reasons": {},
+            }
+        },
+        "ai_history": [{"shared_ai_call_id": "scan-counter"}],
+    }
+    stamp = load_function(
+        "_stamp_shared_ai_lane_verdict",
+        {
+            "DASHBOARD_PRIMARY_LANES": ("FAMILY_ONE",),
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
+            "state": state,
+            "state_lock": AvailableLock(),
+            "time": __import__("time"),
+        },
+    )
+
+    stamp("scan-counter", "CONTINUOUS", False, "AI_REJECT")
+    stamp("scan-counter", "CONTINUOUS", False, "AI_REJECT")
+
+    counter = state["shared_ai_lane_counters"]["CONTINUOUS"]
+    assert counter["evaluated"] == 1
+    assert counter["accepted"] == 0
+    assert counter["rejected"] == 1
+    assert counter["reasons"] == {"AI_REJECT": 1}
+    assert state["ai_history"][0]["continuous_verdict"]["accepted"] is False
+
+
 def test_verdict_and_resolution_share_one_policy_material_builder():
     decision = ast.get_source_segment(
         SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
