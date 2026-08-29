@@ -79,6 +79,35 @@ def test_snapshot_builders_publish_phase_timings_and_lock_diagnostics():
             assert phase in body
         assert "trade_lock.diagnostics()" in body
 
+    for phase in (
+        '"initial_setup"',
+        '"readiness_projection"',
+        '"signal_history_projection"',
+        '"metadata_research_projection"',
+        '"position_order_projection"',
+        '"branding_relay_projection"',
+        '"epoch_policy_projection"',
+        '"final_state_integrity"',
+    ):
+        assert phase in dashboard
+
+
+def test_http_admission_telemetry_is_bounded_and_secret_safe():
+    server = ast.get_source_segment(SOURCE, _function("_create_dashboard_server"))
+    assert 'reason="dispatch_cap_full"' in server
+    assert 'reason="class_cap_full"' in server
+    assert 'reason="slow_handler"' in server
+    assert '"GENERAL"' in server
+    assert "_telemetry_log_interval_sec = 10.0" in server
+    assert "_slow_request_log_sec = 2.0" in server
+    # Only exact allowlisted paths are decoded for telemetry. An arbitrary raw
+    # request target (which can contain query credentials) is never rendered.
+    assert 'request_path.decode("ascii")' in server
+    assert "head.decode" not in server
+    assert "request.args" not in server
+    assert "request.url" not in server
+    assert "query_string" not in server
+
 
 def test_enrichment_loader_runs_before_trade_lock_acquisition():
     for function_name in (

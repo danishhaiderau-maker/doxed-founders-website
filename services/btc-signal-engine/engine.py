@@ -33644,10 +33644,12 @@ def _build_api_state_snapshot():
     t0 = time.perf_counter()
     phase_timings = {}
     try:
+        phase_started = time.perf_counter()
         # Never block HTTP on Bitfinex REST here — state_monitor_loop refreshes price/funding in background.
         # Lock order: state_lock before trade_lock (close_position may take trade_lock after state work).
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
+        phase_timings["initial_setup"] = (time.perf_counter() - phase_started) * 1000
         phase_started = time.perf_counter()
         state_acquired = state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
         phase_timings["state_lock_wait"] = (time.perf_counter() - phase_started) * 1000
@@ -33669,6 +33671,7 @@ def _build_api_state_snapshot():
         finally:
             state_lock.release()
             phase_timings["state_lock_hold"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         # Snapshot construction can take long enough for newer WS ticks to
         # arrive after ``now_ts`` was captured.  Reusing that older timestamp
         # makes the fresh tick appear to have a negative age, which resets the
@@ -33692,6 +33695,7 @@ def _build_api_state_snapshot():
         snapshot["system_ready"] = runtime["system_ready"]
         snapshot["signal_generation_ready"] = runtime["signal_generation_ready"]
         snapshot["runtime_readiness"] = runtime
+        phase_timings["readiness_projection"] = (time.perf_counter() - phase_started) * 1000
         phase_started = time.perf_counter()
         split_execution_truth, relay_evidence_index = _load_dashboard_trade_enrichment()
         phase_timings["relay_evidence_load"] = (time.perf_counter() - phase_started) * 1000
@@ -33753,6 +33757,7 @@ def _build_api_state_snapshot():
                 # they must not mutate money state or extend trade_lock hold.
                 accrue_position_funding(pos, now_ts, refresh=False)
         phase_timings["post_lock_enrichment"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         active_list, exposure_count = _collect_dashboard_active_signals(
             pending_orders_copy,
             positions_copy,
@@ -33784,6 +33789,8 @@ def _build_api_state_snapshot():
         snapshot["expired_orders_total"] = expired_orders_total
         snapshot["dashboard_history_limit"] = _DASHBOARD_HISTORY_MAX
         snapshot["last_ai_best"] = _pick_dashboard_last_ai(snapshot, ai_history_copy)
+        phase_timings["signal_history_projection"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         snapshot["deepseek_key_present"] = bool(_deepseek_api_key())
         snapshot["bot_pid"] = os.getpid()
         snapshot.update(_dashboard_owner_metadata())
@@ -33836,6 +33843,8 @@ def _build_api_state_snapshot():
             "ask_size_btc": snapshot.get("ask_size_btc"),
             "deriv_mark_price": (snapshot.get("funding") or {}).get("mark_price"),
         }
+        phase_timings["metadata_research_projection"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         snapshot["positions"] = []
         # Dedupe by trade_id: a position must never appear twice. If the fill path
         # double-appended an identical trade_id, render it once (real exposure = 1x)
@@ -33915,6 +33924,8 @@ def _build_api_state_snapshot():
         snapshot.setdefault("signal_info", {"active": False, "count": 0, "signals": []})
         snapshot.setdefault("heartbeat", 0)
         snapshot.setdefault("price_ts", 0)
+        phase_timings["position_order_projection"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         snapshot["server_ts"] = utc_iso()
         price_ts = snapshot.get("price_ts") or 0
         snapshot["price_age"] = (now_ts - price_ts) if price_ts else None
@@ -33951,6 +33962,8 @@ def _build_api_state_snapshot():
         snapshot["session_pnl_usd"] = session_realized_pnl
         snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
+        phase_timings["branding_relay_projection"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         snapshot["bot_start_time"] = bot_start_time
         snapshot["fresh_collection_mode"] = bool(state.get("fresh_collection_mode", False))
         _epoch_id, _epoch_cutoff, _epoch_kind = _fresh_epoch_identity_from_session()
@@ -34014,6 +34027,8 @@ def _build_api_state_snapshot():
         snapshot["min_signal_age_sec"] = get_min_signal_age_sec()
         snapshot["smart_submit_enabled"] = smart_submit_enabled()
         snapshot["research_config"] = research_config_for_dashboard()
+        phase_timings["epoch_policy_projection"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         if not state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC):
             raise TimeoutError("api-state snapshot timed out waiting for final state_lock")
         try:
@@ -34038,6 +34053,7 @@ def _build_api_state_snapshot():
             fund_out["next_time_melbourne"] = _format_melbourne_hm(fund_out["next_time_iso"])
         snapshot["funding"] = fund_out
         snapshot["state_integrity"] = build_state_integrity()
+        phase_timings["final_state_integrity"] = (time.perf_counter() - phase_started) * 1000
         phase_timings["total"] = (time.perf_counter() - t0) * 1000
         snapshot["api_state_phase_timings_ms"] = {
             key: round(value, 3) for key, value in phase_timings.items()
@@ -42121,6 +42137,37 @@ def _create_dashboard_server():
         _client_io_timeout_sec = 15.0
         _priority_client_io_timeout_sec = 2.0
         _overload_io_timeout_sec = 0.1
+        _slow_request_log_sec = 2.0
+        _telemetry_log_interval_sec = 10.0
+        _telemetry_log_lock = threading.Lock()
+        _telemetry_log_last = {}
+
+        @classmethod
+        def _bounded_request_log(
+            cls, *, event, path_label, cap_name, reason,
+            admission_sec=0.0, handler_sec=0.0,
+        ):
+            """Rate-limit admission diagnostics without logging URLs or query data."""
+            total_sec = max(0.0, admission_sec) + max(0.0, handler_sec)
+            if event == "completed" and total_sec < cls._slow_request_log_sec:
+                return
+            key = (str(event), str(path_label), str(cap_name), str(reason))
+            now = time.monotonic()
+            with cls._telemetry_log_lock:
+                if now - float(cls._telemetry_log_last.get(key) or 0.0) < cls._telemetry_log_interval_sec:
+                    return
+                cls._telemetry_log_last[key] = now
+            logger.warning(
+                "[HTTP ADMISSION] event=%s path=%s cap=%s reason=%s "
+                "admission_ms=%d handler_ms=%d total_ms=%d",
+                event,
+                path_label,
+                cap_name,
+                reason,
+                int(max(0.0, admission_sec) * 1000),
+                int(max(0.0, handler_sec) * 1000),
+                int(total_sec * 1000),
+            )
 
         def _request_cap(self, request):
             """Reserve independent workers for authority and controls.
@@ -42138,18 +42185,31 @@ def _create_dashboard_server():
                 head = request.recv(1024, socket.MSG_PEEK)
                 request_path = _dashboard_request_path_from_head(head)
                 if request_path in self._control_paths:
-                    return self._control_thread_cap
+                    return self._control_thread_cap, "control", request_path.decode("ascii")
                 if request_path in self._canonical_paths:
-                    return self._canonical_thread_cap
+                    return self._canonical_thread_cap, "canonical", request_path.decode("ascii")
                 if request_path in self._relay_state_paths:
-                    return self._relay_state_thread_cap
+                    return self._relay_state_thread_cap, "relay_state", request_path.decode("ascii")
                 if request_path in self._data_sync_paths:
-                    return self._data_sync_thread_cap
+                    return self._data_sync_thread_cap, "data_sync", request_path.decode("ascii")
             except (OSError, TimeoutError):
                 pass
-            return self._general_thread_cap
+            # Never log an unrecognized request target: it may contain a token
+            # or other operator-supplied path material. Query strings were
+            # already stripped above, but GENERAL is the safer bounded label.
+            return self._general_thread_cap, "general", "GENERAL"
 
-        def _reject_overload(self, request):
+        def _reject_overload(
+            self, request, *, reason, path_label="UNCLASSIFIED",
+            cap_name="dispatch", admission_sec=0.0,
+        ):
+            self._bounded_request_log(
+                event="rejected",
+                path_label=path_label,
+                cap_name=cap_name,
+                reason=reason,
+                admission_sec=admission_sec,
+            )
             body = b'{"ok":false,"error":"dashboard_busy","retry_after_sec":1}'
             response = (
                 b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -42172,7 +42232,7 @@ def _create_dashboard_server():
             # the single accept loop. Slow tunnel clients previously consumed
             # 50ms here apiece, so a burst delayed even local Pause/relay calls.
             if not self._dispatch_thread_cap.acquire(blocking=False):
-                self._reject_overload(request)
+                self._reject_overload(request, reason="dispatch_cap_full")
                 return
             try:
                 t = threading.Thread(
@@ -42189,10 +42249,20 @@ def _create_dashboard_server():
         def _classify_and_process(self, request, client_address):
             request_cap = None
             request_cap_acquired = False
+            cap_name = "unclassified"
+            path_label = "UNCLASSIFIED"
+            admission_started = time.monotonic()
+            handler_started = None
             try:
-                request_cap = self._request_cap(request)
+                request_cap, cap_name, path_label = self._request_cap(request)
                 if not request_cap.acquire(blocking=False):
-                    self._reject_overload(request)
+                    self._reject_overload(
+                        request,
+                        reason="class_cap_full",
+                        path_label=path_label,
+                        cap_name=cap_name,
+                        admission_sec=time.monotonic() - admission_started,
+                    )
                     return
                 request_cap_acquired = True
                 # Bound socket reads/writes. App computation can take longer,
@@ -42203,8 +42273,19 @@ def _create_dashboard_server():
                     if is_priority
                     else self._client_io_timeout_sec
                 )
+                handler_started = time.monotonic()
                 self.process_request_thread(request, client_address)
             finally:
+                finished = time.monotonic()
+                if handler_started is not None:
+                    self._bounded_request_log(
+                        event="completed",
+                        path_label=path_label,
+                        cap_name=cap_name,
+                        reason="slow_handler",
+                        admission_sec=handler_started - admission_started,
+                        handler_sec=finished - handler_started,
+                    )
                 if request_cap_acquired:
                     request_cap.release()
                 self._dispatch_thread_cap.release()
