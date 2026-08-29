@@ -64,10 +64,10 @@ def test_pending_registration_is_once_only_by_trade_identity():
     assert "order['registration_suppressed_reason'] = 'RETIRED_LIFECYCLE'" in body
 
 
-def test_health_and_session_expose_v31_with_explicit_legacy_writer():
+def test_status_and_session_expose_v31_with_explicit_legacy_writer():
     session = ast.unparse(_function("_write_research_session"))
-    health = ast.unparse(_function("health"))
-    for body in (session, health):
+    status = ast.unparse(_function("status"))
+    for body in (session, status):
         assert "'collector_version': COLLECTOR_V31_VERSION" in body
         assert "'legacy_collector_version': COLLECTOR_V22_VERSION" in body
 

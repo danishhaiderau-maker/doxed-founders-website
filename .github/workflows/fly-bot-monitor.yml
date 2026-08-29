@@ -57,9 +57,13 @@ jobs:
 
           required = os.environ["EXPECTED_REVISION"]
           with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
-              health = json.load(response)
-          if response.status != 200 or health.get("process_alive") is not True:
-              raise SystemExit(f"Fly process is not alive: {health}")
+              liveness = json.load(response)
+          if response.status != 200 or liveness.get("process_alive") is not True:
+              raise SystemExit(f"Fly process is not alive: {liveness}")
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/api/status", timeout=12) as status_response:
+              health = json.load(status_response)
+          if status_response.status != 200 or health.get("process_alive") is not True:
+              raise SystemExit(f"Fly detailed status is unavailable: {health}")
           reported = str(health.get("source_git_rev") or health.get("git_rev") or "")
           if not re.fullmatch(r"[0-9a-f]{7,40}", reported):
               raise SystemExit(f"Fly returned an invalid source revision: {reported}")
@@ -134,7 +138,7 @@ jobs:
           import urllib.request
 
           with urllib.request.urlopen(
-              "https://doxed-btc-bot.fly.dev/health", timeout=12
+              "https://doxed-btc-bot.fly.dev/api/status", timeout=12
           ) as response:
               health = json.load(response)
           progress = health.get("strategy_progress") or {}

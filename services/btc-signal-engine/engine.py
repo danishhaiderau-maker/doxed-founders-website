@@ -34504,10 +34504,9 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
         }
 
 
-@app.route('/health')
 @app.route('/api/status')
 @app.route('/status')
-def health():
+def status():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
         paused = bool(state.get("execution_paused", False))
@@ -34614,6 +34613,53 @@ def health():
             "writers_hooked": True,
         },
     })
+
+
+@app.route('/health')
+def health():
+    """Fast process-liveness probe used by Fly.
+
+    Strategy readiness and the detailed operational payload deliberately live
+    on ``/ready`` and ``/api/status``.  Building those snapshots can inspect
+    the trade lock, market paths, and policy registry; doing that on Fly's
+    five-second machine probe caused healthy processes to be removed from
+    routing during ordinary dashboard/analyzer load. Process restarts, if any,
+    are diagnosed separately from Fly service-check failures.
+
+    Individual dictionary reads are safe under CPython's GIL and intentionally
+    avoid waiting for ``state_lock``.  A stale main-loop heartbeat still fails
+    closed with HTTP 503, so this is not a false-alive endpoint.
+    """
+    now = time.time()
+    hb = state.get("last_heartbeat", last_heartbeat)
+    heartbeat_age = max(0.0, now - float(hb or 0))
+    process_alive = heartbeat_age <= 15.0
+    payload = {
+        "status": "alive" if process_alive else "heartbeat_stale",
+        "probe_contract": "PROCESS_LIVENESS_ONLY",
+        "detail_endpoint": "/api/status",
+        "readiness_endpoint": "/ready",
+        "process_alive": process_alive,
+        "last_heartbeat": hb,
+        "time_since_heartbeat": heartbeat_age,
+        "bot_instance_id": BOT_INSTANCE_ID,
+        "dashboard_pid": os.getpid(),
+        "dashboard_port": DASHBOARD_PORT,
+        "source_git_rev": _runtime_git_rev(),
+        "git_rev": _runtime_git_rev(),
+        "bot_version": state.get("bot_version") or EXECUTION_FIX_VERSION,
+        "analyzer_sync_id": state.get("analyzer_sync_id") or ANALYZER_SYNC_ID,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "execution_paused": bool(state.get("execution_paused", False)),
+        "execution_reason": state.get("execution_reason", ""),
+        "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+        "live_armed": bool(state.get("live_armed", False)),
+        "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
+        "force_paper_mode": _force_paper_mode_active(),
+    }
+    return jsonify(payload), (200 if process_alive else 503)
 
 
 @app.route('/ready')

@@ -14,14 +14,15 @@ const version =
   combo.match(/RESEARCH_STACK_VERSION\s*=\s*"([^"]+)"/)?.[1]
   ?? combo.match(/EXECUTION_FIX_VERSION\s*=\s*"([^"]+)"/)?.[1]
   ?? 'unknown';
+const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
+const existing = JSON.parse(readFileSync(manifestPath, 'utf8'));
 const manifest = {
+  ...existing,
   engine_version: version,
   combo_version: new Date().toISOString().slice(0, 10),
-  exit_version: 'scenario-c-v4',
-  benchmark_lane: 'CONTINUOUS',
   signal_hash: hash,
-  source: 'bybit-15m-research-bot/bybit_bot.py',
+  source: 'services/btc-conservative-agent/bot.py',
   updated_at: new Date().toISOString(),
 };
-writeFileSync(join(root, 'services/btc-signal-engine/manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 console.log('manifest updated', hash, version);

@@ -1206,14 +1206,22 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         ):
             self.assertIn("_direct_private_exchange_owner", function_source(name), name)
 
-    def test_health_and_ready_layers_are_truthful(self):
-        for name in ("health", "ready"):
+    def test_status_and_ready_layers_are_truthful(self):
+        for name in ("status", "ready"):
             route = function_source(name)
             self.assertIn('"signal_generation_ready"', route)
             self.assertIn('"live_entry_armable"', route)
             self.assertIn('"trading_ready"', route)
             self.assertIn('"trading_block_reason"', route)
         ready = function_source("ready")
+
+    def test_health_is_bounded_liveness_not_strategy_readiness(self):
+        route = function_source("health")
+        ready = function_source("ready")
+        self.assertIn('"probe_contract": "PROCESS_LIVENESS_ONLY"', route)
+        self.assertIn('"detail_endpoint": "/api/status"', route)
+        self.assertNotIn("_strategy_progress_health_snapshot", route)
+        self.assertNotIn("can_open_live_entry", route)
         runtime = function_source("_runtime_readiness_components")
         self.assertIn(
             "system_ready = bool(structural_stable and rest_entry_quote_ok)",

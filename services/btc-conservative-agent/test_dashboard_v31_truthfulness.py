@@ -64,10 +64,18 @@ def test_api_exposes_collector_and_legacy_writer_as_separate_identities() -> Non
 
 
 def test_health_separates_diagnostic_and_qualification_fill_worlds() -> None:
-    body = _function_source("health")
+    body = _function_source("status")
     assert '"fill_model": "SEPARATED_EVIDENCE_WORLDS"' in body
     assert '"diagnostic_fill_model": "IDEAL_TOUCH_DIAGNOSTIC_ONLY"' in body
     assert '"qualification_fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE"' in body
+
+
+def test_fly_health_probe_is_liveness_only() -> None:
+    body = _function_source("health")
+    assert '"probe_contract": "PROCESS_LIVENESS_ONLY"' in body
+    assert '"detail_endpoint": "/api/status"' in body
+    assert "_strategy_progress_health_snapshot" not in body
+    assert "can_open_live_entry" not in body
 
 
 def test_fresh_session_uses_signed_epoch_cutoff_across_bot_restart() -> None:

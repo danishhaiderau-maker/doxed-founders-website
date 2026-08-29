@@ -142,7 +142,9 @@ jobs:
           for _ in range(60):
               try:
                   with urllib.request.urlopen(base + "/health", timeout=8) as response:
-                      payload = json.load(response)
+                      liveness = json.load(response)
+                  with urllib.request.urlopen(base + "/api/status", timeout=8) as status_response:
+                      payload = json.load(status_response)
                   with urllib.request.urlopen(base + "/ready", timeout=8) as ready_response:
                       ready = json.load(ready_response)
                   last = json.dumps(payload, sort_keys=True)
@@ -150,6 +152,8 @@ jobs:
                   runtime_lanes = [row.get("lane") for row in payload.get("active_tiles") or []]
                   if (
                       response.status == 200
+                      and status_response.status == 200
+                      and liveness.get("process_alive") is True
                       and ready_response.status == 200
                       and ready.get("ok") is True
                       and payload.get("process_alive") is True

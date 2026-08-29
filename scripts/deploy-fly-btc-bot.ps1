@@ -78,7 +78,7 @@ $lastReady = $null
 for ($attempt = 0; $attempt -lt 60; $attempt++) {
   try {
     $lastHealth = Invoke-RestMethod `
-      -Uri "https://doxed-btc-bot.fly.dev/health" `
+      -Uri "https://doxed-btc-bot.fly.dev/api/status" `
       -TimeoutSec 8
     $lastReady = Invoke-RestMethod `
       -Uri "https://doxed-btc-bot.fly.dev/ready" `
