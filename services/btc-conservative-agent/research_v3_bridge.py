@@ -1079,7 +1079,16 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
         "event_id": str(event_id),
         "episode_id": episode_id,
         "writes": [opportunity, lifecycle],
-        "store_verification": store.verify(),
+        # This runs on the synchronous entry/collector path while the fresh-
+        # epoch serializer is held.  A full-store verification walks every
+        # immutable market segment and can therefore block all family lanes
+        # behind historical data growth.  The provisional write touches only
+        # these two ledgers; verify those durable writes here.  Startup,
+        # analyzer, and qualification flows continue to run ``store.verify``
+        # across the complete store.
+        "store_verification": store.verify_write_set(
+            ledgers=("opportunity", "lifecycle"),
+        ),
     }
 
 

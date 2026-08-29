@@ -37,6 +37,36 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_provisional_hot_path_verifies_only_its_two_ledgers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                V3EvidenceStore,
+                "verify",
+                side_effect=AssertionError("full-store verification entered hot path"),
+            ):
+                receipt = dual_write_provisional_source(
+                    "family-pending",
+                    {
+                        "shared_ai_call_id": "scan-family-pending",
+                        "signal_ts": 1000,
+                        "raw_direction": "SHORT",
+                        "observation_status": "WAITING_ENTRY_WINDOW",
+                    },
+                    epoch_id="epoch-v3-test",
+                    data_dir=tmp,
+                )
+
+            verification = receipt["store_verification"]
+            self.assertEqual(
+                verification["schema"],
+                "v3_store_write_set_verification_v1",
+            )
+            self.assertTrue(verification["passed"])
+            self.assertEqual(
+                set(verification["ledger_counts"]),
+                {"opportunity", "lifecycle"},
+            )
+
     def _lost_expected_order(self, tmp):
         dual_write_lane_decision(
             {
