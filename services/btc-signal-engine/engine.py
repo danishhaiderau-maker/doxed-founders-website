@@ -142,6 +142,7 @@ from chase_offset_touch_grid import (
     TOUCH_GRID_FILE as CHASE_OFFSET_TOUCH_GRID_FILE,
     arm_compressed_shadow_chase,
     arm_touch_grid_rows,
+    candle_ts_sec,
     new_grid_state,
     orig_limit_price,
     poll_compressed_shadow_chase,
@@ -12338,6 +12339,8 @@ def _fill_replay_3m_stamps(signal=None, context=None) -> dict:
 
 
 _cycle_3m_written_buckets = {}
+_cycle_3m_inflight_buckets = set()
+_cycle_3m_bucket_lock = threading.Lock()
 _touch_grid_book = {}
 _compressed_shadow_chase_book = {}
 _compressed_shadow_seen_call_ids = set()
@@ -12597,7 +12600,9 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
         reset_provisional_events(epoch_id=fresh_epoch_id)
         with replay_lock:
             replay_buffers.clear()
-        _cycle_3m_written_buckets.clear()
+        with _cycle_3m_bucket_lock:
+            _cycle_3m_written_buckets.clear()
+            _cycle_3m_inflight_buckets.clear()
         _touch_grid_book.clear()
         with _compressed_shadow_lock:
             _compressed_shadow_chase_book.clear()
@@ -13430,15 +13435,28 @@ def _record_cycle_3m_universe(
     """Append one taken-or-skipped 3m universe row. Log-only; never a veto."""
     bucket = cycle_bucket_3m()
     outcome_u = str(outcome or "SKIPPED").upper()
-    prev = _cycle_3m_written_buckets.get(bucket)
-    if prev == "TAKEN":
-        return None
-    if prev == "SKIPPED" and outcome_u == "SKIPPED" and not decision:
-        return None
+    reservation = (bucket, outcome_u)
+    # Six family lanes can enter this recorder concurrently. Reserve only the
+    # tiny per-bucket decision here; market calculations and durable writes
+    # remain outside both this lock and the collector epoch lock.
+    with _cycle_3m_bucket_lock:
+        prev = _cycle_3m_written_buckets.get(bucket)
+        if prev == "TAKEN":
+            return None
+        if prev == "SKIPPED" and outcome_u == "SKIPPED" and not decision:
+            return None
+        if reservation in _cycle_3m_inflight_buckets:
+            return None
+        _cycle_3m_inflight_buckets.add(reservation)
     try:
         extra = _cycle_3m_flow_and_sr()
         if candles_1m is None:
-            candles_1m = fetch_mtf_candles("1m", limit=200) or []
+            # Collector persistence is part of the synchronous post-entry
+            # path.  It must never wait on Bitfinex REST retries: snapshot the
+            # independently maintained OHLCV cache and report missing source
+            # evidence truthfully instead.
+            candles_1m = _collector_cached_candles_1m(limit=200)
+        candles_1m = list(candles_1m or [])
         snap = compute_3m_universe_snapshot(
             candles_1m,
             dist_to_support=extra.get("dist_to_support"),
@@ -13455,13 +13473,48 @@ def _record_cycle_3m_universe(
             trade_id=trade_id,
             direction=direction,
         )
+        captured_ts = time.time()
+        last_source_ts = candle_ts_sec(candles_1m[-1]) if candles_1m else None
+        source_age_sec = (
+            None if last_source_ts is None else captured_ts - float(last_source_ts)
+        )
+        source_available = bool(candles_1m) and last_source_ts is not None
+        source_fresh = bool(
+            source_available
+            and 0.0 <= source_age_sec <= float(CANDLE_STALE_SEC)
+        )
+        evidence_status = (
+            "AVAILABLE" if source_fresh
+            else "SOURCE_STALE" if source_available
+            else "SOURCE_UNAVAILABLE"
+        )
+        snap.update({
+            "evidence_status": evidence_status,
+            "calculation_status": "COMPUTED" if source_fresh else "UNKNOWN",
+            "source_row_count": len(candles_1m),
+            "source_last_candle_ts": last_source_ts,
+            "source_age_sec": source_age_sec,
+            "source_freshness_limit_sec": float(CANDLE_STALE_SEC),
+            "source_unavailable_reason": (
+                None if source_fresh
+                else "CACHED_1M_SOURCE_STALE" if source_available
+                else "CACHED_1M_SOURCE_UNAVAILABLE"
+            ),
+        })
+        if not source_fresh:
+            # ``False`` would look like an observed negative conclusion even
+            # though no market bars existed.  Preserve the three-state truth.
+            snap["would_block_short"] = None
+            snap["would_block_reason"] = evidence_status
         _safe_append_jsonl(CYCLE_3M_UNIVERSE_FILE, snap, label="CYCLE_3M_UNIVERSE")
-        _cycle_3m_written_buckets[bucket] = outcome_u
+        with _cycle_3m_bucket_lock:
+            if _cycle_3m_written_buckets.get(bucket) != "TAKEN" or outcome_u == "TAKEN":
+                _cycle_3m_written_buckets[bucket] = outcome_u
+            if len(_cycle_3m_written_buckets) > 12:
+                oldest = min(_cycle_3m_written_buckets)
+                _cycle_3m_written_buckets.pop(oldest, None)
         with state_lock:
             state["last_cycle_3m_universe"] = copy.deepcopy(snap)
-        if len(_cycle_3m_written_buckets) > 12:
-            oldest = min(_cycle_3m_written_buckets)
-            _cycle_3m_written_buckets.pop(oldest, None)
         logger.info(
             f"[CYCLE 3M UNIVERSE] {snap.get('line')} bucket={bucket} "
             f"tag={CYCLE_3M_UNIVERSE_TAG} path_tag={PATH_REPLAY_POLICY_TAG} "
@@ -13471,6 +13524,9 @@ def _record_cycle_3m_universe(
     except Exception as exc:
         logger.warning(f"[CYCLE 3M UNIVERSE] record failed: {exc} [PIPELINE ENFORCEMENT]")
         return None
+    finally:
+        with _cycle_3m_bucket_lock:
+            _cycle_3m_inflight_buckets.discard(reservation)
 
 
 def _maybe_record_heartbeat_cycle_3m():
@@ -15169,7 +15225,13 @@ def _stamp_shared_ai_lane_verdict(
     """Attach one independent post-AI lane verdict and increment it once."""
     call_id = str(call_id or "")
     lane = str(lane or "").upper()
-    if not call_id or lane not in DASHBOARD_PRIMARY_LANES:
+    # Continuous is a benchmark tile rather than a registry-owned family, so
+    # it is intentionally absent from DASHBOARD_PRIMARY_LANES.  It still uses
+    # this shared-call funnel and must be counted beside the five families.
+    if not call_id or (
+        lane not in DASHBOARD_PRIMARY_LANES
+        and lane != RESEARCH_LANE_CONTINUOUS
+    ):
         return
     verdict = {
         "ok": bool(accepted),
