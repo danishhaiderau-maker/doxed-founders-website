@@ -8,7 +8,8 @@ param(
   [string]$ProgressHeartbeatFile = "",
   [string]$ProgressRelayEvidenceJson = "",
   [switch]$ForceFullRefresh,
-  [string]$MirroredSourceRevision = ""
+  [string]$MirroredSourceRevision = "",
+  [object]$InitialManifest = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,6 +80,71 @@ function Invoke-DataSyncJsonRequest {
         )
       }
       Start-Sleep -Seconds ([Math]::Min(15, 2 * $attempt))
+    }
+  }
+}
+
+function New-DataSyncManifestUri {
+  # Explicit cache bypass is required for generation refreshes and the final
+  # identity fence. A short server inventory cache is safe for ordinary loop
+  # polls, but it cannot prove that the generation stayed stable while files
+  # were copied.
+  return (
+    "$base/api/data-sync/manifest?fresh=1&nonce=" +
+    [uri]::EscapeDataString([guid]::NewGuid().ToString("N"))
+  )
+}
+
+function Get-DataSyncManifestIdentityValue {
+  param(
+    [Parameter(Mandatory = $true)]$Manifest,
+    [Parameter(Mandatory = $true)][string[]]$Names
+  )
+  foreach ($name in $Names) {
+    if ($Manifest.PSObject.Properties.Name -contains $name) {
+      $value = $Manifest.$name
+      if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
+        return [pscustomobject]@{ Name = $name; Value = $value; Present = $true }
+      }
+    }
+  }
+  return [pscustomobject]@{ Name = $null; Value = $null; Present = $false }
+}
+
+function Assert-DataSyncManifestIdentity {
+  param(
+    [Parameter(Mandatory = $true)]$Initial,
+    [Parameter(Mandatory = $true)]$Final
+  )
+  if ([string]$Final.schema -ne "fly_runtime_incremental_sync_v1") {
+    throw "Unexpected Fly sync manifest schema during final identity fence."
+  }
+  $identityFields = @(
+    @{ Label = "source_git_rev"; Names = @("source_git_rev"); Numeric = $false; Required = $true },
+    @{ Label = "tile_registry_signature"; Names = @("tile_registry_signature"); Numeric = $false; Required = $true },
+    @{ Label = "fresh_collection_signal_ts"; Names = @("fresh_collection_signal_ts"); Numeric = $true; Required = $true },
+    # Servers may publish the collection identity under one of these explicit
+    # epoch names. Compare the logical value whenever either manifest exposes
+    # it; absence from both remains backwards compatible.
+    @{ Label = "dataset_epoch"; Names = @("dataset_epoch", "collection_epoch_id", "epoch_id", "generation_epoch"); Numeric = $false; Required = $false }
+  )
+  foreach ($field in $identityFields) {
+    $before = Get-DataSyncManifestIdentityValue -Manifest $Initial -Names $field.Names
+    $after = Get-DataSyncManifestIdentityValue -Manifest $Final -Names $field.Names
+    if ($field.Required -and (-not $before.Present -or -not $after.Present)) {
+      throw "Fly sync final identity fence is missing required field $($field.Label)."
+    }
+    if ($before.Present -ne $after.Present) {
+      throw "Fly sync final identity fence changed field availability for $($field.Label)."
+    }
+    if (-not $before.Present) { continue }
+    $matches = if ($field.Numeric) {
+      [double]$before.Value -eq [double]$after.Value
+    } else {
+      [string]$before.Value -ceq [string]$after.Value
+    }
+    if (-not $matches) {
+      throw "Fly sync final identity fence mismatch for $($field.Label)."
     }
   }
 }
@@ -235,10 +301,19 @@ function Set-SqliteSnapshotLease {
   $Row.size = [int64]$lease.snapshot_size
   $Row.physical_size = [int64]$lease.snapshot_size
 }
-$manifest = Invoke-DataSyncJsonRequest `
-  -Stage "manifest_initial" `
-  -Uri "$base/api/data-sync/manifest" `
-  -TimeoutSec $manifestTimeoutSec
+# The long-running loop already performs an authenticated, retry-bounded
+# manifest preflight before deciding whether this expensive child sync is due.
+# PowerShell invokes this script in-process, so reuse that exact object instead
+# of immediately amplifying load with an identical second request. Standalone
+# callers retain the authenticated fetch below. Per-file generation fences and
+# the final authenticated acknowledgement remain authoritative for atomicity.
+$manifest = $InitialManifest
+if ($null -eq $manifest) {
+  $manifest = Invoke-DataSyncJsonRequest `
+    -Stage "manifest_initial" `
+    -Uri "$base/api/data-sync/manifest" `
+    -TimeoutSec $manifestTimeoutSec
+}
 if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
   throw "Unexpected Fly sync manifest schema."
 }
@@ -594,7 +669,7 @@ foreach ($row in $selectedFiles) {
         }
         $freshManifest = Invoke-DataSyncJsonRequest `
           -Stage "manifest_refresh" `
-          -Uri "$base/api/data-sync/manifest" `
+          -Uri (New-DataSyncManifestUri) `
           -TimeoutSec $manifestTimeoutSec
         if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
           throw "Unexpected Fly sync manifest schema during generation refresh."
@@ -683,6 +758,16 @@ foreach ($row in $selectedFiles) {
 
 Save-SyncState
 $downloadClient.Dispose()
+
+# Do not acknowledge or publish canonical parity from a generation that
+# changed while this pass was copying files. This authenticated cache-bypassed
+# fence deliberately permits ordinary append growth, but revision, tile
+# configuration, Fresh Collection, and any explicit epoch must remain exact.
+$finalManifest = Invoke-DataSyncJsonRequest `
+  -Stage "manifest_final_identity" `
+  -Uri (New-DataSyncManifestUri) `
+  -TimeoutSec $manifestTimeoutSec
+Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest
 
 $ackBody = @{ files = @($ackRows) } | ConvertTo-Json -Depth 5
 $ack = Invoke-DataSyncJsonRequest `

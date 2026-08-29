@@ -36197,6 +36197,14 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "corrupt_evidence_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
+_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 3.0
+_data_sync_inventory_cache_condition = threading.Condition()
+_data_sync_inventory_cache = {
+    "expires_at": 0.0,
+    "refreshed_at": 0.0,
+    "refreshing": False,
+    "rows": None,
+}
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
     # Collector v2.2 is a write-once, serialized JSONL ledger. It may grow
     # during a large mirror download; inode replacement remains fenced.
@@ -36243,13 +36251,64 @@ def _data_sync_volume_root() -> Path:
 
 
 def _data_sync_allowed_roots() -> list:
-    runtime = _data_sync_runtime_root()
-    roots = [runtime]
+    """Return unique, non-overlapping physical roots within the Fly volume.
+
+    The named research paths are sometimes real runtime children and sometimes
+    symlinks to sibling directories on the persistent volume. Walking runtime
+    plus every child redundantly inventories the same large tree; following a
+    nested symlink can also create an unbounded traversal cycle. Resolve the
+    entry roots once, retain external-on-volume targets only when runtime does
+    not already contain them, and let ``os.walk(..., followlinks=False)`` own
+    traversal below each physical root.
+    """
+    runtime = _data_sync_runtime_root().resolve()
+    volume = _data_sync_volume_root().resolve()
+    roots = []
+
+    def add_root(candidate: Path) -> None:
+        try:
+            physical = candidate.resolve(strict=True)
+            if not physical.is_dir():
+                return
+            physical.relative_to(volume)
+        except (OSError, ValueError):
+            return
+        # Keep the broadest root only. This makes physical traversal disjoint
+        # even when two logical paths resolve to the same directory.
+        for existing in roots:
+            try:
+                physical.relative_to(existing)
+                return
+            except ValueError:
+                pass
+        roots[:] = [
+            existing
+            for existing in roots
+            if not _data_sync_path_is_within(existing, physical)
+        ]
+        roots.append(physical)
+
+    add_root(runtime)
     for name in ("research", "research_accumulator", "research_archive"):
-        candidate = runtime / name
-        if candidate.exists():
-            roots.append(candidate)
+        add_root(runtime / name)
     return roots
+
+
+def _data_sync_path_is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _data_sync_is_linked_directory(path: Path) -> bool:
+    """Detect POSIX symlinks and Windows directory junctions."""
+    try:
+        lexical = Path(os.path.abspath(path))
+        return path.is_symlink() or path.resolve(strict=True) != lexical
+    except OSError:
+        return True
 
 
 def _data_sync_relpath(path: Path) -> str:
@@ -36478,10 +36537,13 @@ def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
         append_path(volume / name)
 
     for root in _data_sync_allowed_roots():
-        for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
             _dirnames[:] = [
                 name for name in _dirnames
-                if name.lower() not in _DATA_SYNC_EXCLUDED_DIR_NAMES
+                if (
+                    name.lower() not in _DATA_SYNC_EXCLUDED_DIR_NAMES
+                    and not _data_sync_is_linked_directory(Path(dirpath) / name)
+                )
             ]
             for filename in filenames:
                 append_path(Path(dirpath) / filename)
@@ -36493,6 +36555,59 @@ def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
             break
     rows.sort(key=lambda row: row["path"])
     return rows
+
+
+def _data_sync_cached_inventory(*, force_refresh: bool = False) -> list:
+    """Share one recent metadata snapshot across concurrent manifest polls."""
+    with _data_sync_inventory_cache_condition:
+        now = time.monotonic()
+        cached_rows = _data_sync_inventory_cache.get("rows")
+        ordinary_cache_hit = (
+            not force_refresh
+            and now < float(_data_sync_inventory_cache.get("expires_at") or 0.0)
+        )
+        if isinstance(cached_rows, list) and ordinary_cache_hit:
+            return [dict(row) for row in cached_rows]
+        if _data_sync_inventory_cache.get("refreshing"):
+            while _data_sync_inventory_cache.get("refreshing"):
+                _data_sync_inventory_cache_condition.wait()
+            joined_rows = _data_sync_inventory_cache.get("rows")
+            if isinstance(joined_rows, list):
+                return [dict(row) for row in joined_rows]
+        _data_sync_inventory_cache["refreshing"] = True
+    # Scan outside the condition so waiters can join this flight rather than
+    # serially starting their own forced refresh.
+    try:
+        rows = _data_sync_inventory(include_sqlite_snapshots=False)
+    except BaseException:
+        with _data_sync_inventory_cache_condition:
+            # Fail closed: a forced identity fence that could not complete
+            # invalidates the previously cached inventory. A joined waiter
+            # must retry one new flight (or observe its failure), never return
+            # stale rows as though the requested refresh had succeeded.
+            _data_sync_inventory_cache["rows"] = None
+            _data_sync_inventory_cache["expires_at"] = 0.0
+            _data_sync_inventory_cache["refreshed_at"] = 0.0
+            _data_sync_inventory_cache["refreshing"] = False
+            _data_sync_inventory_cache_condition.notify_all()
+        raise
+    with _data_sync_inventory_cache_condition:
+        _data_sync_inventory_cache["rows"] = [dict(row) for row in rows]
+        refreshed_at = time.monotonic()
+        _data_sync_inventory_cache["refreshed_at"] = refreshed_at
+        _data_sync_inventory_cache["expires_at"] = refreshed_at + (
+            _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS
+        )
+        _data_sync_inventory_cache["refreshing"] = False
+        _data_sync_inventory_cache_condition.notify_all()
+        return [dict(row) for row in rows]
+
+
+def _data_sync_manifest_force_refresh(args) -> bool:
+    """Recognize both human and sync-client cache bypass query contracts."""
+    fresh = str(args.get("fresh") or "").strip().lower()
+    cache_bypass = str(args.get("cache_bypass") or "").strip()
+    return fresh in {"1", "true", "yes"} or bool(cache_bypass)
 
 
 def _data_sync_optional_file_audit() -> list:
@@ -36579,9 +36694,15 @@ def api_data_sync_manifest():
     # Inventory polling must stay metadata-only. SQLite leases are acquired
     # one at a time through the authenticated endpoint below immediately
     # before the corresponding download.
-    files = _data_sync_inventory(include_sqlite_snapshots=False)
+    # The endpoint remains protected by the global BOT_ADMIN_TOKEN guard.
+    # A final generation/identity fence may explicitly bypass the short TTL,
+    # while the cache lock still guarantees only one physical scan at a time.
+    force_refresh = _data_sync_manifest_force_refresh(request.args)
+    files = _data_sync_cached_inventory(force_refresh=force_refresh)
     usage = shutil.disk_usage(_data_sync_volume_root())
     ack = _read_data_sync_ack()
+    session = _load_research_session_meta() or {}
+    collection_epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
     with state_lock:
         fresh_collection_signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
     if fresh_collection_signal_ts <= 0:
@@ -36589,7 +36710,6 @@ def api_data_sync_manifest():
         # research_session.json is the durable epoch authority. Re-publish the
         # same cutoff (the sync client compares monotonically) so manifests do
         # not falsely claim that no Fresh Collection has ever run.
-        session = _load_research_session_meta() or {}
         try:
             fresh_collection_signal_ts = float(
                 session.get("fresh_collection_start_time") or 0.0
@@ -36612,6 +36732,10 @@ def api_data_sync_manifest():
         "file_count": len(files),
         "total_bytes": sum(row["size"] for row in files),
         "acknowledged_files": len(ack),
+        # Explicit persisted identity only: never derive a replacement epoch
+        # inside the sync endpoint when research_session.json is unbound.
+        "collection_epoch_id": collection_epoch_id or None,
+        "collection_epoch_status": "BOUND" if collection_epoch_id else "UNAVAILABLE",
         # Monotonic signal — local sync loop wipes its mirror when this advances.
         # 0.0 means no Fresh Collection has run yet; the loop treats any
         # strictly-greater value as a wipe trigger.

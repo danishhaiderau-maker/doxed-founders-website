@@ -300,6 +300,374 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
         assert rows[0]["size"] == target.stat().st_size
 
 
+def test_data_sync_allowed_roots_are_non_overlapping_physical_directories(
+    monkeypatch, tmp_path
+):
+    runtime = tmp_path / "runtime"
+    (runtime / "research" / "nested").mkdir(parents=True)
+    (runtime / "research_accumulator").mkdir()
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+
+    namespace = {"Path": Path, "os": os}
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_runtime_root", "_data_sync_volume_root",
+        "_data_sync_path_is_within", "_data_sync_allowed_roots",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+
+    roots = namespace["_data_sync_allowed_roots"]()
+    assert roots == [runtime.resolve()]
+    for index, root in enumerate(roots):
+        for other in roots[index + 1:]:
+            assert not namespace["_data_sync_path_is_within"](root, other)
+            assert not namespace["_data_sync_path_is_within"](other, root)
+
+
+def test_data_sync_top_level_research_symlink_is_on_volume_and_round_trips(
+    monkeypatch, tmp_path
+):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    physical = tmp_path / "durable-research"
+    physical.mkdir()
+    evidence = physical / "episode.jsonl"
+    evidence.write_text('{"episode":1}\n', encoding="utf-8")
+    link = runtime / "research"
+    link.mkdir()
+    original_resolve = Path.resolve
+
+    def mapped_resolve(self, strict=False):
+        lexical = Path(os.path.abspath(self))
+        try:
+            suffix = lexical.relative_to(link)
+        except ValueError:
+            return original_resolve(self, strict=strict)
+        mapped = physical.joinpath(*suffix.parts)
+        return original_resolve(mapped, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", mapped_resolve)
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+
+    namespace = {
+        "Path": Path,
+        "os": os,
+        "_DATA_SYNC_EXTENSIONS": frozenset({".jsonl"}),
+        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+        "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
+    }
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_rotation_parts", "_data_sync_runtime_root",
+        "_data_sync_volume_root", "_data_sync_path_is_within",
+        "_data_sync_is_linked_directory",
+        "_data_sync_allowed_roots", "_data_sync_relpath",
+        "_data_sync_path_allowed", "_data_sync_resolve_relpath",
+        "_data_sync_complete_record_size", "_data_sync_consistency_mode",
+        "_data_sync_inventory",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+
+    roots = namespace["_data_sync_allowed_roots"]()
+    assert roots == [runtime.resolve(), physical.resolve()]
+    rows = namespace["_data_sync_inventory"]()
+    assert [row["path"] for row in rows] == ["research/episode.jsonl"]
+    assert namespace["_data_sync_relpath"](evidence) == "research/episode.jsonl"
+    assert namespace["_data_sync_resolve_relpath"]("research/episode.jsonl") == (
+        evidence.resolve()
+    )
+
+
+def test_data_sync_top_level_research_symlink_outside_volume_is_excluded(
+    monkeypatch, tmp_path
+):
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    runtime.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.jsonl").write_text("{}\n", encoding="utf-8")
+    link = runtime / "research"
+    link.mkdir()
+    original_resolve = Path.resolve
+
+    def mapped_resolve(self, strict=False):
+        lexical = Path(os.path.abspath(self))
+        try:
+            suffix = lexical.relative_to(link)
+        except ValueError:
+            return original_resolve(self, strict=strict)
+        mapped = outside.joinpath(*suffix.parts)
+        return original_resolve(mapped, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", mapped_resolve)
+    monkeypatch.setenv("BOT_DATA_DIR", str(volume))
+
+    namespace = {"Path": Path, "os": os}
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_runtime_root", "_data_sync_volume_root",
+        "_data_sync_path_is_within", "_data_sync_allowed_roots",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+
+    assert namespace["_data_sync_allowed_roots"]() == [runtime.resolve()]
+
+
+def test_data_sync_inventory_never_follows_nested_directory_symlinks(monkeypatch, tmp_path):
+    visited = []
+    yielded_dirnames = ["linked-research"]
+
+    def fake_walk(root, *, followlinks):
+        visited.append((Path(root), followlinks))
+        yield str(root), yielded_dirnames, []
+
+    monkeypatch.setattr(os, "walk", fake_walk)
+    original_is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: self.name == "linked-research" or original_is_symlink(self),
+    )
+    namespace = {
+        "Path": Path,
+        "os": os,
+        "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+        "_data_sync_volume_root": lambda: tmp_path,
+        "_data_sync_allowed_roots": lambda: [tmp_path],
+        "_data_sync_is_linked_directory": lambda path: path.name == "linked-research",
+    }
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_inventory"
+    )
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    assert namespace["_data_sync_inventory"]() == []
+    assert visited == [(tmp_path, False)]
+    assert yielded_dirnames == []
+
+
+def test_data_sync_inventory_cache_is_short_ttl_single_flight():
+    calls = []
+    barrier = threading.Barrier(8)
+
+    def inventory(*, include_sqlite_snapshots):
+        assert include_sqlite_snapshots is False
+        calls.append(time.monotonic())
+        time.sleep(0.05)
+        return [{"path": "evidence.json", "size": 1}]
+
+    namespace = {
+        "time": time,
+        "threading": threading,
+        "_data_sync_inventory": inventory,
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 0.2,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_inventory_cache": {
+            "expires_at": 0.0, "refreshing": False, "rows": None,
+        },
+    }
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_cached_inventory"
+    )
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    results = []
+
+    def fetch():
+        barrier.wait()
+        results.append(namespace["_data_sync_cached_inventory"]())
+
+    workers = [threading.Thread(target=fetch) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert len(results) == 8
+    assert len(calls) == 1
+    assert all(row == [{"path": "evidence.json", "size": 1}] for row in results)
+    results[0][0]["size"] = 999
+    assert namespace["_data_sync_cached_inventory"]()[0]["size"] == 1
+    time.sleep(0.21)
+    assert namespace["_data_sync_cached_inventory"]()[0]["size"] == 1
+    assert len(calls) == 2
+
+
+def test_data_sync_inventory_forced_refresh_bypasses_stale_rows_and_serializes():
+    calls = []
+    barrier = threading.Barrier(6)
+    activity_lock = threading.Lock()
+    active_scans = 0
+    maximum_active_scans = 0
+
+    def inventory(*, include_sqlite_snapshots):
+        nonlocal active_scans, maximum_active_scans
+        with activity_lock:
+            active_scans += 1
+            maximum_active_scans = max(maximum_active_scans, active_scans)
+        calls.append(len(calls) + 1)
+        time.sleep(0.05)
+        result = [{"path": "evidence.json", "size": calls[-1]}]
+        with activity_lock:
+            active_scans -= 1
+        return result
+
+    namespace = {
+        "time": time,
+        "_data_sync_inventory": inventory,
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_inventory_cache": {
+            "expires_at": 0.0, "refreshed_at": 0.0,
+            "refreshing": False, "rows": None,
+        },
+    }
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_cached_inventory"
+    )
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    assert namespace["_data_sync_cached_inventory"]()[0]["size"] == 1
+    assert namespace["_data_sync_cached_inventory"]()[0]["size"] == 1
+    results = []
+
+    def fresh_fetch():
+        barrier.wait()
+        results.append(
+            namespace["_data_sync_cached_inventory"](force_refresh=True)[0]["size"]
+        )
+
+    workers = [threading.Thread(target=fresh_fetch) for _ in range(6)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=2)
+
+    assert len(results) == 6
+    assert sorted(results) == [2] * 6
+    assert len(calls) == 2
+    assert maximum_active_scans == 1
+
+
+def test_failed_forced_refresh_never_releases_stale_rows_to_waiter():
+    calls = []
+    failure_started = threading.Event()
+    release_failure = threading.Event()
+
+    def inventory(*, include_sqlite_snapshots):
+        call_number = len(calls) + 1
+        calls.append(call_number)
+        if call_number == 1:
+            return [{"path": "evidence.json", "size": 1}]
+        if call_number == 2:
+            failure_started.set()
+            assert release_failure.wait(timeout=2)
+            raise OSError("forced inventory scan failed")
+        return [{"path": "evidence.json", "size": call_number}]
+
+    cache = {
+        "expires_at": 0.0,
+        "refreshed_at": 0.0,
+        "refreshing": False,
+        "rows": None,
+    }
+    namespace = {
+        "time": time,
+        "_data_sync_inventory": inventory,
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_inventory_cache": cache,
+    }
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_cached_inventory"
+    )
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    cached_inventory = namespace["_data_sync_cached_inventory"]
+
+    assert cached_inventory() == [{"path": "evidence.json", "size": 1}]
+    leader_errors = []
+    waiter_results = []
+
+    def failing_leader():
+        try:
+            cached_inventory(force_refresh=True)
+        except OSError as exc:
+            leader_errors.append(str(exc))
+
+    def joined_waiter():
+        waiter_results.append(cached_inventory(force_refresh=True))
+
+    leader = threading.Thread(target=failing_leader)
+    leader.start()
+    assert failure_started.wait(timeout=2)
+    waiter = threading.Thread(target=joined_waiter)
+    waiter.start()
+    # The forced waiter is now blocked on the leader's in-flight scan.
+    time.sleep(0.05)
+    assert waiter.is_alive()
+    release_failure.set()
+    leader.join(timeout=2)
+    waiter.join(timeout=2)
+
+    assert leader_errors == ["forced inventory scan failed"]
+    assert waiter_results == [[{"path": "evidence.json", "size": 3}]]
+    assert calls == [1, 2, 3]
+    assert cache["rows"] == [{"path": "evidence.json", "size": 3}]
+    assert cache["refreshing"] is False
+    # The successful waiter flight is now the only cacheable generation.
+    assert cached_inventory() == [{"path": "evidence.json", "size": 3}]
+    assert calls == [1, 2, 3]
+
+
+def test_data_sync_manifest_route_recognizes_client_cache_bypass_contract():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_manifest_force_refresh"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    should_refresh = namespace["_data_sync_manifest_force_refresh"]
+
+    assert should_refresh({"fresh": "1"}) is True
+    assert should_refresh({"fresh": "true"}) is True
+    assert should_refresh({"cache_bypass": "9ee00e34-identity-fence"}) is True
+    assert should_refresh({}) is False
+    assert should_refresh({"fresh": "0", "cache_bypass": ""}) is False
+
+    route_body = BOT[
+        BOT.index("def api_data_sync_manifest"):
+        BOT.index("@app.route('/api/data-sync/sqlite-snapshot')")
+    ]
+    assert "_data_sync_manifest_force_refresh(request.args)" in route_body
+    assert "_data_sync_cached_inventory(force_refresh=force_refresh)" in route_body
+
+
 def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monkeypatch, tmp_path):
     receipt_names = {
         "tile_independence_report.json",
@@ -469,8 +837,13 @@ def test_sqlite_snapshot_lease_materializes_only_requested_database(tmp_path):
 
 def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():
     manifest_body = BOT[BOT.index("def api_data_sync_manifest"):BOT.index("@app.route('/api/data-sync/sqlite-snapshot')")]
+    cache_body = BOT[BOT.index("def _data_sync_cached_inventory"):BOT.index("def _data_sync_optional_file_audit")]
     snapshot_body = BOT[BOT.index("def _data_sync_sqlite_snapshot"):BOT.index("def _data_sync_resolve_sqlite_snapshot")]
-    assert "_data_sync_inventory(include_sqlite_snapshots=False)" in manifest_body
+    assert "files = _data_sync_cached_inventory(force_refresh=force_refresh)" in manifest_body
+    assert "_data_sync_inventory(include_sqlite_snapshots=False)" in cache_body
+    assert 'session = _load_research_session_meta() or {}' in manifest_body
+    assert '"collection_epoch_id": collection_epoch_id or None' in manifest_body
+    assert '"collection_epoch_status": "BOUND" if collection_epoch_id else "UNAVAILABLE"' in manifest_body
     assert '"sqlite_snapshots_materialized": False' in manifest_body
     assert "read_bytes()" not in snapshot_body
     assert 'handle.read(1024 * 1024)' in snapshot_body

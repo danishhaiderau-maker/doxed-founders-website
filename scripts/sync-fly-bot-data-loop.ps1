@@ -483,6 +483,9 @@ try {
       # downloads only new bytes for those files.
       $syncArgs = @{
         SourceUrl = $SourceUrl
+        # Reuse this cycle's authenticated preflight. The child remains safe
+        # for standalone use because it fetches when InitialManifest is null.
+        InitialManifest = $manifest
         ProgressHeartbeatFile = $heartbeatFile
         ProgressRelayEvidenceJson = ($relayEvidenceStatus | ConvertTo-Json -Compress)
         MirroredSourceRevision = $(if ($lastSyncedSourceRevision) { $lastSyncedSourceRevision } else { "" })
