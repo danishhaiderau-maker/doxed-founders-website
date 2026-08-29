@@ -12,20 +12,51 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def _jsonl(path: Path) -> list[dict]:
+_CONSERVATIVE_INTENT_FIELDS = (
+    "schema", "ledger", "record_id", "event_id", "episode_id", "epoch_id",
+    "opportunity_id", "policy_epoch_id", "policy_id", "policy_signature",
+    "schedule_id", "tape_id", "research_lane", "intent_kind",
+    "execution_basis", "requested_qty", "executed_direction", "chase_schedule",
+)
+
+
+def _snapshot_size(path: Path) -> int:
     try:
-        payload = path.read_bytes()
+        return max(0, int(path.stat().st_size))
     except OSError:
-        return []
-    rows: list[dict] = []
-    for raw in payload.splitlines():
-        try:
-            value = json.loads(raw.decode("utf-8", errors="replace"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-    return rows
+        return 0
+
+
+def _iter_jsonl(path: Path, *, byte_limit: int | None = None):
+    """Yield rows only through one pre-captured immutable size boundary."""
+    limit = _snapshot_size(path) if byte_limit is None else max(0, int(byte_limit))
+    if limit <= 0:
+        return
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return
+    with handle:
+        remaining = limit
+        while remaining > 0:
+            raw = handle.readline(remaining)
+            if not raw:
+                break
+            remaining -= len(raw)
+            # A row appended beyond the captured boundary, or an incomplete
+            # concurrent write, belongs to the next analyzer generation.
+            if not raw.endswith(b"\n"):
+                break
+            try:
+                value = json.loads(raw.decode("utf-8", errors="replace"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                yield value
+
+
+def _jsonl(path: Path) -> list[dict]:
+    return list(_iter_jsonl(path))
 
 
 def has_v3_evidence(data_dir=".") -> bool:
@@ -36,45 +67,71 @@ def load_v3_cycle_snapshot(data_dir=".") -> dict:
     root = Path(data_dir)
     ledger_root = root / "v3" / "ledgers"
     names = ("opportunity", "decision", "order_intent", "execution", "lifecycle", "market_segment")
-    rows = {name: _jsonl(ledger_root / f"{name}.jsonl") for name in names}
-    opportunities = rows["opportunity"]
     digest = hashlib.sha256()
+    counts: dict[str, int] = {}
+    latest: dict = {}
+    epoch_id = None
+    signatures: set[str] = set()
+    policy_epochs: set[str] = set()
     for name in names:
-        for row in rows[name]:
+        count = 0
+        path = ledger_root / f"{name}.jsonl"
+        boundary = _snapshot_size(path)
+        for row in _iter_jsonl(path, byte_limit=boundary):
+            count += 1
             digest.update(name.encode("utf-8"))
             digest.update(b"\0")
             digest.update(json.dumps(row, sort_keys=True, separators=(",", ":")).encode("utf-8"))
             digest.update(b"\n")
-    latest = max(opportunities, key=lambda row: float(row.get("signal_ts") or 0), default={})
-    epoch_id = str(latest.get("epoch_id") or "") or None
-    scoped_decisions = [row for row in rows["decision"] if not epoch_id or row.get("epoch_id") == epoch_id]
-    signatures = sorted({str(row.get("policy_signature")) for row in scoped_decisions if row.get("policy_signature")})
-    policy_epochs = sorted({str(row.get("policy_epoch_id")) for row in scoped_decisions if row.get("policy_epoch_id")})
+            if name == "opportunity" and (
+                not latest
+                or float(row.get("signal_ts") or 0) > float(latest.get("signal_ts") or 0)
+            ):
+                latest = row
+            elif name == "decision" and (not epoch_id or row.get("epoch_id") == epoch_id):
+                if row.get("policy_signature"):
+                    signatures.add(str(row["policy_signature"]))
+                if row.get("policy_epoch_id"):
+                    policy_epochs.add(str(row["policy_epoch_id"]))
+        counts[name] = count
+        if name == "opportunity":
+            epoch_id = str(latest.get("epoch_id") or "") or None
+    sorted_signatures = sorted(signatures)
+    sorted_policy_epochs = sorted(policy_epochs)
     return {
         "schema": "policy_cycle_snapshot_v3_1",
         "snapshot_id": "policy-v3-snapshot-" + digest.hexdigest()[:24],
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source_file": "v3/ledgers/*.jsonl",
-        "source_read_mode": "BYTES_THEN_PARSE_V1",
+        "source_read_mode": "STREAMED_JSONL_V1",
         "collector_version": "collector_v3.1",
-        "row_count": len(opportunities),
-        "ledger_counts": {name: len(value) for name, value in rows.items()},
+        "row_count": counts["opportunity"],
+        "ledger_counts": counts,
         "last_event_id": latest.get("episode_id"),
         "last_signal_ts": latest.get("signal_ts"),
         "epoch_id": epoch_id,
-        "policy_epoch_id": policy_epochs[0] if len(policy_epochs) == 1 else None,
-        "policy_epoch_ids": policy_epochs,
-        "policy_signature": signatures[0] if len(signatures) == 1 else None,
-        "policy_signatures": signatures,
+        "policy_epoch_id": sorted_policy_epochs[0] if len(sorted_policy_epochs) == 1 else None,
+        "policy_epoch_ids": sorted_policy_epochs,
+        "policy_signature": sorted_signatures[0] if len(sorted_signatures) == 1 else None,
+        "policy_signatures": sorted_signatures,
     }
 
 
 def load_v3_order_intents(data_dir=".", *, epoch_id: str | None = None) -> tuple[dict, ...]:
     """Return immutable V3.1 order-intent rows for one signed epoch."""
-    rows = _jsonl(Path(data_dir) / "v3" / "ledgers" / "order_intent.jsonl")
-    if epoch_id:
-        rows = [row for row in rows if str(row.get("epoch_id") or "") == str(epoch_id)]
-    return tuple(json.loads(json.dumps(row, sort_keys=True, separators=(",", ":"))) for row in rows)
+    path = Path(data_dir) / "v3" / "ledgers" / "order_intent.jsonl"
+    boundary = _snapshot_size(path)
+    wanted = None if epoch_id is None else str(epoch_id)
+    projected = []
+    for row in _iter_jsonl(path, byte_limit=boundary):
+        if wanted is not None and str(row.get("epoch_id") or "") != wanted:
+            continue
+        projected.append({key: row[key] for key in _CONSERVATIVE_INTENT_FIELDS if key in row})
+    # json.loads already returns a fresh object per line. A JSON dump/load
+    # deep-copy doubled peak memory for the 226 MB canonical ledger and was
+    # the native-fault site; returning the parsed rows preserves exact values
+    # and durable line order without redundant serialization.
+    return tuple(projected)
 
 
 def load_or_build_genome(data_dir=".", report_dir=".") -> dict:

@@ -7,6 +7,7 @@ from collector_v22_schema import RESEARCH_EVENTS_FILE
 from research import research_dashboard as dashboard
 from research.policy_cycle_snapshot import build_policy_cycle_reports
 from research import policy_cycle_snapshot
+from research import v3_policy_report_adapter
 
 
 SIGNAL_TS = 1_800_000_000.0
@@ -45,6 +46,131 @@ def _event(index, outcome="ACCEPTED_UNFILLED"):
 def _append(path: Path, row):
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
+
+
+def test_v3_order_intents_stream_without_redundant_json_copy(tmp_path, monkeypatch):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    path = ledgers / "order_intent.jsonl"
+    expected = [
+        {"record_id": "intent-1", "epoch_id": "epoch-a", "execution_basis": {"requested_qty": 2}},
+        {"record_id": "intent-other", "epoch_id": "epoch-b"},
+        {"record_id": "intent-2", "epoch_id": "epoch-a", "value": 3.5},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in expected), encoding="utf-8")
+
+    monkeypatch.setattr(
+        v3_policy_report_adapter.json,
+        "dumps",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("redundant JSON serialization entered order-intent loader")
+        ),
+    )
+    actual = v3_policy_report_adapter.load_v3_order_intents(
+        tmp_path, epoch_id="epoch-a"
+    )
+
+    assert actual == (
+        expected[0],
+        {"record_id": "intent-2", "epoch_id": "epoch-a"},
+    )
+    assert actual[0] is not expected[0]
+
+
+def test_v3_order_intent_projection_drops_large_unused_policy_payload(tmp_path):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    row = {
+        "schema": "research_evidence_v3",
+        "ledger": "order_intent",
+        "record_id": "intent-large",
+        "event_id": "event-large",
+        "epoch_id": "epoch-a",
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT",
+        "execution_basis": {"requested_qty": 1},
+        "chase_schedule": {"intervals": []},
+        "entry_children": [{"unused": "x" * 2_000_000}],
+        "paper_policy_spec": {"unused": "y" * 2_000_000},
+    }
+    (ledgers / "order_intent.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+
+    actual = v3_policy_report_adapter.load_v3_order_intents(
+        tmp_path, epoch_id="epoch-a"
+    )
+
+    assert len(actual) == 1
+    assert "entry_children" not in actual[0]
+    assert "paper_policy_spec" not in actual[0]
+    assert len(json.dumps(actual[0])) < 1_000
+
+
+def test_v3_order_intent_snapshot_excludes_append_after_size_capture(tmp_path, monkeypatch):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    path = ledgers / "order_intent.jsonl"
+    first = {"record_id": "intent-first", "epoch_id": "epoch-a"}
+    later = {"record_id": "intent-later", "epoch_id": "epoch-a"}
+    path.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    real_iter = v3_policy_report_adapter._iter_jsonl
+    appended = False
+
+    def append_then_iter(source, *, byte_limit=None):
+        nonlocal appended
+        if not appended:
+            appended = True
+            with source.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(later) + "\n")
+        yield from real_iter(source, byte_limit=byte_limit)
+
+    monkeypatch.setattr(v3_policy_report_adapter, "_iter_jsonl", append_then_iter)
+    actual = v3_policy_report_adapter.load_v3_order_intents(
+        tmp_path, epoch_id="epoch-a"
+    )
+
+    assert [row["record_id"] for row in actual] == ["intent-first"]
+    assert sum(1 for _ in path.open(encoding="utf-8")) == 2
+
+
+def test_v3_cycle_snapshot_streams_ledgers_with_stable_counts_and_identity(tmp_path):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    rows = {
+        "opportunity": [
+            {"record_id": "opp-1", "episode_id": "opp-1", "epoch_id": "epoch-old", "signal_ts": 10},
+            {"record_id": "opp-2", "episode_id": "opp-2", "epoch_id": "epoch-current", "signal_ts": 20},
+        ],
+        "decision": [
+            {"record_id": "dec-old", "epoch_id": "epoch-old", "policy_signature": "old"},
+            {
+                "record_id": "dec-current",
+                "epoch_id": "epoch-current",
+                "policy_signature": "sig-current",
+                "policy_epoch_id": "policy-current",
+            },
+        ],
+        "order_intent": [{"record_id": "intent-1", "epoch_id": "epoch-current"}],
+    }
+    for name, ledger_rows in rows.items():
+        (ledgers / f"{name}.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in ledger_rows), encoding="utf-8"
+        )
+
+    receipt = v3_policy_report_adapter.load_v3_cycle_snapshot(tmp_path)
+
+    assert receipt["source_read_mode"] == "STREAMED_JSONL_V1"
+    assert receipt["row_count"] == 2
+    assert receipt["last_event_id"] == "opp-2"
+    assert receipt["epoch_id"] == "epoch-current"
+    assert receipt["policy_signatures"] == ["sig-current"]
+    assert receipt["policy_epoch_ids"] == ["policy-current"]
+    assert receipt["ledger_counts"] == {
+        "opportunity": 2,
+        "decision": 2,
+        "order_intent": 1,
+        "execution": 0,
+        "lifecycle": 0,
+        "market_segment": 0,
+    }
 
 
 def test_policy_builders_share_pinned_snapshot_while_mirror_grows(tmp_path, monkeypatch):
