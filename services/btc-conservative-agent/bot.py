@@ -36541,7 +36541,13 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "corrupt_evidence_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
-_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 30.0
+# A complete canonical mirror pass can legitimately take several minutes on
+# the shared-CPU Fly machine.  A 30-second lease guaranteed that the first poll
+# after a large pass launched another recursive inventory walk immediately.
+# The desktop polls every three minutes. Expire shortly before that poll so it
+# can never report MATCH/SKIP from an inventory that predates newly appended or
+# newly created evidence. The non-blocking worker refresh remains fail closed.
+_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 150.0
 _DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
 _DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
@@ -37277,17 +37283,22 @@ def _data_sync_request_async_inventory(*, force_refresh: bool = False) -> dict:
                 "generated_at": _data_sync_async_inventory.get("generated_at"),
                 "error": None,
             }
-        prior_status = str(_data_sync_async_inventory.get("status") or "EMPTY")
         if not _data_sync_async_inventory.get("refreshing"):
             _data_sync_async_inventory["refreshing"] = True
             _data_sync_async_inventory["status"] = "BUILDING"
             _data_sync_async_inventory["error"] = None
             start_worker = True
         result = {
-            # Expose a validated restart snapshot as explicitly STALE on the
-            # first reconciliation request. Its rows stay withheld and the
-            # client cannot commit it; subsequent joiners see BUILDING.
-            "status": "STALE" if prior_status == "STALE" else "BUILDING",
+            # Stale-while-revalidate is deliberately fail closed for sync
+            # commits: retain the last validated rows in memory for recovery,
+            # but withhold them from callers until the worker publishes a new
+            # CURRENT generation.  This keeps requests non-blocking without
+            # allowing a stale inventory to claim mirror parity.
+            "status": (
+                "STALE_REVALIDATING"
+                if isinstance(_data_sync_async_inventory.get("rows"), list)
+                else "BUILDING"
+            ),
             "rows": [],
             "generated_at": _data_sync_async_inventory.get("generated_at"),
             "error": _data_sync_async_inventory.get("error"),
@@ -37499,7 +37510,7 @@ def api_data_sync_manifest():
             "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
         },
     }
-    if inventory_status in {"BUILDING", "STALE"}:
+    if inventory_status in {"BUILDING", "STALE", "STALE_REVALIDATING"}:
         response = jsonify(payload)
         response.headers["Retry-After"] = "2"
         return response, 503

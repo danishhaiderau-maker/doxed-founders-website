@@ -333,7 +333,8 @@ if ([string]$manifest.inventory_status -ne "CURRENT") {
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
 $chunkLimit = 1MB
-$interChunkThrottleMs = 50
+$interChunkThrottleMs = 150
+$interFileThrottleMs = 250
 $selectedFiles = @($manifest.files)
 $selectedFiles = @(
   $selectedFiles | Sort-Object `
@@ -773,6 +774,14 @@ foreach ($row in $selectedFiles) {
     size = $remoteSize
     mtime_ns = [int64]$row.mtime_ns
   })
+  # A final chunk is immediately followed by the next file request otherwise.
+  # Yield briefly after every downloaded file as well as between chunks so the
+  # shared-CPU Fly machine can schedule health/ready/status handlers.  This
+  # changes only copy pacing; resumability, hashes and final acknowledgement
+  # remain authoritative.
+  if ($downloadedGeneration -and $selectedFileIndex -lt $selectedFileCount) {
+    Start-Sleep -Milliseconds $interFileThrottleMs
+  }
 }
 
 Save-SyncState

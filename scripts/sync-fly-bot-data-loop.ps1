@@ -103,15 +103,17 @@ function Remove-OrphanedMirrorCandidates {
 }
 
 # Growth trigger (default 50 MB). Override with FLY_VOLUME_SYNC_THRESHOLD_MB.
-# Poll cadence is faster than the force-sync interval so large jsonl growth is
-# mirrored for the analyzer without waiting a full IntervalSec cycle.
+# Each ordinary poll obtains a freshly completed inventory generation. Polling
+# faster than the configured interval caused immediate re-scans after long
+# syncs and starved the runtime control plane.
 $thresholdMb = 50.0
 if ($env:FLY_VOLUME_SYNC_THRESHOLD_MB) {
   try { $thresholdMb = [double]$env:FLY_VOLUME_SYNC_THRESHOLD_MB } catch { $thresholdMb = 50.0 }
 }
 if ($thresholdMb -lt 5) { $thresholdMb = 5.0 }
 $thresholdBytes = [int64]($thresholdMb * 1MB)
-$pollSec = [Math]::Max(30, [Math]::Min(60, [int]($IntervalSec / 3)))
+$minimumInventoryPollSec = 180
+$pollSec = [Math]::Max($minimumInventoryPollSec, [int]$IntervalSec)
 $fullSyncSec = [Math]::Max(600, $FullSyncIntervalSec)
 
 # Compute local mirror size + merge Fly /api/data_size numbers into one report.
@@ -247,13 +249,15 @@ if (-not $env:BOT_ADMIN_TOKEN) {
   throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }
 
-$preflightManifestAttempts = 5
+$preflightManifestAttempts = 8
 $preflightManifestTimeoutSec = 90
+$preflightInventoryWaitMaxSec = 60
 $relaySyncAttempts = 2
 
 function Get-FlySyncPreflightManifest {
   param([Parameter(Mandatory = $true)][string]$ManifestUri)
   $preflightHeaders = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
+  $preflightWait = [System.Diagnostics.Stopwatch]::StartNew()
   for ($attempt = 1; $attempt -le $preflightManifestAttempts; $attempt++) {
     try {
       $preflight = Invoke-RestMethod `
@@ -269,13 +273,35 @@ function Get-FlySyncPreflightManifest {
       }
       return $preflight
     } catch {
-      if ($attempt -ge $preflightManifestAttempts) {
+      $remainingWaitSec = [Math]::Floor(
+        $preflightInventoryWaitMaxSec - $preflightWait.Elapsed.TotalSeconds
+      )
+      if ($attempt -ge $preflightManifestAttempts -or $remainingWaitSec -le 0) {
         throw (
           "Fly data-sync stage=loop_manifest_preflight failed after " +
           "$attempt/$preflightManifestAttempts attempt(s): $($_.Exception.Message)"
         )
       }
-      Start-Sleep -Seconds ([Math]::Min(15, 2 * $attempt))
+      # BUILDING/STALE_REVALIDATING is a single-flight background scan, not a
+      # reason to launch another worker. Respect the server's Retry-After as a
+      # minimum while bounding the complete join window to 60 seconds.
+      $retryAfterSec = 0
+      try {
+        $response = $_.Exception.Response
+        if ($response -and $response.Headers) {
+          if ($response.Headers.RetryAfter -and $response.Headers.RetryAfter.Delta) {
+            $retryAfterSec = [int][Math]::Ceiling($response.Headers.RetryAfter.Delta.TotalSeconds)
+          } elseif ($response.Headers["Retry-After"]) {
+            [void][int]::TryParse([string]$response.Headers["Retry-After"], [ref]$retryAfterSec)
+          }
+        }
+      } catch { $retryAfterSec = 0 }
+      $backoffSec = [Math]::Min(10, 2 * $attempt)
+      $delaySec = [Math]::Min(
+        $remainingWaitSec,
+        [Math]::Max(1, [Math]::Max($retryAfterSec, $backoffSec))
+      )
+      Start-Sleep -Seconds $delaySec
     }
   }
 }
@@ -650,6 +676,9 @@ try {
       Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report wrapper failed: $($_.Exception.Message)"
     }
     if ($didSync) {
+      # A full copy can run for several minutes. Give the control plane one
+      # complete configured interval before requesting another recursive
+      # inventory; append/new-file detection remains bounded by IntervalSec.
       Start-Sleep -Seconds $pollSec
     } else {
       # A failed preflight must retry at the bounded poll cadence. Sleeping

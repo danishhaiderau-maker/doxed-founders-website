@@ -13,6 +13,7 @@ on:
       # focused containment/nonce suite is an explicit deployment gate.
       - "services/btc-conservative-agent/data_sync_inventory_worker.py"
       - "services/btc-conservative-agent/test_data_sync_inventory_worker_contract.py"
+      - "services/btc-conservative-agent/test_data_sync_cadence_throttle_contract.py"
       - "services/btc-signal-engine/data_sync_inventory_worker.py"
       - "scripts/check-relay-flat.mjs"
       - ".github/workflows/fly-bot-deploy.yml"
@@ -75,6 +76,7 @@ jobs:
         run: |
           python -m py_compile bot.py data_sync_inventory_worker.py btc_conservative_agent.py fly_relay_state_pusher.py
           python -m pytest test_data_sync_inventory_worker_contract.py -q
+          python -m pytest test_data_sync_cadence_throttle_contract.py -q
           python test_fly_startup_contract.py
           python test_paper_skips_risk_pauses.py
           python test_daily_pnl_utc_rollover.py

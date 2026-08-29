@@ -142,7 +142,8 @@ def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
 
 
 def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
-    assert "$preflightManifestAttempts = 5" in SYNC_LOOP
+    assert "$preflightManifestAttempts = 8" in SYNC_LOOP
+    assert "$preflightInventoryWaitMaxSec = 60" in SYNC_LOOP
     assert "$preflightManifestTimeoutSec = 90" in SYNC_LOOP
     assert "function Get-FlySyncPreflightManifest" in SYNC_LOOP
     assert "stage=loop_manifest_preflight failed after" in SYNC_LOOP
@@ -168,7 +169,8 @@ def test_sync_loop_separates_poll_retry_and_full_mutation_cadence():
     failure_marker = SYNC_LOOP.index("$failureAt = (Get-Date).ToUniversalTime()")
     catch_start = SYNC_LOOP.rfind("    } catch {", 0, failure_marker)
     loop_tail = SYNC_LOOP[catch_start:]
-    assert loop_tail.count("Start-Sleep -Seconds $pollSec") >= 2
+    assert "Start-Sleep -Seconds $pollSec" in loop_tail
+    assert "Start-Sleep -Seconds $pollSec" in loop_tail
     assert "Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))" not in loop_tail
 
 
@@ -901,7 +903,10 @@ def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
     assert '/api/data-sync/sqlite-snapshot?path=' in SYNC_SCRIPT
     assert 'Set-SqliteSnapshotLease -Row $row' in SYNC_SCRIPT
     assert '$chunkLimit = 1MB' in SYNC_SCRIPT
-    assert '$interChunkThrottleMs = 50' in SYNC_SCRIPT
+    assert '$interChunkThrottleMs = 150' in SYNC_SCRIPT
+    assert '$interFileThrottleMs = 250' in SYNC_SCRIPT
+    assert 'Start-Sleep -Milliseconds $interChunkThrottleMs' in SYNC_SCRIPT
+    assert 'Start-Sleep -Milliseconds $interFileThrottleMs' in SYNC_SCRIPT
     assert 'SQLite snapshot checksum mismatch for $rel.' in SYNC_SCRIPT
     assert '/api/data-sync/manifest?include_snapshots=1' not in SYNC_LOOP
     assert '"sqlite_snapshots_materialized": False' in BOT
@@ -2244,7 +2249,9 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     assert "_data_sync_inventory(" not in ast.unparse(node)
     state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generated_at": "now", "expires_at": time.monotonic() + 10, "refreshing": False})
     assert request_inventory()["status"] == "CURRENT"
-    assert request_inventory(force_refresh=True)["status"] == "BUILDING"
+    revalidating = request_inventory(force_refresh=True)
+    assert revalidating["status"] == "STALE_REVALIDATING"
+    assert revalidating["rows"] == []
     assert len(started) == 2
 
     state.update({"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "refreshing": False})
@@ -2253,7 +2260,7 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
         "generated_at": "prior",
     }
     stale = request_inventory()
-    assert stale["status"] == "STALE"
+    assert stale["status"] == "STALE_REVALIDATING"
     assert stale["rows"] == []
 
 

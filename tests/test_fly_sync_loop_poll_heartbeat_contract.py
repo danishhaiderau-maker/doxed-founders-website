@@ -17,7 +17,8 @@ def _child_source() -> str:
 def test_manifest_preflight_has_bounded_retries_and_stage_diagnostics():
     source = _source()
 
-    assert "$preflightManifestAttempts = 5" in source
+    assert "$preflightManifestAttempts = 8" in source
+    assert "$preflightInventoryWaitMaxSec = 60" in source
     assert "$preflightManifestTimeoutSec = 90" in source
     assert "stage=loop_manifest_preflight failed after" in source
     assert '$currentStage = "loop_manifest_preflight"' in source
@@ -81,7 +82,7 @@ def test_reused_manifest_is_fenced_against_a_fresh_authenticated_identity():
     acknowledgement = child_source.index('-Stage "acknowledgement"')
     canonical_completion = child_source.index("Canonical manifest commit failed")
 
-    assert "?fresh=1&nonce=" in child_source
+    assert '"$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery&nonce="' in child_source
     assert final_fence < identity_assertion < acknowledgement < canonical_completion
     for identity_field in (
         "source_git_rev",
