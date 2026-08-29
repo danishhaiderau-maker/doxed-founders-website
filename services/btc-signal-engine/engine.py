@@ -27559,7 +27559,11 @@ def dump_system_state():
     except Exception as e:
         logger.error(f"[CRASH DUMP FAILED] {e}")
 
-def _strategy_progress_health_snapshot(now: float = None) -> dict:
+def _strategy_progress_health_snapshot(
+    now: float = None,
+    *,
+    trade_lock_timeout_sec: float | None = None,
+) -> dict:
     """Prove the strategy loop can progress; a heartbeat thread is insufficient."""
     now = float(now or time.time())
     with state_lock:
@@ -27615,7 +27619,12 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         and not scheduled_cycle_within_bound
     )
 
-    lock_available = trade_lock.acquire(timeout=WATCHDOG_TRADE_LOCK_TIMEOUT_SEC)
+    lock_probe_timeout = (
+        WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+        if trade_lock_timeout_sec is None
+        else max(0.0, float(trade_lock_timeout_sec))
+    )
+    lock_available = trade_lock.acquire(timeout=lock_probe_timeout)
     if lock_available:
         trade_lock.release()
     lock_diagnostics = (
@@ -27721,6 +27730,46 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         "pending_orders": len(pending_orders),
         "live_armed": live_armed,
     }
+
+
+def _compact_strategy_progress_health_snapshot(progress: dict) -> dict:
+    """Bound public liveness payloads without discarding diagnostic evidence."""
+    compact = dict(progress or {})
+    scheduled = dict(compact.get("scheduled_ai_cycle") or {})
+    scheduled.pop("stack_tail", None)
+    compact["scheduled_ai_cycle"] = scheduled
+    evidence = dict(compact.get("post_ai_evidence") or {})
+    workers = {}
+    for hook, raw in (evidence.get("workers") or {}).items():
+        worker = dict(raw or {})
+        dead_letters = list(worker.pop("dead_letters", []) or [])
+        bounded = {
+            key: worker.get(key)
+            for key in (
+                "accepting", "active", "completed", "queued", "unfinished",
+                "timed_out_handler_alive",
+            )
+            if key in worker
+        }
+        bounded["dead_letter_count"] = len(dead_letters)
+        if dead_letters:
+            latest = dead_letters[-1] if isinstance(dead_letters[-1], dict) else {}
+            bounded["latest_dead_letter"] = {
+                key: latest.get(key)
+                for key in ("hook", "reason", "key", "error_type", "ts")
+                if latest.get(key) not in (None, "")
+            }
+        workers[str(hook)] = bounded
+    evidence["workers"] = workers
+    last_gap = evidence.get("last_gap")
+    if isinstance(last_gap, dict):
+        evidence["last_gap"] = {
+            key: last_gap.get(key)
+            for key in ("schema", "hook", "reason", "key", "ts")
+            if last_gap.get(key) not in (None, "")
+        }
+    compact["post_ai_evidence"] = evidence
+    return compact
 
 
 def _strategy_progress_incident_snapshot(now: float = None) -> dict:
@@ -34175,7 +34224,9 @@ def health():
     force_paper_mode = _force_paper_mode_active()
     relay_configured = bool((os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip())
     process_alive = heartbeat_age <= 15.0
-    strategy_progress = _strategy_progress_health_snapshot(now)
+    strategy_progress = _compact_strategy_progress_health_snapshot(
+        _strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)
+    )
     strategy_progress_incident = _strategy_progress_incident_snapshot(now)
     status = "paused" if paused else (
         "alive" if process_alive and strategy_progress["ok"] else "degraded"
@@ -34277,7 +34328,9 @@ def ready():
         now=now,
     )
     dashboard_owner = is_active_dashboard_owner()
-    strategy_progress = _strategy_progress_health_snapshot(now)
+    strategy_progress = _compact_strategy_progress_health_snapshot(
+        _strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)
+    )
     strategy_progress_incident = _strategy_progress_incident_snapshot(now)
     process_ready = bool(
         dashboard_owner
@@ -36124,11 +36177,19 @@ def _data_sync_sqlite_snapshot(path: Path) -> dict:
     finally:
         destination.close()
         source.close()
-    payload = snapshot.read_bytes()
+    digest = hashlib.sha256()
+    snapshot_size = 0
+    with snapshot.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            snapshot_size += len(chunk)
+            digest.update(chunk)
     return {
         "snapshot_id": token,
-        "snapshot_size": len(payload),
-        "snapshot_sha256": hashlib.sha256(payload).hexdigest(),
+        "snapshot_size": snapshot_size,
+        "snapshot_sha256": digest.hexdigest(),
     }
 
 
@@ -36302,12 +36363,10 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
 
 @app.route('/api/data-sync/manifest')
 def api_data_sync_manifest():
-    include_sqlite_snapshots = str(
-        request.args.get("include_snapshots") or ""
-    ).strip().lower() in {"1", "true", "yes"}
-    files = _data_sync_inventory(
-        include_sqlite_snapshots=include_sqlite_snapshots
-    )
+    # Inventory polling must stay metadata-only. SQLite leases are acquired
+    # one at a time through the authenticated endpoint below immediately
+    # before the corresponding download.
+    files = _data_sync_inventory(include_sqlite_snapshots=False)
     usage = shutil.disk_usage(_data_sync_volume_root())
     ack = _read_data_sync_ack()
     with state_lock:
@@ -36335,7 +36394,7 @@ def api_data_sync_manifest():
         "tile_registry_signature": active_tile_registry_signature(),
         "active_tiles": tile_registry,
         "files": files,
-        "sqlite_snapshots_materialized": include_sqlite_snapshots,
+        "sqlite_snapshots_materialized": False,
         "optional_files": _data_sync_optional_file_audit(),
         "file_count": len(files),
         "total_bytes": sum(row["size"] for row in files),
@@ -36351,6 +36410,23 @@ def api_data_sync_manifest():
             "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
         },
     })
+
+
+@app.route('/api/data-sync/sqlite-snapshot')
+def api_data_sync_sqlite_snapshot():
+    """Materialize one short-lived, integrity-checked SQLite download lease."""
+    try:
+        path = _data_sync_resolve_relpath(request.args.get("path"))
+        if _data_sync_consistency_mode(path) != "sqlite_snapshot_v1":
+            return jsonify({"error": "requested path is not an allowed SQLite database"}), 400
+        snapshot = _data_sync_sqlite_snapshot(path)
+        return jsonify({
+            "schema": "fly_runtime_sqlite_snapshot_lease_v1",
+            "path": _data_sync_relpath(path),
+            **snapshot,
+        })
+    except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.route('/api/data-sync/file')
@@ -36383,8 +36459,8 @@ def api_data_sync_file():
             with snapshot.open("rb") as handle:
                 handle.seek(offset)
                 payload = handle.read(min(limit, snapshot_size - offset))
-            if hashlib.sha256(snapshot.read_bytes()).hexdigest() != expected_snapshot_sha:
-                return jsonify({"error": "sqlite snapshot identity mismatch"}), 409
+            if not re.fullmatch(r"[0-9a-f]{64}", expected_snapshot_sha):
+                return jsonify({"error": "sqlite snapshot identity is invalid"}), 409
             response = make_response(payload)
             response.headers["Content-Type"] = "application/octet-stream"
             response.headers["X-Data-Path"] = _data_sync_relpath(path)
@@ -41386,6 +41462,7 @@ def _create_dashboard_server():
         )
         _data_sync_paths = (
             b"/api/data-sync/manifest",
+            b"/api/data-sync/sqlite-snapshot",
             b"/api/data-sync/file",
             b"/api/data-sync/ack",
         )

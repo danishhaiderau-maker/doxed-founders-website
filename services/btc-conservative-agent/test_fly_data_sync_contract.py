@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 import zipfile
+from flask import Flask, jsonify, request
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -424,6 +425,57 @@ def test_hot_sqlite_is_advertised_as_integrity_checked_snapshot(monkeypatch, tmp
         copied.close()
 
 
+def test_sqlite_snapshot_lease_materializes_only_requested_database(tmp_path):
+    first = tmp_path / "first.db"
+    second = tmp_path / "second.db"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    tree = ast.parse(BOT)
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "api_data_sync_sqlite_snapshot"
+    ]
+    app = Flask(__name__)
+    calls = []
+    namespace = {
+        "app": app,
+        "request": request,
+        "jsonify": jsonify,
+        "sqlite3": sqlite3,
+        "_data_sync_resolve_relpath": lambda rel: {
+            "first.db": first,
+            "second.db": second,
+        }.get(rel) or (_ for _ in ()).throw(ValueError("invalid path")),
+        "_data_sync_consistency_mode": lambda path: (
+            "sqlite_snapshot_v1" if path.suffix == ".db" else "strict_generation_v1"
+        ),
+        "_data_sync_sqlite_snapshot": lambda path: (
+            calls.append(path.name)
+            or {"snapshot_id": "a" * 32, "snapshot_size": 5, "snapshot_sha256": "b" * 64}
+        ),
+        "_data_sync_relpath": lambda path: path.name,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    with app.test_request_context("/api/data-sync/sqlite-snapshot?path=first.db"):
+        payload = namespace["api_data_sync_sqlite_snapshot"]().get_json()
+    assert payload["path"] == "first.db"
+    assert calls == ["first.db"]
+    with app.test_request_context("/api/data-sync/sqlite-snapshot?path=../escape.db"):
+        response, status = namespace["api_data_sync_sqlite_snapshot"]()
+    assert status == 400
+    assert response.get_json()["error"] == "invalid path"
+
+
+def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():
+    manifest_body = BOT[BOT.index("def api_data_sync_manifest"):BOT.index("@app.route('/api/data-sync/sqlite-snapshot')")]
+    snapshot_body = BOT[BOT.index("def _data_sync_sqlite_snapshot"):BOT.index("def _data_sync_resolve_sqlite_snapshot")]
+    assert "_data_sync_inventory(include_sqlite_snapshots=False)" in manifest_body
+    assert '"sqlite_snapshots_materialized": False' in manifest_body
+    assert "read_bytes()" not in snapshot_body
+    assert 'handle.read(1024 * 1024)' in snapshot_body
+
+
 def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
     assert 'requested_mode == "sqlite_snapshot_v1"' in BOT
     assert '"snapshot_id": token' in BOT
@@ -431,10 +483,16 @@ def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
     assert '$consistencyMode -eq "sqlite_snapshot_v1"' in SYNC_SCRIPT
     assert '&snapshot_id=$([uri]::EscapeDataString([string]$row.snapshot_id))' in SYNC_SCRIPT
     assert 'SQLite snapshot identity changed while downloading $rel.' in SYNC_SCRIPT
-    assert SYNC_SCRIPT.count('/api/data-sync/manifest?include_snapshots=1') == 2
+    assert '/api/data-sync/manifest?include_snapshots=1' not in SYNC_SCRIPT
+    assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
+    assert '/api/data-sync/sqlite-snapshot?path=' in SYNC_SCRIPT
+    assert 'Set-SqliteSnapshotLease -Row $row' in SYNC_SCRIPT
+    assert '$chunkLimit = 1MB' in SYNC_SCRIPT
+    assert '$interChunkThrottleMs = 50' in SYNC_SCRIPT
+    assert 'SQLite snapshot checksum mismatch for $rel.' in SYNC_SCRIPT
     assert '/api/data-sync/manifest?include_snapshots=1' not in SYNC_LOOP
-    assert 'request.args.get("include_snapshots")' in BOT
-    assert '"sqlite_snapshots_materialized": include_sqlite_snapshots' in BOT
+    assert '"sqlite_snapshots_materialized": False' in BOT
+    assert 'b"/api/data-sync/sqlite-snapshot"' in BOT
 
 
 def test_ephemeral_open_positions_is_explicitly_optional_not_required():
@@ -924,7 +982,7 @@ def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
     assert "$generationRefreshCount -lt 3" in SYNC_SCRIPT
     assert "-match 'generation changed'" in SYNC_SCRIPT
     assert '-Stage "manifest_refresh"' in SYNC_SCRIPT
-    assert '-Uri "$base/api/data-sync/manifest?include_snapshots=1"' in SYNC_SCRIPT
+    assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
     assert 'Where-Object { [string]$_.path -eq $rel }' in SYNC_SCRIPT
     assert "$sameGeneration = $false" in SYNC_SCRIPT
     assert "$fullReplaceRetry = $true" in SYNC_SCRIPT
@@ -942,7 +1000,7 @@ def test_sync_prioritizes_and_can_refresh_short_lived_sqlite_snapshot_leases():
     assert "-match '^Fly sync HTTP 400 '" in SYNC_SCRIPT
     assert "-match 'sqlite snapshot is unavailable or expired'" in SYNC_SCRIPT
     assert '($generationChanged -or $sqliteLeaseExpired)' in SYNC_SCRIPT
-    assert 'refreshed authenticated manifest' in SYNC_SCRIPT
+    assert 'Set-SqliteSnapshotLease -Row $row' in SYNC_SCRIPT
 
 
 def test_shadow_jsonl_is_validated_before_startup_collection_and_sync():
@@ -983,7 +1041,8 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "consistency_mode=$consistencyMode" in SYNC_SCRIPT
     assert "expected_mtime_ns=$expectedMtime" in SYNC_SCRIPT
     assert "expected_inode=$expectedInode" in SYNC_SCRIPT
-    assert "$chunkLimit = 4MB" in SYNC_SCRIPT
+    assert "$chunkLimit = 1MB" in SYNC_SCRIPT
+    assert "Start-Sleep -Milliseconds $interChunkThrottleMs" in SYNC_SCRIPT
     assert '$appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")' in SYNC_SCRIPT
     assert "[int64]$previous.mtime_ns -eq [int64]$row.mtime_ns" in SYNC_SCRIPT
     assert "def _data_sync_rotation_parts" in BOT

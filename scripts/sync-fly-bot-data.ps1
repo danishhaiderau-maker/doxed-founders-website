@@ -213,16 +213,39 @@ function Save-SyncState {
 }
 
 $base = $SourceUrl.TrimEnd("/")
+function Set-SqliteSnapshotLease {
+  param([Parameter(Mandatory = $true)]$Row)
+  $rel = [string]$Row.path
+  $lease = Invoke-DataSyncJsonRequest `
+    -Stage "sqlite_snapshot_lease" `
+    -Uri "$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" `
+    -TimeoutSec $manifestTimeoutSec
+  if (
+    $lease.schema -ne "fly_runtime_sqlite_snapshot_lease_v1" -or
+    [string]$lease.path -ne $rel -or
+    -not [string]$lease.snapshot_id -or
+    [int64]$lease.snapshot_size -lt 0 -or
+    [string]$lease.snapshot_sha256 -notmatch '^[0-9a-f]{64}$'
+  ) {
+    throw "Invalid Fly SQLite snapshot lease for $rel."
+  }
+  $Row | Add-Member -NotePropertyName snapshot_id -NotePropertyValue ([string]$lease.snapshot_id) -Force
+  $Row | Add-Member -NotePropertyName snapshot_size -NotePropertyValue ([int64]$lease.snapshot_size) -Force
+  $Row | Add-Member -NotePropertyName snapshot_sha256 -NotePropertyValue ([string]$lease.snapshot_sha256) -Force
+  $Row.size = [int64]$lease.snapshot_size
+  $Row.physical_size = [int64]$lease.snapshot_size
+}
 $manifest = Invoke-DataSyncJsonRequest `
   -Stage "manifest_initial" `
-  -Uri "$base/api/data-sync/manifest?include_snapshots=1" `
+  -Uri "$base/api/data-sync/manifest" `
   -TimeoutSec $manifestTimeoutSec
 if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
   throw "Unexpected Fly sync manifest schema."
 }
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
-$chunkLimit = 4MB
+$chunkLimit = 1MB
+$interChunkThrottleMs = 50
 $selectedFiles = @($manifest.files)
 $selectedFiles = @(
   $selectedFiles | Sort-Object `
@@ -341,6 +364,12 @@ foreach ($row in $selectedFiles) {
   $extension = [System.IO.Path]::GetExtension($local).ToLowerInvariant()
   $appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")
   $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
+  if ($consistencyMode -eq "sqlite_snapshot_v1") {
+    # Acquire exactly one short-lived lease immediately before this DB is
+    # compared/downloaded; ordinary manifest polling remains metadata-only.
+    Set-SqliteSnapshotLease -Row $row
+    $remoteSize = [int64]$row.size
+  }
   # A revision refresh must walk and revalidate the entire manifest, but it
   # must remain resumable.  Inode/mtime/size (or append-prefix inode/size)
   # identifies the exact Fly volume generation independently of application
@@ -503,6 +532,9 @@ foreach ($row in $selectedFiles) {
             -FileCount $selectedFileCount `
             -FileBytes $offset `
             -RemoteBytes $remoteSize
+          if ($offset -lt $remoteSize) {
+            Start-Sleep -Milliseconds $interChunkThrottleMs
+          }
         } catch {
           $generationChanged = (
             $_.Exception.Message -match '^Fly sync HTTP 409 ' -and
@@ -536,6 +568,13 @@ foreach ($row in $selectedFiles) {
       }
       if ($refreshGeneration) {
         $generationRefreshCount += 1
+        if ($consistencyMode -eq "sqlite_snapshot_v1") {
+          Set-SqliteSnapshotLease -Row $row
+          $remoteSize = [int64]$row.size
+          $sameGeneration = $false
+          $fullReplaceRetry = $true
+          continue
+        }
         if (
           $consistencyMode -eq "strict_generation_v1" -and
           $remoteSize -le $chunkLimit
@@ -555,7 +594,7 @@ foreach ($row in $selectedFiles) {
         }
         $freshManifest = Invoke-DataSyncJsonRequest `
           -Stage "manifest_refresh" `
-          -Uri "$base/api/data-sync/manifest?include_snapshots=1" `
+          -Uri "$base/api/data-sync/manifest" `
           -TimeoutSec $manifestTimeoutSec
         if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
           throw "Unexpected Fly sync manifest schema during generation refresh."
@@ -581,6 +620,12 @@ foreach ($row in $selectedFiles) {
       }
       if ([int64](Get-Item -LiteralPath $candidate).Length -ne $remoteSize) {
         throw "Incomplete Fly mirror candidate for $rel."
+      }
+      if ($consistencyMode -eq "sqlite_snapshot_v1") {
+        $candidateSha = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($candidateSha -ne ([string]$row.snapshot_sha256).ToLowerInvariant()) {
+          throw "SQLite snapshot checksum mismatch for $rel."
+        }
       }
       try {
         Test-MirrorCandidate -Path $candidate -RelativePath $rel
