@@ -1,5 +1,6 @@
 import ast
 import json
+import math
 from pathlib import Path
 
 
@@ -26,7 +27,7 @@ def _load_lock_classifier(timeout=2.0):
         if isinstance(item, ast.FunctionDef)
         and item.name == "_trade_lock_probe_status"
     )
-    namespace = {"WATCHDOG_TRADE_LOCK_TIMEOUT_SEC": timeout}
+    namespace = {"WATCHDOG_TRADE_LOCK_TIMEOUT_SEC": timeout, "math": math}
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace[node.name]
 
@@ -117,7 +118,12 @@ def test_health_lock_probe_is_nonblocking_without_weakening_watchdog_default():
 def test_zero_wait_lock_classifier_allows_only_bounded_known_owner_contention():
     classify = _load_lock_classifier(timeout=2.0)
     assert classify(True, {}, 0.0) == (False, True)
-    assert classify(False, {"owner_ident": 7, "held_seconds": 0.25}, 0.0) == (True, True)
-    assert classify(False, {"owner_ident": 7, "held_seconds": 2.01}, 0.0) == (False, False)
-    assert classify(False, {"owner_ident": None, "held_seconds": 0.25}, 0.0) == (False, False)
-    assert classify(False, {"owner_ident": 7, "held_seconds": 0.25}, None) == (False, False)
+    active = {"owner_ident": 7, "owner_active": True, "held_seconds": 0.25}
+    assert classify(False, active, 0.0) == (True, True)
+    assert classify(False, {**active, "held_seconds": 2.01}, 0.0) == (False, False)
+    assert classify(False, {**active, "owner_ident": None}, 0.0) == (False, False)
+    assert classify(False, active, None) == (False, False)
+    assert classify(False, {**active, "owner_active": False}, 0.0) == (False, False)
+    assert classify(False, {"owner_ident": 7, "owner_active": True}, 0.0) == (False, False)
+    assert classify(False, {**active, "held_seconds": float("nan")}, 0.0) == (False, False)
+    assert classify(False, {**active, "held_seconds": -0.01}, 0.0) == (False, False)

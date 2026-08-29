@@ -25373,9 +25373,11 @@ class _TrackedRLock:
             depth = self._depth
         held_sec = max(0.0, float(now or time.time()) - acquired_at) if acquired_at else 0.0
         stack_tail = []
+        owner_active = False
         if owner_ident is not None:
             frame = sys._current_frames().get(owner_ident)
             if frame is not None:
+                owner_active = True
                 stack_tail = [
                     f"{Path(item.filename).name}:{item.lineno}:{item.name}"
                     for item in traceback.extract_stack(frame)[-8:]
@@ -25384,6 +25386,7 @@ class _TrackedRLock:
             "name": self._name,
             "owner_thread": owner_name,
             "owner_ident": owner_ident,
+            "owner_active": owner_active,
             "held_seconds": round(held_sec, 3),
             "depth": depth,
             "stack_tail": stack_tail,
@@ -27565,13 +27568,20 @@ def _trade_lock_probe_status(
     trade_lock_timeout_sec: float | None,
 ) -> tuple[bool, bool]:
     """Classify zero-wait contention without hiding a genuinely stuck lock."""
+    held_seconds = lock_diagnostics.get("held_seconds")
+    valid_held_seconds = bool(
+        isinstance(held_seconds, (int, float))
+        and math.isfinite(float(held_seconds))
+        and float(held_seconds) >= 0.0
+    )
     busy_transient = bool(
         not lock_available
         and trade_lock_timeout_sec is not None
         and float(trade_lock_timeout_sec) <= 0.0
         and lock_diagnostics.get("owner_ident") is not None
-        and float(lock_diagnostics.get("held_seconds") or 0.0)
-        <= WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+        and lock_diagnostics.get("owner_active") is True
+        and valid_held_seconds
+        and float(held_seconds) <= WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
     )
     return busy_transient, bool(lock_available or busy_transient)
 
