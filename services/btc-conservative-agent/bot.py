@@ -41534,6 +41534,22 @@ def _ensure_flask_port_available(port: int = None):
             f"Run: taskkill /PID {others[0]} /F  then start one bot from Final Bots."
         )
 
+def _dashboard_request_path_from_head(head: bytes) -> bytes:
+    """Extract the origin-form path from one HTTP request-line preview.
+
+    Worker reservation must classify ``/path?query`` exactly like ``/path``.
+    Returning an empty path fails safely into the bounded general pool.
+    """
+    try:
+        first_line = bytes(head or b"").split(b"\r\n", 1)[0]
+        parts = first_line.split(b" ")
+        if len(parts) < 2:
+            return b""
+        return parts[1].split(b"?", 1)[0]
+    except (TypeError, ValueError):
+        return b""
+
+
 def _create_dashboard_server():
     """Bind the dashboard socket synchronously so startup fails as one process."""
     _ensure_flask_port_available(DASHBOARD_PORT)
@@ -41553,7 +41569,11 @@ def _create_dashboard_server():
         _general_thread_cap = threading.BoundedSemaphore(8)
         _canonical_thread_cap = threading.BoundedSemaphore(8)
         _relay_state_thread_cap = threading.BoundedSemaphore(4)
-        _data_sync_thread_cap = threading.BoundedSemaphore(2)
+        # The canonical mirror loop and stability supervisor are independent,
+        # legitimate readers.  Four reserved workers allow both to overlap
+        # with one chunk/ack and one bounded diagnostic without borrowing from
+        # presentation traffic or weakening the global dispatch cap.
+        _data_sync_thread_cap = threading.BoundedSemaphore(4)
         _control_thread_cap = threading.BoundedSemaphore(2)
         _canonical_paths = (
             b"/api/relay-execution-state",
@@ -41566,6 +41586,8 @@ def _create_dashboard_server():
             b"/api/data-sync/sqlite-snapshot",
             b"/api/data-sync/file",
             b"/api/data-sync/ack",
+            b"/api/data-sync/analyzer-report",
+            b"/api/data-sync/platform-relay-evidence",
         )
         _control_paths = (
             b"/api/ping",
@@ -41593,14 +41615,14 @@ def _create_dashboard_server():
 
                 request.settimeout(0.05)
                 head = request.recv(1024, socket.MSG_PEEK)
-                first_line = head.split(b"\r\n", 1)[0]
-                if any(b" " + path + b" " in first_line for path in self._control_paths):
+                request_path = _dashboard_request_path_from_head(head)
+                if request_path in self._control_paths:
                     return self._control_thread_cap
-                if any(b" " + path + b" " in first_line for path in self._canonical_paths):
+                if request_path in self._canonical_paths:
                     return self._canonical_thread_cap
-                if any(b" " + path + b" " in first_line for path in self._relay_state_paths):
+                if request_path in self._relay_state_paths:
                     return self._relay_state_thread_cap
-                if any(b" " + path + b" " in first_line for path in self._data_sync_paths):
+                if request_path in self._data_sync_paths:
                     return self._data_sync_thread_cap
             except (OSError, TimeoutError):
                 pass
@@ -41680,7 +41702,7 @@ def run_flask(httpd):
     logger.info(
         f"[FLASK] Serving dashboard on {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT} "
         f"(bounded werkzeug server, general_threads=8, canonical_threads=8, "
-        f"relay_state_threads=4, data_sync_threads=2, control_threads=2, backlog=64) "
+        f"relay_state_threads=4, data_sync_threads=4, control_threads=2, backlog=64) "
         "[PIPELINE ENFORCEMENT]"
     )
     try:
