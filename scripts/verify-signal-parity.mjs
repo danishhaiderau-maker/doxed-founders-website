@@ -17,6 +17,8 @@ const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_co
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
 const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
+const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
+const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
@@ -73,6 +75,18 @@ if (singletonAgentHash !== singletonEngineHash) {
   );
 }
 console.log(`OK  process singleton dependency matches (${singletonAgentHash})`);
+
+if (!existsSync(inventoryWorkerAgent) || !existsSync(inventoryWorkerEngine)) {
+  fail('Missing isolated data-sync inventory worker in canonical bot or signal engine');
+}
+const inventoryWorkerAgentHash = sha256(inventoryWorkerAgent);
+const inventoryWorkerEngineHash = sha256(inventoryWorkerEngine);
+if (inventoryWorkerAgentHash !== inventoryWorkerEngineHash) {
+  fail(
+    `data-sync inventory worker (${inventoryWorkerAgentHash}) !== signal-engine copy (${inventoryWorkerEngineHash})`,
+  );
+}
+console.log(`OK  data-sync inventory worker matches (${inventoryWorkerAgentHash})`);
 
 if (existsSync(manifestPath)) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

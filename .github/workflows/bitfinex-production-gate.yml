@@ -33,6 +33,7 @@ jobs:
       - name: Mirror bot.py -> engine.py (parity keepalive)
         run: |
           cp services/btc-conservative-agent/bot.py services/btc-signal-engine/engine.py
+          cp services/btc-conservative-agent/data_sync_inventory_worker.py services/btc-signal-engine/data_sync_inventory_worker.py
           if [ -f services/btc-conservative-agent/combo_pathway_config.py ]; then
             cp services/btc-conservative-agent/combo_pathway_config.py services/btc-signal-engine/combos.py
           fi

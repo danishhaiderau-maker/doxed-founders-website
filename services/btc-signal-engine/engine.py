@@ -36544,6 +36544,13 @@ _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 30.0
 _DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
+_DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
+_DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
+_DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v1"
+_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
+_DATA_SYNC_INVENTORY_ORPHAN_MAX_AGE_SECONDS = 15 * 60
+_DATA_SYNC_INVENTORY_ORPHAN_SCAN_LIMIT = 1000
+_DATA_SYNC_INVENTORY_ORPHAN_REMOVE_LIMIT = 100
 _data_sync_inventory_cache_condition = threading.Condition()
 _data_sync_inventory_cache = {
     "expires_at": 0.0,
@@ -37044,10 +37051,168 @@ def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
         return None
 
 
+def _data_sync_inventory_work_root() -> Path:
+    """Return a real, non-linked work directory contained by the Fly volume."""
+    volume = _data_sync_volume_root().resolve(strict=True)
+    candidate = volume / ".data-sync-snapshots"
+    if candidate.exists():
+        lexical = Path(os.path.abspath(candidate))
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(volume)
+        if not resolved.is_dir():
+            raise ValueError("data-sync work root is not a directory")
+        if candidate.is_symlink() or resolved != lexical:
+            raise ValueError("data-sync work root must not be linked")
+    else:
+        resolved = candidate.resolve()
+        resolved.relative_to(volume)
+        candidate.mkdir(parents=True, exist_ok=False)
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(volume)
+    return resolved
+
+
+def _data_sync_cleanup_inventory_worker_orphans(
+    work_root: Path, *, now: float | None = None
+) -> int:
+    """Remove only aged nonce worker files from the confined work directory."""
+    root = work_root.resolve(strict=True)
+    root.relative_to(_data_sync_volume_root().resolve(strict=True))
+    if work_root.is_symlink() or root != Path(os.path.abspath(work_root)):
+        raise ValueError("data-sync cleanup root must not be linked")
+    cutoff = float(time.time() if now is None else now) - (
+        _DATA_SYNC_INVENTORY_ORPHAN_MAX_AGE_SECONDS
+    )
+    pattern = re.compile(
+        r"^inventory-(?:request|result)-[0-9a-f]{32}\.json"
+        r"(?:\.tmp|\.[0-9a-f]{32}\.tmp)?$"
+    )
+    removed = 0
+    for scanned, path in enumerate(root.iterdir()):
+        if scanned >= _DATA_SYNC_INVENTORY_ORPHAN_SCAN_LIMIT:
+            break
+        try:
+            if pattern.fullmatch(path.name) and path.lstat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+                if removed >= _DATA_SYNC_INVENTORY_ORPHAN_REMOVE_LIMIT:
+                    break
+        except OSError:
+            continue
+    return removed
+
+
 def _data_sync_inventory_refresh_worker() -> None:
+    """Build the volume inventory outside the latency-sensitive bot process.
+
+    A Python thread moved the scan off the HTTP handler but not out of the
+    interpreter which owns trading and localhost liveness.  On a busy Fly
+    volume that scan can take tens of seconds and starve the safe watchdog.
+    The stdlib-only child publishes one nonce-bound temporary result. This
+    monitor accepts only a successful, fresh, current-revision result and is
+    the sole authority allowed to promote the canonical snapshot.
+    """
+    nonce = None
+    request_path = None
+    result_path = None
     try:
-        rows = _data_sync_inventory(include_sqlite_snapshots=False)
-        generated_at = utc_iso()
+        nonce = uuid.uuid4().hex
+        launched_unix = time.time()
+        work_root = _data_sync_inventory_work_root()
+        _data_sync_cleanup_inventory_worker_orphans(work_root)
+        request_path = work_root / f"inventory-request-{nonce}.json"
+        result_path = work_root / f"inventory-result-{nonce}.json"
+        rewrite_targets = [
+            os.path.abspath(value)
+            for value in (globals().get("SIGNAL_SNAPSHOT_FILE"),)
+            if isinstance(value, str) and value
+        ]
+        request_payload = {
+            "schema": _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA,
+            "nonce": nonce,
+            "source_revision": _runtime_git_rev(),
+            "launched_unix": launched_unix,
+            "work_root": str(work_root),
+            "volume_root": str(_data_sync_volume_root().resolve()),
+            "runtime_root": str(_data_sync_runtime_root().resolve()),
+            "allowed_roots": [str(path.resolve()) for path in _data_sync_allowed_roots()],
+            "top_level_receipt_names": sorted(_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES),
+            "extensions": sorted(_DATA_SYNC_EXTENSIONS),
+            "excluded_names": sorted(_DATA_SYNC_EXCLUDED_NAMES),
+            "excluded_dir_names": sorted(_DATA_SYNC_EXCLUDED_DIR_NAMES),
+            "append_prefix_names": sorted(_DATA_SYNC_APPEND_PREFIX_NAMES),
+            "serialized_append_targets": sorted(
+                str(Path(path).resolve())
+                for path in globals().get("_jsonl_serialized_append_targets", set())
+            ),
+            "rewrite_targets": sorted(rewrite_targets),
+            "max_rows": 5000,
+        }
+        request_tmp = request_path.with_name(f"{request_path.name}.tmp")
+        request_tmp.write_text(
+            json.dumps(request_payload, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(request_tmp, request_path)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve().with_name(_DATA_SYNC_INVENTORY_WORKER_NAME)),
+            "--request", str(request_path),
+            "--result", str(result_path),
+            "--nonce", nonce,
+        ]
+        # The stdlib-only scanner needs no bot credentials, exchange keys, or
+        # deployment tokens. Preserve only OS/Python process essentials.
+        worker_env = {
+            key: os.environ[key]
+            for key in (
+                "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+                "PATH", "LANG", "LC_ALL",
+            )
+            if key in os.environ
+        }
+        worker_env.update({
+            "OPENBLAS_NUM_THREADS": "1",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONHASHSEED": "0",
+        })
+        completed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS,
+            check=False,
+            env=worker_env,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"inventory subprocess exited {completed.returncode}"
+            )
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        rows = result.get("rows")
+        if (
+            result.get("schema") != _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA
+            or not hmac.compare_digest(str(result.get("nonce") or ""), nonce)
+            or not hmac.compare_digest(
+                str(result.get("source_revision") or ""), _runtime_git_rev()
+            )
+            or not isinstance(rows, list)
+            or int(result.get("file_count") or -1) != len(rows)
+            or float(result.get("generated_unix") or 0.0) < launched_unix
+            or not hmac.compare_digest(
+                str(result.get("rows_sha256") or ""),
+                _data_sync_inventory_rows_sha256(rows),
+            )
+        ):
+            raise RuntimeError("inventory subprocess result validation failed")
+        generated_at = str(result.get("generated_at") or "")
+        if not generated_at:
+            raise RuntimeError("inventory subprocess timestamp is missing")
+        # Only the trading parent may promote the nonce-bound worker result to
+        # the canonical restart snapshot.
         _data_sync_persist_inventory_snapshot(rows, generated_at)
         with _data_sync_inventory_cache_condition:
             _data_sync_async_inventory.update({
@@ -37069,6 +37234,20 @@ def _data_sync_inventory_refresh_worker() -> None:
                 "expires_at": 0.0,
             })
             _data_sync_inventory_cache_condition.notify_all()
+    finally:
+        transient_paths = [request_path, result_path]
+        if nonce and request_path is not None:
+            try:
+                transient_paths.extend(request_path.parent.glob(f"*{nonce}*"))
+            except OSError:
+                pass
+        for transient in transient_paths:
+            if transient is None:
+                continue
+            try:
+                transient.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _data_sync_request_async_inventory(*, force_refresh: bool = False) -> dict:

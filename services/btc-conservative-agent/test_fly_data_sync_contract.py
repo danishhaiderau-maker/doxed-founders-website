@@ -2257,6 +2257,22 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     assert stale["rows"] == []
 
 
+def test_inventory_refresh_uses_standalone_nonce_bound_worker_contract():
+    worker = ROOT / "data_sync_inventory_worker.py"
+    assert worker.is_file()
+    worker_source = worker.read_text(encoding="utf-8")
+    assert "import bot" not in worker_source
+    assert "from bot" not in worker_source
+    assert '_DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"' in BOT
+    assert 'work_root / f"inventory-request-{nonce}.json"' in BOT
+    assert 'work_root / f"inventory-result-{nonce}.json"' in BOT
+    assert '"--nonce", nonce' in BOT
+    assert "_DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA" in BOT
+    assert 'float(result.get("generated_unix") or 0.0) < launched_unix' in BOT
+    assert "_data_sync_inventory_rows_sha256(rows)" in BOT
+    assert "_data_sync_persist_inventory_snapshot(rows, generated_at)" in BOT
+
+
 def test_sync_requires_current_inventory_and_targeted_refresh_never_walks_volume():
     assert '[string]$manifest.inventory_status -ne "CURRENT"' in SYNC_SCRIPT
     assert '[string]$preflight.inventory_status -ne "CURRENT"' in SYNC_LOOP

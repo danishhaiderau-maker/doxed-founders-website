@@ -16,6 +16,8 @@ const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_co
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
 const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
+const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
+const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
 const engineDir = join(root, 'services/btc-signal-engine');
@@ -65,6 +67,12 @@ if (existsSync(combosAgent)) {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   console.log(`Updated manifest (engine=${manifest.engine_version} hash=${botHash})`);
 }
+
+if (!existsSync(inventoryWorkerAgent)) {
+  throw new Error('Missing canonical data_sync_inventory_worker.py');
+}
+copyFileSync(inventoryWorkerAgent, inventoryWorkerEngine);
+console.log(`Mirrored data-sync inventory worker (${sha256(readFileSync(inventoryWorkerAgent, 'utf8'))})`);
 
 // Registry-owned policy dependencies are part of the executable mirror. Copy
 // only the active family modules plus their common implementation and remove

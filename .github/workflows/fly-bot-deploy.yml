@@ -9,6 +9,11 @@ on:
       # running Fly service. A test-only push must not claim a new deployed
       # source revision.
       - "!services/btc-conservative-agent/test*.py"
+      # The isolated inventory worker is part of the deployed runtime, and its
+      # focused containment/nonce suite is an explicit deployment gate.
+      - "services/btc-conservative-agent/data_sync_inventory_worker.py"
+      - "services/btc-conservative-agent/test_data_sync_inventory_worker_contract.py"
+      - "services/btc-signal-engine/data_sync_inventory_worker.py"
       - "scripts/check-relay-flat.mjs"
       - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
@@ -68,7 +73,8 @@ jobs:
 
       - name: Verify Fly and dashboard safety contracts
         run: |
-          python -m py_compile bot.py btc_conservative_agent.py fly_relay_state_pusher.py
+          python -m py_compile bot.py data_sync_inventory_worker.py btc_conservative_agent.py fly_relay_state_pusher.py
+          python -m pytest test_data_sync_inventory_worker_contract.py -q
           python test_fly_startup_contract.py
           python test_paper_skips_risk_pauses.py
           python test_daily_pnl_utc_rollover.py
