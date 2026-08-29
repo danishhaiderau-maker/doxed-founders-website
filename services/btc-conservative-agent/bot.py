@@ -36,6 +36,7 @@ import ccxt
 import websocket
 import signal
 import ssl
+import socket
 import hashlib
 import hmac
 import sqlite3
@@ -276,6 +277,22 @@ WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY = max(
 WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR = max(
     2,
     int(os.getenv("WATCHDOG_PROGRESS_SUCCESSES_BEFORE_CLEAR", "3")),
+)
+DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC = max(
+    1.0,
+    float(os.getenv("DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC", "5")),
+)
+DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC = max(
+    0.2,
+    float(os.getenv("DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC", "1")),
+)
+DASHBOARD_HTTP_WATCHDOG_STARTUP_GRACE_SEC = max(
+    60.0,
+    float(os.getenv("DASHBOARD_HTTP_WATCHDOG_STARTUP_GRACE_SEC", "180")),
+)
+DASHBOARD_HTTP_WATCHDOG_FAILURES_BEFORE_EXIT = max(
+    6,
+    int(os.getenv("DASHBOARD_HTTP_WATCHDOG_FAILURES_BEFORE_EXIT", "12")),
 )
 # One scheduled AI cycle also records six independent paper routes and their
 # evidence.  On a growing append-only ledger that bounded post-decision work
@@ -28090,6 +28107,94 @@ def watchdog_loop():
                     os._exit(75)
         time.sleep(5)
 
+
+def _probe_local_dashboard_control(timeout_sec: float = None) -> tuple[bool, str]:
+    """Probe the dashboard without sharing its HTTP client or worker pools."""
+    timeout = max(
+        0.05,
+        float(timeout_sec or DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC),
+    )
+    try:
+        with socket.create_connection(("127.0.0.1", DASHBOARD_PORT), timeout) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(
+                b"GET /api/ping HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Connection: close\r\n\r\n"
+            )
+            first_line = b""
+            while b"\r\n" not in first_line and len(first_line) < 128:
+                chunk = sock.recv(128 - len(first_line))
+                if not chunk:
+                    break
+                first_line += chunk
+        status_line = first_line.split(b"\r\n", 1)[0]
+        fields = status_line.split(b" ")
+        if len(fields) >= 2 and fields[1] == b"200":
+            return True, "HTTP_200"
+        return False, status_line.decode("ascii", errors="replace") or "EMPTY_RESPONSE"
+    except (OSError, TimeoutError) as exc:
+        return False, f"{type(exc).__name__}:{exc}"
+
+
+def _dashboard_http_restart_allowed(lock_timeout_sec: float = 0.25) -> bool:
+    """Fail-safe recovery gate: paper-forced, disarmed, and exposure-free only."""
+    if not _force_paper_mode_active():
+        return False
+    acquired = trade_lock.acquire(timeout=max(0.0, float(lock_timeout_sec)))
+    if not acquired:
+        return False
+    try:
+        return bool(
+            not state.get("live_armed", False)
+            and len(open_positions) == 0
+            and len(pending_orders) == 0
+        )
+    finally:
+        trade_lock.release()
+
+
+def dashboard_http_watchdog_loop():
+    """Let Fly recover a wedged dashboard only when no execution risk exists."""
+    consecutive_failures = 0
+    while not shutdown_event.is_set():
+        startup_age = max(0.0, time.time() - float(process_boot_time or time.time()))
+        if (
+            not _DASHBOARD_BOOTSTRAP_COMPLETE
+            or startup_age < DASHBOARD_HTTP_WATCHDOG_STARTUP_GRACE_SEC
+        ):
+            consecutive_failures = 0
+        else:
+            healthy, detail = _probe_local_dashboard_control()
+            if healthy:
+                consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                logger.error(
+                    "[HTTP WATCHDOG] localhost control probe failed %s/%s: %s",
+                    consecutive_failures,
+                    DASHBOARD_HTTP_WATCHDOG_FAILURES_BEFORE_EXIT,
+                    detail,
+                )
+                if (
+                    consecutive_failures
+                    >= DASHBOARD_HTTP_WATCHDOG_FAILURES_BEFORE_EXIT
+                ):
+                    if _dashboard_http_restart_allowed():
+                        logger.critical(
+                            "[HTTP WATCHDOG] dashboard control plane remained wedged "
+                            "while force-paper, disarmed, and flat; exiting 75 for "
+                            "supervisor recovery"
+                        )
+                        dump_system_state()
+                        dump_threads()
+                        os._exit(75)
+                    logger.critical(
+                        "[HTTP WATCHDOG] restart refused: live arm, exposure, "
+                        "non-force-paper mode, or unprovable trade-lock state"
+                    )
+        shutdown_event.wait(DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC)
+
 def dump_threads():
     for thread in threading.enumerate():
         logger.debug(f"[THREAD] {thread.name} alive={thread.is_alive()}")
@@ -42671,6 +42776,9 @@ def main():
     threading.Thread(target=safe_thread(heartbeat_loop), daemon=True).start()
     threading.Thread(target=safe_thread(periodic_pipeline_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
+    threading.Thread(
+        target=safe_thread(dashboard_http_watchdog_loop), daemon=True
+    ).start()
     threading.Thread(target=safe_thread(bitfinex_live_reconcile_loop), daemon=True).start()
     threading.Thread(
         target=safe_thread(_platform_relay_connection_keepalive_loop),
