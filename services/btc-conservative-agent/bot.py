@@ -25488,6 +25488,12 @@ class _TrackedRLock:
         self._owner_name = None
         self._acquired_at = 0.0
         self._depth = 0
+        self._acquire_sequence = 0
+        self._timeout_count = 0
+        self._last_timeout_at = 0.0
+        self._last_timeout_thread = None
+        self._owner_at_last_timeout = None
+        self._owner_ident_at_last_timeout = None
 
     def acquire(self, blocking=True, timeout=-1):
         acquired = self._lock.acquire(blocking, timeout)
@@ -25501,18 +25507,33 @@ class _TrackedRLock:
                     self._owner_name = threading.current_thread().name
                     self._acquired_at = time.time()
                     self._depth = 1
+                    self._acquire_sequence += 1
+        else:
+            with self._meta_lock:
+                self._timeout_count += 1
+                self._last_timeout_at = time.time()
+                self._last_timeout_thread = threading.current_thread().name
+                self._owner_at_last_timeout = (
+                    self._owner_name or "OWNER_TRANSITION_PENDING"
+                )
+                self._owner_ident_at_last_timeout = self._owner_ident
         return acquired
 
     def release(self):
         ident = threading.get_ident()
         with self._meta_lock:
-            if self._owner_ident == ident and self._depth > 0:
-                self._depth -= 1
-                if self._depth == 0:
-                    self._owner_ident = None
-                    self._owner_name = None
-                    self._acquired_at = 0.0
-        self._lock.release()
+            if self._owner_ident != ident or self._depth <= 0:
+                raise RuntimeError(f"cannot release un-owned {self._name}")
+            self._depth -= 1
+            # Keep metadata and the underlying ownership transition atomic to
+            # diagnostics. Clearing metadata before RLock.release() created a
+            # real window where a failed probe reported depth=0/owner=None even
+            # though another thread still could not acquire the lock.
+            self._lock.release()
+            if self._depth == 0:
+                self._owner_ident = None
+                self._owner_name = None
+                self._acquired_at = 0.0
 
     def __enter__(self):
         self.acquire()
@@ -25531,6 +25552,12 @@ class _TrackedRLock:
             owner_name = self._owner_name
             acquired_at = self._acquired_at
             depth = self._depth
+            acquire_sequence = self._acquire_sequence
+            timeout_count = self._timeout_count
+            last_timeout_at = self._last_timeout_at
+            last_timeout_thread = self._last_timeout_thread
+            owner_at_last_timeout = self._owner_at_last_timeout
+            owner_ident_at_last_timeout = self._owner_ident_at_last_timeout
         held_sec = max(0.0, float(now or time.time()) - acquired_at) if acquired_at else 0.0
         stack_tail = []
         owner_active = False
@@ -25549,6 +25576,12 @@ class _TrackedRLock:
             "owner_active": owner_active,
             "held_seconds": round(held_sec, 3),
             "depth": depth,
+            "acquire_sequence": acquire_sequence,
+            "timeout_count": timeout_count,
+            "last_timeout_at": last_timeout_at or None,
+            "last_timeout_thread": last_timeout_thread,
+            "owner_at_last_timeout": owner_at_last_timeout,
+            "owner_ident_at_last_timeout": owner_ident_at_last_timeout,
             "stack_tail": stack_tail,
         }
 
@@ -32740,6 +32773,8 @@ def _build_relay_execution_state_snapshot() -> dict:
     never queue behind that work.  This endpoint deliberately contains only the
     exact limit/order/position/closure fields consumed by the isolated executor.
     """
+    build_started = time.perf_counter()
+    phase_timings = {}
     now_ts = time.time()
     runtime = _recompute_system_readiness(now_ts)
     exchange_audit = _exchange_exposure_audit_snapshot(now_ts)
@@ -32850,33 +32885,48 @@ def _build_relay_execution_state_snapshot() -> dict:
         }
     finally:
         state_lock.release()
+    phase_started = time.perf_counter()
+    split_execution_truth, relay_evidence_index = _load_dashboard_trade_enrichment()
+    phase_timings["relay_evidence_load"] = (time.perf_counter() - phase_started) * 1000
+    phase_started = time.perf_counter()
     trade_acquired = trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+    phase_timings["trade_lock_wait"] = (time.perf_counter() - phase_started) * 1000
     if not trade_acquired:
         raise TimeoutError("relay execution snapshot timed out waiting for trade_lock")
+    phase_started = time.perf_counter()
     try:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
-        recent_trades = copy.deepcopy(_snapshot_trades_for_api(session_start))
+        raw_recent_trades = _snapshot_trade_rows_locked(session_start)
         relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
-        fidelity_trades = [
-            _relay_fidelity_trade_row(row)
-            for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
-            if isinstance(row, dict)
-        ]
-        visible_expired = [
-            row
-            for row in expired_orders
-            if isinstance(row, dict)
-            and str(row.get("research_lane") or "").upper() != "AI_SCAN"
-        ]
-        expired_orders_total = len(visible_expired)
-        recent_expired = copy.deepcopy(visible_expired[-MAX_EXPIRED_ORDERS:])
+        raw_fidelity_trades = copy.deepcopy(
+            trades[-_RELAY_FIDELITY_TRADES_MAX:]
+        )
+        session_trade_count, session_realized_pnl = (
+            _session_trade_aggregates_locked(session_start)
+        )
+        recent_expired, expired_orders_total = _snapshot_expired_rows_locked(
+            MAX_EXPIRED_ORDERS
+        )
         bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
             positions_copy,
         )
     finally:
         trade_lock.release()
+        phase_timings["trade_lock_hold"] = (time.perf_counter() - phase_started) * 1000
+    phase_started = time.perf_counter()
+    recent_trades = _enrich_dashboard_trade_rows(
+        raw_recent_trades,
+        split_execution_truth,
+        relay_evidence_index,
+    )
+    fidelity_trades = [
+        _relay_fidelity_trade_row(row)
+        for row in raw_fidelity_trades
+        if isinstance(row, dict)
+    ]
+    phase_timings["post_lock_enrichment"] = (time.perf_counter() - phase_started) * 1000
     active_list, _ = _collect_dashboard_active_signals(
         pending_copy,
         positions_copy,
@@ -32943,16 +32993,6 @@ def _build_relay_execution_state_snapshot() -> dict:
     # overlay did not include them, so under live trading the tile froze
     # at the first heavy build and under-counted every trade that closed
     # afterwards.
-    session_trade_count = sum(1 for _r in recent_trades if isinstance(_r, dict))
-    session_realized_pnl = 0.0
-    for _r in recent_trades:
-        if not isinstance(_r, dict):
-            continue
-        try:
-            session_realized_pnl += float(_r.get("net_pnl_usd") or _r.get("net") or 0.0)
-        except (TypeError, ValueError):
-            continue
-    session_realized_pnl = round(session_realized_pnl, 2)
     snapshot["trade_count_session"] = session_trade_count
     snapshot["trade_count"] = session_trade_count
     snapshot["session_pnl_usd"] = session_realized_pnl
@@ -33024,6 +33064,11 @@ def _build_relay_execution_state_snapshot() -> dict:
         "relay_push": relay_push_summary,
         "ddollar_gate": ddollar_gate_summary,
     }
+    phase_timings["total"] = (time.perf_counter() - build_started) * 1000
+    snapshot["snapshot_phase_timings_ms"] = {
+        key: round(value, 3) for key, value in phase_timings.items()
+    }
+    snapshot["trade_lock_diagnostics"] = trade_lock.diagnostics()
     return snapshot
 
 
@@ -33108,33 +33153,45 @@ def api_relay_state(force_rebuild: bool = False):
                 "regime": state.get("regime"),
                 "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
             }
+        split_execution_truth, relay_evidence_index = _load_dashboard_trade_enrichment()
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
             relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
-            fidelity_trades = [
-                _relay_fidelity_trade_row(row)
-                for row in trades[-_RELAY_FIDELITY_TRADES_MAX:]
-                if isinstance(row, dict)
-            ]
-            trades_for_relay = [
-                _relay_trade_row_lite(copy.deepcopy(row))
-                for row in _snapshot_trades_for_api(session_start)
-                if isinstance(row, dict)
-            ]
+            raw_fidelity_trades = copy.deepcopy(
+                trades[-_RELAY_FIDELITY_TRADES_MAX:]
+            )
+            raw_trades_for_relay = _snapshot_trade_rows_locked(session_start)
             bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
             )
-            orders = []
-            tick_px = snapshot.get("price")
-            for o in pending_orders_copy:
-                oc = copy.deepcopy(o)
-                oc["age_min"] = (now_ts - o["created_ts"]) / 60 if o.get("created_ts") else 0
-                if tick_px and tick_px > 0:
-                    oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
-                orders.append(oc)
-            expired_orders_copy = copy.deepcopy(expired_orders)
+            expired_orders_copy = copy.deepcopy(
+                expired_orders[-_DASHBOARD_HISTORY_MAX:]
+            )
+        enriched_trades_for_relay = _enrich_dashboard_trade_rows(
+            raw_trades_for_relay,
+            split_execution_truth,
+            relay_evidence_index,
+        )
+        fidelity_trades = [
+            _relay_fidelity_trade_row(row)
+            for row in raw_fidelity_trades
+            if isinstance(row, dict)
+        ]
+        trades_for_relay = [
+            _relay_trade_row_lite(row)
+            for row in enriched_trades_for_relay
+            if isinstance(row, dict)
+        ]
+        orders = []
+        tick_px = snapshot.get("price")
+        for o in pending_orders_copy:
+            oc = copy.deepcopy(o)
+            oc["age_min"] = (now_ts - o["created_ts"]) / 60 if o.get("created_ts") else 0
+            if tick_px and tick_px > 0:
+                oc["limit_touched"] = _pending_limit_touched(o, float(tick_px))
+            orders.append(oc)
         active_list, _exposure = _collect_dashboard_active_signals(
             pending_orders_copy,
             positions_copy,
@@ -33346,37 +33403,91 @@ def _session_realized_pnl_usd() -> float:
         return round(total, 2)
 
 
-def _snapshot_trades_for_api(session_start: float):
-    """Session-filtered trade rows for /api/state — cap size so dashboard polls stay fast."""
+def _snapshot_trade_rows_locked(session_start: float):
+    """Copy only bounded trade rows; caller owns ``trade_lock``.
+
+    No file reads, hashing, imports, or evidence joins are allowed here.
+    """
     if session_start:
         src = [t for t in trades if _trade_row_in_session(t, session_start)]
     else:
         src = list(trades)
     if len(src) > _DASHBOARD_TRADES_MAX:
         src = src[-_DASHBOARD_TRADES_MAX:]
+    return copy.deepcopy(src)
+
+
+def _session_trade_aggregates_locked(session_start: float) -> tuple[int, float]:
+    """Calculate exact session totals without copying the unbounded ledger."""
+    count = 0
+    realized = 0.0
+    for row in trades:
+        if session_start and not _trade_row_in_session(row, session_start):
+            continue
+        count += 1
+        try:
+            value = row.get("net_pnl_usd")
+            if value in (None, ""):
+                value = row.get("net")
+            realized += float(value or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return count, round(realized, 2)
+
+
+def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
+    """Copy a bounded tail while returning the exact visible-row count."""
+    selected = []
+    total = 0
+    bounded_limit = max(0, int(limit))
+    for row in expired_orders:
+        if (
+            not isinstance(row, dict)
+            or str(row.get("research_lane") or "").upper() == "AI_SCAN"
+        ):
+            continue
+        total += 1
+        if bounded_limit:
+            selected.append(row)
+            if len(selected) > bounded_limit:
+                del selected[0]
+    return copy.deepcopy(selected), total
+
+
+def _load_dashboard_trade_enrichment():
+    """Load disk-backed relay evidence outside ``trade_lock``."""
     try:
         from research.dual_execution_truth import split_execution_truth
         from research.platform_relay_evidence import (
             _platform_relay_evidence_index,
-            _snapshot_with_platform_relay_evidence,
         )
         index = _platform_relay_evidence_index()
     except Exception:
         split_execution_truth = None
         index = {}
-    rows = []
-    for trade in src:
+    return split_execution_truth, index
+
+
+def _enrich_dashboard_trade_rows(
+    raw_rows: list,
+    split_execution_truth=None,
+    evidence_index=None,
+):
+    """Join immutable relay evidence after the money-state lock is released."""
+    index = evidence_index or {}
+    enriched = []
+    for trade in raw_rows:
         row = dict(trade) if isinstance(trade, dict) else trade
         tid = str((row or {}).get("trade_id") or "") if isinstance(row, dict) else ""
         if isinstance(row, dict) and tid and index and tid in index:
-            row = _snapshot_with_platform_relay_evidence(row, tid, index)
+            row = _pure_snapshot_with_platform_relay_evidence(row, tid, index)
         if isinstance(row, dict) and callable(split_execution_truth):
             try:
                 row["dual_execution_truth"] = split_execution_truth(row)
             except Exception:
                 pass
-        rows.append(row)
-    return rows
+        enriched.append(row)
+    return enriched
 
 
 def _attach_patient_chase_routes(
@@ -33531,14 +33642,18 @@ def _build_api_state_snapshot():
     background refresher share one code path (identical JSON shape).
     """
     t0 = time.perf_counter()
+    phase_timings = {}
     try:
         # Never block HTTP on Bitfinex REST here — state_monitor_loop refreshes price/funding in background.
         # Lock order: state_lock before trade_lock (close_position may take trade_lock after state work).
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
+        phase_started = time.perf_counter()
         state_acquired = state_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
+        phase_timings["state_lock_wait"] = (time.perf_counter() - phase_started) * 1000
         if not state_acquired:
             raise TimeoutError("api-state snapshot timed out waiting for state_lock")
+        phase_started = time.perf_counter()
         try:
             # The raw order book is large and fast-moving. Deep-copying it only
             # to discard it afterwards held state_lock for up to 38 seconds,
@@ -33553,6 +33668,7 @@ def _build_api_state_snapshot():
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]
         finally:
             state_lock.release()
+            phase_timings["state_lock_hold"] = (time.perf_counter() - phase_started) * 1000
         # Snapshot construction can take long enough for newer WS ticks to
         # arrive after ``now_ts`` was captured.  Reusing that older timestamp
         # makes the fresh tick appear to have a negative age, which resets the
@@ -33576,26 +33692,23 @@ def _build_api_state_snapshot():
         snapshot["system_ready"] = runtime["system_ready"]
         snapshot["signal_generation_ready"] = runtime["signal_generation_ready"]
         snapshot["runtime_readiness"] = runtime
+        phase_started = time.perf_counter()
+        split_execution_truth, relay_evidence_index = _load_dashboard_trade_enrichment()
+        phase_timings["relay_evidence_load"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
         trade_acquired = trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC)
+        phase_timings["trade_lock_wait"] = (time.perf_counter() - phase_started) * 1000
         if not trade_acquired:
             raise TimeoutError("api-state snapshot timed out waiting for trade_lock")
+        phase_started = time.perf_counter()
         try:
-            trades_copy = _snapshot_trades_for_api(session_start)
-            visible_expired = [
-                row
-                for row in expired_orders
-                if isinstance(row, dict)
-                and str(row.get("research_lane") or "").upper() != "AI_SCAN"
-            ]
-            expired_orders_total = len(visible_expired)
-            expired_orders_copy = copy.deepcopy(visible_expired[-_DASHBOARD_HISTORY_MAX:])
-            for pos in open_positions:
-                if pos.get("status") == "OPEN":
-                    # Snapshot construction must never perform exchange I/O.
-                    # A Bitfinex TLS outage previously held trade_lock through
-                    # several retry ladders for 15+ minutes, starving the
-                    # dashboard and making its listener appear dead.
-                    accrue_position_funding(pos, now_ts, refresh=False)
+            raw_trades_copy = _snapshot_trade_rows_locked(session_start)
+            session_trade_count, session_realized_pnl = (
+                _session_trade_aggregates_locked(session_start)
+            )
+            expired_orders_copy, expired_orders_total = (
+                _snapshot_expired_rows_locked(_DASHBOARD_HISTORY_MAX)
+            )
             positions_copy = copy.deepcopy(open_positions)
             pending_orders_copy = copy.deepcopy(pending_orders)
             relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
@@ -33627,6 +33740,19 @@ def _build_api_state_snapshot():
                 }
         finally:
             trade_lock.release()
+            phase_timings["trade_lock_hold"] = (time.perf_counter() - phase_started) * 1000
+        phase_started = time.perf_counter()
+        trades_copy = _enrich_dashboard_trade_rows(
+            raw_trades_copy,
+            split_execution_truth,
+            relay_evidence_index,
+        )
+        for pos in positions_copy:
+            if pos.get("status") == "OPEN":
+                # Funding presentation updates operate on the detached copy;
+                # they must not mutate money state or extend trade_lock hold.
+                accrue_position_funding(pos, now_ts, refresh=False)
+        phase_timings["post_lock_enrichment"] = (time.perf_counter() - phase_started) * 1000
         active_list, exposure_count = _collect_dashboard_active_signals(
             pending_orders_copy,
             positions_copy,
@@ -33820,9 +33946,9 @@ def _build_api_state_snapshot():
         snapshot["account_balance"] = get_display_balance()
         snapshot["equity"] = snapshot["account_balance"] + total_unreal
         session_trades = trades_copy
-        snapshot["trade_count_session"] = _session_trade_count()
+        snapshot["trade_count_session"] = session_trade_count
         snapshot["trade_count"] = snapshot["trade_count_session"]
-        snapshot["session_pnl_usd"] = _session_realized_pnl_usd()
+        snapshot["session_pnl_usd"] = session_realized_pnl
         snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
         snapshot["trades"] = [_slim_trade_for_dashboard(t) for t in session_trades]
         snapshot["bot_start_time"] = bot_start_time
@@ -33912,9 +34038,15 @@ def _build_api_state_snapshot():
             fund_out["next_time_melbourne"] = _format_melbourne_hm(fund_out["next_time_iso"])
         snapshot["funding"] = fund_out
         snapshot["state_integrity"] = build_state_integrity()
+        phase_timings["total"] = (time.perf_counter() - t0) * 1000
+        snapshot["api_state_phase_timings_ms"] = {
+            key: round(value, 3) for key, value in phase_timings.items()
+        }
+        snapshot["trade_lock_diagnostics"] = trade_lock.diagnostics()
         logger.info(
             f"[API STATE] edge_threshold synced to UI: {snapshot['edge_threshold']} "
-            f"elapsed_ms={int((time.perf_counter() - t0) * 1000)} [PIPELINE ENFORCEMENT]"
+            f"elapsed_ms={int(phase_timings['total'])} "
+            f"phases={snapshot['api_state_phase_timings_ms']} [PIPELINE ENFORCEMENT]"
         )
         return snapshot
     except Exception:

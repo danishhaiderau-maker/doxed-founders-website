@@ -119,6 +119,64 @@ def test_tracked_rlock_reports_and_clears_owner_diagnostics():
     assert detail["depth"] == 0
 
 
+def test_tracked_rlock_timeout_keeps_owner_and_records_contention():
+    lock = compile_tracked_lock()("test-lock")
+    owner_entered = threading.Event()
+    owner_release = threading.Event()
+
+    def owner():
+        with lock:
+            owner_entered.set()
+            owner_release.wait(2.0)
+
+    thread = threading.Thread(target=owner, name="money-path-owner")
+    thread.start()
+    assert owner_entered.wait(1.0)
+    try:
+        assert lock.acquire(timeout=0.01) is False
+        detail = lock.diagnostics()
+        assert detail["owner_thread"] == "money-path-owner"
+        assert detail["owner_active"] is True
+        assert detail["depth"] == 1
+        assert detail["timeout_count"] == 1
+        assert detail["last_timeout_thread"] == threading.current_thread().name
+        assert detail["owner_at_last_timeout"] == "money-path-owner"
+        assert detail["acquire_sequence"] == 1
+    finally:
+        owner_release.set()
+        thread.join(1.0)
+    assert not thread.is_alive()
+
+
+def test_tracked_rlock_handoff_never_exposes_ownerless_unavailable_state():
+    lock = compile_tracked_lock()("handoff-lock")
+    stop = threading.Event()
+
+    def churn():
+        while not stop.is_set():
+            with lock:
+                pass
+
+    workers = [threading.Thread(target=churn, name=f"owner-{i}") for i in range(2)]
+    for worker in workers:
+        worker.start()
+    try:
+        for _ in range(500):
+            if lock.acquire(blocking=False):
+                lock.release()
+                continue
+            detail = lock.diagnostics()
+            # The owner may legitimately release between the failed probe and
+            # diagnostics. The atomic timeout receipt must still identify who
+            # held it at the failed acquisition boundary.
+            assert detail["owner_at_last_timeout"] is not None
+    finally:
+        stop.set()
+        for worker in workers:
+            worker.join(1.0)
+    assert all(not worker.is_alive() for worker in workers)
+
+
 def test_all_process_startup_grace_uses_non_persisted_boot_clock():
     assert "time.time() - bot_start_time < STARTUP_GRACE_PERIOD" not in SOURCE
     assert "time.time() - process_boot_time < STARTUP_GRACE_PERIOD" in SOURCE
