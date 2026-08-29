@@ -107,6 +107,8 @@ def run():
         and "return self._data_sync_thread_cap" in server_source
         and 'b"/api/pause"' in server_source
         and 'b"/api/resume"' in server_source
+        and 'b"/ready"' in server_source
+        and 'b"/api/ready"' in server_source
         and "socket.MSG_PEEK" in server_source
         and "_priority_client_io_timeout_sec = 2.0" in server_source
         and "request_cap.release()" in server_source,
@@ -117,6 +119,8 @@ def run():
         "dashboard request classifier strips query strings deterministically",
         request_path(b"GET /api/data-sync/manifest HTTP/1.1\r\n")
         == b"/api/data-sync/manifest"
+        and request_path(b"GET /ready HTTP/1.1\r\n") == b"/ready"
+        and request_path(b"GET /api/ready?probe=1 HTTP/1.1\r\n") == b"/api/ready"
         and request_path(b"GET /api/data-sync/file?path=v3%2Fledger.jsonl&offset=1 HTTP/1.1\r\n")
         == b"/api/data-sync/file"
         and request_path(b"POST /api/data-sync/analyzer-report?kind=current HTTP/1.1\r\n")

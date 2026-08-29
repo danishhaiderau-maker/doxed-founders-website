@@ -41935,6 +41935,8 @@ def _create_dashboard_server():
             b"/api/pause",
             b"/api/resume",
             b"/health",
+            b"/ready",
+            b"/api/ready",
             b"/api/status",
             b"/status",
         )
