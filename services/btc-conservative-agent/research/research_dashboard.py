@@ -486,14 +486,19 @@ def _integrity_with_generation_freshness(receipt: dict | None) -> dict:
         rep["banner"] = "STALE ANALYZER GENERATION — QUALIFICATION BLOCKED"
         failed = list(rep.get("failed_checks") or [])
         failed.append({
-            "check": "generation_revision_and_epoch_parity",
+            "check": "generation_and_mirror_sync_freshness",
             "expected": {
-                "mirror_source_revision": freshness.get("mirror_source_revision"),
-                "mirror_epoch_id": freshness.get("mirror_epoch_id"),
+                "current": True,
+                "revision_parity": "MATCH",
+                "epoch_parity": "MATCH",
+                "mirror_sync_in_progress": False,
             },
             "found": {
-                "generation_revision": freshness.get("generation_revision"),
-                "generation_epoch_id": freshness.get("generation_epoch_id"),
+                "current": freshness.get("current"),
+                "revision_parity": freshness.get("revision_parity"),
+                "epoch_parity": freshness.get("epoch_parity"),
+                "mirror_sync_in_progress": freshness.get("mirror_sync_in_progress"),
+                "mirror_sync_revision_parity": freshness.get("mirror_sync_revision_parity"),
             },
             "reasons": freshness.get("reasons") or [],
         })
@@ -3867,6 +3872,18 @@ def _filter_lane_rows(rows, *, all_lanes: bool = False):
 @app.route("/api/lanes")
 def api_lanes():
     rows, bench_pnl, evidence = _lane_rows(include_evidence=True)
+    freshness = _generation_freshness_meta()
+    if evidence.get("status") == "CURRENT_GENERATION" and not freshness["current"]:
+        evidence = dict(evidence or {})
+        artifact_status = evidence.get("status")
+        blockers = list(evidence.get("blockers") or [])
+        blockers.extend(freshness.get("reasons") or [])
+        evidence.update({
+            "status": "STALE_GENERATION",
+            "artifact_status": artifact_status,
+            "generation_freshness": freshness,
+            "blockers": list(dict.fromkeys(str(item) for item in blockers if item)),
+        })
     all_lanes = _wants_all_lanes()
     filtered = _filter_lane_rows(rows, all_lanes=all_lanes)
     return jsonify({
@@ -6165,13 +6182,19 @@ async function loadLanes() {
   const evidenceNote = document.getElementById('lanes-evidence-note');
   const currentAvailable = current.evidence_status === 'CURRENT_GENERATION';
   if (evidenceNote) {
-    const blockers = (((current.evidence || {}).benchmark || {}).blockers || []).join(', ');
+    const evidence = current.evidence || {};
+    const blockers = Array.from(new Set([
+      ...(evidence.blockers || []),
+      ...(((evidence.benchmark || {}).blockers) || []),
+    ])).join(', ');
     evidenceNote.textContent = currentAvailable
       ? 'Evidence status: CURRENT GENERATION — revision, source data, epoch and session scope match the atomic report manifest.'
-      : `Evidence status: INSUFFICIENT CURRENT-GENERATION EXECUTION EVIDENCE${blockers ? ` — ${blockers}` : ''}. Historical results are not substituted.`;
+      : current.evidence_status === 'STALE_GENERATION'
+        ? `Evidence status: STALE ANALYZER GENERATION — current qualification and performance claims are blocked${blockers ? ` — ${blockers}` : ''}. Historical results are not substituted.`
+        : `Evidence status: INSUFFICIENT CURRENT-GENERATION EXECUTION EVIDENCE${blockers ? ` — ${blockers}` : ''}. Historical results are not substituted.`;
   }
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
-    `<tr><td>${row.lane || row.research_lane || ''}</td><td>${row.status || row.pathway_status || 'COLLECTING'}</td>`
+    `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : 'STALE / UNAVAILABLE'}</td>`
     + `<td>${row.approves || 0}</td><td>${currentAvailable ? (row.executed_closes || 0) : '—'}</td>`
     + `<td>${currentAvailable ? `$${fmtUsd(row.pnl || 0)}` : '—'}</td><td>${currentAvailable ? `$${fmtUsd(row.ev || 0)}` : '—'}</td>`
     + `<td>${currentAvailable ? (row.counterfactual_closes || 0) : '—'}</td><td>${currentAvailable ? `$${fmtUsd(row.counterfactual_pnl || 0)}` : '—'}</td></tr>`

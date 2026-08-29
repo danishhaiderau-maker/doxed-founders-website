@@ -154,3 +154,96 @@ def test_epoch_mismatch_blocks_even_when_revision_matches(monkeypatch):
     assert status["ready"] is False
     assert best["live_policy_change_allowed"] is False
     assert "EPOCH_PARITY_MISMATCH" in best["blockers"]
+
+
+def test_lanes_fail_closed_while_matching_generation_sync_is_in_progress(monkeypatch):
+    _install_generation(monkeypatch)
+    monkeypatch.setattr(
+        dashboard,
+        "_mirror_sync_receipt",
+        lambda: {
+            "inProgress": True,
+            "revisionParity": "MATCH",
+            "sourceRevision": REVISION[:12],
+            "mirroredSourceRevision": REVISION[:12],
+            "observedSourceRevision": REVISION,
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_lane_rows",
+        lambda **_kwargs: (
+            [{"lane": "FAMILY_ATR_TRAIL", "status": "COLLECTING"}],
+            0.0,
+            {"status": "CURRENT_GENERATION", "blockers": []},
+        ),
+    )
+    dashboard._API_RESPONSE_CACHE.clear()
+
+    with dashboard.app.test_client() as client:
+        lanes = client.get("/api/lanes").get_json()
+        integrity = client.get("/api/integrity").get_json()
+
+    assert lanes["evidence_status"] == "STALE_GENERATION"
+    assert lanes["evidence"]["artifact_status"] == "CURRENT_GENERATION"
+    assert lanes["evidence"]["generation_freshness"]["revision_parity"] == "MATCH"
+    assert lanes["evidence"]["generation_freshness"]["epoch_parity"] == "MATCH"
+    assert lanes["evidence"]["generation_freshness"]["mirror_sync_in_progress"] is True
+    assert any("synchronization is in progress" in item for item in lanes["evidence"]["blockers"])
+    failed = integrity["failed_checks"][-1]
+    assert failed["check"] == "generation_and_mirror_sync_freshness"
+    assert failed["found"]["revision_parity"] == "MATCH"
+    assert failed["found"]["mirror_sync_in_progress"] is True
+    dashboard._API_RESPONSE_CACHE.clear()
+
+
+def test_lanes_remain_current_for_matching_short_and_full_revision(monkeypatch):
+    _install_generation(monkeypatch, mirror_revision=REVISION[:12])
+    monkeypatch.setattr(
+        dashboard,
+        "_lane_rows",
+        lambda **_kwargs: (
+            [{"lane": "FAMILY_ATR_TRAIL", "status": "COLLECTING"}],
+            0.0,
+            {"status": "CURRENT_GENERATION", "blockers": []},
+        ),
+    )
+    dashboard._API_RESPONSE_CACHE.clear()
+
+    with dashboard.app.test_client() as client:
+        lanes = client.get("/api/lanes").get_json()
+
+    assert lanes["evidence_status"] == "CURRENT_GENERATION"
+    dashboard._API_RESPONSE_CACHE.clear()
+
+
+def test_lanes_preserve_unavailable_artifact_status_when_generation_is_stale(monkeypatch):
+    _install_generation(monkeypatch, mirror_revision="different-revision")
+    unavailable = {
+        "status": "UNAVAILABLE_CURRENT_GENERATION",
+        "blockers": ["CURRENT_REPORT_MISSING"],
+    }
+    monkeypatch.setattr(
+        dashboard,
+        "_lane_rows",
+        lambda **_kwargs: ([], 0.0, dict(unavailable)),
+    )
+    dashboard._API_RESPONSE_CACHE.clear()
+
+    with dashboard.app.test_client() as client:
+        lanes = client.get("/api/lanes").get_json()
+
+    assert lanes["evidence_status"] == "UNAVAILABLE_CURRENT_GENERATION"
+    assert lanes["evidence"] == unavailable
+    dashboard._API_RESPONSE_CACHE.clear()
+
+
+def test_lane_ui_surfaces_stale_reason_and_neutralizes_performance_status(monkeypatch):
+    _install_generation(monkeypatch)
+
+    with dashboard.app.test_client() as client:
+        page = client.get("/").get_data(as_text=True)
+
+    assert "Evidence status: STALE ANALYZER GENERATION" in page
+    assert "...(evidence.blockers || [])" in page
+    assert "'STALE / UNAVAILABLE'" in page
