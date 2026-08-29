@@ -11150,7 +11150,10 @@ def _reconcile_overdue_v3_expected_orders(*, force: bool = False) -> dict:
             active_rows=active_exposure_rows, observed_ts=now,
             runtime_revision=_runtime_git_rev(),
         )
-        _v3_expected_order_reconcile_last_ts = now
+        # Throttle from completion, not the pre-scan timestamp.  On a mature
+        # ledger the scan itself can exceed the interval; recording its start
+        # caused reconcile_stale_signals() to repeat the full scan immediately.
+        _v3_expected_order_reconcile_last_ts = time.time()
         if result.get("reconciled"):
             logger.warning(
                 f"[COLLECTOR_V3] reconciled overdue lost pre-order "
@@ -12348,6 +12351,29 @@ _order_multiverse_post_ttl_done = {}
 _order_multiverse_written = set()
 _execution_terminal_trade_ids = set()
 _collector_epoch_lock = threading.RLock()
+_compressed_shadow_lock = threading.RLock()
+_collector_v22_merge_guard = threading.Lock()
+_collector_v22_merge_inflight = False
+_collector_v22_last_merge = 0.0
+_order_multiverse_maturation_cursor = 0
+_order_multiverse_ready_sweep_batch = 0
+_order_multiverse_ready_sweep_started_ts = 0.0
+COLLECTOR_PROVISIONAL_REMERGE_INTERVAL_SEC = max(
+    60.0,
+    float(os.getenv("COLLECTOR_PROVISIONAL_REMERGE_INTERVAL_SEC", "900")),
+)
+COLLECTOR_MATURATION_BATCH_SIZE = max(
+    1,
+    int(os.getenv("COLLECTOR_MATURATION_BATCH_SIZE", "2")),
+)
+COLLECTOR_MATURATION_MAX_BATCH_SIZE = max(
+    COLLECTOR_MATURATION_BATCH_SIZE,
+    int(os.getenv("COLLECTOR_MATURATION_MAX_BATCH_SIZE", "25")),
+)
+COLLECTOR_MATURATION_TARGET_SWEEP_MIN = max(
+    15,
+    int(os.getenv("COLLECTOR_MATURATION_TARGET_SWEEP_MIN", "60")),
+)
 
 
 def _collector_cached_candles_1m(limit: int = 2000) -> list:
@@ -12447,24 +12473,36 @@ def _collector_feature_snapshot(source, *, signal_ts):
     }
 
 
-@_collector_epoch_serialized
 def _merge_collector_v22_provisionals(*, reason: str) -> int:
-    """Self-heal missing same-epoch maturation sources from durable journal."""
+    """Self-heal from the journal without monopolising the epoch lock."""
     epoch_id = _collector_v22_epoch_id()
     restored = 0
     for event_id, source in load_provisional_events(epoch_id=epoch_id).items():
+        # A fresh-epoch boundary invalidates the loaded snapshot.  Check it at
+        # each short mutation boundary instead of holding the epoch lock while
+        # reading and validating the whole durable journal.
+        with _collector_epoch_lock:
+            if _collector_v22_epoch_id() != epoch_id:
+                return restored
         if event_already_written(event_id):
             # Reconcile a crash after final commit but before journal cleanup.
-            remove_provisional_event(event_id)
-            _order_multiverse_written.add(event_id)
+            with _collector_epoch_lock:
+                if _collector_v22_epoch_id() != epoch_id:
+                    return restored
+                remove_provisional_event(event_id)
+                _order_multiverse_written.add(event_id)
             continue
-        if event_id in _order_multiverse_pending_src:
-            continue
-        source = dict(source)
-        source["trade_id"] = event_id
-        _order_multiverse_pending_src[event_id] = source
-        _order_multiverse_state[event_id] = str(source.get("observation_status") or "RESTORED_PROVISIONAL")
-        restored += 1
+        with _collector_epoch_lock:
+            if event_id in _order_multiverse_pending_src:
+                continue
+            recovered = dict(source)
+            recovered["trade_id"] = event_id
+            _order_multiverse_pending_src[event_id] = recovered
+            _order_multiverse_state[event_id] = str(
+                recovered.get("observation_status") or "RESTORED_PROVISIONAL"
+            )
+            restored += 1
+        time.sleep(0)
     if restored:
         logger.info(
             f"[COLLECTOR_V22] recovered provisional_events={restored} epoch_id={epoch_id} "
@@ -12474,9 +12512,38 @@ def _merge_collector_v22_provisionals(*, reason: str) -> int:
     return restored
 
 
+def _schedule_collector_v22_provisional_merge(*, reason: str, now: float) -> bool:
+    """Run periodic durable reconciliation on a low-priority daemon."""
+    global _collector_v22_merge_inflight, _collector_v22_last_merge
+    with _collector_v22_merge_guard:
+        if _collector_v22_merge_inflight:
+            return False
+        _collector_v22_merge_inflight = True
+        _collector_v22_last_merge = float(now)
+
+    def worker():
+        global _collector_v22_merge_inflight, _collector_v22_last_merge
+        try:
+            _merge_collector_v22_provisionals(reason=reason)
+        finally:
+            with _collector_v22_merge_guard:
+                _collector_v22_last_merge = time.time()
+                _collector_v22_merge_inflight = False
+
+    threading.Thread(
+        target=worker,
+        name="collector-v22-provisional-merge",
+        daemon=True,
+    ).start()
+    return True
+
+
 def _restore_collector_v22_provisionals() -> int:
     """Startup recovery; bounded polls repeat this merge as a safety net."""
-    return _merge_collector_v22_provisionals(reason="STARTUP")
+    global _collector_v22_last_merge
+    restored = _merge_collector_v22_provisionals(reason="STARTUP")
+    _collector_v22_last_merge = time.time()
+    return restored
 
 
 def _collector_v22_epoch_id() -> str:
@@ -12520,6 +12587,8 @@ def _collector_source_in_current_epoch(source: dict) -> bool:
 def _reset_collector_epoch_state(reset_anchor: float) -> str:
     """Bind and atomically clear V2/V3 recovery state for a fresh epoch."""
     global _order_multiverse_last_poll, _compressed_shadow_recovery_attempted
+    global _collector_v22_last_merge, _order_multiverse_maturation_cursor
+    global _order_multiverse_ready_sweep_batch, _order_multiverse_ready_sweep_started_ts
     with state_lock:
         state["fresh_collection_mode"] = True
     _write_research_session(float(reset_anchor), fresh_collection_reset=True)
@@ -12530,15 +12599,20 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
             replay_buffers.clear()
         _cycle_3m_written_buckets.clear()
         _touch_grid_book.clear()
-        _compressed_shadow_chase_book.clear()
-        _compressed_shadow_seen_call_ids.clear()
-        _compressed_shadow_recovery_attempted = True
+        with _compressed_shadow_lock:
+            _compressed_shadow_chase_book.clear()
+            _compressed_shadow_seen_call_ids.clear()
+            _compressed_shadow_recovery_attempted = True
         _order_multiverse_state.clear()
         _order_multiverse_pending_src.clear()
         _order_multiverse_path_complete.clear()
         _order_multiverse_post_ttl_done.clear()
         _order_multiverse_written.clear()
         _order_multiverse_last_poll = 0.0
+        _collector_v22_last_merge = 0.0
+        _order_multiverse_maturation_cursor = 0
+        _order_multiverse_ready_sweep_batch = 0
+        _order_multiverse_ready_sweep_started_ts = 0.0
     return fresh_epoch_id
 
 
@@ -12639,7 +12713,11 @@ def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str,
 def _recover_compressed_shadow_chases_once(now: float = None) -> None:
     """Load active and terminal shared-call owners before any new arm."""
     global _compressed_shadow_recovery_attempted
-    with _collector_epoch_lock:
+    # This book has its own lock.  Collector maturation can legitimately hold
+    # the fresh-epoch serialization lock while rebuilding terminal evidence;
+    # making the three-minute AI owner wait behind that work starved the AI
+    # cadence and caused a healthy, flat paper process to self-restart.
+    with _compressed_shadow_lock:
         if _compressed_shadow_recovery_attempted:
             return
         durable_rows = []
@@ -12692,36 +12770,141 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
             _touch_grid_book.pop(tid, None)
     _recover_compressed_shadow_chases_once(now)
     shadow_dead = []
-    for tid, shadow in list(_compressed_shadow_chase_book.items()):
-        try:
-            revalidation, revalidation_reason = _shadow_stage_direction_revalidation(shadow, now)
-            for row in poll_compressed_shadow_chase(
-                shadow, now_ts=now, last=float(price),
-                bid=None if not bid else float(bid),
-                ask=None if not ask else float(ask), bbo_fresh=bool(bid and ask),
-                direction_revalidation_result=revalidation,
-                direction_revalidation_reason=revalidation_reason,
-            ):
-                _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="SHADOW_CHASE")
-            if shadow.get("terminal_emitted"):
-                shadow_dead.append(tid)
-        except Exception as exc:
-            logger.warning(
-                f"[SHADOW CHASE] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]"
-            )
-    for tid in shadow_dead:
-        _compressed_shadow_chase_book.pop(tid, None)
+    shadow_rows = []
+    with _compressed_shadow_lock:
+        for tid, shadow in list(_compressed_shadow_chase_book.items()):
+            try:
+                revalidation, revalidation_reason = _shadow_stage_direction_revalidation(shadow, now)
+                shadow_rows.extend(poll_compressed_shadow_chase(
+                    shadow, now_ts=now, last=float(price),
+                    bid=None if not bid else float(bid),
+                    ask=None if not ask else float(ask), bbo_fresh=bool(bid and ask),
+                    direction_revalidation_result=revalidation,
+                    direction_revalidation_reason=revalidation_reason,
+                ))
+                if shadow.get("terminal_emitted"):
+                    shadow_dead.append(tid)
+            except Exception as exc:
+                logger.warning(
+                    f"[SHADOW CHASE] poll failed trade_id={tid}: {exc} [PIPELINE ENFORCEMENT]"
+                )
+        for tid in shadow_dead:
+            _compressed_shadow_chase_book.pop(tid, None)
+    # Disk validation, rotation and fsync are deliberately outside the
+    # ownership lock so an AI arm is never queued behind research I/O.
+    for row in shadow_rows:
+        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="SHADOW_CHASE")
     _maybe_complete_pending_order_multiverse()
 
 
 def _maybe_complete_pending_order_multiverse():
     global _order_multiverse_last_poll, _v3_terminal_reconcile_last_v22_size
+    global _collector_v22_last_merge, _order_multiverse_maturation_cursor
+    global _order_multiverse_ready_sweep_batch, _order_multiverse_ready_sweep_started_ts
     now = time.time()
     if now - _order_multiverse_last_poll < 60.0:
         return
     _order_multiverse_last_poll = now
-    _merge_collector_v22_provisionals(reason="MATURATION_POLL")
-    for src in list(_order_multiverse_pending_src.values()):
+    # Periodic reconciliation remains complete even when only one in-memory
+    # provisional was lost, but it runs outside this price/order worker and
+    # takes the epoch lock only for one short map mutation at a time.
+    if now - _collector_v22_last_merge >= COLLECTOR_PROVISIONAL_REMERGE_INTERVAL_SEC:
+        _schedule_collector_v22_provisional_merge(reason="MATURATION_POLL", now=now)
+    pending_ids = sorted(_order_multiverse_pending_src)
+    ready_ids = []
+    waiting_ids = []
+    for pending_id in pending_ids:
+        candidate = _order_multiverse_pending_src.get(pending_id) or {}
+        expires = float(candidate.get("expires_ts") or 0)
+        closed = str(candidate.get("status") or "").upper() in (
+            "CLOSED", "FILLED", "EXPIRED", "CANCELLED", "COMPLETE",
+        )
+        if (
+            closed
+            or bool(candidate.get("path_complete"))
+            or (expires > 0 and now >= expires + float(POST_TTL_LOOKAHEAD_SEC))
+        ):
+            ready_ids.append(pending_id)
+        else:
+            waiting_ids.append(pending_id)
+    # Mature evidence is processed oldest-first.  The adaptive component keeps
+    # a terminal backlog on a bounded sweep trajectory, while the hard cap and
+    # per-item lock release prevent a burst from monopolising the AI owner.
+    required_ready_batch = math.ceil(
+        len(ready_ids) / float(COLLECTOR_MATURATION_TARGET_SWEEP_MIN)
+    )
+    if not ready_ids:
+        _order_multiverse_ready_sweep_batch = 0
+        _order_multiverse_ready_sweep_started_ts = 0.0
+    else:
+        if not _order_multiverse_ready_sweep_started_ts:
+            _order_multiverse_ready_sweep_started_ts = now
+        _order_multiverse_ready_sweep_batch = max(
+            _order_multiverse_ready_sweep_batch,
+            COLLECTOR_MATURATION_BATCH_SIZE,
+            required_ready_batch,
+        )
+    count = min(
+        COLLECTOR_MATURATION_MAX_BATCH_SIZE,
+        max(COLLECTOR_MATURATION_BATCH_SIZE, _order_multiverse_ready_sweep_batch),
+    )
+    ready_ids.sort(
+        key=lambda pending_id: float(
+            (_order_multiverse_pending_src.get(pending_id) or {}).get("expires_ts") or 0
+        )
+    )
+    selected_ids = ready_ids[:count]
+    remaining = count - len(selected_ids)
+    if remaining > 0 and waiting_ids:
+        start = _order_multiverse_maturation_cursor % len(waiting_ids)
+        selected_ids.extend(
+            waiting_ids[(start + index) % len(waiting_ids)]
+            for index in range(min(remaining, len(waiting_ids)))
+        )
+        _order_multiverse_maturation_cursor = (
+            start + min(remaining, len(waiting_ids))
+        ) % len(waiting_ids)
+    elif waiting_ids:
+        _order_multiverse_maturation_cursor %= len(waiting_ids)
+    else:
+        _order_multiverse_maturation_cursor = 0
+    oldest_created = min(
+        (
+            float((row or {}).get("created_ts_ts") or 0)
+            for row in _order_multiverse_pending_src.values()
+            if float((row or {}).get("created_ts_ts") or 0) > 0
+        ),
+        default=0.0,
+    )
+    with state_lock:
+        state["collector_maturation"] = {
+            "status": "ACTIVE" if pending_ids else "IDLE",
+            "pending": len(pending_ids),
+            "terminal_ready": len(ready_ids),
+            "selected": len(selected_ids),
+            "base_batch_size": COLLECTOR_MATURATION_BATCH_SIZE,
+            "effective_batch_size": count,
+            "max_batch_size": COLLECTOR_MATURATION_MAX_BATCH_SIZE,
+            "target_sweep_minutes": COLLECTOR_MATURATION_TARGET_SWEEP_MIN,
+            "estimated_ready_sweep_minutes": (
+                math.ceil(len(ready_ids) / float(max(1, count)))
+            ),
+            "ready_sweep_started_ts": _order_multiverse_ready_sweep_started_ts or None,
+            "target_status": (
+                "TARGET_UNACHIEVABLE_MAX_BATCH"
+                if len(ready_ids)
+                > COLLECTOR_MATURATION_MAX_BATCH_SIZE
+                * COLLECTOR_MATURATION_TARGET_SWEEP_MIN
+                else "ON_TARGET"
+            ),
+            "oldest_pending_age_sec": max(0.0, now - oldest_created) if oldest_created else None,
+            "last_poll_ts": now,
+            "last_journal_merge_ts": _collector_v22_last_merge,
+        }
+    for pending_id in selected_ids:
+        src = _order_multiverse_pending_src.get(pending_id)
+        if not isinstance(src, dict):
+            continue
         if src.get("collector_rejected"):
             persist_rejected_opportunity(
                 src,
@@ -12729,6 +12912,7 @@ def _maybe_complete_pending_order_multiverse():
                 reason=str(src.get("collector_reject_reason") or "REJECTED"),
                 would_block_only=bool(src.get("collector_would_block_only")),
             )
+            time.sleep(0)
             continue
         expires = float(src.get("expires_ts") or 0)
         ttl_done = expires > 0 and now >= expires
@@ -12742,6 +12926,7 @@ def _maybe_complete_pending_order_multiverse():
             src,
             path_complete=bool(post_ttl_done or closed or src.get("path_complete")),
         )
+        time.sleep(0)
     # V2 is the durable migration source.  A rollout or crash between the V2
     # append and V3 dual-write must not leave an eternal provisional V3 row.
     # Reconcile once per changed V2 generation; failures retry next poll.
@@ -14746,9 +14931,13 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     )
     requested_qty = (FIXED_MARGIN_USDT * leverage) / initial_limit
     maker_fee, taker_fee = get_trading_fee_rates()
-    with _collector_epoch_lock:
+    epoch_id = _collector_v22_epoch_id()
+    with _compressed_shadow_lock:
         if call_id in _compressed_shadow_seen_call_ids:
             return False
+        # Reserve the shared call while its durable stage-zero row is written.
+        _compressed_shadow_seen_call_ids.add(call_id)
+    try:
         shadow_state, stage_zero = arm_compressed_shadow_chase(
             trade_id=trade_id,
             direction=direction,
@@ -14758,7 +14947,7 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
             shared_ai_call_id=call_id,
             opportunity_id=opportunity_id,
             episode_id=episode_id,
-            epoch_id=_collector_v22_epoch_id(),
+            epoch_id=epoch_id,
             event_id=call_id,
             bid=bid,
             ask=ask,
@@ -14771,11 +14960,18 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
             entry_fee_rate=maker_fee,
             exit_fee_rate=taker_fee,
         )
-        _safe_append_jsonl(
+        durable = _safe_append_jsonl(
             CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE",
         )
+    except Exception:
+        with _compressed_shadow_lock:
+            _compressed_shadow_seen_call_ids.discard(call_id)
+        raise
+    with _compressed_shadow_lock:
+        if not durable or _collector_v22_epoch_id() != epoch_id:
+            _compressed_shadow_seen_call_ids.discard(call_id)
+            return False
         _compressed_shadow_chase_book[trade_id] = shadow_state
-        _compressed_shadow_seen_call_ids.add(call_id)
     logger.info(
         f"[SHADOW CHASE] armed shared_call={call_id} trade_id={trade_id} "
         "schedule=0,1,2,4,7,10m expiry=13m shadow_only "
@@ -37613,7 +37809,14 @@ def load_paper_lifecycle() -> dict:
         logger.error("[PAPER_LIFECYCLE] refused invalid, non-paper, or armed restart snapshot")
         result["invalid"] += 1
         return result
-    order_intent_identities, order_intent_ledger_readable = _load_v3_order_intent_identities()
+    awaiting_snapshot = payload.get("awaiting_signals") or []
+    if awaiting_snapshot:
+        order_intent_identities, order_intent_ledger_readable = _load_v3_order_intent_identities()
+    else:
+        # Pending orders and open positions already carry their durable
+        # identity.  The 200+ MB order-intent index is needed only to decide
+        # whether a pre-order awaiting signal may be restored.
+        order_intent_identities, order_intent_ledger_readable = set(), True
     with trade_lock:
         known_positions = {str(x.get("trade_id")) for x in open_positions if isinstance(x, dict)}
         known_orders = {str(x.get("trade_id")) for x in pending_orders if isinstance(x, dict)}
@@ -37644,7 +37847,7 @@ def load_paper_lifecycle() -> dict:
             str((entry.get("signal_ref") or {}).get("trade_id"))
             for entry in trades_map.values() if isinstance(entry, dict)
         }
-        for raw in payload.get("awaiting_signals") or []:
+        for raw in awaiting_snapshot:
             if not isinstance(raw, dict) or not raw.get("trade_id"):
                 result["invalid"] += 1; continue
             row = _stable_paper_lifecycle_copy(raw)

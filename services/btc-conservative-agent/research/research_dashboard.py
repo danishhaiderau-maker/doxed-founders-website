@@ -3213,6 +3213,12 @@ def _safe_policy_v3_dashboard_source() -> dict:
     screen = report.get("candidate_screen") or {}
     ranking = report.get("safe_policy_ranking") or {}
     freshness = _generation_freshness_meta()
+    if not report:
+        freshness = dict(freshness)
+        freshness.update({"current": False, "stale": True})
+        freshness["reasons"] = sorted(set(
+            list(freshness.get("reasons") or []) + ["CURRENT_POLICY_REPORT_MISSING"]
+        ))
     blockers = list(report.get("blockers") or (['V3_REPORT_NOT_GENERATED'] if not report else []))
     if not freshness["current"]:
         blockers.append("STALE_ANALYZER_GENERATION")

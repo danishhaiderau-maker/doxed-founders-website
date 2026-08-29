@@ -12,6 +12,8 @@ def test_empty_overview_shows_deployed_epoch_and_five_collecting_identities(monk
 
     deployed = payload["deployed_policy_collection"]
     assert payload["status"] == "STALE GENERATION — QUALIFICATION BLOCKED"
+    assert payload["generation_freshness"]["current"] is False
+    assert "CURRENT_POLICY_REPORT_MISSING" in payload["generation_freshness"]["reasons"]
     assert payload["policy_epoch_id"] == "v31-analyzer-hypothesis-paper-v1"
     assert deployed["policy_count"] == 5
     assert deployed["qualification_allowed"] is False

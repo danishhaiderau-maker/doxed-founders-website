@@ -148,7 +148,7 @@ def test_runtime_owns_one_shadow_schedule_per_shared_ai_call():
         "\ndef ", 1
     )[0]
     assert "if not ai_decision_should_execute(ai):" in helper
-    assert "with _collector_epoch_lock:" in helper
+    assert "with _compressed_shadow_lock:" in helper
     assert "call_id in _compressed_shadow_seen_call_ids" in helper
     assert 'places_order=False' not in helper  # module owns immutable isolation flags
     process = source.split("def process_signal", 1)[1]

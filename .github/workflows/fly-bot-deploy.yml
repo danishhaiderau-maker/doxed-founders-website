@@ -64,11 +64,17 @@ jobs:
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
           python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py -q
+          python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
+          python -m pytest test_v31_overview_best_policy_counts.py -q
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+
+      - name: Verify canonical signal-engine parity
+        working-directory: ${{ github.workspace }}
+        run: node scripts/verify-signal-parity.mjs --full
 
       - name: Install production boundary checker
         working-directory: ${{ github.workspace }}

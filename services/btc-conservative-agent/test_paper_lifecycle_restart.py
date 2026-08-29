@@ -37,6 +37,14 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         for rows in self.bot.lane_open_positions.values():
             rows.clear()
         self.bot.state["live_armed"] = False
+        self.addCleanup(self._reset_pending_order_evidence_worker)
+
+    def _reset_pending_order_evidence_worker(self):
+        """Drain the module-global writer before the temp directory is removed."""
+        worker = self.bot._pending_order_evidence_worker
+        if worker is not None:
+            self.assertTrue(worker.shutdown(drain_timeout=5.0))
+            self.bot._pending_order_evidence_worker = None
 
     def _position(self):
         return {
@@ -251,6 +259,21 @@ class PaperLifecycleRestartTests(unittest.TestCase):
              mock.patch.object(self.bot, "_apply_position_exits", side_effect=lambda pos, mark, now: evaluated.append(pos["trade_id"])):
             self.bot.process_positions()
         self.assertEqual(evaluated, ["family-pos-1"])
+
+    def test_restart_without_awaiting_signals_skips_large_order_intent_index(self):
+        payload = {
+            "schema": "paper_lifecycle_v1",
+            "paper_only": True,
+            "live_armed": False,
+            "positions": [],
+            "pending_orders": [self._order()],
+            "awaiting_signals": [],
+        }
+        Path(self.bot.PAPER_LIFECYCLE_FILE).write_text(json.dumps(payload), encoding="utf-8")
+        with mock.patch.object(self.bot, "_load_v3_order_intent_identities") as load_index:
+            result = self.bot.load_paper_lifecycle()
+        load_index.assert_not_called()
+        self.assertEqual(result["pending_orders"], 1)
 
     def test_armed_snapshot_is_refused(self):
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": True,

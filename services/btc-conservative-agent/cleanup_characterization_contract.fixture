@@ -167,6 +167,7 @@
     ["_adopt_from_rebuild", "trade_lock", "state_lock"],
     ["_arm_live_control", "_live_control_lock", "state_lock"],
     ["_disarm_live_control", "_live_control_lock", "state_lock"],
+    ["_reset_collector_epoch_state", "_collector_epoch_lock", "_compressed_shadow_lock"],
     ["_reset_collector_epoch_state", "_collector_epoch_lock", "replay_lock"],
     ["process_signal", "lane_lock", "state_lock"],
     ["refresh_bbo_state", "_bbo_refresh_lock", "state_lock"],

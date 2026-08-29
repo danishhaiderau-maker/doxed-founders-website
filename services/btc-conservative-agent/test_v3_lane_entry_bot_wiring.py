@@ -139,6 +139,29 @@ def test_periodic_ledger_reconciliation_protects_only_durable_exposure():
     assert calls[0]["runtime_revision"] == "rev-1"
 
 
+def test_periodic_ledger_reconciliation_throttles_from_scan_completion():
+    timestamps = iter((2000.0, 2000.0, 2045.0))
+    namespace = {
+        "time": type("Clock", (), {"time": staticmethod(lambda: next(timestamps))}),
+        "copy": copy,
+        "os": os,
+        "trade_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_last_ts": 0.0,
+        "V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC": 30.0,
+        "open_positions": [],
+        "pending_orders": [],
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "_runtime_git_rev": lambda: "rev-1",
+        "reconcile_overdue_expected_order_decisions": lambda **_kwargs: {"reconciled": 0},
+        "logger": QuietLogger(),
+    }
+    reconcile = load_function("_reconcile_overdue_v3_expected_orders", namespace)
+
+    assert reconcile(force=True) == {"reconciled": 0}
+    assert namespace["_v3_expected_order_reconcile_last_ts"] == 2045.0
+
+
 def test_stale_signal_reconciliation_also_runs_durable_v3_reconciliation():
     reconcile = ast.get_source_segment(
         SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
