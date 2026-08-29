@@ -578,6 +578,28 @@ def _bind_candidate_receipt_identity(
     return bound
 
 
+def _validation_receipt_identity(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Project a fill receipt to the identity facts consumed by validation.
+
+    The protection screen can materialize millions of policy/episode rows.  A
+    complete conservative fill receipt is evidence input, but the assessment
+    phase only counts whether its identity is complete and which required
+    identities are missing.  Retaining the full receipt once per protection
+    policy multiplied the same diagnostics and market evidence across the
+    entire grid and pushed CPython into native access violations during final
+    validation.  Keep the exact consumed facts without weakening any gate.
+    """
+    identity = receipt.get("identity") or {}
+    if not isinstance(identity, dict):
+        identity = {}
+    return {
+        "complete": identity.get("complete") is True,
+        "missing_required_identities": list(
+            identity.get("missing_required_identities") or []
+        ),
+    }
+
+
 def _cycle_atr_by_event(root: Path) -> dict[str, float]:
     """Index the immutable 3-minute receipt used by pre-normalized V3.1 rows."""
     result: dict[str, float] = {}
@@ -1095,25 +1117,21 @@ def evaluate_protection_screen(
                 if conservative_outcome == "NO_FILL":
                     outcome = {
                         "outcome_state": "NO_FILL", "net_pnl_usd": None,
-                        "fill_receipt": policy_receipt,
                     }
                 elif conservative_outcome == "UNSUPPORTED":
                     outcome = {
                         "outcome_state": "UNSUPPORTED",
                         "reason": "CONSERVATIVE_FILL_EVIDENCE_UNSUPPORTED",
-                        "fill_receipt": policy_receipt,
                     }
                 elif conservative_outcome not in {"FILL", "PARTIAL_FILL"}:
                     outcome = {
                         "outcome_state": "UNSUPPORTED",
                         "reason": "UNKNOWN_CONSERVATIVE_FILL_OUTCOME",
-                        "fill_receipt": policy_receipt,
                     }
                 elif not prices or source.get("atr14_pct") is None:
                     outcome = {
                         "outcome_state": "UNSUPPORTED",
                         "reason": "ORDERED_1S_PATH_OR_ATR_MISSING",
-                        "fill_receipt": policy_receipt,
                     }
                 else:
                     replay = replay_protected_policy(
@@ -1140,7 +1158,6 @@ def evaluate_protection_screen(
                         "profit_giveback_pct": replay.get("profit_giveback_pct"),
                         "underwater_observation_ratio": replay.get("underwater_observation_ratio"),
                         "replay_path_basis": replay_path_basis,
-                        "fill_receipt": policy_receipt,
                     }
                 diagnostic_outcome: dict[str, Any]
                 if child.get("fill_ts") is None:
@@ -1195,7 +1212,7 @@ def evaluate_protection_screen(
                         "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
                         "regime": source.get("regime"),
                         "replay_path_basis": replay_path_basis,
-                        "receipt_identity": policy_receipt.get("identity"),
+                        "receipt_identity": _validation_receipt_identity(policy_receipt),
                         "policy_outcomes": {policy_id: outcome},
                         "ideal_touch_policy_outcomes": {policy_id: diagnostic_outcome},
                     }

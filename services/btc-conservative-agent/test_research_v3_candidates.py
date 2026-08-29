@@ -9,6 +9,7 @@ from research_v3_candidates import (
     _PolicyNeighborIndex,
     _apply_multifactor_ranking,
     _bind_candidate_receipt_identity,
+    _validation_receipt_identity,
     _comparison_cohort_receipt,
     _conservative_child_receipt,
     _conservative_ohlc_prices,
@@ -83,6 +84,31 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
 
 
 class V3CandidateTests(unittest.TestCase):
+    def test_validation_receipt_identity_drops_unconsumed_receipt_evidence(self):
+        receipt = {
+            "identity": {
+                "schema": "candidate_episode_receipt_identity_v1",
+                "complete": False,
+                "missing_required_identities": ["tape_ids", "schedule_sha256"],
+                "fill_receipt_id": "candidate-fill-ignored-by-assessment",
+                "large_ignored_identity_field": "x" * 1_000_000,
+            },
+            "diagnostics": {"large_ignored_receipt_field": "y" * 1_000_000},
+            "evidence_bucket_ids": list(range(10_000)),
+        }
+
+        projected = _validation_receipt_identity(receipt)
+
+        self.assertEqual(
+            projected,
+            {
+                "complete": False,
+                "missing_required_identities": ["tape_ids", "schedule_sha256"],
+            },
+        )
+        self.assertNotIn("diagnostics", projected)
+        self.assertNotIn("fill_receipt_id", projected)
+
     def test_comparison_cohort_matches_across_distinct_policy_treatments(self):
         rows = [
             {
