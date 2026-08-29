@@ -1,6 +1,8 @@
 """Analyzer-facing Safe Policy Genome V3 status and ranking report."""
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import os
 from collections import Counter
@@ -14,9 +16,15 @@ from research_v3_candidates import evaluate_protection_screen, load_candidate_in
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
-from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
+from combo_pathway_config import (
+    ACTIVE_TILE_ORDER,
+    ACTIVE_TILE_REGISTRY,
+    active_tile_registry_signature,
+)
 
 REPORT_FILE = "safe_policy_genome_v3_report.json"
+EXHAUSTIVE_POLICY_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
+EXHAUSTIVE_POLICY_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
 
 
 def _deployed_policy_collection() -> dict[str, Any]:
@@ -61,6 +69,212 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _source_revision(data_dir: str | Path) -> str:
+    """Resolve the mirrored source identity without invoking Git or the runtime."""
+    runtime_revision = str(
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or ""
+    ).strip()
+    for name in ("canonical_dataset_current.json", ".fly-sync-state.json"):
+        try:
+            payload = json.loads((Path(data_dir) / name).read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        revision = str(
+            payload.get("source_revision")
+            or payload.get("source_git_rev")
+            or payload.get("revision")
+            or ""
+        ).strip()
+        if revision:
+            # The canonical manifest may intentionally store Fly's 12-character
+            # display revision while the analyzer process is pinned to the full
+            # commit. Preserve the full identity only when it proves the same
+            # revision; otherwise fail closed to the canonical mirror value.
+            if runtime_revision and runtime_revision.startswith(revision):
+                return runtime_revision
+            return revision
+    return runtime_revision or "UNKNOWN"
+
+
+def _exhaustive_policy_row(
+    candidate: dict[str, Any],
+    *,
+    epoch_id: str,
+    source_revision: str,
+    analyzer_generation_revision: str,
+    tile_config_signature: str,
+) -> dict[str, Any]:
+    """Project one evaluated policy into a stable, compact audit contract."""
+    validation = candidate.get("validation") or {}
+    risk = validation.get("risk") or {}
+    bootstrap = validation.get("bootstrap") or {}
+    ideal = candidate.get("ideal_touch_diagnostic") or {}
+    full = int(candidate.get("full_fills") or 0)
+    partial = int(candidate.get("partial_fills") or 0)
+    no_fill = int(candidate.get("no_fills") or 0)
+    unknown = int(candidate.get("unsupported_episodes") or 0)
+    supported = int(candidate.get("supported_conservative_episodes") or 0)
+    independent = int(candidate.get("oos_episodes") or 0)
+    unavailable_reasons = []
+    if supported == 0:
+        unavailable_reasons.append("NO_SUPPORTED_CONSERVATIVE_EPISODES")
+    if full + partial == 0:
+        unavailable_reasons.append("NO_CONSERVATIVE_FILLS")
+    if unknown:
+        unavailable_reasons.append("UNSUPPORTED_OR_MISSING_EXECUTION_EVIDENCE")
+    if candidate.get("comparison_cohort_key") is None:
+        unavailable_reasons.append("COMPARISON_COHORT_IDENTITY_INCOMPLETE")
+    policy_identity_verified = not str(candidate.get("policy_signature") or "").startswith("UNVERIFIED-")
+    if not policy_identity_verified:
+        unavailable_reasons.append("POLICY_SIGNATURE_MISSING")
+    metrics_available = full + partial > 0 and risk.get("net_pnl_usd") is not None
+    if metrics_available and (
+        bootstrap.get("mean_lcb95") is None or bootstrap.get("mean_ucb95") is None
+    ):
+        unavailable_reasons.append("CONFIDENCE_INTERVAL_UNAVAILABLE")
+    if metrics_available and all(
+        candidate.get(field) is None
+        for field in ("funding_cost_usd", "slippage_usd", "fee_cost_usd")
+    ):
+        unavailable_reasons.append("FUNDING_SLIPPAGE_FEE_AGGREGATES_UNAVAILABLE")
+    return {
+        "schema": "safe_policy_exhaustive_row_v1",
+        "source_revision": source_revision,
+        "analyzer_generation_revision": analyzer_generation_revision,
+        "epoch_id": epoch_id,
+        "tile_config_signature": tile_config_signature,
+        "policy_id": candidate.get("policy_id"),
+        "policy_signature": candidate.get("policy_signature"),
+        "policy_identity_verified": policy_identity_verified,
+        "policy_family": candidate.get("policy_family") or "UNKNOWN",
+        "policy_spec": candidate.get("policy_spec") or {},
+        "evidence_world": candidate.get("evidence_world") or "CONSERVATIVE_BBO_DEPTH_V1",
+        "qualification": candidate.get("qualification") or "DESCRIPTIVE_ONLY",
+        "qualification_gates": candidate.get("gates") or validation.get("gates") or {},
+        "independent_episode_count": independent,
+        "episodes_total": int(candidate.get("episodes_total") or 0),
+        "supported_episode_count": supported,
+        "full_fill_count": full,
+        "partial_fill_count": partial,
+        "no_fill_count": no_fill,
+        "unknown_count": unknown,
+        "fill_count": full + partial,
+        "fill_rate": candidate.get("conservative_fill_rate"),
+        "wins": risk.get("wins") if metrics_available else None,
+        "losses": risk.get("losses") if metrics_available else None,
+        "net_pnl_usd": risk.get("net_pnl_usd") if metrics_available else None,
+        "ev_per_independent_episode_usd": (
+            round(float(risk["net_pnl_usd"]) / independent, 8)
+            if metrics_available and independent else None
+        ),
+        "max_drawdown_usd": risk.get("max_drawdown_usd") if metrics_available else None,
+        "max_drawdown_pct": risk.get("max_drawdown_pct") if metrics_available else None,
+        "cvar95_usd": risk.get("cvar95_usd") if metrics_available else None,
+        "expected_shortfall_usd": risk.get("cvar95_usd") if metrics_available else None,
+        "longest_losing_sequence": risk.get("longest_loss_streak") if metrics_available else None,
+        "expectancy_lcb95_usd": bootstrap.get("mean_lcb95") if metrics_available else None,
+        "expectancy_ucb95_usd": bootstrap.get("mean_ucb95") if metrics_available else None,
+        "confidence_interval_available": bool(
+            metrics_available
+            and bootstrap.get("mean_lcb95") is not None
+            and bootstrap.get("mean_ucb95") is not None
+        ),
+        # The current protection evaluator does not aggregate these costs at
+        # candidate level. Retain explicit nulls rather than silently implying
+        # zero cost; unavailable_reasons below explains the evidence gap.
+        "funding_cost_usd": candidate.get("funding_cost_usd") if metrics_available else None,
+        "slippage_usd": candidate.get("slippage_usd") if metrics_available else None,
+        "fee_cost_usd": candidate.get("fee_cost_usd") if metrics_available else None,
+        "ideal_touch_diagnostic": {
+            "evidence_world": ideal.get("evidence_world") or "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "touches": int(ideal.get("touches") or 0),
+            "no_touches": int(ideal.get("no_touches") or 0),
+            "wins": ideal.get("wins"),
+            "losses": ideal.get("losses"),
+            "net_pnl_usd": ideal.get("oos_net_usd"),
+            "max_drawdown_usd": ideal.get("max_drawdown_usd"),
+            "qualification_eligible": False,
+        },
+        "comparison_cohort": candidate.get("comparison_cohort") or {},
+        "receipt_identity": candidate.get("receipt_identity") or {},
+        "regime_breakdown": candidate.get("regime_breakdown") or {},
+        "risk_metrics_available": metrics_available,
+        "unavailable_reasons": sorted(set(unavailable_reasons)),
+    }
+
+
+def _persist_exhaustive_policies(
+    report_dir: str | Path,
+    candidates: list[dict[str, Any]],
+    *,
+    epoch_id: str,
+    source_revision: str,
+    analyzer_generation_revision: str,
+    tile_config_signature: str,
+) -> dict[str, Any]:
+    """Atomically persist every unique evaluated policy as compressed JSONL."""
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in candidates:
+        policy_id = str(candidate.get("policy_id") or "").strip()
+        signature = str(candidate.get("policy_signature") or "").strip()
+        if not policy_id:
+            raise ValueError("exhaustive policy row missing policy_id")
+        if not signature:
+            # Externally supplied compatibility candidates in focused tests or
+            # migrations can predate signed policy identities. Retain them
+            # under an explicit non-qualified deterministic identity rather
+            # than silently dropping the evaluated row.
+            signature = "UNVERIFIED-" + hashlib.sha256(policy_id.encode("utf-8")).hexdigest()[:24]
+            candidate = {**candidate, "policy_signature": signature}
+        key = (policy_id, signature)
+        projected = _exhaustive_policy_row(
+            candidate,
+            epoch_id=epoch_id,
+            source_revision=source_revision,
+            analyzer_generation_revision=analyzer_generation_revision,
+            tile_config_signature=tile_config_signature,
+        )
+        previous = unique.get(key)
+        if previous is not None and previous != projected:
+            raise ValueError(f"conflicting duplicate exhaustive policy row: {policy_id}")
+        unique[key] = projected
+
+    destination = Path(report_dir) / EXHAUSTIVE_POLICY_FILE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + f".{os.getpid()}.tmp")
+    with temporary.open("wb") as raw:
+        with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+            for key in sorted(unique):
+                compressed.write(
+                    (json.dumps(unique[key], sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+                )
+        raw.flush()
+        os.fsync(raw.fileno())
+    os.replace(temporary, destination)
+    checksum = hashlib.sha256(destination.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "safe_policy_exhaustive_manifest_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_revision": source_revision,
+        "analyzer_generation_revision": analyzer_generation_revision,
+        "epoch_id": epoch_id,
+        "tile_config_signature": tile_config_signature,
+        "artifact": EXHAUSTIVE_POLICY_FILE,
+        "compression": "gzip",
+        "row_schema": "safe_policy_exhaustive_row_v1",
+        "row_count": len(unique),
+        "sha256": checksum,
+        "size_bytes": destination.stat().st_size,
+        "deduplication_key": ["policy_id", "policy_signature"],
+        "independence_basis": "ONE_SHARED_OPPORTUNITY_EPISODE_NOT_SIBLING_LANE_COUNT",
+    }
+    _atomic_json(Path(report_dir) / EXHAUSTIVE_POLICY_MANIFEST_FILE, manifest)
+    return manifest
 
 
 def _fresh_cutoff(data_dir: str | Path) -> float | None:
@@ -440,6 +654,19 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         ranking = dict(ranking)
         ranking["number_one"] = None
         ranking["qualification"] = "BLOCKED_ORDER_RESOLUTION_INTEGRITY"
+    exhaustive_manifest = _persist_exhaustive_policies(
+        report_dir,
+        list(candidates or []),
+        epoch_id=epoch_id,
+        source_revision=_source_revision(data_dir),
+        analyzer_generation_revision=str(
+            os.getenv("SOURCE_GIT_REV")
+            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("GIT_REVISION")
+            or "UNKNOWN"
+        ),
+        tile_config_signature=active_tile_registry_signature(),
+    )
     # The replay engine may assess tens of thousands of complete policies.  The
     # full candidate rows are working memory, not a report contract: persisting
     # them under both candidate_screen.candidates and ranking.blocked made a
@@ -538,6 +765,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "search": search,
         "search_progress": search_progress(search, progress_receipts),
         "candidate_screen": persisted_candidate_screen,
+        "exhaustive_policy_results": exhaustive_manifest,
         "safe_policy_ranking": persisted_ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],

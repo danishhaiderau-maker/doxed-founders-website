@@ -100,6 +100,8 @@ DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
+SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
+SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -19252,6 +19254,37 @@ def write_report_manifest(payload=None):
                 "size_bytes": os.path.getsize(mirrored_report),
                 "modified_at": datetime.fromtimestamp(
                     os.path.getmtime(fname), tz=timezone.utc
+                ).isoformat(),
+                "analysis_provenance": analysis_provenance,
+            })
+    # The exhaustive policy grid is intentionally separate from the bounded
+    # dashboard JSON. It is compressed, immutable for this generation, and is
+    # copied without JSON stamping so its manifest checksum remains verifiable.
+    for title, fname, desc in (
+        (
+            "Exhaustive Policy Results",
+            SAFE_POLICY_EXHAUSTIVE_FILE,
+            "Every deduplicated evaluated entry+exit policy, including losing, unsupported and non-shortlisted rows",
+        ),
+        (
+            "Exhaustive Policy Results Manifest",
+            SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE,
+            "Row count, revision, epoch, tile signature and checksum for the exhaustive compressed policy artifact",
+        ),
+    ):
+        source = Path(policy_report_dir) / fname
+        if source.is_file() and source.stat().st_mtime >= current_run_cutoff:
+            os.makedirs(REPORTS_DIR, exist_ok=True)
+            mirrored_report = Path(REPORTS_DIR) / fname
+            shutil.copy2(source, mirrored_report)
+            reports.append({
+                "title": title,
+                "file": fname,
+                "category": "Genome & Reports",
+                "description": desc,
+                "size_bytes": mirrored_report.stat().st_size,
+                "modified_at": datetime.fromtimestamp(
+                    source.stat().st_mtime, tz=timezone.utc
                 ).isoformat(),
                 "analysis_provenance": analysis_provenance,
             })
