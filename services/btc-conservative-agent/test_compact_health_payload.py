@@ -87,16 +87,18 @@ def test_compact_health_preserves_status_and_bounds_dead_letters():
     assert len(encoded) < 2_000
 
 
-def test_health_and_ready_use_compact_strategy_snapshot():
+def test_health_is_liveness_only_and_ready_uses_compact_strategy_snapshot():
     health_start = BOT.index("def health():")
     ready_start = BOT.index("def ready():", health_start)
     ready_end = BOT.index("\n@app.route", ready_start + len("def ready():"))
     health_body = BOT[health_start:ready_start]
     ready_body = BOT[ready_start:ready_end]
     marker = "_compact_strategy_progress_health_snapshot("
-    assert marker in health_body
+    assert marker not in health_body
     assert marker in ready_body
-    assert "_strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)" in health_body
+    assert '"probe_contract": "PROCESS_LIVENESS_ONLY"' in health_body
+    assert '"readiness_endpoint": "/ready"' in health_body
+    assert "_strategy_progress_health_snapshot(" not in health_body
     assert "_strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)" in ready_body
 
 

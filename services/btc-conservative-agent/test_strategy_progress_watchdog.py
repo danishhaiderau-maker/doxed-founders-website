@@ -148,6 +148,22 @@ def test_tracked_rlock_timeout_keeps_owner_and_records_contention():
     assert not thread.is_alive()
 
 
+def test_owner_transition_receipt_is_bounded_and_clears_on_owner_publish():
+    lock = compile_tracked_lock()("transition-lock")
+    now = __import__("time").time()
+    with lock._meta_lock:
+        lock._owner_ident = None
+        lock._owner_name = None
+        lock._depth = 0
+        lock._owner_at_last_timeout = "OWNER_TRANSITION_PENDING"
+        lock._owner_transition_since = now - 0.01
+    detail = lock.diagnostics(now)
+    assert 0.0 <= detail["owner_transition_age_sec"] <= 0.02
+    assert lock.acquire(blocking=False) is True
+    lock.release()
+    assert lock.diagnostics(now + 1.0)["owner_transition_age_sec"] is None
+
+
 def test_tracked_rlock_handoff_never_exposes_ownerless_unavailable_state():
     lock = compile_tracked_lock()("handoff-lock")
     stop = threading.Event()
@@ -228,6 +244,49 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertFalse(result["trade_lock_available"])
         self.assertEqual(result["trade_lock_diagnostics"], {})
+
+    def test_fresh_owner_transition_is_transient_for_zero_wait_probe(self):
+        class TransitionLock:
+            def acquire(self, **_kwargs):
+                return False
+
+            def diagnostics(self, now=None):
+                return {
+                    "owner_ident": None,
+                    "owner_active": False,
+                    "depth": 0,
+                    "held_seconds": 0.0,
+                    "owner_at_last_timeout": "OWNER_TRANSITION_PENDING",
+                    "owner_transition_age_sec": 0.01,
+                }
+
+        self.snapshot.__globals__["trade_lock"] = TransitionLock()
+        result = self.snapshot(self.now, trade_lock_timeout_sec=0.0)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["trade_lock_busy_transient"])
+        self.assertTrue(result["trade_lock_progressing"])
+        self.assertNotIn("TRADE_LOCK_UNAVAILABLE", result["reasons"])
+
+    def test_stale_owner_transition_still_fails_closed(self):
+        class StaleTransitionLock:
+            def acquire(self, **_kwargs):
+                return False
+
+            def diagnostics(self, now=None):
+                return {
+                    "owner_ident": None,
+                    "owner_active": False,
+                    "depth": 0,
+                    "held_seconds": 0.0,
+                    "owner_at_last_timeout": "OWNER_TRANSITION_PENDING",
+                    "owner_transition_age_sec": 0.011,
+                }
+
+        self.snapshot.__globals__["trade_lock"] = StaleTransitionLock()
+        result = self.snapshot(self.now, trade_lock_timeout_sec=0.0)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["trade_lock_busy_transient"])
+        self.assertIn("TRADE_LOCK_UNAVAILABLE", result["reasons"])
 
     def test_tracked_lock_reports_owner_and_stack_without_releasing_it(self):
         class DiagnosticLock:

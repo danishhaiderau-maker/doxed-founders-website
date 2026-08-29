@@ -25494,6 +25494,7 @@ class _TrackedRLock:
         self._last_timeout_thread = None
         self._owner_at_last_timeout = None
         self._owner_ident_at_last_timeout = None
+        self._owner_transition_since = 0.0
 
     def acquire(self, blocking=True, timeout=-1):
         acquired = self._lock.acquire(blocking, timeout)
@@ -25508,6 +25509,7 @@ class _TrackedRLock:
                     self._acquired_at = time.time()
                     self._depth = 1
                     self._acquire_sequence += 1
+                self._owner_transition_since = 0.0
         else:
             with self._meta_lock:
                 self._timeout_count += 1
@@ -25517,6 +25519,11 @@ class _TrackedRLock:
                     self._owner_name or "OWNER_TRANSITION_PENDING"
                 )
                 self._owner_ident_at_last_timeout = self._owner_ident
+                if self._owner_ident is None and self._depth == 0:
+                    if self._owner_transition_since <= 0.0:
+                        self._owner_transition_since = self._last_timeout_at
+                else:
+                    self._owner_transition_since = 0.0
         return acquired
 
     def release(self):
@@ -25558,7 +25565,12 @@ class _TrackedRLock:
             last_timeout_thread = self._last_timeout_thread
             owner_at_last_timeout = self._owner_at_last_timeout
             owner_ident_at_last_timeout = self._owner_ident_at_last_timeout
+            owner_transition_since = self._owner_transition_since
         held_sec = max(0.0, float(now or time.time()) - acquired_at) if acquired_at else 0.0
+        transition_age_sec = (
+            max(0.0, float(now or time.time()) - owner_transition_since)
+            if owner_transition_since else None
+        )
         stack_tail = []
         owner_active = False
         if owner_ident is not None:
@@ -25582,6 +25594,10 @@ class _TrackedRLock:
             "last_timeout_thread": last_timeout_thread,
             "owner_at_last_timeout": owner_at_last_timeout,
             "owner_ident_at_last_timeout": owner_ident_at_last_timeout,
+            "owner_transition_age_sec": (
+                round(transition_age_sec, 3)
+                if transition_age_sec is not None else None
+            ),
             "stack_tail": stack_tail,
         }
 
@@ -27797,6 +27813,31 @@ def _trade_lock_probe_status(
         and valid_held_seconds
         and float(held_seconds) <= WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
     )
+    # ``RLock.acquire()`` succeeds before Python can publish the new owner
+    # metadata.  A zero-wait readiness probe can lose in that tiny handoff and
+    # truthfully observe depth=0/owner=None even though the new owner already
+    # holds the underlying lock.  Grant only a watchdog-bounded grace using a
+    # monotonic transition receipt recorded by _TrackedRLock; if publication
+    # never completes, the unchanged receipt ages out and readiness fails
+    # closed instead of hiding a stuck acquisition.
+    transition_age = lock_diagnostics.get("owner_transition_age_sec")
+    valid_transition_age = bool(
+        isinstance(transition_age, (int, float))
+        and math.isfinite(float(transition_age))
+        and float(transition_age) >= 0.0
+    )
+    owner_transition_transient = bool(
+        not lock_available
+        and trade_lock_timeout_sec is not None
+        and float(trade_lock_timeout_sec) <= 0.0
+        and lock_diagnostics.get("owner_ident") is None
+        and int(lock_diagnostics.get("depth") or 0) == 0
+        and lock_diagnostics.get("owner_at_last_timeout")
+        == "OWNER_TRANSITION_PENDING"
+        and valid_transition_age
+        and float(transition_age) <= WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+    )
+    busy_transient = bool(busy_transient or owner_transition_transient)
     return busy_transient, bool(lock_available or busy_transient)
 
 
