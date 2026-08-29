@@ -142,8 +142,8 @@ def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
 
 
 def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
-    assert "$preflightManifestAttempts = 8" in SYNC_LOOP
-    assert "$preflightInventoryWaitMaxSec = 60" in SYNC_LOOP
+    assert "$preflightManifestAttempts = 13" in SYNC_LOOP
+    assert "$preflightInventoryWaitMaxSec = 120" in SYNC_LOOP
     assert "$preflightManifestTimeoutSec = 90" in SYNC_LOOP
     assert "function Get-FlySyncPreflightManifest" in SYNC_LOOP
     assert "stage=loop_manifest_preflight failed after" in SYNC_LOOP

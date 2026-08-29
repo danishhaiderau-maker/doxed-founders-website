@@ -183,8 +183,8 @@ def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
     end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
     function_source = source[start:end]
     harness = (
-        "$preflightManifestAttempts=8; $preflightManifestTimeoutSec=90; "
-        "$preflightInventoryWaitMaxSec=60; $env:BOT_ADMIN_TOKEN='test'; "
+        "$preflightManifestAttempts=13; $preflightManifestTimeoutSec=90; "
+        "$preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
         "$script:calls=0; $script:delays=@(); "
         "function Invoke-RestMethod { $script:calls += 1; "
         "if ($script:calls -lt 8) { throw 'inventory building' }; "
@@ -203,6 +203,48 @@ def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
     )
     assert calls == 8
     assert modeled_wait == 50
+
+
+def _run_modeled_preflight(success_call: int | None) -> tuple[int, int, int]:
+    source = LOOP_PATH.read_text(encoding="utf-8")
+    start = source.index("function Get-FlySyncPreflightManifest")
+    end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
+    function_source = source[start:end]
+    success_condition = (
+        f"$script:calls -lt {success_call}"
+        if success_call is not None else "$true"
+    )
+    harness = (
+        "$preflightManifestAttempts=13; $preflightManifestTimeoutSec=90; "
+        "$preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
+        "$script:calls=0; $script:delays=@(); $script:failed=0; "
+        "function Invoke-RestMethod { $script:calls += 1; "
+        f"if ({success_condition}) {{ throw 'inventory building' }}; "
+        "[pscustomobject]@{inventory_status='CURRENT'} }; "
+        "function Start-Sleep { param([int]$Seconds) $script:delays += $Seconds }; "
+        + function_source +
+        "; try { $null=Get-FlySyncPreflightManifest -ManifestUri 'https://example.invalid' } "
+        "catch { $script:failed=1 }; "
+        "Write-Output \"$script:calls,$(($script:delays | Measure-Object -Sum).Sum),$script:failed\""
+    )
+    completed = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", harness],
+        capture_output=True, text=True, timeout=15, check=True,
+    )
+    return tuple(map(int, completed.stdout.strip().splitlines()[-1].split(",")))
+
+
+def test_building_inventory_can_complete_after_ninety_modeled_seconds():
+    calls, modeled_wait, failed = _run_modeled_preflight(success_call=12)
+    assert (calls, modeled_wait, failed) == (12, 90, 0)
+
+
+def test_building_inventory_join_remains_bounded_when_worker_never_completes():
+    calls, modeled_wait, failed = _run_modeled_preflight(success_call=None)
+    assert calls == 13
+    assert modeled_wait == 100
+    assert modeled_wait <= 120
+    assert failed == 1
 
 
 def test_fly_deployment_workflow_executes_cadence_contract_suite():
