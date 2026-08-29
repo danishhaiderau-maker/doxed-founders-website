@@ -33,6 +33,7 @@ from research.genome.similarity import nearest_cluster
 from research.genome.taxonomy import build_taxonomy_summary
 from research.genome.transitions import summarize_transitions
 from research.genome.validation import validate_genome_integrity
+from research_genome.store import ResearchStore
 
 GENOME_REPORT_FILE = "genome_analysis_report.json"
 GENOME_LIBRARY_FILE = "genome_library.json"
@@ -86,6 +87,49 @@ def _source_preflight(db_path: str) -> Dict[str, Any]:
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
+            identity = None
+            if "research_generation_segments" in available:
+                row = connection.execute(
+                    """SELECT generation_id, dataset_epoch, deployed_revision,
+                              tile_config_signature, schema_version, recorded_at,
+                              start_boundaries_json, legacy_unbound_counts_json
+                         FROM research_generation_segments ORDER BY rowid DESC LIMIT 1"""
+                ).fetchone()
+                if row:
+                    identity = dict(zip(
+                        ("generation_id", "dataset_epoch", "deployed_revision",
+                         "tile_config_signature", "schema_version", "recorded_at",
+                         "start_boundaries_json", "legacy_unbound_counts_json"), row,
+                    ))
+                    identity = ResearchStore._decode_generation(identity)
+                    identity["generation_segment_count"] = int(connection.execute(
+                        """SELECT COUNT(*) FROM research_generation_segments
+                           WHERE dataset_epoch = ?""",
+                        (identity["dataset_epoch"],),
+                    ).fetchone()[0])
+                    latest = None
+                    if "research_ingestion_status" in available:
+                        latest = connection.execute(
+                            """SELECT status, observed_at, row_count, opportunity_count, detail_json
+                                 FROM research_ingestion_status WHERE generation_id = ?
+                                 ORDER BY id DESC LIMIT 1""",
+                            (identity["generation_id"],),
+                        ).fetchone()
+                    identity["last_ingestion"] = None if not latest else {
+                        "status": latest[0], "observed_at": latest[1],
+                        "row_count": latest[2], "opportunity_count": latest[3],
+                        "detail": json.loads(latest[4] or "{}"),
+                    }
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return {
+            "schema": "genome_source_status_v1", "status": "GENOME_SOURCE_UNAVAILABLE",
+            "generated_at": generated_at, "reason": "GENERATION_IDENTITY_METADATA_INVALID",
+            "error_type": type(exc).__name__, "source_label": os.path.basename(db_path),
+            "required_tables": sorted(REQUIRED_SOURCE_TABLES), "available_tables": [],
+            "missing_tables": [], "generation_identity_status": "INVALID",
+            "generation_identity": None, "execution_affected": False,
+            "other_research_pages_affected": False,
+        }
     except sqlite3.Error as exc:
         return {
             "schema": "genome_source_status_v1", "status": "GENOME_SOURCE_UNAVAILABLE",
@@ -105,6 +149,8 @@ def _source_preflight(db_path: str) -> Dict[str, Any]:
         "required_tables": sorted(REQUIRED_SOURCE_TABLES),
         "available_tables": sorted(available),
         "missing_tables": sorted(missing),
+        "generation_identity_status": "AVAILABLE" if identity else "IDENTITY_METADATA_MISSING",
+        "generation_identity": identity,
         "execution_affected": False,
         "other_research_pages_affected": False,
     }

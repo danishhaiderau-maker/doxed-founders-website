@@ -52,7 +52,14 @@ def build_environment_context(ts: datetime | None = None) -> Dict[str, Any]:
 
 
 class GenomeBridge:
-    def __init__(self, base_dir: str) -> None:
+    def __init__(
+        self,
+        base_dir: str,
+        *,
+        dataset_epoch: str | None = None,
+        deployed_revision: str | None = None,
+        tile_config_signature: str | None = None,
+    ) -> None:
         self.base_dir = base_dir
         self.bus = ResearchEventBus()
         self.store = ResearchStore(base_dir)
@@ -60,7 +67,48 @@ class GenomeBridge:
         self._current_env_id: str | None = None
         self._current_mkt_id: str | None = None
         self._current_dec_id: str | None = None
+        self._generation_identity: Dict[str, Any] | None = None
+        identity_values = (dataset_epoch, deployed_revision, tile_config_signature)
+        if any(identity_values):
+            if not all(identity_values):
+                raise ValueError("GENOME_GENERATION_IDENTITY_INCOMPLETE")
+            self.bind_generation_identity(
+                dataset_epoch=str(dataset_epoch),
+                deployed_revision=str(deployed_revision),
+                tile_config_signature=str(tile_config_signature),
+            )
         logger.info("[GENOME] bridge initialized db=%s", self.store.db_path)
+
+    def bind_generation_identity(
+        self,
+        *,
+        dataset_epoch: str,
+        deployed_revision: str,
+        tile_config_signature: str,
+    ) -> Dict[str, Any]:
+        """Bind one immutable collection generation to this Genome database."""
+        revision = str(deployed_revision or "").strip().lower()
+        if len(revision) != 40 or any(ch not in "0123456789abcdef" for ch in revision):
+            raise ValueError("GENOME_DEPLOYED_REVISION_NOT_EXACT_FULL_SHA")
+        identity = self.store.record_generation_identity(
+            dataset_epoch=dataset_epoch,
+            deployed_revision=revision,
+            tile_config_signature=tile_config_signature,
+        )
+        counts = self.store.stats()
+        self.store.record_ingestion_status(
+            generation_id=identity["generation_id"],
+            status="BRIDGE_INITIALIZED",
+            row_count=sum(counts.values()),
+            opportunity_count=None,
+            detail={
+                "count_semantics": "genome_table_rows_plus_research_events",
+                "opportunity_count_status": "UNAVAILABLE_IN_GENOME_STORE",
+                "snapshot_counts": counts,
+            },
+        )
+        self._generation_identity = self.store.generation_identity(identity["generation_id"])
+        return dict(self._generation_identity or identity)
 
     @property
     def bus_seq(self) -> int:
@@ -132,11 +180,13 @@ class GenomeBridge:
             "enabled": True,
             "bus_seq": self.bus_seq,
             "db_path": self.store.db_path,
+            "generation_identity": self._generation_identity,
             **self.store.stats(),
         }
 
     def reset_research_store(self) -> Dict[str, int]:
         result = self.store.reset()
+        self._generation_identity = None
         self._current_env_id = None
         self._current_mkt_id = None
         self._current_dec_id = None
@@ -144,7 +194,13 @@ class GenomeBridge:
         return result
 
 
-def init_genome_bridge(base_dir: str | None = None) -> GenomeBridge:
+def init_genome_bridge(
+    base_dir: str | None = None,
+    *,
+    dataset_epoch: str | None = None,
+    deployed_revision: str | None = None,
+    tile_config_signature: str | None = None,
+) -> GenomeBridge:
     global _bridge
     if base_dir:
         root = os.path.abspath(base_dir)
@@ -158,7 +214,12 @@ def init_genome_bridge(base_dir: str | None = None) -> GenomeBridge:
         else:
             root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.makedirs(root, exist_ok=True)
-    _bridge = GenomeBridge(root)
+    _bridge = GenomeBridge(
+        root,
+        dataset_epoch=dataset_epoch,
+        deployed_revision=deployed_revision,
+        tile_config_signature=tile_config_signature,
+    )
     return _bridge
 
 

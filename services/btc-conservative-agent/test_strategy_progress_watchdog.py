@@ -43,6 +43,12 @@ RECOVERY_GATE_FUNCTION = next(
     if isinstance(node, ast.FunctionDef)
     and node.name == "can_run_ai_recovery_observation"
 )
+LOCK_PROBE_FUNCTION = next(
+    node
+    for node in TREE.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_trade_lock_probe_status"
+)
 
 
 class CsvWriterLockOrderTests(unittest.TestCase):
@@ -77,10 +83,11 @@ def compile_snapshot(namespace):
     namespace.setdefault("replay_lock", threading.RLock())
     namespace.setdefault("post_ai_evidence_health_snapshot", lambda: {})
     namespace.setdefault("sys", __import__("sys"))
+    namespace.setdefault("math", __import__("math"))
     namespace.setdefault("traceback", __import__("traceback"))
     namespace.setdefault("Path", Path)
     namespace.setdefault("WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC", 600.0)
-    module = ast.Module(body=[FUNCTION], type_ignores=[])
+    module = ast.Module(body=[LOCK_PROBE_FUNCTION, FUNCTION], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
     return namespace["_strategy_progress_health_snapshot"]

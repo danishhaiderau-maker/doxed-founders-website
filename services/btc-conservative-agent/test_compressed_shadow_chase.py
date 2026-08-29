@@ -1,4 +1,5 @@
 import hashlib
+import ast
 import json
 from pathlib import Path
 
@@ -156,3 +157,57 @@ def test_runtime_owns_one_shadow_schedule_per_shared_ai_call():
     family_at = process.index("spawn_combo_lanes_from_ai_scan(")
     continuous_at = process.index("spawn_continuous_lane_from_ai_scan(")
     assert arm_at < family_at < continuous_at
+
+
+def test_arm_result_receipt_is_durable_non_execution_evidence():
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "services/btc-conservative-agent/bot.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    helper = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_record_compressed_shadow_arm_result"
+    )
+    namespace = {
+        "_safe_append_jsonl": lambda path, row, label: writes.append((path, row, label)) or True,
+        "CHASE_OFFSET_TOUCH_GRID_FILE": "grid.jsonl",
+        "utc_iso": lambda: "2026-08-29T00:00:00+00:00",
+    }
+    writes = []
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), "<arm-receipt>", "exec"), namespace)
+
+    assert namespace["_record_compressed_shadow_arm_result"](
+        "scan-receipt", "UNSUPPORTED", "MISSING_SIGNAL_PRICE",
+        direction="LONG", trade_id="shadow-1", epoch_id="epoch-1",
+    ) is True
+    assert len(writes) == 1
+    _, row, label = writes[0]
+    assert row["schema"] == "compressed_chase_arm_receipt_v1"
+    assert row["shared_ai_call_id"] == "scan-receipt"
+    assert row["status"] == "UNSUPPORTED"
+    assert row["reason"] == "MISSING_SIGNAL_PRICE"
+    assert row["shadow_only"] is True
+    assert row["places_order"] is False
+    assert label == "SHADOW_CHASE_ARM_RECEIPT"
+
+
+def test_arm_path_records_all_forward_failure_classes():
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "services/btc-conservative-agent/bot.py").read_text(
+        encoding="utf-8"
+    )
+    helper = source.split("def _arm_shared_compressed_shadow_chase", 1)[1].split(
+        "\ndef ", 1
+    )[0]
+    for reason in (
+        "MISSING_OR_INVALID_DIRECTION",
+        "MISSING_SIGNAL_PRICE",
+        "DUPLICATE_SHARED_CALL",
+        "ARM_EXCEPTION:",
+        "STAGE_ZERO_APPEND_FAILED",
+        "EPOCH_CHANGED_DURING_ARM",
+        "STAGE_ZERO_DURABLE",
+    ):
+        assert reason in helper

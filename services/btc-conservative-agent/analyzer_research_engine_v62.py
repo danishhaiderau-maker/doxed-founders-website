@@ -12045,6 +12045,25 @@ def _compressed_shadow_rows(session=None):
     return _filter_jsonl_rows_by_session(rows, session)
 
 
+def _compressed_shadow_arm_receipts(session=None):
+    """Load arm-attempt receipts without promoting them to schedule evidence."""
+    rows = []
+    seen = set()
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
+    roots = (Path(configured_root),) if configured_root else (Path("."),)
+    for filename in COMPRESSED_SHADOW_SCHEDULE_FILES:
+        for root in roots:
+            path = root / filename
+            resolved = str(path.resolve())
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            for row in _load_jsonl_rows(str(path)):
+                if str(row.get("schema") or "") == "compressed_chase_arm_receipt_v1":
+                    rows.append(row)
+    return _filter_jsonl_rows_by_session(rows, session)
+
+
 def _shadow_checkpoint_price(row, direction, *, entry=True):
     bbo = row.get("bbo") if isinstance(row.get("bbo"), dict) else {}
     if direction == "LONG":
@@ -12452,6 +12471,14 @@ def build_missed_opportunity_proof_report(session=None):
     counts = {name: 0 for name in _MISSED_PROOF_CLASSES}
     for row in proofs:
         counts[row["classification"]] += 1
+    arm_receipts = _compressed_shadow_arm_receipts(session=session)
+    arm_status_counts = {}
+    arm_reason_counts = {}
+    for receipt in arm_receipts:
+        status = str(receipt.get("status") or "UNKNOWN").upper()
+        reason = str(receipt.get("reason") or "UNKNOWN")
+        arm_status_counts[status] = arm_status_counts.get(status, 0) + 1
+        arm_reason_counts[reason] = arm_reason_counts.get(reason, 0) + 1
     empty_reason = None if proofs else "SOURCE_EMPTY_OR_UNAVAILABLE: no compressed_chase_shadow_v1 rows"
     return {
         "schema": "missed_opportunity_proof_v1",
@@ -12464,6 +12491,10 @@ def build_missed_opportunity_proof_report(session=None):
         "empty_reason": empty_reason,
         "proof_count": len(proofs),
         "classification_counts": counts,
+        "arm_receipt_count": len(arm_receipts),
+        "arm_status_counts": arm_status_counts,
+        "arm_reason_counts": arm_reason_counts,
+        "arm_receipts": arm_receipts,
         "proofs": proofs,
     }
 

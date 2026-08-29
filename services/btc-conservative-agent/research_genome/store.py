@@ -65,12 +65,36 @@ CREATE TABLE IF NOT EXISTS research_events (
   ts TEXT,
   payload_json TEXT
 );
+CREATE TABLE IF NOT EXISTS research_generation_segments (
+  generation_id TEXT PRIMARY KEY,
+  dataset_epoch TEXT NOT NULL,
+  deployed_revision TEXT NOT NULL,
+  tile_config_signature TEXT NOT NULL,
+  schema_version TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  start_boundaries_json TEXT NOT NULL,
+  legacy_unbound_counts_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS research_ingestion_status (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  generation_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  row_count INTEGER,
+  opportunity_count INTEGER,
+  detail_json TEXT NOT NULL,
+  FOREIGN KEY(generation_id) REFERENCES research_generation_segments(generation_id)
+);
 CREATE INDEX IF NOT EXISTS idx_market_env ON market_genome(environment_id);
 CREATE INDEX IF NOT EXISTS idx_decision_mkt ON decision_genome(market_genome_id);
 CREATE INDEX IF NOT EXISTS idx_exec_dec ON execution_genome(decision_id);
 CREATE INDEX IF NOT EXISTS idx_trade_dec ON trade_genome(decision_id);
 CREATE INDEX IF NOT EXISTS idx_events_name ON research_events(event_name);
+CREATE INDEX IF NOT EXISTS idx_generation_epoch ON research_generation_segments(dataset_epoch, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_ingestion_generation ON research_ingestion_status(generation_id, id);
 """
+
+GENERATION_IDENTITY_SCHEMA = "research_generation_segment_v2"
 
 
 class ResearchStore:
@@ -154,6 +178,227 @@ class ResearchStore:
                 ),
             )
             self._conn.commit()
+
+    def _evidence_boundaries_locked(self) -> Dict[str, Dict[str, int]]:
+        assert self._conn is not None
+        boundaries: Dict[str, Dict[str, int]] = {}
+        for table in (*LAYER_TABLES.values(), "research_events"):
+            count, max_rowid = self._conn.execute(
+                f"SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM {table}"
+            ).fetchone()
+            boundaries[table] = {"row_count": int(count), "max_rowid": int(max_rowid)}
+        return boundaries
+
+    @staticmethod
+    def generation_id(
+        *, dataset_epoch: str, deployed_revision: str, tile_config_signature: str
+    ) -> str:
+        material = "|".join((dataset_epoch, deployed_revision, tile_config_signature))
+        return "generation-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def record_generation_identity(
+        self,
+        *,
+        dataset_epoch: str,
+        deployed_revision: str,
+        tile_config_signature: str,
+        recorded_at: str | None = None,
+    ) -> Dict[str, Any]:
+        """Append a revision segment; never attribute earlier rows retroactively."""
+        epoch = str(dataset_epoch or "").strip()
+        revision = str(deployed_revision or "").strip().lower()
+        signature = str(tile_config_signature or "").strip()
+        if not epoch or not revision or not signature:
+            raise ValueError("GENERATION_IDENTITY_FIELDS_MISSING")
+        if len(revision) != 40 or any(ch not in "0123456789abcdef" for ch in revision):
+            raise ValueError("GENOME_DEPLOYED_REVISION_NOT_EXACT_FULL_SHA")
+        generation_id = self.generation_id(
+            dataset_epoch=epoch, deployed_revision=revision,
+            tile_config_signature=signature,
+        )
+        with self._lock:
+            assert self._conn is not None
+            current = self._conn.execute(
+                """SELECT generation_id, dataset_epoch, deployed_revision,
+                          tile_config_signature, schema_version, recorded_at,
+                          start_boundaries_json, legacy_unbound_counts_json
+                     FROM research_generation_segments WHERE generation_id = ?""",
+                (generation_id,),
+            ).fetchone()
+            keys = (
+                "generation_id", "dataset_epoch", "deployed_revision",
+                "tile_config_signature", "schema_version", "recorded_at",
+                "start_boundaries_json", "legacy_unbound_counts_json",
+            )
+            if current:
+                existing = dict(zip(keys, current))
+                if any(existing[name] != value for name, value in (
+                    ("dataset_epoch", epoch), ("deployed_revision", revision),
+                    ("tile_config_signature", signature),
+                    ("schema_version", GENERATION_IDENTITY_SCHEMA),
+                )):
+                    raise ValueError("GENERATION_IDENTITY_CONFLICT")
+                return self._decode_generation(existing)
+            boundaries = self._evidence_boundaries_locked()
+            stored_segments = self._conn.execute(
+                """SELECT generation_id, dataset_epoch, deployed_revision,
+                          tile_config_signature, schema_version, recorded_at,
+                          start_boundaries_json, legacy_unbound_counts_json
+                     FROM research_generation_segments ORDER BY rowid ASC"""
+            ).fetchall()
+            decoded_segments = [self._decode_generation(dict(zip(keys, row)))
+                                for row in stored_segments]
+            if decoded_segments:
+                latest_boundaries = decoded_segments[-1]["start_boundaries"]
+                for table, boundary in boundaries.items():
+                    if any(boundary[key] < latest_boundaries[table][key]
+                           for key in ("row_count", "max_rowid")):
+                        raise ValueError(f"GENERATION_IDENTITY_BOUNDARY_REGRESSION:{table}")
+                legacy_counts = decoded_segments[0]["legacy_unbound_counts"]
+            else:
+                legacy_counts = {
+                    name: values["row_count"] for name, values in boundaries.items()
+                }
+            values = {
+                "generation_id": generation_id,
+                "dataset_epoch": epoch,
+                "deployed_revision": revision,
+                "tile_config_signature": signature,
+                "schema_version": GENERATION_IDENTITY_SCHEMA,
+                "recorded_at": recorded_at or datetime.now(timezone.utc).isoformat(),
+                "start_boundaries_json": json.dumps(boundaries, sort_keys=True),
+                "legacy_unbound_counts_json": json.dumps(legacy_counts, sort_keys=True),
+            }
+            self._conn.execute(
+                """INSERT INTO research_generation_segments
+                   (generation_id, dataset_epoch, deployed_revision, tile_config_signature,
+                    schema_version, recorded_at, start_boundaries_json,
+                    legacy_unbound_counts_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                tuple(values[name] for name in keys),
+            )
+            self._conn.commit()
+        return self._decode_generation(values)
+
+    @staticmethod
+    def _decode_generation(values: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(values)
+        required = {
+            "generation_id", "dataset_epoch", "deployed_revision",
+            "tile_config_signature", "schema_version", "recorded_at",
+            "start_boundaries_json", "legacy_unbound_counts_json",
+        }
+        if required - result.keys():
+            raise ValueError("GENERATION_IDENTITY_METADATA_FIELDS_MISSING")
+        revision = str(result["deployed_revision"] or "").lower()
+        if len(revision) != 40 or any(ch not in "0123456789abcdef" for ch in revision):
+            raise ValueError("GENOME_DEPLOYED_REVISION_NOT_EXACT_FULL_SHA")
+        expected_id = ResearchStore.generation_id(
+            dataset_epoch=str(result["dataset_epoch"] or ""),
+            deployed_revision=revision,
+            tile_config_signature=str(result["tile_config_signature"] or ""),
+        )
+        if result["generation_id"] != expected_id:
+            raise ValueError("GENERATION_IDENTITY_ID_MISMATCH")
+        if result["schema_version"] != GENERATION_IDENTITY_SCHEMA:
+            raise ValueError("GENERATION_IDENTITY_SCHEMA_MISMATCH")
+        result["deployed_revision"] = revision
+        result["start_boundaries"] = json.loads(result.pop("start_boundaries_json"))
+        result["legacy_unbound_counts"] = json.loads(result.pop("legacy_unbound_counts_json"))
+        expected_tables = {*LAYER_TABLES.values(), "research_events"}
+        boundaries = result["start_boundaries"]
+        legacy = result["legacy_unbound_counts"]
+        if not isinstance(boundaries, dict) or set(boundaries) != expected_tables:
+            raise ValueError("GENERATION_IDENTITY_BOUNDARIES_INVALID")
+        for table, boundary in boundaries.items():
+            if not isinstance(boundary, dict) or set(boundary) != {"row_count", "max_rowid"}:
+                raise ValueError(f"GENERATION_IDENTITY_BOUNDARY_INVALID:{table}")
+            if any(type(boundary[key]) is not int or boundary[key] < 0
+                   for key in ("row_count", "max_rowid")):
+                raise ValueError(f"GENERATION_IDENTITY_BOUNDARY_INVALID:{table}")
+        if not isinstance(legacy, dict) or not set(legacy).issubset(expected_tables):
+            raise ValueError("GENERATION_IDENTITY_LEGACY_COUNTS_INVALID")
+        if any(type(value) is not int or value < 0 for value in legacy.values()):
+            raise ValueError("GENERATION_IDENTITY_LEGACY_COUNTS_INVALID")
+        result["legacy_unbound_total"] = sum(result["legacy_unbound_counts"].values())
+        return result
+
+    def record_ingestion_status(
+        self,
+        *,
+        generation_id: str,
+        status: str,
+        row_count: int | None = None,
+        opportunity_count: int | None = None,
+        observed_at: str | None = None,
+        detail: Dict[str, Any] | None = None,
+    ) -> int:
+        """Append ingestion progress for an already-identified generation."""
+        generation = str(generation_id or "").strip()
+        state = str(status or "").strip().upper()
+        if not generation or not state:
+            raise ValueError("INGESTION_STATUS_FIELDS_MISSING")
+        with self._lock:
+            assert self._conn is not None
+            known = self._conn.execute(
+                "SELECT 1 FROM research_generation_segments WHERE generation_id = ?", (generation,)
+            ).fetchone()
+            if not known:
+                raise ValueError("INGESTION_GENERATION_IDENTITY_MISSING")
+            cursor = self._conn.execute(
+                """INSERT INTO research_ingestion_status
+                   (generation_id, status, observed_at, row_count, opportunity_count, detail_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (generation, state, observed_at or datetime.now(timezone.utc).isoformat(),
+                 row_count, opportunity_count, json.dumps(detail or {}, sort_keys=True, default=str)),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid)
+
+    def generation_identity(self, generation_id: str | None = None) -> Dict[str, Any] | None:
+        """Return identity plus the latest ingestion status for DB-backed answers."""
+        with self._lock:
+            assert self._conn is not None
+            if generation_id:
+                row = self._conn.execute(
+                    """SELECT generation_id, dataset_epoch, deployed_revision,
+                              tile_config_signature, schema_version, recorded_at,
+                              start_boundaries_json, legacy_unbound_counts_json
+                         FROM research_generation_segments WHERE generation_id = ?""",
+                    (generation_id,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """SELECT generation_id, dataset_epoch, deployed_revision,
+                              tile_config_signature, schema_version, recorded_at,
+                              start_boundaries_json, legacy_unbound_counts_json
+                         FROM research_generation_segments ORDER BY rowid DESC LIMIT 1"""
+                ).fetchone()
+            if not row:
+                return None
+            keys = (
+                "generation_id", "dataset_epoch", "deployed_revision",
+                "tile_config_signature", "schema_version", "recorded_at",
+                "start_boundaries_json", "legacy_unbound_counts_json",
+            )
+            result = self._decode_generation(dict(zip(keys, row)))
+            result["generation_segment_count"] = int(self._conn.execute(
+                "SELECT COUNT(*) FROM research_generation_segments WHERE dataset_epoch = ?",
+                (result["dataset_epoch"],),
+            ).fetchone()[0])
+            ingestion = self._conn.execute(
+                """SELECT status, observed_at, row_count, opportunity_count, detail_json
+                     FROM research_ingestion_status WHERE generation_id = ?
+                     ORDER BY id DESC LIMIT 1""",
+                (result["generation_id"],),
+            ).fetchone()
+        result["last_ingestion"] = None
+        if ingestion:
+            result["last_ingestion"] = {
+                "status": ingestion[0], "observed_at": ingestion[1],
+                "row_count": ingestion[2], "opportunity_count": ingestion[3],
+                "detail": json.loads(ingestion[4] or "{}"),
+            }
+        return result
 
     def upsert_layer(self, layer: str, row_id: str, payload: Dict[str, Any], parent_col: str = "", parent_id: str = "") -> None:
         table = LAYER_TABLES.get(layer)

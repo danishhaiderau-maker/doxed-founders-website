@@ -165,6 +165,47 @@ def test_download_everything_includes_compressed_chase_reports_from_manifest() -
             assert members[f"reports/{name}"] == reports / name
 
 
+def test_bundle_members_include_declared_gzip_and_checksum_sidecar() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reports = root / "reports"
+        reports.mkdir(parents=True)
+        gzip_name = "safe_policy_genome_v3_exhaustive.jsonl.gz"
+        sidecar_name = "safe_policy_genome_v3_exhaustive_manifest.json"
+        gzip_path = reports / gzip_name
+        gzip_bytes = b"\x1f\x8bdeclared-exhaustive-policy-fixture"
+        gzip_path.write_bytes(gzip_bytes)
+        checksum = hashlib.sha256(gzip_bytes).hexdigest()
+        _write_json(
+            reports / sidecar_name,
+            {
+                "artifact": gzip_name,
+                "row_count": 1,
+                "sha256": checksum,
+                "size_bytes": len(gzip_bytes),
+            },
+        )
+        _write_json(
+            root / "report_manifest.json",
+            {
+                "generated_at": "2026-08-29T11:49:41+00:00",
+                "reports": [
+                    {"file": gzip_name, "size_bytes": len(gzip_bytes)},
+                    {"file": sidecar_name},
+                ],
+            },
+        )
+        _set_dashboard_roots(root, root)
+
+        members = dict(dashboard._bundle_members())
+
+        assert members[f"reports/{gzip_name}"] == gzip_path
+        assert members[f"reports/{sidecar_name}"] == reports / sidecar_name
+        assert hashlib.sha256(
+            members[f"reports/{gzip_name}"].read_bytes()
+        ).hexdigest() == checksum
+
+
 def test_complete_bundle_split_roots_and_freshness() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "agent"

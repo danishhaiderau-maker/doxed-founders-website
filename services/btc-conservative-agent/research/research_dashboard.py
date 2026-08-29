@@ -1280,6 +1280,18 @@ def _bundle_members():
         if not fname or fname in BUNDLE_FILES:
             continue
         candidate = _best_report_path(fname)
+        # ``_best_report_path`` intentionally parses JSON so it can apply
+        # session-scope precedence.  Manifest-declared binary artifacts (for
+        # example the exhaustive ``.jsonl.gz`` policy export) cannot be parsed
+        # that way.  They are nevertheless generation-owned artifacts, so use
+        # the same atomic publication candidates directly.  Keep JSON on the
+        # existing scope-aware path and let the required-member gate below
+        # continue to fail closed when a declared artifact is absent.
+        if candidate is None and not str(fname).lower().endswith(".json"):
+            candidate = next(
+                (path for path in _data_file_candidates(fname) if path.is_file()),
+                None,
+            )
         if candidate is not None:
             members.setdefault(f"{REPORTS_DIR}/{fname}", candidate)
     return sorted(members.items())

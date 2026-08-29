@@ -140,6 +140,30 @@ def test_complete_signed_schedule_can_prove_missed_profit(tmp_path, monkeypatch)
     assert lab["top_schedule"]["executed"]["pnl_usd"] is None
 
 
+def test_arm_receipt_is_not_counted_as_schedule_or_fill(tmp_path, monkeypatch):
+    engine = _load_engine()
+    monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    _identity_ledgers(tmp_path)
+    rows = [{
+        "schema": "compressed_chase_arm_receipt_v1",
+        "ts": "2026-08-29T00:00:00+00:00",
+        "shared_ai_call_id": "scan-unsupported",
+        "status": "UNSUPPORTED",
+        "reason": "MISSING_SIGNAL_PRICE",
+        "shadow_only": True,
+        "places_order": False,
+    }, *_signed_rows()]
+    _write_jsonl(tmp_path / "chase_offset_touch_grid.jsonl", rows)
+
+    proof = engine.build_missed_opportunity_proof_report(session={})
+    assert proof["proof_count"] == 1
+    assert [row["shared_ai_call_id"] for row in proof["proofs"]] == ["scan-1"]
+    assert proof["arm_receipt_count"] == 1
+    assert proof["arm_status_counts"] == {"UNSUPPORTED": 1}
+    assert proof["arm_reason_counts"] == {"MISSING_SIGNAL_PRICE": 1}
+
+
 def test_missing_checkpoint_fails_closed(tmp_path, monkeypatch):
     engine = _load_engine()
     monkeypatch.delenv("BTC_AGENT_DATA_DIR", raising=False)

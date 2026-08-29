@@ -4885,6 +4885,12 @@ def set_execution_paused(reason: str):
     cancel_reason = None
     with state_lock:
         if reason == "":
+            if state.get("execution_reason") == "GENOME_IDENTITY_INVALID":
+                logger.error(
+                    "[RECOVERY] ignored clear — GENOME_IDENTITY_INVALID requires a valid restart "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+                return
             # [DEMO_PAUSE_2026-07-08] Keep SIMULATION_ONLY sticky while
             # EXECUTION_PAUSED=True (demo_mode.py). Soft recovery paths must
             # not clear the demo/sim pause gate.
@@ -8505,6 +8511,10 @@ PAUSE_PRIORITIES = {
     "": 0,
     "CSV_FAILURE": 100,
     "PRELOAD_FAILED": 100,
+    # Evidence written without an exact epoch/revision/tile identity cannot be
+    # admitted to the canonical research cohort. Keep market-data collection
+    # alive for diagnostics, but fail closed for every new paper/live entry.
+    "GENOME_IDENTITY_INVALID": 1000,
     # A reduce-only close that was not confirmed is a money-path incident.
     # Fresh market data must never clear it implicitly.
     "BITFINEX_CLOSE_FAILED": 190,
@@ -14940,6 +14950,42 @@ def _shared_ai_call_id(ai_result: dict = None, ctx: dict = None) -> str:
     )
 
 
+def _record_compressed_shadow_arm_result(
+    call_id: str,
+    status: str,
+    reason: str,
+    *,
+    direction: str = "",
+    trade_id: str = "",
+    epoch_id: str = "",
+) -> bool:
+    """Durably explain why one shared-call shadow schedule did or did not arm.
+
+    This receipt is evidence-only.  It is deliberately a different schema from
+    ``compressed_chase_shadow_v1`` so analyzers cannot mistake an arm attempt
+    for a price-path observation or executable fill.
+    """
+    shared_call = str(call_id or "").strip()
+    if not shared_call:
+        return False
+    return _safe_append_jsonl(
+        CHASE_OFFSET_TOUCH_GRID_FILE,
+        {
+            "schema": "compressed_chase_arm_receipt_v1",
+            "ts": utc_iso(),
+            "shared_ai_call_id": shared_call,
+            "trade_id": str(trade_id or "") or None,
+            "epoch_id": str(epoch_id or "") or None,
+            "direction": str(direction or "").upper() or None,
+            "status": str(status or "UNKNOWN").upper(),
+            "reason": str(reason or "UNKNOWN"),
+            "shadow_only": True,
+            "places_order": False,
+        },
+        label="SHADOW_CHASE_ARM_RECEIPT",
+    )
+
+
 def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     """Arm one non-executable compressed schedule per executable AI call."""
     if not ai_decision_should_execute(ai):
@@ -14951,7 +14997,13 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
         or (ai or {}).get("raw_direction")
         or ""
     ).upper()
-    if not call_id or raw_direction not in ("LONG", "SHORT"):
+    if not call_id:
+        return False
+    if raw_direction not in ("LONG", "SHORT"):
+        _record_compressed_shadow_arm_result(
+            call_id, "UNSUPPORTED", "MISSING_OR_INVALID_DIRECTION",
+            direction=raw_direction,
+        )
         return False
     direction = raw_direction
     if invert_signal_active():
@@ -14973,6 +15025,9 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
         or 0
     )
     if signal_price <= 0:
+        _record_compressed_shadow_arm_result(
+            call_id, "UNSUPPORTED", "MISSING_SIGNAL_PRICE", direction=direction,
+        )
         return False
     episode_id = "episode-" + hashlib.sha256(
         f"shared:{call_id}".encode("utf-8")
@@ -14989,10 +15044,16 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     maker_fee, taker_fee = get_trading_fee_rates()
     epoch_id = _collector_v22_epoch_id()
     with _compressed_shadow_lock:
-        if call_id in _compressed_shadow_seen_call_ids:
-            return False
+        duplicate_shared_call = call_id in _compressed_shadow_seen_call_ids
         # Reserve the shared call while its durable stage-zero row is written.
-        _compressed_shadow_seen_call_ids.add(call_id)
+        if not duplicate_shared_call:
+            _compressed_shadow_seen_call_ids.add(call_id)
+    if duplicate_shared_call:
+        _record_compressed_shadow_arm_result(
+            call_id, "SKIPPED", "DUPLICATE_SHARED_CALL",
+            direction=direction, trade_id=trade_id, epoch_id=epoch_id,
+        )
+        return False
     try:
         shadow_state, stage_zero = arm_compressed_shadow_chase(
             trade_id=trade_id,
@@ -15019,15 +15080,35 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
         durable = _safe_append_jsonl(
             CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE",
         )
-    except Exception:
+    except Exception as exc:
         with _compressed_shadow_lock:
             _compressed_shadow_seen_call_ids.discard(call_id)
+        _record_compressed_shadow_arm_result(
+            call_id, "UNSUPPORTED", f"ARM_EXCEPTION:{type(exc).__name__}",
+            direction=direction, trade_id=trade_id, epoch_id=epoch_id,
+        )
         raise
     with _compressed_shadow_lock:
-        if not durable or _collector_v22_epoch_id() != epoch_id:
+        current_epoch_id = _collector_v22_epoch_id()
+        arm_failure_reason = (
+            "STAGE_ZERO_APPEND_FAILED" if not durable
+            else "EPOCH_CHANGED_DURING_ARM" if current_epoch_id != epoch_id
+            else None
+        )
+        if arm_failure_reason:
             _compressed_shadow_seen_call_ids.discard(call_id)
-            return False
-        _compressed_shadow_chase_book[trade_id] = shadow_state
+        else:
+            _compressed_shadow_chase_book[trade_id] = shadow_state
+    if arm_failure_reason:
+        _record_compressed_shadow_arm_result(
+            call_id, "UNSUPPORTED", arm_failure_reason,
+            direction=direction, trade_id=trade_id, epoch_id=epoch_id,
+        )
+        return False
+    _record_compressed_shadow_arm_result(
+        call_id, "ARMED", "STAGE_ZERO_DURABLE",
+        direction=direction, trade_id=trade_id, epoch_id=epoch_id,
+    )
     logger.info(
         f"[SHADOW CHASE] armed shared_call={call_id} trade_id={trade_id} "
         "schedule=0,1,2,4,7,10m expiry=13m shadow_only "
@@ -26127,6 +26208,27 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     # refused by the new cutoff; it cannot recreate old V3 ledgers afterward.
     reset_anchor = time.time()
     _reset_collector_epoch_state(reset_anchor)
+    if bridge is not None:
+        try:
+            bridge.bind_generation_identity(
+                dataset_epoch=_collector_v22_epoch_id(),
+                deployed_revision=os.getenv("SOURCE_GIT_REV") or "",
+                tile_config_signature=active_tile_registry_signature(),
+            )
+        except Exception as exc:
+            set_execution_paused("GENOME_IDENTITY_INVALID")
+            logger.error(
+                f"[FRESH COLLECTION] ABORT WIPE — research.db generation identity failed: {exc} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+            return {
+                "ok": False,
+                "wipe_aborted": True,
+                "error": str(exc),
+                "summary": "ABORT WIPE — research database generation identity failed",
+                "archive_path": archive_path,
+                "past_analysis_id": past_analysis_id,
+            }
     with trade_lock:
         pending_orders.clear()
         expired_orders.clear()
@@ -34585,6 +34687,16 @@ def api_resume():
     with state_lock:
         active_reason = str(state.get("execution_reason") or "")
         manual_paused = bool(state.get("manual_admin_pause", False))
+    if active_reason == "GENOME_IDENTITY_INVALID":
+        response = jsonify({
+            "status": "resume_blocked",
+            "execution_paused": True,
+            "reason": "GENOME_IDENTITY_INVALID",
+            "active_pause_reason": active_reason,
+            "remediation": "restart with valid exact generation identity metadata",
+        })
+        response.status_code = 409
+        return response
     ws_healthy = bool(runtime.get("ws_transport_ready", False))
     if not runtime.get("system_ready"):
         # Real WS issue (not just a paused pipeline) — keep blocking.
@@ -42096,10 +42208,19 @@ def main():
     startup_hard_fix_ai_threshold()
     startup_log_research_sync()
     try:
-        init_genome_bridge()
+        init_genome_bridge(
+            dataset_epoch=_collector_v22_epoch_id(),
+            deployed_revision=os.getenv("SOURCE_GIT_REV"),
+            tile_config_signature=active_tile_registry_signature(),
+        )
         logger.info("[GENOME] Trading Genome v1 bridge initialized")
     except Exception as exc:
-        logger.warning(f"[GENOME] bridge init failed: {exc}")
+        set_execution_paused("GENOME_IDENTITY_INVALID")
+        logger.error(
+            f"[GENOME] bridge identity init failed closed: {exc}; "
+            "new entries suppressed while market-data diagnostics continue "
+            "[PIPELINE ENFORCEMENT]"
+        )
     if state.get("strategy_mode") == "RESEARCH":
         reset_session_risk_state()
     session_meta = _load_research_session_meta()
