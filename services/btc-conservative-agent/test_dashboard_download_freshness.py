@@ -64,6 +64,39 @@ def _set_dashboard_roots(report_root: Path, data_root: Path) -> None:
     dashboard._API_RESPONSE_CACHE.clear()
 
 
+def test_source_bearing_downloads_resolve_service_root_not_report_root() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        derived_report_root = Path(tmp) / "canonical-research-data" / "analyzer"
+        derived_report_root.mkdir(parents=True)
+        original_root = dashboard.ROOT
+        try:
+            dashboard.ROOT = derived_report_root
+            source_root = dashboard._agent_source_root()
+            assert source_root == ROOT.resolve()
+            assert (source_root / "bot.py").is_file()
+            assert (source_root / "analyzer_research_engine_v62.py").is_file()
+            assert (source_root / "research" / "research_dashboard.py").is_file()
+        finally:
+            dashboard.ROOT = original_root
+
+
+def test_genome_download_uses_service_source_when_reports_are_canonical() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        derived_report_root = Path(tmp) / "canonical-research-data" / "analyzer"
+        derived_report_root.mkdir(parents=True)
+        original_root = dashboard.ROOT
+        try:
+            dashboard.ROOT = derived_report_root
+            with dashboard.app.test_client() as client:
+                response = client.get("/download/genome")
+            assert response.status_code == 200, response.get_data(as_text=True)
+            with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+                assert archive.testzip() is None
+                assert any(name.startswith("genome/") for name in archive.namelist())
+        finally:
+            dashboard.ROOT = original_root
+
+
 def test_scope_aware_report_selection() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -368,6 +401,10 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         mirror = root / "fly-data-mirror"
         root.mkdir(parents=True)
         mirror.mkdir()
+        (root / "bot.py").write_text("# fixture source\n", encoding="utf-8")
+        (root / "analyzer_research_engine_v62.py").write_text(
+            "# fixture source\n", encoding="utf-8"
+        )
         (root / "research" / "genome" / "__pycache__").mkdir(parents=True)
         _write_json(
             root / "research" / "genome" / "genome_analysis_report.json",
@@ -504,6 +541,8 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
         _set_dashboard_roots(root, mirror)
         original_ensure = dashboard._ensure_current_gpt_audit_bundle
         original_freshness = dashboard._generation_freshness_meta
+        original_agent_root = dashboard._AGENT_ROOT
+        dashboard._AGENT_ROOT = root
         dashboard._ensure_current_gpt_audit_bundle = lambda _root: audit
         dashboard._generation_freshness_meta = lambda: {
             "current": True,
@@ -716,6 +755,7 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 assert refused_input.status_code == 500
                 assert dashboard.REQUIRED_ANALYZER_RAW_INPUTS[0].encode() in refused_input.data
         finally:
+            dashboard._AGENT_ROOT = original_agent_root
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
             dashboard._generation_freshness_meta = original_freshness
 

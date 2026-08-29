@@ -121,6 +121,29 @@ _AGENT_ROOT = _MODULE_ROOT.parent
 _CWD_ROOT = Path.cwd().resolve()
 
 
+def _agent_source_root() -> Path:
+    """Return the immutable service source root, independent of report cwd.
+
+    Canonical analyzer reports live below ``canonical-research-data/analyzer``.
+    Inferring source from ``ROOT`` therefore points bundle builders at derived
+    data and makes source-bearing downloads fail even after a valid analyzer
+    generation.  The dashboard module itself is installed below the service
+    source root, so that location is the stable authority.
+    """
+    source_root = _AGENT_ROOT.resolve()
+    required = (
+        source_root / "bot.py",
+        source_root / "analyzer_research_engine_v62.py",
+        source_root / "research",
+    )
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        raise RuntimeError(
+            "Analyzer service source root is incomplete: " + ", ".join(missing)
+        )
+    return source_root
+
+
 def _approved_non_onedrive_path(value: str | os.PathLike[str] | None) -> Path | None:
     """Resolve a configured path, rejecting stale OneDrive authority."""
     if not value:
@@ -4438,7 +4461,7 @@ def download_everything():
                 f"{reasons}"
             ),
         )
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    agent_root = _agent_source_root()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     candidates = []
 
@@ -5241,7 +5264,7 @@ def _ensure_current_gpt_audit_bundle(agent_root: Path) -> Path:
 def download_all_sessions():
     """One ZIP: every session archive + live reports + CSVs. Uses cache unless ?rebuild=1."""
     force = request.args.get("rebuild") in ("1", "true", "yes")
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    agent_root = _agent_source_root()
     out_path = None
     if not force:
         out_path = next(
@@ -5266,7 +5289,7 @@ def download_all_sessions():
 @app.route("/download/complete")
 def download_complete_cached():
     """Serve a source-current complete bundle, rebuilding stale caches."""
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    agent_root = _agent_source_root()
     candidate = next(
         (
             path
@@ -5289,7 +5312,7 @@ def download_complete_cached():
 @app.route("/download/chatgpt")
 def download_chatgpt_bundle():
     """ChatGPT-safe bundle: CSV + key reports + manifest (atomic ZIP, verified)."""
-    agent_root = ROOT.parent if (ROOT.parent / "trades_3factor.csv").is_file() else ROOT
+    agent_root = _agent_source_root()
     try:
         # Load the canonical agent-root builder explicitly.  A retired copy in
         # research/ has an incompatible build() signature and previously made
@@ -5340,7 +5363,7 @@ def download_chatgpt_bundle():
 @app.route("/download/gpt-audit")
 def download_gpt_audit_bundle():
     """Full-stack GPT audit: bot.py + analyzers + genome modules + implementation checklist."""
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    agent_root = _agent_source_root()
     out_zip = _ensure_current_gpt_audit_bundle(agent_root)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return send_file(
@@ -5353,7 +5376,7 @@ def download_gpt_audit_bundle():
 
 @app.route("/api/gpt-audit")
 def api_gpt_audit_status():
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    agent_root = _agent_source_root()
     manifest_path = agent_root / "research" / "downloads" / "GPT_AUDIT_MANIFEST.json"
     if not manifest_path.is_file():
         return jsonify({"ready": False, "message": "Run analyzer once to generate GPT audit bundle."})
@@ -5367,7 +5390,7 @@ def api_gpt_audit_status():
 @app.route("/download/genome")
 def download_genome_bundle():
     """Genome + DNA fingerprints + integrity audit — one ZIP for ChatGPT/review."""
-    agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
+    agent_root = _agent_source_root()
     genome_dir = agent_root / "research" / "genome"
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     buf = io.BytesIO()
