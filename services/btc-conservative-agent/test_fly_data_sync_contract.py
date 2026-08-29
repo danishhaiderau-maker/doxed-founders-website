@@ -660,12 +660,42 @@ def test_data_sync_manifest_route_recognizes_client_cache_bypass_contract():
     assert should_refresh({}) is False
     assert should_refresh({"fresh": "0", "cache_bypass": ""}) is False
 
+    identity_node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_manifest_identity_only"
+    )
+    identity_namespace = {}
+    exec(
+        compile(ast.Module(body=[identity_node], type_ignores=[]), "bot.py", "exec"),
+        identity_namespace,
+    )
+    identity_only = identity_namespace["_data_sync_manifest_identity_only"]
+    assert identity_only({"identity_only": "1"}) is True
+    assert identity_only({"identity_only": "true"}) is True
+    assert identity_only({"identity_only": "0"}) is False
+    assert identity_only({}) is False
+
     route_body = BOT[
         BOT.index("def api_data_sync_manifest"):
         BOT.index("@app.route('/api/data-sync/sqlite-snapshot')")
     ]
     assert "_data_sync_manifest_force_refresh(request.args)" in route_body
-    assert "_data_sync_cached_inventory(force_refresh=force_refresh)" in route_body
+    assert "_data_sync_manifest_identity_only(request.args)" in route_body
+    assert "files = [] if identity_only else _data_sync_cached_inventory(" in route_body
+    assert '"identity_only": identity_only' in route_body
+
+
+def test_final_identity_fence_skips_full_inventory_without_weakening_file_fences():
+    assert "param([switch]$IdentityOnly)" in SYNC_SCRIPT
+    assert '"&identity_only=1"' in SYNC_SCRIPT
+    assert "New-DataSyncManifestUri -IdentityOnly" in SYNC_SCRIPT
+    assert 'Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest' in SYNC_SCRIPT
+    # Generation refresh still uses the fresh full-manifest path.
+    assert '-Uri (New-DataSyncManifestUri) `' in SYNC_SCRIPT
+    # Each file remains independently fenced during download.
+    assert '"file generation changed after manifest"' in BOT
+    assert '"file generation changed during download"' in BOT
 
 
 def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monkeypatch, tmp_path):
@@ -839,7 +869,8 @@ def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():
     manifest_body = BOT[BOT.index("def api_data_sync_manifest"):BOT.index("@app.route('/api/data-sync/sqlite-snapshot')")]
     cache_body = BOT[BOT.index("def _data_sync_cached_inventory"):BOT.index("def _data_sync_optional_file_audit")]
     snapshot_body = BOT[BOT.index("def _data_sync_sqlite_snapshot"):BOT.index("def _data_sync_resolve_sqlite_snapshot")]
-    assert "files = _data_sync_cached_inventory(force_refresh=force_refresh)" in manifest_body
+    assert "files = [] if identity_only else _data_sync_cached_inventory(" in manifest_body
+    assert "force_refresh=force_refresh" in manifest_body
     assert "_data_sync_inventory(include_sqlite_snapshots=False)" in cache_body
     assert 'session = _load_research_session_meta() or {}' in manifest_body
     assert '"collection_epoch_id": collection_epoch_id or None' in manifest_body

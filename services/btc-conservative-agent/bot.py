@@ -36909,6 +36909,19 @@ def _data_sync_manifest_force_refresh(args) -> bool:
     return fresh in {"1", "true", "yes"} or bool(cache_bypass)
 
 
+def _data_sync_manifest_identity_only(args) -> bool:
+    """Return whether the caller requests only the fresh authority fence.
+
+    The desktop mirror already fences every downloaded file against its
+    manifest generation. Its final check needs only the independently-read
+    deployment, tile, collection-signal, and epoch identities; rebuilding the
+    complete volume inventory for that check can monopolize a shared-CPU Fly
+    machine and starve even the lock-free health route.
+    """
+    value = str(args.get("identity_only") or "").strip().lower()
+    return value in {"1", "true", "yes"}
+
+
 def _data_sync_optional_file_audit() -> list:
     """Describe files intentionally excluded from the required sync contract."""
     return [dict(row) for row in _DATA_SYNC_OPTIONAL_FILES]
@@ -36996,10 +37009,16 @@ def api_data_sync_manifest():
     # The endpoint remains protected by the global BOT_ADMIN_TOKEN guard.
     # A final generation/identity fence may explicitly bypass the short TTL,
     # while the cache lock still guarantees only one physical scan at a time.
+    identity_only = _data_sync_manifest_identity_only(request.args)
     force_refresh = _data_sync_manifest_force_refresh(request.args)
-    files = _data_sync_cached_inventory(force_refresh=force_refresh)
-    usage = shutil.disk_usage(_data_sync_volume_root())
-    ack = _read_data_sync_ack()
+    # Identity-only fences intentionally skip the physical inventory. File
+    # correctness remains protected by the initial full manifest plus the
+    # per-file before/after generation checks in /api/data-sync/file.
+    files = [] if identity_only else _data_sync_cached_inventory(
+        force_refresh=force_refresh
+    )
+    usage = None if identity_only else shutil.disk_usage(_data_sync_volume_root())
+    ack = {} if identity_only else _read_data_sync_ack()
     session = _load_research_session_meta() or {}
     collection_epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
     with state_lock:
@@ -37025,6 +37044,7 @@ def api_data_sync_manifest():
         "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
         "tile_registry_signature": active_tile_registry_signature(),
         "active_tiles": tile_registry,
+        "identity_only": identity_only,
         "files": files,
         "sqlite_snapshots_materialized": False,
         "optional_files": _data_sync_optional_file_audit(),
@@ -37039,7 +37059,7 @@ def api_data_sync_manifest():
         # 0.0 means no Fresh Collection has run yet; the loop treats any
         # strictly-greater value as a wipe trigger.
         "fresh_collection_signal_ts": fresh_collection_signal_ts,
-        "volume": {
+        "volume": None if identity_only else {
             "total": int(usage.total),
             "used": int(usage.used),
             "free": int(usage.free),

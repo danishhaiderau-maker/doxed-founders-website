@@ -85,12 +85,13 @@ function Invoke-DataSyncJsonRequest {
 }
 
 function New-DataSyncManifestUri {
-  # Explicit cache bypass is required for generation refreshes and the final
-  # identity fence. A short server inventory cache is safe for ordinary loop
-  # polls, but it cannot prove that the generation stayed stable while files
-  # were copied.
+  param([switch]$IdentityOnly)
+  # Generation refreshes require a fresh full inventory. The final fence
+  # compares only authority identities, so it explicitly avoids rebuilding
+  # the expensive file inventory after every completed mirror pass.
+  $identityQuery = if ($IdentityOnly) { "&identity_only=1" } else { "" }
   return (
-    "$base/api/data-sync/manifest?fresh=1&nonce=" +
+    "$base/api/data-sync/manifest?fresh=1$identityQuery&nonce=" +
     [uri]::EscapeDataString([guid]::NewGuid().ToString("N"))
   )
 }
@@ -765,7 +766,7 @@ $downloadClient.Dispose()
 # configuration, Fresh Collection, and any explicit epoch must remain exact.
 $finalManifest = Invoke-DataSyncJsonRequest `
   -Stage "manifest_final_identity" `
-  -Uri (New-DataSyncManifestUri) `
+  -Uri (New-DataSyncManifestUri -IdentityOnly) `
   -TimeoutSec $manifestTimeoutSec
 Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest
 
