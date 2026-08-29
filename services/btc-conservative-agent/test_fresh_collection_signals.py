@@ -267,6 +267,13 @@ class FreshCollectionSignalTests(unittest.TestCase):
             bot,
             "_load_research_session_meta",
             return_value={"fresh_collection_start_time": 12345.25},
+        ), mock.patch.object(
+            bot,
+            "_data_sync_request_async_inventory",
+            return_value={
+                "status": "CURRENT", "rows": [],
+                "generated_at": "2026-08-30T00:00:00Z", "error": None,
+            },
         ):
             with bot.app.test_client() as client:
                 response = client.get("/api/data-sync/manifest")

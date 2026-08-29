@@ -122,7 +122,7 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "[TimeSpan]::FromSeconds($chunkTimeoutSec)" in SYNC_SCRIPT
     assert "function Invoke-DataSyncJsonRequest" in SYNC_SCRIPT
     assert '-Stage "manifest_initial"' in SYNC_SCRIPT
-    assert '-Stage "manifest_refresh"' in SYNC_SCRIPT
+    assert '-Stage "manifest_targeted_refresh"' in SYNC_SCRIPT
     assert '-Stage "acknowledgement"' in SYNC_SCRIPT
     assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
@@ -204,6 +204,7 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
         "_data_sync_path_allowed",
         "_data_sync_complete_record_size",
         "_data_sync_consistency_mode",
+        "_data_sync_inventory_record",
         "_data_sync_inventory",
     }
     selected = [
@@ -266,6 +267,7 @@ def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
         "_data_sync_path_allowed",
         "_data_sync_complete_record_size",
         "_data_sync_consistency_mode",
+        "_data_sync_inventory_record",
         "_data_sync_inventory",
     }
     selected = [
@@ -370,6 +372,7 @@ def test_data_sync_top_level_research_symlink_is_on_volume_and_round_trips(
         "_data_sync_allowed_roots", "_data_sync_relpath",
         "_data_sync_path_allowed", "_data_sync_resolve_relpath",
         "_data_sync_complete_record_size", "_data_sync_consistency_mode",
+        "_data_sync_inventory_record",
         "_data_sync_inventory",
     }
     selected = [
@@ -682,17 +685,21 @@ def test_data_sync_manifest_route_recognizes_client_cache_bypass_contract():
     ]
     assert "_data_sync_manifest_force_refresh(request.args)" in route_body
     assert "_data_sync_manifest_identity_only(request.args)" in route_body
-    assert "files = [] if identity_only else _data_sync_cached_inventory(" in route_body
+    assert "_data_sync_request_async_inventory(" in route_body
+    assert "_data_sync_targeted_inventory(targeted_path)" in route_body
+    assert '"inventory_status": inventory_status' in route_body
     assert '"identity_only": identity_only' in route_body
 
 
 def test_final_identity_fence_skips_full_inventory_without_weakening_file_fences():
-    assert "param([switch]$IdentityOnly)" in SYNC_SCRIPT
+    assert "[switch]$IdentityOnly" in SYNC_SCRIPT
+    assert "[string]$Path" in SYNC_SCRIPT
     assert '"&identity_only=1"' in SYNC_SCRIPT
     assert "New-DataSyncManifestUri -IdentityOnly" in SYNC_SCRIPT
     assert 'Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest' in SYNC_SCRIPT
-    # Generation refresh still uses the fresh full-manifest path.
-    assert '-Uri (New-DataSyncManifestUri) `' in SYNC_SCRIPT
+    # Generation refresh is exact-path only; the final authority fence remains
+    # identity-only and the initial manifest remains a full CURRENT inventory.
+    assert '-Uri (New-DataSyncManifestUri -Path $rel) `' in SYNC_SCRIPT
     # Each file remains independently fenced during download.
     assert '"file generation changed after manifest"' in BOT
     assert '"file generation changed during download"' in BOT
@@ -732,6 +739,7 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         "_data_sync_relpath", "_data_sync_path_allowed",
         "_data_sync_resolve_relpath", "_data_sync_complete_record_size",
         "_data_sync_consistency_mode", "_data_sync_sqlite_snapshot",
+        "_data_sync_inventory_record",
         "_data_sync_inventory",
     }
     selected = [
@@ -869,7 +877,8 @@ def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():
     manifest_body = BOT[BOT.index("def api_data_sync_manifest"):BOT.index("@app.route('/api/data-sync/sqlite-snapshot')")]
     cache_body = BOT[BOT.index("def _data_sync_cached_inventory"):BOT.index("def _data_sync_optional_file_audit")]
     snapshot_body = BOT[BOT.index("def _data_sync_sqlite_snapshot"):BOT.index("def _data_sync_resolve_sqlite_snapshot")]
-    assert "files = [] if identity_only else _data_sync_cached_inventory(" in manifest_body
+    assert "_data_sync_request_async_inventory(" in manifest_body
+    assert "_data_sync_targeted_inventory(targeted_path)" in manifest_body
     assert "force_refresh=force_refresh" in manifest_body
     assert "_data_sync_inventory(include_sqlite_snapshots=False)" in cache_body
     assert 'session = _load_research_session_meta() or {}' in manifest_body
@@ -1385,7 +1394,8 @@ def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
     assert "$generationRefreshCount = 0" in SYNC_SCRIPT
     assert "$generationRefreshCount -lt 3" in SYNC_SCRIPT
     assert "-match 'generation changed'" in SYNC_SCRIPT
-    assert '-Stage "manifest_refresh"' in SYNC_SCRIPT
+    assert '-Stage "manifest_targeted_refresh"' in SYNC_SCRIPT
+    assert '-Uri (New-DataSyncManifestUri -Path $rel) `' in SYNC_SCRIPT
     assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
     assert 'Where-Object { [string]$_.path -eq $rel }' in SYNC_SCRIPT
     assert "$sameGeneration = $false" in SYNC_SCRIPT
@@ -2177,3 +2187,84 @@ if __name__ == "__main__":
     test_analyzer_bundle_validation_fails_closed_for_missing_dashboard_and_unsafe_paths()
     test_analyzer_bundle_accepts_complete_read_only_report_tree()
     print("Fly data sync contract checks passed")
+def test_persisted_inventory_snapshot_is_atomic_and_tamper_evident(tmp_path):
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_inventory_snapshot_path",
+        "_data_sync_inventory_rows_sha256",
+        "_data_sync_persist_inventory_snapshot",
+        "_data_sync_load_persisted_inventory_snapshot",
+    }
+    selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    namespace = {
+        "Path": Path, "json": json, "hashlib": hashlib, "hmac": __import__("hmac"),
+        "os": os, "uuid": uuid,
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_NAME": "sync_inventory_current.json",
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA": "fly_runtime_inventory_snapshot_v1",
+        "_data_sync_volume_root": lambda: tmp_path,
+        "_runtime_git_rev": lambda: "a" * 40,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    rows = [{"path": "evidence.jsonl", "size": 12, "inode": 7}]
+    namespace["_data_sync_persist_inventory_snapshot"](rows, "2026-08-30T00:00:00Z")
+    snapshot = namespace["_data_sync_load_persisted_inventory_snapshot"]()
+    assert snapshot["rows"] == rows
+    assert snapshot["file_count"] == 1
+    target = tmp_path / "sync_inventory_current.json"
+    tampered = json.loads(target.read_text(encoding="utf-8"))
+    tampered["rows"][0]["size"] = 13
+    target.write_text(json.dumps(tampered), encoding="utf-8")
+    assert namespace["_data_sync_load_persisted_inventory_snapshot"]() is None
+
+
+def test_async_inventory_cold_start_is_nonblocking_single_flight():
+    tree = ast.parse(BOT)
+    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_request_async_inventory")
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): started.append(self.kwargs)
+
+    state = {"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "refreshing": False, "error": None}
+    namespace = {
+        "time": time, "threading": SimpleNamespace(Thread=FakeThread),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_inventory_refresh_worker": lambda: None,
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    request_inventory = namespace["_data_sync_request_async_inventory"]
+    assert request_inventory()["status"] == "BUILDING"
+    assert request_inventory()["status"] == "BUILDING"
+    assert len(started) == 1
+    assert started[0]["daemon"] is True
+    assert "_data_sync_inventory(" not in ast.unparse(node)
+    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generated_at": "now", "expires_at": time.monotonic() + 10, "refreshing": False})
+    assert request_inventory()["status"] == "CURRENT"
+    assert request_inventory(force_refresh=True)["status"] == "BUILDING"
+    assert len(started) == 2
+
+    state.update({"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "refreshing": False})
+    namespace["_data_sync_load_persisted_inventory_snapshot"] = lambda: {
+        "rows": [{"path": "prior.json", "size": 1}],
+        "generated_at": "prior",
+    }
+    stale = request_inventory()
+    assert stale["status"] == "STALE"
+    assert stale["rows"] == []
+
+
+def test_sync_requires_current_inventory_and_targeted_refresh_never_walks_volume():
+    assert '[string]$manifest.inventory_status -ne "CURRENT"' in SYNC_SCRIPT
+    assert '[string]$preflight.inventory_status -ne "CURRENT"' in SYNC_LOOP
+    assert '-Uri (New-DataSyncManifestUri -Path $rel)' in SYNC_SCRIPT
+    assert '[string]$freshManifest.targeted_path -ne $rel' in SYNC_SCRIPT
+    tree = ast.parse(BOT)
+    targeted = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_targeted_inventory")
+    targeted_source = ast.unparse(targeted)
+    assert "_data_sync_resolve_relpath" in targeted_source
+    assert "_data_sync_inventory_record" in targeted_source
+    assert "os.walk" not in targeted_source

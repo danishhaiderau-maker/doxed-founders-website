@@ -1034,6 +1034,11 @@ class Supervisor:
                 self.token,
                 FLY_MANIFEST_TIMEOUT_SECONDS,
             )
+            if str(manifest.get("inventory_status") or "") != "CURRENT":
+                raise RuntimeError(
+                    "Fly collector inventory is not CURRENT: "
+                    f"{manifest.get('inventory_status') or 'UNAVAILABLE'}"
+                )
             source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
             manifest_registry_signature = manifest.get("tile_registry_signature")
             manifest_tile_lanes = [

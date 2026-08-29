@@ -85,13 +85,19 @@ function Invoke-DataSyncJsonRequest {
 }
 
 function New-DataSyncManifestUri {
-  param([switch]$IdentityOnly)
-  # Generation refreshes require a fresh full inventory. The final fence
-  # compares only authority identities, so it explicitly avoids rebuilding
-  # the expensive file inventory after every completed mirror pass.
+  param(
+    [switch]$IdentityOnly,
+    [string]$Path = ""
+  )
+  # Initial generation refreshes request a fresh full inventory. A hot file is
+  # refreshed by exact path, while the final fence compares authority
+  # identities only. Neither bounded check rebuilds unrelated metadata.
   $identityQuery = if ($IdentityOnly) { "&identity_only=1" } else { "" }
+  $pathQuery = if ($Path) {
+    "&path=" + [uri]::EscapeDataString($Path)
+  } else { "" }
   return (
-    "$base/api/data-sync/manifest?fresh=1$identityQuery&nonce=" +
+    "$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery&nonce=" +
     [uri]::EscapeDataString([guid]::NewGuid().ToString("N"))
   )
 }
@@ -317,6 +323,12 @@ if ($null -eq $manifest) {
 }
 if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
   throw "Unexpected Fly sync manifest schema."
+}
+if ([string]$manifest.inventory_status -ne "CURRENT") {
+  throw (
+    "Fly sync manifest inventory is not CURRENT " +
+    "(status=$([string]$manifest.inventory_status))."
+  )
 }
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
@@ -669,11 +681,17 @@ foreach ($row in $selectedFiles) {
           continue
         }
         $freshManifest = Invoke-DataSyncJsonRequest `
-          -Stage "manifest_refresh" `
-          -Uri (New-DataSyncManifestUri) `
+          -Stage "manifest_targeted_refresh" `
+          -Uri (New-DataSyncManifestUri -Path $rel) `
           -TimeoutSec $manifestTimeoutSec
         if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
           throw "Unexpected Fly sync manifest schema during generation refresh."
+        }
+        if (
+          [string]$freshManifest.inventory_status -ne "CURRENT" -or
+          [string]$freshManifest.targeted_path -ne $rel
+        ) {
+          throw "Fly targeted generation refresh was not CURRENT for $rel."
         }
         $freshRows = @($freshManifest.files | Where-Object { [string]$_.path -eq $rel })
         if ($freshRows.Count -ne 1) {

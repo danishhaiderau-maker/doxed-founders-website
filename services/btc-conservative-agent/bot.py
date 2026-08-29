@@ -36472,6 +36472,10 @@ _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES = frozenset({
 })
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
+    # Server-owned, atomically published inventory acceleration. It describes
+    # research files but is not itself analyzer evidence and must never recurse
+    # into its own inventory.
+    "sync_inventory_current.json",
     # Mutable crash-recovery state belongs only to the Fly collector. It can
     # change between chunk requests and is not research/analyzer evidence.
     "research_events_v22.provisional.json",
@@ -36496,13 +36500,23 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "corrupt_evidence_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
-_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 3.0
+_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 30.0
+_DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
+_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
 _data_sync_inventory_cache_condition = threading.Condition()
 _data_sync_inventory_cache = {
     "expires_at": 0.0,
     "refreshed_at": 0.0,
     "refreshing": False,
     "rows": None,
+}
+_data_sync_async_inventory = {
+    "status": "EMPTY",
+    "rows": None,
+    "generated_at": None,
+    "expires_at": 0.0,
+    "refreshing": False,
+    "error": None,
 }
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
     # Collector v2.2 is a write-once, serialized JSONL ledger. It may grow
@@ -36782,6 +36796,34 @@ def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> 
     )
 
 
+def _data_sync_inventory_record(path: Path, *, include_sqlite_snapshot: bool = False) -> dict:
+    """Build one exact, containment-checked inventory row.
+
+    This is shared by full inventory publication and targeted generation
+    refreshes.  Keeping one implementation prevents the fast path from
+    weakening complete-record, path, or SQLite consistency semantics.
+    """
+    resolved = path.resolve(strict=True)
+    if not _data_sync_path_allowed(resolved):
+        raise ValueError("path is not an allowed runtime data file")
+    stat = resolved.stat()
+    published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
+    row = {
+        "path": _data_sync_relpath(resolved),
+        "size": published_size,
+        "physical_size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+        "inode": int(getattr(stat, "st_ino", 0) or 0),
+        "consistency_mode": _data_sync_consistency_mode(resolved),
+    }
+    if row["consistency_mode"] == "sqlite_snapshot_v1" and include_sqlite_snapshot:
+        snapshot = _data_sync_sqlite_snapshot(resolved)
+        row.update(snapshot)
+        row["size"] = snapshot["snapshot_size"]
+        row["physical_size"] = snapshot["snapshot_size"]
+    return row
+
+
 def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
     """Return the authenticated runtime inventory.
 
@@ -36794,37 +36836,24 @@ def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
     seen = set()
     seen_relpaths = set()
     rows = []
+    scanned_files = 0
 
     def append_path(path: Path) -> None:
         try:
             resolved = path.resolve(strict=True)
-            relpath = _data_sync_relpath(path)
+            relpath = _data_sync_relpath(resolved)
             if (
                 resolved in seen
                 or relpath in seen_relpaths
                 or not _data_sync_path_allowed(path)
             ):
                 return
-            stat = resolved.stat()
-            published_size = _data_sync_complete_record_size(resolved, int(stat.st_size))
+            row = _data_sync_inventory_record(
+                resolved, include_sqlite_snapshot=include_sqlite_snapshots
+            )
             seen.add(resolved)
             seen_relpaths.add(relpath)
-            rows.append({
-                "path": relpath,
-                "size": published_size,
-                "physical_size": int(stat.st_size),
-                "mtime_ns": int(stat.st_mtime_ns),
-                "inode": int(getattr(stat, "st_ino", 0) or 0),
-                "consistency_mode": _data_sync_consistency_mode(resolved),
-            })
-            if (
-                rows[-1]["consistency_mode"] == "sqlite_snapshot_v1"
-                and include_sqlite_snapshots
-            ):
-                snapshot = _data_sync_sqlite_snapshot(resolved)
-                rows[-1].update(snapshot)
-                rows[-1]["size"] = snapshot["snapshot_size"]
-                rows[-1]["physical_size"] = snapshot["snapshot_size"]
+            rows.append(row)
         except (OSError, ValueError):
             return
 
@@ -36846,6 +36875,12 @@ def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
             ]
             for filename in filenames:
                 append_path(Path(dirpath) / filename)
+                scanned_files += 1
+                # A full Fly-volume walk is metadata-heavy Python work. Yield
+                # cooperatively in small deterministic batches so the
+                # independent liveness/control worker can meet its deadline.
+                if scanned_files % 25 == 0:
+                    time.sleep(0.005)
                 if len(rows) >= 5000:
                     break
             if len(rows) >= 5000:
@@ -36900,6 +36935,155 @@ def _data_sync_cached_inventory(*, force_refresh: bool = False) -> list:
         _data_sync_inventory_cache["refreshing"] = False
         _data_sync_inventory_cache_condition.notify_all()
         return [dict(row) for row in rows]
+
+
+def _data_sync_inventory_snapshot_path() -> Path:
+    return _data_sync_volume_root() / _DATA_SYNC_INVENTORY_SNAPSHOT_NAME
+
+
+def _data_sync_inventory_rows_sha256(rows: list) -> str:
+    canonical = json.dumps(
+        rows, separators=(",", ":"), sort_keys=True, ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _data_sync_persist_inventory_snapshot(rows: list, generated_at: str) -> dict:
+    """Atomically persist a completed inventory acceleration snapshot."""
+    payload = {
+        "schema": _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA,
+        "generated_at": str(generated_at),
+        "source_git_rev": _runtime_git_rev(),
+        "rows_sha256": _data_sync_inventory_rows_sha256(rows),
+        "file_count": len(rows),
+        "rows": rows,
+    }
+    target = _data_sync_inventory_snapshot_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, target)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+    return payload
+
+
+def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
+    """Load only a structurally and cryptographically intact prior snapshot.
+
+    A restart snapshot is deliberately STALE until a new physical scan
+    reconciles the current volume. It accelerates diagnostics and proves the
+    previous complete generation, but can never authorize a canonical commit.
+    """
+    try:
+        payload = json.loads(
+            _data_sync_inventory_snapshot_path().read_text(encoding="utf-8")
+        )
+        rows = payload.get("rows")
+        if (
+            payload.get("schema") != _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA
+            or not isinstance(rows, list)
+            or int(payload.get("file_count") or -1) != len(rows)
+            or not hmac.compare_digest(
+                str(payload.get("rows_sha256") or ""),
+                _data_sync_inventory_rows_sha256(rows),
+            )
+        ):
+            return None
+        return payload
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _data_sync_inventory_refresh_worker() -> None:
+    try:
+        rows = _data_sync_inventory(include_sqlite_snapshots=False)
+        generated_at = utc_iso()
+        _data_sync_persist_inventory_snapshot(rows, generated_at)
+        with _data_sync_inventory_cache_condition:
+            _data_sync_async_inventory.update({
+                "status": "CURRENT",
+                "rows": [dict(row) for row in rows],
+                "generated_at": generated_at,
+                "expires_at": time.monotonic() + _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS,
+                "refreshing": False,
+                "error": None,
+            })
+            _data_sync_inventory_cache_condition.notify_all()
+    except BaseException as exc:
+        logger.error(f"data-sync inventory background refresh failed: {exc}")
+        with _data_sync_inventory_cache_condition:
+            _data_sync_async_inventory.update({
+                "status": "STALE" if _data_sync_async_inventory.get("rows") else "EMPTY",
+                "refreshing": False,
+                "error": type(exc).__name__,
+                "expires_at": 0.0,
+            })
+            _data_sync_inventory_cache_condition.notify_all()
+
+
+def _data_sync_request_async_inventory(*, force_refresh: bool = False) -> dict:
+    """Return a completed current inventory or start one non-blocking build."""
+    start_worker = False
+    with _data_sync_inventory_cache_condition:
+        now = time.monotonic()
+        if _data_sync_async_inventory.get("status") == "EMPTY":
+            persisted = _data_sync_load_persisted_inventory_snapshot()
+            if persisted is not None:
+                _data_sync_async_inventory.update({
+                    "status": "STALE",
+                    "rows": [dict(row) for row in persisted["rows"]],
+                    "generated_at": persisted.get("generated_at"),
+                    "expires_at": 0.0,
+                    "error": None,
+                })
+        current = (
+            _data_sync_async_inventory.get("status") == "CURRENT"
+            and isinstance(_data_sync_async_inventory.get("rows"), list)
+            and now < float(_data_sync_async_inventory.get("expires_at") or 0.0)
+        )
+        if current and not force_refresh:
+            return {
+                "status": "CURRENT",
+                "rows": [dict(row) for row in _data_sync_async_inventory["rows"]],
+                "generated_at": _data_sync_async_inventory.get("generated_at"),
+                "error": None,
+            }
+        prior_status = str(_data_sync_async_inventory.get("status") or "EMPTY")
+        if not _data_sync_async_inventory.get("refreshing"):
+            _data_sync_async_inventory["refreshing"] = True
+            _data_sync_async_inventory["status"] = "BUILDING"
+            _data_sync_async_inventory["error"] = None
+            start_worker = True
+        result = {
+            # Expose a validated restart snapshot as explicitly STALE on the
+            # first reconciliation request. Its rows stay withheld and the
+            # client cannot commit it; subsequent joiners see BUILDING.
+            "status": "STALE" if prior_status == "STALE" else "BUILDING",
+            "rows": [],
+            "generated_at": _data_sync_async_inventory.get("generated_at"),
+            "error": _data_sync_async_inventory.get("error"),
+        }
+    if start_worker:
+        threading.Thread(
+            target=_data_sync_inventory_refresh_worker,
+            name="data-sync-inventory-refresh",
+            daemon=True,
+        ).start()
+    return result
+
+
+def _data_sync_targeted_inventory(raw_rel: str) -> list:
+    """Return exactly one current row without walking the volume."""
+    return [_data_sync_inventory_record(_data_sync_resolve_relpath(raw_rel))]
 
 
 def _data_sync_manifest_force_refresh(args) -> bool:
@@ -37011,14 +37195,39 @@ def api_data_sync_manifest():
     # while the cache lock still guarantees only one physical scan at a time.
     identity_only = _data_sync_manifest_identity_only(request.args)
     force_refresh = _data_sync_manifest_force_refresh(request.args)
+    targeted_path = str(request.args.get("path") or "").strip()
     # Identity-only fences intentionally skip the physical inventory. File
     # correctness remains protected by the initial full manifest plus the
     # per-file before/after generation checks in /api/data-sync/file.
-    files = [] if identity_only else _data_sync_cached_inventory(
-        force_refresh=force_refresh
+    if identity_only:
+        inventory_state = {
+            "status": "IDENTITY_ONLY", "rows": [], "generated_at": None,
+            "error": None,
+        }
+    elif targeted_path:
+        try:
+            inventory_state = {
+                "status": "CURRENT",
+                "rows": _data_sync_targeted_inventory(targeted_path),
+                "generated_at": utc_iso(),
+                "error": None,
+            }
+        except (OSError, TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc), "inventory_status": "INVALID_PATH"}), 400
+    else:
+        inventory_state = _data_sync_request_async_inventory(
+            force_refresh=force_refresh
+        )
+    files = inventory_state["rows"]
+    inventory_status = inventory_state["status"]
+    usage = (
+        shutil.disk_usage(_data_sync_volume_root())
+        if inventory_status == "CURRENT" and not targeted_path else None
     )
-    usage = None if identity_only else shutil.disk_usage(_data_sync_volume_root())
-    ack = {} if identity_only else _read_data_sync_ack()
+    ack = (
+        _read_data_sync_ack()
+        if inventory_status == "CURRENT" and not targeted_path else {}
+    )
     session = _load_research_session_meta() or {}
     collection_epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
     with state_lock:
@@ -37035,7 +37244,7 @@ def api_data_sync_manifest():
         except (TypeError, ValueError):
             fresh_collection_signal_ts = 0.0
     tile_registry = active_tile_lifecycle_manifest()
-    return jsonify({
+    payload = {
         "schema": "fly_runtime_incremental_sync_v1",
         "generated_at": utc_iso(),
         "source_git_rev": _runtime_git_rev(),
@@ -37045,6 +37254,10 @@ def api_data_sync_manifest():
         "tile_registry_signature": active_tile_registry_signature(),
         "active_tiles": tile_registry,
         "identity_only": identity_only,
+        "targeted_path": targeted_path or None,
+        "inventory_status": inventory_status,
+        "inventory_generated_at": inventory_state.get("generated_at"),
+        "inventory_error": inventory_state.get("error"),
         "files": files,
         "sqlite_snapshots_materialized": False,
         "optional_files": _data_sync_optional_file_audit(),
@@ -37059,13 +37272,18 @@ def api_data_sync_manifest():
         # 0.0 means no Fresh Collection has run yet; the loop treats any
         # strictly-greater value as a wipe trigger.
         "fresh_collection_signal_ts": fresh_collection_signal_ts,
-        "volume": None if identity_only else {
+        "volume": None if usage is None else {
             "total": int(usage.total),
             "used": int(usage.used),
             "free": int(usage.free),
             "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
         },
-    })
+    }
+    if inventory_status in {"BUILDING", "STALE"}:
+        response = jsonify(payload)
+        response.headers["Retry-After"] = "2"
+        return response, 503
+    return jsonify(payload)
 
 
 @app.route('/api/data-sync/sqlite-snapshot')

@@ -256,11 +256,18 @@ function Get-FlySyncPreflightManifest {
   $preflightHeaders = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
   for ($attempt = 1; $attempt -le $preflightManifestAttempts; $attempt++) {
     try {
-      return Invoke-RestMethod `
+      $preflight = Invoke-RestMethod `
         -Uri $ManifestUri `
         -Headers $preflightHeaders `
         -TimeoutSec $preflightManifestTimeoutSec `
         -ErrorAction Stop
+      if ([string]$preflight.inventory_status -ne "CURRENT") {
+        throw (
+          "Fly data-sync inventory is not CURRENT " +
+          "(status=$([string]$preflight.inventory_status))."
+        )
+      }
+      return $preflight
     } catch {
       if ($attempt -ge $preflightManifestAttempts) {
         throw (

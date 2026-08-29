@@ -399,6 +399,7 @@ def make_fixture(tmp_path):
 def fetcher(url, token, timeout):
     if url.endswith("manifest"):
         return {
+            "inventory_status": "CURRENT",
             "files": [{"path": "research_events_v22.jsonl"}],
             "total_bytes": 100,
             "source_git_rev": "a" * 40,
