@@ -19,6 +19,18 @@ def _load_compactor():
     return namespace[node.name]
 
 
+def _load_lock_classifier(timeout=2.0):
+    tree = ast.parse(BOT)
+    node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef)
+        and item.name == "_trade_lock_probe_status"
+    )
+    namespace = {"WATCHDOG_TRADE_LOCK_TIMEOUT_SEC": timeout}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace[node.name]
+
+
 def test_compact_health_preserves_status_and_bounds_dead_letters():
     secret_context = "private-ai-context-" * 10_000
     source = {
@@ -95,3 +107,17 @@ def test_health_lock_probe_is_nonblocking_without_weakening_watchdog_default():
     assert "WATCHDOG_TRADE_LOCK_TIMEOUT_SEC" in body
     assert "max(0.0, float(trade_lock_timeout_sec))" in body
     assert "trade_lock.acquire(timeout=lock_probe_timeout)" in body
+    assert "_trade_lock_probe_status(" in body
+    assert '"ok": bool(lock_progressing and ws_progressing and ai_progressing)' in body
+    assert '"trade_lock_available": bool(lock_available)' in body
+    assert '"trade_lock_busy_transient": lock_busy_transient' in body
+    assert '"trade_lock_progressing": lock_progressing' in body
+
+
+def test_zero_wait_lock_classifier_allows_only_bounded_known_owner_contention():
+    classify = _load_lock_classifier(timeout=2.0)
+    assert classify(True, {}, 0.0) == (False, True)
+    assert classify(False, {"owner_ident": 7, "held_seconds": 0.25}, 0.0) == (True, True)
+    assert classify(False, {"owner_ident": 7, "held_seconds": 2.01}, 0.0) == (False, False)
+    assert classify(False, {"owner_ident": None, "held_seconds": 0.25}, 0.0) == (False, False)
+    assert classify(False, {"owner_ident": 7, "held_seconds": 0.25}, None) == (False, False)

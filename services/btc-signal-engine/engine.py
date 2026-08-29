@@ -27559,6 +27559,23 @@ def dump_system_state():
     except Exception as e:
         logger.error(f"[CRASH DUMP FAILED] {e}")
 
+def _trade_lock_probe_status(
+    lock_available: bool,
+    lock_diagnostics: dict,
+    trade_lock_timeout_sec: float | None,
+) -> tuple[bool, bool]:
+    """Classify zero-wait contention without hiding a genuinely stuck lock."""
+    busy_transient = bool(
+        not lock_available
+        and trade_lock_timeout_sec is not None
+        and float(trade_lock_timeout_sec) <= 0.0
+        and lock_diagnostics.get("owner_ident") is not None
+        and float(lock_diagnostics.get("held_seconds") or 0.0)
+        <= WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+    )
+    return busy_transient, bool(lock_available or busy_transient)
+
+
 def _strategy_progress_health_snapshot(
     now: float = None,
     *,
@@ -27632,6 +27649,16 @@ def _strategy_progress_health_snapshot(
         if lock_available
         else getattr(trade_lock, "diagnostics", lambda _now=None: {})(now)
     )
+    # A zero-wait HTTP probe can legitimately race the active strategy owner.
+    # Treat a known, recently-acquired owner as progressing, while preserving
+    # the strict bounded acquire used by the watchdog and failing closed once
+    # the same ownership exceeds its watchdog allowance.  Without this grace,
+    # ordinary cancel/reprice work produced intermittent /ready 503 responses.
+    lock_busy_transient, lock_progressing = _trade_lock_probe_status(
+        lock_available,
+        lock_diagnostics,
+        trade_lock_timeout_sec,
+    )
 
     transport_progressing = bool(
         ws_connected
@@ -27662,7 +27689,7 @@ def _strategy_progress_health_snapshot(
     if ai_stall_latched:
         ai_progressing = False
     reasons = []
-    if not lock_available:
+    if not lock_progressing:
         reasons.append("TRADE_LOCK_UNAVAILABLE")
     if not transport_progressing:
         reasons.append("WS_TRANSPORT_STALLED")
@@ -27704,9 +27731,11 @@ def _strategy_progress_health_snapshot(
         }
     )
     return {
-        "ok": bool(lock_available and ws_progressing and ai_progressing),
+        "ok": bool(lock_progressing and ws_progressing and ai_progressing),
         "reasons": reasons,
         "trade_lock_available": bool(lock_available),
+        "trade_lock_busy_transient": lock_busy_transient,
+        "trade_lock_progressing": lock_progressing,
         "trade_lock_diagnostics": lock_diagnostics,
         "ws_progressing": ws_progressing,
         "ws_age_sec": ws_age,
@@ -27714,7 +27743,7 @@ def _strategy_progress_health_snapshot(
         "ai_expected": ai_expected,
         "ai_progressing": ai_progressing,
         "recovery_probe_ok": bool(
-            lock_available and ws_progressing and ai_observed_progressing
+            lock_progressing and ws_progressing and ai_observed_progressing
         ),
         "ai_age_sec": ai_age,
         "evaluation_age_sec": evaluation_age,
