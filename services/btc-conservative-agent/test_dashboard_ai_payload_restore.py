@@ -52,7 +52,8 @@ def test_restore_last_ai_payload_from_log(tmp_path, monkeypatch):
 
 def test_dashboard_names_canonical_non_onedrive_mirror():
     html = bot_mod.HTML
-    assert "C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror" in html
+    assert "C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data" in html
+    assert "C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror" not in html
     assert "services/btc-conservative-agent/fly-data-mirror" not in html
 
 

@@ -5,13 +5,13 @@ Status: **PARTIAL / NOT GLOBAL-READY**
 ## Bound evidence
 
 - Production URL: `https://doxed-btc-bot.fly.dev/`
-- Production revision: `534f1d2a8443`
+- Production revision: `922ad65a27b4`
 - Execution/UI build: `v31-three-tile-protected-w234`
 - Collector: `collector_v3.1`
 - Epoch: `epoch-f9331f49c318f89040ce6993`
 - Analyzer URL: `http://127.0.0.1:9001/`
-- Analyzer report generation: `2026-08-25T10:30:19`
-- Browser viewport actually verified: `1280x720`, DPR 1
+- Analyzer report generation: `2026-08-25T22:40:35.55428+10:00`
+- Browser viewports actually verified: desktop and narrow/mobile `390x844`
 
 ## Production dashboard — rendered inspection
 
@@ -24,7 +24,8 @@ Status: **PARTIAL / NOT GLOBAL-READY**
 - PASS: Overview, Decisions, and Data anchors were present.
 - PASS: Refresh and download controls were present.
 - NOT EXERCISED: destructive wipe, sign-out, strategy toggle, leverage, and capacity controls. Exercising them would mutate production state and is not required for a read-only visual smoke pass.
-- BLOCKED: narrow/mobile rendered verification. The connected browser remained `1280x720` and did not expose viewport resizing.
+- PASS: narrow/mobile production rendering at `390x844`; current runtime values and all three active tiles loaded after refresh.
+- PASS: measured document width remained within the mobile viewport with no page-level horizontal overflow.
 
 ## Analyzer dashboard — rendered interaction
 
@@ -69,10 +70,15 @@ Truthfulness observations:
 - PASS: current page states `MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED` where cohorts are mixed.
 - PASS: current signed V3.1 and legacy executed evidence are visibly separated.
 - PASS: Safe Policy Genome shows `NO_SAFE_QUALIFIED_POLICY`.
-- PASS: Top policy screen shows 70 descriptive rows, zero terminal OOS fill policies, and zero profitable terminal OOS policies.
-- PASS: shadow page shows 52 rejected paths, zero signed terminal shadow episodes, and explicitly waits for sufficient evidence.
+- PASS: Top policy screen shows 100 descriptive rows from 21,070 evaluated policy specifications; no policy is qualified.
+- PASS: shadow page shows 117 current-epoch rejected decisions and zero closed paused-shadow outcomes; it explicitly waits for sufficient comparable evidence.
 - PASS: signed policy rows render explicit offset, fill world, TP, and stop parameters rather than unknown placeholders.
-- BLOCKED: narrow/mobile rendered verification for the same viewport limitation.
+- PASS: narrow/mobile analyzer rendering at `390x844`.
+- PASS: measured analyzer body/document width was `375px` within the `390px` viewport; no page-level horizontal overflow.
+- PASS: mobile navigation wrapped into operable rows without clipping the current policy evidence cards.
+- PASS: browser console contained no warning or error entries during the mobile analyzer pass.
+- PASS: the next scheduled analyzer cycle completed atomically at `22:40:35 AEST`; API, manifest, and dashboard sync identity remained `v31-three-tile-protected-w234`.
+- PASS: that completed snapshot ingested 79 independent opportunities and 222 terminal lifecycles; the live mirror advanced once more to 80/225 immediately afterward and is truthfully marked `PENDING_NEXT_ANALYZER_CYCLE` rather than silently merged.
 - PASS: complete evidence bundle downloaded from `/download/everything` into a disposable non-OneDrive QA directory.
 - PASS: bundle size `37,237,901` bytes; `483` files including preserved sessions and `64` current-report files.
 - PASS: root bundle manifest schema `doxxed_everything_bundle_v2` and epoch `epoch-f9331f49c318f89040ce6993`.
@@ -82,4 +88,4 @@ Truthfulness observations:
 
 ## Global readiness conclusion
 
-This receipt does **not** authorize a FIXED, READY, GREEN, or live-copy claim. The remaining visual gate is narrow/mobile layout. Backend strategy qualification is also not met: there are no conservative terminal OOS fills, only one observed market regime, and policy comparability is missing.
+This receipt does **not** authorize a FIXED, READY, GREEN, or live-copy claim. Desktop and narrow/mobile visual checks pass, but backend strategy qualification is not met: current evidence remains descriptive, conservative terminal OOS evidence is immature, and no safe policy has qualified. Pre-repair counterfactual rows without durable policy-comparability identity remain excluded while the collector waits for a naturally matured post-repair lifecycle.

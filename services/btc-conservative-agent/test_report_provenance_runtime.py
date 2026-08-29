@@ -129,8 +129,10 @@ def test_empty_current_lanes_are_written_and_publish_with_exact_generation_ident
     tmp_path, monkeypatch
 ):
     import research.mirror_coherence as mirror_coherence
+    import research.canonical_data_store as canonical_data_store
 
     monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
+    monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(analyzer, "_load_signal_snapshots", lambda: {})
     monkeypatch.setattr(analyzer, "load_research_session", lambda: {

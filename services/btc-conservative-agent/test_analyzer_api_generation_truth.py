@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 
 from research import research_dashboard as dashboard
@@ -140,6 +141,43 @@ def test_executive_summary_uses_manifest_report_count_over_disk_count():
     })
     assert "all 60 JSON reports" in text
     assert "all 62 JSON reports" not in text
+
+
+def test_integrity_receipt_is_bound_to_final_manifest_generation(monkeypatch, tmp_path):
+    integrity = tmp_path / engine.ANALYZER_INTEGRITY_REPORT_FILE
+    integrity.write_text(json.dumps({
+        "schema": "analyzer_integrity_v1",
+        "generated_at": "2026-08-28T00:00:00+00:00",
+        "valid": True,
+        "checks": [],
+        "failed_checks": [],
+    }), encoding="utf-8")
+    reports_dir = tmp_path / "reports"
+    monkeypatch.setattr(engine, "analyzer_report_path", lambda _name: str(integrity))
+    monkeypatch.setattr(engine, "REPORTS_DIR", str(reports_dir))
+    manifest = {
+        **GENERATION,
+        "tile_registry_signature": "tile-signature",
+    }
+    reports = [{
+        "file": engine.ANALYZER_INTEGRITY_REPORT_FILE,
+        "size_bytes": 0,
+        "modified_at": "old",
+    }]
+
+    assert engine._stamp_integrity_generation_identity(manifest, reports) is True
+
+    stamped = json.loads(integrity.read_text(encoding="utf-8"))
+    assert stamped["checks_generated_at"] == "2026-08-28T00:00:00+00:00"
+    assert stamped["generated_at"] == GENERATION["generated_at"]
+    assert stamped["generation_id"] == GENERATION["generation_id"]
+    assert stamped["generation_revision"] == GENERATION["generation_revision"]
+    assert stamped["source_data_revision"] == GENERATION["source_data_revision"]
+    assert stamped["epoch_id"] == "epoch-current"
+    assert stamped["tile_registry_signature"] == "tile-signature"
+    assert json.loads((reports_dir / integrity.name).read_text(encoding="utf-8")) == stamped
+    assert reports[0]["size_bytes"] == integrity.stat().st_size
+    assert reports[0]["modified_at"] != "old"
 
 
 def test_status_fails_closed_when_a_required_core_report_is_missing(monkeypatch):

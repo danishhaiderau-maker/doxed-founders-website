@@ -21,6 +21,7 @@ if ($pythonCommand) {
   }
 }
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
+. (Join-Path $scriptDir "fly-data-paths.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 
 # Stop only the former desktop production runtime and its relay publisher.
@@ -103,7 +104,8 @@ if (-not $proxyAlive) {
 
 # Start one incremental Fly data synchronizer.
 $syncLock = Join-Path $repoRoot ".fly-data-sync-loop.lock"
-$syncHeartbeat = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
+$canonicalMirror = Get-DoxxedFlyMirrorDir
+$syncHeartbeat = Join-Path $canonicalMirror ".fly-data-sync-loop.heartbeat.json"
 $syncHeartbeatMaxAgeSec = 600
 $syncAlive = $false
 if (Test-Path -LiteralPath $syncLock) {

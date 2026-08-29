@@ -64,6 +64,17 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
     monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: mirror_revision)
     monkeypatch.setattr(
         dashboard,
+        "_mirror_sync_receipt",
+        lambda: {
+            "inProgress": False,
+            "revisionParity": "MATCH",
+            "sourceRevision": mirror_revision,
+            "mirroredSourceRevision": mirror_revision,
+            "observedSourceRevision": mirror_revision,
+        },
+    )
+    monkeypatch.setattr(
+        dashboard,
         "_load_bot_session",
         lambda: {
             "collector_v22_epoch_id": mirror_epoch,

@@ -20,13 +20,46 @@ Fly.io doxed-btc-bot
 
 Desktop
   ├─ :7002 read-only proxy to Fly
-  ├─ Fly data mirror
+  ├─ canonical-research-data/ (verified Fly derivative)
   └─ :9001 external analyzer over that mirror
 ```
 
 The desktop must not run `bot.py` or make a second AI call. Railway hosts the
 platform API and isolated subscriber executor; it does not run another copy of
 the strategy bot.
+
+## Canonical research data store
+
+Fly's persistent `bot_data:/app/data` volume is the durable authority. The only
+desktop raw-evidence location is the ignored, repo-contained
+`services/btc-conservative-agent/canonical-research-data/` folder. The Fly sync
+worker writes that folder atomically and never uploads raw evidence from it;
+the analyzer reads that same folder through `BTC_AGENT_DATA_DIR`.
+
+Every completed sync appends a hash-chained
+`canonical_dataset_manifest.jsonl`, atomically advances
+`canonical_dataset_current.json`, and publishes
+`canonical_dataset_parity.json`. Analyzer admission requires the current epoch,
+source revision, and tile-registry signature to match the completed Fly sync
+receipt. A mismatch fails closed before report generation.
+
+Use `scripts/migrate_canonical_research_store.py` to copy a previously verified
+mirror into the store. Migration verifies sync state, sizes, optional hashes,
+revision parity, and epoch identity. It does not delete or modify the source.
+The Windows wrapper uses the completed sync heartbeat:
+
+```powershell
+& .\scripts\migrate-fly-mirror-to-local.ps1 `
+  -SourceDir "$env:LOCALAPPDATA\DoxxedCrypto\fly-data-mirror"
+```
+
+After its receipt and a local analyzer pass are verified, remove the obsolete
+`DOXXED_FLY_MIRROR_DIR` override; future launchers reject any location other
+than the repository's canonical store. Retain the old mirror until that
+verification is complete.
+Stale local rotations are moved under `archive/sync-retired/` with recoverable
+receipts before their active paths are removed; cleanup paths cannot escape the
+canonical store.
 
 ## Safe deployment
 

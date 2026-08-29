@@ -27,6 +27,9 @@ SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
 SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(
     encoding="utf-8"
 )
+DESKTOP_MIRROR_LAUNCHER = (
+    ROOT.parents[1] / "scripts" / "start-fly-desktop-mirror.ps1"
+).read_text(encoding="utf-8")
 RESEARCH_SUPERVISOR_TASK = (
     ROOT.parents[1] / "scripts" / "register-research-stability-supervisor.ps1"
 ).read_text(encoding="utf-8")
@@ -82,9 +85,8 @@ def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
     assert "Invoke-MirrorAtomicReplace" in SYNC_SCRIPT
     assert "ProgressHeartbeatFile = $heartbeatFile" in SYNC_LOOP
     assert "ProgressRelayEvidenceJson" in SYNC_LOOP
-    assert '$loopPidFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"' in SYNC_SCRIPT
-    assert "$loopPid -eq $PID" in SYNC_SCRIPT
-    assert '$ProgressHeartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"' in SYNC_SCRIPT
+    assert '$loopPidFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"' not in SYNC_SCRIPT
+    assert '$ProgressHeartbeatFile = Join-Path $targetRoot ".fly-data-sync-loop.heartbeat.json"' in SYNC_SCRIPT
     assert "$previousHeartbeat.relayEvidence" in SYNC_SCRIPT
     assert "AdminToken" not in progress_function
 
@@ -148,10 +150,25 @@ def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
     assert "function Invoke-OptionalRelayEvidenceSync" in SYNC_LOOP
     assert "stage=optional_relay_evidence failed after" in SYNC_LOOP
     manifest_call = SYNC_LOOP.index("$manifest = Get-FlySyncPreflightManifest")
-    revision_gate = SYNC_LOOP.index("-not $forceByRevision", manifest_call)
+    required_sync_gate = SYNC_LOOP.index(
+        "-not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision)",
+        manifest_call,
+    )
     relay_call = SYNC_LOOP.index("$relayEvidencePath = Invoke-OptionalRelayEvidenceSync")
     relay_catch = SYNC_LOOP.index("} catch {", relay_call)
-    assert manifest_call < revision_gate < relay_call < relay_catch
+    assert manifest_call < required_sync_gate < relay_call < relay_catch
+
+
+def test_sync_loop_separates_poll_retry_and_full_mutation_cadence():
+    assert "[int]$FullSyncIntervalSec = 1800" in SYNC_LOOP
+    assert "$fullSyncSec = [Math]::Max(600, $FullSyncIntervalSec)" in SYNC_LOOP
+    assert "$forceByTime = $elapsedSec -ge $fullSyncSec" in SYNC_LOOP
+    assert "$forceByTime = $elapsedSec -ge [Math]::Max(15, $IntervalSec)" not in SYNC_LOOP
+    failure_marker = SYNC_LOOP.index("$failureAt = (Get-Date).ToUniversalTime()")
+    catch_start = SYNC_LOOP.rfind("    } catch {", 0, failure_marker)
+    loop_tail = SYNC_LOOP[catch_start:]
+    assert loop_tail.count("Start-Sleep -Seconds $pollSec") >= 2
+    assert "Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))" not in loop_tail
 
 
 def _load_bot_functions(*names):
@@ -343,6 +360,20 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
     assert paths.count("tile_independence_report.json") == 1
     assert "ordinary.json" in paths
     assert "research.db" in paths
+    cheap_db_row = next(row for row in rows if row["path"] == "research.db")
+    assert cheap_db_row["consistency_mode"] == "sqlite_snapshot_v1"
+    assert "snapshot_id" not in cheap_db_row
+    assert not (tmp_path / ".data-sync-snapshots").exists()
+
+    snapshot_rows = namespace["_data_sync_inventory"](
+        include_sqlite_snapshots=True
+    )
+    snapshot_db_row = next(
+        row for row in snapshot_rows if row["path"] == "research.db"
+    )
+    assert snapshot_db_row["snapshot_id"]
+    assert len(snapshot_db_row["snapshot_sha256"]) == 64
+    assert snapshot_db_row["size"] == snapshot_db_row["snapshot_size"]
     assert namespace["_data_sync_resolve_relpath"]("research.db") == (
         runtime / "research.db"
     ).resolve()
@@ -400,6 +431,10 @@ def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
     assert '$consistencyMode -eq "sqlite_snapshot_v1"' in SYNC_SCRIPT
     assert '&snapshot_id=$([uri]::EscapeDataString([string]$row.snapshot_id))' in SYNC_SCRIPT
     assert 'SQLite snapshot identity changed while downloading $rel.' in SYNC_SCRIPT
+    assert SYNC_SCRIPT.count('/api/data-sync/manifest?include_snapshots=1') == 2
+    assert '/api/data-sync/manifest?include_snapshots=1' not in SYNC_LOOP
+    assert 'request.args.get("include_snapshots")' in BOT
+    assert '"sqlite_snapshots_materialized": include_sqlite_snapshots' in BOT
 
 
 def test_ephemeral_open_positions_is_explicitly_optional_not_required():
@@ -889,7 +924,7 @@ def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
     assert "$generationRefreshCount -lt 3" in SYNC_SCRIPT
     assert "-match 'generation changed'" in SYNC_SCRIPT
     assert '-Stage "manifest_refresh"' in SYNC_SCRIPT
-    assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
+    assert '-Uri "$base/api/data-sync/manifest?include_snapshots=1"' in SYNC_SCRIPT
     assert 'Where-Object { [string]$_.path -eq $rel }' in SYNC_SCRIPT
     assert "$sameGeneration = $false" in SYNC_SCRIPT
     assert "$fullReplaceRetry = $true" in SYNC_SCRIPT
@@ -979,7 +1014,7 @@ def test_local_mirror_download_is_validated_then_atomically_published():
 def test_hot_small_strict_document_uses_verified_single_read_snapshot_only():
     assert '$atomicSnapshotFallback = (' in SYNC_SCRIPT
     assert '$ForceFullRefresh -and' in SYNC_SCRIPT
-    assert '$generationRefreshCount -ge 3' in SYNC_SCRIPT
+    assert '$generationRefreshCount -ge 3' not in SYNC_SCRIPT
     assert '$consistencyMode -eq "strict_generation_v1"' in SYNC_SCRIPT
     assert '$remoteSize -le $chunkLimit' in SYNC_SCRIPT
     assert 'if (-not $atomicSnapshotFallback)' in SYNC_SCRIPT
@@ -1120,13 +1155,32 @@ def test_local_sync_has_fail_closed_30_gib_admission_guard():
     assert "fingerprinted receipts" in SYNC_SCRIPT
 
 
-def test_local_sync_removes_only_manifest_absent_top_level_raw_research_files():
+def test_local_sync_archives_only_manifest_absent_top_level_raw_research_files():
     assert "stale local Fly research file" in SYNC_SCRIPT
     assert "\\.(jsonl|log|csv)(?:\\.\\d+)?$" in SYNC_SCRIPT
     assert "$manifestPaths.Contains($candidate.Name)" in SYNC_SCRIPT
     assert "Get-ChildItem -LiteralPath $targetRoot -File" in SYNC_SCRIPT
-    assert "[System.IO.File]::Delete($resolvedCandidate)" in SYNC_SCRIPT
+    assert "[System.IO.File]::Move($resolvedCandidate, $archivePath)" in SYNC_SCRIPT
+    assert 'schema = "canonical_research_cleanup_receipt_v1"' in SYNC_SCRIPT
+    assert 'recoverable = $true' in SYNC_SCRIPT
+    assert "[System.IO.File]::Delete($resolvedCandidate)" not in SYNC_SCRIPT
     assert "[void]$syncState.Remove($candidate.Name)" in SYNC_SCRIPT
+
+
+def test_local_sync_never_archives_the_append_only_canonical_manifest():
+    assert '$canonicalLocalFiles = [System.Collections.Generic.HashSet[string]]::new(' in SYNC_SCRIPT
+    assert '@("canonical_dataset_manifest.jsonl")' in SYNC_SCRIPT
+    assert "$canonicalLocalFiles.Contains($candidate.Name)" in SYNC_SCRIPT
+    assert SYNC_SCRIPT.index("$canonicalLocalFiles.Contains($candidate.Name)") < SYNC_SCRIPT.index(
+        "$manifestPaths.Contains($candidate.Name)"
+    )
+
+
+def test_sync_commits_append_first_canonical_manifest_after_completed_heartbeat():
+    assert "migrate_canonical_research_store.py" in SYNC_SCRIPT
+    assert "--record-existing" in SYNC_SCRIPT
+    assert SYNC_SCRIPT.index("-Completed") < SYNC_SCRIPT.index("--record-existing")
+    assert '$ProgressHeartbeatFile = Join-Path $targetRoot ".fly-data-sync-loop.heartbeat.json"' in SYNC_SCRIPT
 
 
 def test_retention_never_removes_active_or_unacknowledged_files():
@@ -1605,6 +1659,36 @@ def test_optional_analyzer_publication_failure_does_not_invalidate_canonical_syn
     ack_pos = sync.index('$ack = Invoke-DataSyncJsonRequest')
     publication_try_pos = sync.index("if ($PublishAnalyzerReport)")
     assert ack_pos < publication_try_pos
+
+
+def test_sync_batches_state_checkpoints_and_skips_unchanged_state_rewrites():
+    sync = (ROOT.parent.parent / "scripts" / "sync-fly-bot-data.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "$pendingStateWrites = 0" in sync
+    assert "$stateMetadataChanged" in sync
+    assert "$previous.size -ne $remoteSize" in sync
+    assert "if ($downloadedGeneration -or -not $previous -or $stateMetadataChanged)" in sync
+    assert "if ($pendingStateWrites -ge 10)" in sync
+    assert "At most nine changed files need replay after interruption" in sync
+
+
+def test_hot_small_strict_file_uses_atomic_snapshot_after_first_generation_conflict():
+    sync = (ROOT.parent.parent / "scripts" / "sync-fly-bot-data.ps1").read_text(
+        encoding="utf-8"
+    )
+    fallback = sync[sync.index("if ($refreshGeneration) {") : sync.index("$freshManifest = Invoke-DataSyncJsonRequest")]
+    assert '$consistencyMode -eq "strict_generation_v1"' in fallback
+    assert "$remoteSize -le $chunkLimit" in fallback
+    assert "$generationRefreshCount -ge 3" not in fallback
+
+
+def test_desktop_mirror_launcher_loads_canonical_path_helper_before_use():
+    helper_import = '. (Join-Path $scriptDir "fly-data-paths.ps1")'
+    assert helper_import in DESKTOP_MIRROR_LAUNCHER
+    assert DESKTOP_MIRROR_LAUNCHER.index(helper_import) < DESKTOP_MIRROR_LAUNCHER.index(
+        "$canonicalMirror = Get-DoxxedFlyMirrorDir"
+    )
 
 
 def test_unattended_research_supervisor_is_local_repair_only():

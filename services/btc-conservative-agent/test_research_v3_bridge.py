@@ -79,6 +79,41 @@ class V3BridgeTests(unittest.TestCase):
                 "repair-rev",
             )
 
+    def test_restart_reconciliation_closes_overdue_awaiting_despite_provisional_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = dual_write_lane_decision(
+                {
+                    "trade_id": "scan-interrupted", "shared_ai_call_id": "scan-interrupted",
+                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "SHORT",
+                    "research_lane": "CONTINUOUS",
+                },
+                lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 60},
+            )
+            # This is the exact interrupted-runtime shape observed in production:
+            # the durable lane receipt is still AWAITING and a generic child signal
+            # was opened, but no paper order intent was ever committed.
+            dual_write_provisional_source(
+                "cont-child", {
+                    "shared_ai_call_id": "scan-interrupted", "signal_ts": 1000,
+                    "raw_direction": "SHORT", "observation_status": "WAITING_ENTRY_WINDOW",
+                },
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            result = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000,
+                runtime_revision="repair-rev",
+            )
+            self.assertEqual(result["reconciled"], 1)
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().splitlines()]
+            terminal = next(row for row in rows if row.get("entry_resolution") == "NO_ORDER")
+            self.assertEqual(terminal["episode_id"], receipt["episode_id"])
+            self.assertEqual(terminal["exact_reason"], "RUNTIME_RESTART_LEDGER_RECONCILIATION")
+
     def test_restart_ledger_reconciliation_refuses_active_or_not_overdue_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._lost_expected_order(tmp)

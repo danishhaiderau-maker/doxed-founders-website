@@ -53,6 +53,10 @@ const flySyncLoopPath = new URL('./sync-fly-bot-data-loop.ps1', import.meta.url)
 const flySyncPath = new URL('./sync-fly-bot-data.ps1', import.meta.url);
 const flyDataPathsPath = new URL('./fly-data-paths.ps1', import.meta.url);
 const flyMirrorMigrationPath = new URL('./migrate-fly-mirror-to-local.ps1', import.meta.url);
+const rsiTouchAuditPath = new URL(
+  '../services/btc-conservative-agent/run_rsi_touch_offset_audit.py',
+  import.meta.url,
+);
 const analyzerAutoRestartPath = new URL('./analyzer-auto-restart.ps1', import.meta.url);
 const botSourcePath = new URL(
   '../services/btc-conservative-agent/bot.py',
@@ -391,7 +395,7 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
   assert.match(
     syncLoop,
-    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \$forceByRevision[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
+    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \(\$forceByTime -or \$forceByGrowth -or \$forceFresh -or \$forceByRevision\)[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
   );
   assert.match(
     syncLoop,
@@ -436,16 +440,17 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
 });
 
-test('raw Fly evidence defaults to machine-local storage and migration is copy-only', async () => {
+test('raw Fly evidence uses the repository canonical store and legacy migration is copy-only', async () => {
   const paths = await readFile(flyDataPathsPath, 'utf8');
   const syncLoop = await readFile(flySyncLoopPath, 'utf8');
   const sync = await readFile(flySyncPath, 'utf8');
   const migration = await readFile(flyMirrorMigrationPath, 'utf8');
+  const rsiAudit = await readFile(rsiTouchAuditPath, 'utf8');
   const homeMode = await readFile(homeModePath, 'utf8');
 
   assert.match(paths, /DOXXED_FLY_MIRROR_DIR/);
-  assert.match(paths, /LOCALAPPDATA/);
-  assert.match(paths, /DoxxedCrypto\\fly-data-mirror/);
+  assert.match(paths, /canonical-research-data/);
+  assert.doesNotMatch(paths, /LOCALAPPDATA|DoxxedCrypto\\fly-data-mirror/);
   assert.match(syncLoop, /Get-DoxxedFlyMirrorDir/);
   assert.match(syncLoop, /syncArgs\.TargetDir = \$mirrorDir/);
   assert.match(syncLoop, /Import-HomeBotVaultConfig -VaultEnvPath \$vaultEnv/);
@@ -454,8 +459,14 @@ test('raw Fly evidence defaults to machine-local storage and migration is copy-o
   assert.match(sync, /home-bot-vault-env.ps1/);
   assert.match(sync, /Import-CanonicalBotAdminToken/);
   assert.match(homeMode, /DataDir = Get-DoxxedFlyMirrorDir/);
-  assert.match(migration, /Get-FileHash[\s\S]*SHA256/);
-  assert.match(migration, /SourceRetained = \$true/);
+  assert.match(rsiAudit, /canonical-research-data/);
+  assert.match(rsiAudit, /FLY_MIRROR must select the repo-contained canonical-research-data store/);
+  assert.doesNotMatch(rsiAudit, /LOCALAPPDATA|DoxxedCrypto[\\/]fly-data-mirror/);
+  assert.match(migration, /legacyBase/);
+  assert.match(migration, /DoxxedCrypto\\fly-data-mirror/);
+  assert.match(migration, /migrate_canonical_research_store\.py/);
+  assert.match(migration, /--source/);
+  assert.match(migration, /--destination/);
   assert.doesNotMatch(migration, /Remove-Item|Move-Item/);
 });
 

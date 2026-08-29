@@ -132,17 +132,12 @@ def _approved_non_onedrive_path(value: str | os.PathLike[str] | None) -> Path | 
 
 
 _configured_data_root = _approved_non_onedrive_path(os.getenv("BTC_AGENT_DATA_DIR"))
-_local_app_data = _approved_non_onedrive_path(os.getenv("LOCALAPPDATA"))
-_canonical_mirror = (
-    _local_app_data / "DoxxedCrypto" / "fly-data-mirror"
-    if _local_app_data is not None
-    else None
-)
-DATA_ROOT = (
-    _configured_data_root
-    or _canonical_mirror
-    or _AGENT_ROOT
-).resolve()
+_canonical_mirror = _AGENT_ROOT / "canonical-research-data"
+if _configured_data_root and _configured_data_root != _canonical_mirror.resolve():
+    raise RuntimeError(
+        "BTC_AGENT_DATA_DIR must select the repo-contained canonical-research-data store"
+    )
+DATA_ROOT = _canonical_mirror.resolve()
 CURRENT_PATHWAY_RECEIPTS = (
     "tile_independence_report.json",
     "ai_scan_independence_report.json",
@@ -911,10 +906,7 @@ def _failed_gate_names(gates: dict | None) -> list[str]:
 
 def _mirror_sync_receipt() -> dict:
     """Return the canonical mirror-loop receipt, including in-flight state."""
-    candidates = (
-        _AGENT_ROOT.parents[1] / ".fly-data-sync-loop.heartbeat.json",
-        DATA_ROOT / ".fly-data-sync-loop.heartbeat.json",
-    )
+    candidates = (DATA_ROOT / ".fly-data-sync-loop.heartbeat.json",)
     for path in candidates:
         try:
             payload = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -2024,6 +2016,8 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
             "execution_metric_status": (
                 "SUPPORTED_TERMINAL_FILLS"
                 if fills > 0
+                else "UNKNOWN_UNVERIFIABLE_EXECUTION_EVIDENCE"
+                if unsupported_episodes > 0 and supported_episodes == 0
                 else "UNAVAILABLE_NO_SUPPORTED_TERMINAL_FILLS"
             ),
             "gates": item.get("gates") or {},
@@ -5610,11 +5604,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Top Profitable Conservative Policy Combos</h2>
     <p class="note" id="policy-grid-note">Only positive policies with supported conservative BBO/depth fills appear here. Execution fills are split into full and partial receipts. A blank table means this generation has no profitable conservative policy; negative policies are not presented as leaders.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
-    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS episodes</th><th>Supported episodes</th><th>Full fills</th><th>Partial fills</th><th>No fills</th><th>Unsupported</th><th>Fill rate</th><th>Execution wins / losses</th><th>Execution OOS PnL</th><th>Execution EV / episode</th><th>Execution max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <p class="muted">OOS episodes are candidate opportunities in the chronological holdout. They are not fills or complete trade lifecycles. Unsupported means execution is unknown/unverifiable; it must not be read as NO_FILL.</p>
+    <table><thead><tr><th>#</th><th>Family</th><th>Family rank</th><th>Policy / parameters</th><th>OOS candidate opportunities</th><th>Supported episodes</th><th>Full fills</th><th>Partial fills</th><th>No fills</th><th>Unknown / unverifiable</th><th>Fill rate</th><th>Execution wins / losses</th><th>Execution OOS PnL</th><th>Execution EV / episode</th><th>Execution max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
     <h2>Positive Ideal-Touch Diagnostic Hypotheses</h2>
     <div class="stale-banner" style="display:block;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"><strong>IDEAL_TOUCH_DIAGNOSTIC_ONLY</strong> · <strong>NOT EXECUTION VERIFIED</strong> · <strong>NOT QUALIFICATION ELIGIBLE</strong></div>
     <p class="note">Separate research screen: Diagnostic touches are price-path touches only. Diagnostic replay PnL is not conservative execution PnL. These rows can prioritize further testing but cannot qualify a strategy.</p>
-    <table><thead><tr><th>#</th><th>Family</th><th>Policy / parameters</th><th>Rolling OOS episodes</th><th>Touches</th><th>No touches</th><th>Wins / losses after touch</th><th>Diagnostic PnL</th><th>Diagnostic drawdown</th><th>Evidence status</th></tr></thead><tbody id="diagnostic-policy-grid-body"></tbody></table>
+    <table><thead><tr><th>#</th><th>Family</th><th>Policy / parameters</th><th>Rolling OOS candidate opportunities</th><th>Ideal touches</th><th>No touches</th><th>Diagnostic wins / losses after touch</th><th>Diagnostic PnL</th><th>Diagnostic drawdown</th><th>Evidence status</th></tr></thead><tbody id="diagnostic-policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
     <p class="note" id="combos-note">Separate legacy direction-only cohort: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
     <div class="kpis" id="combos-kpis"></div>

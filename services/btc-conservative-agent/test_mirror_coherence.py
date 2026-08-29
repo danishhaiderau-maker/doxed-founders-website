@@ -27,7 +27,7 @@ def _write_json(path: Path, payload: dict) -> None:
 def _fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     repo = tmp_path / "repo"
     mirror = tmp_path / "mirror"
-    heartbeat = repo / ".fly-data-sync-loop.heartbeat.json"
+    heartbeat = mirror / ".fly-data-sync-loop.heartbeat.json"
     _write_json(
         heartbeat,
         {
@@ -131,7 +131,7 @@ def test_stale_receipt_is_waived_only_for_same_token_with_held_lease(tmp_path: P
     with pytest.raises(MirrorCoherenceError, match="MIRROR_SYNC_RECEIPT_STALE"):
         _assert(repo, mirror, previous=before)
 
-    lease = MirrorGenerationLease(repo, owner="test-analyzer").acquire(timeout_seconds=0)
+    lease = MirrorGenerationLease(mirror, owner="test-analyzer").acquire(timeout_seconds=0)
     try:
         assert assert_mirror_coherent(
             repo_root=repo, data_root=mirror, expected_revision=REVISION,

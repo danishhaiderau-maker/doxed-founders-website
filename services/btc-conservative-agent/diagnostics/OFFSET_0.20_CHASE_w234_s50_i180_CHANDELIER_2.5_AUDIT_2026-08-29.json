@@ -1,0 +1,77 @@
+{
+  "schema": "exact_policy_execution_audit_v1",
+  "generated_at": "2026-08-29T09:38:14.7118579+10:00",
+  "policy_id": "OFFSET_0.20_CHASE_w234_s50_i180|CHANDELIER_2.5",
+  "status": "UNKNOWN_UNVERIFIABLE_EXACT_EPISODES",
+  "production_behavior_changed": false,
+  "current_source": {
+    "local_revision": "04b1f4c5c552390c06db47e05b4fc253443117dc",
+    "production_revision": "04b1f4c5c552",
+    "revision_parity": "MATCH",
+    "dataset_epoch": "epoch-4661cc4ae5c1cb6648b82685",
+    "analyzer_epoch": "epoch-4661cc4ae5c1cb6648b82685",
+    "canonical_manifest_entry_hash": "14eff0a43046ab418f3d11c2621c334090ea84954cf2960b9d193cee9a52a8b7",
+    "canonical_migration_parity": "MATCH",
+    "canonical_file_count": 601,
+    "canonical_byte_count": 684070488,
+    "canonical_row_count": 4636,
+    "canonical_opportunity_count": 206,
+    "current_sync_status": "COMPLETE_MANIFEST_CHAIN_VALID",
+    "analyzer_status": "COMPLETE_FOR_LAST_SUCCESSFUL_SYNC_SNAPSHOT",
+    "analyzer_completed_at": "2026-08-28T23:22:10.988972+00:00",
+    "analyzer_manifest_sha256": "44dc2d11d2e9e33058c5a24e2bfe8c085456f2072f493d901afeda37ddecc863",
+    "canonical_analyzer_manifest_entry_hash": "630177cbfcecc4905a77c9a7d7ef9b25e085f686e972f172af8402cd5fa90f3e",
+    "analyzer_revision_epoch_tile_parity": "MATCH_FOR_LAST_SUCCESSFUL_SYNC_SNAPSHOT",
+    "current_fly_parity": "NOT_FRESHLY_VERIFIED_SYNC_PREFLIGHT_HTTP_503_DURING_DASHBOARD_RESTORE",
+    "report_status": "REPORT_NOT_IN_CURRENT_GENERATION",
+    "artifact_parity": "NOT_PROVEN"
+  },
+  "oos_14_semantics": "FOURTEEN_DISTINCT_CANDIDATE_OPPORTUNITIES_IN_CHRONOLOGICAL_FINAL_30_PERCENT_HOLDOUT",
+  "oos_14_does_not_mean": [
+    "FOURTEEN_IDEAL_ENTRIES",
+    "FOURTEEN_CONSERVATIVE_FILLS",
+    "FOURTEEN_COMPLETE_ENTRY_EXIT_LIFECYCLES"
+  ],
+  "exact_trace": {
+    "episode_ids": null,
+    "ideal_entries": null,
+    "conservative_full_fills": 0,
+    "conservative_partial_fills": 0,
+    "unknown_or_missing_data_cases": null,
+    "true_no_fills": null,
+    "per_episode_rejection_codes": null,
+    "blocker": "THE_TRANSIENT_POLICY_ROW_AND_ITS_PER_EPISODE_RECEIPTS_ARE_ABSENT_FROM_THE_CURRENT_GENERATION_CURRENT_MIRRORED_REPORT_AND_RETAINED_RECENT_BUNDLES"
+  },
+  "partial_fill_accounting": {
+    "positive_accepted_partial_is_counted": true,
+    "positive_accepted_partial_is_displayed_separately": true,
+    "candidate_quantity_rounding_drops_positive_partial": false,
+    "accumulates_depth_across_seconds_or_reprices": false,
+    "actual_paper_prefill_gate_accepts_partial_depth": false,
+    "exact_historical_rounding_or_drop_diagnosis": "UNAVAILABLE_WITHOUT_EPISODE_RECEIPTS"
+  },
+  "root_cause": {
+    "proven_for_zero_of_fourteen": false,
+    "statement": "THE_EXACT_EPISODE_CLASSIFICATION_CANNOT_BE_PROVEN_FROM_THE_SURVIVING_AGGREGATE; DO_NOT INFER NO_FILL OR MISSING_DATA"
+  },
+  "ideal_touch_explanation": "DIAGNOSTIC_PNL_USES_A_SIMULATED_IDEAL_TOUCH_TIMESTAMP_AND_SUBSEQUENT_PRICE_PATH; IT DOES_NOT_REQUIRE_OR_PROVE_A_VENUE_EXECUTABLE_ENTRY",
+  "regression": {
+    "command_scope": [
+      "test_analyzer_execution_evidence_ui.py",
+      "test_conservative_limit_fill.py",
+      "test_conservative_fill_cohort.py",
+      "test_research_v3_candidates.py"
+    ],
+    "passed": 41,
+    "subtests_passed": 3,
+    "failed": 0,
+    "fresh_run_at": "2026-08-29T09:37:00+10:00",
+    "duration_seconds": 2.14,
+    "broader_prior_run": {
+      "passed": 56,
+      "subtests_passed": 3,
+      "failed": 0,
+      "duration_seconds": 2.56
+    }
+  }
+}

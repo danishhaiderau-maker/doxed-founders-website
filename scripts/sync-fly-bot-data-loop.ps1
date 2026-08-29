@@ -1,6 +1,7 @@
 param(
   [string]$SourceUrl = "https://doxed-btc-bot.fly.dev",
-  [int]$IntervalSec = 180
+  [int]$IntervalSec = 180,
+  [int]$FullSyncIntervalSec = 1800
 )
 
 $ErrorActionPreference = "Continue"
@@ -46,14 +47,15 @@ $machineStateBase = if ($env:LOCALAPPDATA) {
 $machineLockDir = Join-Path $machineStateBase "DoxxedCrypto\locks"
 New-Item -ItemType Directory -Path $machineLockDir -Force | Out-Null
 $guardFile = Join-Path $machineLockDir ".fly-data-sync-loop.guard"
-$heartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
-$logFile = Join-Path $repoRoot "logs\fly-data-sync.log"
-$freshSignalFile = Join-Path $repoRoot ".fly-data-sync-loop.last-fresh.json"
 $mirrorDir = Get-DoxxedFlyMirrorDir
+$heartbeatFile = Join-Path $mirrorDir ".fly-data-sync-loop.heartbeat.json"
+$logFile = Join-Path $mirrorDir "logs\fly-data-sync.log"
+$freshSignalFile = Join-Path $mirrorDir ".fly-data-sync-loop.last-fresh.json"
 $relayEvidenceDestination = Join-Path $mirrorDir "relay_lifecycle_evidence_v1.json"
 $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
 $growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
-$generationLeaseFile = Join-Path $repoRoot ".fly-mirror-generation.lease"
+$generationLeaseFile = Join-Path $mirrorDir ".fly-mirror-generation.lease"
+New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
 $relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf) {
   (Get-Item -LiteralPath $relayEvidenceDestination).LastWriteTimeUtc.ToString("o")
 } else { $null }
@@ -110,6 +112,7 @@ if ($env:FLY_VOLUME_SYNC_THRESHOLD_MB) {
 if ($thresholdMb -lt 5) { $thresholdMb = 5.0 }
 $thresholdBytes = [int64]($thresholdMb * 1MB)
 $pollSec = [Math]::Max(30, [Math]::Min(60, [int]($IntervalSec / 3)))
+$fullSyncSec = [Math]::Max(600, $FullSyncIntervalSec)
 
 # Compute local mirror size + merge Fly /api/data_size numbers into one report.
 # Written after every sync cycle so the dashboard always has fresh local info.
@@ -387,7 +390,13 @@ try {
       }
       $growthBytes = [Math]::Max([int64]0, $currentTotalBytes - $lastSyncedTotalBytes)
       $elapsedSec = ([datetime]::UtcNow - $lastSyncAt).TotalSeconds
-      $forceByTime = $elapsedSec -ge [Math]::Max(15, $IntervalSec)
+      # Polling and mutation cadence are deliberately separate. A complete
+      # 601-file Fly pass can take much longer than the three-minute poll
+      # cadence; forcing one on every poll starves the analyzer generation
+      # lease. Polls refresh parity/freshness, while a full pass is due only
+      # at the reviewed full-sync interval (or immediately on growth,
+      # revision, or fresh-collection changes).
+      $forceByTime = $elapsedSec -ge $fullSyncSec
       $forceByGrowth = $growthBytes -ge $thresholdBytes
       $forceFresh = $currentSignal -gt $lastSeenSignal
       # A deployment can change schemas or files without adding 50 MB. The
@@ -404,7 +413,7 @@ try {
       # matched cycle.  This makes the earlier "never blocks the canonical
       # mirror" contract true during deployments and recovery.
       if (
-        -not $forceByRevision -and
+        -not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision) -and
         $env:PLATFORM_API_BASE_URL -and
         $env:PLATFORM_RELAY_AGENT_SLUG -and
         $env:PLATFORM_RELAY_USER_ID
@@ -633,7 +642,10 @@ try {
     if ($didSync) {
       Start-Sleep -Seconds $pollSec
     } else {
-      Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))
+      # A failed preflight must retry at the bounded poll cadence. Sleeping
+      # for the full-sync interval would leave a stale heartbeat after a
+      # transient 503 and unnecessarily block the analyzer.
+      Start-Sleep -Seconds $pollSec
     }
   }
 } finally {

@@ -27379,6 +27379,17 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
     ai_age = max(0.0, now - ai_ts) if ai_ts else None
     startup_age = max(0.0, now - float(process_boot_time or now))
     ai_stale_sec = max(300.0, float(get_effective_ai_cooldown_sec()) + 120.0)
+    # A completed market-assessment cycle may truthfully stop before provider
+    # egress (for example CTX_FAIL / invalid support-resistance input).  That
+    # is healthy decision progress, not a missing-AI stall.  The coordinator
+    # records ``last_pipeline_run`` when it begins each bounded assessment;
+    # treat a recent assessment as cadence evidence while retaining the same
+    # hard stale bound if the coordinator actually wedges.
+    evaluation_ts = float(globals().get("last_pipeline_run") or 0)
+    evaluation_age = max(0.0, now - evaluation_ts) if evaluation_ts else None
+    evaluation_progressing = bool(
+        evaluation_ts and evaluation_age <= ai_stale_sec
+    )
     scheduled_snapshot = copy.deepcopy(scheduled_ai_cycle_state)
     scheduled_started = float(scheduled_snapshot.get("started_ts") or 0)
     scheduled_owner_ident = scheduled_snapshot.get("owner_ident")
@@ -27404,6 +27415,7 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
         and not manual
         and (os.getenv("DEEPSEEK_API_KEY") or "").strip()
         and startup_age >= ai_stale_sec
+        and not evaluation_progressing
         and not scheduled_cycle_within_bound
     )
 
@@ -27500,6 +27512,8 @@ def _strategy_progress_health_snapshot(now: float = None) -> dict:
             lock_available and ws_progressing and ai_observed_progressing
         ),
         "ai_age_sec": ai_age,
+        "evaluation_age_sec": evaluation_age,
+        "evaluation_progressing": evaluation_progressing,
         "ai_stale_after_sec": ai_stale_sec,
         "process_startup_age_sec": startup_age,
         "ai_stall_latched": ai_stall_latched,
@@ -27894,7 +27908,7 @@ __ADMIN_ACCESS_CONTROLS__
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
-  Local mirror at <code>C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror</code> syncs on growth
+  Canonical analyzer store at <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> syncs from Fly
     (≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code>, default 50 MB) or every 3 min — then ACK-prunes rotated shards only.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
@@ -27923,7 +27937,7 @@ __ADMIN_ACCESS_CONTROLS__
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
-    Local mirror: <code>C:/Users/danis/AppData/Local/DoxxedCrypto/fly-data-mirror</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
+    Canonical analyzer store: <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> &middot; Fly-to-local sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
 
@@ -35940,7 +35954,15 @@ def _data_sync_append_prefix_matches(stat, *, minimum_size: int, inode: int) -> 
     )
 
 
-def _data_sync_inventory() -> list:
+def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
+    """Return the authenticated runtime inventory.
+
+    The sync loop polls this inventory frequently to establish revision and
+    epoch parity.  Creating SQLite online backups during every poll is both
+    unnecessary and expensive enough to make the readiness endpoint miss its
+    deadline.  Snapshot leases are therefore materialized only for an actual
+    download run that explicitly asks for them.
+    """
     seen = set()
     seen_relpaths = set()
     rows = []
@@ -35967,7 +35989,10 @@ def _data_sync_inventory() -> list:
                 "inode": int(getattr(stat, "st_ino", 0) or 0),
                 "consistency_mode": _data_sync_consistency_mode(resolved),
             })
-            if rows[-1]["consistency_mode"] == "sqlite_snapshot_v1":
+            if (
+                rows[-1]["consistency_mode"] == "sqlite_snapshot_v1"
+                and include_sqlite_snapshots
+            ):
                 snapshot = _data_sync_sqlite_snapshot(resolved)
                 rows[-1].update(snapshot)
                 rows[-1]["size"] = snapshot["snapshot_size"]
@@ -36081,7 +36106,12 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
 
 @app.route('/api/data-sync/manifest')
 def api_data_sync_manifest():
-    files = _data_sync_inventory()
+    include_sqlite_snapshots = str(
+        request.args.get("include_snapshots") or ""
+    ).strip().lower() in {"1", "true", "yes"}
+    files = _data_sync_inventory(
+        include_sqlite_snapshots=include_sqlite_snapshots
+    )
     usage = shutil.disk_usage(_data_sync_volume_root())
     ack = _read_data_sync_ack()
     with state_lock:
@@ -36109,6 +36139,7 @@ def api_data_sync_manifest():
         "tile_registry_signature": active_tile_registry_signature(),
         "active_tiles": tile_registry,
         "files": files,
+        "sqlite_snapshots_materialized": include_sqlite_snapshots,
         "optional_files": _data_sync_optional_file_audit(),
         "file_count": len(files),
         "total_bytes": sum(row["size"] for row in files),

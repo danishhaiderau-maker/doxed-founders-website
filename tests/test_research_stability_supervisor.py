@@ -48,6 +48,12 @@ def write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_default_paths_select_only_repo_canonical_store(tmp_path):
+    mirror, reports = module.default_paths(tmp_path)
+    assert mirror == tmp_path / "services" / "btc-conservative-agent" / "canonical-research-data"
+    assert reports == tmp_path / "services" / "btc-conservative-agent"
+
+
 def test_local_storage_snapshot_tracks_active_and_quarantined_bytes(tmp_path):
     mirror = tmp_path / "fly-data-mirror"
     quarantine = tmp_path / "fly-data-quarantine" / "epoch-old"
@@ -359,7 +365,7 @@ def make_fixture(tmp_path):
         "sourceRevision": "a" * 40,
         "tileRegistrySignature": TEST_TILE_SIGNATURE,
     }
-    write_json(repo / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    write_json(mirror / ".fly-data-sync-loop.heartbeat.json", heartbeat)
     events = []
     for index in range(3):
         events.append({
@@ -1159,9 +1165,9 @@ def test_count_or_signature_mismatch_fails_closed_without_restart(tmp_path):
 
 def test_fly_and_sync_revision_mismatch_fails_closed(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
-    heartbeat = json.loads((repo / ".fly-data-sync-loop.heartbeat.json").read_text())
+    heartbeat = json.loads((mirror / ".fly-data-sync-loop.heartbeat.json").read_text())
     heartbeat["sourceRevision"] = "b" * 40
-    write_json(repo / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    write_json(mirror / ".fly-data-sync-loop.heartbeat.json", heartbeat)
     checker = module.Supervisor(repo, mirror, reports, "https://fly.invalid", "token", now=lambda: NOW,
                                 fetcher=fetcher, process_reader=processes)
     result = checker.check()
@@ -1214,9 +1220,9 @@ def test_exact_mirror_parity_refreshes_one_stale_analyzer_through_safe_launcher(
 
 def test_stale_analyzer_is_not_refreshed_before_mirror_revision_matches_fly(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
-    heartbeat = json.loads((repo / ".fly-data-sync-loop.heartbeat.json").read_text())
+    heartbeat = json.loads((mirror / ".fly-data-sync-loop.heartbeat.json").read_text())
     heartbeat["sourceRevision"] = "c" * 40
-    write_json(repo / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    write_json(mirror / ".fly-data-sync-loop.heartbeat.json", heartbeat)
     calls = []
     rows = [
         {"ProcessId": 1, "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
@@ -1250,12 +1256,10 @@ def test_duplicate_process_is_reported_and_never_killed(tmp_path):
     assert row["detail"]["count"] == 2
 
 
-def test_runtime_repo_owns_sync_heartbeat_and_launcher(tmp_path):
+def test_runtime_repo_owns_launcher_while_canonical_mirror_owns_sync_heartbeat(tmp_path):
     repo, mirror, reports = make_fixture(tmp_path)
     runtime_repo = tmp_path / "runtime-owner"
     (runtime_repo / "scripts").mkdir(parents=True)
-    heartbeat = repo / ".fly-data-sync-loop.heartbeat.json"
-    heartbeat.replace(runtime_repo / heartbeat.name)
     calls = []
     rows = [
         {"ProcessId": 2, "CommandLine": "python analyzer_research_engine_v62.py --owner-port=9001"},

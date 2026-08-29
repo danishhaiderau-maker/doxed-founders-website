@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, "..");
 
 function env(name, fallback = "") {
   return (process.env[name] || fallback).trim();
@@ -124,7 +125,7 @@ const [action, ...rest] = process.argv.slice(2);
 const source =
   rest.includes("--source")
     ? rest[rest.indexOf("--source") + 1]
-    : path.join(process.env.LOCALAPPDATA || "", "DoxxedCrypto", "fly-data-mirror");
+    : path.join(repoRoot, "services", "btc-conservative-agent", "canonical-research-data");
 const dest = rest.includes("--dest") ? rest[rest.indexOf("--dest") + 1] : path.join(os.tmpdir?.() || "/tmp", "research-restore-test");
 const manifestPath =
   (rest.includes("--manifest") ? rest[rest.indexOf("--manifest") + 1] : null) ||

@@ -1102,7 +1102,7 @@ class Supervisor:
         except Exception as exc:
             add("persistent_runtime_readiness", False, type(exc).__name__)
 
-        heartbeat_path = (self.runtime_repo or self.repo) / ".fly-data-sync-loop.heartbeat.json"
+        heartbeat_path = self.mirror / ".fly-data-sync-loop.heartbeat.json"
         sync_revision = None
         sync_registry_signature = None
         try:
@@ -1440,8 +1440,8 @@ class Supervisor:
 
 
 def default_paths(repo: Path) -> tuple[Path, Path]:
-    local = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
-    return local / "DoxxedCrypto" / "fly-data-mirror", repo / "services" / "btc-conservative-agent"
+    agent = repo / "services" / "btc-conservative-agent"
+    return agent / "canonical-research-data", agent
 
 
 def main() -> int:

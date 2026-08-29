@@ -17,8 +17,10 @@ def _load(name, path):
 def test_completed_generation_publication_is_atomic_and_preserves_full_artifact(tmp_path, monkeypatch):
     analyzer = _load("atomic_analyzer", AGENT / "analyzer_research_engine_v62.py")
     import research.mirror_coherence as mirror_coherence
+    import research.canonical_data_store as canonical_data_store
 
     monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
+    monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
     monkeypatch.chdir(tmp_path)
     Path("safe_policy_genome_v3_report.json").write_text(
         json.dumps({"generated_at": "new", "candidate_screen": {"full_grid": [1, 2, 3]}}),

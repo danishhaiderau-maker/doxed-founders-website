@@ -17,21 +17,6 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-atomic.ps1")
-# A loop that was already running before this diagnostics repair does not need
-# to be restarted.  The shared-process PID marker proves this script was
-# invoked by that canonical loop; standalone/manual syncs remain silent unless
-# the caller passes ProgressHeartbeatFile explicitly.
-if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
-  $loopPidFile = Join-Path $repoRoot ".fly-data-sync-loop.lock"
-  if (Test-Path -LiteralPath $loopPidFile -PathType Leaf) {
-    try {
-      $loopPid = [int]((Get-Content -LiteralPath $loopPidFile -Raw).Trim([char]0xFEFF).Trim())
-      if ($loopPid -eq $PID) {
-        $ProgressHeartbeatFile = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
-      }
-    } catch { }
-  }
-}
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
@@ -46,6 +31,9 @@ if (-not $AdminToken) {
 
 $targetRoot = [System.IO.Path]::GetFullPath($TargetDir)
 New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
+if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
+  $ProgressHeartbeatFile = Join-Path $targetRoot ".fly-data-sync-loop.heartbeat.json"
+}
 $statePath = Join-Path $targetRoot ".fly-sync-state.json"
 $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
 Add-Type -AssemblyName System.Net.Http
@@ -227,7 +215,7 @@ function Save-SyncState {
 $base = $SourceUrl.TrimEnd("/")
 $manifest = Invoke-DataSyncJsonRequest `
   -Stage "manifest_initial" `
-  -Uri "$base/api/data-sync/manifest" `
+  -Uri "$base/api/data-sync/manifest?include_snapshots=1" `
   -TimeoutSec $manifestTimeoutSec
 if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
   throw "Unexpected Fly sync manifest schema."
@@ -245,11 +233,9 @@ $selectedFiles = @(
 # before ordinary files so a large revision refresh cannot consume the lease
 # while validating hundreds of unrelated hot documents.
 
-# Fly is the authoritative owner of raw research streams. Once a top-level raw
-# stream or closed rotation is no longer declared by its authenticated
-# manifest, keeping an extra local copy only wastes disk and can make the
-# analyzer rediscover a retired epoch. Reports, archives, JSON configuration
-# and subdirectories are never candidates.
+# Fly is the authoritative owner of raw research streams. A top-level raw file
+# absent from its authenticated manifest is retired locally, but cleanup is
+# archive-first and recoverable. Nothing is directly deleted here.
 $manifestPaths = [System.Collections.Generic.HashSet[string]]::new(
   [System.StringComparer]::OrdinalIgnoreCase
 )
@@ -258,24 +244,43 @@ foreach ($manifestRow in @($manifest.files)) {
 }
 $staleRotationFiles = 0
 $staleRotationBytes = [int64]0
+$staleArchiveRoot = Join-Path $targetRoot "archive\sync-retired"
+$canonicalLocalFiles = [System.Collections.Generic.HashSet[string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase
+)
+foreach ($canonicalLocalName in @("canonical_dataset_manifest.jsonl")) {
+  [void]$canonicalLocalFiles.Add($canonicalLocalName)
+}
 foreach ($candidate in @(Get-ChildItem -LiteralPath $targetRoot -File -Force -ErrorAction SilentlyContinue)) {
   if ($candidate.Name -notmatch '\.(jsonl|log|csv)(?:\.\d+)?$') { continue }
   $resolvedCandidate = [System.IO.Path]::GetFullPath($candidate.FullName)
   if (-not $resolvedCandidate.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Local raw research file escaped the mirror root: $resolvedCandidate"
   }
+  if ($canonicalLocalFiles.Contains($candidate.Name)) { continue }
   if ($manifestPaths.Contains($candidate.Name)) { continue }
   $staleRotationBytes += [int64]$candidate.Length
-  [System.IO.File]::Delete($resolvedCandidate)
-  if (Test-Path -LiteralPath $resolvedCandidate) {
-    throw "Failed to remove stale local Fly research file: $resolvedCandidate"
+  $stamp = [DateTimeOffset]::UtcNow.ToString("yyyyMMddTHHmmssfffZ")
+  $archiveDir = Join-Path $staleArchiveRoot $stamp
+  New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null
+  $archivePath = Join-Path $archiveDir $candidate.Name
+  if (Test-Path -LiteralPath $archivePath) { throw "Archive collision: $archivePath" }
+  [System.IO.File]::Move($resolvedCandidate, $archivePath)
+  $receipt = [ordered]@{
+    schema = "canonical_research_cleanup_receipt_v1"
+    archived_at = [DateTimeOffset]::UtcNow.ToString("o")
+    reason = "ABSENT_FROM_AUTHENTICATED_FLY_MANIFEST"
+    source_relative = $candidate.Name
+    archive_relative = $archivePath.Substring($targetRoot.Length).TrimStart('\').Replace('\', '/')
+    recoverable = $true
   }
+  $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$archivePath.receipt.json" -Encoding UTF8
   [void]$syncState.Remove($candidate.Name)
   $staleRotationFiles += 1
 }
 if ($staleRotationFiles -gt 0) {
   Write-Host (
-    "Removed $staleRotationFiles stale local Fly research file(s), " +
+    "Archived $staleRotationFiles stale local Fly research file(s), " +
     "$staleRotationBytes byte(s), absent from the authenticated manifest."
   )
   Save-SyncState
@@ -313,6 +318,7 @@ if (($currentMirrorBytes + $incomingGrowth) -gt $capBytes) {
 }
 $selectedFileCount = @($selectedFiles).Count
 $selectedFileIndex = 0
+$pendingStateWrites = 0
 foreach ($row in $selectedFiles) {
   $selectedFileIndex += 1
   $rel = [string]$row.path
@@ -357,6 +363,7 @@ foreach ($row in $selectedFiles) {
       $localSize -eq $remoteSize
     )
   }
+  $downloadedGeneration = $false
   if (-not ($sameGeneration -and $localSize -eq $remoteSize)) {
   # Assemble and validate a complete same-directory candidate. Never append
   # directly to a file that the analyzer can read: doing so exposed a partial
@@ -530,7 +537,6 @@ foreach ($row in $selectedFiles) {
       if ($refreshGeneration) {
         $generationRefreshCount += 1
         if (
-          $generationRefreshCount -ge 3 -and
           $consistencyMode -eq "strict_generation_v1" -and
           $remoteSize -le $chunkLimit
         ) {
@@ -549,7 +555,7 @@ foreach ($row in $selectedFiles) {
         }
         $freshManifest = Invoke-DataSyncJsonRequest `
           -Stage "manifest_refresh" `
-          -Uri "$base/api/data-sync/manifest" `
+          -Uri "$base/api/data-sync/manifest?include_snapshots=1" `
           -TimeoutSec $manifestTimeoutSec
         if ($freshManifest.schema -ne "fly_runtime_incremental_sync_v1") {
           throw "Unexpected Fly sync manifest schema during generation refresh."
@@ -592,18 +598,37 @@ foreach ($row in $selectedFiles) {
       }
     }
     Publish-MirrorCandidate -Candidate $candidate -Destination $local
+    $downloadedGeneration = $true
   } finally {
     Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $candidateBackup -Force -ErrorAction SilentlyContinue
   }
   }
-  $syncState[$rel] = [ordered]@{
-    inode = $remoteInode
-    size = $remoteSize
-    mtime_ns = [int64]$row.mtime_ns
-    synced_at = (Get-Date).ToUniversalTime().ToString("o")
+  $stateMetadataChanged = [bool](
+    $previous -and (
+      [int64]$previous.inode -ne $remoteInode -or
+      [int64]$previous.size -ne $remoteSize -or
+      [int64]$previous.mtime_ns -ne [int64]$row.mtime_ns
+    )
+  )
+  if ($downloadedGeneration -or -not $previous -or $stateMetadataChanged) {
+    $syncState[$rel] = [ordered]@{
+      inode = $remoteInode
+      size = $remoteSize
+      mtime_ns = [int64]$row.mtime_ns
+      synced_at = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $pendingStateWrites += 1
+    # Preserve bounded resumability without rewriting the complete state map
+    # for every unchanged manifest row. Metadata is still reconciled when an
+    # earlier interrupted pass published a file before its state checkpoint.
+    # At most nine changed files need replay after interruption; published
+    # mirror files remain atomic.
+    if ($pendingStateWrites -ge 10) {
+      Save-SyncState
+      $pendingStateWrites = 0
+    }
   }
-  Save-SyncState
   $ackRows.Add([ordered]@{
     path = $rel
     size = $remoteSize
@@ -847,6 +872,7 @@ if ($PublishAnalyzerReport) {
 # The child sync owns the atomic data download and ACK, so it must also commit
 # the progress receipt. Without this final marker a successful standalone sync
 # leaves the analyzer permanently fail-closed behind `inProgress: true`.
+$MirroredSourceRevision = [string]$manifest.source_git_rev
 Write-SyncProgressHeartbeat `
   -Phase "complete" `
   -FileIndex $selectedFiles.Count `
@@ -854,6 +880,16 @@ Write-SyncProgressHeartbeat `
   -FileBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
   -RemoteBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
   -Completed
+
+# Commit an append-first, hash-chained dataset identity only after the complete
+# authenticated generation and its heartbeat are durable. Analyzer admission
+# can therefore fail closed on epoch/revision/tile parity.
+if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
+  $migrationScript = Join-Path $repoRoot "scripts\migrate_canonical_research_store.py"
+  $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $ProgressHeartbeatFile
+  if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed with exit code $LASTEXITCODE." }
+  if (-not $canonicalManifestReceipt) { throw "Canonical manifest commit returned no receipt." }
+}
 
 [pscustomobject]@{
   Source = $base

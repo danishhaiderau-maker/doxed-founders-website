@@ -94,13 +94,14 @@ function Invoke-ResetFlyDesktopMirror {
   Stop-RecordedMirrorProcess ".home-analyzer-dashboard.pid" @("research_dashboard.py")
   Stop-RecordedMirrorProcess ".home-analyzer.pid" @("analyzer_research_engine_v62.py")
   foreach ($marker in @(
-    ".fly-data-sync-loop.heartbeat.json",
     ".home-analyzer-start.lock",
     ".home-analyzer-auto-restart.lock",
     ".home-analyzer-auto-restart.heartbeat"
   )) {
     Remove-Item -LiteralPath (Join-Path $repoRoot $marker) -Force -ErrorAction SilentlyContinue
   }
+  $canonicalHeartbeat = Join-Path $repoRoot "services\btc-conservative-agent\canonical-research-data\.fly-data-sync-loop.heartbeat.json"
+  Remove-Item -LiteralPath $canonicalHeartbeat -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
   return (Invoke-FlyDesktopMirror)
 }

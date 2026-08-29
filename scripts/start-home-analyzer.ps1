@@ -168,7 +168,9 @@ $env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()
 # Pin report discovery as well as raw-data discovery. The bridge and desktop
 # launcher are long-lived and can otherwise pass an obsolete report directory
 # into a freshly restarted dashboard.
-$env:BTC_AGENT_REPORT_DIR = $agentDir
+$analyzerReportDir = Join-Path $analyzerDataDir "analyzer"
+New-Item -ItemType Directory -Path $analyzerReportDir -Force | Out-Null
+$env:BTC_AGENT_REPORT_DIR = $analyzerReportDir
 
 . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")

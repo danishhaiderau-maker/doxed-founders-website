@@ -100,6 +100,38 @@ def test_no_supported_terminal_fill_never_publishes_zero_execution_metrics():
     assert row["qualification"] == "INSUFFICIENT_EXECUTION_EVIDENCE"
 
 
+def test_unsupported_only_policy_is_unknown_not_no_fill(monkeypatch):
+    candidate = {
+        "policy_id": "p-missing-market-data",
+        "policy_family": "CHANDELIER",
+        "episodes_total": 14,
+        "oos_episodes": 14,
+        "supported_conservative_episodes": 0,
+        "full_fills": 0,
+        "partial_fills": 0,
+        "no_fills": 0,
+        "unsupported_episodes": 14,
+        "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
+        "ideal_touch_diagnostic": {
+            "touches": 9,
+            "no_touches": 5,
+            "wins": 6,
+            "losses": 3,
+            "oos_net_usd": 1.76,
+        },
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: _source_with(candidate))
+
+    row = dashboard._current_policy_grid_rows()["rows"][0]
+
+    assert row["oos_episodes"] == 14
+    assert row["no_fills"] == 0
+    assert row["unsupported_episodes"] == 14
+    assert row["execution_metric_status"] == "UNKNOWN_UNVERIFIABLE_EXECUTION_EVIDENCE"
+    assert row["oos_net_pnl_usd"] is None
+    assert row["diagnostic_replay_net_pnl_usd"] == 1.76
+
+
 def test_public_leader_payload_excludes_zero_information_grid_rows():
     empty = {
         "policy_id": "exhaustive-zero-information",
@@ -157,6 +189,8 @@ def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
         "Unsupported",
         "Fill rate",
         "Execution EV / episode",
+        "OOS candidate opportunities",
+        "Unknown / unverifiable",
     ):
         assert heading in html
     assert "Execution PnL, EV, wins/losses, and drawdown are UNAVAILABLE" in html

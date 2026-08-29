@@ -24,10 +24,13 @@ from cycle_3m_indicators import (
     wilder_rsi,
 )
 
-MIRROR = os.environ.get(
-    "FLY_MIRROR",
-    os.path.join(os.environ.get("LOCALAPPDATA", ""), "DoxxedCrypto", "fly-data-mirror"),
+_CANONICAL_MIRROR = os.path.realpath(
+    os.path.join(os.path.dirname(__file__), "canonical-research-data")
 )
+_REQUESTED_MIRROR = os.environ.get("FLY_MIRROR")
+if _REQUESTED_MIRROR and os.path.realpath(_REQUESTED_MIRROR) != _CANONICAL_MIRROR:
+    raise RuntimeError("FLY_MIRROR must select the repo-contained canonical-research-data store")
+MIRROR = _CANONICAL_MIRROR
 OUT_JSON = os.path.join(
     os.path.dirname(__file__),
     "rsi_touch_offset_audit.json",

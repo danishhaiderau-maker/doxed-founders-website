@@ -1231,6 +1231,56 @@ def _agent_data_path(filename: str) -> str:
     return filename
 
 
+_CANONICAL_JSON_INPUT_NAMES = frozenset({
+    "execution_funnel_summary.json",
+    "pathway_lane_specs.json",
+    "research_session.json",
+})
+
+
+def _bind_existing_canonical_input_paths(data_root: str) -> dict:
+    """Bind legacy relative evidence constants to the canonical data store.
+
+    Derived reports intentionally remain relative to the isolated report cwd.
+    Only raw CSV/JSONL/log evidence and the small explicit runtime JSON inputs
+    are rebound. This prevents old loaders that predate ``_agent_data_path``
+    from silently treating present canonical evidence as missing.
+    """
+    root = os.path.realpath(data_root)
+    rebound = {}
+
+    def canonical_candidate(value):
+        if not isinstance(value, str) or os.path.dirname(value):
+            return None
+        basename = os.path.basename(value)
+        lower = basename.lower()
+        if not (
+            lower.endswith((".csv", ".jsonl", ".log"))
+            or lower in _CANONICAL_JSON_INPUT_NAMES
+        ):
+            return None
+        candidate = os.path.realpath(os.path.join(root, basename))
+        try:
+            if os.path.commonpath([candidate, root]) != root:
+                raise ValueError("canonical evidence path escaped data root")
+        except ValueError as exc:
+            raise RuntimeError(f"CANONICAL_INPUT_PATH_ESCAPE:{basename}") from exc
+        return candidate if os.path.isfile(candidate) else None
+
+    for name, value in list(globals().items()):
+        if name.endswith("_FILE"):
+            candidate = canonical_candidate(value)
+            if candidate:
+                globals()[name] = candidate
+                rebound[name] = candidate
+        elif name.endswith("_FILES") and isinstance(value, tuple):
+            updated = tuple(canonical_candidate(item) or item for item in value)
+            if updated != value:
+                globals()[name] = updated
+                rebound[name] = updated
+    return rebound
+
+
 def _canonical_genome_source_db_path() -> str:
     """Return the configured mirror DB path even before that source exists."""
     data_root = (os.getenv("BTC_AGENT_DATA_DIR") or "").strip()
@@ -8891,7 +8941,8 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
         from research.mirror_generation_lease import MirrorGenerationLease
 
         lease = MirrorGenerationLease(
-            Path(__file__).resolve().parents[2], owner=f"analyzer-iteration-{iteration}"
+            Path(os.environ["BTC_AGENT_DATA_DIR"]),
+            owner=f"analyzer-iteration-{iteration}",
         )
         wait_sec = float(os.getenv("ANALYZER_MIRROR_LEASE_WAIT_SEC", "1200"))
         with lease.acquire(timeout_seconds=wait_sec):
@@ -8916,6 +8967,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
                 or os.getenv("GIT_REVISION")
                 or ""
             ),
+            require_canonical_manifest=True,
         )
         _CURRENT_ANALYZER_GENERATION_STARTED_AT = time.time()
         session = load_research_session()
@@ -12640,26 +12692,41 @@ def run_integrity_checks(
             f"total_trades={total}",
         )
 
-    # AI funnel: approvals + rejects + skipped + timeout reconcile on AI-involved rows
+    # AI funnel: reconcile rows that actually carry AI outcome evidence.
+    # Generic BLOCKED rows can be pre-AI context failures and therefore must
+    # not be classified as AI-involved without an AI outcome/cooldown marker.
     if decisions is not None and not decisions.empty:
         d = decisions.copy()
         ai_txt = d["ai_decision_text"].fillna("").astype(str).str.upper() if "ai_decision_text" in d.columns else pd.Series([""] * len(d))
         dec = d["decision"].fillna("").astype(str).str.upper() if "decision" in d.columns else pd.Series([""] * len(d))
         skip_st = d["skip_stage"].fillna("").astype(str).str.upper() if "skip_stage" in d.columns else pd.Series([""] * len(d))
-        ai_involved = d[dec.isin(["AI", "BLOCKED"]) | ai_txt.isin(["APPROVE", "REJECT"]) | skip_st.eq("COOLDOWN")]
+        ai_mask = (
+            dec.eq("AI")
+            | ai_txt.isin(["APPROVE", "REJECT"])
+            | ai_txt.str.contains("ERROR|TIMEOUT", regex=True)
+            | skip_st.eq("COOLDOWN")
+        )
+        ai_involved = d[ai_mask].copy()
         sub_txt = ai_involved["ai_decision_text"].fillna("").astype(str).str.upper()
-        appr = int((sub_txt == "APPROVE").sum())
-        rej = int((sub_txt == "REJECT").sum())
-        timeout = int(sub_txt.str.contains("ERROR|TIMEOUT", regex=True).sum())
-        skipped = int(ai_involved["skip_stage"].fillna("").astype(str).str.upper().eq("COOLDOWN").sum()) if "skip_stage" in ai_involved.columns else 0
+        timeout_mask = sub_txt.str.contains("ERROR|TIMEOUT", regex=True)
+        reject_mask = sub_txt.eq("REJECT") & ~timeout_mask
+        approve_mask = sub_txt.eq("APPROVE") & ~timeout_mask
+        cooldown_mask = ai_involved["skip_stage"].fillna("").astype(str).str.upper().eq("COOLDOWN") if "skip_stage" in ai_involved.columns else pd.Series([False] * len(ai_involved), index=ai_involved.index)
+        cooldown_mask &= ~(approve_mask | reject_mask | timeout_mask)
+        unclassified_mask = ~(approve_mask | reject_mask | cooldown_mask | timeout_mask)
+        appr = int(approve_mask.sum())
+        rej = int(reject_mask.sum())
+        skipped = int(cooldown_mask.sum())
+        timeout = int(timeout_mask.sum())
+        unclassified = int(unclassified_mask.sum())
         funnel = appr + rej + skipped + timeout
         n_ai = int(len(ai_involved))
         _add(
             "ai_decision_funnel",
-            abs(funnel - n_ai) <= max(10, int(0.05 * n_ai)),
+            funnel == n_ai and unclassified == 0,
             f"approvals+rejects+skipped+timeout={appr}+{rej}+{skipped}+{timeout}={funnel}",
-            f"ai_involved_rows={n_ai} (total decisions={len(d)})",
-            "decisions_3factor: AI/BLOCKED + ai_decision_text APPROVE/REJECT + COOLDOWN skip_stage",
+            f"ai_involved_rows={n_ai}; unclassified={unclassified} (all rows={len(d)})",
+            "decisions_3factor: actual AI outcomes/errors plus explicit COOLDOWN; pre-AI BLOCKED rows excluded",
         )
 
     # Chase buckets: compare the same completed-trade IDs in both sources.
@@ -19024,6 +19091,53 @@ def _write_current_exit_reports_validation(manifest):
     return receipt
 
 
+def _stamp_integrity_generation_identity(manifest, reports):
+    """Bind the final integrity receipt to the immutable generation identity.
+
+    The base integrity checks run before the expensive policy replay.  Preserve
+    that diagnostic timestamp separately, but expose the completed generation's
+    timestamp and identities on the public receipt so manifest/API/dashboard
+    parity is exact rather than appearing to mix two analyzer generations.
+    """
+    target = Path(analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE))
+    try:
+        payload = _load_json_report(str(target)) if target.is_file() else {}
+        if not isinstance(payload, dict) or not payload:
+            return False
+        previous_generated_at = payload.get("generated_at")
+        if previous_generated_at and not payload.get("checks_generated_at"):
+            payload["checks_generated_at"] = previous_generated_at
+        payload.update({
+            "generated_at": manifest.get("generated_at"),
+            "generation_id": manifest.get("generation_id"),
+            "generation_revision": manifest.get("generation_revision"),
+            "source_data_revision": manifest.get("source_data_revision"),
+            "epoch_id": (manifest.get("fresh_epoch") or {}).get("epoch_id"),
+            "tile_registry_signature": manifest.get("tile_registry_signature"),
+        })
+        temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(temp, target)
+        reports_dir = Path(REPORTS_DIR)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        mirrored = reports_dir / target.name
+        shutil.copy2(target, mirrored)
+        for row in reports:
+            if row.get("file") == ANALYZER_INTEGRITY_REPORT_FILE:
+                row["size_bytes"] = mirrored.stat().st_size
+                row["modified_at"] = datetime.fromtimestamp(
+                    mirrored.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+                break
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        print(
+            f"  ⚠️ Could not bind {ANALYZER_INTEGRITY_REPORT_FILE} to final "
+            f"generation: {exc} {PIPELINE_ENFORCEMENT_TAG}"
+        )
+        return False
+
+
 def write_report_manifest(payload=None):
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = float(
@@ -19223,6 +19337,7 @@ def write_report_manifest(payload=None):
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()[:24]
+    _stamp_integrity_generation_identity(manifest, reports)
     try:
         exit_validation = _write_current_exit_reports_validation(manifest)
         reports.append({
@@ -19291,6 +19406,7 @@ def _publish_completed_report_generation(manifest):
         expected_revision=str(manifest.get("generation_revision") or ""),
         previous=globals().get("_CURRENT_MIRROR_COHERENCE_TOKEN"),
         held_lease=globals().get("_CURRENT_MIRROR_GENERATION_LEASE"),
+        require_canonical_manifest=True,
     )
     published = Path(PUBLISHED_REPORTS_DIR)
     staging = Path(f".{PUBLISHED_REPORTS_DIR}.staging-{os.getpid()}-{time.time_ns()}")
@@ -19327,6 +19443,13 @@ def _publish_completed_report_generation(manifest):
         manifest_tmp = Path(f"{REPORT_MANIFEST_FILE}.published.tmp")
         manifest_tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         os.replace(manifest_tmp, REPORT_MANIFEST_FILE)
+        from research.canonical_data_store import record_analyzer_completion
+        record_analyzer_completion(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            report_manifest_path=os.path.abspath(REPORT_MANIFEST_FILE),
+            analyzer_schema_version="v62",
+            completed_at=str(manifest.get("generated_at") or datetime.now(timezone.utc).isoformat()),
+        )
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -20343,6 +20466,27 @@ if __name__ == "__main__":
         sys.exit(2)
 
     _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _configured_report_root = os.getenv("BTC_AGENT_REPORT_DIR", "").strip()
+    if not _configured_report_root:
+        print("ERROR: BTC_AGENT_REPORT_DIR is required for canonical analyzer artifacts.", file=sys.stderr)
+        sys.exit(2)
+    _configured_report_root = os.path.realpath(_configured_report_root)
+    _canonical_data_root = os.path.realpath(_configured_data_root)
+    try:
+        if os.path.commonpath([_configured_report_root, _canonical_data_root]) != _canonical_data_root:
+            raise ValueError("outside canonical data root")
+    except ValueError:
+        print(
+            "ERROR: BTC_AGENT_REPORT_DIR must be contained by BTC_AGENT_DATA_DIR.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    os.makedirs(_configured_report_root, exist_ok=True)
+    _canonical_input_bindings = _bind_existing_canonical_input_paths(_canonical_data_root)
+    print(
+        f"  ℹ️ Bound {len(_canonical_input_bindings)} canonical evidence path(s) "
+        f"from {_canonical_data_root}"
+    )
     # Home-stack runs from agent/research/; pathway_lab_validation lives in agent root.
     if os.path.isfile(os.path.join(_script_dir, "pathway_lab_validation.py")):
         if _script_dir not in sys.path:
@@ -20351,9 +20495,9 @@ if __name__ == "__main__":
         _agent_root = os.path.dirname(_script_dir)
         if _agent_root and _agent_root not in sys.path:
             sys.path.insert(0, _agent_root)
-    if os.path.abspath(os.getcwd()) != _script_dir:
-        print(f"  ℹ️ Switching cwd → {_script_dir}")
-        os.chdir(_script_dir)
+    if os.path.abspath(os.getcwd()) != _configured_report_root:
+        print(f"  ℹ️ Switching report cwd → {_configured_report_root}")
+        os.chdir(_configured_report_root)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()

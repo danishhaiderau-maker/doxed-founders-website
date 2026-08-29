@@ -44,13 +44,9 @@ def _parse_utc(value: object) -> datetime:
 
 
 def _heartbeat_path(repo_root: Path, data_root: Path) -> Path:
-    candidates = (
-        repo_root / ".fly-data-sync-loop.heartbeat.json",
-        data_root / ".fly-data-sync-loop.heartbeat.json",
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+    candidate = data_root / ".fly-data-sync-loop.heartbeat.json"
+    if candidate.is_file():
+        return candidate
     raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_MISSING")
 
 
@@ -116,6 +112,7 @@ def assert_mirror_coherent(
     now: datetime | None = None,
     max_age_seconds: int | None = None,
     held_lease: object | None = None,
+    require_canonical_manifest: bool = False,
 ) -> MirrorCoherenceToken:
     """Validate a completed, current, revision-matched mirror receipt.
 
@@ -163,7 +160,7 @@ def assert_mirror_coherent(
         and held_lease is not None
         and getattr(held_lease, "held", False)
         and Path(getattr(held_lease, "path", "")).resolve()
-        == (root / ".fly-mirror-generation.lease").resolve()
+        == (mirror / ".fly-mirror-generation.lease").resolve()
     )
     # Freshness is mandatory when an iteration starts.  At publication a long
     # calculation may legitimately outlive the receipt-age SLA, but only the
@@ -176,6 +173,22 @@ def assert_mirror_coherent(
     # generation and collection epoch instead of volatile whole-receipt bytes.
     identity, epoch = _completed_mirror_identity(mirror, values[2])
     token = MirrorCoherenceToken(str(path), identity, str(values[2]), epoch)
+    if require_canonical_manifest:
+        if mirror.name != "canonical-research-data":
+            raise MirrorCoherenceError("CANONICAL_STORE_ROOT_NOT_SELECTED")
+        try:
+            from research.canonical_data_store import require_analyzer_dataset
+
+            require_analyzer_dataset(
+                mirror,
+                {
+                    "dataset_epoch": epoch,
+                    "source_revision": str(values[2]).strip().lower(),
+                    "tile_config_signature": str(payload.get("tileRegistrySignature") or ""),
+                },
+            )
+        except Exception as exc:
+            raise MirrorCoherenceError("CANONICAL_DATASET_MANIFEST_INVALID") from exc
     if previous is not None and token != previous:
         raise MirrorCoherenceError("MIRROR_SYNC_IDENTITY_CHANGED_DURING_ANALYSIS")
     return token

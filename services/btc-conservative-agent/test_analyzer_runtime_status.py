@@ -115,7 +115,7 @@ checks = {
     "all launchers use the canonical tested analyzer": (
         '@("analyzer_research_engine_v62.py")' in start_analyzer
         and '@("analyzer_research_engine_v62.py")' in local_analyzer
-        and '$env:BTC_AGENT_REPORT_DIR = $agentDir' in start_analyzer
+        and '$env:BTC_AGENT_REPORT_DIR = $analyzerReportDir' in start_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in start_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in local_analyzer
