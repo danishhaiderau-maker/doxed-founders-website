@@ -503,7 +503,12 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
 
         _set_dashboard_roots(root, mirror)
         original_ensure = dashboard._ensure_current_gpt_audit_bundle
+        original_freshness = dashboard._generation_freshness_meta
         dashboard._ensure_current_gpt_audit_bundle = lambda _root: audit
+        dashboard._generation_freshness_meta = lambda: {
+            "current": True,
+            "reasons": [],
+        }
         try:
             # Atomic mirror synchronization can create and rename these while
             # a user requests the bundle. They are implementation details, not
@@ -712,6 +717,25 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                 assert dashboard.REQUIRED_ANALYZER_RAW_INPUTS[0].encode() in refused_input.data
         finally:
             dashboard._ensure_current_gpt_audit_bundle = original_ensure
+            dashboard._generation_freshness_meta = original_freshness
+
+
+def test_download_everything_refuses_stale_generation_before_capture(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda: {
+            "current": False,
+            "reasons": ["Canonical Fly mirror synchronization is in progress"],
+        },
+    )
+
+    with dashboard.app.test_client() as client:
+        response = client.get("/download/everything")
+
+    assert response.status_code == 503
+    assert b"complete research download refused" in response.data
+    assert b"synchronization is in progress" in response.data
 
 
 def test_sqlite_online_snapshot_includes_uncheckpointed_wal_commit() -> None:

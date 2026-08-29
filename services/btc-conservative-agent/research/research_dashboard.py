@@ -4428,6 +4428,16 @@ def _count_valid_compressed_shadow_rows(payload: bytes) -> int:
 def download_everything():
     """One verified ZIP containing raw research data, reports, sessions, genome,
     accumulator exports, audit source bundle, and any preserved analysis."""
+    freshness = _generation_freshness_meta()
+    if not freshness["current"]:
+        reasons = "; ".join(freshness.get("reasons") or []) or "generation freshness unavailable"
+        abort(
+            503,
+            description=(
+                "complete research download refused: analyzer generation is not current; "
+                f"{reasons}"
+            ),
+        )
     agent_root = ROOT.parent if (ROOT.parent / "bot.py").is_file() else ROOT
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     candidates = []
