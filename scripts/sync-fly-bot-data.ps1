@@ -51,6 +51,24 @@ $downloadClient = [System.Net.Http.HttpClient]::new()
 $downloadClient.Timeout = [TimeSpan]::FromSeconds($chunkTimeoutSec)
 $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
 
+function Test-DataSyncResourcePressureError {
+  param([string]$Message = "")
+  return [bool]($Message -match '(?i)(?:HTTP\s+|\()(?:502|503)\)?|boot(?:ing)?|starting|restoring|server unavailable|bad gateway')
+}
+
+function Get-DataSyncRetryDelaySec {
+  param(
+    [int]$Attempt,
+    [bool]$ResourcePressure
+  )
+  if ($ResourcePressure) {
+    # A booting or CPU-starved one-core Fly machine needs a real quiet window;
+    # rapid retries compound watchdog starvation and can provoke rc=137.
+    return [Math]::Min(60, 15 * [Math]::Max(1, $Attempt))
+  }
+  return [Math]::Min(15, 2 * [Math]::Max(1, $Attempt))
+}
+
 function Invoke-DataSyncJsonRequest {
   param(
     [Parameter(Mandatory = $true)][string]$Stage,
@@ -79,7 +97,10 @@ function Invoke-DataSyncJsonRequest {
           "$attempt/$transportAttempts attempt(s): $($_.Exception.Message)"
         )
       }
-      Start-Sleep -Seconds ([Math]::Min(15, 2 * $attempt))
+      $resourcePressure = Test-DataSyncResourcePressureError -Message $_.Exception.Message
+      Start-Sleep -Seconds (Get-DataSyncRetryDelaySec `
+        -Attempt $attempt `
+        -ResourcePressure $resourcePressure)
     }
   }
 }
@@ -332,9 +353,15 @@ if ([string]$manifest.inventory_status -ne "CURRENT") {
 }
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
+# Keep each request burst and its cadence bounded for Fly's shared one-core
+# paper runtime. The throttle grows after boot/502/503 pressure and recovers
+# gradually after successful chunks, so a large resumable mirror pass yields
+# CPU to health, trading and watchdog work throughout the copy.
 $chunkLimit = 1MB
-$interChunkThrottleMs = 150
-$interFileThrottleMs = 250
+$baseInterChunkThrottleMs = 1000
+$baseInterFileThrottleMs = 1500
+$maxAdaptiveThrottleMs = 5000
+$adaptiveThrottleMs = $baseInterChunkThrottleMs
 $selectedFiles = @($manifest.files)
 $selectedFiles = @(
   $selectedFiles | Sort-Object `
@@ -622,7 +649,13 @@ foreach ($row in $selectedFiles) {
             -FileBytes $offset `
             -RemoteBytes $remoteSize
           if ($offset -lt $remoteSize) {
-            Start-Sleep -Milliseconds $interChunkThrottleMs
+            Start-Sleep -Milliseconds $adaptiveThrottleMs
+          }
+          if ($adaptiveThrottleMs -gt $baseInterChunkThrottleMs) {
+            $adaptiveThrottleMs = [Math]::Max(
+              $baseInterChunkThrottleMs,
+              $adaptiveThrottleMs - 100
+            )
           }
         } catch {
           $generationChanged = (
@@ -638,6 +671,13 @@ foreach ($row in $selectedFiles) {
             $refreshGeneration = $true
             break
           }
+          $resourcePressure = Test-DataSyncResourcePressureError -Message $_.Exception.Message
+          if ($resourcePressure) {
+            $adaptiveThrottleMs = [Math]::Min(
+              $maxAdaptiveThrottleMs,
+              [Math]::Max(2000, $adaptiveThrottleMs * 2)
+            )
+          }
           if ($attempt -ge $transportAttempts) {
             throw (
               "Fly data-sync stage=file_chunk failed for path=$rel " +
@@ -646,7 +686,9 @@ foreach ($row in $selectedFiles) {
               "$attempt/$transportAttempts attempt(s): $($_.Exception.Message)"
             )
           }
-          Start-Sleep -Seconds (2 * $attempt)
+          Start-Sleep -Seconds (Get-DataSyncRetryDelaySec `
+            -Attempt $attempt `
+            -ResourcePressure $resourcePressure)
         } finally {
           if (Test-Path -LiteralPath $tmp) {
             Remove-Item -LiteralPath $tmp -Force
@@ -780,7 +822,8 @@ foreach ($row in $selectedFiles) {
   # changes only copy pacing; resumability, hashes and final acknowledgement
   # remain authoritative.
   if ($downloadedGeneration -and $selectedFileIndex -lt $selectedFileCount) {
-    Start-Sleep -Milliseconds $interFileThrottleMs
+    $fileThrottleMs = [Math]::Max($baseInterFileThrottleMs, $adaptiveThrottleMs)
+    Start-Sleep -Milliseconds $fileThrottleMs
   }
 }
 

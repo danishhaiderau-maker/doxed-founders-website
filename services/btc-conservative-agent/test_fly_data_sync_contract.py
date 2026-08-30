@@ -937,10 +937,27 @@ def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
     assert '/api/data-sync/sqlite-snapshot?path=' in SYNC_SCRIPT
     assert 'Set-SqliteSnapshotLease -Row $row' in SYNC_SCRIPT
     assert '$chunkLimit = 1MB' in SYNC_SCRIPT
-    assert '$interChunkThrottleMs = 150' in SYNC_SCRIPT
-    assert '$interFileThrottleMs = 250' in SYNC_SCRIPT
-    assert 'Start-Sleep -Milliseconds $interChunkThrottleMs' in SYNC_SCRIPT
-    assert 'Start-Sleep -Milliseconds $interFileThrottleMs' in SYNC_SCRIPT
+    assert '$baseInterChunkThrottleMs = 1000' in SYNC_SCRIPT
+    assert '$baseInterFileThrottleMs = 1500' in SYNC_SCRIPT
+    assert '$maxAdaptiveThrottleMs = 5000' in SYNC_SCRIPT
+    assert 'Start-Sleep -Milliseconds $adaptiveThrottleMs' in SYNC_SCRIPT
+    assert 'Start-Sleep -Milliseconds $fileThrottleMs' in SYNC_SCRIPT
+
+
+def test_sync_resource_pressure_uses_adaptive_pacing_and_fail_closed_backoff():
+    assert "function Test-DataSyncResourcePressureError" in SYNC_SCRIPT
+    assert "function Get-DataSyncRetryDelaySec" in SYNC_SCRIPT
+    assert "(?:502|503)" in SYNC_SCRIPT
+    assert "boot(?:ing)?" in SYNC_SCRIPT
+    assert "15 * [Math]::Max(1, $Attempt)" in SYNC_SCRIPT
+    assert "$adaptiveThrottleMs * 2" in SYNC_SCRIPT
+    assert "$adaptiveThrottleMs - 100" in SYNC_SCRIPT
+    assert SYNC_SCRIPT.count(
+        "Get-DataSyncRetryDelaySec `"
+    ) >= 2, "JSON and file transports must both back off under pressure"
+    assert SYNC_SCRIPT.index("$adaptiveThrottleMs = [Math]::Min(") < SYNC_SCRIPT.index(
+        '"Fly data-sync stage=file_chunk failed for path=$rel "'
+    )
     assert 'SQLite snapshot checksum mismatch for $rel.' in SYNC_SCRIPT
     assert '/api/data-sync/manifest?include_snapshots=1' not in SYNC_LOOP
     assert '"sqlite_snapshots_materialized": False' in BOT
@@ -1495,7 +1512,7 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "expected_mtime_ns=$expectedMtime" in SYNC_SCRIPT
     assert "expected_inode=$expectedInode" in SYNC_SCRIPT
     assert "$chunkLimit = 1MB" in SYNC_SCRIPT
-    assert "Start-Sleep -Milliseconds $interChunkThrottleMs" in SYNC_SCRIPT
+    assert "Start-Sleep -Milliseconds $adaptiveThrottleMs" in SYNC_SCRIPT
     assert '$appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")' in SYNC_SCRIPT
     assert "[int64]$previous.mtime_ns -eq [int64]$row.mtime_ns" in SYNC_SCRIPT
     assert "def _data_sync_rotation_parts" in BOT
