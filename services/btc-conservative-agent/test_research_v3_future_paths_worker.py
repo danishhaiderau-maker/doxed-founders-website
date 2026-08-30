@@ -1,4 +1,5 @@
 import json
+import ast
 from pathlib import Path
 import subprocess
 import sys
@@ -44,5 +45,27 @@ def test_worker_has_hard_cpu_memory_and_batch_guards():
     loop_end = bot_source.index("_COUNTERFACTUAL_REQUIRED_POLICY_KEYS", loop_start)
     loop = bot_source[loop_start:loop_end]
     assert "subprocess.run(" in loop
-    assert "timeout=10.0" in loop
+    assert "timeout=FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC" in loop
     assert "stdout=subprocess.DEVNULL" in loop
+
+
+def _literal_assignment(source: str, name: str):
+    tree = ast.parse(source)
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            if any(isinstance(target, ast.Name) and target.id == name for target in statement.targets):
+                return ast.literal_eval(statement.value)
+    raise AssertionError(f"missing literal assignment: {name}")
+
+
+def test_parent_wall_timeout_allows_throttled_worker_but_stays_bounded():
+    worker_cpu_seconds = _literal_assignment(
+        WORKER.read_text(encoding="utf-8"), "MAX_CPU_SECONDS"
+    )
+    parent_wall_seconds = _literal_assignment(
+        BOT.read_text(encoding="utf-8"), "FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC"
+    )
+    # nice(19) can stretch five seconds of CPU substantially on a shared vCPU.
+    # Parent supervision must allow that throttling without becoming unbounded.
+    assert parent_wall_seconds >= worker_cpu_seconds * 4
+    assert parent_wall_seconds <= 45

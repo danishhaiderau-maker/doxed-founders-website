@@ -41608,6 +41608,9 @@ def analytics_loop():
         set_execution_paused("THREAD_CRASH")
 
 
+FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC = 30.0
+
+
 def all_opportunity_future_path_evidence_loop():
     """Mature future tape evidence independently of AI and execution.
 
@@ -41654,7 +41657,9 @@ def all_opportunity_future_path_evidence_loop():
                         "--result", str(result_path),
                     ],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=10.0, check=False,
+                    stderr=subprocess.DEVNULL,
+                    timeout=FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC,
+                    check=False,
                     env=worker_env,
                 )
                 if completed.returncode != 0:
