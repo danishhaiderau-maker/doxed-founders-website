@@ -155,10 +155,17 @@ def test_sync_acknowledgement_is_fast_exact_and_followed_by_identity_fence():
 
     assert 'schema = "fly_runtime_incremental_ack_v2"' in SYNC_SCRIPT[ack_body:ack_request]
     assert 'defer_retention = $true' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'inventory_sha256 = $inventorySha256' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'inventory_generated_at = $inventoryGeneratedAt' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'source_git_rev = [string]$manifest.source_git_rev' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'collection_epoch_id = [string]$manifest.collection_epoch_id' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'tile_registry_signature = [string]$manifest.tile_registry_signature' in SYNC_SCRIPT[ack_body:ack_request]
+    assert '$requestUrl += "&ack_inventory_sha256=$inventorySha256"' in SYNC_SCRIPT
     assert '$ack.PSObject.Properties.Name -contains "accepted"' in SYNC_SCRIPT
     assert '$ack.PSObject.Properties.Name -contains "rejected_count"' in SYNC_SCRIPT
     assert '$ackRejected -ne 0' in SYNC_SCRIPT[exact_acceptance:post_ack_fence]
     assert "Fly sync acknowledgement was incomplete" in SYNC_SCRIPT
+    assert "Fly sync acknowledgement did not bind to the requested inventory generation" in SYNC_SCRIPT
     assert (
         "Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest"
         in SYNC_SCRIPT[post_ack_fence:analyzer_publish]
@@ -1763,7 +1770,8 @@ def test_ack_http_path_is_bounded_and_never_prunes_synchronously():
     body = BOT[BOT.index("def api_data_sync_ack"):BOT.index(
         "_PLATFORM_RELAY_EVIDENCE_MAX_BYTES"
     )]
-    assert "_data_sync_validated_inventory_index()" in body
+    assert "_data_sync_validated_inventory_index(" in body
+    assert "requested_inventory_sha256, requested_inventory_generated_at" in body
     assert "_data_sync_validate_ack_rows(" in body
     assert 'body.get("schema") != "fly_runtime_incremental_ack_v2"' in body
     assert 'body.get("defer_retention") is not True' in body
@@ -1773,6 +1781,79 @@ def test_ack_http_path_is_bounded_and_never_prunes_synchronously():
     assert '"cleanup_status": "DEFERRED_OUTSIDE_HTTP_REQUEST"' in body
     assert '"accepted": len(accepted_rows)' in body
     assert '"rejected_count": rejected' in body
+
+
+def test_long_sync_ack_can_select_the_exact_retained_initial_generation():
+    namespace = _load_bot_functions(
+        "_data_sync_inventory_rows_sha256",
+        "_data_sync_retain_inventory_generation",
+        "_data_sync_register_served_ack_generation",
+        "_data_sync_validated_inventory_index",
+        "_data_sync_validate_ack_rows",
+    )
+    namespace.update({
+        "hashlib": hashlib,
+        "json": json,
+        "re": re,
+        "hmac": __import__("hmac"),
+        "threading": threading,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_inventory_generations": {},
+        "_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS": 7200,
+        "_DATA_SYNC_INVENTORY_GENERATION_MAX": 8,
+    })
+    initial = [{"path": "v3/ledgers/order.jsonl", "size": 10, "mtime_ns": 100}]
+    evolved = [{"path": "v3/ledgers/order.jsonl", "size": 20, "mtime_ns": 200}]
+    initial_sha = namespace["_data_sync_retain_inventory_generation"](
+        initial, "2026-08-31T00:00:00Z"
+    )
+    namespace["_data_sync_retain_inventory_generation"](
+        evolved, "2026-08-31T00:05:00Z"
+    )
+    # Prove retained generations are immutable copies rather than aliases.
+    initial[0]["size"] = 999
+    index, generated_at, selected_sha = namespace[
+        "_data_sync_validated_inventory_index"
+    ](initial_sha, "2026-08-31T00:00:00Z")
+    assert index["v3/ledgers/order.jsonl"]["size"] == 10
+    assert generated_at == "2026-08-31T00:00:00Z"
+    assert selected_sha == initial_sha
+    assert namespace["_data_sync_validated_inventory_index"](
+        initial_sha, "2026-08-31T00:05:00Z"
+    )[0] == {}
+    assert namespace["_data_sync_validated_inventory_index"](
+        "f" * 64, "2026-08-31T00:00:00Z"
+    )[0] == {}
+    # A small hot strict file may be safely served from a newer exact
+    # before/after generation. It is accepted only when the file endpoint
+    # bound that exact tuple to this initial manifest digest.
+    namespace["_data_sync_register_served_ack_generation"](
+        initial_sha, "v3/ledgers/order.jsonl", 15, 150
+    )
+    index = namespace["_data_sync_validated_inventory_index"](
+        initial_sha, "2026-08-31T00:00:00Z"
+    )[0]
+    accepted, rejected = namespace["_data_sync_validate_ack_rows"](
+        [{"path": "v3/ledgers/order.jsonl", "size": 15, "mtime_ns": 150}],
+        index,
+    )
+    assert list(accepted) == ["v3/ledgers/order.jsonl"]
+    assert sum(rejected.values()) == 0
+    accepted, rejected = namespace["_data_sync_validate_ack_rows"](
+        [{"path": "v3/ledgers/order.jsonl", "size": 16, "mtime_ns": 151}],
+        index,
+    )
+    assert accepted == {}
+    assert rejected["GENERATION_MISMATCH"] == 1
+
+
+def test_manifest_publishes_and_retains_its_exact_inventory_generation():
+    manifest = BOT[BOT.index("def api_data_sync_manifest"):BOT.index(
+        "@app.route('/api/data-sync/sqlite-snapshot')"
+    )]
+    assert "_data_sync_retain_inventory_generation(" in manifest
+    assert '"inventory_sha256": inventory_sha256' in manifest
+    assert 'inventory_status == "CURRENT" and not targeted_path' in manifest
 
 
 def test_atomic_ack_write_preserves_previous_receipt_on_replace_failure(tmp_path):

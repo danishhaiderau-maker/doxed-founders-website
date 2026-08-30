@@ -351,6 +351,11 @@ if ([string]$manifest.inventory_status -ne "CURRENT") {
     "(status=$([string]$manifest.inventory_status))."
   )
 }
+$inventorySha256 = [string]$manifest.inventory_sha256
+$inventoryGeneratedAt = [string]$manifest.inventory_generated_at
+if ($inventorySha256 -notmatch '^[0-9a-f]{64}$' -or -not $inventoryGeneratedAt) {
+  throw "Fly manifest is missing its validated inventory generation identity."
+}
 
 $ackRows = [System.Collections.Generic.List[object]]::new()
 # Keep each request burst and its cadence bounded for Fly's shared one-core
@@ -567,6 +572,7 @@ foreach ($row in $selectedFiles) {
           $expectedInode = [int64]$row.inode
           $expectedPublishedSize = [int64]$row.size
           $requestUrl = "$base/api/data-sync/file?path=$encoded&offset=$offset&limit=$limit"
+          $requestUrl += "&ack_inventory_sha256=$inventorySha256"
           if (-not $atomicSnapshotFallback) {
             $requestUrl += (
               "&expected_physical_size=$expectedPhysicalSize&expected_published_size=$expectedPublishedSize" +
@@ -847,6 +853,11 @@ $ackBody = [ordered]@{
   # client deadline on a shared-CPU Fly machine even though every downloaded
   # file has already passed its generation and checksum fences.
   defer_retention = $true
+  inventory_sha256 = $inventorySha256
+  inventory_generated_at = $inventoryGeneratedAt
+  source_git_rev = [string]$manifest.source_git_rev
+  collection_epoch_id = [string]$manifest.collection_epoch_id
+  tile_registry_signature = [string]$manifest.tile_registry_signature
   files = @($ackRows)
 } | ConvertTo-Json -Depth 5
 $ack = Invoke-DataSyncJsonRequest `
@@ -871,6 +882,12 @@ if ($ackAccepted -ne $ackExpected -or $ackRejected -ne 0) {
     "Fly sync acknowledgement was incomplete " +
     "(expected=$ackExpected accepted=$ackAccepted rejected=$ackRejected)."
   )
+}
+if (
+  [string]$ack.inventory_sha256 -ne $inventorySha256 -or
+  [string]$ack.inventory_generated_at -ne $inventoryGeneratedAt
+) {
+  throw "Fly sync acknowledgement did not bind to the requested inventory generation."
 }
 
 # The acknowledgement itself is remote work and may outlive a deployment or

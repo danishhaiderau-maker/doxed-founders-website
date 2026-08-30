@@ -36894,6 +36894,9 @@ _data_sync_async_inventory = {
     "refreshing": False,
     "error": None,
 }
+_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS = 2 * 60 * 60
+_DATA_SYNC_INVENTORY_GENERATION_MAX = 8
+_data_sync_inventory_generations = {}
 _data_sync_ack_lock = threading.RLock()
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
     # Collector v2.2 is a write-once, serialized JSONL ledger. It may grow
@@ -37325,6 +37328,56 @@ def _data_sync_inventory_rows_sha256(rows: list) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _data_sync_retain_inventory_generation(rows: list, generated_at: str | None) -> str:
+    """Retain a bounded immutable inventory generation for long-sync ACKs."""
+    copied = [dict(row) for row in rows if isinstance(row, dict)]
+    digest = _data_sync_inventory_rows_sha256(copied)
+    now = time.monotonic()
+    with _data_sync_inventory_cache_condition:
+        previous = _data_sync_inventory_generations.get(digest) or {}
+        _data_sync_inventory_generations[digest] = {
+            "rows": copied,
+            "generated_at": generated_at,
+            "retained_at": now,
+            "served_rows": previous.get("served_rows") or {},
+        }
+        expired = [
+            key for key, value in _data_sync_inventory_generations.items()
+            if now - float(value.get("retained_at") or 0.0)
+            > _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS
+        ]
+        for key in expired:
+            _data_sync_inventory_generations.pop(key, None)
+        while len(_data_sync_inventory_generations) > _DATA_SYNC_INVENTORY_GENERATION_MAX:
+            oldest = min(
+                _data_sync_inventory_generations,
+                key=lambda key: float(
+                    _data_sync_inventory_generations[key].get("retained_at") or 0.0
+                ),
+            )
+            _data_sync_inventory_generations.pop(oldest, None)
+    return digest
+
+
+def _data_sync_register_served_ack_generation(
+    inventory_sha256: str, relpath: str, size: int, mtime_ns: int
+) -> None:
+    """Bind an exact safely-served hot-file generation to its initial manifest."""
+    digest = str(inventory_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return
+    with _data_sync_inventory_cache_condition:
+        generation = _data_sync_inventory_generations.get(digest)
+        if not isinstance(generation, dict):
+            return
+        served = generation.setdefault("served_rows", {})
+        history = served.setdefault(str(relpath), [])
+        identity = (int(size), int(mtime_ns))
+        if identity not in history:
+            history.append(identity)
+            del history[:-4]
+
+
 def _data_sync_persist_inventory_snapshot(rows: list, generated_at: str) -> dict:
     """Atomically persist a completed inventory acceleration snapshot."""
     payload = {
@@ -37543,6 +37596,7 @@ def _data_sync_inventory_refresh_worker() -> None:
         # Only the trading parent may promote the nonce-bound worker result to
         # the canonical restart snapshot.
         _data_sync_persist_inventory_snapshot(rows, generated_at)
+        _data_sync_retain_inventory_generation(rows, generated_at)
         with _data_sync_inventory_cache_condition:
             _data_sync_async_inventory.update({
                 "status": "CURRENT",
@@ -37705,8 +37759,10 @@ def _write_data_sync_ack(payload: dict) -> None:
             pass
 
 
-def _data_sync_validated_inventory_index() -> tuple[dict, str | None, str | None]:
-    """Return the last worker-validated inventory as an immutable lookup.
+def _data_sync_validated_inventory_index(
+    requested_sha256: str, requested_generated_at: str
+) -> tuple[dict, str | None, str | None]:
+    """Return one exact retained worker-validated inventory generation.
 
     Acknowledgement is a receipt for the generation the desktop just copied.
     Re-resolving every path in the trading process duplicated the isolated
@@ -37715,18 +37771,35 @@ def _data_sync_validated_inventory_index() -> tuple[dict, str | None, str | None
     later retention still rechecks the exact on-disk generation before any
     recoverable cleanup is permitted.
     """
+    digest = str(requested_sha256 or "").strip().lower()
+    generated_at = str(requested_generated_at or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest) or not generated_at:
+        return {}, generated_at or None, None
     with _data_sync_inventory_cache_condition:
-        rows = _data_sync_async_inventory.get("rows")
-        generated_at = _data_sync_async_inventory.get("generated_at")
+        generation = _data_sync_inventory_generations.get(digest)
+        if not isinstance(generation, dict):
+            return {}, generated_at, digest
+        if not hmac.compare_digest(
+            str(generation.get("generated_at") or ""), generated_at
+        ):
+            return {}, generated_at, digest
+        rows = generation.get("rows")
         if not isinstance(rows, list):
-            return {}, generated_at, None
+            return {}, generated_at, digest
         copied = [dict(row) for row in rows if isinstance(row, dict)]
-    digest = _data_sync_inventory_rows_sha256(copied)
-    return {
+        served_rows = {
+            str(path): list(identities)
+            for path, identities in (generation.get("served_rows") or {}).items()
+        }
+    index = {
         str(row.get("path") or ""): row
         for row in copied
         if str(row.get("path") or "")
-    }, generated_at, digest
+    }
+    for path, identities in served_rows.items():
+        if path in index:
+            index[path]["_served_ack_generations"] = identities
+    return index, generated_at, digest
 
 
 def _data_sync_validate_ack_rows(received: list, inventory: dict) -> tuple[dict, dict]:
@@ -37760,7 +37833,13 @@ def _data_sync_validate_ack_rows(received: list, inventory: dict) -> tuple[dict,
         except (TypeError, ValueError):
             rejected["INVALID_ROW"] += 1
             continue
-        if size != expected_size or mtime_ns != expected_mtime_ns:
+        exact_initial = size == expected_size and mtime_ns == expected_mtime_ns
+        exact_served = (size, mtime_ns) in {
+            (int(item[0]), int(item[1]))
+            for item in (expected.get("_served_ack_generations") or [])
+            if isinstance(item, (list, tuple)) and len(item) == 2
+        }
+        if not exact_initial and not exact_served:
             rejected["GENERATION_MISMATCH"] += 1
             continue
         accepted[rel] = {"size": size, "mtime_ns": mtime_ns}
@@ -37856,6 +37935,12 @@ def api_data_sync_manifest():
         )
     files = inventory_state["rows"]
     inventory_status = inventory_state["status"]
+    inventory_sha256 = (
+        _data_sync_retain_inventory_generation(
+            files, inventory_state.get("generated_at")
+        )
+        if inventory_status == "CURRENT" and not targeted_path else None
+    )
     usage = (
         shutil.disk_usage(_data_sync_volume_root())
         if inventory_status == "CURRENT" and not targeted_path else None
@@ -37893,6 +37978,7 @@ def api_data_sync_manifest():
         "targeted_path": targeted_path or None,
         "inventory_status": inventory_status,
         "inventory_generated_at": inventory_state.get("generated_at"),
+        "inventory_sha256": inventory_sha256,
         "inventory_error": inventory_state.get("error"),
         "files": files,
         "sqlite_snapshots_materialized": False,
@@ -37943,6 +38029,9 @@ def api_data_sync_sqlite_snapshot():
 def api_data_sync_file():
     try:
         path = _data_sync_resolve_relpath(request.args.get("path"))
+        ack_inventory_sha256 = str(
+            request.args.get("ack_inventory_sha256") or ""
+        ).strip().lower()
         offset = max(0, int(request.args.get("offset") or 0))
         limit = min(
             _DATA_SYNC_CHUNK_MAX,
@@ -37981,6 +38070,12 @@ def api_data_sync_file():
             response.headers["X-Data-Snapshot-Sha256"] = expected_snapshot_sha
             response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
             response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= snapshot_size else "0"
+            _data_sync_register_served_ack_generation(
+                ack_inventory_sha256,
+                _data_sync_relpath(path),
+                snapshot_size,
+                int(expected_mtime) if expected_mtime is not None else int(before.st_mtime_ns),
+            )
             return response
         append_prefix = requested_mode == "append_prefix_v1"
         if append_prefix:
@@ -38029,6 +38124,13 @@ def api_data_sync_file():
         eof_size = published_boundary if append_prefix else after.st_size
         response.headers["X-Data-Published-Size"] = str(eof_size)
         response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= eof_size else "0"
+        if not append_prefix:
+            _data_sync_register_served_ack_generation(
+                ack_inventory_sha256,
+                _data_sync_relpath(path),
+                int(after.st_size),
+                int(after.st_mtime_ns),
+            )
         return response
     except (OSError, TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
@@ -38050,8 +38152,12 @@ def api_data_sync_ack():
     received = body.get("files") or []
     if not isinstance(received, list):
         return jsonify({"error": "files must be a list"}), 400
+    requested_inventory_sha256 = str(body.get("inventory_sha256") or "")
+    requested_inventory_generated_at = str(body.get("inventory_generated_at") or "")
     inventory, inventory_generated_at, inventory_sha256 = (
-        _data_sync_validated_inventory_index()
+        _data_sync_validated_inventory_index(
+            requested_inventory_sha256, requested_inventory_generated_at
+        )
     )
     if not inventory:
         return jsonify({
@@ -38060,6 +38166,21 @@ def api_data_sync_ack():
             "rejected_count": min(len(received), 5000),
             "inventory_status": "UNAVAILABLE",
         }), 503
+    session = _load_research_session_meta() or {}
+    expected_identity = {
+        "source_git_rev": _runtime_git_rev(),
+        "collection_epoch_id": str(session.get("collector_v22_epoch_id") or ""),
+        "tile_registry_signature": active_tile_registry_signature(),
+    }
+    for key, expected in expected_identity.items():
+        supplied = str(body.get(key) or "")
+        if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+            return jsonify({
+                "error": f"acknowledgement identity mismatch: {key}",
+                "accepted": 0,
+                "rejected_count": min(len(received), 5000),
+                "inventory_status": "IDENTITY_MISMATCH",
+            }), 409
     accepted_rows, rejected_by_reason = _data_sync_validate_ack_rows(
         received, inventory
     )
