@@ -803,6 +803,28 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
         "signal_price": signal_price,
         "limit_price": limit_price, "requested_qty": order.get("qty"),
+        "execution_basis": {
+            "schema": "research_execution_basis_v1",
+            "requested_qty": order.get("qty"),
+            "requested_qty_provenance": "SOURCE_TICKET_QTY",
+            "market_microstructure_symbol": _first(
+                order.get("market_microstructure_symbol"),
+                signal.get("market_microstructure_symbol"),
+                identity["symbol"],
+            ),
+            "signed_quantity_constraints": copy.deepcopy(
+                _first(
+                    order.get("signed_quantity_constraints"),
+                    signal.get("signed_quantity_constraints"),
+                )
+            ),
+            "quantity_constraints_status": copy.deepcopy(
+                _first(
+                    order.get("quantity_constraints_status"),
+                    signal.get("quantity_constraints_status"),
+                ) or {"supported": False, "receipt": None, "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"]}
+            ),
+        },
         "executed_direction": identity["executed_direction"], "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
         "paper_only": bool(policy["paper_policy_spec"]["paper_only"]),
         "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),

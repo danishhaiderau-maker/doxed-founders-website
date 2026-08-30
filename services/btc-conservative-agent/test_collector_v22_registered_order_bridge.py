@@ -87,6 +87,8 @@ def test_real_registration_replaces_rejected_provisional_with_execution_evidence
         "limit_price": 49950.0,
         "research_chase_schedule": schedule,
         "chase_schedule_authoritative": True,
+        "signed_quantity_constraints": {"schema": "signed_quantity_constraints_v1"},
+        "quantity_constraints_status": {"supported": True},
     }
 
     result = bridge(order, {"final_direction": "LONG", "shared_ai_call_id": "scan-1"})
@@ -100,6 +102,8 @@ def test_real_registration_replaces_rejected_provisional_with_execution_evidence
     assert source["qty"] == 0.04
     assert source["research_chase_schedule"] is schedule
     assert source["chase_schedule_authoritative"] is True
+    assert source["signed_quantity_constraints"] == {"schema": "signed_quantity_constraints_v1"}
+    assert source["quantity_constraints_status"] == {"supported": True}
     assert source["collector_rejected"] is False
     assert source["collector_original_would_block"] is True
     assert source["collector_original_would_block_reason"] == "WOULD_BLOCK_CHOP"
@@ -183,3 +187,12 @@ def test_schedule_mutation_paths_refresh_collector_after_mutation():
     assert BOT_SOURCE.count("_refresh_collector_v22_registered_order_evidence") >= 6
     assert "schedule_reprice(\n            order," in BOT_SOURCE
     assert "schedule_close(\n                order," in BOT_SOURCE
+
+
+def test_runtime_registration_captures_constraints_before_evidence_enqueue():
+    lane_start = BOT_SOURCE.index("def lane_register_pending_order(order: dict):")
+    lane_end = BOT_SOURCE.index("\ndef lane_unregister_pending_order", lane_start)
+    body = BOT_SOURCE[lane_start:lane_end]
+    assert 'capture_helper = globals().get("_capture_runtime_quantity_constraints")' in body
+    assert body.index("capture_helper =") < body.index(".submit(")
+    assert 'order["market_microstructure_symbol"]' in body

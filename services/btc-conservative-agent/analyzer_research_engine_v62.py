@@ -81,6 +81,10 @@ from research.shadow_outcome_reconstruction import (
     attach_market_evidence as _attach_market_evidence,
     reconstruct_row as _reconstruct_research_row,
 )
+from research.conservative_limit_fill import evaluate_limit_fill as _evaluate_conservative_limit_fill
+from research.quantity_execution import (
+    validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
+)
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
 
@@ -12092,9 +12096,13 @@ def _compressed_stage_observation_supported(row):
     """
     if not isinstance(row, dict):
         return False
+    # Eligibility is a policy outcome, not an evidence-quality requirement.
+    # A timely, signed INVALID/NO_TRADE observation is still a supported stage
+    # and must be retained when proving a true no-fill.  Touch/fill evaluation
+    # below separately requires ``eligible_at_stage is True``.
     if not (
         row.get("identity_complete") is True
-        and row.get("eligible_at_stage") is True
+        and isinstance(row.get("eligible_at_stage"), bool)
         and row.get("bbo_fresh") is True
         and row.get("bbo_valid") is True
     ):
@@ -12117,12 +12125,67 @@ def _compressed_stage_observation_supported(row):
 
 
 def _one_second_tape_by_bucket():
-    rows = _load_jsonl_rows("market_microstructure_1s.jsonl")
-    return {
-        int(row["bucket_ts"]): row for row in rows
-        if row.get("bucket_ts") is not None
-        and str(row.get("schema") or "") == "market_microstructure_1s_v1"
-    }
+    """Load the canonical tape plus numeric rotations, failing closed on conflicts."""
+    configured_root = Path(os.getenv("BTC_AGENT_DATA_DIR") or ".")
+    base = configured_root / "market_microstructure_1s.jsonl"
+    paths = []
+    if base.is_file():
+        paths.append(base)
+    paths.extend(sorted(
+        (
+            path for path in base.parent.glob(base.name + ".*")
+            if path.name[len(base.name) + 1:].isdigit()
+        ),
+        key=lambda path: int(path.name.rsplit(".", 1)[-1]),
+    ))
+    by_bucket = {}
+    for path in paths:
+        for row in _load_jsonl_rows(str(path)):
+            if (
+                row.get("bucket_ts") is None
+                or str(row.get("schema") or "") != "market_microstructure_1s_v1"
+                or str(row.get("symbol") or "") != EXPECTED_SYMBOL
+            ):
+                continue
+            try:
+                bucket_number = float(row["bucket_ts"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(bucket_number) or not bucket_number.is_integer():
+                continue
+            bucket = int(bucket_number)
+            supplied_hash = str(row.get("row_sha256") or "")
+            canonical_row = {key: value for key, value in row.items() if key != "row_sha256"}
+            try:
+                computed_hash = hashlib.sha256(json.dumps(
+                    canonical_row, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")).hexdigest()
+            except (TypeError, ValueError):
+                computed_hash = ""
+            if not supplied_hash or supplied_hash != computed_hash:
+                by_bucket[bucket] = {
+                    "schema": "market_microstructure_1s_integrity_failure_v1",
+                    "symbol": EXPECTED_SYMBOL, "bucket_ts": bucket,
+                    "fresh": False, "valid_bbo": False,
+                    "row_integrity_failure": True,
+                }
+                continue
+            prior = by_bucket.get(bucket)
+            if prior is None:
+                by_bucket[bucket] = row
+                continue
+            prior_hash = str(prior.get("row_sha256") or "")
+            row_hash = supplied_hash
+            if prior.get("duplicate_conflict") or not prior_hash or not row_hash or prior_hash != row_hash:
+                by_bucket[bucket] = {
+                    "schema": "market_microstructure_1s_conflict_v1",
+                    "symbol": EXPECTED_SYMBOL,
+                    "bucket_ts": bucket,
+                    "fresh": False,
+                    "valid_bbo": False,
+                    "duplicate_conflict": True,
+                }
+    return by_bucket
 
 
 def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
@@ -12236,6 +12299,209 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
     }
 
 
+def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tape_by_bucket):
+    """Replay the signed virtual limit over the complete one-second path.
+
+    Unlike the legacy helper, this can prove both fills between checkpoints and
+    true no-fills.  Any missing second keeps the outcome UNKNOWN/UNVERIFIABLE;
+    it is never silently converted to NO_FILL.
+    """
+    if not expiry or not stages:
+        return {}
+    start_ts = _first_number(first.get("tape_window_start_ts"), first.get("signal_ts"))
+    end_ts = _first_number(
+        expiry.get("tape_window_end_ts"), first.get("tape_window_end_ts"),
+        expiry.get("observed_ts"), expiry.get("ts"),
+    )
+    if start_ts is None or end_ts is None or end_ts < start_ts:
+        return {}
+    # Canonical tape windows are [start, end): never consume the expiry bucket.
+    expected = list(range(int(math.ceil(start_ts)), int(math.floor(end_ts))))
+    points = []
+    missing = []
+    for second in expected:
+        row = tape_by_bucket.get(second)
+        if not row or row.get("fresh") is not True or row.get("valid_bbo") is not True:
+            missing.append(second)
+            continue
+        points.append({
+            "bucket_ts": second,
+            "bbo": {"bid": row.get("bid"), "ask": row.get("ask"), "last": row.get("last")},
+            "bid_qty": row.get("bid_qty"), "ask_qty": row.get("ask_qty"),
+            "row_sha256": row.get("row_sha256"),
+        })
+
+    ordered_stages = sorted(
+        (row for row in stages.values() if _compressed_stage_observation_supported(row)),
+        key=lambda row: _first_number(row.get("observed_ts"), row.get("ts")) or float("inf"),
+    )
+    complete = bool(expected and not missing)
+    requested_qty = _first_number(first.get("requested_qty"), first.get("quantity"))
+    signed_quantity_constraints = first.get("signed_quantity_constraints")
+    normalized_quantity_constraints, quantity_constraint_reasons = (
+        _validate_signed_quantity_constraints(
+            signed_quantity_constraints, symbol=EXPECTED_SYMBOL,
+        )
+    )
+    direction = str(direction or "").upper()
+    eligible_intervals = []
+    logical_end = int(math.floor(end_ts))
+    for index, stage in enumerate(ordered_stages):
+        if stage.get("eligible_at_stage") is not True:
+            continue
+        stage_ts = _first_number(stage.get("observed_ts"), stage.get("ts"))
+        interval_start = int(math.ceil(stage_ts)) if stage_ts is not None else None
+        next_ts = None
+        if index + 1 < len(ordered_stages):
+            next_ts = _first_number(
+                ordered_stages[index + 1].get("observed_ts"),
+                ordered_stages[index + 1].get("ts"),
+            )
+        interval_end = min(
+            logical_end,
+            int(math.ceil(next_ts)) if next_ts is not None else logical_end,
+        )
+        limit_price = _first_number(stage.get("virtual_limit_price"))
+        if interval_start is not None and limit_price is not None and interval_end > interval_start:
+            eligible_intervals.append({
+                "bucket_id": f"stage-{stage.get('stage_index')}",
+                "start_ts": interval_start, "end_ts": interval_end,
+                "limit_price": limit_price,
+                "generation": first.get("schedule_generation_id"),
+            })
+
+    evaluator = None
+    if (
+        direction in {"LONG", "SHORT"}
+        and requested_qty is not None
+        and normalized_quantity_constraints is not None
+        and eligible_intervals
+    ):
+        evaluator = _evaluate_conservative_limit_fill(
+            tape_by_bucket.values(), direction=direction,
+            requested_qty=requested_qty, chase_schedule=eligible_intervals,
+            aggressor_window_sec=1, symbol=EXPECTED_SYMBOL,
+            quantity_constraints=signed_quantity_constraints,
+        )
+    evaluator = evaluator or {}
+    evaluator_outcome = str(evaluator.get("outcome") or "").upper()
+    fill_status = "UNKNOWN_UNVERIFIABLE"
+    if direction not in {"LONG", "SHORT"}:
+        outcome_code = "UNKNOWN_INVALID_DIRECTION"
+    elif not complete:
+        outcome_code = "UNKNOWN_MISSING_OR_CONFLICTING_1S_TAPE"
+    elif normalized_quantity_constraints is None:
+        outcome_code = "UNKNOWN_" + "_".join(
+            quantity_constraint_reasons or ["SIGNED_QUANTITY_CONSTRAINTS_INVALID"]
+        )
+    elif not eligible_intervals:
+        # No executable counterfactual was eligible.  This is not a true
+        # no-fill observation and must never enter NO_FILL denominators.
+        fill_status = "INELIGIBLE"
+        outcome_code = "INELIGIBLE_NO_ENTRY_AT_ANY_STAGE"
+    elif evaluator.get("supported") is not True:
+        reasons = evaluator.get("negative_reasons") or ["UNSPECIFIED"]
+        outcome_code = "UNKNOWN_CONSERVATIVE_EVALUATOR_" + "_".join(str(x) for x in reasons)
+    elif evaluator_outcome == "FILL":
+        fill_status = "FULL_FILL"
+        outcome_code = "FULL_FILL_AVAILABLE_DEPTH"
+    elif evaluator_outcome == "PARTIAL_FILL":
+        fill_status = "PARTIAL_FILL"
+        outcome_code = "PARTIAL_FILL_AVAILABLE_DEPTH"
+    elif evaluator_outcome == "NO_FILL":
+        fill_status = "NO_FILL"
+        outcome_code = "TRUE_NO_FILL_" + "_".join(
+            str(x) for x in (evaluator.get("negative_reasons") or ["NO_PROVABLE_FILL"])
+        )
+    else:
+        outcome_code = "UNKNOWN_CONSERVATIVE_EVALUATOR_OUTCOME"
+
+    accepted_qty = _first_number(evaluator.get("filled_qty"))
+    if fill_status == "NO_FILL":
+        accepted_qty = 0.0
+    available_qty = _first_number(evaluator.get("visible_executable_qty"))
+    entry_execution_price = _first_number(evaluator.get("fill_price"))
+    touch_ts = _first_number(evaluator.get("trigger_bucket_ts"))
+    touch_stage_index = None
+    chase_bucket_id = str(evaluator.get("chase_bucket_id") or "")
+    if chase_bucket_id.startswith("stage-"):
+        try:
+            touch_stage_index = int(chase_bucket_id.split("-", 1)[1])
+        except (TypeError, ValueError):
+            touch_stage_index = None
+
+    terminal_point = points[-1] if points else None
+    terminal_bbo = (terminal_point or {}).get("bbo") or {}
+    terminal_execution_price = _first_number(
+        terminal_bbo.get("bid") if direction == "LONG" else terminal_bbo.get("ask")
+    )
+    entry_fee_rate = _first_number(first.get("entry_fee_rate"))
+    exit_fee_rate = _first_number(first.get("exit_fee_rate"))
+    slippage_model = str(first.get("slippage_model") or "")
+    executable_qty = accepted_qty if fill_status in {"FULL_FILL", "PARTIAL_FILL"} else None
+    explicit_cost_basis = bool(
+        executable_qty is not None and executable_qty > 0
+        and entry_execution_price is not None and entry_execution_price > 0
+        and terminal_execution_price is not None and terminal_execution_price > 0
+        and entry_fee_rate is not None and entry_fee_rate >= 0
+        and exit_fee_rate is not None and exit_fee_rate >= 0
+        and slippage_model == "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
+    )
+    notional_usd = executable_qty * entry_execution_price if explicit_cost_basis else None
+    exit_notional_usd = executable_qty * terminal_execution_price if explicit_cost_basis else None
+    fee_usd = (
+        notional_usd * entry_fee_rate + exit_notional_usd * exit_fee_rate
+        if explicit_cost_basis else None
+    )
+    # The shared conservative evaluator books at the declared limit and makes
+    # no price-improvement claim; therefore additional entry slippage is zero.
+    slippage_usd = 0.0 if explicit_cost_basis else None
+    # Bind the join receipt to both source tape and the complete evaluator
+    # decision.  The latter includes direction, requested quantity, declared
+    # limits, quantity-constraint payload hash, and selected evidence bucket;
+    # otherwise different execution claims could share one tape-only ID.
+    evaluator_material = json.dumps(
+        evaluator, sort_keys=True, separators=(",", ":"), default=str,
+    )
+    receipt_material = "|".join(
+        [
+            str(int(math.ceil(start_ts))), str(int(math.floor(end_ts))),
+            hashlib.sha256(evaluator_material.encode("utf-8")).hexdigest(),
+        ]
+        + [str(point.get("row_sha256") or "") for point in points]
+    )
+    return {
+        "schema": "analyzer_compressed_chase_tape_join_v2",
+        "receipt_id": "tape-join-sha256-" + hashlib.sha256(receipt_material.encode("utf-8")).hexdigest(),
+        "source_path": first.get("tape_evidence_path") or "market_microstructure_1s.jsonl",
+        "timeframe": "1s", "start_ts": start_ts, "end_ts": end_ts,
+        "coverage_status": "COMPLETE" if complete else "INSUFFICIENT",
+        "expected_seconds": len(expected), "observed_seconds": len(points),
+        "missing_seconds": len(missing), "missing_second_sample": missing[:20],
+        "conservative_execution_supported": fill_status in {"FULL_FILL", "PARTIAL_FILL"},
+        "fill_status": fill_status, "outcome_code": outcome_code,
+        "touch_ts": touch_ts,
+        "touch_stage_index": touch_stage_index,
+        "entry_execution_price": entry_execution_price,
+        "terminal_execution_price": terminal_execution_price,
+        "requested_quantity": requested_qty, "available_quantity": available_qty,
+        "accepted_quantity": accepted_qty, "quantity": executable_qty,
+        "raw_partial_quantity": evaluator.get("raw_partial_qty"),
+        "rounded_executable_quantity": evaluator.get("rounded_executable_qty"),
+        "accumulated_quantity": evaluator.get("accumulated_qty"),
+        "minimum_lot_decision": evaluator.get("minimum_lot_decision") or "UNKNOWN",
+        "minimum_notional_decision": evaluator.get("minimum_notional_decision") or "UNKNOWN",
+        "quantity_attempts": evaluator.get("quantity_attempts") or [],
+        "signed_quantity_constraints": normalized_quantity_constraints,
+        "quantity_constraint_reasons": quantity_constraint_reasons,
+        "notional_usd": notional_usd, "fee_usd": fee_usd,
+        "slippage_usd": slippage_usd, "slippage_model": slippage_model or None,
+        "fee_profile": first.get("fee_profile"), "entry_fee_rate": entry_fee_rate,
+        "exit_fee_rate": exit_fee_rate, "points": points,
+        "conservative_evaluator_receipt": evaluator,
+    }
+
+
 def build_missed_opportunity_proof_report(session=None):
     """Build fail-closed proof rows from the signed compressed shadow schedule.
 
@@ -12282,8 +12548,20 @@ def build_missed_opportunity_proof_report(session=None):
         direction = str(first.get("direction") or opportunity.get("raw_direction") or "").upper()
         expected = [int(x) for x in (first.get("schedule_seconds") or [0, 60, 120, 240, 420, 600])]
         expiry_sec = int(_first_number(first.get("terminal_expiry_sec"), 780) or 780)
-        stages = {int(r.get("stage_index")): r for r in rows if str(r.get("event") or "").upper() == "STAGE" and r.get("stage_index") is not None}
-        expiry = next((r for r in reversed(rows) if str(r.get("event") or "").upper() == "EXPIRED"), None)
+        stage_rows = [
+            r for r in rows
+            if str(r.get("event") or "").upper() == "STAGE"
+            and r.get("stage_index") is not None
+        ]
+        stage_index_counts = Counter(int(r.get("stage_index")) for r in stage_rows)
+        duplicate_stage_indexes = sorted(
+            index for index, count in stage_index_counts.items() if count != 1
+        )
+        stages = {}
+        for stage in stage_rows:
+            stages.setdefault(int(stage.get("stage_index")), stage)
+        expiry_rows = [r for r in rows if str(r.get("event") or "").upper() == "EXPIRED"]
+        expiry = expiry_rows[-1] if len(expiry_rows) == 1 else None
         checkpoints = []
         touch_row = None
         for index, due_sec in enumerate(expected):
@@ -12316,13 +12594,15 @@ def build_missed_opportunity_proof_report(session=None):
                 "conservative_touch": touched,
             })
         entry_price = None
-        tape = {}
-        if expiry:
-            tape = expiry.get("tape_evidence") or expiry.get("path_evidence") or {}
-        if not isinstance(tape, dict):
-            tape = {}
-        if not tape:
-            tape = _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket)
+        # Embedded terminal evidence is not an execution authority.  Historical
+        # rows may contain diagnostic summaries produced under older or looser
+        # fill contracts, so always rebuild from the canonical signed 1s tape
+        # through the shared conservative evaluator.  Missing tape therefore
+        # remains UNKNOWN/UNVERIFIABLE instead of falling back to a receipt that
+        # cannot be independently reproduced.
+        tape = _joined_compressed_chase_tape_evidence(
+            first, expiry, stages, direction, tape_by_bucket,
+        )
         fill_status = str(tape.get("fill_status") or "").upper()
         entry_price = _first_number(
             tape.get("entry_execution_price"),
@@ -12332,12 +12612,20 @@ def build_missed_opportunity_proof_report(session=None):
         if not isinstance(tape_points, list):
             tape_points = []
         tape_receipt = tape.get("receipt_id") or tape.get("sha256") or (expiry or {}).get("tape_receipt_id")
+        tape_touch_ts = _first_number(tape.get("touch_ts"))
+        if touch_row is None and tape_touch_ts is not None:
+            touch_row = {
+                "observed_ts": tape_touch_ts,
+                "stage_index": tape.get("touch_stage_index"),
+            }
         path_prices = [
             _shadow_checkpoint_price(point, direction, entry=False)
             for point in tape_points if isinstance(point, dict)
         ]
         path_prices = [price for price in path_prices if price is not None]
-        expiry_mark = path_prices[-1] if path_prices else None
+        expiry_mark = _first_number(tape.get("terminal_execution_price"))
+        if expiry_mark is None:
+            expiry_mark = path_prices[-1] if path_prices else None
         post_touch_returns = []
         if touch_row is not None:
             post_touch_returns = [
@@ -12384,24 +12672,63 @@ def build_missed_opportunity_proof_report(session=None):
             if row.get("identity_complete") is not True:
                 identity_missing.extend(row.get("missing_identity_fields") or ["runtime_identity_complete"])
         identity_missing = sorted({str(value) for value in identity_missing if value})
-        stage_coverage_complete = len(stages) == len(expected) and all(
+        expected_stage_indexes = set(range(len(expected)))
+        stage_coverage_complete = (
+            not duplicate_stage_indexes
+            and set(stages) == expected_stage_indexes
+            and all(
             _compressed_stage_observation_supported(r) for r in stages.values()
+            )
+        )
+        supported_no_fill = fill_status == "NO_FILL"
+        supported_fill = bool(
+            tape.get("conservative_execution_supported") is True
+            and fill_status in {"FULL_FILL", "PARTIAL_FILL"}
+            and entry_price is not None
+            and touch_row is not None
         )
         tape_coverage_complete = bool(
             tape_receipt and tape_points
             and str(tape.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
             and int(tape.get("missing_seconds") or 0) == 0
-            and tape.get("conservative_execution_supported") is True
-            and fill_status in {"FULL_FILL", "PARTIAL_FILL"}
-            and entry_price is not None
+            and (supported_fill or supported_no_fill)
             and str(tape.get("timeframe") or "").lower() == "1s"
             and _first_number(tape.get("start_ts")) is not None
             and _first_number(tape.get("end_ts")) is not None
-            and touch_row is not None
-            and _first_number(tape.get("start_ts")) <= (_first_number(touch_row.get("observed_ts"), touch_row.get("ts")) or float("-inf"))
-            and _first_number(tape.get("end_ts")) >= (_first_number((expiry or {}).get("observed_ts"), (expiry or {}).get("ts")) or float("inf"))
+            and _first_number(tape.get("end_ts")) >= (
+                _first_number(
+                    first.get("expires_ts"), first.get("tape_window_end_ts"),
+                    (expiry or {}).get("observed_ts"), (expiry or {}).get("ts"),
+                )
+                or float("inf")
+            )
         )
+        if supported_fill:
+            tape_coverage_complete = bool(
+                tape_coverage_complete
+                and _first_number(tape.get("start_ts")) <= (
+                    _first_number(touch_row.get("observed_ts"), touch_row.get("ts"))
+                    or float("-inf")
+                )
+            )
         coverage_complete = stage_coverage_complete and expiry is not None and tape_coverage_complete
+        rejection_codes = []
+        if identity_missing:
+            rejection_codes.append("IDENTITY_INCOMPLETE")
+        if not stage_coverage_complete:
+            rejection_codes.append("STAGE_COVERAGE_INCOMPLETE")
+        if duplicate_stage_indexes:
+            rejection_codes.append("DUPLICATE_STAGE_INDEX")
+        if set(stages) != expected_stage_indexes:
+            rejection_codes.append("STAGE_INDEX_SET_MISMATCH")
+        if len(expiry_rows) > 1:
+            rejection_codes.append("DUPLICATE_TERMINAL_RECEIPT")
+        if expiry is None:
+            rejection_codes.append("TERMINAL_RECEIPT_MISSING")
+        if not tape_coverage_complete:
+            rejection_codes.append(
+                str(tape.get("outcome_code") or "TAPE_OR_EXECUTION_EVIDENCE_INCOMPLETE")
+            )
         proof_class = "INSUFFICIENT_EVIDENCE"
         if not identity_missing and coverage_complete and touch_row is not None and net_terminal_return is not None:
             if net_terminal_return > 0:
@@ -12438,10 +12765,11 @@ def build_missed_opportunity_proof_report(session=None):
             },
             "checkpoint_market_counterfactuals": checkpoints,
             "conservative_touch": touch_row is not None,
-            "conservative_fill_status": fill_status or "UNAVAILABLE",
-            "touch_ts": (touch_row or {}).get("observed_ts"),
+            "conservative_fill_status": fill_status or "UNKNOWN_UNVERIFIABLE",
+            "touch_ts": tape_touch_ts or (touch_row or {}).get("observed_ts"),
             "conservative_entry_price": entry_price,
-            "terminal_ts": (expiry or {}).get("observed_ts"),
+            "terminal_ts": _first_number(first.get("expires_ts"), (expiry or {}).get("observed_ts")),
+            "terminal_receipt_observed_ts": (expiry or {}).get("observed_ts"),
             "terminal_mark_price": expiry_mark,
             "gross_terminal_return_pct": gross_terminal_return,
             "net_terminal_return_pct": net_terminal_return,
@@ -12454,7 +12782,19 @@ def build_missed_opportunity_proof_report(session=None):
                 "tape_status": tape.get("coverage_status") or "UNAVAILABLE",
                 "missing_seconds": tape.get("missing_seconds"),
                 "tape_receipt": tape_receipt,
+                "requested_quantity": tape.get("requested_quantity", first.get("requested_qty")),
+                "available_quantity": tape.get("available_quantity"),
+                "accepted_quantity": tape.get("accepted_quantity"),
+                "raw_partial_quantity": tape.get("raw_partial_quantity"),
+                "rounded_executable_quantity": tape.get("rounded_executable_quantity"),
+                "accumulated_quantity": tape.get("accumulated_quantity"),
+                "minimum_lot_decision": tape.get("minimum_lot_decision") or "UNKNOWN",
+                "minimum_notional_decision": tape.get("minimum_notional_decision") or "UNKNOWN",
+                "quantity_attempts": tape.get("quantity_attempts") or [],
+                "signed_quantity_constraints": tape.get("signed_quantity_constraints"),
+                "quantity_constraint_reasons": tape.get("quantity_constraint_reasons") or [],
                 "identity_missing": identity_missing,
+                "rejection_codes": rejection_codes,
             },
             "cost_assumption": {
                 "fee_profile": EXPECTED_FEE_PROFILE,

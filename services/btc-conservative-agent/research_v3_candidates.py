@@ -703,13 +703,13 @@ def _conservative_child_receipt(
     qty = _number(source.get("requested_qty"))
     if not schedule:
         return {
-            "schema": "conservative_limit_fill_receipt_v1",
+            "schema": "conservative_limit_fill_receipt_v2",
             "outcome": "UNSUPPORTED", "supported": False,
             "negative_reasons": ["COUNTERFACTUAL_CHASE_SCHEDULE_MISSING_OR_INVALID"],
         }
     if qty is None or qty <= 0:
         return {
-            "schema": "conservative_limit_fill_receipt_v1",
+            "schema": "conservative_limit_fill_receipt_v2",
             "outcome": "UNSUPPORTED", "supported": False,
             "negative_reasons": ["REQUESTED_QTY_MISSING_OR_INVALID"],
         }
@@ -728,6 +728,7 @@ def _conservative_child_receipt(
         requested_qty=qty,
         chase_schedule=schedule,
         symbol=str(source.get("market_microstructure_symbol") or "tBTCF0:USTF0"),
+        quantity_constraints=source.get("signed_quantity_constraints"),
     )
     receipt.update({
         "event_id": source.get("event_id"),

@@ -17,7 +17,7 @@ def _load_grid():
     return module
 
 
-def _armed(module):
+def _armed(module, **extra):
     return module.arm_compressed_shadow_chase(
         trade_id="shadow-1",
         direction="LONG",
@@ -28,6 +28,9 @@ def _armed(module):
         opportunity_id="opp-1",
         episode_id="episode-1",
         epoch_id="epoch-1",
+        event_source_revision="a" * 40,
+        event_config_signature="tile-config-a",
+        **extra,
     )
 
 
@@ -78,6 +81,61 @@ def test_terminal_is_idempotent_and_no_post_terminal_provisional_event_exists():
     assert module.poll_compressed_shadow_chase(
         state, now_ts=2_000.0, last=102.0, bid=101.9, ask=102.1
     ) == []
+
+
+def test_quantity_constraints_survive_every_receipt_and_restart_recovery():
+    module = _load_grid()
+    constraints = {
+        "schema": "signed_quantity_constraints_v1",
+        "symbol": "tBTCF0:USTF0",
+        "source_revision": "a" * 40,
+        "captured_at": "2026-08-30T03:00:00+00:00",
+    }
+    status = {"supported": True, "receipt": constraints, "reasons": []}
+    state, stage_zero = _armed(
+        module,
+        signed_quantity_constraints=constraints,
+        quantity_constraints_status=status,
+    )
+    stage_one = module.poll_compressed_shadow_chase(
+        state, now_ts=1060, last=101, bid=100.9, ask=101.1,
+    )[0]
+    assert stage_zero["signed_quantity_constraints"] == constraints
+    assert stage_one["quantity_constraints_status"] == status
+    assert stage_zero["event_source_revision"] == "a" * 40
+    assert stage_zero["event_config_signature"] == "tile-config-a"
+    assert stage_zero["quantity_constraint_source_revision_match"] is True
+    recovered = module.recover_compressed_shadow_states(
+        [stage_zero, stage_one], now_ts=1061,
+    )["shadow-1"]
+    assert recovered["signed_quantity_constraints"] == constraints
+    assert recovered["quantity_constraints_status"] == status
+    assert recovered["event_source_revision"] == "a" * 40
+    assert recovered["event_config_signature"] == "tile-config-a"
+
+
+def test_constraint_revision_mismatch_is_not_identity_complete():
+    module = _load_grid()
+    constraints = {"source_revision": "b" * 40}
+    state, receipt = _armed(
+        module,
+        signed_quantity_constraints=constraints,
+        quantity_constraints_status={"supported": True, "receipt": constraints, "reasons": []},
+    )
+    assert state["quantity_constraint_source_revision_match"] is False
+    assert receipt["identity_complete"] is False
+    assert "quantity_constraint_source_revision_mismatch" in receipt["missing_identity_fields"]
+
+
+def test_missing_quantity_constraints_are_explicitly_unsupported():
+    module = _load_grid()
+    state, stage_zero = _armed(module)
+    expected = {
+        "supported": False, "receipt": None,
+        "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"],
+    }
+    assert state["quantity_constraints_status"] == expected
+    assert stage_zero["quantity_constraints_status"] == expected
 
 
 def test_shadow_receipts_cannot_be_mistaken_for_paper_or_live_execution():

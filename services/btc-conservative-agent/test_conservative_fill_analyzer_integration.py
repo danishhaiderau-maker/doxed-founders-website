@@ -9,6 +9,7 @@ from research.policy_cycle_snapshot import (
     build_policy_cycle_reports,
 )
 from test_policy_cycle_snapshot import _append, _event
+from research.quantity_execution import build_signed_quantity_constraints
 
 
 def qualified_event(index=1):
@@ -22,6 +23,12 @@ def qualified_event(index=1):
             "requested_qty": 1.0,
             "requested_qty_provenance": "SOURCE_TICKET_QTY",
             "exchange_qty_claim": True,
+            "signed_quantity_constraints": build_signed_quantity_constraints(
+                symbol="BTC", quantity_step="0.00000001", quantity_precision=8,
+                min_lot="0.00000001", min_notional="0.000001",
+                captured_at="2026-08-30T00:00:00Z", source_revision="test-revision",
+                source="TEST_FIXTURE",
+            ),
         },
         "research_chase_schedule": {
             "authoritative": True,

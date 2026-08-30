@@ -208,6 +208,7 @@ from research.counterfactual_normalization import (
     policy_comparability_key as _pure_policy_comparability_key,
     horizons as _pure_counterfactual_horizons,
 )
+from research.venue_quantity_constraints import capture_quantity_constraints
 from scenario_c_config import (
     SCENARIO_C_LADDER_LABEL,
     SCENARIO_C_PROFILE_ID,
@@ -3652,6 +3653,22 @@ def lane_register_pending_order(order: dict):
             master_signal if isinstance(master_signal, dict) else {},
         )
         order.update(copy.deepcopy(frozen_identity))
+        capture_helper = globals().get("_capture_runtime_quantity_constraints")
+        constraint_capture = (
+            capture_helper() if callable(capture_helper) else {
+                "supported": False, "receipt": None,
+                "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_HELPER_UNAVAILABLE"],
+            }
+        )
+        order["signed_quantity_constraints"] = copy.deepcopy(
+            constraint_capture.get("receipt")
+        )
+        order["quantity_constraints_status"] = copy.deepcopy(constraint_capture)
+        captured_receipt = constraint_capture.get("receipt")
+        order["market_microstructure_symbol"] = (
+            globals().get("BITFINEX_WS_SYMBOL")
+            or (captured_receipt.get("symbol") if isinstance(captured_receipt, dict) else None)
+        )
         # ``master_signal`` is shared by every research lane spawned from one
         # AI call.  A lane-scoped paper identity belongs to its order and
         # position only; writing it back here lets the next lane inherit the
@@ -13137,6 +13154,7 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             evaluation_ts=time.time(),
             requested_qty=source.get("qty"),
             market_microstructure_symbol=BITFINEX_WS_SYMBOL,
+            signed_quantity_constraints=source.get("signed_quantity_constraints"),
             chase_schedule=source.get("research_chase_schedule") or source.get("chase_schedule"),
             chase_schedule_authoritative=bool(source.get("chase_schedule_authoritative")),
         )
@@ -13163,6 +13181,8 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "symbol": source.get("symbol") or source.get("pair") or "BTCUSD",
             "shared_ai_call_id": source.get("shared_ai_call_id"),
             "qty": source.get("qty"),
+            "signed_quantity_constraints": copy.deepcopy(source.get("signed_quantity_constraints")),
+            "quantity_constraints_status": copy.deepcopy(source.get("quantity_constraints_status")),
             "research_chase_schedule": source.get("research_chase_schedule") or source.get("chase_schedule"),
             "chase_schedule_authoritative": bool(source.get("chase_schedule_authoritative")),
             "research_feature_snapshot": feature_snapshot,
@@ -13258,6 +13278,12 @@ def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict =
         return False
     refreshed = dict(source)
     refreshed["qty"] = order.get("qty", refreshed.get("qty"))
+    refreshed["signed_quantity_constraints"] = copy.deepcopy(
+        order.get("signed_quantity_constraints", refreshed.get("signed_quantity_constraints"))
+    )
+    refreshed["quantity_constraints_status"] = copy.deepcopy(
+        order.get("quantity_constraints_status", refreshed.get("quantity_constraints_status"))
+    )
     refreshed["status"] = order.get("status", refreshed.get("status"))
     refreshed["limit_price"] = order.get("limit_price", refreshed.get("limit_price"))
     refreshed["limit_chase_count"] = order.get(
@@ -13359,6 +13385,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             evaluation_ts=time.time(),
             requested_qty=signal.get("qty"),
             market_microstructure_symbol=BITFINEX_WS_SYMBOL,
+            signed_quantity_constraints=signal.get("signed_quantity_constraints"),
             chase_schedule=signal.get("research_chase_schedule") or signal.get("chase_schedule"),
             chase_schedule_authoritative=bool(signal.get("chase_schedule_authoritative")),
         )
@@ -13394,6 +13421,8 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 "research_feature_snapshot": feature_snapshot,
                 "collector_ai": dict(ai or {}),
                 "qty": signal.get("qty"),
+                "signed_quantity_constraints": copy.deepcopy(signal.get("signed_quantity_constraints")),
+                "quantity_constraints_status": copy.deepcopy(signal.get("quantity_constraints_status")),
                 "research_chase_schedule": signal.get("research_chase_schedule") or signal.get("chase_schedule"),
                 "chase_schedule_authoritative": bool(signal.get("chase_schedule_authoritative")),
             }
@@ -15060,6 +15089,13 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     requested_qty = (FIXED_MARGIN_USDT * leverage) / initial_limit
     maker_fee, taker_fee = get_trading_fee_rates()
     epoch_id = _collector_v22_epoch_id()
+    capture_helper = globals().get("_capture_runtime_quantity_constraints")
+    quantity_constraints_status = (
+        capture_helper() if callable(capture_helper) else {
+            "supported": False, "receipt": None,
+            "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_HELPER_UNAVAILABLE"],
+        }
+    )
     with _compressed_shadow_lock:
         duplicate_shared_call = call_id in _compressed_shadow_seen_call_ids
         # Reserve the shared call while its durable stage-zero row is written.
@@ -15093,6 +15129,10 @@ def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
             fee_profile=EXCHANGE_FEE_PROFILE,
             entry_fee_rate=maker_fee,
             exit_fee_rate=taker_fee,
+            signed_quantity_constraints=quantity_constraints_status.get("receipt"),
+            quantity_constraints_status=quantity_constraints_status,
+            event_source_revision=_runtime_git_rev(),
+            event_config_signature=active_tile_registry_signature(),
         )
         durable = _safe_append_jsonl(
             CHASE_OFFSET_TOUCH_GRID_FILE, stage_zero, label="SHADOW_CHASE",
@@ -38534,6 +38574,28 @@ def export_csv():
                 zip_file.write(file, arcname=os.path.basename(file))
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
+
+def _capture_runtime_quantity_constraints() -> dict:
+    """Capture exact venue metadata for evidence; never invent constraints."""
+    try:
+        return capture_quantity_constraints(
+            bitfinex_public,
+            ccxt_symbol=SYMBOL_CCXT,
+            evidence_symbol=BITFINEX_WS_SYMBOL,
+            captured_at=utc_iso(),
+            source_revision=_runtime_git_rev(),
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[QUANTITY CONSTRAINTS] unsupported capture: {type(exc).__name__} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return {
+            "supported": False,
+            "receipt": None,
+            "reasons": ["VENUE_QUANTITY_CONSTRAINT_CAPTURE_FAILED"],
+        }
+
 
 def calc_position_qty(price, leverage, margin_usdt=None):
     try:

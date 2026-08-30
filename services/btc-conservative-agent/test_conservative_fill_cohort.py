@@ -8,6 +8,16 @@ sys.path.insert(0, str(ROOT / "research"))
 
 from collector_v22 import build_research_event
 from conservative_fill_cohort import build_conservative_fill_cohort, build_v3_conservative_fill_cohort
+from quantity_execution import build_signed_quantity_constraints
+
+
+def signed_constraints(symbol="BTC"):
+    return build_signed_quantity_constraints(
+        symbol=symbol, quantity_step="0.00000001", quantity_precision=8,
+        min_lot="0.00000001", min_notional="0.000001",
+        captured_at="2026-08-30T00:00:00Z", source_revision="test-revision",
+        source="TEST_FIXTURE",
+    )
 
 
 def tape_row(ts, *, ask=101, bid=99, ask_qty=2, bid_qty=2,
@@ -29,6 +39,7 @@ def event(qty=1, *, schema="research_event_v2.2"):
         "research_execution_basis": {
             "requested_qty": qty, "requested_qty_provenance": "SOURCE_TICKET_QTY",
             "exchange_qty_claim": True,
+            "signed_quantity_constraints": signed_constraints(),
         },
         "research_chase_schedule": {
             "authoritative": True,
@@ -63,11 +74,39 @@ def test_standardized_basis_is_explicitly_not_exchange_qty():
     assert basis["exchange_qty_claim"] is False
 
 
+def test_collector_persists_signed_constraints_verbatim_without_defaults():
+    signed = signed_constraints("tBTCF0:USTF0")
+    new = build_research_event(
+        trade_id="new", epoch_id="epoch", signal_ts=100, signal_price=100,
+        requested_qty=.25, market_microstructure_symbol="tBTCF0:USTF0",
+        signed_quantity_constraints=signed, candles_1m=[],
+    )
+    assert new["research_execution_basis"]["signed_quantity_constraints"] == signed
+    missing = build_research_event(
+        trade_id="missing", epoch_id="epoch", signal_ts=100, signal_price=100,
+        requested_qty=.25, candles_1m=[],
+    )
+    assert missing["research_execution_basis"]["signed_quantity_constraints"] is None
+
+
 def test_missing_qty_is_unsupported():
     e = event(None)
     result = build_conservative_fill_cohort([e], [tape_row(i) for i in range(100, 103)])
     assert result["receipts"][0]["outcome"] == "UNSUPPORTED"
     assert result["receipts"][0]["negative_reasons"] == ["MISSING_REQUESTED_QTY"]
+
+
+def test_missing_signed_quantity_constraints_are_unknown_unsupported():
+    e = event()
+    e["research_execution_basis"].pop("signed_quantity_constraints")
+    result = build_conservative_fill_cohort(
+        [e], [tape_row(100), tape_row(101), tape_row(102, ask=100)],
+    )
+    receipt = result["receipts"][0]
+    assert receipt["outcome"] == "UNSUPPORTED"
+    assert receipt["final_classification"] == "UNSUPPORTED"
+    assert receipt["minimum_lot_decision"] == "UNKNOWN"
+    assert "SIGNED_QUANTITY_CONSTRAINTS_MISSING" in receipt["negative_reasons"]
 
 
 def test_exact_qty_fill_partial_and_no_fill_receipts():
@@ -120,6 +159,7 @@ def test_strategy_symbol_alias_maps_to_exact_bitfinex_tape_instrument():
     e = event()
     e.pop("symbol")
     e["event_episode"] = {"symbol": "BTCUSD"}
+    e["research_execution_basis"]["signed_quantity_constraints"] = signed_constraints("tBTCF0:USTF0")
     rows = [
         tape_row(100, symbol="tBTCF0:USTF0"),
         tape_row(101, symbol="tBTCF0:USTF0"),
@@ -151,6 +191,7 @@ def test_v31_finalized_intent_produces_identity_preserving_partial_fill():
         "execution_basis": {
             "requested_qty": 1, "requested_qty_provenance": "SOURCE_TICKET_QTY",
             "exchange_qty_claim": True, "market_microstructure_symbol": "tBTCF0:USTF0",
+            "signed_quantity_constraints": signed_constraints("tBTCF0:USTF0"),
         },
         "chase_schedule": {"authoritative": True, "direction": "LONG", "intervals": [
             {"bucket_id": "step-0", "start_ts": 100, "end_ts": 103, "limit_price": 100},
@@ -185,6 +226,7 @@ def test_v31_terminal_fractional_second_is_included_without_generation_overlap()
         "execution_basis": {
             "requested_qty": .1, "requested_qty_provenance": "SOURCE_TICKET_QTY",
             "exchange_qty_claim": True, "market_microstructure_symbol": "tBTCF0:USTF0",
+            "signed_quantity_constraints": signed_constraints("tBTCF0:USTF0"),
         },
         "chase_schedule": {"authoritative": True, "direction": "SHORT", "intervals": [
             {"bucket_id": "step-0", "start_ts": 97, "start_ts_exact": 97.2,

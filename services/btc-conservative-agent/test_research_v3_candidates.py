@@ -19,6 +19,7 @@ from research_v3_candidates import (
 )
 from research_v3_store import V3EvidenceStore
 from research_v3_ranking import rank_safe_policies
+from research.quantity_execution import build_signed_quantity_constraints
 
 
 def source(event_id="event-1", episode_id="episode-1"):
@@ -55,6 +56,12 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
     row = source()
     row["requested_qty"] = 1.0
     row["market_microstructure_symbol"] = "tBTCF0:USTF0"
+    row["signed_quantity_constraints"] = build_signed_quantity_constraints(
+        symbol="tBTCF0:USTF0", quantity_step="0.00000001", quantity_precision=8,
+        min_lot="0.00000001", min_notional="0.000001",
+        captured_at="2026-08-30T00:00:00Z", source_revision="test-revision",
+        source="TEST_FIXTURE",
+    )
     row["entry_children"][0]["chase_schedule"] = [{
         "active_from_ts": 1000.2,
         "active_until_ts": 1004.2,
@@ -580,7 +587,7 @@ class V3CandidateTests(unittest.TestCase):
         self.assertTrue(report["candidates"])
         self.assertTrue(all(
             candidate["policy_spec"]["fill"]["source_fill_model"]
-            == "public-tape-conservative-v2"
+            == "public-tape-conservative-v3-quantity-aware"
             for candidate in report["candidates"]
         ))
 

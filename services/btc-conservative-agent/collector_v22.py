@@ -552,6 +552,7 @@ def build_research_event(
     market_microstructure_symbol: Optional[str] = None,
     chase_schedule: Optional[Sequence[Mapping[str, Any]]] = None,
     chase_schedule_authoritative: bool = False,
+    signed_quantity_constraints: Optional[Mapping[str, Any]] = None,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
@@ -694,6 +695,13 @@ def build_research_event(
             if market_microstructure_symbol else None
         ),
         "exchange_qty_claim": exchange_qty_claim,
+        # Preserve the signed venue receipt verbatim. Validation belongs to
+        # the conservative evaluator; the collector must not repair, default,
+        # or relabel missing exchange constraints.
+        "signed_quantity_constraints": (
+            dict(signed_quantity_constraints)
+            if isinstance(signed_quantity_constraints, Mapping) else None
+        ),
         "note": (
             "Exact source ticket quantity" if exchange_qty_claim else
             "Research-only standardized notional; not an exchange quantity claim"

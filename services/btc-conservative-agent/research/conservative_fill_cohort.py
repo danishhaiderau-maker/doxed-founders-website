@@ -25,13 +25,19 @@ _TAPE_SYMBOL_ALIASES = {
 def _unsupported(event: Mapping[str, Any], reason: str) -> dict[str, Any]:
     basis = event.get("research_execution_basis") or {}
     return {
-        "schema": "conservative_limit_fill_receipt_v1",
+        "schema": "conservative_limit_fill_receipt_v2",
         "event_id": event.get("event_id"),
         "outcome": "UNSUPPORTED",
         "supported": False,
         "requested_qty": basis.get("requested_qty"),
         "filled_qty": 0.0,
+        "raw_partial_qty": 0.0,
+        "rounded_executable_qty": 0.0,
+        "accumulated_qty": 0.0,
         "remaining_qty": basis.get("requested_qty"),
+        "minimum_lot_decision": "UNKNOWN",
+        "minimum_notional_decision": "UNKNOWN",
+        "final_classification": "UNSUPPORTED",
         "negative_reasons": [reason],
         "qualification": "DESCRIPTIVE_ONLY",
         "qualification_effect": "NONE",
@@ -97,6 +103,7 @@ def build_conservative_fill_cohort(
             chase_schedule=intervals,
             aggressor_window_sec=aggressor_window_sec,
             symbol=tape_symbol,
+            quantity_constraints=basis.get("signed_quantity_constraints"),
         )
         receipt["event_id"] = event.get("event_id")
         receipt["requested_qty_provenance"] = basis.get("requested_qty_provenance")
@@ -236,6 +243,7 @@ def build_v3_conservative_fill_cohort(
                 chase_schedule=intervals,
                 aggressor_window_sec=aggressor_window_sec,
                 symbol=tape_symbol,
+                quantity_constraints=basis.get("signed_quantity_constraints") or row.get("signed_quantity_constraints"),
             )
             receipt["microstructure_completeness"] = completeness
             receipt["market_microstructure_symbol"] = tape_symbol

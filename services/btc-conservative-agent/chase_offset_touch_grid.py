@@ -66,6 +66,10 @@ def arm_compressed_shadow_chase(
     entry_fee_rate: Optional[float] = None,
     exit_fee_rate: Optional[float] = None,
     slippage_model: str = COMPRESSED_SHADOW_COST_MODEL,
+    signed_quantity_constraints: Optional[Mapping[str, Any]] = None,
+    quantity_constraints_status: Optional[Mapping[str, Any]] = None,
+    event_source_revision: str = "",
+    event_config_signature: str = "",
 ) -> tuple[dict, dict]:
     """Create an auditable shadow schedule and its stage-0 receipt.
 
@@ -89,6 +93,20 @@ def arm_compressed_shadow_chase(
     missing = [key for key in (
         "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id", "event_id",
     ) if not identities[key]]
+    if not str(event_source_revision or "").strip():
+        missing.append("event_source_revision")
+    if not str(event_config_signature or "").strip():
+        missing.append("event_config_signature")
+    constraint_revision = str(
+        (signed_quantity_constraints or {}).get("source_revision")
+        if isinstance(signed_quantity_constraints, Mapping) else ""
+    ).strip()
+    constraint_revision_match = (
+        None if not constraint_revision or not str(event_source_revision or "").strip()
+        else constraint_revision == str(event_source_revision).strip()
+    )
+    if constraint_revision_match is False:
+        missing.append("quantity_constraint_source_revision_mismatch")
     generation_material = (
         f"{COMPRESSED_SHADOW_POLICY_SIGNATURE}|{trade_id}|{float(signal_ts):.6f}|"
         f"{str(direction or '').upper()}"
@@ -121,6 +139,20 @@ def arm_compressed_shadow_chase(
         "entry_fee_rate": entry_fee_rate,
         "exit_fee_rate": exit_fee_rate,
         "slippage_model": str(slippage_model or ""),
+        "event_source_revision": str(event_source_revision or ""),
+        "event_config_signature": str(event_config_signature or ""),
+        "quantity_constraint_source_revision_match": constraint_revision_match,
+        "signed_quantity_constraints": (
+            dict(signed_quantity_constraints)
+            if isinstance(signed_quantity_constraints, Mapping) else None
+        ),
+        "quantity_constraints_status": (
+            dict(quantity_constraints_status)
+            if isinstance(quantity_constraints_status, Mapping) else {
+                "supported": False, "receipt": None,
+                "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"],
+            }
+        ),
         **identities,
     }
     return state, _compressed_shadow_receipt(
@@ -199,6 +231,13 @@ def _compressed_shadow_receipt(
         "entry_fee_rate": state.get("entry_fee_rate"),
         "exit_fee_rate": state.get("exit_fee_rate"),
         "slippage_model": state.get("slippage_model"),
+        "event_source_revision": state.get("event_source_revision"),
+        "event_config_signature": state.get("event_config_signature"),
+        "quantity_constraint_source_revision_match": state.get(
+            "quantity_constraint_source_revision_match"
+        ),
+        "signed_quantity_constraints": state.get("signed_quantity_constraints"),
+        "quantity_constraints_status": state.get("quantity_constraints_status"),
     }
 
 
@@ -303,6 +342,16 @@ def recover_compressed_shadow_states(
             "entry_fee_rate": latest.get("entry_fee_rate"),
             "exit_fee_rate": latest.get("exit_fee_rate"),
             "slippage_model": latest.get("slippage_model") or "",
+            "event_source_revision": latest.get("event_source_revision") or "",
+            "event_config_signature": latest.get("event_config_signature") or "",
+            "quantity_constraint_source_revision_match": latest.get(
+                "quantity_constraint_source_revision_match"
+            ),
+            "signed_quantity_constraints": latest.get("signed_quantity_constraints"),
+            "quantity_constraints_status": latest.get("quantity_constraints_status") or {
+                "supported": False, "receipt": None,
+                "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"],
+            },
             **{key: latest.get(key) or "" for key in (
                 "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
                 "event_id", "policy_id", "policy_signature",

@@ -8,6 +8,7 @@ from research import research_dashboard as dashboard
 from research.policy_cycle_snapshot import build_policy_cycle_reports
 from research import policy_cycle_snapshot
 from research import v3_policy_report_adapter
+from research.quantity_execution import build_signed_quantity_constraints
 
 
 SIGNAL_TS = 1_800_000_000.0
@@ -319,7 +320,13 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
             "requested_qty": 1,
             "requested_qty_provenance": "SOURCE_TICKET_QTY",
             "exchange_qty_claim": True,
-            "market_microstructure_symbol": "tBTCF0:USTF0",
+                "market_microstructure_symbol": "tBTCF0:USTF0",
+                "signed_quantity_constraints": build_signed_quantity_constraints(
+                    symbol="tBTCF0:USTF0", quantity_step="0.00000001", quantity_precision=8,
+                    min_lot="0.00000001", min_notional="0.000001",
+                    captured_at="2026-08-30T00:00:00Z", source_revision="test-revision",
+                    source="TEST_FIXTURE",
+                ),
         },
         "chase_schedule": {
             "authoritative": True,
