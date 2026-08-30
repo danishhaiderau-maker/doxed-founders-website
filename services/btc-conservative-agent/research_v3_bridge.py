@@ -945,7 +945,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
 
 def dual_write_terminal_paper_schedule(
     order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str,
-    data_dir: str,
+    data_dir: str, lifecycle_final: bool = False,
 ) -> dict[str, Any] | None:
     """Append the exact terminal paper chase schedule as evidence only.
 
@@ -954,6 +954,13 @@ def dual_write_terminal_paper_schedule(
     emitted only after the established schedule recorder has closed the
     schedule.  It does not decide, submit, reprice, fill, or cancel an order.
     """
+    # A chase-gate pull temporarily closes the currently resting order before
+    # the same signal resumes at a later enabled bucket.  Persisting that
+    # boundary as the final schedule would create multiple authoritative
+    # hashes for one policy lifecycle.  Only the caller that has already made
+    # the whole lifecycle terminal may publish the selectable snapshot.
+    if lifecycle_final is not True:
+        return None
     schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
     if not isinstance(schedule, Mapping) or schedule.get("authoritative") is not True:
         return None
@@ -995,6 +1002,7 @@ def dual_write_terminal_paper_schedule(
         "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "chase_schedule": frozen_schedule,
         "chase_schedule_authoritative": True,
+        "schedule_lifecycle_final": True,
         "schedule_sha256": schedule_sha256,
         **causal_ids,
         **policy,

@@ -149,7 +149,10 @@ def normalize_result(row: Mapping[str, Any], generation: Mapping[str, str]) -> d
         "source_revision": generation["source_revision"],
         "tile_config_signature": generation["tile_config_signature"],
     })
-    for field in ("lane", "family", "chase_policy", "exit_family", "regime", "side", "split"):
+    for field in (
+        "lane", "family", "chase_policy", "exit_family", "regime", "side", "split",
+        "ai_direction", "ai_decision",
+    ):
         if result.get(field) is not None:
             result[field] = str(result[field]).strip().upper()
     return result
@@ -172,16 +175,35 @@ class PolicyEvidenceLibrary:
         cached = self.cache.get_query(query_hash)
         if cached is not None:
             return cached
-        cohort_keys = self.cache.cohort_keys(normalized)
-        if len(cohort_keys) > 1:
-            raise ValueError("MIXED_COMPARISON_COHORTS_FORBIDDEN")
         rows = self.cache.select(normalized)
+        total_row_count = self.cache.count(normalized)
+        cohort_keys = sorted({str(row["comparison_cohort_key"]) for row in rows})
+        policy_cohorts: dict[str, set[str]] = {}
+        for row in rows:
+            policy_cohorts.setdefault(str(row["policy_signature"]), set()).add(
+                str(row["comparison_cohort_key"])
+            )
+        if len(policy_cohorts) > 1:
+            if total_row_count > len(rows):
+                raise ValueError("TRUNCATED_POLICY_COMPARISON_FORBIDDEN")
+            cohort_sets = {tuple(sorted(values)) for values in policy_cohorts.values()}
+            if len(cohort_sets) != 1:
+                raise ValueError("MIXED_COMPARISON_COHORTS_FORBIDDEN")
+        comparison_group_key = stable_hash("comparison-group", {
+            "generation_key": self.generation["generation_key"],
+            "evidence_world": normalized["evidence_world"],
+            "cohort_keys": cohort_keys,
+        }) if cohort_keys else None
         result = {
             "schema": "policy_evidence_query_result_v1",
             "generation": dict(self.generation),
             "query": normalized,
             "query_hash": query_hash,
-            "comparison_cohort_key": next(iter(cohort_keys), None),
+            "comparison_cohort_key": cohort_keys[0] if len(cohort_keys) == 1 else None,
+            "comparison_cohort_keys": cohort_keys,
+            "comparison_group_key": comparison_group_key,
+            "total_row_count": total_row_count,
+            "truncated": total_row_count > len(rows),
             "row_count": len(rows),
             "rows": rows,
         }

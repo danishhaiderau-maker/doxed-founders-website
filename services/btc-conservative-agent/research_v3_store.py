@@ -4,17 +4,61 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
+from combo_pathway_config import active_tile_registry_signature
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+_provenance_cache: dict[str, str] | None = None
+
+
+def _collection_provenance() -> dict[str, str]:
+    """Bind every newly appended ledger row to its running source/config.
+
+    Epoch identity intentionally survives deployments, so it cannot by itself
+    prove which code/config emitted a row.  Resolve this once per process and
+    stamp centrally; individual collectors must not be able to omit it.
+    """
+    global _provenance_cache
+    if _provenance_cache is not None:
+        return dict(_provenance_cache)
+    deployed = str(os.getenv("SOURCE_GIT_REV") or "").strip()
+    source = deployed
+    if not source:
+        for name in ("GIT_COMMIT", "GITHUB_SHA", "RAILWAY_GIT_COMMIT_SHA"):
+            candidate = str(os.getenv(name) or "").strip()
+            if candidate:
+                source = candidate
+                break
+    if not source:
+        try:
+            completed = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=Path(__file__).resolve().parent,
+                capture_output=True,
+                text=True,
+                timeout=4,
+                check=False,
+            )
+            if completed.returncode == 0:
+                source = str(completed.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            source = ""
+    _provenance_cache = {
+        "evidence_provenance_schema": "v3_collection_provenance_v1",
+        "source_revision": source or "UNKNOWN",
+        "deployed_revision": deployed or "NOT_DEPLOYED_LOCAL",
+        "tile_config_signature": active_tile_registry_signature(),
+    }
+    return dict(_provenance_cache)
 
 
 def _path_lock(path: Path) -> threading.RLock:
@@ -168,6 +212,7 @@ class V3EvidenceStore:
             "schema": EVIDENCE_SCHEMA,
             "ledger": ledger,
             "epoch_id": self.epoch_id,
+            **_collection_provenance(),
         })
         line = canonical_json(material) + "\n"
         with self._exclusive(path):

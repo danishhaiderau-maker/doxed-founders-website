@@ -257,6 +257,55 @@ def test_generation_bound_artifact_and_query_cache_retain_every_result(tmp_path)
         assert connection.execute("SELECT classification FROM episode_policy_result").fetchone()[0] == "NO_FILL"
 
 
+def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
+    root = tmp_path / "canonical-research-data"
+    v3 = _fixture(root, entry_rows=[_row(10, ask=101), _row(11, ask=101)])
+    decision_path = v3 / "ledgers/decision.jsonl"
+    decision = json.loads(decision_path.read_text().strip())
+    for field in ("direction", "policy_family", "entry_offset_pct", "chase_policy",
+                  "exit_family", "regime"):
+        decision.pop(field, None)
+    decision.update({
+        "executed_direction": "LONG", "raw_ai_decision": "APPROVE",
+        "long_score": 78, "short_score": 22, "score_gap": 56,
+        "paper_policy_spec": {
+            "schema": "paper_policy_identity_spec_v3",
+            "entry_offset_fraction": 0.003,
+            "entry_limit_policy": "OFFSET_0.30_CHASE_W234_S50_I180",
+            "exit_config": {"family": "CHANDELIER", "exit_profile_id": "CHANDELIER_1.5"},
+        },
+    })
+    _write(decision_path, [decision])
+    opportunity_path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(opportunity_path.read_text().strip())
+    opportunity["feature_snapshot_at_signal"] = {
+        "market_context": {"regime_label": "BULL"}
+    }
+    _write(opportunity_path, [opportunity])
+    manifest = {"entry_hash": "a" * 64, "dataset_epoch": "epoch-1",
+                "source_revision": "rev-1", "tile_config_signature": "b" * 64}
+    (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")
+    summary = persist_v3_conservative_results(root, analyzer_revision="rev-1")
+    assert summary["cache_rows_ingested"] == 1
+
+    from research.policy_evidence_library import PolicyEvidenceLibrary
+    library = PolicyEvidenceLibrary(str(root), manifest, analyzer_revision="rev-1")
+    result = library.query({
+        "evidence_world": "CONSERVATIVE_BBO_DEPTH_TAPE",
+        "entry_offset_pct": "0.30", "family": "CHANDELIER",
+        "chase_policy": "OFFSET_0.30_CHASE_W234_S50_I180",
+        "exit_family": "CHANDELIER_1.5", "regime": "BULL",
+        "side": "LONG", "ai_direction": "LONG", "ai_decision": "APPROVE",
+        "policy_signature": "sig-1", "opportunity_id": "opp-1",
+    })
+    assert result["row_count"] == 1
+    stored = result["rows"][0]
+    assert stored["entry_offset_pct"] == "0.30"
+    assert stored["long_score"] == 78
+    assert stored["short_score"] == 22
+    assert stored["score_gap"] == 56
+
+
 def test_missing_opportunity_identity_remains_unknown_in_artifact_and_is_explicitly_skipped_from_cache(tmp_path):
     root = tmp_path / "canonical-research-data"
     v3 = _fixture(root)

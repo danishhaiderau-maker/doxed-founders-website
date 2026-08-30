@@ -15,6 +15,8 @@ from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_bridge import _paper_market_segment
 from research_v3_store import V3EvidenceStore, _id_cache, _segment_hash_cache
 from research_v3_contract import canonical_json
+from research_order_schedule import initialize_order_schedule, close_order_schedule
+from research.policy_evidence_bindings import authoritative_schedule_intents
 
 
 def _event(event_id="cont-1", episode_id="episode-1"):
@@ -61,9 +63,11 @@ class V3BridgeTests(unittest.TestCase):
             }
             first = dual_write_terminal_paper_schedule(
                 order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
             )
             second = dual_write_terminal_paper_schedule(
                 order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
             )
             self.assertTrue(first["write"]["written"])
             self.assertTrue(second["write"]["duplicate"])
@@ -74,6 +78,78 @@ class V3BridgeTests(unittest.TestCase):
             self.assertTrue(row["evidence_only"])
             self.assertEqual(row["schedule_sha256"], first["schedule_sha256"])
             self.assertEqual(row["chase_schedule"]["terminal_reason"], "FILLED")
+            self.assertTrue(row["schedule_lifecycle_final"])
+
+    def test_closed_temporary_chase_pull_is_not_selectable_terminal_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "pull-1", "shared_ai_call_id": "scan-pull-1",
+                "raw_direction": "LONG", "final_direction": "LONG", "qty": .2,
+                "research_chase_schedule": {
+                    "authoritative": True,
+                    "intervals": [{"start_ts": 1, "end_ts": 2, "limit_price": 100}],
+                    "terminal_ts": 2, "terminal_reason": "VIRTUAL_CHASE_HIDE",
+                },
+            }
+            self.assertIsNone(dual_write_terminal_paper_schedule(
+                source, source, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=False,
+            ))
+            self.assertFalse((Path(tmp) / "v3/ledgers/order_intent.jsonl").exists())
+
+    def test_pull_virtual_wait_reregister_final_expiry_has_one_selectable_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "resume-1", "created_ts_ts": 1,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "shared_ai_call_id": "scan-resume-1", "signal_price": 100,
+                "research_lane": "CONTINUOUS",
+            }
+            first_order = {
+                **signal, "status": "PENDING", "created_ts": 1, "qty": .2,
+                "limit_price": 99, "limit_chase_count": 0,
+            }
+            initialize_order_schedule(
+                first_order, signal, now=1, registered=True,
+            )
+            close_order_schedule(
+                first_order, signal, now=2, reason="VIRTUAL_CHASE_HIDE",
+            )
+            self.assertIsNone(dual_write_terminal_paper_schedule(
+                first_order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=False,
+            ))
+
+            resumed_order = {
+                **signal, "status": "PENDING", "created_ts": 4, "qty": .2,
+                "limit_price": 100, "limit_chase_count": 3,
+            }
+            resumed_order.pop("research_chase_schedule", None)
+            resumed_order.pop("chase_schedule_authoritative", None)
+            initialize_order_schedule(
+                resumed_order, signal, now=4, registered=True,
+                reason="ORDER_REREGISTERED_AFTER_VIRTUAL_WAIT",
+            )
+            close_order_schedule(
+                resumed_order, signal, now=7, reason="TTL_EXPIRED",
+            )
+            receipt = dual_write_terminal_paper_schedule(
+                resumed_order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
+            )
+            self.assertTrue(receipt["write"]["written"])
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("order_intent").read_text().splitlines()]
+            selected = authoritative_schedule_intents(rows)
+            self.assertEqual(len(selected), 1)
+            self.assertTrue(selected[0]["schedule_lifecycle_final"])
+            self.assertEqual(len(selected[0]["chase_schedule"]["intervals"]), 2)
+            self.assertEqual(
+                [item["chase_step_index"] for item in selected[0]["chase_schedule"]["intervals"]],
+                [0, 3],
+            )
+            self.assertEqual(selected[0]["chase_schedule"]["terminal_reason"], "TTL_EXPIRED")
 
     def test_terminal_schedule_snapshot_refuses_open_or_incomplete_schedule(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,6 +163,7 @@ class V3BridgeTests(unittest.TestCase):
             }
             self.assertIsNone(dual_write_terminal_paper_schedule(
                 source, source, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
             ))
             self.assertFalse((Path(tmp) / "v3/ledgers/order_intent.jsonl").exists())
 

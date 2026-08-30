@@ -13,7 +13,7 @@ from typing import Any, Mapping
 
 
 SCHEMA_VERSION = "policy_evidence_library_v1"
-CACHE_SCHEMA_VERSION = "policy_evidence_cache_v2"
+CACHE_SCHEMA_VERSION = "policy_evidence_cache_v3"
 EVALUATOR_VERSION = "lazy_policy_evaluator_v2"
 EVIDENCE_WORLDS = frozenset({
     "IDEAL_TOUCH_DIAGNOSTIC",
@@ -24,9 +24,17 @@ EVIDENCE_WORLDS = frozenset({
 })
 CLASSIFICATIONS = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
 SPLITS = frozenset({"TRAIN", "OOS", "HOLDOUT"})
-QUERY_LIST_FIELDS = ("lane", "family", "chase_policy", "exit_family", "regime", "side", "split")
+QUERY_LIST_FIELDS = (
+    "comparison_cohort_key", "opportunity_id", "episode_id", "decision_id",
+    "policy_signature", "lane", "family", "chase_policy", "exit_family",
+    "regime", "side", "split", "ai_direction", "ai_decision",
+)
 MAX_FILTER_VALUES = 64
 MAX_QUERY_LIMIT = 5000
+CASE_SENSITIVE_QUERY_FIELDS = frozenset({
+    "comparison_cohort_key", "opportunity_id", "episode_id", "decision_id",
+    "policy_signature",
+})
 
 
 def canonical_json(value: Any) -> str:
@@ -44,6 +52,15 @@ def _normalized_text_values(value: Any, field: str) -> list[str]:
     if len(values) > MAX_FILTER_VALUES:
         raise ValueError(f"TOO_MANY_{field.upper()}_FILTER_VALUES")
     return sorted({str(item).strip().upper() for item in values if str(item).strip()})
+
+
+def _normalized_identity_values(value: Any, field: str) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    if len(values) > MAX_FILTER_VALUES:
+        raise ValueError(f"TOO_MANY_{field.upper()}_FILTER_VALUES")
+    return sorted({str(item).strip() for item in values if str(item).strip()})
 
 
 def _offset(value: Any) -> str | None:
@@ -64,9 +81,19 @@ def normalize_query(query: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("EVIDENCE_WORLD_REQUIRED_OR_INVALID")
     normalized: dict[str, Any] = {"evidence_world": world}
     for field in QUERY_LIST_FIELDS:
-        values = _normalized_text_values(query.get(field), field)
+        values = (
+            _normalized_identity_values(query.get(field), field)
+            if field in CASE_SENSITIVE_QUERY_FIELDS
+            else _normalized_text_values(query.get(field), field)
+        )
         if values:
-            if field == "side" and any(item not in {"LONG", "SHORT"} for item in values):
+            allowed_directions = (
+                {"LONG", "SHORT", "NO_TRADE"} if field == "ai_direction"
+                else {"LONG", "SHORT"}
+            )
+            if field in {"side", "ai_direction"} and any(
+                item not in allowed_directions for item in values
+            ):
                 raise ValueError("INVALID_SIDE")
             if field == "split" and any(item not in SPLITS for item in values):
                 raise ValueError("INVALID_SPLIT")

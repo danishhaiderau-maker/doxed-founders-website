@@ -10168,6 +10168,7 @@ def _pull_order_to_virtual_chase(signal: dict, order: dict, new_limit: float, ch
         "VIRTUAL_CHASE_HIDE",
         record_expired=False,
         expire_signal=False,
+        evidence_lifecycle_final=False,
     )
     if not cancel_result.get("finalized"):
         logger.critical(
@@ -13261,7 +13262,9 @@ def _promote_collector_v22_registered_order(order: dict, signal: dict = None):
 
 
 @_collector_epoch_serialized
-def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict = None):
+def _refresh_collector_v22_registered_order_evidence(
+    order: dict, signal: dict = None, *, lifecycle_final: bool = False,
+):
     """Persist the latest authoritative order schedule after every mutation."""
     if not isinstance(order, dict):
         return False
@@ -13304,12 +13307,17 @@ def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict =
     # V3 submit receipts are immutable. Once the existing recorder closes the
     # schedule, append its final exact version for conservative replay. This is
     # evidence-only and cannot affect order execution.
-    if schedule.get("terminal_ts") is not None and schedule.get("terminal_reason"):
+    if (
+        lifecycle_final is True
+        and schedule.get("terminal_ts") is not None
+        and schedule.get("terminal_reason")
+    ):
         try:
             dual_write_terminal_paper_schedule(
                 order,
                 signal if isinstance(signal, dict) else {},
                 epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+                lifecycle_final=True,
             )
         except Exception as exc:
             # Evidence capture is deliberately fail-isolated: an absent causal
@@ -17955,6 +17963,7 @@ def _cancel_pending_for_chase_gate(order: dict, reason: str = "CHASE_BUCKET_BLOC
         reason,
         record_expired=False,
         expire_signal=False,
+        evidence_lifecycle_final=False,
     )
     if not cancel_result.get("finalized"):
         logger.critical(
@@ -21187,22 +21196,14 @@ def process_pending_orders():
             schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
         collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
         if callable(collector_refresh):
-            collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
+            collector_refresh(
+                order, fill_signal if isinstance(fill_signal, dict) else None,
+                lifecycle_final=True,
+            )
         _record_expired_order(order, reason)
         expire_signal_for_order(order, reason)
         logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
     for order, fill_signal in fills:
-        schedule_close = globals().get("close_research_order_schedule")
-        if callable(schedule_close):
-            schedule_close(
-                order,
-                fill_signal if isinstance(fill_signal, dict) else None,
-                now=time.time(),
-                reason="FILLED",
-            )
-        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-        if callable(collector_refresh):
-            collector_refresh(order, fill_signal if isinstance(fill_signal, dict) else None)
         fill_order(order)
 
 def fill_order(order):
@@ -21227,7 +21228,10 @@ def fill_order(order):
             )
         collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
         if callable(collector_refresh):
-            collector_refresh(order, paused_signal if isinstance(paused_signal, dict) else None)
+            collector_refresh(
+                order, paused_signal if isinstance(paused_signal, dict) else None,
+                lifecycle_final=True,
+            )
         _record_expired_order(order, "ADMIN_MANUAL_PAUSE")
         expire_signal_for_order(order, "ADMIN_MANUAL_PAUSE")
         logger.warning(
@@ -21351,6 +21355,24 @@ def fill_order(order):
         )
         clear_fill_handoff()
         return
+    # Publish FILLED schedule evidence only after the OPEN lifecycle commit
+    # wins. A manual pause may race between touch detection and fill_order();
+    # emitting earlier could leave both FILLED and ADMIN_MANUAL_PAUSE terminal
+    # hashes for the same schedule identity.
+    schedule_close = globals().get("close_research_order_schedule")
+    if callable(schedule_close):
+        schedule_close(
+            order,
+            signal if isinstance(signal, dict) else None,
+            now=time.time(),
+            reason="FILLED",
+        )
+    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+    if callable(collector_refresh):
+        collector_refresh(
+            order, signal if isinstance(signal, dict) else None,
+            lifecycle_final=True,
+        )
     clear_fill_handoff()
     mark_approve_research_executed(pos.get("trade_id"), fill_px)
     persist_signal(fill_snapshot, "FILLED")
@@ -24239,6 +24261,7 @@ def _cancel_pending_order_confirmed(
     record_expired: bool = True,
     expire_signal: bool = True,
     final_status: str = "CANCELLED",
+    evidence_lifecycle_final: bool = True,
 ) -> dict:
     """Cancel one pending entry and finalize local state only after confirmation.
 
@@ -24372,7 +24395,10 @@ def _cancel_pending_order_confirmed(
 
     collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
     if callable(collector_refresh):
-        collector_refresh(order, master_signal if isinstance(master_signal, dict) else None)
+        collector_refresh(
+            order, master_signal if isinstance(master_signal, dict) else None,
+            lifecycle_final=bool(evidence_lifecycle_final),
+        )
     result["confirmed"] = True
     result["finalized"] = True
     if record_expired:

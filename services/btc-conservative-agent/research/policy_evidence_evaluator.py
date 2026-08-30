@@ -115,7 +115,8 @@ def _schedule(intent: Mapping[str, Any]) -> list[dict[str, Any]] | None:
     return result
 
 
-def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any], reasons: list[str]) -> dict[str, Any]:
+def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
+             opportunity: Mapping[str, Any], reasons: list[str]) -> dict[str, Any]:
     tape_ids = sorted(binding.get("tape_ids") or [])
     identity_values = [
         binding.get("epoch_id"), binding.get("opportunity_id"),
@@ -129,6 +130,32 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any], reasons: l
         if all(str(value or "") for value in identity_values)
         else None
     )
+    policy_spec = (
+        decision.get("paper_policy_spec")
+        if isinstance(decision.get("paper_policy_spec"), Mapping) else {}
+    )
+    exit_config = (
+        policy_spec.get("exit_config")
+        if isinstance(policy_spec.get("exit_config"), Mapping) else {}
+    )
+    feature_snapshot = (
+        opportunity.get("feature_snapshot_at_signal")
+        if isinstance(opportunity.get("feature_snapshot_at_signal"), Mapping) else {}
+    )
+    market_context = (
+        feature_snapshot.get("market_context")
+        if isinstance(feature_snapshot.get("market_context"), Mapping) else {}
+    )
+    entry_offset_pct = decision.get("entry_offset_pct")
+    if entry_offset_pct is None and policy_spec.get("entry_offset_fraction") is not None:
+        fraction = _number(policy_spec.get("entry_offset_fraction"))
+        entry_offset_pct = fraction * 100.0 if fraction is not None else None
+    ai_direction = str(opportunity.get("raw_direction") or "").upper() or None
+    side_candidate = str(
+        decision.get("direction") or decision.get("side")
+        or decision.get("executed_direction") or ai_direction or ""
+    ).upper() or None
+    side = side_candidate if side_candidate in {"LONG", "SHORT"} else None
     return {
         "schema": SCHEMA,
         "epoch_id": binding.get("epoch_id"),
@@ -140,13 +167,29 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any], reasons: l
         "evidence_world": EVIDENCE_WORLD,
         "comparison_cohort_key": cohort,
         "lane": binding.get("research_lane"),
-        "family": decision.get("policy_family") or decision.get("family"),
-        "entry_offset_pct": decision.get("entry_offset_pct"),
-        "chase_policy": decision.get("chase_policy"),
-        "exit_family": decision.get("exit_family"),
-        "regime": decision.get("regime") or decision.get("market_regime"),
-        "side": str(decision.get("direction") or decision.get("side") or "").upper() or None,
+        "family": (
+            decision.get("policy_family") or decision.get("family")
+            or exit_config.get("family")
+        ),
+        "entry_offset_pct": entry_offset_pct,
+        "chase_policy": (
+            decision.get("chase_policy") or policy_spec.get("entry_limit_policy")
+        ),
+        "exit_family": (
+            decision.get("exit_family") or exit_config.get("exit_profile_id")
+            or exit_config.get("family")
+        ),
+        "regime": (
+            decision.get("regime") or decision.get("market_regime")
+            or market_context.get("regime_label")
+        ),
+        "side": side,
         "split": str(decision.get("split") or "").upper() or None,
+        "ai_direction": ai_direction,
+        "ai_decision": str(decision.get("raw_ai_decision") or "").upper() or None,
+        "long_score": decision.get("long_score"),
+        "short_score": decision.get("short_score"),
+        "score_gap": decision.get("score_gap"),
         "classification": "UNKNOWN", "supported": False,
         "unknown_reason_codes": sorted(set(reasons)),
         "requested_qty": None, "available_qty": None, "raw_partial_qty": None,
@@ -256,7 +299,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             tape_ids.append(str(segment["segment_ref"]["sha256"]))
 
         if reasons:
-            results.append(_unknown(binding, decision, reasons))
+            results.append(_unknown(binding, decision, opportunities.get(identity, {}), reasons))
             continue
         receipt = evaluate_limit_fill(
             tape_rows, direction=direction, requested_qty=requested_qty,
@@ -264,20 +307,20 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             symbol=str(intent.get("symbol") or "BTCUSD"), quantity_constraints=constraints,
         )
         if receipt.get("supported") is not True:
-            results.append(_unknown(binding, decision, [
+            results.append(_unknown(binding, decision, opportunities.get(identity, {}), [
                 "UNKNOWN_CONSERVATIVE_EVALUATOR_" + str(reason)
                 for reason in receipt.get("negative_reasons") or ["UNSPECIFIED"]
             ]))
             continue
         classification = str(receipt.get("final_classification") or "UNKNOWN")
         if classification not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}:
-            results.append(_unknown(binding, decision, ["UNKNOWN_EVALUATOR_CLASSIFICATION"]))
+            results.append(_unknown(binding, decision, opportunities.get(identity, {}), ["UNKNOWN_EVALUATOR_CLASSIFICATION"]))
             continue
         cohort = stable_hash("cohort", {
             "epoch_id": identity[0], "opportunity_id": identity[1],
             "episode_id": identity[2], "tape_ids": sorted(tape_ids),
         })
-        row = _unknown(binding, decision, [])
+        row = _unknown(binding, decision, opportunities.get(identity, {}), [])
         row.update({
             "comparison_cohort_key": cohort, "classification": classification,
             "supported": True, "unknown_reason_codes": [],

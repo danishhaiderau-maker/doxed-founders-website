@@ -212,12 +212,63 @@ def test_terminal_refresh_appends_v3_schedule_evidence_without_affecting_open_mu
     schedule["terminal_ts"] = 2
     schedule["terminal_reason"] = "FILLED"
     order["status"] = "FILLED"
-    assert refresh(order, {"shared_ai_call_id": "scan-4"}) is True
+    assert refresh(
+        order, {"shared_ai_call_id": "scan-4"}, lifecycle_final=True,
+    ) is True
     assert len(terminal_writes) == 1
     captured_order, captured_signal, kwargs = terminal_writes[0]
     assert captured_order["status"] == "FILLED"
     assert captured_signal["shared_ai_call_id"] == "scan-4"
-    assert kwargs == {"epoch_id": "epoch-1", "data_dir": "C:/canonical"}
+    assert kwargs == {
+        "epoch_id": "epoch-1", "data_dir": "C:/canonical",
+        "lifecycle_final": True,
+    }
+
+
+def test_temporary_pull_resume_then_final_expiry_publishes_one_selectable_schedule():
+    pending = {"cont-resume": {"trade_id": "cont-resume", "collector_rejected": False}}
+    upserts = []
+    terminal_writes = []
+    refresh = _load_refresh(pending, upserts, terminal_writes)
+    signal = {"shared_ai_call_id": "scan-resume"}
+    schedule = {
+        "authoritative": True,
+        "intervals": [
+            {"start_ts": 1, "end_ts": 2, "limit_price": 100},
+        ],
+        "terminal_ts": 2,
+        "terminal_reason": "VIRTUAL_CHASE_HIDE",
+    }
+    order = {
+        "trade_id": "cont-resume", "status": "CANCELLED", "qty": .1,
+        "research_chase_schedule": schedule,
+        "chase_schedule_authoritative": True,
+    }
+
+    # Pulling a resting order into virtual chase is not lifecycle final.
+    assert refresh(order, signal, lifecycle_final=False) is True
+    assert terminal_writes == []
+
+    # The same policy lifecycle resumes with a later interval.
+    schedule["terminal_ts"] = None
+    schedule["terminal_reason"] = None
+    schedule["intervals"].append(
+        {"start_ts": 4, "end_ts": None, "limit_price": 101},
+    )
+    order["status"] = "PENDING"
+    assert refresh(order, signal, lifecycle_final=False) is True
+    assert terminal_writes == []
+
+    # Final expiry closes the complete accumulated schedule exactly once.
+    schedule["intervals"][-1]["end_ts"] = 7
+    schedule["terminal_ts"] = 7
+    schedule["terminal_reason"] = "TTL_EXPIRED"
+    order["status"] = "EXPIRED"
+    assert refresh(order, signal, lifecycle_final=True) is True
+    assert len(terminal_writes) == 1
+    captured_order, _captured_signal, kwargs = terminal_writes[0]
+    assert len(captured_order["research_chase_schedule"]["intervals"]) == 2
+    assert kwargs["lifecycle_final"] is True
 
 
 def test_terminal_schedule_evidence_failure_is_isolated_from_execution_refresh():
@@ -237,7 +288,7 @@ def test_terminal_schedule_evidence_failure_is_isolated_from_execution_refresh()
             "terminal_ts": 2, "terminal_reason": "FILLED",
         },
     }
-    assert refresh(order) is True
+    assert refresh(order, lifecycle_final=True) is True
     assert upserts[-1][1]["status"] == "FILLED"
 
 
@@ -245,6 +296,27 @@ def test_schedule_mutation_paths_refresh_collector_after_mutation():
     assert BOT_SOURCE.count("_refresh_collector_v22_registered_order_evidence") >= 6
     assert "schedule_reprice(\n            order," in BOT_SOURCE
     assert "schedule_close(\n                order," in BOT_SOURCE
+
+
+def test_filled_terminal_schedule_is_published_only_after_open_commit_wins():
+    process_start = BOT_SOURCE.index("def process_pending_orders():")
+    process_end = BOT_SOURCE.index("\ndef fill_order(order):", process_start)
+    process_body = BOT_SOURCE[process_start:process_end]
+    fill_start = process_end
+    fill_end = BOT_SOURCE.index("\ndef _observable_exit_price", fill_start)
+    fill_body = BOT_SOURCE[fill_start:fill_end]
+
+    # Touch detection delegates to fill_order without claiming FILLED evidence.
+    fill_loop = process_body[process_body.rindex("    for order, fill_signal in fills:"):]
+    assert "fill_order(order)" in fill_loop
+    assert "lifecycle_final=True" not in fill_loop
+
+    # The terminal write follows the atomic OPEN lifecycle winner. The earlier
+    # manual-pause branch remains free to publish its sole cancellation truth.
+    commit = fill_body.index("fill_snapshot = _finalize_position_open_lifecycle(")
+    guard = fill_body.index("if fill_snapshot is None:", commit)
+    terminal = fill_body.index("lifecycle_final=True", guard)
+    assert commit < guard < terminal
 
 
 def test_runtime_registration_captures_constraints_before_evidence_enqueue():

@@ -4,13 +4,37 @@ import os
 from pathlib import Path
 
 import research.policy_evidence_bindings as bindings_module
-from research.policy_evidence_bindings import build_v3_binding_index, persist_v3_binding_index
+from research.policy_evidence_bindings import (
+    authoritative_schedule_intents,
+    build_v3_binding_index,
+    persist_v3_binding_index,
+)
 from research.policy_evidence_schema import canonical_json
 
 
 def _write(path: Path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def test_explicitly_nonfinal_schedule_snapshot_is_never_selectable():
+    schedule = {
+        "authoritative": True,
+        "intervals": [{"start_ts": 1, "end_ts": 2, "limit_price": 99}],
+    }
+    temporary = {
+        "schedule_id": "schedule-1",
+        "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
+        "schedule_lifecycle_final": False,
+        "chase_schedule": schedule,
+    }
+    final = {
+        **temporary,
+        "schedule_lifecycle_final": True,
+        "chase_schedule": {**schedule, "terminal_ts": 3, "terminal_reason": "FILLED"},
+    }
+    assert authoritative_schedule_intents([temporary]) == []
+    assert authoritative_schedule_intents([temporary, final]) == [final]
 
 
 def _fixture(tmp_path: Path, *, roles=("ENTRY_PATH", "POST_EXIT_PATH"), schedule=True):

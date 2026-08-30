@@ -223,6 +223,10 @@ def authoritative_schedule_intents(
         if isinstance(row.get("chase_schedule"), Mapping)
         and row["chase_schedule"].get("authoritative") is True
         and row.get("schedule_id")
+        # New producers explicitly mark whole-lifecycle finality.  Absence is
+        # accepted for immutable legacy fixtures/receipts; an explicit false
+        # can never become selectable conservative evidence.
+        and row.get("schedule_lifecycle_final") is not False
     ]
     return [
         row for row in authoritative

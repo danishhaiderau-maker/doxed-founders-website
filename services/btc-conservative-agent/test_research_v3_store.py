@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import research_v3_store
 from research_v3_store import V3EvidenceStore, _segment_hash_cache
 
 
@@ -119,6 +120,32 @@ class ResearchV3StoreTests(unittest.TestCase):
             row = json.loads(store.ledger_path("opportunity").read_text().strip())
             self.assertEqual(row["epoch_id"], "epoch-v3-test")
             self.assertEqual(row["ledger"], "opportunity")
+
+    def test_every_new_ledger_row_is_centrally_revision_and_config_bound(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"SOURCE_GIT_REV": "abcdef1234567890"}, clear=False,
+        ):
+            previous = research_v3_store._provenance_cache
+            research_v3_store._provenance_cache = None
+            try:
+                store = V3EvidenceStore(tmp, epoch_id="epoch-provenance")
+                store.append("decision", {
+                    "record_id": "decision-provenance",
+                    # Callers cannot spoof the central running identity.
+                    "source_revision": "spoofed",
+                    "deployed_revision": "spoofed",
+                    "tile_config_signature": "spoofed",
+                })
+                row = json.loads(store.ledger_path("decision").read_text())
+            finally:
+                research_v3_store._provenance_cache = previous
+        self.assertEqual(row["evidence_provenance_schema"], "v3_collection_provenance_v1")
+        self.assertEqual(row["source_revision"], "abcdef1234567890")
+        self.assertEqual(row["deployed_revision"], "abcdef1234567890")
+        self.assertEqual(
+            row["tile_config_signature"],
+            research_v3_store.active_tile_registry_signature(),
+        )
 
     def test_concurrent_writers_do_not_duplicate_or_corrupt(self):
         with tempfile.TemporaryDirectory() as tmp:

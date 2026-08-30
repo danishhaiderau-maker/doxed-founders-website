@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 from unittest import mock
 
@@ -16,7 +17,7 @@ MANIFEST = {"entry_hash":"manifest", "dataset_epoch":"epoch", "source_revision":
 def row(episode, classification, *, cohort="same", world="CONSERVATIVE_BBO_DEPTH_TAPE", offset=0.10, **extra):
     payload = {
         "opportunity_id": "opportunity-" + episode, "episode_id": episode,
-        "decision_id": "decision-" + episode, "policy_signature": "policy-" + episode,
+        "decision_id": "decision-" + episode, "policy_signature": "policy-main",
         "evidence_world": world, "comparison_cohort_key": cohort,
         "classification": classification, "supported": classification != "UNKNOWN",
         "entry_offset_pct": offset, "family": "ATR_TRAIL", "side": "LONG", "split": "OOS",
@@ -74,9 +75,59 @@ class PolicyEvidenceLibraryTests(unittest.TestCase):
     def test_mixed_comparison_cohorts_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
             lib = PolicyEvidenceLibrary(str(Path(tmp) / "canonical-research-data"), MANIFEST, analyzer_revision="a")
-            lib.ingest([row("1", "NO_FILL", cohort="a"), row("2", "NO_FILL", cohort="b")])
+            lib.ingest([
+                row("1", "NO_FILL", cohort="a", policy_signature="policy-a"),
+                row("2", "NO_FILL", cohort="b", policy_signature="policy-b"),
+            ])
             with self.assertRaisesRegex(ValueError, "MIXED_COMPARISON_COHORTS"):
                 lib.query({"evidence_world":"CONSERVATIVE_BBO_DEPTH_TAPE"})
+
+    def test_same_evidence_policy_comparison_and_identity_filters_are_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib = PolicyEvidenceLibrary(str(Path(tmp) / "canonical-research-data"), MANIFEST, analyzer_revision="a")
+            rows = []
+            for episode, cohort in (("1", "cohort-a"), ("2", "cohort-b")):
+                rows.extend([
+                    row(episode, "NO_FILL", cohort=cohort, policy_signature="policy-a",
+                        ai_direction="LONG", ai_decision="APPROVE"),
+                    row(episode, "NO_FILL", cohort=cohort,
+                        policy_signature="policy-b", decision_id="decision-b-" + episode,
+                        ai_direction="LONG", ai_decision="APPROVE"),
+                ])
+            lib.ingest(rows)
+            result = lib.query({
+                "evidence_world":"CONSERVATIVE_BBO_DEPTH_TAPE",
+                "policy_signature":["policy-a", "policy-b"],
+                "ai_direction":"LONG", "ai_decision":"APPROVE", "limit":10,
+            })
+            self.assertEqual(result["row_count"], 4)
+            self.assertEqual(result["comparison_cohort_keys"], ["cohort-a", "cohort-b"])
+            self.assertTrue(result["comparison_group_key"].startswith("comparison-group-"))
+            self.assertFalse(result["truncated"])
+            one = lib.query({
+                "evidence_world":"CONSERVATIVE_BBO_DEPTH_TAPE",
+                "comparison_cohort_key":"cohort-a", "episode_id":"1",
+            })
+            self.assertEqual(one["row_count"], 2)
+
+    def test_incompatible_disposable_cache_is_archived_before_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = Path(tmp) / "canonical-research-data"
+            identity = generation_identity(MANIFEST, analyzer_revision="a")
+            from research.policy_evidence_cache import cache_path
+            path = cache_path(canonical, identity["generation_key"])
+            path.parent.mkdir(parents=True)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("CREATE TABLE cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+                connection.execute("INSERT INTO cache_meta VALUES (?, ?)", ("cache_schema", "policy_evidence_cache_v2"))
+                connection.commit()
+            finally:
+                connection.close()
+            lib = PolicyEvidenceLibrary(str(canonical), MANIFEST, analyzer_revision="a")
+            lib.ingest([row("1", "NO_FILL")])
+            self.assertTrue(path.is_file())
+            self.assertEqual(len(list(path.parent.glob("results.sqlite.archived-policy_evidence_cache_v2*"))), 1)
 
     def test_distinct_opportunities_decisions_and_cohorts_never_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
