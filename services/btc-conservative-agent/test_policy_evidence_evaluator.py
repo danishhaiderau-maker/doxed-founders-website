@@ -172,6 +172,39 @@ def test_complete_all_opportunity_future_tape_is_usable_as_exact_entry_path(tmp_
     assert row["supported"] is True
 
 
+def test_recovery_overlay_supersedes_raw_unknown_for_evaluation(tmp_path):
+    v3 = _fixture(tmp_path)
+    path = v3 / "ledgers/market_segment.jsonl"
+    segments = [json.loads(line) for line in path.read_text().splitlines()]
+    future = segments[0]
+    future.pop("context_role", None)
+    future.update({
+        "record_id": "recovered-complete",
+        "future_path_owner_key": "owner-1",
+        "segment_role": "SIGNAL_TO_120M_FUTURE_PATH",
+        "future_path_status": "COMPLETE",
+        "coverage": {
+            "conservative_bbo_depth_eligible": True,
+            "required_horizons_sec": [60, 300, 900, 1800, 3600, 7200],
+        },
+    })
+    unknown = {
+        key: future[key] for key in ("epoch_id", "opportunity_id", "episode_id")
+    }
+    unknown.update({
+        "record_id": "raw-unknown", "future_path_owner_key": "owner-1",
+        "segment_role": "SIGNAL_TO_120M_FUTURE_PATH",
+        "future_path_status": "UNKNOWN", "segment_ref": None,
+    })
+    _write(path, [unknown])
+    _write(v3 / "recovery_ledgers/market_segment.jsonl", [future])
+
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["classification"] == "FULL_FILL"
+    assert row["supported"] is True
+    assert row["tape_ids"] == [future["segment_ref"]["sha256"]]
+
+
 def test_incomplete_all_opportunity_future_tape_remains_unknown(tmp_path):
     v3 = _fixture(tmp_path)
     path = v3 / "ledgers/market_segment.jsonl"

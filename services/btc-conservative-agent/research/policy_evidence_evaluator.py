@@ -17,6 +17,7 @@ from typing import Any, Mapping
 from research.conservative_limit_fill import evaluate_limit_fill
 from research.policy_evidence_bindings import (
     ALL_OPPORTUNITY_FUTURE_ROLE,
+    authoritative_future_path_segments,
     authoritative_schedule_intents,
     build_v3_binding_index,
     complete_conservative_future_path,
@@ -165,11 +166,30 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
         name: _read_jsonl(root / "ledgers" / f"{name}.jsonl")
         for name in ("decision", "opportunity", "order_intent", "market_segment")
     }
+    recovery_segments = _read_jsonl(
+        root / "recovery_ledgers" / "market_segment.jsonl"
+    )
+    ledgers["market_segment"].extend(recovery_segments)
     bindings = build_v3_binding_index(root)["bindings"]
     decisions = {str(row.get("event_id") or ""): row for row in ledgers["decision"]}
     opportunities = {_identity(row): row for row in ledgers["opportunity"]}
     intents: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     segments: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    envelope_cache: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
+
+    def load_envelope_cached(segment: Mapping[str, Any]):
+        ref = segment.get("segment_ref") if isinstance(segment.get("segment_ref"), Mapping) else {}
+        key = canonical_json(ref)
+        if key not in envelope_cache:
+            envelope_cache[key] = _load_envelope(root, segment)
+        return envelope_cache[key]
+
+    def verify_segment_cached(segment: Mapping[str, Any]):
+        _envelope, error = load_envelope_cached(segment)
+        if error:
+            return None, [error]
+        ref = segment.get("segment_ref") if isinstance(segment.get("segment_ref"), Mapping) else {}
+        return str(ref.get("sha256") or "") or None, []
     for row in ledgers["order_intent"]:
         intents.setdefault(_policy_identity(row), []).append(row)
     for row in ledgers["market_segment"]:
@@ -206,7 +226,10 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
 
         tape_rows: list[dict[str, Any]] = []
         tape_ids: list[str] = []
-        for segment in segments.get(identity, []):
+        selected_segments, _future_history = authoritative_future_path_segments(
+            root, segments.get(identity, []), verifier=verify_segment_cached,
+        )
+        for segment in selected_segments:
             coverage = segment.get("coverage") if isinstance(segment.get("coverage"), Mapping) else {}
             role = segment_role(segment)
             if role not in {
@@ -221,7 +244,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             elif coverage.get("conservative_bbo_depth_eligible") is not True:
                 reasons.append("UNKNOWN_ENTRY_SEGMENT_NOT_CONSERVATIVE_ELIGIBLE")
                 continue
-            envelope, error = _load_envelope(root, segment)
+            envelope, error = load_envelope_cached(segment)
             if error:
                 reasons.append(error)
                 continue
