@@ -97,6 +97,9 @@ def _run_sync(
         def do_POST(self):
             assert self.path == "/api/data-sync/platform-relay-evidence"
             assert self.headers.get("X-Bot-Admin-Token") == token
+            assert self.headers.get("X-Content-SHA256") == __import__("hashlib").sha256(body).hexdigest()
+            semantic_digest = self.headers.get("X-Relay-Semantic-SHA256")
+            assert semantic_digest and len(semantic_digest) == 64
             forwarded = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             assert forwarded == body
             if post_status != 200:
@@ -112,6 +115,8 @@ def _run_sync(
                 "schema": "relay_lifecycle_evidence_v1",
                 "sha256": __import__("hashlib").sha256(body).hexdigest(),
                 "records": len(payload["records"]),
+                "semanticSha256": semantic_digest,
+                "duplicate": False,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -191,3 +196,25 @@ def test_forward_http_status_is_classified_without_leaking_request_or_body(tmp_p
     assert "secret-never-print" not in combined
     assert "user-scope" not in combined
     assert "/api/data-sync/platform-relay-evidence" not in combined
+
+
+def test_sync_declares_exact_body_checksum_for_idempotent_retry():
+    assert "'X-Content-SHA256' = $digest" in SCRIPT
+    assert "'X-Relay-Semantic-SHA256' = $incomingSemanticDigest" in SCRIPT
+    assert SCRIPT.index("$digest =") < SCRIPT.index("'X-Content-SHA256' = $digest")
+    assert "-TimeoutSec 105" in SCRIPT
+
+
+def test_semantic_digest_ignores_envelope_time_and_nested_property_order(tmp_path):
+    first = _valid_payload()
+    first["records"][0]["events"][0]["payload"] = {"b": 2, "a": 1}
+    result, destination = _run_sync(tmp_path, first)
+    assert result.returncode == 0, result.stderr
+    second = json.loads(json.dumps(first))
+    second["generatedAt"] = datetime.now(timezone.utc).isoformat()
+    second["records"][0]["events"][0]["payload"] = {"a": 1, "b": 2}
+    # Existing raw bytes differ, while semantic lifecycle evidence does not.
+    destination.write_text(json.dumps(first), encoding="utf-8")
+    result, _ = _run_sync(tmp_path, second)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(destination.read_text(encoding="utf-8"))["generatedAt"] == first["generatedAt"]

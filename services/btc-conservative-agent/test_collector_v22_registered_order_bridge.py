@@ -14,6 +14,9 @@ class _Logger:
     def info(self, message):
         self.rows.append(message)
 
+    def warning(self, message):
+        self.rows.append(message)
+
 
 def _load_bridge(pending, sync_calls):
     tree = ast.parse(BOT_SOURCE)
@@ -37,7 +40,7 @@ def _load_bridge(pending, sync_calls):
     return namespace["_promote_collector_v22_registered_order"], namespace["logger"]
 
 
-def _load_refresh(pending, upserts):
+def _load_refresh(pending, upserts, terminal_writes=None):
     tree = ast.parse(BOT_SOURCE)
     node = next(
         item
@@ -50,11 +53,17 @@ def _load_refresh(pending, upserts):
         upserts.append((event_id, copy.deepcopy(source), epoch_id))
 
     namespace = {
+        "os": type("_OS", (), {"getcwd": staticmethod(lambda: "C:/canonical")}),
         "copy": copy,
+        "logger": _Logger(),
         "_collector_epoch_serialized": lambda fn: fn,
         "_order_multiverse_pending_src": pending,
         "_collector_v22_epoch_id": lambda: "epoch-1",
         "upsert_provisional_event": upsert,
+        "dual_write_terminal_paper_schedule": lambda order, signal, **kwargs: (
+            terminal_writes.append((copy.deepcopy(order), copy.deepcopy(signal), kwargs))
+            if terminal_writes is not None else None
+        ),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
     return namespace["_refresh_collector_v22_registered_order_evidence"]
@@ -181,6 +190,55 @@ def test_reprice_and_terminal_close_refresh_durable_schedule_snapshot():
     # Durable rows are copies, not aliases to later runtime mutations.
     schedule["intervals"][-1]["end_ts"] = 1300
     assert upserts[-1][1]["research_chase_schedule"]["intervals"][-1]["end_ts"] == 1200
+
+
+def test_terminal_refresh_appends_v3_schedule_evidence_without_affecting_open_mutations():
+    pending = {"cont-4": {"trade_id": "cont-4", "collector_rejected": False}}
+    upserts = []
+    terminal_writes = []
+    refresh = _load_refresh(pending, upserts, terminal_writes)
+    schedule = {
+        "authoritative": True,
+        "intervals": [{"start_ts": 1, "end_ts": None, "limit_price": 100}],
+    }
+    order = {
+        "trade_id": "cont-4", "status": "PENDING", "qty": .1,
+        "research_chase_schedule": schedule, "chase_schedule_authoritative": True,
+    }
+    assert refresh(order) is True
+    assert terminal_writes == []
+
+    schedule["intervals"][0]["end_ts"] = 2
+    schedule["terminal_ts"] = 2
+    schedule["terminal_reason"] = "FILLED"
+    order["status"] = "FILLED"
+    assert refresh(order, {"shared_ai_call_id": "scan-4"}) is True
+    assert len(terminal_writes) == 1
+    captured_order, captured_signal, kwargs = terminal_writes[0]
+    assert captured_order["status"] == "FILLED"
+    assert captured_signal["shared_ai_call_id"] == "scan-4"
+    assert kwargs == {"epoch_id": "epoch-1", "data_dir": "C:/canonical"}
+
+
+def test_terminal_schedule_evidence_failure_is_isolated_from_execution_refresh():
+    pending = {"cont-5": {"trade_id": "cont-5", "collector_rejected": False}}
+    upserts = []
+    refresh = _load_refresh(pending, upserts, [])
+    namespace = refresh.__globals__
+    namespace["dual_write_terminal_paper_schedule"] = lambda *args, **kwargs: (_ for _ in ()).throw(
+        ValueError("V3_CAUSAL_IDENTITY_INCOMPLETE")
+    )
+    order = {
+        "trade_id": "cont-5", "status": "FILLED", "qty": .1,
+        "chase_schedule_authoritative": True,
+        "research_chase_schedule": {
+            "authoritative": True,
+            "intervals": [{"start_ts": 1, "end_ts": 2, "limit_price": 100}],
+            "terminal_ts": 2, "terminal_reason": "FILLED",
+        },
+    }
+    assert refresh(order) is True
+    assert upserts[-1][1]["status"] == "FILLED"
 
 
 def test_schedule_mutation_paths_refresh_collector_after_mutation():

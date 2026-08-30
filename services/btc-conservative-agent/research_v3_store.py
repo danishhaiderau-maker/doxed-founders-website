@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -40,6 +41,41 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+@contextmanager
+def _advisory_file_lock(path: Path):
+    """Hold one exclusive byte-range/file lock across processes.
+
+    A separate lock file is used so replacing a content-addressed object never
+    changes the inode carrying the lock.  Both supported implementations are
+    released by the operating system if a writer crashes.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class V3EvidenceStore:
     """One JSONL ledger per entity plus content-addressed market segments.
 
@@ -50,13 +86,35 @@ class V3EvidenceStore:
     """
 
     def __init__(self, root: str | Path, *, epoch_id: str):
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.epoch_id = str(epoch_id)
         self.ledger_dir = self.root / "v3" / "ledgers"
         self.segment_dir = self.root / "v3" / "market_segments"
         self.receipt_dir = self.root / "v3" / "receipts"
-        for path in (self.ledger_dir, self.segment_dir, self.receipt_dir):
+        self.lock_dir = self.root / "v3" / ".locks"
+        for path in (self.ledger_dir, self.segment_dir, self.receipt_dir, self.lock_dir):
             path.mkdir(parents=True, exist_ok=True)
+
+    def _assert_contained(self, path: Path) -> Path:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(f"V3_STORE_PATH_OUTSIDE_ROOT:{resolved}") from exc
+        return resolved
+
+    def _lock_path(self, path: Path) -> Path:
+        resolved = self._assert_contained(path)
+        key = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
+        return self._assert_contained(self.lock_dir / f"{key}.lock")
+
+    @contextmanager
+    def _exclusive(self, path: Path):
+        """Serialize one object in this process and across worker processes."""
+        resolved = self._assert_contained(path)
+        with _path_lock(resolved):
+            with _advisory_file_lock(self._lock_path(resolved)):
+                yield
 
     def ledger_path(self, name: str) -> Path:
         if name not in LEDGER_NAMES:
@@ -112,7 +170,7 @@ class V3EvidenceStore:
             "epoch_id": self.epoch_id,
         })
         line = canonical_json(material) + "\n"
-        with _path_lock(path):
+        with self._exclusive(path):
             durable_ids = self._cached_ids(path)
             if record_id in durable_ids:
                 return {"written": False, "duplicate": True, "record_id": record_id, "ledger": ledger}
@@ -148,7 +206,7 @@ class V3EvidenceStore:
         sha = hashlib.sha256(payload).hexdigest()
         target = self.segment_dir / sha[:2] / f"{sha}.json"
         target.parent.mkdir(parents=True, exist_ok=True)
-        with _path_lock(target):
+        with self._exclusive(target):
             if target.exists():
                 if self._cached_segment_hash(target) != sha:
                     raise ValueError("CONTENT_ADDRESS_COLLISION_OR_CORRUPTION")
@@ -219,7 +277,7 @@ class V3EvidenceStore:
         for ledger in LEDGER_NAMES:
             path = self.ledger_path(ledger)
             try:
-                with _path_lock(path):
+                with self._exclusive(path):
                     counts[ledger] = len(self._cached_ids(path))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 counts[ledger] = 0
@@ -228,7 +286,7 @@ class V3EvidenceStore:
         for path in self.segment_dir.glob("*/*.json"):
             try:
                 expected = path.stem
-                with _path_lock(path):
+                with self._exclusive(path):
                     actual = self._cached_segment_hash(path)
                 if actual != expected:
                     defects.append({"segment": path.as_posix(), "reason": "SHA256_MISMATCH"})
@@ -268,7 +326,7 @@ class V3EvidenceStore:
                 continue
             path = self.ledger_path(ledger)
             try:
-                with _path_lock(path):
+                with self._exclusive(path):
                     counts[ledger] = len(self._cached_ids(path))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 counts[ledger] = 0
@@ -286,7 +344,7 @@ class V3EvidenceStore:
                 continue
             path = self.segment_dir / expected[:2] / f"{expected}.json"
             try:
-                with _path_lock(path):
+                with self._exclusive(path):
                     actual = self._cached_segment_hash(path)
                 if actual != expected:
                     defects.append({"segment": path.as_posix(), "reason": "SHA256_MISMATCH"})

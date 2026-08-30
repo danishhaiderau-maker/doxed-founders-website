@@ -136,6 +136,18 @@ def _verify_segment(v3_root: Path, row: Mapping[str, Any]) -> tuple[str | None, 
     return (digest if not errors else None), errors
 
 
+def _recognized_status_only_segment(row: Mapping[str, Any]) -> bool:
+    """True only for declared future-path state rows that own no object."""
+    if row.get("segment_ref") is not None:
+        return False
+    role = segment_role(row)
+    status = str(row.get("future_path_status") or "").upper()
+    return bool(
+        role == f"{ALL_OPPORTUNITY_FUTURE_ROLE}_REQUEST" and status == "PENDING"
+        or role == ALL_OPPORTUNITY_FUTURE_ROLE and status in {"PENDING", "UNKNOWN"}
+    )
+
+
 def _schedule_hash(row: Mapping[str, Any]) -> str | None:
     schedule = row.get("chase_schedule")
     if not isinstance(schedule, Mapping) or not schedule:
@@ -145,6 +157,30 @@ def _schedule_hash(row: Mapping[str, Any]) -> str | None:
     if persisted and persisted != computed:
         return None
     return computed
+
+
+def authoritative_schedule_intents(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Select only final persisted schedule versions.
+
+    The submit receipt truthfully freezes the schedule as it existed when the
+    order was registered.  Reprices and the terminal boundary happen later, so
+    the collector appends a terminal evidence snapshot instead of mutating the
+    submit receipt. Submit-time/open versions are never sufficient for replay;
+    conflicting terminal snapshots still fail closed downstream.
+    """
+    authoritative = [
+        row for row in rows
+        if isinstance(row.get("chase_schedule"), Mapping)
+        and row["chase_schedule"].get("authoritative") is True
+        and row.get("schedule_id")
+    ]
+    return [
+        row for row in authoritative
+        if str(row.get("intent_kind") or "").upper()
+        == "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL"
+    ]
 
 
 def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
@@ -179,11 +215,17 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
         roles: set[str] = set()
         conservative_roles: set[str] = set()
         for segment in segments.get(key, []):
-            digest, errors = _verify_segment(root, segment)
-            if errors:
-                reasons.update(errors)
-            elif digest:
-                tape_ids.add(digest)
+            # Request/PENDING/UNKNOWN rows declare the denominator and the
+            # missing-evidence state. They intentionally have no object ref
+            # and must not be misclassified as a malformed SHA. A row that
+            # actually claims a ref is always verified and fails closed.
+            claimed_ref = segment.get("segment_ref")
+            if not _recognized_status_only_segment(segment):
+                digest, errors = _verify_segment(root, segment)
+                if errors:
+                    reasons.update(errors)
+                elif digest:
+                    tape_ids.add(digest)
             coverage = segment.get("coverage") if isinstance(segment.get("coverage"), Mapping) else {}
             role = segment_role(segment)
             if role:
@@ -200,12 +242,9 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
             decision.get("order_intent_expected") is False
             and str(decision.get("outcome_state") or "").upper() == "REJECTED"
         )
-        authoritative_intents = [
-            row for row in intents.get(policy_key, [])
-            if isinstance(row.get("chase_schedule"), Mapping)
-            and row["chase_schedule"].get("authoritative") is True
-            and row.get("schedule_id")
-        ]
+        authoritative_intents = authoritative_schedule_intents(
+            intents.get(policy_key, [])
+        )
         schedule_hashes = sorted({value for row in authoritative_intents if (value := _schedule_hash(row))})
         schedule_ids = sorted({str(row["schedule_id"]) for row in authoritative_intents})
         if not no_order:

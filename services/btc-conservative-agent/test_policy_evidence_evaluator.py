@@ -68,8 +68,10 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
     _write(v3 / "ledgers/decision.jsonl", [decision])
     schedule = {"schema": "schedule-v1", "authoritative": True,
                 "intervals": [{"bucket_id": "s0", "start_ts": 10, "end_ts": 12,
-                               "limit_price": 100}]}
+                               "limit_price": 100}],
+                "terminal_ts": 12, "terminal_reason": "FILLED"}
     intent = {**identity, "event_id": "intent-1", "policy_signature": "sig-1",
+              "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
               "schedule_id": "schedule-1", "chase_schedule": schedule,
               "schedule_sha256": hashlib.sha256(canonical_json(schedule).encode()).hexdigest(),
               "requested_qty": qty, "symbol": "BTCUSD"}
@@ -118,6 +120,37 @@ def test_complete_non_crossing_tape_is_true_no_fill(tmp_path):
     assert row["classification"] == "NO_FILL"
     assert row["supported"] is True
     assert row["filled_qty"] == 0
+
+
+def test_terminal_authoritative_schedule_is_used_instead_of_open_submit_version(tmp_path):
+    v3 = _fixture(tmp_path)
+    path = v3 / "ledgers/order_intent.jsonl"
+    submit = json.loads(path.read_text().strip())
+    submit_schedule = dict(submit["chase_schedule"])
+    submit_schedule["intervals"] = [{"bucket_id": "s0", "start_ts": 10,
+                                      "end_ts": None, "limit_price": 101}]
+    submit["intent_kind"] = "ACTUAL_PAPER_LIMIT_SUBMIT"
+    submit["chase_schedule"] = submit_schedule
+    submit["schedule_sha256"] = hashlib.sha256(
+        canonical_json(submit_schedule).encode()
+    ).hexdigest()
+    terminal = dict(submit)
+    terminal_schedule = {
+        "authoritative": True,
+        "intervals": [{"bucket_id": "s0", "start_ts": 10,
+                       "end_ts": 12, "limit_price": 100}],
+        "terminal_ts": 12, "terminal_reason": "FILLED",
+    }
+    terminal["intent_kind"] = "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL"
+    terminal["chase_schedule"] = terminal_schedule
+    terminal["schedule_sha256"] = hashlib.sha256(
+        canonical_json(terminal_schedule).encode()
+    ).hexdigest()
+    _write(path, [submit, terminal])
+
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["classification"] == "FULL_FILL"
+    assert row["schedule_sha256"] == terminal["schedule_sha256"]
 
 
 def test_complete_all_opportunity_future_tape_is_usable_as_exact_entry_path(tmp_path):

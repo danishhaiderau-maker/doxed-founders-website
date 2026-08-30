@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 import uuid
+import threading
+import io
 
 from platform_relay_streaming import BACKEND, validate_streaming
 from research.platform_relay_evidence import _validate_platform_relay_evidence_payload
@@ -157,6 +159,115 @@ def test_upload_handler_never_decodes_full_json_in_parent():
     assert "request.stream.read" in body
     assert "received_size > _PLATFORM_RELAY_EVIDENCE_MAX_BYTES" in body
     assert "os.replace(staged, destination)" in body
+    assert "CHECKSUM_MISMATCH" in body
+    assert "_PLATFORM_RELAY_EVIDENCE_INSTALL_LOCK" in body
+    assert "_platform_relay_evidence_duplicate_receipt" in body
+
+
+def _compiled_receipt_helpers():
+    names = {
+        "_platform_relay_evidence_receipt_path",
+        "_platform_relay_evidence_duplicate_receipt",
+        "_write_platform_relay_evidence_receipt",
+    }
+    functions = [node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    module = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
+    namespace = {
+        "Path": Path, "json": json, "hmac": hmac, "hashlib": hashlib, "os": os, "uuid": uuid,
+        "_PLATFORM_RELAY_EVIDENCE_RECEIPT_SCHEMA": "platform_relay_evidence_install_receipt_v1",
+    }
+    exec(compile(module, str(BOT_PATH), "exec"), namespace)
+    return namespace
+
+
+def test_duplicate_receipt_accepts_exact_retry_and_rejects_genuine_delta_or_corruption(tmp_path):
+    helpers = _compiled_receipt_helpers()
+    destination = tmp_path / "relay.json"
+    raw = b'{"validated":true}'
+    destination.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    result = {
+        "payload_schema": "relay_lifecycle_evidence_v1", "records": 7,
+        "generating_revision": "a" * 40,
+    }
+    semantic = hashlib.sha256(b"semantic").hexdigest()
+    helpers["_write_platform_relay_evidence_receipt"](
+        destination, digest, semantic, len(raw), result
+    )
+    exact = helpers["_platform_relay_evidence_duplicate_receipt"](destination, digest, len(raw))
+    assert exact is not None and exact["records"] == 7
+    assert helpers["_platform_relay_evidence_duplicate_receipt"](
+        destination, hashlib.sha256(b"genuine delta").hexdigest(), len(raw)
+    ) is None
+    destination.write_bytes(b"x" * len(raw))
+    assert helpers["_platform_relay_evidence_duplicate_receipt"](
+        destination, digest, len(raw)
+    ) is None
+
+
+def test_retry_installation_is_serialized_and_receipt_publish_is_atomic():
+    assert isinstance(threading.RLock(), type(threading.RLock()))
+    assert "with _PLATFORM_RELAY_EVIDENCE_INSTALL_LOCK:" in SOURCE
+    writer = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                  and node.name == "_write_platform_relay_evidence_receipt")
+    body = ast.get_source_segment(SOURCE, writer)
+    assert "os.replace(temp, receipt_path)" in body
+
+
+def test_endpoint_exact_duplicate_skips_but_semantic_claim_cannot_skip_changed_body(tmp_path):
+    helpers = _compiled_receipt_helpers()
+    route = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                 and node.name == "api_data_sync_platform_relay_evidence")
+    route.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[route], type_ignores=[]))
+    destination = tmp_path / "relay.json"
+    calls = []
+
+    def validate(staged, digest, size):
+        calls.append(digest)
+        return {
+            "valid": True, "payload_schema": "relay_lifecycle_evidence_v1",
+            "records": 1, "generating_revision": "a" * 40,
+            "staged_path": staged,
+        }
+
+    class Request:
+        pass
+
+    request = Request()
+    namespace = {
+        **helpers, "request": request, "jsonify": lambda value: value,
+        "Path": Path, "hashlib": hashlib, "hmac": hmac, "re": __import__("re"),
+        "uuid": uuid, "os": os, "json": json, "subprocess": subprocess,
+        "_PLATFORM_RELAY_EVIDENCE_MAX_BYTES": 25 * 1024 * 1024,
+        "_PLATFORM_RELAY_EVIDENCE_INSTALL_LOCK": threading.RLock(),
+        "_data_sync_inventory_work_root": lambda: tmp_path,
+        "_data_sync_volume_root": lambda: tmp_path,
+        "PLATFORM_RELAY_EVIDENCE_FILE": str(destination),
+        "_validate_platform_relay_evidence_in_worker": validate,
+    }
+    exec(compile(module, str(BOT_PATH), "exec"), namespace)
+    endpoint = namespace["api_data_sync_platform_relay_evidence"]
+
+    def invoke(raw, declared=None, semantic=None):
+        request.content_length = len(raw)
+        request.stream = io.BytesIO(raw)
+        request.headers = {
+            "X-Content-SHA256": declared or hashlib.sha256(raw).hexdigest(),
+            "X-Relay-Semantic-SHA256": semantic or hashlib.sha256(b"semantic").hexdigest(),
+        }
+        return endpoint()
+
+    first = invoke(b'{"first":true}')
+    assert first["duplicate"] is False and len(calls) == 1
+    exact = invoke(b'{"first":true}')
+    assert exact["duplicate"] is True and len(calls) == 1
+    # Reusing the old semantic claim cannot bypass validation when raw bytes differ.
+    changed = invoke(b'{"other":true}', semantic=first["semanticSha256"])
+    assert changed["duplicate"] is False and len(calls) == 2
+    mismatch = invoke(b'{"corrupt":true}', declared="0" * 64)
+    assert mismatch[1] == 400 and mismatch[0]["errorCode"] == "CHECKSUM_MISMATCH"
+    assert len(calls) == 2
 
 
 def test_streaming_validator_matches_pure_schema_codes(tmp_path):

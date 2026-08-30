@@ -943,6 +943,72 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
             "writes": writes, "store_verification": store.verify()}
 
 
+def dual_write_terminal_paper_schedule(
+    order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str,
+    data_dir: str,
+) -> dict[str, Any] | None:
+    """Append the exact terminal paper chase schedule as evidence only.
+
+    Submit-time order intents are immutable and therefore cannot contain later
+    reprices or the terminal interval boundary.  This append-only snapshot is
+    emitted only after the established schedule recorder has closed the
+    schedule.  It does not decide, submit, reprice, fill, or cancel an order.
+    """
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    if not isinstance(schedule, Mapping) or schedule.get("authoritative") is not True:
+        return None
+    if schedule.get("terminal_ts") is None or not schedule.get("terminal_reason"):
+        return None
+    intervals = schedule.get("intervals")
+    if not isinstance(intervals, list) or not intervals:
+        return None
+    if any(not isinstance(row, Mapping) or row.get("end_ts") is None for row in intervals):
+        return None
+    event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
+    identity = _causal_identity(event_id, signal, order)
+    policy = _paper_policy_identity(str(epoch_id), order, signal)
+    frozen_schedule = copy.deepcopy(dict(schedule))
+    schedule_sha256 = hashlib.sha256(
+        canonical_json(frozen_schedule).encode("utf-8")
+    ).hexdigest()
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id,
+        episode_id=identity["episode_id"], include_schedule=True,
+    )
+    row = {
+        "record_id": f"order-intent:{event_id}:paper-schedule-terminal:{schedule_sha256[:16]}",
+        "episode_id": identity["episode_id"],
+        "event_id": event_id,
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
+        "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
+        "observed_ts": schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"),
+        "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
+        "limit_price": order.get("limit_price"),
+        "requested_qty": order.get("qty"),
+        "signed_quantity_constraints": copy.deepcopy(
+            _first(order.get("signed_quantity_constraints"), signal.get("signed_quantity_constraints"))
+        ),
+        "executed_direction": identity["executed_direction"],
+        "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
+        "paper_only": True,
+        "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
+        "chase_schedule": frozen_schedule,
+        "chase_schedule_authoritative": True,
+        "schedule_sha256": schedule_sha256,
+        **causal_ids,
+        **policy,
+        "effective_execution_mode": "PAPER_OBSERVED",
+        "evidence_only": True,
+    }
+    write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("order_intent", row)
+    return {
+        "schema": "v3_terminal_paper_schedule_receipt_v1",
+        "epoch_id": str(epoch_id), **identity, **causal_ids, **policy,
+        "schedule_sha256": schedule_sha256, "write": write,
+    }
+
+
 def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], position: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Write an observed paper fill once, without claiming exchange execution."""
     event_id = str(_first(position.get("trade_id"), order.get("trade_id"), signal.get("trade_id")) or "")

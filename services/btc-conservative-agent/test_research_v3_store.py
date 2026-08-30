@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import tempfile
 import threading
@@ -9,7 +10,87 @@ from unittest import mock
 from research_v3_store import V3EvidenceStore, _segment_hash_cache
 
 
+def _append_process(root, record_id, start, result_queue):
+    start.wait()
+    result_queue.put(V3EvidenceStore(root, epoch_id="epoch-multiprocess").append(
+        "decision", {"record_id": record_id, "episode_id": record_id},
+    ))
+
+
+def _segment_process(root, start, result_queue):
+    start.wait()
+    result_queue.put(V3EvidenceStore(root, epoch_id="epoch-multiprocess").put_market_segment(
+        source="BITFINEX", symbol="BTC", timeframe="2s", start_ts=1, end_ts=2,
+        rows=[{"ts": 1, "bid": 100, "ask": 101}],
+    ))
+
+
 class ResearchV3StoreTests(unittest.TestCase):
+    @staticmethod
+    def _run_processes(target, args, count):
+        context = multiprocessing.get_context("spawn")
+        start = context.Event()
+        result_queue = context.Queue()
+        processes = [context.Process(target=target, args=(*args, start, result_queue)) for _ in range(count)]
+        for process in processes:
+            process.start()
+        start.set()
+        results = [result_queue.get(timeout=30) for _ in processes]
+        for process in processes:
+            process.join(timeout=30)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+            if process.exitcode != 0:
+                raise AssertionError(f"child process failed with exit code {process.exitcode}")
+        return results
+
+    def test_multiprocess_same_record_id_is_written_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._run_processes(_append_process, (tmp, "same-id"), 8)
+            rows = V3EvidenceStore(tmp, epoch_id="epoch-multiprocess").ledger_path("decision").read_text().splitlines()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(sum(bool(result["written"]) for result in results), 1)
+            self.assertEqual(sum(bool(result["duplicate"]) for result in results), 7)
+
+    def test_multiprocess_distinct_rows_are_complete_and_not_truncated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context = multiprocessing.get_context("spawn")
+            start = context.Event()
+            result_queue = context.Queue()
+            processes = [context.Process(
+                target=_append_process, args=(tmp, f"distinct-{index}", start, result_queue),
+            ) for index in range(12)]
+            for process in processes:
+                process.start()
+            start.set()
+            results = [result_queue.get(timeout=30) for _ in processes]
+            for process in processes:
+                process.join(timeout=30)
+                self.assertEqual(process.exitcode, 0)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-multiprocess")
+            rows = [json.loads(line) for line in store.ledger_path("decision").read_text().splitlines()]
+            self.assertEqual(len(rows), 12)
+            self.assertEqual(len({row["record_id"] for row in rows}), 12)
+            self.assertTrue(all(result["written"] for result in results))
+            self.assertTrue(store.verify()["passed"])
+
+    def test_multiprocess_same_market_segment_is_one_valid_object(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results = self._run_processes(_segment_process, (tmp,), 8)
+            self.assertEqual(len({result["sha256"] for result in results}), 1)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-multiprocess")
+            verification = store.verify()
+            self.assertTrue(verification["passed"])
+            self.assertEqual(verification["market_segment_count"], 1)
+
+    def test_lock_target_outside_store_root_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-containment")
+            with self.assertRaisesRegex(ValueError, "V3_STORE_PATH_OUTSIDE_ROOT"):
+                with store._exclusive(Path(outside) / "not-store-data.jsonl"):
+                    self.fail("outside path must never be locked or written")
+
     def test_verify_reuses_signature_validated_ids_after_append(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-cache")

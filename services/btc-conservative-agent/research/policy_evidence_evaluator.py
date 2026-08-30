@@ -17,6 +17,7 @@ from typing import Any, Mapping
 from research.conservative_limit_fill import evaluate_limit_fill
 from research.policy_evidence_bindings import (
     ALL_OPPORTUNITY_FUTURE_ROLE,
+    authoritative_schedule_intents,
     build_v3_binding_index,
     complete_conservative_future_path,
     segment_role,
@@ -179,10 +180,16 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
         decision = decisions.get(str(binding.get("event_id") or ""), {})
         identity = _identity(binding)
         reasons = list(binding.get("unknown_reason_codes") or [])
-        matching_intents = intents.get((*identity, str(binding.get("policy_signature") or "")), [])
-        if len(matching_intents) != 1:
+        matching_intents = authoritative_schedule_intents(
+            intents.get((*identity, str(binding.get("policy_signature") or "")), [])
+        )
+        schedule_fingerprints = {
+            (str(row.get("schedule_id") or ""), str(row.get("schedule_sha256") or ""))
+            for row in matching_intents
+        }
+        if len(schedule_fingerprints) != 1:
             reasons.append("UNKNOWN_AUTHORITATIVE_INTENT_NOT_UNIQUE")
-        intent = matching_intents[0] if len(matching_intents) == 1 else {}
+        intent = matching_intents[-1] if len(schedule_fingerprints) == 1 else {}
         schedule = _schedule(intent)
         if schedule is None:
             reasons.append("UNKNOWN_AUTHORITATIVE_SCHEDULE_UNUSABLE")
@@ -260,7 +267,13 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             "minimum_lot_decision": receipt.get("minimum_lot_decision"),
             "minimum_notional_decision": receipt.get("minimum_notional_decision"),
             "quantity_attempts": receipt.get("quantity_attempts") or [],
-            "schedule_sha256": receipt.get("schedule_sha256"), "tape_ids": sorted(tape_ids),
+            # Preserve the content identity of the authoritative persisted
+            # schedule envelope. The fill evaluator also hashes its normalized
+            # interval list; expose that separately rather than replacing the
+            # signed collector identity with a derived representation.
+            "schedule_sha256": binding.get("schedule_sha256"),
+            "evaluated_schedule_sha256": receipt.get("schedule_sha256"),
+            "tape_ids": sorted(tape_ids),
             "fill_price": receipt.get("fill_price"), "evaluator_receipt": receipt,
         })
         results.append(row)

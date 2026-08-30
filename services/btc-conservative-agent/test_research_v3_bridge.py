@@ -9,7 +9,7 @@ from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
 from research_v3_bridge import dual_write_lane_decision
 from research_v3_bridge import dual_write_lane_entry_resolution
-from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
+from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources
 from research_v3_bridge import reconcile_overdue_expected_order_decisions
 from research_v3_bridge import reconcile_terminal_v22_into_v3
 from research_v3_bridge import _paper_market_segment
@@ -39,6 +39,57 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_terminal_schedule_snapshot_is_append_only_idempotent_and_evidence_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "terminal-1", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "shared_ai_call_id": "scan-terminal-1", "signal_price": 101,
+                "research_lane": "CONTINUOUS",
+            }
+            schedule = {
+                "schema": "research_chase_schedule_v1", "authoritative": True,
+                "intervals": [{"bucket_id": "b0", "start_ts": 1001,
+                               "end_ts": 1010, "limit_price": 100}],
+                "terminal_ts": 1010, "terminal_ts_exact": 1010.5,
+                "terminal_reason": "FILLED",
+            }
+            order = {
+                **signal, "created_ts": 1001, "status": "FILLED", "qty": .2,
+                "limit_price": 100, "research_chase_schedule": schedule,
+                "chase_schedule_authoritative": True,
+            }
+            first = dual_write_terminal_paper_schedule(
+                order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            second = dual_write_terminal_paper_schedule(
+                order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            self.assertTrue(first["write"]["written"])
+            self.assertTrue(second["write"]["duplicate"])
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test"
+            ).ledger_path("order_intent").read_text().strip())
+            self.assertEqual(row["intent_kind"], "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL")
+            self.assertTrue(row["evidence_only"])
+            self.assertEqual(row["schedule_sha256"], first["schedule_sha256"])
+            self.assertEqual(row["chase_schedule"]["terminal_reason"], "FILLED")
+
+    def test_terminal_schedule_snapshot_refuses_open_or_incomplete_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "open-1", "shared_ai_call_id": "scan-open-1",
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "research_chase_schedule": {
+                    "authoritative": True,
+                    "intervals": [{"start_ts": 1, "end_ts": None, "limit_price": 100}],
+                },
+            }
+            self.assertIsNone(dual_write_terminal_paper_schedule(
+                source, source, epoch_id="epoch-v3-test", data_dir=tmp,
+            ))
+            self.assertFalse((Path(tmp) / "v3/ledgers/order_intent.jsonl").exists())
+
     def test_market_segment_rejects_malformed_nonfinite_and_nonpositive_book_values_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
             tape = Path(tmp) / "market_microstructure_1s.jsonl"

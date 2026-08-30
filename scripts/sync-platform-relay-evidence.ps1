@@ -44,10 +44,28 @@ function Get-RelayEvidenceSemanticDigest($Payload) {
   # evidence is byte-for-byte equivalent.  Hash every top-level field except
   # that observation timestamp so an unchanged snapshot is not reposted to
   # Fly and does not invalidate the runtime's evidence cache every poll.
+  function ConvertTo-RelayCanonicalValue($Value) {
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [Collections.IDictionary]) {
+      $mapped = [ordered]@{}
+      foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+        $mapped[$key] = ConvertTo-RelayCanonicalValue $Value[$key]
+      }
+      return $mapped
+    }
+    if ($Value -is [Collections.IEnumerable] -and -not ($Value -is [Management.Automation.PSCustomObject])) {
+      return @($Value | ForEach-Object { ConvertTo-RelayCanonicalValue $_ })
+    }
+    $mapped = [ordered]@{}
+    foreach ($name in @($Value.PSObject.Properties.Name | Sort-Object)) {
+      $mapped[[string]$name] = ConvertTo-RelayCanonicalValue $Value.PSObject.Properties[[string]$name].Value
+    }
+    return $mapped
+  }
   $semantic = [ordered]@{}
   foreach ($name in @($Payload.PSObject.Properties.Name | Sort-Object)) {
     if ([string]$name -ceq 'generatedAt') { continue }
-    $semantic[[string]$name] = $Payload.PSObject.Properties[[string]$name].Value
+    $semantic[[string]$name] = ConvertTo-RelayCanonicalValue $Payload.PSObject.Properties[[string]$name].Value
   }
   $bytes = [Text.Encoding]::UTF8.GetBytes(
     ($semantic | ConvertTo-Json -Depth 100 -Compress)
@@ -174,19 +192,31 @@ try {
 } finally {
   $sha256.Dispose()
 }
+# The isolated validator has a 90-second hard ceiling. Keep the client
+# deadline outside that ceiling so a valid but CPU-contended first install is
+# not abandoned and immediately posted a second time.
 try {
   $forward = Invoke-RestMethod -Method Post `
     -Uri ($sourceBotUrl.TrimEnd('/') + '/api/data-sync/platform-relay-evidence') `
-    -Headers @{ 'X-Bot-Admin-Token' = $adminToken; 'Content-Type' = 'application/json' } `
-    -Body ([Text.Encoding]::UTF8.GetBytes($raw)) -TimeoutSec 45
+    -Headers @{
+      'X-Bot-Admin-Token' = $adminToken
+      'Content-Type' = 'application/json'
+      # The source verifies this against the streamed request body.  Once a
+      # checksum has already been fully validated and atomically installed,
+      # retries can skip the expensive schema/event walk without trusting the
+      # caller's declaration.
+      'X-Content-SHA256' = $digest
+      'X-Relay-Semantic-SHA256' = $incomingSemanticDigest
+    } `
+    -Body ([Text.Encoding]::UTF8.GetBytes($raw)) -TimeoutSec 105
 } catch {
   Stop-RelayEvidenceSync (Get-RelayForwardFailureCode $_.Exception)
 }
 if ($forward.ok -ne $true -or [string]$forward.schema -ne 'relay_lifecycle_evidence_v1' -or
-    [string]$forward.sha256 -cne $digest -or [int]$forward.records -ne @($payload.records).Count) {
+    [string]$forward.sha256 -cne $digest -or
+    [int]$forward.records -ne @($payload.records).Count) {
   Stop-RelayEvidenceSync 'FORWARD_ACK_INVALID'
 }
-
 $parent = Split-Path -Parent $destination
 if (-not $parent) { Stop-RelayEvidenceSync 'DESTINATION_INVALID' }
 New-Item -ItemType Directory -Force -Path $parent | Out-Null

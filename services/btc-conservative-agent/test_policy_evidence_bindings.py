@@ -21,10 +21,12 @@ def _fixture(tmp_path: Path, *, roles=("ENTRY_PATH", "POST_EXIT_PATH"), schedule
     }])
     schedule_value = {
         "schema": "schedule-v1", "authoritative": True,
-        "intervals": [{"start_ts": 1, "limit_price": 99}],
+        "intervals": [{"start_ts": 1, "end_ts": 2, "limit_price": 99}],
+        "terminal_ts": 2, "terminal_reason": "FILLED",
     }
     intents = [{
         **identity, "policy_signature": "policy-1", "schedule_id": "schedule-1",
+        "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
         "chase_schedule": schedule_value,
     }] if schedule else []
     _write(v3 / "ledgers" / "order_intent.jsonl", intents)
@@ -118,6 +120,97 @@ def test_future_path_missing_status_or_required_horizon_remains_unknown(tmp_path
     assert binding["conservative_segment_roles"] == []
     assert "UNKNOWN_REQUIRED_ENTRY_HORIZONS_INCOMPLETE" in binding["unknown_reason_codes"]
     assert "UNKNOWN_REQUIRED_POST_EXIT_HORIZONS_INCOMPLETE" in binding["unknown_reason_codes"]
+
+
+def test_future_path_request_does_not_poison_a_later_verified_object(tmp_path):
+    v3, _ = _fixture(tmp_path, roles=("IGNORED_CONTEXT_ROLE",))
+    path = v3 / "ledgers" / "market_segment.jsonl"
+    complete = json.loads(path.read_text().strip())
+    complete.pop("context_role", None)
+    complete["segment_role"] = "SIGNAL_TO_120M_FUTURE_PATH"
+    complete["future_path_status"] = "COMPLETE"
+    complete["coverage"] = {
+        "conservative_bbo_depth_eligible": True,
+        "required_horizons_sec": [60, 300, 900, 1800, 3600, 7200],
+    }
+    request = {
+        key: complete[key] for key in ("epoch_id", "opportunity_id", "episode_id")
+    }
+    request.update({
+        "segment_role": "SIGNAL_TO_120M_FUTURE_PATH_REQUEST",
+        "future_path_status": "PENDING", "segment_ref": None,
+    })
+    _write(path, [request, complete])
+
+    binding = build_v3_binding_index(v3)["bindings"][0]
+    assert binding["exact_binding_complete"] is True
+    assert "UNKNOWN_TAPE_SHA256_INVALID" not in binding["unknown_reason_codes"]
+
+
+def test_unrecognized_or_malformed_segment_ref_still_fails_closed(tmp_path):
+    v3, _ = _fixture(tmp_path)
+    path = v3 / "ledgers" / "market_segment.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows.append({
+        "epoch_id": "epoch-1", "opportunity_id": "opportunity:1",
+        "episode_id": "episode-1", "context_role": "ENTRY_PATH",
+        "segment_ref": {},
+    })
+    _write(path, rows)
+    binding = build_v3_binding_index(v3)["bindings"][0]
+    assert binding["exact_binding_complete"] is False
+    assert "UNKNOWN_TAPE_SHA256_INVALID" in binding["unknown_reason_codes"]
+
+
+def test_unique_terminal_schedule_supersedes_submit_snapshot_and_conflicts_fail_closed(tmp_path):
+    v3, submit = _fixture(tmp_path)
+    terminal = {
+        "schema": "schedule-v1", "authoritative": True,
+        "intervals": [{"start_ts": 1, "end_ts": 2, "limit_price": 100}],
+        "terminal_ts": 2, "terminal_reason": "FILLED",
+    }
+    identity = {"epoch_id": "epoch-1", "opportunity_id": "opportunity:1", "episode_id": "episode-1"}
+    terminal_row = {
+        **identity, "policy_signature": "policy-1", "schedule_id": "schedule-1",
+        "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
+        "chase_schedule": terminal,
+        "schedule_sha256": hashlib.sha256(canonical_json(terminal).encode()).hexdigest(),
+    }
+    submit_row = {
+        **identity, "policy_signature": "policy-1", "schedule_id": "schedule-1",
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "chase_schedule": submit,
+    }
+    _write(v3 / "ledgers/order_intent.jsonl", [submit_row, terminal_row])
+    binding = build_v3_binding_index(v3)["bindings"][0]
+    assert binding["exact_binding_complete"] is True
+    assert binding["schedule_sha256"] == terminal_row["schedule_sha256"]
+
+    conflicting = dict(terminal_row)
+    conflicting_schedule = dict(terminal)
+    conflicting_schedule["terminal_reason"] = "EXPIRED"
+    conflicting["chase_schedule"] = conflicting_schedule
+    conflicting["schedule_sha256"] = hashlib.sha256(
+        canonical_json(conflicting_schedule).encode()
+    ).hexdigest()
+    _write(v3 / "ledgers/order_intent.jsonl", [submit_row, terminal_row, conflicting])
+    binding = build_v3_binding_index(v3)["bindings"][0]
+    assert binding["exact_binding_complete"] is False
+    assert "UNKNOWN_SCHEDULE_VERSION_CONFLICT" in binding["unknown_reason_codes"]
+
+
+def test_submit_time_open_schedule_is_not_misrepresented_as_replay_authority(tmp_path):
+    v3, schedule = _fixture(tmp_path)
+    schedule.pop("terminal_ts")
+    schedule.pop("terminal_reason")
+    schedule["intervals"][0]["end_ts"] = None
+    identity = {"epoch_id": "epoch-1", "opportunity_id": "opportunity:1", "episode_id": "episode-1"}
+    _write(v3 / "ledgers/order_intent.jsonl", [{
+        **identity, "policy_signature": "policy-1", "schedule_id": "schedule-1",
+        "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "chase_schedule": schedule,
+    }])
+    binding = build_v3_binding_index(v3)["bindings"][0]
+    assert binding["exact_binding_complete"] is False
+    assert "UNKNOWN_AUTHORITATIVE_SCHEDULE_MISSING" in binding["unknown_reason_codes"]
 
 
 def test_tape_checksum_mismatch_is_unknown_not_no_fill(tmp_path):

@@ -3,7 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from research_v3_future_paths import _bounded_tape_tail, _contained, mature_future_market_paths
+from research_v3_future_paths import (
+    _bounded_tape_tail, _bounded_tape_window, _contained,
+    mature_future_market_paths,
+)
 from research_v3_store import V3EvidenceStore
 
 
@@ -165,3 +168,112 @@ def test_old_interval_outside_runtime_tail_is_unknown_with_exact_reason(tmp_path
     assert result["bounded_tape_read"]["bytes_read"] <= 1600
     terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "UNKNOWN"]
     assert terminal[0]["unknown_reason"] == "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
+
+
+def test_rotated_tape_is_joined_before_truthful_complete_classification(tmp_path):
+    _seed(tmp_path, outcomes=("APPROVED",))
+    _write_tape(tmp_path)
+    active = tmp_path / "market_microstructure_1s.jsonl"
+    active.replace(tmp_path / "market_microstructure_1s.jsonl.7")
+    active.write_text(json.dumps({
+        "bucket_ts": SIGNAL_TS + 7210, "last": 80_100,
+        "bid": 80_099, "ask": 80_101, "bid_qty": 1, "ask_qty": 1,
+    }) + "\n", encoding="utf-8")
+    result = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 7230,
+        max_batch=8, max_tape_read_bytes=8 * 1024 * 1024,
+    )
+    assert result["complete_count"] == 1
+    assert result["bounded_tape_read"]["source_files_read"] == 2
+    terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "COMPLETE"]
+    assert terminal[0]["coverage"]["requested_bounds_complete"] is True
+
+
+def test_rotated_tape_window_obeys_aggregate_byte_ceiling(tmp_path):
+    active = tmp_path / "market_microstructure_1s.jsonl"
+    for index, path in enumerate((active, Path(str(active) + ".3"), Path(str(active) + ".2"))):
+        path.write_text("".join(json.dumps({
+            "bucket_ts": 300 - index * 100 + offset, "last": 10,
+            "bid": 9, "ask": 11, "bid_qty": 1, "ask_qty": 1,
+        }) + "\n" for offset in range(20)), encoding="utf-8")
+    _rows, receipt = _bounded_tape_window(
+        active, required_start_ts=1, max_bytes=900,
+    )
+    assert receipt["bytes_read"] <= 900
+    assert receipt["requested_start_boundary_reached"] is False
+
+
+def test_oldest_mature_candidates_are_drained_despite_stale_cursor(tmp_path):
+    store = V3EvidenceStore(tmp_path, epoch_id=EPOCH)
+    for index in range(12):
+        episode = f"episode-{index:02d}"
+        store.append("opportunity", {
+            "record_id": f"opportunity:{episode}", "episode_id": episode,
+            "signal_ts": SIGNAL_TS + index, "symbol": "BTCUSD",
+        })
+    (tmp_path / "v3" / "receipts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "v3" / "receipts" / "future-path-cursor.json").write_text(
+        json.dumps({"epoch_id": EPOCH, "cursor": 160}), encoding="utf-8",
+    )
+    result = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 9000, max_batch=3,
+    )
+    unknown = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "UNKNOWN"]
+    assert [row["episode_id"] for row in unknown] == [
+        "episode-00", "episode-01", "episode-02",
+    ]
+    assert result["cursor"] == 163
+
+
+def test_pending_request_backlog_advances_instead_of_rewriting_first_batch(tmp_path):
+    store = V3EvidenceStore(tmp_path, epoch_id=EPOCH)
+    for index in range(7):
+        episode = f"episode-{index}"
+        store.append("opportunity", {
+            "record_id": f"opportunity:{episode}", "episode_id": episode,
+            "signal_ts": SIGNAL_TS + index, "symbol": "BTCUSD",
+        })
+    first = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 100, max_batch=3,
+    )
+    second = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 100, max_batch=3,
+    )
+    pending = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "PENDING"]
+    assert len(first["request_writes"]) == 3
+    assert len(second["request_writes"]) == 3
+    assert [row["episode_id"] for row in pending] == [
+        "episode-0", "episode-1", "episode-2",
+        "episode-3", "episode-4", "episode-5",
+    ]
+
+
+def test_legacy_active_tail_unknown_gets_one_bounded_rotated_recovery(tmp_path):
+    _seed(tmp_path, outcomes=("APPROVED",))
+    store = V3EvidenceStore(tmp_path, epoch_id=EPOCH)
+    owner = __import__("research_v3_future_paths")._owner_key(
+        EPOCH, "opportunity:episode-shared", "decision:event-0",
+    )
+    store.append("market_segment", {
+        "record_id": "legacy-unknown", "episode_id": "episode-shared",
+        "opportunity_id": "opportunity:episode-shared",
+        "decision_id": "decision:event-0", "future_path_owner_key": owner,
+        "future_path_status": "UNKNOWN",
+        "unknown_reason": "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL",
+        "bounded_tape_read": {"schema": "bounded_tape_tail_read_v1"},
+    })
+    _write_tape(tmp_path)
+    active = tmp_path / "market_microstructure_1s.jsonl"
+    active.replace(tmp_path / "market_microstructure_1s.jsonl.4")
+    active.write_text(json.dumps({
+        "bucket_ts": SIGNAL_TS + 7210, "last": 80_100,
+        "bid": 80_099, "ask": 80_101, "bid_qty": 1, "ask_qty": 1,
+    }) + "\n", encoding="utf-8")
+    first = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 7230,
+    )
+    second = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 8000,
+    )
+    assert first["complete_count"] == 1
+    assert second["candidate_count"] == 0

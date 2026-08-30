@@ -185,7 +185,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -13301,6 +13301,23 @@ def _refresh_collector_v22_registered_order_evidence(order: dict, signal: dict =
     refreshed["chase_schedule_authoritative"] = True
     _order_multiverse_pending_src[tid] = refreshed
     upsert_provisional_event(tid, refreshed, epoch_id=_collector_v22_epoch_id())
+    # V3 submit receipts are immutable. Once the existing recorder closes the
+    # schedule, append its final exact version for conservative replay. This is
+    # evidence-only and cannot affect order execution.
+    if schedule.get("terminal_ts") is not None and schedule.get("terminal_reason"):
+        try:
+            dual_write_terminal_paper_schedule(
+                order,
+                signal if isinstance(signal, dict) else {},
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+            )
+        except Exception as exc:
+            # Evidence capture is deliberately fail-isolated: an absent causal
+            # owner remains UNKNOWN and must never interrupt a fill/cancel.
+            logger.warning(
+                f"[COLLECTOR_V3] terminal schedule evidence unavailable: {exc} "
+                "[EVIDENCE ONLY]"
+            )
     return True
 
 
@@ -37954,6 +37971,63 @@ _PLATFORM_RELAY_EVIDENCE_WORKER_TIMEOUT_SEC = max(
 )
 _PLATFORM_RELAY_EVIDENCE_WORKER_REQUEST_SCHEMA = "platform_relay_evidence_worker_request_v1"
 _PLATFORM_RELAY_EVIDENCE_WORKER_RESULT_SCHEMA = "platform_relay_evidence_worker_result_v1"
+_PLATFORM_RELAY_EVIDENCE_INSTALL_LOCK = threading.RLock()
+_PLATFORM_RELAY_EVIDENCE_RECEIPT_SCHEMA = "platform_relay_evidence_install_receipt_v1"
+
+
+def _platform_relay_evidence_receipt_path(destination: Path) -> Path:
+    return destination.with_name(f"{destination.name}.receipt.json")
+
+
+def _platform_relay_evidence_duplicate_receipt(
+    destination: Path, digest: str, size: int
+) -> dict | None:
+    """Return trusted ACK metadata only for an intact prior installation."""
+    receipt_path = _platform_relay_evidence_receipt_path(destination)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if not (
+            receipt.get("schema") == _PLATFORM_RELAY_EVIDENCE_RECEIPT_SCHEMA
+            and hmac.compare_digest(str(receipt.get("sha256") or ""), digest)
+            and int(receipt.get("size") or -1) == int(size)
+            and destination.is_file()
+            and destination.stat().st_size == int(receipt.get("size") or -1)
+            and receipt.get("payload_schema") == "relay_lifecycle_evidence_v1"
+            and isinstance(receipt.get("records"), int)
+            and receipt["records"] >= 0
+            and bool(receipt.get("generating_revision"))
+        ):
+            return None
+        installed_digest = hashlib.sha256()
+        with destination.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                installed_digest.update(block)
+        if not hmac.compare_digest(installed_digest.hexdigest(), str(receipt.get("sha256") or "")):
+            return None
+        return receipt
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _write_platform_relay_evidence_receipt(
+    destination: Path, digest: str, semantic_digest: str, size: int, result: dict
+) -> None:
+    receipt_path = _platform_relay_evidence_receipt_path(destination)
+    receipt = {
+        "schema": _PLATFORM_RELAY_EVIDENCE_RECEIPT_SCHEMA,
+        "sha256": digest,
+        "semantic_sha256": semantic_digest,
+        "size": int(size),
+        "payload_schema": result["payload_schema"],
+        "records": int(result["records"]),
+        "generating_revision": result["generating_revision"],
+    }
+    temp = receipt_path.with_name(f"{receipt_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(json.dumps(receipt, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+        os.replace(temp, receipt_path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _validate_platform_relay_evidence_payload(payload: dict) -> tuple[bool, str]:
@@ -38049,6 +38123,12 @@ def api_data_sync_platform_relay_evidence():
         destination = _data_sync_volume_root() / destination.name
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest_builder = hashlib.sha256()
+    declared_digest = str(request.headers.get("X-Content-SHA256") or "").strip().lower()
+    semantic_digest = str(request.headers.get("X-Relay-Semantic-SHA256") or "").strip().lower()
+    if declared_digest and not re.fullmatch(r"[0-9a-f]{64}", declared_digest):
+        return jsonify({"ok": False, "errorCode": "CHECKSUM_INVALID"}), 400
+    if not re.fullmatch(r"[0-9a-f]{64}", semantic_digest):
+        return jsonify({"ok": False, "errorCode": "SEMANTIC_CHECKSUM_INVALID"}), 400
     received_size = 0
     work_root = _data_sync_inventory_work_root()
     temp = work_root / f"relay-input-stage-{uuid.uuid4().hex}.json"
@@ -38069,11 +38149,32 @@ def api_data_sync_platform_relay_evidence():
         if received_size <= 0 or (declared_size is not None and received_size != declared_size):
             return jsonify({"ok": False, "errorCode": "SIZE_INVALID"}), 413
         digest = digest_builder.hexdigest()
-        result = _validate_platform_relay_evidence_in_worker(temp, digest, received_size)
-        staged = Path(result["staged_path"])
-        if not result["valid"]:
-            return jsonify({"ok": False, "errorCode": result["error_code"]}), 400
-        os.replace(staged, destination)
+        if declared_digest and not hmac.compare_digest(declared_digest, digest):
+            return jsonify({"ok": False, "errorCode": "CHECKSUM_MISMATCH"}), 400
+        # Serialize only installation/validation, not request streaming. A
+        # timed-out client may retry while its first validation is still
+        # finishing. The retry hashes its own bytes, waits here, then uses the
+        # first request's durable receipt instead of launching a second worker.
+        with _PLATFORM_RELAY_EVIDENCE_INSTALL_LOCK:
+            prior = _platform_relay_evidence_duplicate_receipt(destination, digest, received_size)
+            if prior is not None:
+                result = {
+                    "payload_schema": prior["payload_schema"],
+                    "records": prior["records"],
+                    "generating_revision": prior["generating_revision"],
+                }
+                duplicate = True
+            else:
+                result = _validate_platform_relay_evidence_in_worker(temp, digest, received_size)
+                staged = Path(result["staged_path"])
+                if not result["valid"]:
+                    return jsonify({"ok": False, "errorCode": result["error_code"]}), 400
+                os.replace(staged, destination)
+                staged = None
+                _write_platform_relay_evidence_receipt(
+                    destination, digest, semantic_digest, received_size, result
+                )
+                duplicate = False
     except subprocess.TimeoutExpired:
         return jsonify({"ok": False, "errorCode": "VALIDATION_TIMEOUT"}), 503
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
@@ -38089,8 +38190,10 @@ def api_data_sync_platform_relay_evidence():
         "ok": True,
         "schema": result["payload_schema"],
         "sha256": digest,
+        "semanticSha256": semantic_digest,
         "records": result["records"],
         "generatingRevision": result["generating_revision"],
+        "duplicate": duplicate,
     })
 
 
@@ -41518,13 +41621,49 @@ def all_opportunity_future_path_evidence_loop():
         return
     while not shutdown_event.is_set():
         try:
-            from research_v3_future_paths import mature_future_market_paths
-            receipt = mature_future_market_paths(
-                data_dir=os.getcwd(),
-                epoch_id=_collector_v22_epoch_id(),
-                now_ts=time.time(),
-                max_batch=8,
+            nonce = uuid.uuid4().hex
+            result_path = (
+                Path(os.getcwd()) / "v3" / "receipts"
+                / f"future-path-worker-{nonce}.json"
             )
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            worker_env = {
+                key: os.environ[key]
+                for key in (
+                    "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP",
+                    "TMPDIR", "PATH", "LANG", "LC_ALL",
+                )
+                if key in os.environ
+            }
+            worker_env.update({
+                "PYTHONNOUSERSITE": "1", "PYTHONHASHSEED": "0",
+                "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+            })
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve().with_name(
+                            "research_v3_future_paths_worker.py"
+                        )),
+                        "--data-dir", os.getcwd(),
+                        "--epoch-id", _collector_v22_epoch_id(),
+                        "--now-ts", str(time.time()),
+                        "--max-batch", "64",
+                        "--result", str(result_path),
+                    ],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=10.0, check=False,
+                    env=worker_env,
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError("future-path worker failed")
+                receipt = json.loads(result_path.read_text(encoding="utf-8"))
+                if receipt.get("schema") != "all_opportunity_future_path_worker_result_v1":
+                    raise RuntimeError("future-path worker result invalid")
+            finally:
+                result_path.unlink(missing_ok=True)
             with state_lock:
                 state["all_opportunity_future_path_evidence"] = {
                     key: copy.deepcopy(receipt.get(key))
