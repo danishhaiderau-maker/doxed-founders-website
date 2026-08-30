@@ -141,6 +141,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           REQUIRE_BOT_ADMIN_TOKEN: "NO"
           REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
           EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
           RECOVERY_FAILED_RUN_ID: ${{ inputs.recovery_failed_run_id }}

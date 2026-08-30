@@ -4,6 +4,8 @@ import {
   buildOwnerHttpsRequestOptions,
   describeOwnerFetchError,
   hasFullOwnerOrderState,
+  isCompleteStoredExchangeOrderAuditFlat,
+  isCompleteStoredRawFlatReconcileSnapshot,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
   isRelayPausedAndDisarmed,
@@ -109,6 +111,16 @@ test('strict flat proof rejects one satoshi, dust, and stale observations', () =
   );
 });
 
+test('durable recovery proof accepts complete stored zeros but rejects nonzero or incomplete evidence', () => {
+  assert.equal(isCompleteStoredRawFlatReconcileSnapshot(
+    rawFlat({ updatedAt: '2025-01-01T00:00:00.000Z' }),
+  ), true);
+  assert.equal(isCompleteStoredRawFlatReconcileSnapshot(rawFlat({ pendingLots: 1 })), false);
+  const incomplete = rawFlat();
+  delete incomplete.signedLedgerOpenQty;
+  assert.equal(isCompleteStoredRawFlatReconcileSnapshot(incomplete), false);
+});
+
 test('authenticated source proof rejects a sanitized state without an order book', () => {
   assert.equal(
     hasFullOwnerOrderState({ dashboard_owner: true, positions: [] }),
@@ -196,4 +208,17 @@ test('strict exchange order proof requires a fresh known zero-order snapshot', (
     ),
     false,
   );
+});
+
+test('durable recovery order proof accepts stored known zeros but rejects unknown or nonzero state', () => {
+  const stored = {
+    known: true,
+    activeOrderCount: 0,
+    managedActiveOrderCount: 0,
+    foreignActiveOrderCount: 0,
+    checkedAt: '2025-01-01T00:00:00.000Z',
+  };
+  assert.equal(isCompleteStoredExchangeOrderAuditFlat(stored), true);
+  assert.equal(isCompleteStoredExchangeOrderAuditFlat({ ...stored, known: false }), false);
+  assert.equal(isCompleteStoredExchangeOrderAuditFlat({ ...stored, foreignActiveOrderCount: 1 }), false);
 });

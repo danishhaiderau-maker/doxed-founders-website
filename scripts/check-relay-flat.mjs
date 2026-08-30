@@ -43,6 +43,13 @@ const adminToken =
 const CANONICAL_FLY_OWNER_URL = 'https://doxed-btc-bot.fly.dev';
 const requireCanonicalFlyOwner =
   process.env.REQUIRE_CANONICAL_FLY_OWNER === 'YES';
+const durableOnlyRecovery =
+  process.env.DURABLE_RELAYS_ONLY_RECOVERY === 'YES';
+if (durableOnlyRecovery && requireCanonicalFlyOwner) {
+  throw new Error(
+    'DURABLE_RELAYS_ONLY_RECOVERY cannot be combined with REQUIRE_CANONICAL_FLY_OWNER=YES',
+  );
+}
 const ownerFetchTimeoutMs = Math.max(
   1_000,
   Number.parseInt(process.env.OWNER_STATE_TIMEOUT_MS ?? '15000', 10) || 15_000,
@@ -299,6 +306,18 @@ export function isStrictRawFlatReconcileSnapshot(rec, nowMs = Date.now()) {
   );
 }
 
+export function isCompleteStoredRawFlatReconcileSnapshot(rec) {
+  if (rec == null || typeof rec !== 'object') return false;
+  for (const key of [
+    'rawExchangePositionQty', 'dustPositionQty', 'signedExchangePositionQty',
+    'ledgerOpenQty', 'signedLedgerOpenQty', 'deltaBtc', 'openLots', 'pendingLots',
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(rec, key)) return false;
+    if (typeof rec[key] !== 'number' || !Number.isFinite(rec[key]) || rec[key] !== 0) return false;
+  }
+  return Number.isFinite(Date.parse(String(rec.updatedAt ?? '')));
+}
+
 export function isStrictExchangeOrderAuditFlat(audit, nowMs = Date.now()) {
   if (audit == null || typeof audit !== 'object') return false;
   const checkedAgeMs = nowMs - Date.parse(String(audit.checkedAt ?? ''));
@@ -319,6 +338,15 @@ export function isRelayPausedAndDisarmed(row) {
     && (row.relayExecutionMode == null || row.relayExecutionMode === 'PAUSED')
     && row.relayArmedAt == null
     && row.realTradingConfirmedAt == null
+  );
+}
+
+export function isCompleteStoredExchangeOrderAuditFlat(audit) {
+  return (
+    audit != null && typeof audit === 'object' && audit.known === true
+    && audit.activeOrderCount === 0 && audit.managedActiveOrderCount === 0
+    && audit.foreignActiveOrderCount === 0
+    && Number.isFinite(Date.parse(String(audit.checkedAt ?? '')))
   );
 }
 
@@ -390,8 +418,10 @@ async function loadRelayBoundaryRows() {
 }
 
 async function main() {
-  const { bot, baseUrl: botUrl } = await fetchOwnerState();
-  const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
+  const ownerState = durableOnlyRecovery ? null : await fetchOwnerState();
+  const bot = ownerState?.bot ?? null;
+  const botUrl = ownerState?.baseUrl ?? null;
+  const pendingOrders = (bot?.orders ?? bot?.pending_orders ?? []).filter(
     (order) =>
       order
       && !['FILLED', 'CANCELLED', 'CANCELED', 'EXPIRED', 'REJECTED'].includes(
@@ -404,20 +434,21 @@ async function main() {
   const output = {
     at: new Date().toISOString(),
     showcase: {
-      botVersion: bot.bot_version ?? null,
-      botInstanceId: bot.bot_instance_id ?? null,
+      proofMode: durableOnlyRecovery ? 'DURABLE_RECOVERY_ONLY' : 'AUTHENTICATED_OWNER',
+      botVersion: bot?.bot_version ?? null,
+      botInstanceId: bot?.bot_instance_id ?? null,
       url: botUrl,
-      dashboardOwner: bot.dashboard_owner === true,
-      positions: Array.isArray(bot.positions) ? bot.positions.length : null,
-      pendingOrders: pendingOrders.length,
+      dashboardOwner: bot == null ? null : bot.dashboard_owner === true,
+      positions: Array.isArray(bot?.positions) ? bot.positions.length : null,
+      pendingOrders: bot == null ? null : pendingOrders.length,
     },
     instances: rows,
   };
   console.log(JSON.stringify(output, null, 2));
 
-  const showcaseFlat =
-    output.showcase.positions === 0
-    && output.showcase.pendingOrders === 0;
+  const showcaseFlat = durableOnlyRecovery || (
+    output.showcase.positions === 0 && output.showcase.pendingOrders === 0
+  );
   const trackedFlat = rows.every((row) => row.activeParticipants === 0);
   const cheetahRows = rows
     .filter((row) => String(row.user).toLowerCase().includes('cheetah'));
@@ -426,8 +457,12 @@ async function main() {
   const reconciledFlat = cheetahRows.length > 0
     && cheetahRows.every((row) => {
       return (
-        isStrictRawFlatReconcileSnapshot(row.reconcile)
-        && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
+        (durableOnlyRecovery
+          ? isCompleteStoredRawFlatReconcileSnapshot(row.reconcile)
+          : isStrictRawFlatReconcileSnapshot(row.reconcile))
+        && (durableOnlyRecovery
+          ? isCompleteStoredExchangeOrderAuditFlat(row.exchangeOrderAudit)
+          : isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit))
         && row.orphanOrderIds.length === 0
         && row.orphanPositionIds.length === 0
       );
