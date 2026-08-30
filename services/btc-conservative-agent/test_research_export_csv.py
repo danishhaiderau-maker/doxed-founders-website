@@ -35,6 +35,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix="research_export_") as tmp:
         try:
             os.chdir(tmp)
+            log_path = os.path.join(tmp, "large-bot.log")
+            with open(log_path, "wb") as log_file:
+                log_file.write(b"discard-me\n" * 200000)
+                log_file.write(b"tail-one\ntail-two\ntail-three\n")
+            bounded_tail = bot._read_log_tail(log_path, max_lines=2, max_bytes=128)
+            if bounded_tail != "tail-two\ntail-three\n":
+                print(f"[FAIL] bounded log tail mismatch: {bounded_tail!r}")
+                return 1
+            if bot.DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC < 5.0:
+                print("[FAIL] HTTP watchdog deadline is shorter than Fly liveness timeout")
+                return 1
             for name in required:
                 with open(name, "w", encoding="utf-8") as f:
                     f.write("{}\n")

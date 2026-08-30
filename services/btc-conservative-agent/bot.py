@@ -285,7 +285,10 @@ DASHBOARD_HTTP_WATCHDOG_INTERVAL_SEC = max(
 )
 DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC = max(
     0.2,
-    float(os.getenv("DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC", "1")),
+    # Match Fly's liveness timeout. A one-second localhost deadline produced
+    # false exit-75 recoveries on the single shared CPU while an owner export
+    # was reading/compressing evidence, even though /api/ping still completed.
+    float(os.getenv("DASHBOARD_HTTP_WATCHDOG_TIMEOUT_SEC", "5")),
 )
 DASHBOARD_HTTP_WATCHDOG_STARTUP_GRACE_SEC = max(
     60.0,
@@ -38473,13 +38476,25 @@ def analyzer_mirror_logout():
     return resp
 
 
-def _read_log_tail(path, max_lines=400):
+def _read_log_tail(path, max_lines=400, max_bytes=262144):
     if not path or not os.path.exists(path):
         return ""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return "".join(lines[-max_lines:])
+        # The persistent Fly log is capped at 50 MiB. readlines() used to
+        # allocate Python objects for the entire file on every debug export,
+        # starving the one-vCPU control plane for tens of seconds. Read only a
+        # bounded suffix and discard its first partial line.
+        size = os.path.getsize(path)
+        start = max(0, size - max(1, int(max_bytes)))
+        with open(path, "rb") as f:
+            f.seek(start)
+            payload = f.read()
+        if start and b"\n" in payload:
+            payload = payload.split(b"\n", 1)[1]
+        lines = payload.splitlines(keepends=True)
+        return b"".join(lines[-max(1, int(max_lines)):]).decode(
+            "utf-8", errors="replace"
+        )
     except Exception:
         return ""
 
