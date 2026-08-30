@@ -99,6 +99,7 @@ def test_missing_identity_is_not_fabricated_and_is_ineligible():
     assert row["identity_complete"] is False
     assert set(row["missing_identity_fields"]) == {
         "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
+        "event_source_revision", "event_config_signature",
     }
     assert row["shared_ai_call_id"] == ""
     assert row["opportunity_id"] == ""
