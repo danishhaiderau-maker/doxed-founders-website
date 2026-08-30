@@ -109,19 +109,21 @@ def test_receipt_hash_size_and_containment_fail_closed(tmp_path):
 def test_apply_is_append_only_idempotent_and_complete(tmp_path):
     root, tape, size, digest = _fixture(tmp_path)
     first = _recover(root, tape, size, digest, apply=True)
-    ledger = root / "v3" / "ledgers" / "market_segment.jsonl"
+    raw_ledger = root / "v3" / "ledgers" / "market_segment.jsonl"
+    ledger = root / "v3" / "recovery_ledgers" / "market_segment.jsonl"
     rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
     assert first["complete_recovered_count"] == 1
     assert first["conservative_eligible_complete_count"] == 1
-    assert len(rows) == 2
+    assert len(rows) == 1
     recovered = rows[-1]
     assert recovered["future_path_status"] == "COMPLETE"
     assert recovered["evidence_provenance"] == "ARCHIVED_FLY_MIRROR_RECOVERY"
     assert recovered["supersedes_record_ids"] == ["old-unknown"]
     assert recovered["segment_ref"]["sha256"]
+    assert len(raw_ledger.read_text(encoding="utf-8").splitlines()) == 1
     second = _recover(root, tape, size, digest, apply=True)
     assert second["reapplication_noop"] is True
-    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 2
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_complete_with_gap_is_separately_conservative_ineligible(tmp_path):
@@ -137,7 +139,7 @@ def test_missing_requested_bound_remains_unknown(tmp_path):
     result = _recover(root, tape, size, digest, apply=True)
     assert result["complete_recovered_count"] == 0
     assert result["incomplete_unknown_count"] == 1
-    ledger = root / "v3" / "ledgers" / "market_segment.jsonl"
+    ledger = root / "v3" / "recovery_ledgers" / "market_segment.jsonl"
     recovered = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     assert recovered["future_path_status"] == "UNKNOWN"
     assert recovered["segment_ref"] is None
@@ -146,8 +148,10 @@ def test_missing_requested_bound_remains_unknown(tmp_path):
 def test_report_selection_prefers_latest_verified_superseding_record(tmp_path):
     root, tape, size, digest = _fixture(tmp_path)
     _recover(root, tape, size, digest, apply=True)
-    ledger = root / "v3" / "ledgers" / "market_segment.jsonl"
-    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    raw_ledger = root / "v3" / "ledgers" / "market_segment.jsonl"
+    overlay_ledger = root / "v3" / "recovery_ledgers" / "market_segment.jsonl"
+    rows = [json.loads(line) for line in raw_ledger.read_text(encoding="utf-8").splitlines()]
+    rows += [json.loads(line) for line in overlay_ledger.read_text(encoding="utf-8").splitlines()]
     selected, audit = authoritative_future_path_segments(root / "v3", rows)
     future = [row for row in selected if row.get("future_path_owner_key") == "owner-1"]
     assert len(future) == 1
@@ -160,3 +164,24 @@ def test_report_selection_prefers_latest_verified_superseding_record(tmp_path):
     assert binding["future_path_history_count"] == 2
     assert binding["selected_future_path_record_ids"] == [future[0]["record_id"]]
     assert binding["required_entry_horizons_complete"] is True
+    assert report["recovery_market_segment_row_count"] == 1
+
+
+def test_fly_raw_ledger_refresh_cannot_erase_recovery_overlay(tmp_path):
+    root, tape, size, digest = _fixture(tmp_path)
+    raw_ledger = root / "v3" / "ledgers" / "market_segment.jsonl"
+    original_raw = raw_ledger.read_bytes()
+    first = _recover(root, tape, size, digest, apply=True)
+    assert first["append_written_count"] == 1
+
+    # Model a full canonical Fly refresh replacing its raw authority.  The
+    # separately named recovery overlay must remain authoritative to reports.
+    raw_ledger.write_bytes(original_raw)
+    report = build_v3_binding_index(root / "v3")
+    binding = report["bindings"][0]
+    assert report["recovery_market_segment_row_count"] == 1
+    assert binding["required_entry_horizons_complete"] is True
+    assert binding["future_path_history_count"] == 2
+
+    second = _recover(root, tape, size, digest, apply=True)
+    assert second["reapplication_noop"] is True

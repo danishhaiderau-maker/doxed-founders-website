@@ -25,9 +25,12 @@ Add `--apply` only after reviewing the dry-run JSON. Apply mode verifies that:
 - the tape fits within the same 24 MiB evidence-read ceiling.
 
 Apply mode never edits or deletes an earlier ledger row. It appends a
-deterministic superseding `COMPLETE` or `UNKNOWN` record, writes any complete
+deterministic superseding `COMPLETE` or `UNKNOWN` record to the distinct
+`v3/recovery_ledgers/market_segment.jsonl` derived overlay, writes any complete
 path as a content-addressed object, and publishes one immutable status receipt
-under `v3/receipts/`. Reapplying an already receipted source is a no-op.
+under `v3/receipts/`. Fly remains the raw-ledger authority; mirror refreshes do
+not write this overlay, while binding reports read and label both authorities.
+Reapplying an already receipted source is a no-op.
 
 `COMPLETE` means only that both requested time bounds are present. Coverage
 still records maximum gaps, BBO/depth counts, and

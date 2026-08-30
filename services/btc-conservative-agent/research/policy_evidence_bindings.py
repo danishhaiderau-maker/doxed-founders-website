@@ -235,6 +235,15 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
     if root.name != "v3":
         raise ValueError("V3_BINDING_ROOT_MUST_BE_V3")
     ledgers = {name: _read_jsonl(root / "ledgers" / f"{name}.jsonl") for name in LEDGERS}
+    # Fly is the raw-data authority and atomically refreshes ``ledgers``.  The
+    # local analyzer may additionally bind checksum-verified archived paths
+    # from this separate append-only derived overlay.  Keeping the authorities
+    # distinct prevents a mirror refresh from erasing or impersonating locally
+    # recovered evidence.
+    recovery_segments = _read_jsonl(
+        root / "recovery_ledgers" / "market_segment.jsonl"
+    )
+    ledgers["market_segment"].extend(recovery_segments)
     opportunities = {_key(row): row for row in ledgers["opportunity"]}
     segments: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     intents: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -356,6 +365,8 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
         "exactly_bound_count": complete,
         "unknown_unverifiable_count": len(bindings) - complete,
         "unknown_reason_counts": dict(sorted(reason_counts.items())),
+        "raw_market_segment_row_count": len(ledgers["market_segment"]) - len(recovery_segments),
+        "recovery_market_segment_row_count": len(recovery_segments),
         "bindings_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
         "bindings": bindings,
     }

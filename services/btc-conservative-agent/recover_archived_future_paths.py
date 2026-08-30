@@ -23,7 +23,22 @@ from research_v3_store import V3EvidenceStore
 
 
 RECOVERY_SOURCE = "ARCHIVED_FLY_MIRROR_RECOVERY"
-RECOVERY_SELECTION_VERSION = "archived_fly_mirror_recovery_v1"
+RECOVERY_SELECTION_VERSION = "archived_fly_mirror_recovery_v2"
+RECOVERY_LEDGER_RELATIVE = Path("v3/recovery_ledgers/market_segment.jsonl")
+
+
+class _RecoveryOverlayStore(V3EvidenceStore):
+    """Write derived recovery rows outside the Fly-owned raw ledger.
+
+    A canonical mirror refresh atomically replaces Fly-owned ledger files.  A
+    separate append-only overlay keeps locally verified recovery evidence from
+    being mistaken for Fly runtime data or silently removed by that refresh.
+    """
+
+    def __init__(self, root: Path, *, epoch_id: str):
+        super().__init__(root, epoch_id=epoch_id)
+        self.ledger_dir = self.root / "v3" / "recovery_ledgers"
+        self.ledger_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _contained(root: Path, candidate: Path) -> Path:
@@ -111,16 +126,21 @@ def _verify_archive_authority(
 
 
 def _latest_unknown_owners(root: Path, epoch_id: str) -> list[dict[str, Any]]:
-    path = _contained(root, root / "v3" / "ledgers" / "market_segment.jsonl")
     latest: dict[str, dict[str, Any]] = {}
-    for row in _read_jsonl(path):
-        if str(row.get("epoch_id") or "") != str(epoch_id):
-            continue
-        if str(row.get("segment_role") or "").upper() != "SIGNAL_TO_120M_FUTURE_PATH":
-            continue
-        owner = str(row.get("future_path_owner_key") or "")
-        if owner:
-            latest[owner] = row
+    paths = (
+        root / "v3" / "ledgers" / "market_segment.jsonl",
+        root / RECOVERY_LEDGER_RELATIVE,
+    )
+    for candidate in paths:
+        path = _contained(root, candidate)
+        for row in _read_jsonl(path):
+            if str(row.get("epoch_id") or "") != str(epoch_id):
+                continue
+            if str(row.get("segment_role") or "").upper() != "SIGNAL_TO_120M_FUTURE_PATH":
+                continue
+            owner = str(row.get("future_path_owner_key") or "")
+            if owner:
+                latest[owner] = row
     return [
         row for row in latest.values()
         if str(row.get("future_path_status") or "").upper() == "UNKNOWN"
@@ -174,12 +194,12 @@ def recover_archived_future_paths(
     authority = _verify_archive_authority(
         root, tape, expected_size=expected_size, expected_sha256=expected_sha256,
     )
-    status_receipt_path = root / "v3" / "receipts" / f"archive-future-path-recovery-{authority['sha256'][:24]}.json"
+    status_receipt_path = root / "v3" / "receipts" / f"archive-future-path-recovery-v2-{authority['sha256'][:24]}.json"
     if apply and status_receipt_path.is_file():
         persisted = json.loads(status_receipt_path.read_text(encoding="utf-8-sig"))
         if (
             not isinstance(persisted, Mapping)
-            or persisted.get("schema") != "archived_future_path_recovery_status_v1"
+            or persisted.get("schema") != "archived_future_path_recovery_status_v2"
             or persisted.get("epoch_id") != str(epoch_id)
             or (persisted.get("archive") or {}).get("sha256") != authority["sha256"]
         ):
@@ -228,7 +248,7 @@ def recover_archived_future_paths(
         })
     written = duplicate = 0
     if apply:
-        store = V3EvidenceStore(root, epoch_id=str(epoch_id))
+        store = _RecoveryOverlayStore(root, epoch_id=str(epoch_id))
         for plan in plans:
             previous = plan["previous"]
             segment_ref = None
@@ -264,11 +284,12 @@ def recover_archived_future_paths(
             written += int(result["written"])
             duplicate += int(result["duplicate"])
     status = {
-        "schema": "archived_future_path_recovery_status_v1",
+        "schema": "archived_future_path_recovery_status_v2",
         "mode": "APPLY" if apply else "DRY_RUN",
         "epoch_id": str(epoch_id),
         "source": RECOVERY_SOURCE,
         "selection_version": RECOVERY_SELECTION_VERSION,
+        "recovery_ledger_relative": RECOVERY_LEDGER_RELATIVE.as_posix(),
         "archive": authority,
         "bounded_read": read_receipt,
         "unknown_owner_candidates": len(owners),
