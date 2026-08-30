@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 
-from platform_relay_streaming import validate_streaming
+from platform_relay_streaming import BACKEND, validate_streaming
 from research.platform_relay_evidence import _validate_platform_relay_evidence_payload
 
 
@@ -75,6 +75,16 @@ def test_worker_accepts_valid_and_rejects_invalid_payload_without_secrets(tmp_pa
     worker_source = WORKER.read_text(encoding="utf-8")
     assert "BOT_ADMIN_TOKEN" not in worker_source
     assert "BITFINEX" not in worker_source
+
+
+def test_compiled_streaming_backend_is_pinned_and_missing_import_fails_closed():
+    assert BACKEND == "yajl2_c"
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    worker_source = WORKER.read_text(encoding="utf-8")
+    assert "ijson==3.5.1" in requirements
+    assert "import platform_relay_streaming" in dockerfile
+    assert "from platform_relay_streaming import validate_streaming" in worker_source
 
 
 def _compiled_parent_helper(tmp_path, fake_run):
@@ -239,7 +249,7 @@ def test_streaming_validator_rejects_malformed_unknown_root_value(tmp_path):
     path.write_text(raw[:-1] + ',"optional":truX}', encoding="utf-8")
     try:
         validate_streaming(path)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         pass
     else:
         raise AssertionError("malformed optional root value was accepted")

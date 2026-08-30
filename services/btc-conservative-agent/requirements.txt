@@ -5,3 +5,4 @@ numpy>=1.26
 pandas>=2.0
 pytz>=2024.1
 requests>=2.31
+ijson==3.5.1
