@@ -36847,6 +36847,10 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "open_positions.json",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
+    # V3 per-object writer locks are transient coordination state, not
+    # research evidence. Walking them adds thousands of useless metadata
+    # operations to every Fly inventory generation.
+    ".locks",
     ".data-sync-snapshots",
     "research_epoch_quarantine",
     "research_archive",
@@ -36890,6 +36894,7 @@ _data_sync_async_inventory = {
     "refreshing": False,
     "error": None,
 }
+_data_sync_ack_lock = threading.RLock()
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
     # Collector v2.2 is a write-once, serialized JSONL ledger. It may grow
     # during a large mirror download; inode replacement remains fenced.
@@ -37675,9 +37680,91 @@ def _read_data_sync_ack() -> dict:
 def _write_data_sync_ack(payload: dict) -> None:
     target = _data_sync_ack_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
-    os.replace(tmp, target)
+    tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+        # Best-effort directory durability on platforms which permit opening
+        # a directory descriptor. The atomically replaced file is already
+        # complete when this optional fence is unavailable (notably Windows).
+        try:
+            directory_fd = os.open(str(target.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _data_sync_validated_inventory_index() -> tuple[dict, str | None, str | None]:
+    """Return the last worker-validated inventory as an immutable lookup.
+
+    Acknowledgement is a receipt for the generation the desktop just copied.
+    Re-resolving every path in the trading process duplicated the isolated
+    worker's expensive volume walk and made the HTTP request take minutes.
+    The retained rows remain cryptographically bound to the worker result;
+    later retention still rechecks the exact on-disk generation before any
+    recoverable cleanup is permitted.
+    """
+    with _data_sync_inventory_cache_condition:
+        rows = _data_sync_async_inventory.get("rows")
+        generated_at = _data_sync_async_inventory.get("generated_at")
+        if not isinstance(rows, list):
+            return {}, generated_at, None
+        copied = [dict(row) for row in rows if isinstance(row, dict)]
+    digest = _data_sync_inventory_rows_sha256(copied)
+    return {
+        str(row.get("path") or ""): row
+        for row in copied
+        if str(row.get("path") or "")
+    }, generated_at, digest
+
+
+def _data_sync_validate_ack_rows(received: list, inventory: dict) -> tuple[dict, dict]:
+    """Validate a bounded ack batch without touching the filesystem."""
+    accepted = {}
+    rejected = {
+        "INVALID_ROW": 0,
+        "PATH_NOT_IN_VALIDATED_INVENTORY": 0,
+        "GENERATION_MISMATCH": 0,
+        "DUPLICATE_PATH": 0,
+    }
+    seen = set()
+    for row in received[:5000]:
+        if not isinstance(row, dict):
+            rejected["INVALID_ROW"] += 1
+            continue
+        rel = str(row.get("path") or "")
+        if not rel or rel in seen:
+            rejected["DUPLICATE_PATH" if rel in seen else "INVALID_ROW"] += 1
+            continue
+        seen.add(rel)
+        expected = inventory.get(rel)
+        if not isinstance(expected, dict):
+            rejected["PATH_NOT_IN_VALIDATED_INVENTORY"] += 1
+            continue
+        try:
+            size = int(row.get("size"))
+            mtime_ns = int(row.get("mtime_ns"))
+            expected_size = int(expected.get("size"))
+            expected_mtime_ns = int(expected.get("mtime_ns"))
+        except (TypeError, ValueError):
+            rejected["INVALID_ROW"] += 1
+            continue
+        if size != expected_size or mtime_ns != expected_mtime_ns:
+            rejected["GENERATION_MISMATCH"] += 1
+            continue
+        accepted[rel] = {"size": size, "mtime_ns": mtime_ns}
+    return accepted, rejected
 
 
 def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = None) -> list:
@@ -37950,43 +38037,67 @@ def api_data_sync_file():
 @app.route('/api/data-sync/ack', methods=['POST'])
 def api_data_sync_ack():
     body = request.get_json(silent=True) or {}
+    if (
+        body.get("schema") != "fly_runtime_incremental_ack_v2"
+        or body.get("defer_retention") is not True
+    ):
+        return jsonify({
+            "error": "unsupported acknowledgement contract",
+            "accepted": 0,
+            "rejected_count": 0,
+            "expected_schema": "fly_runtime_incremental_ack_v2",
+        }), 400
     received = body.get("files") or []
-    acks = _read_data_sync_ack()
-    accepted = 0
-    for row in received[:5000]:
-        if not isinstance(row, dict):
-            continue
-        rel = str(row.get("path") or "")
-        try:
-            path = _data_sync_resolve_relpath(rel)
-            stat = path.stat()
-        except (OSError, ValueError):
-            continue
-        if (
-            int(row.get("size") or -1) == int(stat.st_size)
-            and int(row.get("mtime_ns") or -1) == int(stat.st_mtime_ns)
-        ):
+    if not isinstance(received, list):
+        return jsonify({"error": "files must be a list"}), 400
+    inventory, inventory_generated_at, inventory_sha256 = (
+        _data_sync_validated_inventory_index()
+    )
+    if not inventory:
+        return jsonify({
+            "error": "validated inventory is unavailable",
+            "accepted": 0,
+            "rejected_count": min(len(received), 5000),
+            "inventory_status": "UNAVAILABLE",
+        }), 503
+    accepted_rows, rejected_by_reason = _data_sync_validate_ack_rows(
+        received, inventory
+    )
+    acknowledged_at = utc_iso()
+    with _data_sync_ack_lock:
+        acks = _read_data_sync_ack()
+        for rel, row in accepted_rows.items():
             acks[rel] = {
-                "size": int(stat.st_size),
-                "mtime_ns": int(stat.st_mtime_ns),
-                "acknowledged_at": utc_iso(),
+                **row,
+                "acknowledged_at": acknowledged_at,
+                "inventory_generated_at": inventory_generated_at,
+                "inventory_sha256": inventory_sha256,
             }
-            accepted += 1
-    _write_data_sync_ack(acks)
+        _write_data_sync_ack(acks)
     try:
         usage = shutil.disk_usage(_data_sync_volume_root())
         volume_used_pct = round((usage.used / usage.total) * 100, 2) if usage.total else None
     except OSError:
         volume_used_pct = None
-    removed = _prune_acknowledged_rotations(acks, volume_used_pct=volume_used_pct)
+    rejected = sum(rejected_by_reason.values()) + max(0, len(received) - 5000)
     return jsonify({
         "ok": True,
-        "accepted": accepted,
-        "removed_acknowledged_rotations": removed,
+        "received": len(received),
+        "accepted": len(accepted_rows),
+        "rejected_count": rejected,
+        "rejected_by_reason": {
+            **rejected_by_reason,
+            "OVER_BATCH_LIMIT": max(0, len(received) - 5000),
+        },
+        "inventory_status": "VALIDATED",
+        "inventory_generated_at": inventory_generated_at,
+        "inventory_sha256": inventory_sha256,
+        "removed_acknowledged_rotations": [],
+        "cleanup_status": "DEFERRED_OUTSIDE_HTTP_REQUEST",
         "volume_used_pct": volume_used_pct,
         "policy": (
-            "acknowledged rotations older than 24h are pruned except newest 2 generations; "
-            "raw research JSONL never pruned without archive ack; STORAGE_PRESSURE at 85%"
+            "ack receipt committed atomically; cleanup deferred outside the HTTP request; "
+            "active, unacknowledged, newest-two, and raw research evidence remain protected"
         ),
     })
 

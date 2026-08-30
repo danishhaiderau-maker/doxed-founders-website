@@ -134,6 +134,19 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
 test('Fly deploy proves a disarmed paper-signal owner, never a direct live executor', async () => {
   const workflow = await readFile(flyDeployPath, 'utf8');
 
+  assert.match(
+    workflow,
+    /liveness\.get\("boot"\) == "starting"[\s\S]*liveness\.get\("status"\) == "starting"/,
+  );
+  assert.match(
+    workflow,
+    /bootstrap is still starting[\s\S]*time\.sleep\(3\)[\s\S]*continue[\s\S]*base \+ "\/api\/status"/,
+  );
+  assert.ok(
+    workflow.indexOf('liveness.get("boot") == "starting"')
+      < workflow.indexOf('progress = payload.get("strategy_progress") or {}'),
+    'startup response must be retried before strategy evidence is asserted',
+  );
   assert.match(workflow, /health\.get\("live_armed"\) is False/);
   assert.match(workflow, /health\.get\("bitfinex_live_enabled"\) is False/);
   assert.match(workflow, /health\.get\("force_paper_mode"\) is True/);

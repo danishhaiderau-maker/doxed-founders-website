@@ -135,12 +135,35 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert '-Stage "manifest_initial"' in SYNC_SCRIPT
     assert '-Stage "manifest_targeted_refresh"' in SYNC_SCRIPT
     assert '-Stage "acknowledgement"' in SYNC_SCRIPT
+    assert '-Stage "manifest_post_ack_identity"' in SYNC_SCRIPT
     assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
     assert "$attempt/$transportAttempts attempt(s)" in SYNC_SCRIPT
     # Retry hardening must not weaken the candidate/checksum/atomic contract.
     assert "Get-FileHash -LiteralPath $tmp -Algorithm SHA256" in SYNC_SCRIPT
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
+
+
+def test_sync_acknowledgement_is_fast_exact_and_followed_by_identity_fence():
+    ack_body = SYNC_SCRIPT.index('$ackBody = [ordered]@{')
+    ack_request = SYNC_SCRIPT.index('-Stage "acknowledgement"', ack_body)
+    exact_acceptance = SYNC_SCRIPT.index('$ackAccepted -ne $ackExpected', ack_request)
+    post_ack_fence = SYNC_SCRIPT.index(
+        '-Stage "manifest_post_ack_identity"', exact_acceptance
+    )
+    analyzer_publish = SYNC_SCRIPT.index('$analyzerPublished = $false', post_ack_fence)
+
+    assert 'schema = "fly_runtime_incremental_ack_v2"' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'defer_retention = $true' in SYNC_SCRIPT[ack_body:ack_request]
+    assert '$ack.PSObject.Properties.Name -contains "accepted"' in SYNC_SCRIPT
+    assert '$ack.PSObject.Properties.Name -contains "rejected_count"' in SYNC_SCRIPT
+    assert '$ackRejected -ne 0' in SYNC_SCRIPT[exact_acceptance:post_ack_fence]
+    assert "Fly sync acknowledgement was incomplete" in SYNC_SCRIPT
+    assert (
+        "Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest"
+        in SYNC_SCRIPT[post_ack_fence:analyzer_publish]
+    )
+    assert ack_body < ack_request < exact_acceptance < post_ack_fence < analyzer_publish
 
 
 def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
@@ -1679,6 +1702,94 @@ def test_retention_never_removes_active_or_unacknowledged_files():
     assert "int(ack.get(\"size\") or -1) == int(stat.st_size)" in BOT
     assert "int(ack.get(\"mtime_ns\") or -1) == int(stat.st_mtime_ns)" in BOT
     assert "volume_used_pct" in BOT
+
+
+def test_ack_validation_uses_validated_inventory_without_filesystem_calls():
+    validate = _load_bot_functions("_data_sync_validate_ack_rows")[
+        "_data_sync_validate_ack_rows"
+    ]
+    inventory = {
+        f"v3/ledgers/row-{index}.jsonl": {
+            "path": f"v3/ledgers/row-{index}.jsonl",
+            "size": index + 10,
+            "mtime_ns": index + 100,
+        }
+        for index in range(5000)
+    }
+    received = [
+        {"path": path, "size": row["size"], "mtime_ns": row["mtime_ns"]}
+        for path, row in inventory.items()
+    ]
+    accepted, rejected = validate(received, inventory)
+    assert len(accepted) == 5000
+    assert sum(rejected.values()) == 0
+
+    mixed = [
+        received[0],
+        dict(received[0]),
+        {"path": received[1]["path"], "size": -1, "mtime_ns": received[1]["mtime_ns"]},
+        {"path": "outside.jsonl", "size": 1, "mtime_ns": 2},
+        {"path": "", "size": 1, "mtime_ns": 2},
+        "invalid",
+    ]
+    accepted, rejected = validate(mixed, inventory)
+    assert list(accepted) == [received[0]["path"]]
+    assert rejected == {
+        "INVALID_ROW": 2,
+        "PATH_NOT_IN_VALIDATED_INVENTORY": 1,
+        "GENERATION_MISMATCH": 1,
+        "DUPLICATE_PATH": 1,
+    }
+
+
+def test_ack_http_path_is_bounded_and_never_prunes_synchronously():
+    body = BOT[BOT.index("def api_data_sync_ack"):BOT.index(
+        "_PLATFORM_RELAY_EVIDENCE_MAX_BYTES"
+    )]
+    assert "_data_sync_validated_inventory_index()" in body
+    assert "_data_sync_validate_ack_rows(" in body
+    assert 'body.get("schema") != "fly_runtime_incremental_ack_v2"' in body
+    assert 'body.get("defer_retention") is not True' in body
+    assert "_data_sync_resolve_relpath(" not in body
+    assert "path.stat()" not in body
+    assert "_prune_acknowledged_rotations(" not in body
+    assert '"cleanup_status": "DEFERRED_OUTSIDE_HTTP_REQUEST"' in body
+    assert '"accepted": len(accepted_rows)' in body
+    assert '"rejected_count": rejected' in body
+
+
+def test_atomic_ack_write_preserves_previous_receipt_on_replace_failure(tmp_path):
+    namespace = _load_bot_functions("_write_data_sync_ack")
+    target = tmp_path / "sync_ack.json"
+    target.write_text('{"old":true}', encoding="utf-8")
+    namespace.update({"json": json, "uuid": uuid})
+    namespace["_data_sync_ack_path"] = lambda: target
+    original_replace = os.replace
+
+    def fail_replace(source, destination):
+        assert Path(destination) == target
+        raise OSError("modeled replace failure")
+
+    namespace["os"].replace = fail_replace
+    try:
+        try:
+            namespace["_write_data_sync_ack"]({"new": True})
+            raise AssertionError("replace failure should propagate")
+        except OSError as exc:
+            assert str(exc) == "modeled replace failure"
+    finally:
+        namespace["os"].replace = original_replace
+    assert target.read_text(encoding="utf-8") == '{"old":true}'
+    assert list(tmp_path.glob("sync_ack.json.*.tmp")) == []
+
+
+def test_inventory_excludes_only_internal_lock_directories_from_evidence_walk():
+    excluded_block = BOT[BOT.index("_DATA_SYNC_EXCLUDED_DIR_NAMES"):BOT.index(
+        "_DATA_SYNC_CHUNK_MAX"
+    )]
+    assert '".locks"' in excluded_block
+    assert '"ledgers"' not in excluded_block
+    assert '"market_segments"' not in excluded_block
 
 
 def test_numbered_rotations_are_supported_and_highest_two_are_retained():

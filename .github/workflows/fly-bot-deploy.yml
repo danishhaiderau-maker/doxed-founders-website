@@ -225,6 +225,22 @@ jobs:
               try:
                   with urllib.request.urlopen(base + "/health", timeout=8) as response:
                       liveness = json.load(response)
+                  # The dashboard socket binds before private state restoration
+                  # completes. During that bounded startup window /health
+                  # deliberately returns a minimal 200 payload without strategy
+                  # progress or tile fields. Treat only that explicit startup
+                  # contract as retryable; all post-bootstrap evidence remains
+                  # mandatory below.
+                  if (
+                      liveness.get("boot") == "starting"
+                      and liveness.get("status") == "starting"
+                  ):
+                      last = (
+                          "Fly dashboard bootstrap is still starting: "
+                          + json.dumps(liveness, sort_keys=True)
+                      )
+                      time.sleep(3)
+                      continue
                   with urllib.request.urlopen(base + "/api/status", timeout=8) as status_response:
                       payload = json.load(status_response)
                   with urllib.request.urlopen(base + "/ready", timeout=8) as ready_response:

@@ -797,13 +797,48 @@ $finalManifest = Invoke-DataSyncJsonRequest `
   -TimeoutSec $manifestTimeoutSec
 Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest
 
-$ackBody = @{ files = @($ackRows) } | ConvertTo-Json -Depth 5
+$ackBody = [ordered]@{
+  schema = "fly_runtime_incremental_ack_v2"
+  # Retention is deliberately outside the parity-critical request. Running a
+  # volume prune before returning the acknowledgement can exceed the bounded
+  # client deadline on a shared-CPU Fly machine even though every downloaded
+  # file has already passed its generation and checksum fences.
+  defer_retention = $true
+  files = @($ackRows)
+} | ConvertTo-Json -Depth 5
 $ack = Invoke-DataSyncJsonRequest `
   -Stage "acknowledgement" `
   -Uri "$base/api/data-sync/ack" `
   -Method Post `
   -Body $ackBody `
   -TimeoutSec $ackTimeoutSec
+
+# A transport-level HTTP success is not sufficient: every exact manifest row
+# must have been accepted. Missing v2 result fields and partial acceptance both
+# fail closed so an older or overloaded server can never publish false parity.
+$ackExpected = [int]$ackRows.Count
+$ackAccepted = if ($ack.PSObject.Properties.Name -contains "accepted") {
+  [int]$ack.accepted
+} else { -1 }
+$ackRejected = if ($ack.PSObject.Properties.Name -contains "rejected_count") {
+  [int]$ack.rejected_count
+} else { -1 }
+if ($ackAccepted -ne $ackExpected -or $ackRejected -ne 0) {
+  throw (
+    "Fly sync acknowledgement was incomplete " +
+    "(expected=$ackExpected accepted=$ackAccepted rejected=$ackRejected)."
+  )
+}
+
+# The acknowledgement itself is remote work and may outlive a deployment or
+# Fresh Collection transition. Fence the authority once more after it returns;
+# parity is publishable only when the same revision/epoch/tile identities still
+# hold on both sides of the acknowledgement.
+$postAckManifest = Invoke-DataSyncJsonRequest `
+  -Stage "manifest_post_ack_identity" `
+  -Uri (New-DataSyncManifestUri -IdentityOnly) `
+  -TimeoutSec $manifestTimeoutSec
+Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest
 
 $analyzerPublished = $false
 $analyzerPublishErrorCode = $null
