@@ -41898,6 +41898,11 @@ def build_counterfactual_observability_fields(buf: dict, snapshot: dict, replay:
 
 
 def _platform_relay_evidence_index(path=PLATFORM_RELAY_EVIDENCE_FILE) -> dict:
+    # Every runtime consumer shares the same immutable file-identity cache.
+    # The analytics loop previously bypassed the dashboard cache and reparsed
+    # the multi-megabyte platform artifact on its ten-minute cadence.
+    if os.path.abspath(path) == os.path.abspath(PLATFORM_RELAY_EVIDENCE_FILE):
+        return _load_dashboard_trade_enrichment()[1]
     return _pure_platform_relay_evidence_index(path)
 
 

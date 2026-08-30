@@ -46,6 +46,15 @@ def test_legacy_relay_state_builder_uses_same_bounded_trade_projection():
     assert "_snapshot_trade_rows_locked(session_start)" not in body
 
 
+def test_all_runtime_relay_evidence_consumers_share_file_identity_cache():
+    function = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "_platform_relay_evidence_index")
+    body = ast.get_source_segment(SOURCE, function)
+    assert "_load_dashboard_trade_enrichment()[1]" in body
+    assert "os.path.abspath(path)" in body
+    assert "_pure_platform_relay_evidence_index(path)" in body
+
+
 def test_projection_shape_is_bounded_and_ignores_oversized_research_fields():
     namespace = _functions(
         "_relay_trade_row_lite", "_relay_fidelity_trade_row",

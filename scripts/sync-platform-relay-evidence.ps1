@@ -39,6 +39,27 @@ function Get-RelayForwardFailureCode([System.Exception]$Exception) {
   return 'FORWARD_FAILED'
 }
 
+function Get-RelayEvidenceSemanticDigest($Payload) {
+  # The platform refreshes generatedAt even when the immutable lifecycle/event
+  # evidence is byte-for-byte equivalent.  Hash every top-level field except
+  # that observation timestamp so an unchanged snapshot is not reposted to
+  # Fly and does not invalidate the runtime's evidence cache every poll.
+  $semantic = [ordered]@{}
+  foreach ($name in @($Payload.PSObject.Properties.Name | Sort-Object)) {
+    if ([string]$name -ceq 'generatedAt') { continue }
+    $semantic[[string]$name] = $Payload.PSObject.Properties[[string]$name].Value
+  }
+  $bytes = [Text.Encoding]::UTF8.GetBytes(
+    ($semantic | ConvertTo-Json -Depth 100 -Compress)
+  )
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try {
+    return (([BitConverter]::ToString($hasher.ComputeHash($bytes))) -replace '-', '').ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+}
+
 $apiBaseUrl = [Environment]::GetEnvironmentVariable('PLATFORM_API_BASE_URL', 'Process')
 $agentSlug = [Environment]::GetEnvironmentVariable('PLATFORM_RELAY_AGENT_SLUG', 'Process')
 $userId = [Environment]::GetEnvironmentVariable('PLATFORM_RELAY_USER_ID', 'Process')
@@ -113,6 +134,31 @@ foreach ($record in @($payload.records)) {
       Stop-RelayEvidenceSync 'EVENT_INVALID'
     }
     if (-not $eventIds.Add([string]$event.id)) { Stop-RelayEvidenceSync 'DUPLICATE_EVENT' }
+  }
+}
+
+# A refreshed envelope timestamp is not new lifecycle evidence.  Compare the
+# fully validated semantic payload with the last locally accepted artifact
+# before forwarding it to the single-vCPU Fly runtime.  This keeps the sync
+# heartbeat current without rewriting the same 7 MB evidence file and waking
+# expensive downstream joins every three minutes.
+$incomingSemanticDigest = Get-RelayEvidenceSemanticDigest $payload
+if (Test-Path -LiteralPath $destination -PathType Leaf) {
+  try {
+    $existingPayload = Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json
+    $existingValid = (
+      $existingPayload.schema -eq 'relay_lifecycle_evidence_v1' -and
+      $existingPayload.generatingRevision -and
+      $existingPayload.runIdentity -and
+      $null -ne $existingPayload.records
+    )
+  } catch {
+    $existingValid = $false
+  }
+  if ($existingValid -and
+      (Get-RelayEvidenceSemanticDigest $existingPayload) -ceq $incomingSemanticDigest) {
+    Write-Output $destination
+    return
   }
 }
 

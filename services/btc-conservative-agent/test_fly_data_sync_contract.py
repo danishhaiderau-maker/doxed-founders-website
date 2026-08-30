@@ -60,6 +60,17 @@ def test_relay_evidence_timestamp_survives_powershell_json_date_conversion():
     assert "[Globalization.CultureInfo]::InvariantCulture" in RELAY_SYNC
 
 
+def test_relay_evidence_sync_deduplicates_timestamp_only_envelope_refreshes():
+    assert "function Get-RelayEvidenceSemanticDigest" in RELAY_SYNC
+    assert "if ([string]$name -ceq 'generatedAt') { continue }" in RELAY_SYNC
+    assert "$incomingSemanticDigest = Get-RelayEvidenceSemanticDigest $payload" in RELAY_SYNC
+    assert "Get-RelayEvidenceSemanticDigest $existingPayload" in RELAY_SYNC
+    dedupe = RELAY_SYNC.index("$incomingSemanticDigest =")
+    forward = RELAY_SYNC.index("$forward = Invoke-RestMethod")
+    assert dedupe < forward
+    assert "Write-Output $destination\n    return" in RELAY_SYNC
+
+
 def test_fresh_epoch_signal_receipt_has_a_literal_signal_key():
     assert "@{ signal_ts = $currentSignal" in SYNC_LOOP
     assert "@{$signal_ts" not in SYNC_LOOP
