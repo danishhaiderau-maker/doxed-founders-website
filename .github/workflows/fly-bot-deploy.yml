@@ -64,6 +64,8 @@ jobs:
           flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "sh -lc 'echo ===PROCESS_MEMORY===; ps -eo pid,ppid,rss,vsz,etime,comm,args --sort=-rss | head -n 20; echo ===RECENT_BOT_LOG===; tail -n 2500 /app/data/bot.log'"
           flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "python -c 'from pathlib import Path; import json,resource,time; from platform_relay_streaming import validate_streaming; p=Path(\"/app/data/relay_lifecycle_evidence_v1.json\"); t=time.perf_counter(); r=validate_streaming(p); print(json.dumps({\"stage\":\"direct_stream_validation\",\"valid\":r[0],\"code\":r[1],\"records\":r[2].get(\"records\"),\"bytes\":p.stat().st_size,\"seconds\":round(time.perf_counter()-t,3),\"maxrss_kib\":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))'"
+          flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "grep -nE 'fly-entrypoint.*bot (starting|exited)|WATCHDOG.*(failed|exiting|stale)|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log"
 
   restart-only:
