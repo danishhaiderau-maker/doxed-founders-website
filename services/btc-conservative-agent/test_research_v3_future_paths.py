@@ -5,7 +5,7 @@ import pytest
 
 from research_v3_future_paths import (
     _bounded_tape_tail, _bounded_tape_window, _contained,
-    mature_future_market_paths,
+    TAPE_SELECTION_VERSION, mature_future_market_paths,
 )
 from research_v3_store import V3EvidenceStore
 
@@ -168,6 +168,14 @@ def test_old_interval_outside_runtime_tail_is_unknown_with_exact_reason(tmp_path
     assert result["bounded_tape_read"]["bytes_read"] <= 1600
     terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "UNKNOWN"]
     assert terminal[0]["unknown_reason"] == "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
+    assert terminal[0]["bounded_tape_read"]["selection_version"] == TAPE_SELECTION_VERSION
+    # The current selector's truthful missing-interval result is terminal; it
+    # must not be retried forever.
+    second = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 10000,
+        max_batch=8, max_tape_read_bytes=1600,
+    )
+    assert second["candidate_count"] == 0
 
 
 def test_rotated_tape_is_joined_before_truthful_complete_classification(tmp_path):
@@ -184,7 +192,10 @@ def test_rotated_tape_is_joined_before_truthful_complete_classification(tmp_path
         max_batch=8, max_tape_read_bytes=8 * 1024 * 1024,
     )
     assert result["complete_count"] == 1
-    assert result["bounded_tape_read"]["source_files_read"] == 2
+    assert result["bounded_tape_read"]["source_files_read"] == 1
+    assert result["bounded_tape_read"]["source_receipts"][0]["source_name"] == (
+        "market_microstructure_1s.jsonl.7"
+    )
     terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "COMPLETE"]
     assert terminal[0]["coverage"]["requested_bounds_complete"] is True
 
@@ -197,10 +208,70 @@ def test_rotated_tape_window_obeys_aggregate_byte_ceiling(tmp_path):
             "bid": 9, "ask": 11, "bid_qty": 1, "ask_qty": 1,
         }) + "\n" for offset in range(20)), encoding="utf-8")
     _rows, receipt = _bounded_tape_window(
-        active, required_start_ts=1, max_bytes=900,
+        active, required_start_ts=1, required_end_ts=20, max_bytes=900,
     )
     assert receipt["bytes_read"] <= 900
     assert receipt["requested_start_boundary_reached"] is False
+
+
+def test_interval_genuinely_older_than_oldest_retained_source_is_unknown(tmp_path):
+    _seed(tmp_path, outcomes=("REJECTED",))
+    active = tmp_path / "market_microstructure_1s.jsonl"
+    active.write_text("".join(json.dumps({
+        "bucket_ts": SIGNAL_TS + 10_000 + offset, "last": 80_000,
+        "bid": 79_999, "ask": 80_001, "bid_qty": 1, "ask_qty": 1,
+    }) + "\n" for offset in range(20)), encoding="utf-8")
+    first = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 20_000,
+        max_batch=8,
+    )
+    assert first["unknown_count"] == 1
+    terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "UNKNOWN"]
+    assert terminal[0]["unknown_reason"] == "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
+    assert terminal[0]["bounded_tape_read"]["source_files_overlapping"] == 0
+    second = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 21_000,
+        max_batch=8,
+    )
+    assert second["candidate_count"] == 0
+
+
+def test_requested_interval_rotation_is_selected_before_newer_files_spend_cap(tmp_path):
+    _seed(tmp_path, outcomes=("APPROVED",))
+    row = lambda ts: json.dumps({
+        "bucket_ts": ts, "last": 80_000, "bid": 79_999,
+        "ask": 80_001, "bid_qty": 1, "ask_qty": 1,
+    }, sort_keys=True) + "\n"
+    active = tmp_path / "market_microstructure_1s.jsonl"
+    requested = Path(str(active) + ".2")
+    newer = Path(str(active) + ".3")
+    requested.write_text(
+        "".join(row(SIGNAL_TS + offset) for offset in range(0, 7201, 2)),
+        encoding="utf-8",
+    )
+    # Together the two newer, non-overlapping sources exceed the cap.  The old
+    # newest-first implementation spent its budget before ever reaching .2.
+    newer.write_text(
+        "".join(row(SIGNAL_TS + 10_000 + offset) for offset in range(5000)),
+        encoding="utf-8",
+    )
+    active.write_text(
+        "".join(row(SIGNAL_TS + 20_000 + offset) for offset in range(5000)),
+        encoding="utf-8",
+    )
+    cap = requested.stat().st_size + 3 * 16 * 1024 + 1024
+    assert active.stat().st_size + newer.stat().st_size > cap
+    result = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 30_000,
+        max_batch=8, max_tape_read_bytes=cap,
+    )
+    assert result["complete_count"] == 1
+    receipt = result["bounded_tape_read"]
+    assert receipt["bytes_read"] <= cap
+    assert receipt["selection_version"] == TAPE_SELECTION_VERSION
+    assert [item["source_name"] for item in receipt["source_receipts"]] == [
+        "market_microstructure_1s.jsonl.2",
+    ]
 
 
 def test_oldest_mature_candidates_are_drained_despite_stale_cursor(tmp_path):
@@ -260,7 +331,7 @@ def test_legacy_active_tail_unknown_gets_one_bounded_rotated_recovery(tmp_path):
         "decision_id": "decision:event-0", "future_path_owner_key": owner,
         "future_path_status": "UNKNOWN",
         "unknown_reason": "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL",
-        "bounded_tape_read": {"schema": "bounded_tape_tail_read_v1"},
+        "bounded_tape_read": {"schema": "bounded_rotated_tape_window_v1"},
     })
     _write_tape(tmp_path)
     active = tmp_path / "market_microstructure_1s.jsonl"

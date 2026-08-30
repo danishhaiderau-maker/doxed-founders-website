@@ -27,6 +27,8 @@ MATURATION_SETTLE_SEC = 30
 SOURCE_TAPE_FILE = "market_microstructure_1s.jsonl"
 MAX_TAPE_READ_BYTES = 16 * 1024 * 1024
 MAX_TAPE_TOTAL_READ_BYTES = 24 * 1024 * 1024
+TAPE_RANGE_PROBE_BYTES = 16 * 1024
+TAPE_SELECTION_VERSION = "requested_interval_overlap_v2"
 
 
 def _timestamp(value: Any) -> float | None:
@@ -149,14 +151,70 @@ def _rotated_tape_paths(active: Path) -> list[Path]:
     ]
 
 
+def _bounded_tape_range_probe(
+    path: Path, *, max_bytes: int = TAPE_RANGE_PROBE_BYTES,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Boundedly identify a chronological tape file's first/last timestamp."""
+    size = path.stat().st_size
+    budget = max(2, int(max_bytes))
+    head_budget = max(1, budget // 2)
+    tail_budget = max(1, budget - head_budget)
+    first_ts = last_ts = None
+    bytes_read = 0
+    parse_errors = 0
+    with path.open("rb") as handle:
+        head = handle.read(min(size, head_budget))
+        bytes_read += len(head)
+        for raw_line in head.splitlines():
+            try:
+                raw = json.loads(raw_line.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                parse_errors += 1
+                continue
+            row = _market_row(raw) if isinstance(raw, Mapping) else None
+            if row is not None:
+                first_ts = float(row["ts"])
+                break
+        tail_start = max(0, size - tail_budget)
+        handle.seek(tail_start)
+        tail = handle.read(min(size, tail_budget))
+        bytes_read += len(tail)
+        tail_lines = tail.splitlines()
+        # When seeking into a file, the first line is potentially partial.
+        if tail_start and tail_lines:
+            tail_lines = tail_lines[1:]
+        for raw_line in reversed(tail_lines):
+            try:
+                raw = json.loads(raw_line.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                parse_errors += 1
+                continue
+            row = _market_row(raw) if isinstance(raw, Mapping) else None
+            if row is not None:
+                last_ts = float(row["ts"])
+                break
+    return {"start_ts": first_ts, "end_ts": last_ts}, {
+        "schema": "bounded_tape_range_probe_v1",
+        "source_name": path.name,
+        "file_size_bytes": size,
+        "max_read_bytes": budget,
+        "bytes_read": bytes_read,
+        "parse_errors": parse_errors,
+        "observed_start_ts": first_ts,
+        "observed_end_ts": last_ts,
+    }
+
+
 def _bounded_tape_window(
-    active: Path, *, required_start_ts: float, max_bytes: int,
+    active: Path, *, required_start_ts: float, required_end_ts: float,
+    max_bytes: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Read a bounded active+rotated tape horizon, newest to oldest.
+    """Read bounded active+rotated sources overlapping the requested horizon.
 
     A rotation must not turn otherwise retained evidence into UNKNOWN.  Reads
-    stop as soon as the requested lower boundary is present, or at the strict
-    aggregate byte ceiling.  Rows are then returned chronologically.
+    are selected by bounded timestamp probes, then processed oldest-to-newest
+    under one strict aggregate byte ceiling.  Non-overlapping newer files can
+    therefore never consume the budget needed by an older retained interval.
     """
     budget = max(1, int(max_bytes))
     rows_by_ts: dict[float, dict[str, Any]] = {}
@@ -165,7 +223,41 @@ def _bounded_tape_window(
     parse_errors = 0
     boundary_reached = False
     paths = _rotated_tape_paths(active)
+    probes: list[dict[str, Any]] = []
+    overlapping: list[tuple[float, Path]] = []
+    unknown_range: list[Path] = []
+    # Range discovery must never consume the whole evidence-read allowance,
+    # especially in deliberately tiny test/diagnostic budgets.
+    per_probe_budget = min(
+        TAPE_RANGE_PROBE_BYTES,
+        max(2, budget // max(8, len(paths) * 8)),
+    )
     for path in paths:
+        remaining = budget - bytes_read
+        if remaining <= 0:
+            break
+        source_range, probe = _bounded_tape_range_probe(
+            path, max_bytes=min(per_probe_budget, remaining),
+        )
+        probes.append(probe)
+        bytes_read += int(probe["bytes_read"])
+        parse_errors += int(probe["parse_errors"])
+        start = source_range.get("start_ts")
+        end = source_range.get("end_ts")
+        if start is None or end is None:
+            unknown_range.append(path)
+        elif float(start) <= required_end_ts + 2.0 and float(end) >= required_start_ts - 2.0:
+            overlapping.append((float(start), path))
+    selected_paths = [path for _start, path in sorted(overlapping)] + unknown_range
+    retained_starts = [
+        float(probe["observed_start_ts"])
+        for probe in probes if probe.get("observed_start_ts") is not None
+    ]
+    retained_ends = [
+        float(probe["observed_end_ts"])
+        for probe in probes if probe.get("observed_end_ts") is not None
+    ]
+    for path in selected_paths:
         remaining = budget - bytes_read
         if remaining <= 0:
             break
@@ -177,7 +269,12 @@ def _bounded_tape_window(
         for row in rows:
             rows_by_ts[float(row["ts"])] = row
         observed_start = receipt.get("observed_start_ts")
-        if observed_start is not None and float(observed_start) <= required_start_ts + 2.0:
+        observed_end = receipt.get("observed_end_ts")
+        if (
+            observed_start is not None and observed_end is not None
+            and float(observed_start) <= required_start_ts + 2.0
+            and float(observed_end) >= required_end_ts - 2.0
+        ):
             boundary_reached = True
             break
         # A partial tail of this shard cannot safely skip farther backwards:
@@ -187,10 +284,15 @@ def _bounded_tape_window(
     ordered = [rows_by_ts[key] for key in sorted(rows_by_ts)]
     return ordered, {
         "schema": "bounded_rotated_tape_window_v1",
+        "selection_version": TAPE_SELECTION_VERSION,
         "max_read_bytes": budget,
         "bytes_read": bytes_read,
         "parse_errors": parse_errors,
         "source_files_considered": len(paths),
+        "source_range_probes": probes,
+        "retained_observed_start_ts": min(retained_starts) if retained_starts else None,
+        "retained_observed_end_ts": max(retained_ends) if retained_ends else None,
+        "source_files_overlapping": len(selected_paths),
         "source_files_read": len(receipts),
         "source_receipts": receipts,
         "requested_start_boundary_reached": boundary_reached,
@@ -199,7 +301,7 @@ def _bounded_tape_window(
         "truncated_to_recent_tail": bool(
             not boundary_reached and (
                 any(receipt.get("truncated_to_recent_tail") for receipt in receipts)
-                or len(receipts) < len(paths) or bytes_read >= budget
+                or len(receipts) < len(selected_paths) or bytes_read >= budget
             )
         ),
     }
@@ -266,13 +368,13 @@ def _candidates(root: Path, epoch_id: str) -> list[dict[str, Any]]:
             return True
         if status != "UNKNOWN":
             return False
-        # One bounded migration retry is allowed for the exact historical bug:
-        # active-file-only reads could not see a retained rotated interval.
-        # A row emitted by the rotated reader is final even when still UNKNOWN.
+        # One bounded migration retry is allowed for older selectors that did
+        # not choose source rotations by the requested timestamp interval.
+        # A row emitted by the current selector is final even when UNKNOWN.
         return not (
             row.get("unknown_reason") == "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
-            and (row.get("bounded_tape_read") or {}).get("schema")
-            != "bounded_rotated_tape_window_v1"
+            and (row.get("bounded_tape_read") or {}).get("selection_version")
+            != TAPE_SELECTION_VERSION
         )
 
     completed = {
@@ -465,7 +567,8 @@ def mature_future_market_paths(
         lower = min(start for start, _ in windows.values())
         upper = max(end for _, end in windows.values())
         tape_rows, tail_read = _bounded_tape_window(
-            tape, required_start_ts=lower, max_bytes=max_tape_read_bytes,
+            tape, required_start_ts=lower, required_end_ts=upper,
+            max_bytes=max_tape_read_bytes,
         )
         parse_errors = int(tail_read["parse_errors"])
         for row in tape_rows:
@@ -527,8 +630,18 @@ def mature_future_market_paths(
             complete += 1
         else:
             tail_start = tail_read.get("observed_start_ts")
+            retained_start = tail_read.get("retained_observed_start_ts")
+            retained_end = tail_read.get("retained_observed_end_ts")
             reason = (
                 "SOURCE_TAPE_MISSING" if not source_exists
+                else "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
+                if (
+                    retained_start is not None and retained_end is not None
+                    and (
+                        start_ts < float(retained_start) - 2.0
+                        or end_ts > float(retained_end) + 2.0
+                    )
+                )
                 else "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
                 if tail_read.get("truncated_to_recent_tail") and tail_start is not None
                 and start_ts < float(tail_start) - 2.0
