@@ -31,6 +31,10 @@ research/*
 !research/counterfactual_normalization.py
 !research/epoch_quarantine.py
 !research/shadow_outcome_reconstruction.py
+!research/conservative_fill_cohort.py
+!research/conservative_limit_fill.py
+!research/quantity_execution.py
+!research/venue_quantity_constraints.py
 
 # 4. Re-include deploy + Python dependency manifests.
 !requirements.txt

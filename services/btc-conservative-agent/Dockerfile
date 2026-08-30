@@ -38,6 +38,9 @@ RUN python -c "import research.analysis_eligibility, research.platform_relay_evi
 # V3 dual-write is on the Fly bot's critical evidence path. Fail the image
 # build if the whitelist omits any collector dependency.
 RUN python -c "import collector_v22, collector_v22_provisional, research_v3_contract, research_v3_store, research_v3_bridge"
+# Quantity-aware conservative paper evidence is part of both the runtime
+# collector and analyzer path. Fail the image build if the whitelist omits it.
+RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
