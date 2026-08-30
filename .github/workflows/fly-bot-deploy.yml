@@ -62,7 +62,7 @@ jobs:
           flyctl machine status --app doxed-btc-bot "$machine_id"
           flyctl logs --app doxed-btc-bot --no-tail
           flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
-            "grep -E 'fly-entrypoint.*bot (starting|exited)|WATCHDOG|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log | tail -n 300"
+            "sed -n '287200,287900p' /app/data/bot.log"
 
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
