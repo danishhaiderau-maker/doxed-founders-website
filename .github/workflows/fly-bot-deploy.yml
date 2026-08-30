@@ -32,6 +32,10 @@ on:
         description: Exact 12-character Fly revision permitted for recover-unready
         required: false
         type: string
+      recovery_failed_run_id:
+        description: Failed deploy run that proves the exact unready revision reached Fly
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -139,28 +143,33 @@ jobs:
           REQUIRE_CANONICAL_FLY_OWNER: "NO"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
           EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+          RECOVERY_FAILED_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
         run: |
           python - <<'PY'
-          import json, os, time, urllib.request
+          import json, os, urllib.request
           expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
+          run_id = str(os.environ.get("RECOVERY_FAILED_RUN_ID") or "").strip()
           if len(expected) != 12:
               raise SystemExit("recover-unready requires an exact 12-character revision")
-          payload = None
-          last = None
-          for _ in range(10):
-              try:
-                  with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=8) as response:
-                      payload = json.load(response)
-                  break
-              except Exception as exc:
-                  last = exc
-                  time.sleep(2)
-          if payload is None:
-              raise SystemExit(f"unready recovery health proof unavailable: {last}")
-          observed = str(payload.get("source_git_rev") or "")[:12]
-          if observed != expected or payload.get("boot") != "starting":
-              raise SystemExit(f"recovery target mismatch: expected={expected} observed={observed} boot={payload.get('boot')}")
-          print(f"Exact unready recovery target proven: {observed}")
+          if not run_id.isdigit():
+              raise SystemExit("recover-unready requires the failed deployment run id")
+          base = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions"
+          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
+          def fetch(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+                  return json.load(response)
+          run = fetch(f"{base}/runs/{run_id}")
+          if str(run.get("head_sha") or "")[:12] != expected or run.get("conclusion") != "failure":
+              raise SystemExit("recovery run does not bind the expected failed revision")
+          jobs = fetch(f"{base}/runs/{run_id}/jobs?per_page=100").get("jobs") or []
+          steps = [step for job in jobs for step in (job.get("steps") or [])]
+          deployed = any(step.get("name") == "Deploy the exact source revision" and step.get("conclusion") == "success" for step in steps)
+          failed_liveness = any(step.get("name") == "Prove liveness, execution safety, and exact revision" and step.get("conclusion") == "failure" for step in steps)
+          if not deployed or not failed_liveness:
+              raise SystemExit("recovery run lacks successful deploy plus failed post-deploy liveness proof")
+          print(f"Exact unready recovery target proven by Actions run {run_id}: {expected}")
           PY
           node scripts/check-relay-flat.mjs
 
