@@ -62,6 +62,8 @@ jobs:
           flyctl machine status --app doxed-btc-bot "$machine_id"
           flyctl logs --app doxed-btc-bot --no-tail
           flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "sh -lc 'echo ===PROCESS_MEMORY===; ps -eo pid,ppid,rss,vsz,etime,comm,args --sort=-rss | head -n 20; echo ===RECENT_BOT_LOG===; tail -n 2500 /app/data/bot.log'"
+          flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "grep -nE 'fly-entrypoint.*bot (starting|exited)|WATCHDOG.*(failed|exiting|stale)|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log"
 
   restart-only:
