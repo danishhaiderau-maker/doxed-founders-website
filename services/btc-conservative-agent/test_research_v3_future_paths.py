@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from research_v3_future_paths import _contained, mature_future_market_paths
+from research_v3_future_paths import _bounded_tape_tail, _contained, mature_future_market_paths
 from research_v3_store import V3EvidenceStore
 
 
@@ -130,3 +130,38 @@ def test_orphan_decision_is_explicit_unknown_not_silently_dropped(tmp_path):
     terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "UNKNOWN"]
     assert terminal[0]["decision_id"] == "decision:orphan"
     assert terminal[0]["unknown_reason"] == "OPPORTUNITY_IDENTITY_MISSING"
+
+
+def test_runtime_tape_read_is_strictly_byte_bounded_and_aligned(tmp_path):
+    tape = tmp_path / "market_microstructure_1s.jsonl"
+    old = json.dumps({"bucket_ts": 1, "last": 10, "bid": 9, "ask": 11}) + "\n"
+    recent = [
+        json.dumps({"bucket_ts": 100 + value, "last": 20, "bid": 19, "ask": 21}) + "\n"
+        for value in range(3)
+    ]
+    tape.write_text(old * 1000 + "".join(recent), encoding="utf-8")
+    budget = sum(len(row.encode("utf-8")) for row in recent) + 8
+    rows, receipt = _bounded_tape_tail(tape, max_bytes=budget)
+    assert receipt["truncated_to_recent_tail"] is True
+    assert receipt["bytes_read"] <= budget
+    assert [row["ts"] for row in rows] == [100.0, 101.0, 102.0]
+    assert all(row["ts"] != 1 for row in rows)
+
+
+def test_old_interval_outside_runtime_tail_is_unknown_with_exact_reason(tmp_path):
+    _seed(tmp_path, outcomes=("REJECTED",))
+    _write_tape(tmp_path)
+    tape = tmp_path / "market_microstructure_1s.jsonl"
+    with tape.open("a", encoding="utf-8") as handle:
+        for offset in range(8000, 8010):
+            handle.write(json.dumps({
+                "bucket_ts": SIGNAL_TS + offset, "last": 80_000,
+                "bid": 79_999, "ask": 80_001, "bid_qty": 1, "ask_qty": 1,
+            }) + "\n")
+    result = mature_future_market_paths(
+        data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 9000,
+        max_batch=8, max_tape_read_bytes=1600,
+    )
+    assert result["bounded_tape_read"]["bytes_read"] <= 1600
+    terminal = [row for row in _market_rows(tmp_path) if row["future_path_status"] == "UNKNOWN"]
+    assert terminal[0]["unknown_reason"] == "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"

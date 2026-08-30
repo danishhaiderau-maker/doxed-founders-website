@@ -25,6 +25,7 @@ DEFAULT_REQUIRED_HORIZONS_SEC = (60, 300, 900, 1800, 3600, 7200)
 DEFAULT_MAX_BATCH = 8
 MATURATION_SETTLE_SEC = 30
 SOURCE_TAPE_FILE = "market_microstructure_1s.jsonl"
+MAX_TAPE_READ_BYTES = 16 * 1024 * 1024
 
 
 def _timestamp(value: Any) -> float | None:
@@ -86,6 +87,50 @@ def _market_row(raw: Mapping[str, Any]) -> dict[str, Any] | None:
     row["ts"] = ts
     row["price"] = price
     return row
+
+
+def _bounded_tape_tail(path: Path, *, max_bytes: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read only a fixed recent tail, aligned to complete JSONL records.
+
+    The production tape is append-only and chronological.  Reading it from
+    byte zero every five minutes is unbounded CPU/disk work on the single VM.
+    A tail read keeps runtime evidence maturation independent of total history;
+    older intervals remain explicitly UNKNOWN for offline/canonical backfill.
+    """
+    size = path.stat().st_size
+    budget = max(1, int(max_bytes))
+    start_offset = max(0, size - budget)
+    rows: list[dict[str, Any]] = []
+    parse_errors = 0
+    bytes_read = 0
+    with path.open("rb") as handle:
+        handle.seek(start_offset)
+        if start_offset:
+            handle.readline()  # discard the leading partial JSONL record
+        aligned_offset = handle.tell()
+        for raw_line in handle:
+            bytes_read += len(raw_line)
+            try:
+                raw = json.loads(raw_line.decode("utf-8-sig"))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                parse_errors += 1
+                continue
+            if not isinstance(raw, Mapping):
+                continue
+            row = _market_row(raw)
+            if row is not None:
+                rows.append(row)
+    return rows, {
+        "schema": "bounded_tape_tail_read_v1",
+        "file_size_bytes": size,
+        "max_read_bytes": budget,
+        "start_offset": aligned_offset,
+        "bytes_read": bytes_read,
+        "truncated_to_recent_tail": aligned_offset > 0,
+        "parse_errors": parse_errors,
+        "observed_start_ts": rows[0]["ts"] if rows else None,
+        "observed_end_ts": rows[-1]["ts"] if rows else None,
+    }
 
 
 def _coverage(rows: list[dict[str, Any]], start_ts: float, end_ts: float) -> dict[str, Any]:
@@ -243,6 +288,7 @@ def mature_future_market_paths(
     *, data_dir: str | Path, epoch_id: str, now_ts: float,
     required_horizons_sec: Iterable[int] = DEFAULT_REQUIRED_HORIZONS_SEC,
     max_batch: int = DEFAULT_MAX_BATCH,
+    max_tape_read_bytes: int = MAX_TAPE_READ_BYTES,
 ) -> dict[str, Any]:
     """Mature a bounded batch; absent evidence remains PENDING/UNKNOWN."""
     root = Path(data_dir).resolve()
@@ -299,27 +345,31 @@ def mature_future_market_paths(
     }
     source_exists = tape.is_file()
     parse_errors = 0
+    tail_read = {
+        "schema": "bounded_tape_tail_read_v1",
+        "file_size_bytes": 0,
+        "max_read_bytes": int(max_tape_read_bytes),
+        "start_offset": 0,
+        "bytes_read": 0,
+        "truncated_to_recent_tail": False,
+        "parse_errors": 0,
+        "observed_start_ts": None,
+        "observed_end_ts": None,
+    }
     if source_exists and windows:
         lower = min(start for start, _ in windows.values())
         upper = max(end for _, end in windows.values())
-        with tape.open("r", encoding="utf-8-sig") as handle:
-            for line in handle:
-                try:
-                    raw = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    parse_errors += 1
-                    continue
-                if not isinstance(raw, Mapping):
-                    continue
-                row = _market_row(raw)
-                if row is None:
-                    continue
-                ts = float(row["ts"])
-                if ts < lower or ts > upper:
-                    continue
-                for key, (start, end) in windows.items():
-                    if start <= ts <= end:
-                        selected_rows[key][ts] = row
+        tape_rows, tail_read = _bounded_tape_tail(
+            tape, max_bytes=max_tape_read_bytes,
+        )
+        parse_errors = int(tail_read["parse_errors"])
+        for row in tape_rows:
+            ts = float(row["ts"])
+            if ts < lower or ts > upper:
+                continue
+            for key, (start, end) in windows.items():
+                if start <= ts <= end:
+                    selected_rows[key][ts] = row
     complete = unknown = 0
     writes: list[dict[str, Any]] = []
     for item in identity_unknown[:batch_size]:
@@ -358,7 +408,14 @@ def mature_future_market_paths(
             )
             complete += 1
         else:
-            reason = "SOURCE_TAPE_MISSING" if not source_exists else "REQUESTED_HORIZON_INCOMPLETE"
+            tail_start = tail_read.get("observed_start_ts")
+            reason = (
+                "SOURCE_TAPE_MISSING" if not source_exists
+                else "SOURCE_INTERVAL_OUTSIDE_BOUNDED_TAIL"
+                if tail_read.get("truncated_to_recent_tail") and tail_start is not None
+                and start_ts < float(tail_start) - 2.0
+                else "REQUESTED_HORIZON_INCOMPLETE"
+            )
             unknown += 1
         suffix = segment_ref["sha256"] if segment_ref else "unknown"
         write = store.append("market_segment", {
@@ -378,6 +435,7 @@ def mature_future_market_paths(
             "decision_outcome": item["decision_outcome"],
             "segment_ref": segment_ref,
             "coverage": coverage,
+            "bounded_tape_read": tail_read,
             "evidence_only": True,
         })
         writes.append(write)
@@ -394,6 +452,7 @@ def mature_future_market_paths(
         "complete_count": complete,
         "unknown_count": unknown,
         "source_tape_present": source_exists,
+        "bounded_tape_read": tail_read,
         "request_writes": request_writes,
         "writes": writes,
     }

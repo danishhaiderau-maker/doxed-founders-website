@@ -32895,6 +32895,55 @@ def _relay_fidelity_trade_row(row: dict) -> dict:
     }
 
 
+def _relay_trade_enrichment_row_lite(row: dict) -> dict:
+    """Bounded scalar projection needed before post-lock evidence enrichment."""
+    if not isinstance(row, dict):
+        return {}
+    lite = _relay_trade_row_lite(row)
+    lite.update({
+        "status": row.get("status"),
+        "executed": row.get("executed"),
+        "filled": row.get("filled"),
+        "fill_price": row.get("fill_price") or row.get("entry"),
+        "source_fill_status": row.get("source_fill_status"),
+        "copy_fill_status": row.get("copy_fill_status"),
+        "actual_bitfinex_realized_pnl_usd": row.get("actual_bitfinex_realized_pnl_usd"),
+        "copy_disposition": row.get("copy_disposition"),
+        "block_reason": row.get("block_reason"),
+        "epoch_id": row.get("epoch_id"),
+        "source_epoch_id": row.get("source_epoch_id"),
+        "copy_session_id": row.get("copy_session_id"),
+        "showcase_session_epoch": row.get("showcase_session_epoch"),
+        "fill_origin": {
+            "classification": (row.get("fill_origin") or {}).get("classification")
+        } if isinstance(row.get("fill_origin"), dict) else None,
+    })
+    return lite
+
+
+def _snapshot_relay_trade_projections_locked(session_start: float) -> tuple[list, list, list]:
+    """Project bounded relay rows while holding ``trade_lock``.
+
+    Closed trade rows retain rich research dictionaries such as
+    ``entry_features``, ``entry_controls``, ``entry_indicators``, entry/exit
+    context and occasionally replay/path payloads. Deep-copying 512 of those
+    dictionaries held the money-state lock for minutes even though relay
+    presentation consumes only scalar identity/execution fields.
+    """
+    if session_start:
+        recent_source = [row for row in trades if _trade_row_in_session(row, session_start)]
+    else:
+        recent_source = trades
+    recent_source = recent_source[-_DASHBOARD_TRADES_MAX:]
+    relay_source = trades[-_RELAY_TRADES_MAP_MAX:]
+    fidelity_source = trades[-_RELAY_FIDELITY_TRADES_MAX:]
+    return (
+        [_relay_trade_enrichment_row_lite(row) for row in recent_source if isinstance(row, dict)],
+        [_relay_trade_row_lite(row) for row in relay_source if isinstance(row, dict)],
+        [_relay_fidelity_trade_row(row) for row in fidelity_source if isinstance(row, dict)],
+    )
+
+
 def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
     """Exact resting-limit state needed for copy, chase, and abandon checks."""
     if not isinstance(row, dict):
@@ -33131,10 +33180,12 @@ def _build_relay_execution_state_snapshot() -> dict:
     try:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
-        raw_recent_trades = _snapshot_trade_rows_locked(session_start)
-        relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
-        raw_fidelity_trades = copy.deepcopy(
-            trades[-_RELAY_FIDELITY_TRADES_MAX:]
+        (
+            raw_recent_trades,
+            relay_trades_copy,
+            raw_fidelity_trades,
+        ) = _snapshot_relay_trade_projections_locked(
+            session_start
         )
         session_trade_count, session_realized_pnl = (
             _session_trade_aggregates_locked(session_start)
