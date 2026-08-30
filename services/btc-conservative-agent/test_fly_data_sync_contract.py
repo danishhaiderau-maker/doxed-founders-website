@@ -2282,7 +2282,8 @@ def test_inventory_refresh_uses_standalone_nonce_bound_worker_contract():
 
 def test_sync_requires_current_inventory_and_targeted_refresh_never_walks_volume():
     assert '[string]$manifest.inventory_status -ne "CURRENT"' in SYNC_SCRIPT
-    assert '[string]$preflight.inventory_status -ne "CURRENT"' in SYNC_LOOP
+    assert '$expectedInventoryStatus = if ($IdentityOnly) { "IDENTITY_ONLY" } else { "CURRENT" }' in SYNC_LOOP
+    assert '[string]$preflight.inventory_status -ne $expectedInventoryStatus' in SYNC_LOOP
     assert '-Uri (New-DataSyncManifestUri -Path $rel)' in SYNC_SCRIPT
     assert '[string]$freshManifest.targeted_path -ne $rel' in SYNC_SCRIPT
     tree = ast.parse(BOT)

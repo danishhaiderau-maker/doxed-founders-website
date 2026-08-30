@@ -177,6 +177,18 @@ def test_default_cadence_is_bounded_to_180_seconds_and_cache_expires_first():
     assert ttl < 180
 
 
+def test_ordinary_poll_uses_identity_only_and_full_inventory_is_due_gated():
+    """A 180s poll must not restart the 150s Fly volume scan every cycle."""
+    source = LOOP_PATH.read_text(encoding="utf-8")
+    identity_call = source.index('/api/data-sync/manifest?identity_only=1')
+    due_gate = source.index('$needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision')
+    full_call = source.index('-ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")', due_gate)
+    assert identity_call < due_gate < full_call
+    assert 'reason = "identity_match_before_full_interval"' in source
+    assert 'growthBytes = $null' in source
+    assert 'currentTotalBytes = $null' in source
+
+
 def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
     source = LOOP_PATH.read_text(encoding="utf-8")
     start = source.index("function Get-FlySyncPreflightManifest")

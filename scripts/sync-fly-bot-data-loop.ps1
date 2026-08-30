@@ -255,7 +255,10 @@ $preflightInventoryWaitMaxSec = 120
 $relaySyncAttempts = 2
 
 function Get-FlySyncPreflightManifest {
-  param([Parameter(Mandatory = $true)][string]$ManifestUri)
+  param(
+    [Parameter(Mandatory = $true)][string]$ManifestUri,
+    [switch]$IdentityOnly
+  )
   $preflightHeaders = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
   $preflightWait = [System.Diagnostics.Stopwatch]::StartNew()
   for ($attempt = 1; $attempt -le $preflightManifestAttempts; $attempt++) {
@@ -265,10 +268,11 @@ function Get-FlySyncPreflightManifest {
         -Headers $preflightHeaders `
         -TimeoutSec $preflightManifestTimeoutSec `
         -ErrorAction Stop
-      if ([string]$preflight.inventory_status -ne "CURRENT") {
+      $expectedInventoryStatus = if ($IdentityOnly) { "IDENTITY_ONLY" } else { "CURRENT" }
+      if ([string]$preflight.inventory_status -ne $expectedInventoryStatus) {
         throw (
           "Fly data-sync inventory is not CURRENT " +
-          "(status=$([string]$preflight.inventory_status))."
+          "(status=$([string]$preflight.inventory_status), expected=$expectedInventoryStatus)."
         )
       }
       return $preflight
@@ -363,8 +367,15 @@ try {
     }
     try {
       $currentStage = "loop_manifest_preflight"
+      # Ordinary three-minute checks need only the cheap authority identity.
+      # A complete volume inventory is requested below only when a revision,
+      # fresh-collection signal, or the reviewed 30-minute interval makes an
+      # atomic mirror pass due.  This prevents the 180-second desktop poll
+      # from continuously restarting a metadata-heavy Fly-volume scan after
+      # its 150-second cache expires.
       $manifest = Get-FlySyncPreflightManifest `
-        -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")
+        -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest?identity_only=1") `
+        -IdentityOnly
       if ($manifest.PSObject.Properties.Name -contains "source_git_rev") {
         $observedSourceRevision = [string]$manifest.source_git_rev
         if (-not $observedSourceRevision) { $observedSourceRevision = $null }
@@ -416,22 +427,15 @@ try {
         $lastSyncedSourceRevision = $null
       }
 
-      $currentTotalBytes = [int64]0
-      if ($manifest.PSObject.Properties.Name -contains "total_bytes") {
-        $currentTotalBytes = [int64]$manifest.total_bytes
-      } else {
-        $currentTotalBytes = [int64](($manifest.files | Measure-Object -Property size -Sum).Sum)
-      }
-      $growthBytes = [Math]::Max([int64]0, $currentTotalBytes - $lastSyncedTotalBytes)
       $elapsedSec = ([datetime]::UtcNow - $lastSyncAt).TotalSeconds
       # Polling and mutation cadence are deliberately separate. A complete
       # 601-file Fly pass can take much longer than the three-minute poll
-      # cadence; forcing one on every poll starves the analyzer generation
-      # lease. Polls refresh parity/freshness, while a full pass is due only
-      # at the reviewed full-sync interval (or immediately on growth,
-      # revision, or fresh-collection changes).
+      # cadence; forcing one on every poll starves the Fly HTTP/control plane.
+      # Identity polls refresh revision/freshness, while a physical inventory
+      # is due only at the reviewed full-sync interval or immediately on a
+      # revision/fresh-collection change. Growth is measured during that
+      # bounded inventory, never by continuously walking the volume.
       $forceByTime = $elapsedSec -ge $fullSyncSec
-      $forceByGrowth = $growthBytes -ge $thresholdBytes
       $forceFresh = $currentSignal -gt $lastSeenSignal
       # A deployment can change schemas or files without adding 50 MB. The
       # remote revision is only an observation; it becomes the mirrored
@@ -440,6 +444,22 @@ try {
         -not $lastSyncedSourceRevision -or
         -not $observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)
       )
+
+      $needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision
+      $currentTotalBytes = $lastSyncedTotalBytes
+      $growthBytes = [int64]0
+      $forceByGrowth = $false
+      if ($needsFullInventory) {
+        $currentStage = "loop_full_manifest"
+        $manifest = Get-FlySyncPreflightManifest `
+          -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")
+        if ($manifest.PSObject.Properties.Name -contains "total_bytes") {
+          $currentTotalBytes = [int64]$manifest.total_bytes
+        } else {
+          $currentTotalBytes = [int64](($manifest.files | Measure-Object -Property size -Sum).Sum)
+        }
+        $growthBytes = [Math]::Max([int64]0, $currentTotalBytes - $lastSyncedTotalBytes)
+      }
 
       # Relay evidence is optional and may consume two 90-second bounded
       # attempts.  Never put it ahead of a required revision repair: first
@@ -486,11 +506,11 @@ try {
           syncedAt = (Get-Date).ToUniversalTime().ToString("o")
           source = $SourceUrl
           skipped = $true
-          reason = "below_threshold"
-          growthBytes = $growthBytes
+          reason = "identity_match_before_full_interval"
+          growthBytes = $null
           thresholdBytes = $thresholdBytes
           thresholdMb = $thresholdMb
-          currentTotalBytes = $currentTotalBytes
+          currentTotalBytes = $null
           lastSyncedTotalBytes = $lastSyncedTotalBytes
           elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
           sourceRevision = $lastSyncedSourceRevision
@@ -505,7 +525,7 @@ try {
         }
         $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
         Add-Content -LiteralPath $logFile -Value (
-          "$($heartbeat.syncedAt)`tSKIP`tgrowth=$([Math]::Round($growthBytes/1MB,2))MB < threshold=${thresholdMb}MB"
+          "$($heartbeat.syncedAt)`tSKIP`tidentity match; full inventory not due"
         )
         Start-Sleep -Seconds $pollSec
         continue

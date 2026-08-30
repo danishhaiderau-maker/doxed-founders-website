@@ -33442,11 +33442,11 @@ def api_relay_state(force_rebuild: bool = False):
         with trade_lock:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
-            relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
-            raw_fidelity_trades = copy.deepcopy(
-                trades[-_RELAY_FIDELITY_TRADES_MAX:]
-            )
-            raw_trades_for_relay = _snapshot_trade_rows_locked(session_start)
+            (
+                raw_trades_for_relay,
+                relay_trades_copy,
+                raw_fidelity_trades,
+            ) = _snapshot_relay_trade_projections_locked(session_start)
             bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
@@ -33739,8 +33739,35 @@ def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
     return copy.deepcopy(selected), total
 
 
+_DASHBOARD_TRADE_ENRICHMENT_CACHE_LOCK = threading.Lock()
+_DASHBOARD_TRADE_ENRICHMENT_CACHE_KEY = None
+_DASHBOARD_TRADE_ENRICHMENT_CACHE_VALUE = (None, {})
+
+
+def _dashboard_trade_enrichment_file_key(path=PLATFORM_RELAY_EVIDENCE_FILE):
+    """Return the immutable file identity used by the presentation cache."""
+    try:
+        stat = os.stat(path)
+        return (os.path.abspath(path), int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        return (os.path.abspath(path), None, None)
+
+
 def _load_dashboard_trade_enrichment():
-    """Load disk-backed relay evidence outside ``trade_lock``."""
+    """Load disk-backed relay evidence once per file revision.
+
+    The canonical execution snapshot refreshes several times per second. The
+    platform export changes far less often and is immutable for a given
+    ``(path, mtime_ns, size)`` identity. Re-reading it, deep-copying every
+    record, and hashing each grouped lifecycle on every refresh saturated the
+    single-vCPU runtime even after the money-state lock copy was made lite.
+    """
+    global _DASHBOARD_TRADE_ENRICHMENT_CACHE_KEY
+    global _DASHBOARD_TRADE_ENRICHMENT_CACHE_VALUE
+    cache_key = _dashboard_trade_enrichment_file_key()
+    with _DASHBOARD_TRADE_ENRICHMENT_CACHE_LOCK:
+        if cache_key == _DASHBOARD_TRADE_ENRICHMENT_CACHE_KEY:
+            return _DASHBOARD_TRADE_ENRICHMENT_CACHE_VALUE
     try:
         from research.dual_execution_truth import split_execution_truth
         from research.platform_relay_evidence import (
@@ -33750,7 +33777,11 @@ def _load_dashboard_trade_enrichment():
     except Exception:
         split_execution_truth = None
         index = {}
-    return split_execution_truth, index
+    value = (split_execution_truth, index)
+    with _DASHBOARD_TRADE_ENRICHMENT_CACHE_LOCK:
+        _DASHBOARD_TRADE_ENRICHMENT_CACHE_KEY = cache_key
+        _DASHBOARD_TRADE_ENRICHMENT_CACHE_VALUE = value
+    return value
 
 
 def _enrich_dashboard_trade_rows(
