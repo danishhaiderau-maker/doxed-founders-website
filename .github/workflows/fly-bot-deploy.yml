@@ -28,6 +28,7 @@ on:
           - deploy
           - recover-unready
           - restart-only
+          - inspect-runtime
       expected_unready_revision:
         description: Exact 12-character Fly revision permitted for recover-unready
         required: false
@@ -45,6 +46,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  inspect-runtime:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Capture current machine status and recent logs without mutation
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl status --app doxed-btc-bot
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          flyctl machine status --app doxed-btc-bot "$machine_id"
+          flyctl logs --app doxed-btc-bot --no-tail
+
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
     runs-on: ubuntu-latest
