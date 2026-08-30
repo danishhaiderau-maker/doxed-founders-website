@@ -148,6 +148,52 @@ def _recognized_status_only_segment(row: Mapping[str, Any]) -> bool:
     )
 
 
+def authoritative_future_path_segments(
+    v3_root: Path, rows: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select the latest valid future-path state per owner; retain history counts.
+
+    Ledgers remain append-only.  A recovery record can supersede an earlier
+    UNKNOWN without making that history disappear from the audit metadata.
+    """
+    material = list(rows)
+    ordinary: list[dict[str, Any]] = []
+    histories: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in material:
+        if segment_role(row) != ALL_OPPORTUNITY_FUTURE_ROLE:
+            ordinary.append(row)
+            continue
+        owner = str(row.get("future_path_owner_key") or "")
+        if not owner:
+            ordinary.append(row)
+            continue
+        histories[owner].append(row)
+    selected: list[dict[str, Any]] = []
+    selected_ids: list[str] = []
+    invalid_newer_ids: list[str] = []
+    for owner in sorted(histories):
+        history = histories[owner]
+        chosen = None
+        for candidate in reversed(history):
+            if _recognized_status_only_segment(candidate):
+                chosen = candidate
+                break
+            _digest, errors = _verify_segment(v3_root, candidate)
+            if not errors:
+                chosen = candidate
+                break
+            invalid_newer_ids.append(str(candidate.get("record_id") or ""))
+        if chosen is not None:
+            selected.append(chosen)
+            selected_ids.append(str(chosen.get("record_id") or ""))
+    return ordinary + selected, {
+        "future_path_history_count": sum(len(value) for value in histories.values()),
+        "future_path_owner_count": len(histories),
+        "selected_future_path_record_ids": sorted(selected_ids),
+        "invalid_newer_future_path_record_ids": sorted(filter(None, invalid_newer_ids)),
+    }
+
+
 def _schedule_hash(row: Mapping[str, Any]) -> str | None:
     schedule = row.get("chase_schedule")
     if not isinstance(schedule, Mapping) or not schedule:
@@ -214,7 +260,10 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
         tape_ids: set[str] = set()
         roles: set[str] = set()
         conservative_roles: set[str] = set()
-        for segment in segments.get(key, []):
+        selected_segments, future_history = authoritative_future_path_segments(
+            root, segments.get(key, []),
+        )
+        for segment in selected_segments:
             # Request/PENDING/UNKNOWN rows declare the denominator and the
             # missing-evidence state. They intentionally have no object ref
             # and must not be misclassified as a malformed SHA. A row that
@@ -291,6 +340,7 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
             "coverage_status": "EXACTLY_BOUND" if not reasons else "UNKNOWN_UNVERIFIABLE",
             "unknown_reason_codes": sorted(reasons),
             "conservative_outcome": None,
+            **future_history,
         })
     bindings.sort(key=lambda row: tuple(str(row.get(field) or "") for field in (
         "epoch_id", "opportunity_id", "episode_id", "policy_signature", "event_id"
