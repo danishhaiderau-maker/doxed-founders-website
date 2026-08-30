@@ -1485,7 +1485,7 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert "and not is_authenticated_data_sync" in BOT
     assert "@app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])" in BOT
     assert "def _validate_platform_relay_evidence_payload" in BOT
-    assert "os.replace(temp, destination)" in BOT
+    assert "os.replace(staged, destination)" in BOT
 
 
 def test_local_mirror_download_is_validated_then_atomically_published():

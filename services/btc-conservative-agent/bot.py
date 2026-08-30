@@ -37949,10 +37949,91 @@ def api_data_sync_ack():
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
+_PLATFORM_RELAY_EVIDENCE_WORKER_TIMEOUT_SEC = max(
+    1.0, float(os.getenv("PLATFORM_RELAY_EVIDENCE_WORKER_TIMEOUT_SEC", "90"))
+)
+_PLATFORM_RELAY_EVIDENCE_WORKER_REQUEST_SCHEMA = "platform_relay_evidence_worker_request_v1"
+_PLATFORM_RELAY_EVIDENCE_WORKER_RESULT_SCHEMA = "platform_relay_evidence_worker_result_v1"
 
 
 def _validate_platform_relay_evidence_payload(payload: dict) -> tuple[bool, str]:
     return _pure_validate_platform_relay_evidence_payload(payload)
+
+
+def _validate_platform_relay_evidence_in_worker(staged: Path, digest: str, size: int) -> dict:
+    """Validate a staged upload without holding the trading interpreter's GIL."""
+    nonce = uuid.uuid4().hex
+    work_root = _data_sync_inventory_work_root()
+    request_path = work_root / f"relay-request-{nonce}.json"
+    result_path = work_root / f"relay-result-{nonce}.json"
+    worker_input = work_root / f"relay-input-{nonce}.json"
+    keep_worker_input = False
+    launched_unix = time.time()
+    if staged.resolve(strict=True).parent != work_root.resolve(strict=True):
+        raise ValueError("relay evidence staging escaped confined work root")
+    os.replace(staged, worker_input)
+    request_payload = {
+        "schema": _PLATFORM_RELAY_EVIDENCE_WORKER_REQUEST_SCHEMA,
+        "nonce": nonce,
+        "input_path": str(worker_input),
+        "expected_sha256": digest,
+        "expected_size": int(size),
+        "launched_unix": launched_unix,
+    }
+    request_tmp = request_path.with_name(f"{request_path.name}.tmp")
+    request_tmp.write_text(json.dumps(request_payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    os.replace(request_tmp, request_path)
+    worker_env = {
+        key: os.environ[key]
+        for key in ("SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "PATH", "LANG", "LC_ALL")
+        if key in os.environ
+    }
+    worker_env.update({
+        "PYTHONNOUSERSITE": "1", "PYTHONHASHSEED": "0",
+        "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+    })
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().with_name("platform_relay_evidence_worker.py")),
+             "--request", str(request_path), "--result", str(result_path), "--nonce", nonce],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=_PLATFORM_RELAY_EVIDENCE_WORKER_TIMEOUT_SEC, check=False, env=worker_env,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("relay evidence validator subprocess failed")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        if not (
+            result.get("schema") == _PLATFORM_RELAY_EVIDENCE_WORKER_RESULT_SCHEMA
+            and hmac.compare_digest(str(result.get("nonce") or ""), nonce)
+            and hmac.compare_digest(str(result.get("request_sha256") or ""), digest)
+            and hmac.compare_digest(str(result.get("input_sha256") or ""), digest)
+            and int(result.get("input_size") or -1) == int(size)
+            and float(result.get("generated_unix") or 0.0) >= launched_unix
+            and isinstance(result.get("valid"), bool)
+        ):
+            raise RuntimeError("relay evidence validator result validation failed")
+        if result["valid"] and not (
+            result.get("error_code") == "OK"
+            and result.get("payload_schema") == "relay_lifecycle_evidence_v1"
+            and isinstance(result.get("records"), int)
+            and result["records"] >= 0
+            and bool(result.get("generating_revision"))
+        ):
+            raise RuntimeError("relay evidence validator success metadata invalid")
+        result["staged_path"] = worker_input
+        keep_worker_input = True
+        return result
+    finally:
+        for transient in (
+            request_path, result_path, request_tmp,
+            None if keep_worker_input else worker_input,
+        ):
+            if transient is None:
+                continue
+            try:
+                transient.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])
@@ -37963,36 +38044,41 @@ def api_data_sync_platform_relay_evidence():
     raw = request.get_data(cache=False)
     if not raw or len(raw) > _PLATFORM_RELAY_EVIDENCE_MAX_BYTES:
         return jsonify({"ok": False, "errorCode": "SIZE_INVALID"}), 413
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return jsonify({"ok": False, "errorCode": "JSON_INVALID"}), 400
-    valid, code = _validate_platform_relay_evidence_payload(payload)
-    if not valid:
-        return jsonify({"ok": False, "errorCode": code}), 400
     destination = Path(PLATFORM_RELAY_EVIDENCE_FILE)
     if not destination.is_absolute():
         destination = _data_sync_volume_root() / destination.name
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temp = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
     digest = hashlib.sha256(raw).hexdigest()
+    work_root = _data_sync_inventory_work_root()
+    temp = work_root / f"relay-input-stage-{uuid.uuid4().hex}.json"
+    staged = None
     try:
         with temp.open("wb") as handle:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp, destination)
+        result = _validate_platform_relay_evidence_in_worker(temp, digest, len(raw))
+        staged = Path(result["staged_path"])
+        if not result["valid"]:
+            return jsonify({"ok": False, "errorCode": result["error_code"]}), 400
+        os.replace(staged, destination)
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "errorCode": "VALIDATION_TIMEOUT"}), 503
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+        return jsonify({"ok": False, "errorCode": "VALIDATION_FAILED"}), 500
     finally:
-        try:
-            temp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for transient in (temp, staged):
+            if transient is not None:
+                try:
+                    transient.unlink(missing_ok=True)
+                except OSError:
+                    pass
     return jsonify({
         "ok": True,
-        "schema": payload["schema"],
+        "schema": result["payload_schema"],
         "sha256": digest,
-        "records": len(payload["records"]),
-        "generatingRevision": payload["generatingRevision"],
+        "records": result["records"],
+        "generatingRevision": result["generating_revision"],
     })
 
 

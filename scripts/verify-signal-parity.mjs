@@ -19,6 +19,8 @@ const singletonAgent = join(root, 'services/btc-conservative-agent/process_singl
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
 const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
+const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
+const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
@@ -87,6 +89,18 @@ if (inventoryWorkerAgentHash !== inventoryWorkerEngineHash) {
   );
 }
 console.log(`OK  data-sync inventory worker matches (${inventoryWorkerAgentHash})`);
+
+if (!existsSync(relayEvidenceWorkerAgent) || !existsSync(relayEvidenceWorkerEngine)) {
+  fail('Missing isolated relay-evidence validation worker in canonical bot or signal engine');
+}
+const relayEvidenceWorkerAgentHash = sha256(relayEvidenceWorkerAgent);
+const relayEvidenceWorkerEngineHash = sha256(relayEvidenceWorkerEngine);
+if (relayEvidenceWorkerAgentHash !== relayEvidenceWorkerEngineHash) {
+  fail(
+    `relay-evidence validation worker (${relayEvidenceWorkerAgentHash}) !== signal-engine copy (${relayEvidenceWorkerEngineHash})`,
+  );
+}
+console.log(`OK  relay-evidence validation worker matches (${relayEvidenceWorkerAgentHash})`);
 
 if (existsSync(manifestPath)) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

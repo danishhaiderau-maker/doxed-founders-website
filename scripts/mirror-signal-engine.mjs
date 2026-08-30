@@ -18,6 +18,8 @@ const singletonAgent = join(root, 'services/btc-conservative-agent/process_singl
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
 const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
+const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
+const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
 const engineDir = join(root, 'services/btc-signal-engine');
@@ -73,6 +75,12 @@ if (!existsSync(inventoryWorkerAgent)) {
 }
 copyFileSync(inventoryWorkerAgent, inventoryWorkerEngine);
 console.log(`Mirrored data-sync inventory worker (${sha256(readFileSync(inventoryWorkerAgent, 'utf8'))})`);
+
+if (!existsSync(relayEvidenceWorkerAgent)) {
+  throw new Error('Missing canonical platform_relay_evidence_worker.py');
+}
+copyFileSync(relayEvidenceWorkerAgent, relayEvidenceWorkerEngine);
+console.log(`Mirrored relay-evidence validation worker (${sha256(readFileSync(relayEvidenceWorkerAgent, 'utf8'))})`);
 
 // Registry-owned policy dependencies are part of the executable mirror. Copy
 // only the active family modules plus their common implementation and remove
