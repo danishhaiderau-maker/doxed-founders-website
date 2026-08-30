@@ -25365,8 +25365,62 @@ def _analyzer_view_authed() -> bool:
     return bool(expected and presented and hmac.compare_digest(presented, expected))
 
 
+_dashboard_handler_lock = threading.Lock()
+_dashboard_active_handlers = {}
+_DASHBOARD_TELEMETRY_STATIC_ROUTES = frozenset({
+    "/api/data-sync/manifest", "/api/data-sync/sqlite-snapshot",
+    "/api/data-sync/file", "/api/data-sync/ack",
+    "/api/data-sync/analyzer-report", "/api/data-sync/platform-relay-evidence",
+    "/api/ping", "/api/pause", "/api/resume", "/health", "/ready",
+    "/api/ready", "/api/status", "/status", "/api/relay-state",
+    "/api/relay-execution-state",
+})
+
+
+def _dashboard_routed_label():
+    """Return a fixed, query-free label after Flask has matched the route."""
+    rule = getattr(getattr(request, "url_rule", None), "rule", None)
+    if rule in _DASHBOARD_TELEMETRY_STATIC_ROUTES:
+        return rule
+    if not rule:
+        return "UNMATCHED"
+    if "<" in str(rule):
+        return "DYNAMIC_ROUTE"
+    return "API_OTHER" if str(rule).startswith("/api/") else "PAGE_OTHER"
+
+
+def _dashboard_handler_update_routed_label():
+    ident = threading.get_ident()
+    with _dashboard_handler_lock:
+        active = _dashboard_active_handlers.get(ident)
+        if active is not None:
+            active["routed_label"] = _dashboard_routed_label()
+
+
+def _dashboard_handler_snapshot(now=None):
+    """Return bounded handler counts/ages without request or client data."""
+    now = float(now if now is not None else time.monotonic())
+    with _dashboard_handler_lock:
+        rows = [dict(row) for row in _dashboard_active_handlers.values()]
+    by_cap = {}
+    for row in rows[:32]:
+        cap = str(row.get("cap_name") or "unclassified")[:24]
+        age_ms = int(max(0.0, now - float(row.get("started") or now)) * 1000)
+        bucket = by_cap.setdefault(cap, {"active": 0, "oldest_ms": 0, "routes": {}})
+        bucket["active"] += 1
+        bucket["oldest_ms"] = max(bucket["oldest_ms"], age_ms)
+        route = str(row.get("routed_label") or row.get("pre_label") or "UNCLASSIFIED")
+        if route not in _DASHBOARD_TELEMETRY_STATIC_ROUTES and route not in {
+            "GENERAL", "UNCLASSIFIED", "UNMATCHED", "DYNAMIC_ROUTE", "API_OTHER", "PAGE_OTHER"
+        }:
+            route = "UNCLASSIFIED"
+        bucket["routes"][route] = bucket["routes"].get(route, 0) + 1
+    return {"active_total": len(rows[:32]), "by_cap": by_cap}
+
+
 @app.before_request
 def _emergency_api_guard():
+    _dashboard_handler_update_routed_label()
     path = request.path or ""
     method = (request.method or "GET").upper()
 
@@ -27765,7 +27819,86 @@ def safe_thread(fn):
                 time.sleep(2)
     return wrapper
 
-def dump_system_state():
+def _watchdog_crash_context(progress=None, incident=None, *, trigger="UNSPECIFIED", restart_allowed=False):
+    """Return a bounded, secret-free watchdog receipt from existing snapshots."""
+    def bounded_stack(value):
+        frames = []
+        for raw in list(value or [])[-12:]:
+            parts = str(raw).rsplit(":", 2)
+            if len(parts) != 3:
+                continue
+            filename, line, function = parts
+            frames.append(f"{Path(filename).name}:{line}:{function}")
+        return frames
+
+    def bounded_reasons(value):
+        return [str(item)[:96] for item in list(value or [])[:16]]
+
+    progress = progress if isinstance(progress, dict) else {}
+    incident = incident if isinstance(incident, dict) else {}
+    cycle = progress.get("scheduled_ai_cycle")
+    cycle = cycle if isinstance(cycle, dict) else {}
+    lock = progress.get("trade_lock_diagnostics")
+    lock = lock if isinstance(lock, dict) else {}
+    context = {
+        "schema": "watchdog_crash_context_v1",
+        "trigger": str(trigger)[:64],
+        "restart_allowed": bool(restart_allowed),
+        "exit_code": 75 if restart_allowed else None,
+        "source_revision": str(SOURCE_GIT_REV or ""),
+        "bot_instance_id": str(BOT_INSTANCE_ID or ""),
+        "incident": {
+            "active": bool(incident.get("active")),
+            "age_sec": incident.get("age_sec"),
+            "reasons": bounded_reasons(incident.get("reasons")),
+            "consecutive_failures": incident.get("consecutive_failures"),
+            "consecutive_successes": incident.get("consecutive_successes"),
+        },
+        "progress": {
+            "ok": progress.get("ok"),
+            "reasons": bounded_reasons(progress.get("reasons")),
+            "recovery_probe_ok": progress.get("recovery_probe_ok"),
+            "force_paper_mode": _force_paper_mode_active(),
+            "live_armed": progress.get("live_armed"),
+            "open_positions": progress.get("open_positions"),
+            "pending_orders": progress.get("pending_orders"),
+            "ai_expected": progress.get("ai_expected"),
+            "ai_age_sec": progress.get("ai_age_sec"),
+            "ai_stale_after_sec": progress.get("ai_stale_after_sec"),
+            "evaluation_age_sec": progress.get("evaluation_age_sec"),
+            "evaluation_progressing": progress.get("evaluation_progressing"),
+            "ai_stall_latched": progress.get("ai_stall_latched"),
+            "ws_age_sec": progress.get("ws_age_sec"),
+            "ws_heartbeat_age_sec": progress.get("ws_heartbeat_age_sec"),
+            "ws_progressing": progress.get("ws_progressing"),
+            "trade_lock_available": progress.get("trade_lock_available"),
+            "trade_lock_busy_transient": progress.get("trade_lock_busy_transient"),
+            "trade_lock_progressing": progress.get("trade_lock_progressing"),
+        },
+        "scheduled_ai_cycle": {
+            key: cycle.get(key)
+            for key in (
+                "stage", "stage_age_sec", "cycle_age_sec", "watchdog_bound_sec",
+                "within_watchdog_bound", "owner", "owner_active",
+            )
+            if key in cycle
+        },
+        "trade_lock": {
+            key: lock.get(key)
+            for key in (
+                "owner_thread", "owner_active", "held_seconds", "depth",
+                "acquire_sequence", "timeout_count", "owner_transition_age_sec",
+            )
+            if key in lock
+        },
+        "http_handlers": _dashboard_handler_snapshot(),
+    }
+    context["scheduled_ai_cycle"]["stack_tail"] = bounded_stack(cycle.get("stack_tail"))
+    context["trade_lock"]["stack_tail"] = bounded_stack(lock.get("stack_tail"))
+    return context
+
+
+def dump_system_state(*, trigger="UNSPECIFIED", progress=None, incident=None, restart_allowed=False):
     try:
         price_ts = state.get("price_ts")
         snapshot = {
@@ -27786,6 +27919,13 @@ def dump_system_state():
             "ws_age": (time.time() - price_ts) if price_ts else None,
             "candles": len(latest_candles)
         }
+        if progress is not None or incident is not None or trigger != "UNSPECIFIED":
+            snapshot["watchdog"] = _watchdog_crash_context(
+                progress,
+                incident,
+                trigger=trigger,
+                restart_allowed=restart_allowed,
+            )
         with open("crash_dump.json", "a") as f:
             f.write(json.dumps(snapshot) + "\n")
         logger.critical("[CRASH DUMP] Written to crash_dump.json")
@@ -28162,7 +28302,11 @@ def watchdog_loop():
                 # storm while a position-bearing paper process awaits repair.
                 now = time.time()
                 if now - last_progress_dump_ts >= 300.0:
-                    dump_system_state()
+                    dump_system_state(
+                        trigger="STRATEGY_PROGRESS_INCIDENT",
+                        progress=progress,
+                        incident=incident,
+                    )
                     dump_threads()
                     last_progress_dump_ts = now
                 # A paper-only, disarmed, position-flat process may be restarted
@@ -28174,6 +28318,12 @@ def watchdog_loop():
                     and progress["open_positions"] == 0
                     and progress["pending_orders"] == 0
                 ):
+                    dump_system_state(
+                        trigger="STRATEGY_PROGRESS_EXIT_75",
+                        progress=progress,
+                        incident=incident,
+                        restart_allowed=True,
+                    )
                     logger.critical(
                         "[WATCHDOG] paper strategy stalled while flat; exiting 75 "
                         "for supervisor recovery"
@@ -42743,9 +42893,18 @@ def _create_dashboard_server():
                     else self._client_io_timeout_sec
                 )
                 handler_started = time.monotonic()
+                with _dashboard_handler_lock:
+                    _dashboard_active_handlers[threading.get_ident()] = {
+                        "started": handler_started,
+                        "cap_name": cap_name,
+                        "pre_label": path_label,
+                        "routed_label": None,
+                    }
                 self.process_request_thread(request, client_address)
             finally:
                 finished = time.monotonic()
+                with _dashboard_handler_lock:
+                    _dashboard_active_handlers.pop(threading.get_ident(), None)
                 if handler_started is not None:
                     self._bounded_request_log(
                         event="completed",
