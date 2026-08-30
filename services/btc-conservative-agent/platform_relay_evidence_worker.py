@@ -8,7 +8,7 @@ import os
 import time
 from pathlib import Path
 
-from research.platform_relay_evidence import _validate_platform_relay_evidence_payload
+from platform_relay_streaming import validate_streaming
 
 
 REQUEST_SCHEMA = "platform_relay_evidence_worker_request_v1"
@@ -51,6 +51,12 @@ def main() -> int:
     try:
         if hasattr(os, "nice"):
             os.nice(10)
+        try:
+            import resource
+            resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_CPU, (60, 60))
+        except (ImportError, OSError, ValueError):
+            pass
         request_path = Path(args.request)
         result_path = Path(args.result)
         request = _load_request(request_path, result_path, args.nonce)
@@ -61,11 +67,9 @@ def main() -> int:
             valid, code, payload = False, "INPUT_INTEGRITY_INVALID", None
         else:
             try:
-                payload = json.loads(input_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                valid, code, payload = validate_streaming(input_path)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
                 valid, code, payload = False, "JSON_INVALID", None
-            else:
-                valid, code = _validate_platform_relay_evidence_payload(payload)
         result = {
             "schema": RESULT_SCHEMA,
             "nonce": args.nonce,
@@ -76,7 +80,7 @@ def main() -> int:
             "valid": bool(valid),
             "error_code": str(code),
             "payload_schema": payload.get("schema") if isinstance(payload, dict) else None,
-            "records": len(payload.get("records") or []) if isinstance(payload, dict) else None,
+            "records": payload.get("records") if isinstance(payload, dict) else None,
             "generating_revision": payload.get("generatingRevision") if isinstance(payload, dict) else None,
         }
         temporary = result_path.with_name(f"{result_path.name}.{os.getpid()}.tmp")

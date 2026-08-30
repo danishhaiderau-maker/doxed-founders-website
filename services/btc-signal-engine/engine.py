@@ -38041,23 +38041,35 @@ def api_data_sync_platform_relay_evidence():
     """Install a validated Neon/Bitfinex evidence snapshot for the bot's
     append-derived counterfactual join. The data-sync namespace is protected by
     the strict admin-token middleware; no trading state is mutated here."""
-    raw = request.get_data(cache=False)
-    if not raw or len(raw) > _PLATFORM_RELAY_EVIDENCE_MAX_BYTES:
+    declared_size = request.content_length
+    if declared_size is not None and (declared_size <= 0 or declared_size > _PLATFORM_RELAY_EVIDENCE_MAX_BYTES):
         return jsonify({"ok": False, "errorCode": "SIZE_INVALID"}), 413
     destination = Path(PLATFORM_RELAY_EVIDENCE_FILE)
     if not destination.is_absolute():
         destination = _data_sync_volume_root() / destination.name
     destination.parent.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(raw).hexdigest()
+    digest_builder = hashlib.sha256()
+    received_size = 0
     work_root = _data_sync_inventory_work_root()
     temp = work_root / f"relay-input-stage-{uuid.uuid4().hex}.json"
     staged = None
     try:
         with temp.open("wb") as handle:
-            handle.write(raw)
+            while True:
+                block = request.stream.read(1024 * 1024)
+                if not block:
+                    break
+                received_size += len(block)
+                if received_size > _PLATFORM_RELAY_EVIDENCE_MAX_BYTES:
+                    return jsonify({"ok": False, "errorCode": "SIZE_INVALID"}), 413
+                digest_builder.update(block)
+                handle.write(block)
             handle.flush()
             os.fsync(handle.fileno())
-        result = _validate_platform_relay_evidence_in_worker(temp, digest, len(raw))
+        if received_size <= 0 or (declared_size is not None and received_size != declared_size):
+            return jsonify({"ok": False, "errorCode": "SIZE_INVALID"}), 413
+        digest = digest_builder.hexdigest()
+        result = _validate_platform_relay_evidence_in_worker(temp, digest, received_size)
         staged = Path(result["staged_path"])
         if not result["valid"]:
             return jsonify({"ok": False, "errorCode": result["error_code"]}), 400
