@@ -13,7 +13,7 @@ import os
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from research.policy_evidence_schema import canonical_json, generation_identity
 
@@ -150,6 +150,7 @@ def _recognized_status_only_segment(row: Mapping[str, Any]) -> bool:
 
 def authoritative_future_path_segments(
     v3_root: Path, rows: Iterable[dict[str, Any]],
+    *, verifier: Callable[[Mapping[str, Any]], tuple[str | None, list[str]]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select the latest valid future-path state per owner; retain history counts.
 
@@ -157,6 +158,7 @@ def authoritative_future_path_segments(
     UNKNOWN without making that history disappear from the audit metadata.
     """
     material = list(rows)
+    verify = verifier or (lambda row: _verify_segment(v3_root, row))
     ordinary: list[dict[str, Any]] = []
     histories: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in material:
@@ -178,7 +180,7 @@ def authoritative_future_path_segments(
             if _recognized_status_only_segment(candidate):
                 chosen = candidate
                 break
-            _digest, errors = _verify_segment(v3_root, candidate)
+            _digest, errors = verify(candidate)
             if not errors:
                 chosen = candidate
                 break
@@ -244,6 +246,20 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
         root / "recovery_ledgers" / "market_segment.jsonl"
     )
     ledgers["market_segment"].extend(recovery_segments)
+    verification_cache: dict[str, tuple[str | None, tuple[str, ...]]] = {}
+
+    def verify_segment_cached(row: Mapping[str, Any]) -> tuple[str | None, list[str]]:
+        # Multiple policy decisions share one opportunity and therefore one
+        # immutable path. Verify its bytes once per deterministic build rather
+        # than rereading a large two-hour object for every policy row.
+        ref = row.get("segment_ref") if isinstance(row.get("segment_ref"), Mapping) else {}
+        key = canonical_json(ref)
+        cached = verification_cache.get(key)
+        if cached is None:
+            digest, errors = _verify_segment(root, row)
+            cached = (digest, tuple(errors))
+            verification_cache[key] = cached
+        return cached[0], list(cached[1])
     opportunities = {_key(row): row for row in ledgers["opportunity"]}
     segments: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     intents: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -270,7 +286,7 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
         roles: set[str] = set()
         conservative_roles: set[str] = set()
         selected_segments, future_history = authoritative_future_path_segments(
-            root, segments.get(key, []),
+            root, segments.get(key, []), verifier=verify_segment_cached,
         )
         for segment in selected_segments:
             # Request/PENDING/UNKNOWN rows declare the denominator and the
@@ -279,7 +295,7 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
             # actually claims a ref is always verified and fails closed.
             claimed_ref = segment.get("segment_ref")
             if not _recognized_status_only_segment(segment):
-                digest, errors = _verify_segment(root, segment)
+                digest, errors = verify_segment_cached(segment)
                 if errors:
                     reasons.update(errors)
                 elif digest:

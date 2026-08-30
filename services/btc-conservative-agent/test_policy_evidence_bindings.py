@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 
+import research.policy_evidence_bindings as bindings_module
 from research.policy_evidence_bindings import build_v3_binding_index, persist_v3_binding_index
 from research.policy_evidence_schema import canonical_json
 
@@ -69,6 +70,31 @@ def test_exact_binding_requires_verified_tapes_schedule_and_both_horizons(tmp_pa
     assert row["conservative_outcome"] is None
     assert report["outcome_evaluation_performed"] is False
     assert report["timestamp_join_performed"] is False
+
+
+def test_shared_opportunity_segments_are_verified_once_per_build(tmp_path, monkeypatch):
+    v3, _ = _fixture(tmp_path)
+    decisions_path = v3 / "ledgers" / "decision.jsonl"
+    decisions = [json.loads(line) for line in decisions_path.read_text().splitlines()]
+    second = dict(decisions[0], event_id="decision-2", policy_signature="policy-2", policy_id="p2")
+    _write(decisions_path, decisions + [second])
+    intents_path = v3 / "ledgers" / "order_intent.jsonl"
+    intents = [json.loads(line) for line in intents_path.read_text().splitlines()]
+    _write(intents_path, intents + [dict(intents[0], policy_signature="policy-2")])
+
+    calls = 0
+    original = bindings_module._verify_segment
+
+    def counted(root, row):
+        nonlocal calls
+        calls += 1
+        return original(root, row)
+
+    monkeypatch.setattr(bindings_module, "_verify_segment", counted)
+    report = build_v3_binding_index(v3)
+    assert report["decision_binding_count"] == 2
+    assert report["exactly_bound_count"] == 2
+    assert calls == 2
 
 
 def test_pre_signal_only_and_missing_schedule_fail_closed(tmp_path):
