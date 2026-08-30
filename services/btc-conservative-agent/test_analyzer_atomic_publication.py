@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 
@@ -7,10 +8,19 @@ AGENT = Path(__file__).resolve().parent
 
 
 def _load(name, path):
+    # The desktop launcher intentionally exports the real canonical mirror for
+    # long-lived processes.  Unit imports must not inherit that machine-level
+    # selection: each test redirects ROOT/DATA_ROOT to its own isolated store
+    # after import, and production containment remains enforced by the module.
+    inherited_data_root = os.environ.pop("BTC_AGENT_DATA_DIR", None)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if inherited_data_root is not None:
+            os.environ["BTC_AGENT_DATA_DIR"] = inherited_data_root
     return module
 
 
@@ -22,6 +32,7 @@ def test_completed_generation_publication_is_atomic_and_preserves_full_artifact(
     monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
     monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     Path("safe_policy_genome_v3_report.json").write_text(
         json.dumps({"generated_at": "new", "candidate_screen": {"full_grid": [1, 2, 3]}}),
         encoding="utf-8",
@@ -48,6 +59,73 @@ def test_completed_generation_publication_is_atomic_and_preserves_full_artifact(
     assert json.loads(Path(analyzer.REPORT_MANIFEST_FILE).read_text())["generation_id"] == "new-generation"
     assert not list(tmp_path.glob(".published_reports.staging-*"))
     assert not list(tmp_path.glob(".published_reports.previous-*"))
+
+
+def test_policy_evidence_library_manifest_is_declared_inventory_and_status_only(tmp_path, monkeypatch):
+    analyzer = _load("policy_library_atomic_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    dashboard = _load("policy_library_atomic_dashboard", AGENT / "research" / "research_dashboard.py")
+    import research.mirror_coherence as mirror_coherence
+    import research.canonical_data_store as canonical_data_store
+
+    monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
+    monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    filename = analyzer.POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
+    binding_filename = analyzer.POLICY_EVIDENCE_BINDING_REPORT_FILE
+    Path(filename).write_text(json.dumps({
+        "schema":"policy_evidence_library_v1", "cache_status":"NOT_BUILT",
+        "evaluation_triggered":False, "qualification_allowed":False,
+    }), encoding="utf-8")
+    Path(binding_filename).write_text(json.dumps({
+        "schema": "v3_policy_evidence_binding_index_v1", "exactly_bound_count": 0,
+    }), encoding="utf-8")
+    manifest = {"generation_id":"g", "reports":[
+        {"file":filename}, {"file":binding_filename},
+    ], "text_artifacts":[]}
+    analyzer._publish_completed_report_generation(manifest)
+    assert (Path(analyzer.PUBLISHED_REPORTS_DIR) / filename).is_file()
+    assert (Path(analyzer.PUBLISHED_REPORTS_DIR) / binding_filename).is_file()
+
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
+    response = dashboard.app.test_client().get("/api/policy-evidence-library")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["cache_status"] == "NOT_BUILT"
+    assert payload["evaluation_triggered"] is False
+
+
+def test_policy_evidence_reports_are_atomically_mirrored_for_archive(tmp_path, monkeypatch):
+    analyzer = _load("policy_report_mirror_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    monkeypatch.chdir(tmp_path)
+    source = Path(analyzer.POLICY_EVIDENCE_BINDING_REPORT_FILE)
+    source.write_text('{"generation":"current"}', encoding="utf-8")
+    destination = analyzer._atomic_mirror_analyzer_report(source.name)
+    assert destination == Path(analyzer.REPORTS_DIR) / source.name
+    assert json.loads(destination.read_text()) == {"generation": "current"}
+    source.write_text('{"generation":"replacement"}', encoding="utf-8")
+    analyzer._atomic_mirror_analyzer_report(source.name)
+    assert json.loads(destination.read_text()) == {"generation": "replacement"}
+    assert not list(Path(analyzer.REPORTS_DIR).glob(f".{source.name}.*.tmp"))
+
+
+def test_policy_library_manifest_records_identity_skip_without_claiming_fill(tmp_path, monkeypatch):
+    analyzer = _load("policy_status_stamp_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    monkeypatch.chdir(tmp_path)
+    target = Path(analyzer.POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE)
+    target.write_text('{"schema":"policy_evidence_library_v1"}', encoding="utf-8")
+    payload = analyzer._stamp_policy_evaluator_status(target, {
+        "schema": "v3_conservative_policy_evidence_v1", "row_count": 3,
+        "classification_counts": {"UNKNOWN": 3}, "cache_rows_ingested": 2,
+        "cache_rows_skipped_missing_identity": 1,
+        "cache_skip_reason_counts": {"RESULT_IDENTITY_MISSING_OPPORTUNITY_ID": 1},
+    })
+    assert payload["evaluation_triggered"] is True
+    assert payload["conservative_evaluator"]["classification_counts"] == {"UNKNOWN": 3}
+    assert payload["conservative_evaluator"]["cache_rows_skipped_missing_identity"] == 1
+    assert not list(tmp_path.glob(f".{target.name}.*.tmp"))
 
 
 def test_dashboard_reads_declared_artifacts_only_from_completed_generation(tmp_path, monkeypatch):

@@ -134,6 +134,7 @@ def test_empty_current_lanes_are_written_and_publish_with_exact_generation_ident
     monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
     monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(analyzer, "_load_signal_snapshots", lambda: {})
     monkeypatch.setattr(analyzer, "load_research_session", lambda: {
         "fresh_collection_mode": True,

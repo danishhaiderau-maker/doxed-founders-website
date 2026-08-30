@@ -12,7 +12,9 @@ from research_v3_bridge import dual_write_lane_entry_resolution
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
 from research_v3_bridge import reconcile_overdue_expected_order_decisions
 from research_v3_bridge import reconcile_terminal_v22_into_v3
+from research_v3_bridge import _paper_market_segment
 from research_v3_store import V3EvidenceStore, _id_cache, _segment_hash_cache
+from research_v3_contract import canonical_json
 
 
 def _event(event_id="cont-1", episode_id="episode-1"):
@@ -37,6 +39,47 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_market_segment_rejects_malformed_nonfinite_and_nonpositive_book_values_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "market_microstructure_1s.jsonl"
+            tape.write_text("\n".join([
+                json.dumps({"bucket_ts": 1000, "last": 100, "bid": 99, "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+                json.dumps({"bucket_ts": 1001, "last": 100, "bid": "bad", "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+                json.dumps({"bucket_ts": 1002, "last": 100, "bid": 99, "ask": 101,
+                            "bid_qty": 0, "ask_qty": float("inf")}),
+                json.dumps({"bucket_ts": 1003, "last": "NaN", "bid": 99, "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+                json.dumps({"bucket_ts": "not-a-time", "last": 100, "bid": 99, "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+            ]) + "\n", encoding="utf-8")
+
+            rows, coverage = _paper_market_segment(tmp, start_ts=1000, end_ts=1003)
+
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(coverage["invalid_timestamp_rows"], 1)
+            self.assertEqual(coverage["invalid_price_rows"], 1)
+            self.assertEqual(coverage["invalid_bbo_rows"], 1)
+            self.assertEqual(coverage["invalid_depth_rows"], 1)
+            self.assertFalse(coverage["all_rows_have_valid_bbo"])
+            self.assertFalse(coverage["all_rows_have_visible_depth"])
+
+    def test_market_segment_requires_both_requested_boundaries_and_reports_gaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "market_microstructure_1s.jsonl").write_text(
+                "\n".join(json.dumps({"bucket_ts": ts, "last": 100, "bid": 99,
+                                       "ask": 101, "bid_qty": 1, "ask_qty": 1})
+                          for ts in (1003, 1006, 1007)) + "\n",
+                encoding="utf-8",
+            )
+            _rows, coverage = _paper_market_segment(tmp, start_ts=1000, end_ts=1010)
+            self.assertFalse(coverage["requested_bounds_complete"])
+            self.assertFalse(coverage["two_second_or_better"])
+            self.assertEqual(coverage["observed_start_ts"], 1003.0)
+            self.assertEqual(coverage["observed_end_ts"], 1007.0)
+            self.assertEqual(coverage["max_gap_sec"], 3.0)
+
     def test_provisional_hot_path_verifies_only_its_two_ledgers(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(
@@ -405,6 +448,20 @@ class V3BridgeTests(unittest.TestCase):
                 row["market_context_segment_coverage"]["future_exit_path_included"] is False
                 for row in decisions
             ))
+            self.assertTrue(all(
+                row["market_context_segment_coverage"]["future_path_status"]
+                == "NOT_CAPTURED_AT_DECISION_TIME"
+                for row in decisions
+            ))
+            self.assertTrue(all(
+                row["market_context_segment_coverage"]["horizon_coverage"]
+                ["decision_to_entry_terminal"] is False
+                and row["market_context_segment_coverage"]["horizon_coverage"]
+                ["entry_to_exit_terminal"] is False
+                and row["market_context_segment_coverage"]["horizon_coverage"]
+                ["post_exit"] is False
+                for row in decisions
+            ))
             lifecycles = [
                 json.loads(line)
                 for line in store.ledger_path("lifecycle").read_text().splitlines()
@@ -676,6 +733,10 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(intent["intent_kind"], "ACTUAL_PAPER_LIMIT_SUBMIT")
             self.assertEqual(intent["requested_qty"], 0.2)
             self.assertTrue(intent["chase_schedule_authoritative"])
+            self.assertEqual(
+                intent["schedule_sha256"],
+                hashlib.sha256(canonical_json(intent["chase_schedule"]).encode("utf-8")).hexdigest(),
+            )
             self.assertEqual(intent["atr14_pct_at_signal"], 0.081)
             self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
             self.assertEqual(intent["entry_children_count"], 1)
@@ -922,6 +983,20 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(ref["row_count"], 5)
             self.assertEqual(market_row["coverage"]["max_gap_sec"], 1.0)
             self.assertTrue(market_row["coverage"]["two_second_or_better"])
+            self.assertTrue(market_row["coverage"]["requested_bounds_complete"])
+            self.assertTrue(market_row["coverage"]["all_rows_have_valid_bbo"])
+            self.assertTrue(market_row["coverage"]["all_rows_have_visible_depth"])
+            self.assertTrue(market_row["coverage"]["conservative_bbo_depth_eligible"])
+            self.assertEqual(market_row["context_role"], "ENTRY_AND_EXIT_PATH")
+            self.assertTrue(market_row["coverage"]["entry_path_included"])
+            self.assertTrue(market_row["coverage"]["future_exit_path_included"])
+            self.assertTrue(market_row["coverage"]["horizon_coverage"]["decision_to_entry_terminal"])
+            self.assertTrue(market_row["coverage"]["horizon_coverage"]["entry_to_exit_terminal"])
+            self.assertFalse(market_row["coverage"]["horizon_coverage"]["post_exit"])
+            self.assertEqual(
+                market_row["coverage"]["future_path_status"],
+                "CAPTURED_THROUGH_TERMINAL_CLOSE",
+            )
             self.assertEqual(envelope["rows"][0]["ts"], 1000.0)
             self.assertEqual(envelope["rows"][0]["price"], 100.0)
             self.assertEqual(envelope["rows"][-1]["ask_qty"], 3.0)

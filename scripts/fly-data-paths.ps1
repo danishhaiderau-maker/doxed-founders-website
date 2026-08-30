@@ -8,10 +8,13 @@ function Get-DoxxedFlyMirrorDir {
   $canonical = [System.IO.Path]::GetFullPath(
     (Join-Path $scriptRoot "services\btc-conservative-agent\canonical-research-data")
   ).TrimEnd('\')
-  $candidate = if ($RequestedPath) { $RequestedPath } else {
-    [Environment]::GetEnvironmentVariable("DOXXED_FLY_MIRROR_DIR", [EnvironmentVariableTarget]::Process)
-  }
-  if (-not $candidate) { $candidate = $canonical }
+  # The canonical store is no longer environment-selectable.  Older desktop
+  # sessions may still carry DOXXED_FLY_MIRROR_DIR/BTC_AGENT_DATA_DIR values
+  # that point at the retired AppData mirror; allowing those inherited values
+  # to choose authority either forks the dataset or prevents every launcher
+  # from starting.  Explicit migration callers may still pass RequestedPath,
+  # which is validated below and must resolve to the same canonical directory.
+  $candidate = if ($RequestedPath) { $RequestedPath } else { $canonical }
   $resolved = [System.IO.Path]::GetFullPath($candidate).TrimEnd('\')
   if ($resolved -ne $canonical) {
     throw "DOXXED_FLY_MIRROR_DIR must select the repo-contained canonical store: $canonical"

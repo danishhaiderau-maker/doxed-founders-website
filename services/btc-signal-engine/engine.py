@@ -41324,6 +41324,52 @@ def analytics_loop():
         logger.exception("[CRITICAL] Analytics loop crash")
         set_execution_paused("THREAD_CRASH")
 
+
+def all_opportunity_future_path_evidence_loop():
+    """Mature future tape evidence independently of AI and execution.
+
+    The work is deliberately bounded and runs on its own daemon.  A missing or
+    incomplete tape produces an auditable UNKNOWN row; it can never pause the
+    bot, alter an AI verdict, submit an order, or delay the periodic AI owner.
+    """
+    # Let startup, market-data recovery, and the first AI cycle own disk/CPU.
+    # Thereafter this low-priority evidence pass runs only every five minutes.
+    if shutdown_event.wait(60.0):
+        return
+    while not shutdown_event.is_set():
+        try:
+            from research_v3_future_paths import mature_future_market_paths
+            receipt = mature_future_market_paths(
+                data_dir=os.getcwd(),
+                epoch_id=_collector_v22_epoch_id(),
+                now_ts=time.time(),
+                max_batch=8,
+            )
+            with state_lock:
+                state["all_opportunity_future_path_evidence"] = {
+                    key: copy.deepcopy(receipt.get(key))
+                    for key in (
+                        "schema", "epoch_id", "now_ts", "candidate_count",
+                        "pending_count", "mature_selected", "complete_count",
+                        "unknown_count", "source_tape_present",
+                    )
+                }
+            if receipt.get("complete_count") or receipt.get("unknown_count"):
+                logger.info(
+                    "[COLLECTOR_V3] all-opportunity future paths "
+                    f"complete={receipt.get('complete_count')} "
+                    f"unknown={receipt.get('unknown_count')} "
+                    f"pending={receipt.get('pending_count')} "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+        except Exception as exc:
+            logger.error(
+                f"[COLLECTOR_V3] future-path evidence pass failed: {exc} "
+                "[EVIDENCE ONLY]"
+            )
+        if shutdown_event.wait(300.0):
+            break
+
 _COUNTERFACTUAL_REQUIRED_POLICY_KEYS = (
     "policy_snapshot_schema",
     "policy_version",
@@ -43737,6 +43783,10 @@ def main():
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()
     threading.Thread(target=safe_thread(analytics_loop), daemon=True).start()
+    threading.Thread(
+        target=safe_thread(all_opportunity_future_path_evidence_loop),
+        daemon=True,
+    ).start()
     threading.Thread(target=safe_thread(position_manager), daemon=True).start()
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()
     threading.Thread(target=safe_thread(heartbeat_loop), daemon=True).start()

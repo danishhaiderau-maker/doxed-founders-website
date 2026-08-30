@@ -246,6 +246,7 @@ BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))
 PUBLIC_URL = os.getenv("RESEARCH_DASHBOARD_PUBLIC_URL", f"http://127.0.0.1:{BIND_PORT}")
 
 REPORT_MANIFEST_FILE = "report_manifest.json"
+POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
@@ -4113,6 +4114,20 @@ def api_ai():
 @app.route("/api/manifest")
 def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
+
+
+@app.route("/api/policy-evidence-library")
+def api_policy_evidence_library():
+    """Read-only status only; evaluation and arbitrary SQL are never exposed."""
+    payload = _read_report(POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE, {})
+    if not payload:
+        return jsonify({
+            "schema": "policy_evidence_library_v1",
+            "cache_status": "NOT_PUBLISHED_IN_CURRENT_GENERATION",
+            "evaluation_triggered": False,
+            "qualification_allowed": False,
+        })
+    return jsonify(payload)
 
 
 @app.route("/api/chase-policy-lab")

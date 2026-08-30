@@ -8,6 +8,7 @@ from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
+import math
 import time
 
 from research_v3_contract import COLLECTOR_VERSION
@@ -48,6 +49,15 @@ def _timestamp(value: Any) -> float | None:
             return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
         except (TypeError, ValueError):
             return None
+
+
+def _positive_finite(value: Any) -> float | None:
+    """Return a usable market value, never raising on hostile tape rows."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
 
 
 def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
@@ -224,6 +234,10 @@ def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> t
     source = Path(data_dir) / "market_microstructure_1s.jsonl"
     rows_by_ts: dict[float, dict[str, Any]] = {}
     parse_errors = 0
+    invalid_timestamp_rows = 0
+    invalid_price_rows = 0
+    invalid_bbo_rows = 0
+    invalid_depth_rows = 0
     if source.is_file() and end_ts >= start_ts:
         with source.open("r", encoding="utf-8-sig") as handle:
             for line in handle:
@@ -235,19 +249,41 @@ def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> t
                 if not isinstance(raw, Mapping):
                     continue
                 ts = _timestamp(_first(raw.get("bucket_ts"), raw.get("ts"), raw.get("t")))
-                price = _first(raw.get("last"), raw.get("price"), raw.get("mark"))
-                if ts is None or price in (None, "") or ts < start_ts or ts > end_ts:
+                if ts is None or not math.isfinite(ts):
+                    invalid_timestamp_rows += 1
+                    continue
+                if ts < start_ts or ts > end_ts:
+                    continue
+                price = _positive_finite(_first(raw.get("last"), raw.get("price"), raw.get("mark")))
+                if price is None:
+                    invalid_price_rows += 1
                     continue
                 row = dict(raw)
                 # Candidate replay consumes explicit ts/price while the full
                 # BBO/depth row remains available for conservative fills.
                 row["ts"] = ts
-                row["price"] = float(price)
+                row["price"] = price
                 rows_by_ts[ts] = row
     rows = [rows_by_ts[key] for key in sorted(rows_by_ts)]
     times = list(sorted(rows_by_ts))
     gaps = [right - left for left, right in zip(times, times[1:])]
     max_gap = max(gaps) if gaps else None
+    requested_bounds_complete = bool(times) and times[0] <= start_ts + 2.0 and times[-1] >= end_ts - 2.0
+    bbo_rows = []
+    depth_rows = []
+    for row in rows:
+        bid = _positive_finite(row.get("bid"))
+        ask = _positive_finite(row.get("ask"))
+        if bid is None or ask is None or ask < bid:
+            invalid_bbo_rows += 1
+            continue
+        bbo_rows.append(row)
+        bid_qty = _positive_finite(_first(row.get("bid_qty"), row.get("bid_size")))
+        ask_qty = _positive_finite(_first(row.get("ask_qty"), row.get("ask_size")))
+        if bid_qty is None or ask_qty is None:
+            invalid_depth_rows += 1
+            continue
+        depth_rows.append(row)
     coverage = {
         "schema": "paper_market_segment_coverage_v1",
         "requested_start_ts": float(start_ts),
@@ -257,7 +293,16 @@ def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> t
         "row_count": len(rows),
         "max_gap_sec": max_gap,
         "two_second_or_better": bool(rows) and (max_gap is None or max_gap <= 2.0),
+        "requested_bounds_complete": requested_bounds_complete,
+        "bbo_row_count": len(bbo_rows),
+        "depth_row_count": len(depth_rows),
+        "all_rows_have_valid_bbo": bool(rows) and len(bbo_rows) == len(rows),
+        "all_rows_have_visible_depth": bool(rows) and len(depth_rows) == len(rows),
         "parse_errors": parse_errors,
+        "invalid_timestamp_rows": invalid_timestamp_rows,
+        "invalid_price_rows": invalid_price_rows,
+        "invalid_bbo_rows": invalid_bbo_rows,
+        "invalid_depth_rows": invalid_depth_rows,
     }
     return rows, coverage
 
@@ -276,7 +321,15 @@ def _pre_signal_market_segment(
     receipt.update({
         "context_role": "PRE_SIGNAL_ONLY",
         "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
+        "entry_path_included": False,
         "future_exit_path_included": False,
+        "future_path_status": "NOT_CAPTURED_AT_DECISION_TIME",
+        "horizon_coverage": {
+            "pre_signal_context": bool(coverage.get("requested_bounds_complete")),
+            "decision_to_entry_terminal": False,
+            "entry_to_exit_terminal": False,
+            "post_exit": False,
+        },
     })
     return tuple(rows), receipt
 
@@ -564,7 +617,15 @@ def dual_write_lane_decision(
     segment_coverage: dict[str, Any] = {
         "context_role": "PRE_SIGNAL_ONLY",
         "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
+        "entry_path_included": False,
         "future_exit_path_included": False,
+        "future_path_status": "NOT_CAPTURED_AT_DECISION_TIME",
+        "horizon_coverage": {
+            "pre_signal_context": False,
+            "decision_to_entry_terminal": False,
+            "entry_to_exit_terminal": False,
+            "post_exit": False,
+        },
         "row_count": 0,
         "two_second_or_better": False,
         "reason": "SIGNAL_TIMESTAMP_MISSING",
@@ -575,6 +636,15 @@ def dual_write_lane_decision(
         segment_rows, segment_coverage = _pre_signal_market_segment(
             str(Path(data_dir).resolve()), signal_ts,
         )
+        segment_coverage = dict(segment_coverage)
+        segment_coverage["entry_path_included"] = False
+        segment_coverage["future_path_status"] = "NOT_CAPTURED_AT_DECISION_TIME"
+        segment_coverage["horizon_coverage"] = {
+            "pre_signal_context": bool(segment_coverage.get("requested_bounds_complete")),
+            "decision_to_entry_terminal": False,
+            "entry_to_exit_terminal": False,
+            "post_exit": False,
+        }
         if segment_rows:
             segment_ref = store.put_market_segment(
                 source="LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL",
@@ -754,6 +824,10 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     policy = _paper_policy_identity(str(epoch_id), signal, order)
     schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
     schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
+    schedule_sha256 = (
+        hashlib.sha256(canonical_json(schedule).encode("utf-8")).hexdigest()
+        if schedule_available else None
+    )
     causal_ids = _explicit_causal_ids(
         epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
         include_schedule=schedule_available,
@@ -830,6 +904,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "chase_schedule": order.get("research_chase_schedule") or signal.get("research_chase_schedule") or {},
         "chase_schedule_authoritative": bool(order.get("chase_schedule_authoritative") or signal.get("chase_schedule_authoritative")),
+        "schedule_sha256": schedule_sha256,
         "entry_children": entry_children,
         "entry_children_count": len(entry_children),
         "atr14_pct_at_signal": atr14_pct_at_signal,
@@ -933,6 +1008,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         position.get("signal_created_ts"), position.get("entry_ts"),
     ))
     close_ts = _timestamp(_first(outcome.get("close_ts"), outcome.get("ts")))
+    fill_ts_observed = _timestamp(_first(position.get("entry_ts"), outcome.get("entry_ts")))
     segment_refs = []
     segment_writes = []
     segment_rows = []
@@ -946,6 +1022,44 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         segment_rows, segment_coverage = _paper_market_segment(
             data_dir, start_ts=start_ts, end_ts=close_ts,
         )
+        segment_coverage.update({
+            "context_role": "ENTRY_AND_EXIT_PATH",
+            "entry_path_included": bool(
+                fill_ts_observed is not None
+                and start_ts <= fill_ts_observed <= close_ts
+                and segment_coverage.get("requested_bounds_complete")
+            ),
+            "future_exit_path_included": bool(segment_coverage.get("requested_bounds_complete")),
+            "future_path_status": "CAPTURED_THROUGH_TERMINAL_CLOSE"
+            if segment_coverage.get("requested_bounds_complete") else "INCOMPLETE_THROUGH_TERMINAL_CLOSE",
+            # A signal-to-close segment proves only the named horizons below.
+            # It never silently proves an arbitrary post-exit or policy horizon.
+            "horizon_coverage": {
+                "pre_signal_context": False,
+                "decision_to_entry_terminal": bool(
+                    fill_ts_observed is not None
+                    and start_ts <= fill_ts_observed <= close_ts
+                    and segment_coverage.get("requested_bounds_complete")
+                ),
+                "entry_to_exit_terminal": bool(
+                    fill_ts_observed is not None
+                    and start_ts <= fill_ts_observed <= close_ts
+                    and segment_coverage.get("requested_bounds_complete")
+                ),
+                "post_exit": False,
+            },
+            "conservative_bbo_depth_eligible": bool(
+                segment_coverage.get("two_second_or_better")
+                and segment_coverage.get("requested_bounds_complete")
+                and segment_coverage.get("all_rows_have_valid_bbo")
+                and segment_coverage.get("all_rows_have_visible_depth")
+                and not segment_coverage.get("parse_errors")
+                and not segment_coverage.get("invalid_timestamp_rows")
+                and not segment_coverage.get("invalid_price_rows")
+                and not segment_coverage.get("invalid_bbo_rows")
+                and not segment_coverage.get("invalid_depth_rows")
+            ),
+        })
         if segment_rows:
             segment_ref = store.put_market_segment(
                 source="LIVE_MICROSTRUCTURE_1S",
@@ -972,6 +1086,7 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
                 "episode_id": identity["episode_id"],
                 "event_id": event_id,
                 "segment_ref": segment_ref,
+                "context_role": "ENTRY_AND_EXIT_PATH",
                 "coverage": segment_coverage,
                 **lifecycle_identity,
             }))

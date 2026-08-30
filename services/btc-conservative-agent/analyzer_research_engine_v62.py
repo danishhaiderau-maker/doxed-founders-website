@@ -106,6 +106,8 @@ BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
 SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
+POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
+POLICY_EVIDENCE_BINDING_REPORT_FILE = "policy_evidence_binding_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -19154,6 +19156,47 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
     os.replace(temp, path)
 
 
+def _atomic_mirror_analyzer_report(source_name):
+    """Atomically mirror a completed report into the archive authority tree."""
+    source = Path(source_name)
+    if not source.is_file() or source.name != str(source_name):
+        raise ValueError("ANALYZER_REPORT_SOURCE_MUST_BE_LOCAL_BASENAME")
+    destination_dir = Path(REPORTS_DIR)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / source.name
+    temporary = destination_dir / f".{source.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _stamp_policy_evaluator_status(path, status):
+    """Attach bounded evaluator coverage to the status manifest atomically."""
+    target = Path(path)
+    payload = json.loads(target.read_text(encoding="utf-8-sig"))
+    payload["evaluation_triggered"] = True
+    payload["conservative_evaluator"] = {
+        key: status.get(key) for key in (
+            "schema", "row_count", "classification_counts", "results_sha256",
+            "relative_path", "artifact_sha256", "artifact_size_bytes",
+            "cache_rows_ingested", "cache_rows_skipped_missing_identity",
+            "cache_skip_reason_counts",
+        )
+    }
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return payload
+
+
 def _cross_world_list(payload, *paths):
     """Return the first explicit list at a known report path."""
     for path in paths:
@@ -19628,6 +19671,68 @@ def write_report_manifest(payload=None):
                 ).isoformat(),
                 "analysis_provenance": analysis_provenance,
             })
+    # Publish derived-library status only after binding it to the current
+    # canonical manifest. This does not evaluate or ingest policy rows.
+    policy_evidence_library_error = None
+    try:
+        from research.policy_evidence_bindings import persist_v3_binding_index
+        from research.policy_evidence_evaluator import persist_v3_conservative_results
+        from research.policy_evidence_library import build_library_manifest
+
+        binding_status = persist_v3_binding_index(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            analyzer_revision=str(generation_revision),
+            summary_destination=POLICY_EVIDENCE_BINDING_REPORT_FILE,
+        )
+        binding_report_mirror = _atomic_mirror_analyzer_report(
+            POLICY_EVIDENCE_BINDING_REPORT_FILE
+        )
+        reports.append({
+            "title": "Policy Evidence Binding Coverage",
+            "file": POLICY_EVIDENCE_BINDING_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": "Exact V3 identity, schedule and content-addressed path coverage",
+            "size_bytes": binding_report_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                os.path.getmtime(POLICY_EVIDENCE_BINDING_REPORT_FILE), tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "exactly_bound_count": binding_status.get("exactly_bound_count"),
+        })
+        conservative_evaluator_status = persist_v3_conservative_results(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            analyzer_revision=str(generation_revision),
+        )
+        library_status = build_library_manifest(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            analyzer_revision=str(generation_revision),
+            destination=POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+        )
+        library_status = _stamp_policy_evaluator_status(
+            POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+            conservative_evaluator_status,
+        )
+        library_manifest_mirror = _atomic_mirror_analyzer_report(
+            POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
+        )
+        reports.append({
+            "title": "Policy Evidence Library Manifest",
+            "file": POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+            "category": "Genome & Reports",
+            "description": "Manifest-bound status for the disposable derived policy evidence query cache",
+            "size_bytes": library_manifest_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                os.path.getmtime(POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE), tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "derived_cache_status": library_status.get("cache_status"),
+            "conservative_classification_counts": conservative_evaluator_status.get(
+                "classification_counts"
+            ),
+            "conservative_result_artifact": conservative_evaluator_status.get("relative_path"),
+        })
+    except Exception as exc:
+        policy_evidence_library_error = f"{type(exc).__name__}: {exc}"
     # The exhaustive policy grid is intentionally separate from the bounded
     # dashboard JSON. It is compressed, immutable for this generation, and is
     # copied without JSON stamping so its manifest checksum remains verifiable.
@@ -19690,6 +19795,20 @@ def write_report_manifest(payload=None):
             "kind": analysis_provenance["fresh_epoch_kind"],
         },
         "required_report_status": {
+            POLICY_EVIDENCE_BINDING_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == POLICY_EVIDENCE_BINDING_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_evidence_library_error,
+            },
+            POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_evidence_library_error,
+            },
             BEST_POLICY_RESEARCH_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == BEST_POLICY_RESEARCH_REPORT_FILE
