@@ -26,7 +26,12 @@ on:
         type: choice
         options:
           - deploy
+          - recover-unready
           - restart-only
+      expected_unready_revision:
+        description: Exact 12-character Fly revision permitted for recover-unready
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -51,7 +56,7 @@ jobs:
           flyctl machines restart --app doxed-btc-bot "$machine_id"
 
   test-and-deploy:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -115,6 +120,7 @@ jobs:
           npx prisma generate
 
       - name: Prove the current Fly owner and every relay account are flat
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
         working-directory: ${{ github.workspace }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -123,6 +129,30 @@ jobs:
           REQUIRE_CANONICAL_FLY_OWNER: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
         run: node scripts/check-relay-flat.mjs
+
+      - name: Prove exact unready Fly revision and every durable relay account is flat
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-unready'
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
+          if len(expected) != 12:
+              raise SystemExit("recover-unready requires an exact 12-character revision")
+          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
+              payload = json.load(response)
+          observed = str(payload.get("source_git_rev") or "")[:12]
+          if response.status != 200 or observed != expected or payload.get("boot") != "starting":
+              raise SystemExit(f"recovery target mismatch: expected={expected} observed={observed} boot={payload.get('boot')}")
+          print(f"Exact unready recovery target proven: {observed}")
+          PY
+          node scripts/check-relay-flat.mjs
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
