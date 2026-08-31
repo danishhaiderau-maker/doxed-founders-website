@@ -146,24 +146,14 @@ $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$AnalyzerPort/"
 $env:ANALYZER_EMBEDDED_DASHBOARD = "0"
 $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
 $env:PLATFORM_RELAY_EVIDENCE_FILE = Join-Path $analyzerDataDir "relay_lifecycle_evidence_v1.json"
-$sourceRevision = ""
-try {
-  $canonical = Get-Content -LiteralPath $flyCanonicalLock -Raw | ConvertFrom-Json
-  $health = Invoke-RestMethod -Uri (([string]$canonical.sourceUrl).TrimEnd('/') + '/health') -TimeoutSec 10
-  $runtimeRevision = [string]$health.source_git_rev
-  if ($runtimeRevision -match '^[0-9a-fA-F]{7,40}$') {
-    $resolvedRuntimeRevision = (& git -C $repoRoot rev-parse $runtimeRevision 2>$null).Trim()
-    if ($LASTEXITCODE -eq 0 -and $resolvedRuntimeRevision -match '^[0-9a-fA-F]{40}$') {
-      $sourceRevision = $resolvedRuntimeRevision
-    }
-  }
-} catch {}
-if ($sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
-  $sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
-}
+$sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
   throw "Analyzer source revision could not be resolved to a full Git SHA."
 }
+# This revision identifies the analyzer code that is actually executing.  The
+# deployed Fly/data revision is recorded independently by the canonical sync
+# receipt and report source-data provenance.  Stamping local HEAD as the old
+# Fly revision makes a new analyzer binary falsely appear to be old code.
 $env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()
 # Pin report discovery as well as raw-data discovery. The bridge and desktop
 # launcher are long-lived and can otherwise pass an obsolete report directory

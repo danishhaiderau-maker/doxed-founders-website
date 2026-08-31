@@ -120,10 +120,10 @@ checks = {
         and 'research\\analyzer_research_engine_v62.py' not in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in local_analyzer
     ),
-    "analyzer stamps reports with the deployed Fly revision": (
-        "Invoke-RestMethod" in start_analyzer
-        and "source_git_rev" in start_analyzer
-        and "rev-parse $runtimeRevision" in start_analyzer
+    "analyzer stamps reports with the exact executing source revision": (
+        "$sourceRevision = (& git -C $repoRoot rev-parse HEAD" in start_analyzer
+        and "rev-parse $runtimeRevision" not in start_analyzer
+        and "$env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()" in start_analyzer
     ),
     "bounded analyzer restart validates its exact owned process": (
         "[switch]$Restart" in start_analyzer
