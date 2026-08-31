@@ -57,15 +57,28 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          flyctl status --app doxed-btc-bot
-          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
-          flyctl machine status --app doxed-btc-bot "$machine_id"
-          flyctl logs --app doxed-btc-bot --no-tail
-          flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+          run_probe() {
+            label="$1"
+            shift
+            echo "===${label}==="
+            if timeout --signal=TERM --kill-after=5s 45s "$@"; then
+              return 0
+            else
+              code="$?"
+            fi
+            echo "::warning title=Fly read-only probe incomplete::${label} exited ${code}; continuing with the remaining bounded probes"
+            return 0
+          }
+          run_probe FLY_STATUS flyctl status --app doxed-btc-bot
+          machine_json="$(timeout --signal=TERM --kill-after=5s 30s flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          run_probe MACHINE_STATUS flyctl machine status --app doxed-btc-bot "$machine_id"
+          run_probe RECENT_PLATFORM_LOGS flyctl logs --app doxed-btc-bot --no-tail
+          run_probe PROCESS_AND_BOT_LOG flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "sh -lc 'echo ===PROCESS_MEMORY===; ps -eo pid,ppid,rss,vsz,etime,comm,args --sort=-rss | head -n 20; echo ===RECENT_BOT_LOG===; tail -n 2500 /app/data/bot.log'"
-          flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+          run_probe RELAY_STREAM_VALIDATION flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "python -c 'from pathlib import Path; import json,resource,time; from platform_relay_streaming import validate_streaming; p=Path(\"/app/data/relay_lifecycle_evidence_v1.json\"); t=time.perf_counter(); r=validate_streaming(p); print(json.dumps({\"stage\":\"direct_stream_validation\",\"valid\":r[0],\"code\":r[1],\"records\":r[2].get(\"records\"),\"bytes\":p.stat().st_size,\"seconds\":round(time.perf_counter()-t,3),\"maxrss_kib\":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))'"
-          flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+          run_probe INCIDENT_LOG_SCAN flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "grep -nE 'fly-entrypoint.*bot (starting|exited)|WATCHDOG.*(failed|exiting|stale)|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log"
 
   restart-only:
