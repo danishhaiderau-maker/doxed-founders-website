@@ -6,6 +6,7 @@ from research_v3_validation import (
     validate_policy,
     validate_purged_walk_forward,
 )
+from research_v3_liquidation_buffer import build_liquidation_buffer_receipt
 
 
 def episode(index, pnl, *, state="FULL_FILL", regime=None, measured_costs=True):
@@ -151,8 +152,25 @@ class V3ValidationTests(unittest.TestCase):
     def test_liquidation_buffer_is_never_inferred_from_price_path(self):
         rows = [episode(i, 2) for i in range(100)]
         unverified = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True)
-        verified = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True, liquidation_buffer_verified=True)
+        asserted = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True, liquidation_buffer_verified=True)
+        observations = [{
+            "schema": "exchange_liquidation_buffer_observation_v1",
+            "episode_id": f"e-{i}", "policy_id": "p", "direction": "LONG",
+            "leverage": 10.0, "margin_usd": 100.0, "equity_usd": 1000.0,
+            "entry_price": 100.0, "worst_adverse_mark_price": 95.0,
+            "exchange_liquidation_price": 80.0,
+            "maintenance_margin_rate_pct": 0.5,
+            "max_adverse_excursion_pct": 5.0, "max_drawdown_usd": 5.0,
+            "observed_buffer_pct": (15.0 / 95.0) * 100.0,
+            "source_receipt_ids": [f"exchange-{i}"],
+        } for i in range(100)]
+        receipt = build_liquidation_buffer_receipt(
+            policy_id="p", observations=observations,
+            minimum_required_buffer_pct=10.0,
+        )
+        verified = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True, liquidation_buffer_verified=receipt)
         self.assertFalse(unverified["gates"]["liquidation_buffer_pass"])
+        self.assertFalse(asserted["gates"]["liquidation_buffer_pass"])
         self.assertTrue(verified["gates"]["liquidation_buffer_pass"])
 
     def test_executed_outcome_without_measured_cost_receipt_fails_closed(self):

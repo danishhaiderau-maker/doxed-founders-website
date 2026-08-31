@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 from research_v3_risk import drawdown_budget_gate, portfolio_risk_metrics
 from research_v3_sealed_holdout import verify_evaluation_receipt
+from research_v3_liquidation_buffer import verify_liquidation_buffer_receipt
 
 
 SUPPORTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
@@ -295,7 +296,7 @@ def validate_policy(
     conservative_execution: bool,
     neighborhood_stable: bool,
     sealed_holdout: Any,
-    liquidation_buffer_verified: bool = False,
+    liquidation_buffer_verified: Any = None,
     purged_walk_forward: dict[str, Any] | None = None,
     minimum_episodes: int = 100,
     minimum_regimes: int = 3,
@@ -317,6 +318,17 @@ def validate_policy(
     regimes = {str(row.get("regime") or "UNKNOWN") for row in episodes if str(row.get("regime") or "UNKNOWN") != "UNKNOWN"}
     adjusted_required_probability = 1.0 - (0.05 / max(1, int(policies_tested)))
     probability = float(bootstrap.get("probability_mean_positive") or 0)
+    executed_episode_ids = [
+        str(row.get("episode_id") or "")
+        for row in episodes
+        if str(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("outcome_state") or "")
+        in EXECUTED_TERMINAL_STATES
+    ]
+    liquidation_buffer = verify_liquidation_buffer_receipt(
+        liquidation_buffer_verified,
+        policy_id=policy_id,
+        executed_episode_ids=executed_episode_ids,
+    )
     gates = {
         "integrity_pass": not missing,
         "complete_paths_pass": not missing,
@@ -326,7 +338,7 @@ def validate_policy(
         "cvar_budget_pass": "CVAR95_BUDGET_FAILED" not in budget["reasons"],
         # A complete market path does not prove liquidation safety. Require an
         # explicit leverage/margin/liquidation-distance receipt.
-        "liquidation_buffer_pass": bool(liquidation_buffer_verified),
+        "liquidation_buffer_pass": liquidation_buffer["passed"],
         "purged_walk_forward_pass": bool(
             isinstance(purged_walk_forward, dict)
             and purged_walk_forward.get("passed") is True
@@ -373,6 +385,7 @@ def validate_policy(
             "passed": False,
             "blockers": ["PURGED_WALK_FORWARD_NOT_SUPPLIED"],
         },
+        "liquidation_buffer": liquidation_buffer,
         "sealed_holdout": sealed_holdout if isinstance(sealed_holdout, dict) else {
             "schema": "sealed_holdout_evaluation_v1",
             "passed": False,
