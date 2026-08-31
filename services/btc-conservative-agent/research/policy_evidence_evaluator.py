@@ -491,7 +491,78 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
         "regime_features_at_signal": regime_features,
         "regime_feature_coverage": regime_feature_coverage,
         "net_pnl_usd": None,
+        "terminal_outcome_status": "UNKNOWN",
+        "terminal_outcome_reason_codes": ["UNKNOWN_TERMINAL_EXECUTION_NOT_EXACTLY_BOUND"],
+        "profitability_supported": False,
+        "pre_entry_path_status": (
+            "COMPLETE" if binding.get("required_pre_entry_path_complete") is True else "UNKNOWN"
+        ),
     }
+
+
+def _bind_terminal_outcome(
+    executions: list[Mapping[str, Any]], lifecycles: list[Mapping[str, Any]],
+    *, classification: str, entry_slippage_usd: Any, evaluated_filled_qty: Any,
+) -> dict[str, Any]:
+    """Bind one observed terminal paper outcome without estimating missing costs."""
+    if classification == "NO_FILL":
+        return {"terminal_outcome_status": "NOT_APPLICABLE_NO_FILL",
+                "terminal_outcome_reason_codes": [], "profitability_supported": True,
+                "gross_pnl_usd": 0.0, "fees_usd": 0.0, "funding_usd": 0.0,
+                "slippage_usd": 0.0, "net_pnl_usd": 0.0}
+    terminal = [row for row in executions if row.get("close_ts") is not None]
+    terminal_lifecycle = [row for row in lifecycles if row.get("terminal") is True]
+    reasons: list[str] = []
+    if len(terminal) != 1:
+        reasons.append("UNKNOWN_TERMINAL_EXECUTION_NOT_UNIQUE")
+    if len(terminal_lifecycle) != 1:
+        reasons.append("UNKNOWN_TERMINAL_LIFECYCLE_NOT_UNIQUE")
+    if reasons:
+        return {"terminal_outcome_status": "UNKNOWN", "terminal_outcome_reason_codes": reasons,
+                "profitability_supported": False, "net_pnl_usd": None}
+    execution = terminal[0]
+    gross = _number(execution.get("gross_pnl_usd"))
+    trading = _number(execution.get("trading_fees_usd"))
+    funding = _number(execution.get("funding_fees_usd"))
+    exit_slippage = _number(execution.get("exit_slippage_usd"))
+    entry_slippage = _number(entry_slippage_usd)
+    observed_net = _number(execution.get("net_pnl_usd"))
+    observed_qty = _number(execution.get("filled_qty"))
+    evaluated_qty = _number(evaluated_filled_qty)
+    for value, code in ((gross, "UNKNOWN_GROSS_PNL_MISSING"),
+                        (trading, "UNKNOWN_TRADING_FEES_MISSING"),
+                        (funding, "UNKNOWN_FUNDING_FEES_MISSING"),
+                        (entry_slippage, "UNKNOWN_ENTRY_SLIPPAGE_MISSING"),
+                        (exit_slippage, "UNKNOWN_EXIT_SLIPPAGE_MISSING"),
+                        (observed_net, "UNKNOWN_NET_PNL_MISSING"),
+                        (observed_qty, "UNKNOWN_TERMINAL_FILLED_QUANTITY_MISSING")):
+        if value is None:
+            reasons.append(code)
+    if reasons:
+        return {"terminal_outcome_status": "UNKNOWN", "terminal_outcome_reason_codes": reasons,
+                "profitability_supported": False, "gross_pnl_usd": gross,
+                "fees_usd": trading, "funding_usd": funding,
+                "slippage_usd": None, "net_pnl_usd": None}
+    if evaluated_qty is None or abs(float(observed_qty) - float(evaluated_qty)) > 1e-9:
+        return {"terminal_outcome_status": "UNKNOWN",
+                "terminal_outcome_reason_codes": ["UNKNOWN_TERMINAL_QUANTITY_MISMATCH"],
+                "profitability_supported": False, "gross_pnl_usd": gross,
+                "fees_usd": trading, "funding_usd": funding,
+                "slippage_usd": None, "net_pnl_usd": None}
+    total_slippage = float(entry_slippage) + float(exit_slippage)
+    reconciled_net = float(gross) - float(trading) - float(funding) - total_slippage
+    if abs(float(observed_net) - reconciled_net) > 1e-8:
+        return {"terminal_outcome_status": "UNKNOWN",
+                "terminal_outcome_reason_codes": ["UNKNOWN_TERMINAL_COST_RECONCILIATION_MISMATCH"],
+                "profitability_supported": False, "gross_pnl_usd": gross,
+                "fees_usd": trading, "funding_usd": funding,
+                "slippage_usd": total_slippage, "net_pnl_usd": None}
+    return {"terminal_outcome_status": "REALIZED_COST_COMPLETE",
+            "terminal_outcome_reason_codes": [], "profitability_supported": True,
+            "gross_pnl_usd": gross, "fees_usd": trading, "funding_usd": funding,
+            "slippage_usd": total_slippage, "net_pnl_usd": observed_net,
+            "exit_price": execution.get("exit_price"), "close_ts": execution.get("close_ts"),
+            "exit_reason": execution.get("exit_reason")}
 
 
 def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
@@ -501,7 +572,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
         raise ValueError("V3_EVALUATOR_ROOT_MUST_BE_V3")
     ledgers = {
         name: _read_jsonl(root / "ledgers" / f"{name}.jsonl")
-        for name in ("decision", "opportunity", "order_intent", "market_segment")
+        for name in ("decision", "opportunity", "order_intent", "market_segment", "execution", "lifecycle")
     }
     recovery_segments = _read_jsonl(
         root / "recovery_ledgers" / "market_segment.jsonl"
@@ -511,6 +582,8 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
     decisions = {str(row.get("event_id") or ""): row for row in ledgers["decision"]}
     opportunities = {_identity(row): row for row in ledgers["opportunity"]}
     intents: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    executions: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    lifecycles: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
     segments: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     envelope_cache: dict[str, tuple[dict[str, Any] | None, str | None]] = {}
 
@@ -529,6 +602,10 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
         return str(ref.get("sha256") or "") or None, []
     for row in ledgers["order_intent"]:
         intents.setdefault(_policy_identity(row), []).append(row)
+    for row in ledgers["execution"]:
+        executions.setdefault(_policy_identity(row), []).append(row)
+    for row in ledgers["lifecycle"]:
+        lifecycles.setdefault(_policy_identity(row), []).append(row)
     for row in ledgers["market_segment"]:
         segments.setdefault(_identity(row), []).append(row)
 
@@ -641,12 +718,31 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             "missed_entry_cost_usd": receipt.get("missed_entry_cost_usd"),
             "missed_entry_cost_basis": receipt.get("missed_entry_cost_basis"),
         })
+        policy_key = (*identity, str(binding.get("policy_signature") or ""))
+        if binding.get("required_pre_entry_path_complete") is not True:
+            row.update({
+                "terminal_outcome_status": "UNKNOWN",
+                "terminal_outcome_reason_codes": [
+                    "UNKNOWN_REQUIRED_PRE_ENTRY_BBO_DEPTH_TRADE_PATH_INCOMPLETE"
+                ],
+                "profitability_supported": False, "net_pnl_usd": None,
+            })
+        else:
+            row.update(_bind_terminal_outcome(
+                executions.get(policy_key, []), lifecycles.get(policy_key, []),
+                classification=classification, entry_slippage_usd=receipt.get("slippage_usd"),
+                evaluated_filled_qty=receipt.get("filled_qty"),
+            ))
         results.append(row)
     results.sort(key=lambda row: tuple(str(row.get(field) or "") for field in (
         "opportunity_id", "episode_id", "decision_id", "policy_signature"
     )))
     counts = {name: sum(row["classification"] == name for row in results)
               for name in ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN")}
+    terminal_counts = {
+        name: sum(row.get("terminal_outcome_status") == name for row in results)
+        for name in ("REALIZED_COST_COMPLETE", "NOT_APPLICABLE_NO_FILL", "UNKNOWN")
+    }
     feature_names = tuple(_regime_features_at_signal({}, {}).keys())
     observed_by_dimension = {
         name: sum(
@@ -682,6 +778,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
         "profitability_calculated": False,
     }
     return {"schema": SCHEMA, "row_count": len(results), "classification_counts": counts,
+            "terminal_outcome_counts": terminal_counts,
             "results_sha256": hashlib.sha256(canonical_json(results).encode()).hexdigest(),
             "regime_feature_coverage": regime_feature_coverage,
             "phase7_support_qualification": phase7_support,

@@ -7,6 +7,23 @@ from research_v3_future_paths import (
     _bounded_tape_tail, _bounded_tape_window, _contained,
     TAPE_SELECTION_VERSION, mature_future_market_paths,
 )
+
+
+def test_maturation_persists_separate_content_addressed_pre_entry_path(tmp_path):
+    _seed(tmp_path, outcomes=("APPROVED",))
+    tape = tmp_path / "market_microstructure_1s.jsonl"
+    def row(ts):
+        return {"bucket_ts": ts, "last": 80000, "bid": 79999, "ask": 80001,
+                "bid_qty": 1, "ask_qty": 1, "trade_count": 0, "buy_qty": 0, "sell_qty": 0}
+    rows = [row(SIGNAL_TS + offset) for offset in range(-60, 7201)]
+    tape.write_text("".join(json.dumps(value) + "\n" for value in rows), encoding="utf-8")
+    mature_future_market_paths(data_dir=tmp_path, epoch_id=EPOCH, now_ts=SIGNAL_TS + 7400,
+                               max_tape_read_bytes=64 * 1024 * 1024)
+    pre = [row for row in _market_rows(tmp_path) if row.get("segment_role") == "PRE_ENTRY_PATH"]
+    assert len(pre) == 1
+    assert pre[0]["future_path_status"] == "COMPLETE"
+    assert pre[0]["segment_ref"]["sha256"]
+    assert pre[0]["coverage"]["evidence_scope"] == "BBO_DEPTH_AND_TRADES_AT_OR_BEFORE_SIGNAL"
 from research_v3_store import V3EvidenceStore
 
 

@@ -22,6 +22,7 @@ from research_v3_store import V3EvidenceStore
 
 FUTURE_PATH_SCHEMA = "all_opportunity_future_path_v1"
 DEFAULT_REQUIRED_HORIZONS_SEC = (60, 300, 900, 1800, 3600, 7200)
+DEFAULT_PRE_ENTRY_SEC = 60
 DEFAULT_MAX_BATCH = 64
 MATURATION_SETTLE_SEC = 30
 SOURCE_TAPE_FILE = "market_microstructure_1s.jsonl"
@@ -486,6 +487,7 @@ def mature_future_market_paths(
     required_horizons_sec: Iterable[int] = DEFAULT_REQUIRED_HORIZONS_SEC,
     max_batch: int = DEFAULT_MAX_BATCH,
     max_tape_read_bytes: int = MAX_TAPE_TOTAL_READ_BYTES,
+    pre_entry_sec: int = DEFAULT_PRE_ENTRY_SEC,
 ) -> dict[str, Any]:
     """Mature a bounded batch; absent evidence remains PENDING/UNKNOWN."""
     root = Path(data_dir).resolve()
@@ -494,6 +496,7 @@ def mature_future_market_paths(
     if not horizons:
         raise ValueError("FUTURE_PATH_HORIZONS_REQUIRED")
     maximum = horizons[-1]
+    pre_entry = max(1, int(pre_entry_sec))
     candidates = _candidates(root, str(epoch_id))
     store = V3EvidenceStore(root, epoch_id=str(epoch_id))
     identity_unknown = [row for row in candidates if row.get("identity_unknown_reason")]
@@ -564,7 +567,7 @@ def mature_future_market_paths(
         "observed_end_ts": None,
     }
     if source_exists and windows:
-        lower = min(start for start, _ in windows.values())
+        lower = min(start - pre_entry for start, _ in windows.values())
         upper = max(end for _, end in windows.values())
         tape_rows, tail_read = _bounded_tape_window(
             tape, required_start_ts=lower, required_end_ts=upper,
@@ -576,7 +579,7 @@ def mature_future_market_paths(
             if ts < lower or ts > upper:
                 continue
             for key, (start, end) in windows.items():
-                if start <= ts <= end:
+                if start - pre_entry <= ts <= end:
                     selected_rows[key][ts] = row
     complete = unknown = 0
     writes: list[dict[str, Any]] = []
@@ -604,10 +607,35 @@ def mature_future_market_paths(
         unknown += 1
     for item in selected:
         start_ts, end_ts = windows[item["owner_key"]]
+        all_rows = [selected_rows[item["owner_key"]][key] for key in sorted(selected_rows[item["owner_key"]])]
+        pre_rows = [row for row in all_rows if start_ts - pre_entry <= float(row["ts"]) <= start_ts]
+        pre_coverage = _coverage(pre_rows, start_ts - pre_entry, start_ts)
+        pre_coverage.update({
+            "context_role": "PRE_ENTRY_PATH",
+            "required_pre_entry_sec": pre_entry,
+            "evidence_scope": "BBO_DEPTH_AND_TRADES_AT_OR_BEFORE_SIGNAL",
+        })
+        pre_status = "COMPLETE" if pre_coverage["conservative_bbo_depth_eligible"] else "UNKNOWN"
+        pre_ref = None
+        if pre_status == "COMPLETE":
+            pre_ref = store.put_market_segment(
+                source="LIVE_1S_PRE_ENTRY_PATH", symbol=item["symbol"], timeframe="1s",
+                start_ts=start_ts - pre_entry, end_ts=start_ts, rows=pre_rows,
+            )
+        if pre_ref is not None:
+            writes.append(store.append("market_segment", {
+                "record_id": f"pre-entry-path:{item['owner_key']}:{pre_ref['sha256']}",
+                "episode_id": item["episode_id"], "event_id": item["event_id"],
+                "opportunity_id": item["opportunity_id"], "decision_id": item["decision_id"],
+                "shared_ai_call_id": item["shared_ai_call_id"],
+                "segment_role": "PRE_ENTRY_PATH", "future_path_owner_key": item["owner_key"],
+                "future_path_status": pre_status, "unknown_reason": None,
+                "segment_ref": pre_ref, "coverage": pre_coverage, "evidence_only": True,
+            }))
         cache_key = (item["symbol"], start_ts, end_ts)
         cached = window_cache.get(cache_key)
         if cached is None:
-            rows = [selected_rows[item["owner_key"]][key] for key in sorted(selected_rows[item["owner_key"]])]
+            rows = [row for row in all_rows if start_ts <= float(row["ts"]) <= end_ts]
             coverage = _coverage(rows, start_ts, end_ts)
             coverage["parse_errors"] = parse_errors
             coverage["required_horizons_sec"] = list(horizons)
@@ -666,6 +694,10 @@ def mature_future_market_paths(
             "decision_outcome": item["decision_outcome"],
             "segment_ref": segment_ref,
             "coverage": coverage,
+            "pre_entry_capture_status": pre_status,
+            "pre_entry_unknown_reason": (
+                None if pre_ref else "PRE_ENTRY_BBO_DEPTH_TRADE_PATH_INCOMPLETE"
+            ),
             "bounded_tape_read": tail_read,
             "evidence_only": True,
         })

@@ -91,7 +91,8 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
     _write(v3 / "ledgers/order_intent.jsonl", [intent])
     rows = entry_rows if entry_rows is not None else [_row(10, ask=100), _row(11, ask=100)]
     segments = [_segment(v3, identity, "ENTRY_PATH", rows, 1),
-                _segment(v3, identity, "POST_EXIT_PATH", [_row(20)], 2)]
+                _segment(v3, identity, "POST_EXIT_PATH", [_row(20)], 2),
+                _segment(v3, identity, "PRE_ENTRY_PATH", [_row(9)], 0)]
     _write(v3 / "ledgers/market_segment.jsonl", segments)
     for name in ("execution", "lifecycle"):
         _write(v3 / f"ledgers/{name}.jsonl", [])
@@ -135,6 +136,72 @@ def test_partial_fill_preserves_all_quantity_boundaries(tmp_path):
     assert row["minimum_lot_decision"] == "PASS"
     assert row["minimum_notional_decision"] == "PASS"
     assert row["quantity_attempts"][0]["accepted"] is True
+
+
+def test_realized_terminal_outcome_requires_complete_measured_costs(tmp_path):
+    v3 = _fixture(tmp_path)
+    identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
+                "policy_signature": "sig-1"}
+    _write(v3 / "ledgers/execution.jsonl", [{
+        **identity, "close_ts": 20, "gross_pnl_usd": 5.0,
+        "trading_fees_usd": 0.5, "funding_fees_usd": 0.25,
+        "entry_slippage_usd": 0.0, "exit_slippage_usd": 0.25,
+        "filled_qty": 1.0, "net_pnl_usd": 4.0,
+        "exit_price": 105, "exit_reason": "TARGET",
+    }])
+    _write(v3 / "ledgers/lifecycle.jsonl", [{
+        **identity, "terminal": True, "outcome_state": "PAPER_REALIZED",
+    }])
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["classification"] == "FULL_FILL"
+    assert row["terminal_outcome_status"] == "REALIZED_COST_COMPLETE"
+    assert row["profitability_supported"] is True
+    assert row["slippage_usd"] == 0.25
+    assert row["net_pnl_usd"] == 4.0
+    assert build_v3_conservative_results(v3)["terminal_outcome_counts"] == {
+        "REALIZED_COST_COMPLETE": 1, "NOT_APPLICABLE_NO_FILL": 0, "UNKNOWN": 0,
+    }
+
+
+def test_missing_terminal_cost_is_unknown_without_changing_fill_classification(tmp_path):
+    v3 = _fixture(tmp_path, direction="SHORT", entry_rows=[_row(10, bid=100), _row(11, bid=100)])
+    identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
+                "policy_signature": "sig-1"}
+    _write(v3 / "ledgers/execution.jsonl", [{
+        **identity, "close_ts": 20, "gross_pnl_usd": 2.0,
+        "trading_fees_usd": 0.2, "funding_fees_usd": 0.0,
+        "filled_qty": 1.0, "net_pnl_usd": 1.8,
+    }])
+    _write(v3 / "ledgers/lifecycle.jsonl", [{**identity, "terminal": True}])
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["classification"] == "FULL_FILL"
+    assert row["terminal_outcome_status"] == "UNKNOWN"
+    assert row["profitability_supported"] is False
+    assert "UNKNOWN_EXIT_SLIPPAGE_MISSING" in row["terminal_outcome_reason_codes"]
+    assert row["net_pnl_usd"] is None
+
+
+def test_true_no_fill_has_terminal_zero_outcome_without_execution_row(tmp_path):
+    rows = [_row(10, ask=101), _row(11, ask=101)]
+    row = build_v3_conservative_results(_fixture(tmp_path, entry_rows=rows))["results"][0]
+    assert row["classification"] == "NO_FILL"
+    assert row["terminal_outcome_status"] == "NOT_APPLICABLE_NO_FILL"
+    assert row["profitability_supported"] is True
+    assert row["net_pnl_usd"] == 0.0
+
+
+def test_missing_pre_entry_path_blocks_profitability_but_preserves_fill_truth(tmp_path):
+    v3 = _fixture(tmp_path)
+    path = v3 / "ledgers/market_segment.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    _write(path, [row for row in rows if row.get("context_role") != "PRE_ENTRY_PATH"])
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["classification"] == "FULL_FILL"
+    assert row["pre_entry_path_status"] == "UNKNOWN"
+    assert row["profitability_supported"] is False
+    assert row["terminal_outcome_reason_codes"] == [
+        "UNKNOWN_REQUIRED_PRE_ENTRY_BBO_DEPTH_TRADE_PATH_INCOMPLETE"
+    ]
 
 
 def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_path):

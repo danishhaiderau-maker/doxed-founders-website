@@ -335,6 +335,7 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
             "ENTRY_PATH", "ENTRY_AND_EXIT_PATH", "FULL_LIFECYCLE",
             ALL_OPPORTUNITY_FUTURE_ROLE,
         })
+        pre_entry_complete = "PRE_ENTRY_PATH" in conservative_roles
         post_exit_complete = bool(conservative_roles & {
             "POST_EXIT_PATH", "ENTRY_AND_EXIT_PATH", "FULL_LIFECYCLE",
             ALL_OPPORTUNITY_FUTURE_ROLE,
@@ -364,6 +365,8 @@ def build_v3_binding_index(v3_root: str | Path) -> dict[str, Any]:
                 "EXACT" if len(schedule_hashes) == 1 and len(schedule_ids) == 1 else "UNKNOWN"
             ),
             "required_entry_horizons_complete": entry_complete,
+            "required_pre_entry_path_complete": pre_entry_complete,
+            "pre_entry_path_status": "COMPLETE" if pre_entry_complete else "UNKNOWN",
             "required_post_exit_horizons_complete": post_exit_complete,
             "exact_binding_complete": not reasons,
             "coverage_status": "EXACTLY_BOUND" if not reasons else "UNKNOWN_UNVERIFIABLE",
