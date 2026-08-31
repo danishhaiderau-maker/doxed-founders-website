@@ -23,6 +23,12 @@ import {
 import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
   SignalSubscriberExecutionService,
+  relayExecutorPollDelayMs,
+  PERSISTED_WAKE_ACTIVE_POLL_MS,
+  PERSISTED_WAKE_PAUSED_POLL_MS,
+  PERSISTED_WAKE_IDLE_POLL_MS,
+  RECONCILIATION_PAUSED_POLL_MS,
+  RECONCILIATION_IDLE_POLL_MS,
   stableRelayFeeModel,
   stableRelayExecutionProfile,
   isCanonicalDuplicateEntry,
@@ -112,6 +118,36 @@ import {
   isDeterministicBitfinexSubmitRejection,
   desiredLiveCopyCoordinationState,
 } from './signal-subscriber-execution.service';
+
+test('relay executor polling keeps direct wake latency separate from Neon backstops', () => {
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'ACTIVE'), PERSISTED_WAKE_ACTIVE_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'PAUSED'), PERSISTED_WAKE_PAUSED_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'IDLE'), PERSISTED_WAKE_IDLE_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'ACTIVE', 800), 800);
+  assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'PAUSED', 800), RECONCILIATION_PAUSED_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'IDLE', 800), RECONCILIATION_IDLE_POLL_MS);
+  assert.ok(PERSISTED_WAKE_ACTIVE_POLL_MS > 250, 'Neon fallback must not regress to 4 Hz');
+  assert.ok(PERSISTED_WAKE_IDLE_POLL_MS >= PERSISTED_WAKE_PAUSED_POLL_MS);
+});
+
+test('persisted wake backstop projects JSON in Postgres and never reinstates a 250ms full-state loop', () => {
+  const source = readFileSync(
+    resolve(__dirname, 'signal-subscriber-execution.service.ts'),
+    'utf8',
+  );
+  assert.doesNotMatch(source, /setInterval\(\(\) => void this\.pollPersistedFastWake\(\),\s*250\)/);
+  assert.match(source, /i\."dashboardState"\s*->\s*\$\{RELAY_EXECUTOR_WAKE_KEY\}\s+AS\s+"wake"/);
+  assert.match(source, /this\.prisma\.\$queryRaw<WakeProjectionRow\[\]>/);
+  assert.match(source, /this\.prisma\.\$executeRaw/);
+  assert.match(source, /"dashboardState"\s*=\s*COALESCE\("dashboardState", '\{\}'::jsonb\)\s*-\s*\$\{RELAY_EXECUTOR_WAKE_KEY\}/);
+  const wakePollSource = source.slice(
+    source.indexOf('private async consumePersistedExecutorWakes'),
+    source.indexOf('/** Cross-process signed-webhook fast lane'),
+  );
+  assert.doesNotMatch(wakePollSource, /select:\s*\{\s*id:\s*true,\s*dashboardState:\s*true/);
+  assert.doesNotMatch(wakePollSource, /dashboardState[^\n]*::boolean/);
+  assert.match(source, /if \(!this\.executorDestroyed\)/);
+});
 
 test('Scenario C exchange stop promotion defaults on and requires an explicit rollback to disable', () => {
   const prior = process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED;

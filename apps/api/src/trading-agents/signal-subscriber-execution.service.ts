@@ -107,6 +107,17 @@ const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
+/**
+ * The authenticated direct wake is the latency path. Neon is only the durable
+ * crash/restart backstop, so it must never be polled as a 4 Hz message queue
+ * (especially because the wake currently lives beside the comparatively large
+ * dashboardState document).
+ */
+export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
+export const PERSISTED_WAKE_PAUSED_POLL_MS = 10_000;
+export const PERSISTED_WAKE_IDLE_POLL_MS = 30_000;
+export const RECONCILIATION_PAUSED_POLL_MS = 5_000;
+export const RECONCILIATION_IDLE_POLL_MS = 30_000;
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
@@ -128,6 +139,24 @@ export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
 export const LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS = 30_000;
 const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
+
+export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
+
+/** Pure cadence resolver kept deterministic for the cost/correctness contract. */
+export function relayExecutorPollDelayMs(
+  channel: 'RECONCILIATION' | 'PERSISTED_WAKE',
+  activity: RelayExecutorPollActivity,
+  activeReconciliationMs = POLL_MS,
+): number {
+  if (channel === 'PERSISTED_WAKE') {
+    if (activity === 'ACTIVE') return PERSISTED_WAKE_ACTIVE_POLL_MS;
+    if (activity === 'PAUSED') return PERSISTED_WAKE_PAUSED_POLL_MS;
+    return PERSISTED_WAKE_IDLE_POLL_MS;
+  }
+  if (activity === 'ACTIVE') return activeReconciliationMs;
+  if (activity === 'PAUSED') return RECONCILIATION_PAUSED_POLL_MS;
+  return RECONCILIATION_IDLE_POLL_MS;
+}
 
 export type ExactShowcaseEntryQtyResolution =
   | { ok: true; qty: number; requiredMarginUsd: number; capQty: number }
@@ -3528,6 +3557,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * never waits for exchange execution and therefore cannot reintroduce the
    * former cross-trade head-of-line bottleneck. */
   private persistedWakePollRunning = false;
+  private reconciliationTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistedWakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastRelayPollActivity: RelayExecutorPollActivity = 'IDLE';
+  private executorDestroyed = false;
   /** Exact direct wakes completed by this process. Prevent the durable
    * crash-fallback copy from executing the same wake a second time. */
   private readonly completedDirectWakeAt = new Map<string, number>();
@@ -3813,6 +3846,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   onModuleInit() {
+    this.executorDestroyed = false;
     if (!executionEnabled()) {
       this.startExecutorConnectionKeepalive();
       this.logger.warn('Subscriber execution disabled (SUBSCRIBER_EXECUTION_ENABLED=false)');
@@ -3836,18 +3870,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
-        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, every ${POLL_MS}ms (max $${cap}/trade)`,
+        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (max $${cap}/trade)`,
       );
     });
-    setInterval(() => void this.tick(), POLL_MS);
-    setTimeout(() => void this.tick(), POLL_MS);
+    this.scheduleReconciliation(POLL_MS);
     // Signed showcase lifecycle events must not wait for the full reconciliation
     // pass. A healthy full pass can take several seconds because Bitfinex auth
     // calls are deliberately serialized on one nonce lane. Poll the durable
     // cross-process wake independently and run only the idempotent atomic-claim
     // entry / exitingLots-guarded close path. The normal tick remains the crash
     // recovery and reconciliation backstop.
-    setInterval(() => void this.pollPersistedFastWake(), 250).unref();
+    this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
     // Authenticated account-info trades are the latency path for exchange fills.
     // They consume no REST nonce/read budget; the ordinary reconciliation tick
     // remains the fail-closed reconnect/outage backstop.
@@ -3857,8 +3890,51 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   onModuleDestroy() {
+    this.executorDestroyed = true;
+    if (this.reconciliationTimer) clearTimeout(this.reconciliationTimer);
+    if (this.persistedWakeTimer) clearTimeout(this.persistedWakeTimer);
     for (const stream of this.bitfinexTradeStreams.values()) stream.stop();
     this.bitfinexTradeStreams.clear();
+  }
+
+  /**
+   * Full reconciliation stays at the configured money-path cadence while a
+   * relay is ACTIVE. A PAUSED relay retains a five-second exit/recovery
+   * backstop, while an installation with no relevant relay performs only a
+   * 30-second discovery pass. Explicit authenticated wakes still call
+   * wakeNow()/the signed fast path immediately and never wait for this timer.
+   */
+  private scheduleReconciliation(delayMs: number): void {
+    if (this.executorDestroyed) return;
+    this.reconciliationTimer = setTimeout(async () => {
+      try {
+        await this.tick();
+      } finally {
+        if (!this.executorDestroyed) {
+          this.scheduleReconciliation(
+            relayExecutorPollDelayMs('RECONCILIATION', this.lastRelayPollActivity),
+          );
+        }
+      }
+    }, delayMs);
+    this.reconciliationTimer.unref();
+  }
+
+  /** Durable Neon wake polling is a backstop, not the latency path. */
+  private schedulePersistedWakePoll(delayMs: number): void {
+    if (this.executorDestroyed) return;
+    this.persistedWakeTimer = setTimeout(async () => {
+      try {
+        await this.pollPersistedFastWake();
+      } finally {
+        if (!this.executorDestroyed) {
+          this.schedulePersistedWakePoll(
+            relayExecutorPollDelayMs('PERSISTED_WAKE', this.lastRelayPollActivity),
+          );
+        }
+      }
+    }, delayMs);
+    this.persistedWakeTimer.unref();
   }
 
   private async syncBitfinexTradeStreams(): Promise<void> {
@@ -4672,40 +4748,65 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
   private async consumePersistedExecutorWakes(): Promise<RelayExecutorWakeRequest | null> {
     if (!executionEnabled()) return null;
-    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
-    if (!agent) return null;
-    const instances = await this.prisma.tradingAgentInstance.findMany({
-      where: {
-        agentId: agent.id,
-        exchangeProvider: 'bitfinex',
-        status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
-      },
-      select: { id: true, dashboardState: true },
-      take: 50,
+    const agent = await this.prisma.tradingAgent.findUnique({
+      where: { slug: AGENT_SLUG },
+      select: { id: true },
     });
+    if (!agent) return null;
+    type WakeProjectionRow = {
+      id: string;
+      status: string;
+      wake: unknown;
+      relayArmedAt: string | null;
+      relayExecutionMode: string | null;
+      simActive: boolean;
+      hasExposure: boolean;
+    };
+    // Project only the wake and tiny activity fields in Postgres. Selecting the
+    // Prisma JSON column here would transfer the entire dashboard document on
+    // every backstop poll, recreating the Neon egress incident even after the
+    // cadence reduction. Exposure is authoritative durable participant state;
+    // status=ACTIVE alone is not treated as an armed money path.
+    const instances = await this.prisma.$queryRaw<WakeProjectionRow[]>(Prisma.sql`
+      SELECT
+        i."id",
+        i."status"::text AS "status",
+        i."dashboardState" -> ${RELAY_EXECUTOR_WAKE_KEY} AS "wake",
+        i."dashboardState" ->> 'relayArmedAt' AS "relayArmedAt",
+        i."dashboardState" ->> 'relayExecutionMode' AS "relayExecutionMode",
+        COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "simActive",
+        EXISTS (
+          SELECT 1
+          FROM "SignalCycleParticipant" p
+          JOIN "SignalCycle" c ON c."id" = p."cycleId"
+          WHERE p."userId" = i."userId"
+            AND c."agentId" = i."agentId"
+            AND p."status"::text IN ('OPEN', 'PENDING_ENTRY')
+        ) AS "hasExposure"
+      FROM "TradingAgentInstance" i
+      WHERE i."agentId" = ${agent.id}
+        AND i."exchangeProvider" = 'bitfinex'
+        AND i."status"::text IN ('ACTIVE', 'PAUSED')
+      ORDER BY i."updatedAt" DESC
+      LIMIT 50
+    `);
+    this.lastRelayPollActivity = instances.some((row) =>
+      row.hasExposure
+      || row.simActive
+      || (row.status === TradingAgentInstanceStatus.ACTIVE
+        && (!!row.relayArmedAt || row.relayExecutionMode === 'LIVE'))
+    ) ? 'ACTIVE' : instances.length > 0 ? 'PAUSED' : 'IDLE';
     let best: RelayExecutorWakeRequest | null = null;
     for (const inst of instances) {
-      const wake = readRelayExecutorWakeRequest(inst.dashboardState);
+      const wake = readRelayExecutorWakeRequest({ [RELAY_EXECUTOR_WAKE_KEY]: inst.wake });
       if (!wake) continue;
       const wakeMs = Date.parse(wake.at);
       if (!Number.isFinite(wakeMs) || Date.now() - wakeMs > 120_000) {
-        const cleared = applyDashboardPatch(
-          (inst.dashboardState ?? {}) as Record<string, unknown>,
-          { [RELAY_EXECUTOR_WAKE_KEY]: null },
-        );
-        await this.prisma.tradingAgentInstance
-          .update({ where: { id: inst.id }, data: { dashboardState: cleared as object } })
-          .catch(() => {});
+        await this.clearProjectedExecutorWake(inst.id, wake).catch(() => {});
         continue;
       }
       if (!best || Date.parse(wake.at) >= Date.parse(best.at)) best = wake;
-      const cleared = applyDashboardPatch(
-        (inst.dashboardState ?? {}) as Record<string, unknown>,
-        { [RELAY_EXECUTOR_WAKE_KEY]: null },
-      );
-      await this.prisma.tradingAgentInstance
-        .update({ where: { id: inst.id }, data: { dashboardState: cleared as object } })
-        .catch(() => {});
+      await this.clearProjectedExecutorWake(inst.id, wake).catch(() => {});
     }
     if (best) {
       this.lastShowcaseWakeAt = Date.parse(best.at) || Date.now();
@@ -4713,6 +4814,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         best.trigger === 'POSITION_CLOSED' ? 'POSITION_CLOSED' : null;
     }
     return best;
+  }
+
+  /** Compare-and-remove only the consumed wake; preserve concurrent dashboard writers. */
+  private async clearProjectedExecutorWake(
+    instanceId: string,
+    wake: RelayExecutorWakeRequest,
+  ): Promise<void> {
+    const serialized = JSON.stringify(wake);
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "TradingAgentInstance"
+      SET "dashboardState" = COALESCE("dashboardState", '{}'::jsonb) - ${RELAY_EXECUTOR_WAKE_KEY}
+      WHERE "id" = ${instanceId}
+        AND "dashboardState" -> ${RELAY_EXECUTOR_WAKE_KEY} = ${serialized}::jsonb
+    `);
   }
 
   /** Cross-process signed-webhook fast lane; safe to overlap the reconciliation tick. */
@@ -5649,7 +5764,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.tickStartedAtMs = Date.now();
     this.currentStage = 'LOAD_AGENT';
     try {
-      const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
+      const agent = await this.prisma.tradingAgent.findUnique({
+        where: { slug: AGENT_SLUG },
+        select: { id: true },
+      });
       if (!agent) return;
 
       // Hire expiry (expiresAt) gates LIVE COPY only. The relay sim is the free $20
@@ -5668,6 +5786,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           exchangeProvider: { not: 'paper' },
         },
       });
+      const armedOrSimActive = instances.some((instance) =>
+        isCopyRelaySimActive(instance.dashboardState)
+        || (instance.status === TradingAgentInstanceStatus.ACTIVE
+          && relayArmTimestampMs(instance.dashboardState) != null),
+      );
+      const exposure = !armedOrSimActive && instances.length > 0
+        ? await this.prisma.signalCycleParticipant.findFirst({
+            where: {
+              userId: { in: instances.map((instance) => instance.userId) },
+              status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+              cycle: { agentId: agent.id },
+            },
+            select: { id: true },
+          })
+        : null;
+      this.lastRelayPollActivity = armedOrSimActive || exposure
+        ? 'ACTIVE'
+        : instances.length > 0 ? 'PAUSED' : 'IDLE';
       const discoveredIds = new Set(instances.map((instance) => instance.id));
       for (const cachedId of this.relayInstanceCache.keys()) {
         if (!discoveredIds.has(cachedId)) this.relayInstanceCache.delete(cachedId);
