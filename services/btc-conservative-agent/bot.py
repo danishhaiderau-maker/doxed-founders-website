@@ -30467,7 +30467,7 @@ DASHBOARD_JS = """(function () {
           'positionsTable',
           positionRows || '<tr><td colspan="11" style="color:#8b949e;">No open paper positions right now.</td></tr>'
         );
-        safeHTML('expiredOrdersTable', (d.expired_orders || []).map(e => {
+        const expiredOrderRows = (d.expired_orders || []).map(e => {
           const ageText = e.age_min != null
             ? Number(e.age_min).toFixed(2) + (e.never_placed ? ' (not placed)' : '')
             : '-';
@@ -30482,7 +30482,11 @@ DASHBOARD_JS = """(function () {
             <td>${e.conf||'-'}</td>
             <td>${e.mode||'-'}</td>
           </tr>`;
-        }).join(''));
+        }).join('');
+        safeHTML(
+          'expiredOrdersTable',
+          expiredOrderRows || '<tr><td colspan="8" style="color:#8b949e;">No expired orders in this session.</td></tr>'
+        );
         const expiredHint = document.getElementById('expiredOrdersTableHint');
         if (expiredHint) {
           const shown = (d.expired_orders || []).length;
@@ -30530,7 +30534,7 @@ DASHBOARD_JS = """(function () {
           psHint.innerText = ps.historical_coverage_note +
             ' Showing latest ' + pausedRecent.length + ' rows. Safety: never relay-eligible.';
         }
-        safeHTML('tradesTable', (d.trades||[]).map(t => {
+        const closedTradeRows = (d.trades||[]).map(t => {
           const truth = t.dual_execution_truth || {};
           const show = truth.showcase_simulated || {};
           const bf = truth.bitfinex_authenticated || {};
@@ -30565,7 +30569,11 @@ DASHBOARD_JS = """(function () {
             <td>${bitfinexLabel}</td>
             <td>${relLabel}</td>
           </tr>`;
-        }).join(''));
+        }).join('');
+        safeHTML(
+          'tradesTable',
+          closedTradeRows || '<tr><td colspan="18" style="color:#8b949e;">No closed trades in this session.</td></tr>'
+        );
         const tradesHint = document.getElementById('tradesTableHint');
         if (tradesHint) {
           const shown = (d.trades || []).length;
