@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 
 MAX_TAIL_BYTES = 262_144
+
+
+def _utc_timestamp(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return None
 
 
 def _tail_lines(path: Path, *, max_bytes: int = MAX_TAIL_BYTES) -> list[bytes]:
@@ -66,7 +80,7 @@ def build_runtime_incident_history(
             instance_id = ""
             exit_code = None
         incidents.append({
-            "time": receipt.get("time"),
+            "time": _utc_timestamp(receipt.get("time")),
             "classification": classification,
             "reason": reason,
             "restart_requested": bool(

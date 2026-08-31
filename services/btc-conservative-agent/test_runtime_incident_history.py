@@ -24,6 +24,7 @@ def test_runtime_history_classifies_only_explicit_application_receipts(tmp_path)
         "APPLICATION_WATCHDOG_RESTART_REQUESTED", "APPLICATION_CRASH_DUMP_UNATTRIBUTED"
     ]
     assert result["application_incidents"][0]["exit_code"] == 75
+    assert result["application_incidents"][0]["time"] == "2026-08-31T00:00:00Z"
     assert result["platform_events"] == []
     assert result["platform_history_status"] == "UNAVAILABLE_NO_AUTHORITATIVE_PLATFORM_EVENT_RECEIPTS"
 
@@ -31,14 +32,16 @@ def test_runtime_history_classifies_only_explicit_application_receipts(tmp_path)
 def test_runtime_history_skips_malformed_and_is_bounded(tmp_path):
     path = tmp_path / "crash_dump.json"
     path.write_text(
-        "not-json\n" + "\n".join(json.dumps({"time": str(i)}) for i in range(6)),
+        "not-json\n" + "\n".join(json.dumps({"time": f"2026-08-31T0{i}:00:00+10:00"}) for i in range(6)),
         encoding="utf-8",
     )
     result = build_runtime_incident_history(
         path, current_started_at=None, current_instance_id=None,
         current_revision=None, limit=3,
     )
-    assert [row["time"] for row in result["application_incidents"]] == ["3", "4", "5"]
+    assert [row["time"] for row in result["application_incidents"]] == [
+        "2026-08-30T17:00:00Z", "2026-08-30T18:00:00Z", "2026-08-30T19:00:00Z"
+    ]
     assert result["malformed_receipts_skipped"] == 1
 
 
