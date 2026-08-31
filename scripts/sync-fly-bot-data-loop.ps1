@@ -33,6 +33,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-quarantine.ps1")
+. (Join-Path $scriptDir "fly-sync-backoff.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
@@ -61,6 +62,8 @@ $relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestinati
 } else { $null }
 $env:PLATFORM_RELAY_EVIDENCE_FILE = $relayEvidenceDestination
 $env:PLATFORM_SOURCE_BOT_URL = $SourceUrl
+$consecutiveFailures = 0
+$maximumFailureBackoffSec = 1800
 
 function Write-Utf8NoBomJsonAtomic {
   param(
@@ -362,6 +365,7 @@ try {
     Remove-OrphanedMirrorCandidates -MirrorPath $mirrorDir
     $started = Get-Date
     $didSync = $false
+    $sleepSec = $pollSec
     $observedSourceRevision = $null
     $currentStage = "loop_start"
     $relayEvidenceStatus = [ordered]@{
@@ -520,6 +524,7 @@ try {
       }
 
       if (-not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision)) {
+        $consecutiveFailures = 0
         $revisionParity = $(
           if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
           elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }
@@ -549,6 +554,9 @@ try {
           activeTiles = $(if ($manifest.PSObject.Properties.Name -contains "active_tiles") { @($manifest.active_tiles) } else { @() })
           relayEvidence = $relayEvidenceStatus
           pollOk = $true
+          consecutiveFailures = 0
+          backoffSec = 0
+          nextRetryAt = $null
         }
         $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
         Add-Content -LiteralPath $logFile -Value (
@@ -607,6 +615,9 @@ try {
         Add-Content -LiteralPath $logFile -Value (
           "$((Get-Date).ToUniversalTime().ToString('o'))`tDEFER`tanalyzer owns mirror-generation lease"
         )
+        # Fly preflight succeeded; local analyzer ownership is a normal defer,
+        # not another outage failure.
+        $consecutiveFailures = 0
         Start-Sleep -Seconds $pollSec
         continue
       }
@@ -618,6 +629,7 @@ try {
       $currentStage = "atomic_mirror_sync"
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
       $didSync = $true
+      $consecutiveFailures = 0
       $lastSyncedTotalBytes = $currentTotalBytes
       $lastSyncedVolumeUsedBytes = $currentVolumeUsedBytes
       $lastSyncAt = [datetime]::UtcNow
@@ -658,12 +670,21 @@ try {
         trigger = $(if ($forceByRevision) { "revision" } elseif ($forceByGrowth) { "growth" } elseif ($forceFresh) { "fresh" } else { "interval" })
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
         pollOk = $true
+        consecutiveFailures = 0
+        backoffSec = 0
+        nextRetryAt = $null
       }
       Add-Content -LiteralPath $logFile -Value (
         "$($heartbeat.syncedAt)`tOK`ttrigger=$($heartbeat.trigger)`trev=$($heartbeat.sourceRevision)`tfiles=$($heartbeat.files)`tpruned=$($heartbeat.prunedRotations)`telapsed=$($heartbeat.elapsedSec)s"
       )
     } catch {
+      $consecutiveFailures += 1
+      $sleepSec = Get-FlySyncFailureBackoffSeconds `
+        -ConsecutiveFailures $consecutiveFailures `
+        -NormalPollSeconds $pollSec `
+        -MaximumBackoffSeconds $maximumFailureBackoffSec
       $failureAt = (Get-Date).ToUniversalTime().ToString("o")
+      $nextRetryAt = [datetime]::UtcNow.AddSeconds($sleepSec).ToString("o")
       $failureMessage = $_.Exception.Message
       $retainedHeartbeat = $null
       if (Test-Path -LiteralPath $heartbeatFile -PathType Leaf) {
@@ -692,6 +713,9 @@ try {
         $heartbeat["pollStage"] = $currentStage
         $heartbeat["pollError"] = $failureMessage
         $heartbeat["relayEvidence"] = $relayEvidenceStatus
+        $heartbeat["consecutiveFailures"] = $consecutiveFailures
+        $heartbeat["backoffSec"] = $sleepSec
+        $heartbeat["nextRetryAt"] = $nextRetryAt
       } else {
         $heartbeat = [ordered]@{
           ok = $false
@@ -712,10 +736,13 @@ try {
           )
           relayEvidence = $relayEvidenceStatus
           elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)
+          consecutiveFailures = $consecutiveFailures
+          backoffSec = $sleepSec
+          nextRetryAt = $nextRetryAt
         }
       }
       Add-Content -LiteralPath $logFile -Value (
-        "$failureAt`tERROR`tstage=$currentStage`t$failureMessage"
+        "$failureAt`tERROR`tstage=$currentStage`tfailures=$consecutiveFailures`tbackoff=${sleepSec}s`tnextRetry=$nextRetryAt`t$failureMessage"
       )
     }
     $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8
@@ -732,12 +759,12 @@ try {
       # A full copy can run for several minutes. Give the control plane one
       # complete configured interval before requesting another recursive
       # inventory; append/new-file detection remains bounded by IntervalSec.
-      Start-Sleep -Seconds $pollSec
+      Start-Sleep -Seconds $sleepSec
     } else {
-      # A failed preflight must retry at the bounded poll cadence. Sleeping
-      # for the full-sync interval would leave a stale heartbeat after a
-      # transient 503 and unnecessarily block the analyzer.
-      Start-Sleep -Seconds $pollSec
+      # Healthy no-sync iterations keep the normal cadence. Consecutive
+      # failures use the deterministic bounded backoff selected above, which
+      # prevents an outage from repeatedly pressuring Fly.
+      Start-Sleep -Seconds $sleepSec
     }
   }
 } finally {

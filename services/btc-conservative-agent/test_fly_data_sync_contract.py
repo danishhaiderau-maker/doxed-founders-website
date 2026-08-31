@@ -28,6 +28,7 @@ SYNC_SCRIPT = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data.ps1").read_text(
 SYNC_LOOP = (ROOT.parents[1] / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(
     encoding="utf-8"
 )
+SYNC_BACKOFF = ROOT.parents[1] / "scripts" / "fly-sync-backoff.ps1"
 DESKTOP_MIRROR_LAUNCHER = (
     ROOT.parents[1] / "scripts" / "start-fly-desktop-mirror.ps1"
 ).read_text(encoding="utf-8")
@@ -210,9 +211,34 @@ def test_sync_loop_separates_poll_retry_and_full_mutation_cadence():
     failure_marker = SYNC_LOOP.index("$failureAt = (Get-Date).ToUniversalTime()")
     catch_start = SYNC_LOOP.rfind("    } catch {", 0, failure_marker)
     loop_tail = SYNC_LOOP[catch_start:]
-    assert "Start-Sleep -Seconds $pollSec" in loop_tail
-    assert "Start-Sleep -Seconds $pollSec" in loop_tail
+    assert loop_tail.count("Start-Sleep -Seconds $sleepSec") == 2
+    assert "$sleepSec = Get-FlySyncFailureBackoffSeconds" in loop_tail
     assert "Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))" not in loop_tail
+
+
+def test_sync_outage_backoff_is_deterministic_bounded_and_reset_on_success():
+    helper = SYNC_BACKOFF.read_text(encoding="utf-8")
+    assert "function Get-FlySyncFailureBackoffSeconds" in helper
+    command = (
+        f". '{SYNC_BACKOFF}'; "
+        "@(0,1,2,3,4,5,6) | ForEach-Object { "
+        "Get-FlySyncFailureBackoffSeconds -ConsecutiveFailures $_ "
+        "-NormalPollSeconds 180 -MaximumBackoffSeconds 1800 } | ConvertTo-Json -Compress"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert json.loads(completed.stdout) == [180, 180, 360, 720, 1440, 1800, 1800]
+    assert ". (Join-Path $scriptDir \"fly-sync-backoff.ps1\")" in SYNC_LOOP
+    assert "$consecutiveFailures += 1" in SYNC_LOOP
+    assert "$consecutiveFailures = 0" in SYNC_LOOP
+    assert 'nextRetryAt = $nextRetryAt' in SYNC_LOOP
+    assert 'backoffSec = $sleepSec' in SYNC_LOOP
+    assert 'Start-Sleep -Seconds $sleepSec' in SYNC_LOOP
 
 
 def test_identity_poll_uses_o1_volume_growth_to_trigger_full_inventory():
