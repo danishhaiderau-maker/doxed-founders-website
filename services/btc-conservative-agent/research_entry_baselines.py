@@ -111,6 +111,42 @@ def build_entry_baseline_registry() -> dict[str, Any]:
 ENTRY_BASELINE_REGISTRY = build_entry_baseline_registry()
 
 
+def _evidence_present(value: Any) -> bool:
+    """Treat explicit zero-valued cost/latency evidence as present."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (tuple, list, dict, set)):
+        return bool(value)
+    return True
+
+
+def missing_baseline_evidence(
+    baseline_id: str, evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return only the signed-input gate, before terminal replay exists."""
+    baseline = next(
+        (row for row in ENTRY_BASELINE_REGISTRY["baselines"]
+         if row["baseline_id"] == str(baseline_id)),
+        None,
+    )
+    if baseline is None:
+        raise KeyError(f"UNKNOWN_ENTRY_BASELINE:{baseline_id}")
+    supplied = evidence if isinstance(evidence, Mapping) else {}
+    missing = [
+        name for name in baseline["required_evidence"]
+        if not _evidence_present(supplied.get(name))
+    ]
+    return {
+        "baseline_id": baseline["baseline_id"],
+        "policy_signature": baseline["policy_signature"],
+        "complete": not missing,
+        "missing_evidence": missing,
+        "rejection_codes": [f"MISSING_{name.upper()}" for name in missing],
+    }
+
+
 def classify_baseline_evidence(
     baseline_id: str, evidence: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -120,35 +156,28 @@ def classify_baseline_evidence(
     engine may supply a terminal classification only after it has consumed the
     signed evidence named by the baseline.
     """
-    baseline = next(
-        (row for row in ENTRY_BASELINE_REGISTRY["baselines"]
-         if row["baseline_id"] == str(baseline_id)),
-        None,
-    )
-    if baseline is None:
-        raise KeyError(f"UNKNOWN_ENTRY_BASELINE:{baseline_id}")
     supplied = evidence if isinstance(evidence, Mapping) else {}
-    missing = [name for name in baseline["required_evidence"] if not supplied.get(name)]
-    if missing:
+    gate = missing_baseline_evidence(baseline_id, supplied)
+    if gate["missing_evidence"]:
         return {
-            "baseline_id": baseline["baseline_id"],
-            "policy_signature": baseline["policy_signature"],
+            "baseline_id": gate["baseline_id"],
+            "policy_signature": gate["policy_signature"],
             "outcome_state": "UNKNOWN",
             "supported": False,
-            "rejection_codes": [f"MISSING_{name.upper()}" for name in missing],
+            "rejection_codes": gate["rejection_codes"],
         }
     terminal = str(supplied.get("terminal_outcome") or "").upper()
     if terminal not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}:
         return {
-            "baseline_id": baseline["baseline_id"],
-            "policy_signature": baseline["policy_signature"],
+            "baseline_id": gate["baseline_id"],
+            "policy_signature": gate["policy_signature"],
             "outcome_state": "UNKNOWN",
             "supported": False,
             "rejection_codes": ["CONSERVATIVE_TERMINAL_OUTCOME_MISSING"],
         }
     return {
-        "baseline_id": baseline["baseline_id"],
-        "policy_signature": baseline["policy_signature"],
+        "baseline_id": gate["baseline_id"],
+        "policy_signature": gate["policy_signature"],
         "outcome_state": terminal,
         "supported": True,
         "rejection_codes": [],
