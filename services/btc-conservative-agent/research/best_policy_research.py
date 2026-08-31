@@ -17,7 +17,7 @@ from policy_search_manifest import POLICY_SEARCH_MANIFEST
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 POLICY_CANDIDATE_OOS_REPORT_FILE = "policy_candidate_oos_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
-QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v1"
+QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v2"
 REQUIRED_QUALIFICATION_GATES = (
     "chronological_untouched_oos",
     "cost_adjusted_positive_expectancy",
@@ -28,7 +28,68 @@ REQUIRED_QUALIFICATION_GATES = (
     "regime_diversity",
     "no_data_integrity_defects",
     "control_benchmark_comparison",
+    "purged_walk_forward_validation",
+    "sealed_holdout_receipt",
+    "measured_execution_costs",
+    "liquidation_buffer",
+    "detailed_regime_support",
+    "baseline_replay_coverage",
 )
+
+QUALIFICATION_GATE_LABELS = {
+    "chronological_untouched_oos": "Chronological untouched OOS",
+    "cost_adjusted_positive_expectancy": "Positive cost-adjusted expectancy",
+    "acceptable_drawdown": "Acceptable drawdown and CVaR",
+    "minimum_independent_episodes": "Adequate independent sample",
+    "parameter_neighborhood_stability": "Stable neighbouring parameters",
+    "conservative_execution": "Conservative execution evidence",
+    "regime_diversity": "Multiple regimes represented",
+    "no_data_integrity_defects": "No data-integrity defects",
+    "control_benchmark_comparison": "Control and benchmark comparison",
+    "purged_walk_forward_validation": "Purged walk-forward and embargoed folds",
+    "sealed_holdout_receipt": "Single-use sealed holdout receipt",
+    "measured_execution_costs": "Measured fees, funding, latency and slippage",
+    "liquidation_buffer": "Verified liquidation buffer",
+    "detailed_regime_support": "Detailed regime and liquidity support",
+    "baseline_replay_coverage": "Market, no-chase, 13m and 30m baseline replay",
+}
+
+
+def qualification_gate_details(gates, evidence=None, *, current_generation_available=True) -> list[dict]:
+    """Project mandatory gates without turning absent evidence into a pass.
+
+    Boolean gates remain in the report for existing clients.  This richer view
+    distinguishes an observed failure from an unmeasured gate and from a report
+    that is not bound to the current generation.
+    """
+    values = gates if isinstance(gates, dict) else {}
+    receipts = evidence if isinstance(evidence, dict) else {}
+    rows = []
+    for gate in REQUIRED_QUALIFICATION_GATES:
+        receipt = receipts.get(gate)
+        receipt = receipt if isinstance(receipt, dict) else {}
+        if not current_generation_available:
+            status = "UNAVAILABLE"
+            blocker = "CURRENT_GENERATION_UNAVAILABLE"
+        elif values.get(gate) is True:
+            status = "PASS"
+            blocker = None
+        elif gate in values and values.get(gate) is False:
+            status = "FAIL"
+            blocker = str(receipt.get("blocker") or f"QUALIFICATION_GATE_FAILED:{gate}")
+        else:
+            status = "UNKNOWN"
+            blocker = str(receipt.get("blocker") or f"QUALIFICATION_GATE_EVIDENCE_MISSING:{gate}")
+        rows.append({
+            "gate": gate,
+            "label": QUALIFICATION_GATE_LABELS.get(gate, gate.replace("_", " ").title()),
+            "status": status,
+            "blocker": blocker,
+            "evidence": receipt.get("evidence"),
+            "receipt_id": receipt.get("receipt_id"),
+            "source": receipt.get("source"),
+        })
+    return rows
 
 
 def qualification_gate_blockers(gates) -> list[str]:
@@ -120,6 +181,11 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
         identities = collection.get("effective_paper_execution_identities") or []
         identity = identities[0] if len(identities) == 1 else {}
         gates = oos.get("qualification_gates") or {}
+        gate_receipts = oos.get("qualification_gate_evidence") or {}
+        generation_available = bool(
+            genome.get("epoch_id")
+            and str(oos.get("epoch_id") or "") == str(genome.get("epoch_id") or "")
+        )
         candidate = oos.get("candidate") or oos.get("current_candidate")
         blockers = sorted(set(list(oos.get("blockers") or []) + qualification_gate_blockers(gates) + candidate_contract_blockers(candidate)))
         qualified = bool(str(oos.get("status") or "").upper() == "QUALIFIED" and candidate and not blockers)
@@ -137,6 +203,9 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
             "current_candidate": candidate if qualified else None,
             "descriptive_challenger": oos.get("descriptive_challenger"),
             "qualification_gates": gates,
+            "qualification_gate_details": qualification_gate_details(
+                gates, gate_receipts, current_generation_available=generation_available
+            ),
             "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
             "evidence": {
                 "current_epoch_events": int(evidence.get("current_events") or 0),
@@ -207,6 +276,7 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
 
     oos = _json(report_root / POLICY_CANDIDATE_OOS_REPORT_FILE)
     gates = oos.get("qualification_gates") or {}
+    gate_receipts = oos.get("qualification_gate_evidence") or {}
     blockers = list(oos.get("blockers") or [])
     if cycle_snapshot and (
         (oos.get("cycle_snapshot") or {}).get("snapshot_id")
@@ -259,6 +329,16 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
         "current_candidate": candidate if qualified else None,
         "descriptive_challenger": oos.get("descriptive_challenger"),
         "qualification_gates": gates,
+        "qualification_gate_details": qualification_gate_details(
+            gates,
+            gate_receipts,
+            current_generation_available=bool(
+                epoch_id
+                and str(oos.get("epoch_id") or "") == epoch_id
+                and str(oos.get("policy_epoch_id") or "") == current_policy_epoch
+                and str(oos.get("evidence_policy_signature") or "") == current_policy_signature
+            ),
+        ),
         "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
         "evidence": {
             "current_epoch_events": len(current),

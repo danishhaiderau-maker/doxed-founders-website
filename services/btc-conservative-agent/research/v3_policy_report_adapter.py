@@ -11,6 +11,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from research.best_policy_research import (
+    QUALIFICATION_GATE_SCHEMA,
+    REQUIRED_QUALIFICATION_GATES,
+    qualification_gate_details,
+)
+
 
 _CONSERVATIVE_INTENT_FIELDS = (
     "schema", "ledger", "record_id", "event_id", "episode_id", "epoch_id",
@@ -149,14 +155,9 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         winner
         and genome.get("qualification") not in (None, "NO_SAFE_QUALIFIED_POLICY")
     )
-    required = (
-        "chronological_untouched_oos", "cost_adjusted_positive_expectancy",
-        "acceptable_drawdown", "minimum_independent_episodes",
-        "parameter_neighborhood_stability", "conservative_execution",
-        "regime_diversity", "no_data_integrity_defects",
-        "control_benchmark_comparison",
-    )
+    required = REQUIRED_QUALIFICATION_GATES
     winner_gates = (winner or {}).get("gates") or {}
+    validation = (winner or {}).get("validation") or {}
     episode_count = int(collection.get("independent_opportunities") or 0)
     execution_count = int(collection.get("execution_rows") or 0)
     segment_count = int(collection.get("market_segments") or 0)
@@ -168,6 +169,56 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
     gates["parameter_neighborhood_stability"] = bool(
         winner_gates.get("neighborhood_stability_pass")
     )
+    gates.update({
+        "purged_walk_forward_validation": bool(winner_gates.get("purged_walk_forward_pass")),
+        "sealed_holdout_receipt": bool(winner_gates.get("sealed_holdout_pass")),
+        "measured_execution_costs": bool(winner_gates.get("measured_costs_pass")),
+        "liquidation_buffer": bool(winner_gates.get("liquidation_buffer_pass")),
+        "detailed_regime_support": bool(winner_gates.get("regime_coverage_pass")),
+        "baseline_replay_coverage": bool(winner_gates.get("baseline_replay_coverage_pass")),
+    })
+    purged = validation.get("purged_walk_forward") or {}
+    sealed = validation.get("sealed_holdout") or {}
+    measured = validation.get("measured_cost_evidence") or {}
+    liquidation = validation.get("liquidation_buffer") or {}
+    gate_evidence = {
+        "purged_walk_forward_validation": {
+            "evidence": purged.get("schema"),
+            "receipt_id": purged.get("receipt_id"),
+            "blocker": next(iter(purged.get("blockers") or []), None),
+            "source": "winner.validation.purged_walk_forward",
+        },
+        "sealed_holdout_receipt": {
+            "evidence": sealed.get("schema"),
+            "receipt_id": sealed.get("receipt_id"),
+            "blocker": next(iter(sealed.get("blockers") or []), None),
+            "source": "winner.validation.sealed_holdout",
+        },
+        "measured_execution_costs": {
+            "evidence": measured.get("schema"),
+            "blocker": next(iter(measured.get("defects") or []), None),
+            "source": "winner.validation.measured_cost_evidence",
+        },
+        "liquidation_buffer": {
+            "evidence": liquidation.get("schema"),
+            "receipt_id": liquidation.get("receipt_id"),
+            "blocker": next(iter(liquidation.get("blockers") or []), None),
+            "source": "winner.validation.liquidation_buffer",
+        },
+        "detailed_regime_support": {
+            "evidence": f"regimes={len(validation.get('regimes') or [])}",
+            "source": "winner.validation.regimes",
+        },
+        "baseline_replay_coverage": {
+            "evidence": ((winner or {}).get("baseline_replay_coverage") or {}).get("schema"),
+            "receipt_id": ((winner or {}).get("baseline_replay_coverage") or {}).get("receipt_id"),
+            "blocker": next(iter(
+                ((winner or {}).get("baseline_replay_coverage") or {}).get("blockers") or
+                ["BASELINE_REPLAY_COVERAGE_NOT_PROVEN"]
+            ), None),
+            "source": "winner.baseline_replay_coverage",
+        },
+    }
     # Cohort-level gates are truthful before a winner exists. Candidate-level
     # performance gates remain false until the sealed ranking supplies them.
     gates.update({
@@ -220,7 +271,13 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         "current_candidate": winner if qualified else None,
         "descriptive_challenger": descriptive,
         "qualification_gates": gates,
-        "qualification_gate_schema": "best_policy_qualification_gates_v1",
+        "qualification_gate_details": qualification_gate_details(
+            gates,
+            {**gate_evidence, **((winner or {}).get("qualification_gate_evidence") or {})},
+            current_generation_available=bool(genome.get("epoch_id")),
+        ),
+        "qualification_gate_evidence": gate_evidence,
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
         "evidence": evidence,
         "blockers": blockers,
         "source_report": "safe_policy_genome_v3_report.json",

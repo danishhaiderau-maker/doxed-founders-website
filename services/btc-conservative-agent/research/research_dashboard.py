@@ -65,14 +65,16 @@ try:
     from research.best_policy_research import (
         QUALIFICATION_GATE_SCHEMA,
         candidate_contract_blockers,
+        qualification_gate_details,
         qualification_gate_blockers,
     )
 except ImportError:
     RESEARCH_EVENTS_FILE = "research_events_v22.jsonl"
     validate_replay_eligibility = None
-    QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v1"
+    QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v2"
     candidate_contract_blockers = lambda candidate: ["CANDIDATE_VALIDATOR_UNAVAILABLE"]
     qualification_gate_blockers = lambda gates: ["QUALIFICATION_GATE_VALIDATOR_UNAVAILABLE"]
+    qualification_gate_details = lambda gates, evidence=None, current_generation_available=True: []
 
 try:
     from combo_pathway_config import (
@@ -3168,6 +3170,16 @@ def _best_policy_research_payload():
         "evidence": analyzed_evidence,
         "live_observed_evidence": live_evidence,
         "blockers": blockers,
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gate_details": qualification_gate_details(
+            gate_values,
+            policy_report.get("qualification_gate_evidence"),
+            current_generation_available=bool(
+                current_epoch and report_epoch == current_epoch
+                and str(policy_report.get("policy_epoch_id") or "") == current_policy_epoch
+                and str(policy_report.get("evidence_policy_signature") or "") == current_policy_signature
+            ),
+        ),
         "note": (
             "A candidate appears only after replay-eligible, independent, untouched out-of-sample "
             "evidence passes every declared qualification gate for this exact epoch."
@@ -3444,6 +3456,13 @@ def _best_policy_research_v31_payload() -> dict:
         "current": True, "stale": False, "revision_parity": "MATCH",
         "epoch_parity": "MATCH", "reasons": [],
     }
+    report_gate_values = compatibility.get("qualification_gates") or {}
+    report_gate_evidence = compatibility.get("qualification_gate_evidence") or {}
+    gate_details = qualification_gate_details(
+        report_gate_values,
+        report_gate_evidence,
+        current_generation_available=bool(compatibility_matches and freshness["current"]),
+    )
     return {
         "schema": "best_policy_research_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
@@ -3472,6 +3491,8 @@ def _best_policy_research_v31_payload() -> dict:
         "evidence": evidence,
         "live_observed_evidence": collection,
         "blockers": source["blockers"],
+        "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+        "qualification_gate_details": gate_details,
         "generation_freshness": freshness,
         "stale": freshness["stale"],
         "note": (
@@ -5870,6 +5891,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
     <p class="note"><strong>V3.1 evidence:</strong> <a href="/safe-policy-genome-v3.1">Safe Policy Genome</a> · <a href="/cross-world-evidence">Cross-world evidence</a> · <a href="/static-policies">Static policies</a> · <a href="/dynamic-policies">Dynamic/regime</a> · <a href="/shadow-research">Shadow paths</a> · <a href="/risk-drawdown">Risk/drawdown</a> · <a href="/chronological-oos">Chronological OOS</a> · <a href="/evidence-maturity">Evidence maturity</a> · <a href="/partial-reduction">Partial-reduction reconciliation</a></p>
     <div class="kpis" id="decision-readiness"></div>
+    <h3>Mandatory Bitfinex qualification gates</h3>
+    <p class="note">PASS requires current-generation evidence. FAIL is a measured failure, UNKNOWN means the evidence has not been supplied, and UNAVAILABLE means no exact current analyzer generation can be evaluated.</p>
+    <div class="table-scroll" tabindex="0"><table><thead><tr><th>Gate</th><th>Status</th><th>Evidence / receipt</th><th>Precise blocker</th></tr></thead><tbody id="qualification-gate-body"><tr><td colspan="4">Loading qualification gates…</td></tr></tbody></table></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
     <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code>. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
@@ -6496,6 +6520,14 @@ async function loadDecisionReadiness() {
   document.getElementById('decision-readiness').innerHTML = cards.map(([label, value, cls]) =>
     `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`
   ).join('');
+  const gateRows = d.qualification_gate_details || [];
+  document.getElementById('qualification-gate-body').innerHTML = gateRows.length
+    ? gateRows.map(row => {
+        const cls = row.status === 'PASS' ? 'green' : (row.status === 'FAIL' ? 'red' : 'amber');
+        const evidence = row.evidence || row.receipt_id || row.source || 'No current evidence receipt';
+        return `<tr><td>${row.label || row.gate}</td><td class="${cls}">${row.status}</td><td>${evidence}</td><td>${row.blocker || '—'}</td></tr>`;
+      }).join('')
+    : '<tr><td colspan="4">UNAVAILABLE — qualification gate projection was not published.</td></tr>';
   document.getElementById('decision-readiness-provenance').textContent =
     `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
     + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
