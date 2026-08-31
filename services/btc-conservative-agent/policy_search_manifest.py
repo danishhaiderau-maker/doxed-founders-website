@@ -11,7 +11,11 @@ import json
 from math import prod
 
 from chase_offset_touch_grid import CHASE_POLICIES, OFFSET_PCT_GRID
-from research_entry_baselines import ENTRY_BASELINE_REGISTRY
+from research_entry_baselines import (
+    CHASE_WINDOW_BUCKETS,
+    CHASE_WINDOW_SECONDS,
+    ENTRY_BASELINE_REGISTRY,
+)
 
 SEARCH_MANIFEST_SCHEMA = "policy_search_manifest_v1"
 SEARCH_MANIFEST_VERSION = "complete_static_dynamic_v1_20260820"
@@ -77,6 +81,15 @@ def build_policy_search_manifest() -> dict:
         "indicator_families": list(INDICATOR_FAMILIES),
         "causal_regime_features": list(CAUSAL_REGIME_FEATURES),
         "entry_baseline_registry": ENTRY_BASELINE_REGISTRY,
+        "entry_treatment_axes": {
+            "execution_mode": ["MARKET_AT_SIGNAL", "LIMIT"],
+            "chase_mode": ["NO_CHASE", "CHASE_13_MIN_COMPRESSED", "CHASE_30_MIN_LEGACY"],
+            "chase_window_bucket": list(CHASE_WINDOW_BUCKETS),
+            "chase_window_bucket_seconds": CHASE_WINDOW_SECONDS,
+            "expiry_action": ["EXPIRE_UNFILLED", "FINAL_MARKET_AFTER_EXPIRY"],
+            "execution_class": "RESEARCH_ONLY",
+            "missing_evidence_outcome": "UNKNOWN",
+        },
         "search_protocol": {
             "stage_1": "independent-axis screening on chronological training episodes",
             "stage_2": "Cartesian zoom only inside stable positive neighborhoods",
@@ -112,4 +125,6 @@ def compact_search_receipt() -> dict:
         "causal_regime_features": list(CAUSAL_REGIME_FEATURES),
         "entry_baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
         "entry_baseline_count": len(ENTRY_BASELINE_REGISTRY["baselines"]),
+        "chase_window_buckets": list(CHASE_WINDOW_BUCKETS),
+        "chase_window_bucket_seconds": CHASE_WINDOW_SECONDS,
     }

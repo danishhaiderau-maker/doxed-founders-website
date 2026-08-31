@@ -25,6 +25,16 @@ class PolicySearchManifestTests(unittest.TestCase):
         self.assertIn("regime classifier", protocol["dynamic_policy"])
         self.assertIn("never auto-activate", protocol["activation"])
 
+    def test_research_entry_treatments_explicitly_cover_windows_and_terminal_modes(self):
+        axes = POLICY_SEARCH_MANIFEST["entry_treatment_axes"]
+        self.assertEqual(axes["chase_window_bucket"], list(range(6)))
+        self.assertEqual(axes["chase_window_bucket_seconds"], 300)
+        self.assertIn("MARKET_AT_SIGNAL", axes["execution_mode"])
+        self.assertIn("NO_CHASE", axes["chase_mode"])
+        self.assertIn("FINAL_MARKET_AFTER_EXPIRY", axes["expiry_action"])
+        self.assertEqual(axes["execution_class"], "RESEARCH_ONLY")
+        self.assertEqual(axes["missing_evidence_outcome"], "UNKNOWN")
+
     def test_event_binds_search_and_signal_time_features(self):
         signal_ts = 1_700_000_000.0
         bars = [[(signal_ts + i * 60) * 1000, 100.0, 101.0, 99.0, 100.0, 1.0] for i in range(181)]

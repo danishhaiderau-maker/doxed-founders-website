@@ -1,4 +1,5 @@
 from research_entry_baselines import (
+    CHASE_WINDOW_BUCKETS,
     ENTRY_BASELINE_REGISTRY,
     build_entry_baseline_registry,
     classify_baseline_evidence,
@@ -19,7 +20,7 @@ def test_required_baselines_are_typed_signed_and_research_only():
     assert set(rows) == {
         "MARKET_ENTRY_AT_SIGNAL", "NO_CHASE_LIMIT", "CHASE_13_MIN_COMPRESSED",
         "CHASE_30_MIN_LEGACY", "FINAL_MARKET_AFTER_EXPIRY",
-    }
+    } | {f"CHASE_WINDOW_{bucket}" for bucket in CHASE_WINDOW_BUCKETS}
     assert rows["MARKET_ENTRY_AT_SIGNAL"]["entry_type"] == "MARKET_ENTRY"
     assert rows["FINAL_MARKET_AFTER_EXPIRY"]["entry_type"] == "FINAL_MARKET_AFTER_EXPIRY"
     assert rows["NO_CHASE_LIMIT"]["chase_policy_id"] == "no_chase"
@@ -30,6 +31,11 @@ def test_required_baselines_are_typed_signed_and_research_only():
     assert rows["CHASE_30_MIN_LEGACY"]["source_entry_policy_id"] == (
         "OFFSET_0.10_CHASE_w234_s50_i180"
     )
+    for bucket in CHASE_WINDOW_BUCKETS:
+        row = rows[f"CHASE_WINDOW_{bucket}"]
+        assert row["chase_window_bucket"] == bucket
+        assert row["window_start_sec"] == bucket * 300
+        assert row["window_end_sec"] == (bucket + 1) * 300
     for row in rows.values():
         assert row["execution_class"] == "RESEARCH_ONLY"
         assert row["places_order"] is False
@@ -62,5 +68,6 @@ def test_manifest_exposes_registry_without_changing_existing_cartesian_grid():
     assert POLICY_SEARCH_MANIFEST["entry_baseline_registry"] == ENTRY_BASELINE_REGISTRY
     assert POLICY_SEARCH_MANIFEST["counts"]["entry_policy_cartesian"] == 2700
     receipt = compact_search_receipt()
-    assert receipt["entry_baseline_count"] == 5
+    assert receipt["entry_baseline_count"] == 11
+    assert receipt["chase_window_buckets"] == list(range(6))
     assert receipt["entry_baseline_registry_signature"] == ENTRY_BASELINE_REGISTRY["registry_signature"]

@@ -127,6 +127,31 @@ def _market_schedule_failures(
     return []
 
 
+def _chase_window_schedule_failures(
+    baseline: Mapping[str, Any], episode: Mapping[str, Any],
+    envelope: Mapping[str, Any],
+) -> list[str]:
+    """Require a window treatment's signed schedule to stay in that window."""
+    if baseline.get("entry_type") != "LIMIT_CHASE_WINDOW":
+        return []
+    try:
+        signal_ts = int(float(episode.get("signal_ts")))
+        window_start = signal_ts + int(baseline["window_start_sec"])
+        window_end = signal_ts + int(baseline["window_end_sec"])
+    except (KeyError, TypeError, ValueError):
+        return ["CHASE_WINDOW_TIMESTAMP_MISSING"]
+    schedule = envelope.get("schedule") or []
+    for interval in schedule:
+        try:
+            start_ts = int(interval.get("start_ts"))
+            end_ts = int(interval.get("end_ts"))
+        except (AttributeError, TypeError, ValueError):
+            return ["CHASE_WINDOW_SCHEDULE_INVALID"]
+        if start_ts < window_start or start_ts >= window_end or end_ts <= start_ts or end_ts > window_end:
+            return ["CHASE_WINDOW_SCHEDULE_OUTSIDE_DECLARED_BUCKET"]
+    return []
+
+
 def _evidence_projection(
     baseline: Mapping[str, Any], episode: Mapping[str, Any],
     envelope: Mapping[str, Any], rows: list[Mapping[str, Any]],
@@ -182,6 +207,10 @@ def replay_episode(episode: Mapping[str, Any]) -> dict[str, Any]:
         market_failures = _market_schedule_failures(baseline, episode, envelope, rows)
         if market_failures:
             results.append(_unknown(baseline, episode, *market_failures))
+            continue
+        window_failures = _chase_window_schedule_failures(baseline, episode, envelope)
+        if window_failures:
+            results.append(_unknown(baseline, episode, *window_failures))
             continue
         evidence = _evidence_projection(baseline, episode, envelope, rows)
         gate = missing_baseline_evidence(baseline["baseline_id"], evidence)

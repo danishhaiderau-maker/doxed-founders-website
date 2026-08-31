@@ -21,9 +21,11 @@ from research_v3_contract import canonical_hash
 
 
 ENTRY_BASELINE_SCHEMA = "research_entry_baseline_registry_v1"
+CHASE_WINDOW_BUCKETS = tuple(range(6))
+CHASE_WINDOW_SECONDS = 300
 
 
-_BASELINES = (
+_CORE_BASELINES = (
     {
         "baseline_id": "MARKET_ENTRY_AT_SIGNAL",
         "entry_type": "MARKET_ENTRY",
@@ -94,6 +96,28 @@ _BASELINES = (
 )
 
 
+_CHASE_WINDOW_BASELINES = tuple(
+    {
+        "baseline_id": f"CHASE_WINDOW_{bucket}",
+        "entry_type": "LIMIT_CHASE_WINDOW",
+        "timing": f"SIGNAL_PLUS_{bucket * CHASE_WINDOW_SECONDS}_TO_{(bucket + 1) * CHASE_WINDOW_SECONDS}_SEC",
+        "chase_window_bucket": bucket,
+        "window_start_sec": bucket * CHASE_WINDOW_SECONDS,
+        "window_end_sec": (bucket + 1) * CHASE_WINDOW_SECONDS,
+        "terminal_expiry_sec": 1800,
+        "places_order": False,
+        "required_evidence": (
+            "signed_stage_receipts", "bbo_depth_trade_tape", "requested_quantity",
+            "venue_quantity_constraints", "latency", "fees",
+        ),
+    }
+    for bucket in CHASE_WINDOW_BUCKETS
+)
+
+
+_BASELINES = _CORE_BASELINES + _CHASE_WINDOW_BASELINES
+
+
 def build_entry_baseline_registry() -> dict[str, Any]:
     rows = []
     for source in _BASELINES:
@@ -103,7 +127,15 @@ def build_entry_baseline_registry() -> dict[str, Any]:
         row["missing_evidence_outcome"] = "UNKNOWN"
         row["policy_signature"] = canonical_hash("entry-baseline", row)
         rows.append(row)
-    material = {"schema": ENTRY_BASELINE_SCHEMA, "baselines": rows}
+    material = {
+        "schema": ENTRY_BASELINE_SCHEMA,
+        "chase_window_axis": {
+            "bucket_seconds": CHASE_WINDOW_SECONDS,
+            "buckets": list(CHASE_WINDOW_BUCKETS),
+            "coverage": "EXPLICIT_RESEARCH_TREATMENTS",
+        },
+        "baselines": rows,
+    }
     material["registry_signature"] = canonical_hash("entry-baselines", material)
     return material
 
