@@ -2,6 +2,7 @@ import json
 
 from research import policy_candidate_oos as policy_oos
 from research.policy_candidate_oos import (
+    _evaluate,
     _oos_policy_comparison,
     _regime_key,
     build_policy_candidate_oos_report,
@@ -43,6 +44,27 @@ def test_empty_dataset_fails_closed(tmp_path):
     assert report["independent_oos_qualified"] is False
     persisted = json.loads((tmp_path / "policy_candidate_oos_report.json").read_text())
     assert persisted["qualification_gates"]["conservative_execution"] is False
+
+
+def test_missing_policy_outcome_stays_unknown_instead_of_becoming_zero_pnl():
+    rows = [{"event_id": "episode-a"}, {"event_id": "episode-b"}]
+    result = _evaluate(
+        "POLICY_A",
+        rows,
+        {
+            "episode-a": {"POLICY_A": 2.5},
+            "episode-b": {"CONTROL": -1.0},
+        },
+    )
+
+    assert result["approved_opportunities"] == 2
+    assert result["supported_outcomes"] == 1
+    assert result["unknown_outcomes"] == 1
+    assert result["coverage_complete"] is False
+    assert result["independent_episodes"] == 1
+    assert result["net_pnl_usd"] is None
+    assert result["expectancy_usd"] is None
+    assert result["max_drawdown_usd"] is None
 
 
 def test_regime_key_uses_only_frozen_signal_snapshot():
