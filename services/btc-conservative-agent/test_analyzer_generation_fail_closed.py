@@ -66,6 +66,8 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
         dashboard,
         "_mirror_sync_receipt",
         lambda: {
+            "ok": True,
+            "pollOk": True,
             "inProgress": False,
             "revisionParity": "MATCH",
             "sourceRevision": mirror_revision,
