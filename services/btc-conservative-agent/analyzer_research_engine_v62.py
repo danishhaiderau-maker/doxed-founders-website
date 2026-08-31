@@ -108,6 +108,7 @@ SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
 SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
 POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
 POLICY_EVIDENCE_BINDING_REPORT_FILE = "policy_evidence_binding_report.json"
+EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -19189,6 +19190,85 @@ def _atomic_mirror_analyzer_report(source_name):
     return destination
 
 
+def _write_evidence_coverage_triage_report(canonical_root, binding_status, conservative_status):
+    """Build one fail-closed coverage receipt from this exact generation."""
+    import gzip
+    from research.evidence_coverage_triage import (
+        build_evidence_coverage_triage_report, ledger_source_counts,
+        verify_archive_receipts,
+    )
+
+    root = Path(canonical_root).resolve()
+    if root.name != "canonical-research-data":
+        raise ValueError("EVIDENCE_COVERAGE_ROOT_NOT_CANONICAL")
+    binding_generation = binding_status.get("generation") or {}
+    conservative_generation = conservative_status.get("generation") or {}
+    if not binding_generation or binding_generation != conservative_generation:
+        raise ValueError("EVIDENCE_COVERAGE_GENERATION_MISMATCH")
+
+    def resolve_artifact(relative_path, expected_sha256, label):
+        candidate = (root / Path(str(relative_path or ""))).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"{label}_OUTSIDE_CANONICAL_ROOT") from exc
+        if not candidate.is_file():
+            raise FileNotFoundError(f"{label}_MISSING")
+        actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if actual != str(expected_sha256 or "").lower():
+            raise ValueError(f"{label}_CHECKSUM_MISMATCH")
+        return candidate, actual
+
+    binding_path, binding_sha = resolve_artifact(
+        binding_status.get("exhaustive_relative_path"),
+        binding_status.get("exhaustive_sha256"), "EVIDENCE_BINDING_INDEX",
+    )
+    results_path, results_sha = resolve_artifact(
+        conservative_status.get("relative_path"),
+        conservative_status.get("artifact_sha256"), "CONSERVATIVE_RESULTS",
+    )
+    if binding_path.parent != results_path.parent:
+        raise ValueError("EVIDENCE_COVERAGE_GENERATION_DIRECTORY_MISMATCH")
+
+    def read_gzip_jsonl(path):
+        with gzip.open(path, "rt", encoding="utf-8-sig") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    # Legacy evidence is never auto-discovered. It participates only through
+    # an explicitly configured archive whose every receipt verifies.
+    archive_root = os.getenv("BTC_VERIFIED_LEGACY_ARCHIVE_ROOT")
+    archive_summary = verify_archive_receipts(archive_root)
+    if archive_root and (
+        archive_summary.get("invalid_session_count", 0)
+        or archive_summary.get("unverifiable_session_count", 0)
+    ):
+        raise ValueError("CONFIGURED_LEGACY_ARCHIVE_NOT_FULLY_VERIFIED")
+    report = build_evidence_coverage_triage_report(
+        {"bindings": read_gzip_jsonl(binding_path)}, read_gzip_jsonl(results_path),
+        archive_summary=archive_summary,
+        source_counts=ledger_source_counts(root / "v3"),
+        input_artifacts=(
+            {"path": binding_path.relative_to(root).as_posix(), "sha256": binding_sha},
+            {"path": results_path.relative_to(root).as_posix(), "sha256": results_sha},
+        ),
+    )
+    report["generation"] = binding_generation
+    material = dict(report)
+    material.pop("report_payload_sha256", None)
+    from research.policy_evidence_schema import canonical_json
+    report["report_payload_sha256"] = hashlib.sha256(
+        canonical_json(material).encode("utf-8")
+    ).hexdigest()
+    target = Path(EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return report, _atomic_mirror_analyzer_report(target.name)
+
+
 def _stamp_policy_evaluator_status(path, status):
     """Attach bounded evaluator coverage to the status manifest atomically."""
     target = Path(path)
@@ -19690,6 +19770,7 @@ def write_report_manifest(payload=None):
     # Publish derived-library status only after binding it to the current
     # canonical manifest. This does not evaluate or ingest policy rows.
     policy_evidence_library_error = None
+    evidence_coverage_triage_error = None
     try:
         from research.policy_evidence_bindings import persist_v3_binding_index
         from research.policy_evidence_evaluator import persist_v3_conservative_results
@@ -19747,8 +19828,28 @@ def write_report_manifest(payload=None):
             ),
             "conservative_result_artifact": conservative_evaluator_status.get("relative_path"),
         })
+        try:
+            coverage_report, coverage_mirror = _write_evidence_coverage_triage_report(
+                os.environ["BTC_AGENT_DATA_DIR"], binding_status, conservative_evaluator_status,
+            )
+            reports.append({
+                "title": "Evidence Coverage Triage",
+                "file": EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE,
+                "category": "Genome & Reports",
+                "description": "Checksum-bound canonical evidence coverage, unknowns and archive triage",
+                "size_bytes": coverage_mirror.stat().st_size,
+                "modified_at": datetime.fromtimestamp(
+                    Path(EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE).stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+                "analysis_provenance": analysis_provenance,
+                "coverage_totals": coverage_report.get("totals"),
+            })
+        except Exception as exc:
+            evidence_coverage_triage_error = f"{type(exc).__name__}: {exc}"
     except Exception as exc:
         policy_evidence_library_error = f"{type(exc).__name__}: {exc}"
+        if evidence_coverage_triage_error is None:
+            evidence_coverage_triage_error = policy_evidence_library_error
     # The exhaustive policy grid is intentionally separate from the bounded
     # dashboard JSON. It is compressed, immutable for this generation, and is
     # copied without JSON stamping so its manifest checksum remains verifiable.
@@ -19824,6 +19925,12 @@ def write_report_manifest(payload=None):
                     for row in reports
                 ),
                 "generation_error": policy_evidence_library_error,
+            },
+            EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE for row in reports
+                ),
+                "generation_error": evidence_coverage_triage_error,
             },
             BEST_POLICY_RESEARCH_REPORT_FILE: {
                 "available_in_generation": any(
