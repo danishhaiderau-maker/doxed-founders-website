@@ -175,6 +175,72 @@ class V3ReportTests(unittest.TestCase):
             self.assertEqual(integrity["overdue_orphan"], 0)
             self.assertNotIn("ORPHAN_EXPECTED_ORDER", second["blockers"])
 
+    def test_expired_order_receipt_repairs_intent_edge_but_keeps_execution_unknown(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1,
+                "shared_ai_call_id": "scan-1",
+            })
+            store.append("decision", {
+                "record_id": "d-1", "episode_id": "episode-1",
+                "shared_ai_call_id": "scan-1", "decision_stage": "LANE_POLICY_VERDICT",
+                "research_lane": "FAMILY_ATR_TRAIL", "policy_id": "trail",
+                "policy_signature": "sig-trail", "policy_epoch_id": "pe-1",
+                "order_intent_expected": True, "resolution_deadline_ts": 2,
+            })
+            Path(data, "expired_orders_3factor.csv").write_text(
+                "time,trade_id,shared_ai_call_id,research_lane,reason,expired_ts,touched_limit\n"
+                "2026-01-01T00:30:00Z,ftr-1,scan-1,FAMILY_ATR_TRAIL,"
+                "SIGNAL_TTL_EXPIRED,1801,True\n",
+                encoding="utf-8",
+            )
+
+            report = build_safe_policy_genome_v3_report(data, reports)
+            integrity = report["collection"]["entry_resolution_integrity"]
+            self.assertTrue(integrity["passed"])
+            self.assertEqual(integrity["submitted"], 1)
+            self.assertEqual(integrity["recovered_expired_order"], 1)
+            self.assertEqual(integrity["overdue_orphan"], 0)
+            recovered = integrity["recovered_expired_orders"]
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0]["trade_id"], "ftr-1")
+            self.assertEqual(recovered[0]["resolution"], "ORDER_SUBMITTED_THEN_EXPIRED")
+            self.assertEqual(recovered[0]["execution_classification"], "UNKNOWN")
+            self.assertIn(
+                "UNKNOWN_EXECUTION_GRADE_MARKET_EVIDENCE_MISSING",
+                recovered[0]["unknown_reason_codes"],
+            )
+            self.assertNotIn("ORPHAN_EXPECTED_ORDER", report["blockers"])
+
+    def test_expired_order_recovery_rejects_ambiguous_lane_receipts(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-1", "episode_id": "episode-1", "signal_ts": 1,
+                "shared_ai_call_id": "scan-1",
+            })
+            for suffix in ("a", "b"):
+                store.append("decision", {
+                    "record_id": f"d-{suffix}", "episode_id": "episode-1",
+                    "shared_ai_call_id": "scan-1", "decision_stage": "LANE_POLICY_VERDICT",
+                    "research_lane": "SAME_LANE", "policy_id": suffix,
+                    "policy_signature": f"sig-{suffix}", "policy_epoch_id": "pe-1",
+                    "order_intent_expected": True, "resolution_deadline_ts": 2,
+                })
+            Path(data, "expired_orders_3factor.csv").write_text(
+                "time,trade_id,shared_ai_call_id,research_lane,reason\n"
+                "2026-01-01T00:30:00Z,trade-1,scan-1,SAME_LANE,SIGNAL_TTL_EXPIRED\n",
+                encoding="utf-8",
+            )
+
+            integrity = build_safe_policy_genome_v3_report(
+                data, reports,
+            )["collection"]["entry_resolution_integrity"]
+            self.assertFalse(integrity["passed"])
+            self.assertEqual(integrity["recovered_expired_order"], 0)
+            self.assertEqual(integrity["overdue_orphan"], 2)
+
     def test_report_exposes_rejected_and_disabled_lane_decisions_separately(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             store = V3EvidenceStore(data, epoch_id="epoch-v3")

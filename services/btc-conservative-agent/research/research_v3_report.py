@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import os
+import csv
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,75 @@ def _read_ledger(path: Path) -> list[dict[str, Any]]:
     except FileNotFoundError:
         pass
     return rows
+
+
+def _recover_expired_order_resolutions(
+    data_dir: str | Path,
+    expected_decisions: list[dict[str, Any]],
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Index exact expired-order receipts without inventing execution outcomes.
+
+    Older collector builds could persist a paper order and its later expiry in
+    ``expired_orders_3factor.csv`` while missing the normalized V3 order-intent
+    append.  A unique expiry receipt proves that an order was submitted, so it
+    resolves the decision-to-order integrity edge.  It does *not* prove a fill
+    or no-fill: those classifications still require execution-grade BBO/depth
+    and trade evidence.
+    """
+    path = Path(data_dir) / "expired_orders_3factor.csv"
+    if not path.is_file():
+        return {}
+    decision_by_call_lane: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for decision in expected_decisions:
+        shared_call = str(decision.get("shared_ai_call_id") or "").strip()
+        lane = str(decision.get("research_lane") or "").strip().upper()
+        if shared_call and lane:
+            decision_by_call_lane.setdefault((shared_call, lane), []).append(decision)
+    candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                shared_call = str(row.get("shared_ai_call_id") or "").strip()
+                lane = str(row.get("research_lane") or "").strip().upper()
+                trade_id = str(row.get("trade_id") or "").strip()
+                reason = str(row.get("reason") or "").strip().upper()
+                decisions = decision_by_call_lane.get((shared_call, lane), [])
+                if len(decisions) != 1 or not trade_id or not reason.endswith("TTL_EXPIRED"):
+                    continue
+                decision = decisions[0]
+                key = (
+                    str(decision.get("episode_id") or ""),
+                    str(decision.get("policy_signature") or ""),
+                    lane,
+                )
+                candidates.setdefault(key, []).append({
+                    "trade_id": trade_id,
+                    "shared_ai_call_id": shared_call,
+                    "research_lane": lane,
+                    "expired_at": row.get("time") or None,
+                    "expired_ts": row.get("expired_ts") or None,
+                    "reason": reason,
+                    "touched_limit_diagnostic": str(row.get("touched_limit") or "").upper() == "TRUE",
+                })
+    except (OSError, csv.Error):
+        return {}
+    recovered: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for key, rows in candidates.items():
+        unique = {row["trade_id"]: row for row in rows}
+        if len(unique) != 1:
+            continue
+        receipt = next(iter(unique.values()))
+        recovered[key] = {
+            **receipt,
+            "resolution": "ORDER_SUBMITTED_THEN_EXPIRED",
+            "execution_classification": "UNKNOWN",
+            "unknown_reason_codes": [
+                "UNKNOWN_EXECUTION_LEDGER_MISSING",
+                "UNKNOWN_EXECUTION_GRADE_MARKET_EVIDENCE_MISSING",
+            ],
+            "source_path": "expired_orders_3factor.csv",
+        }
+    return recovered
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -566,12 +636,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         row for row in immediate_lane_decisions if row.get("order_intent_expected") is True
     ]
     intent_keys = {resolution_key(row) for row in order_intents}
+    recovered_expired_orders = _recover_expired_order_resolutions(
+        data_dir, expected_order_decisions,
+    )
     entry_resolutions: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in lifecycles:
         if row.get("resolution_scope") == "LANE_ENTRY":
             entry_resolutions.setdefault(resolution_key(row), []).append(row)
     entry_resolution_counts = Counter()
     orphan_expected_orders = []
+    applied_expired_order_recoveries: dict[tuple[str, str, str], dict[str, Any]] = {}
     for decision in expected_order_decisions:
         key = resolution_key(decision)
         rows = entry_resolutions.get(key, [])
@@ -580,6 +654,13 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             entry_resolution_counts["submitted"] += 1
         elif "NO_ORDER" in states:
             entry_resolution_counts["terminal_no_order"] += 1
+        elif key in recovered_expired_orders:
+            # The expiry receipt proves the missing order-intent edge, while
+            # deliberately leaving the execution result UNKNOWN. Existing V3
+            # intent/lifecycle resolutions always remain authoritative.
+            entry_resolution_counts["submitted"] += 1
+            entry_resolution_counts["recovered_expired_order"] += 1
+            applied_expired_order_recoveries[key] = recovered_expired_orders[key]
         else:
             deadline = float(decision.get("resolution_deadline_ts") or 0)
             awaiting_deadlines = [float(row.get("resolution_deadline_ts") or 0) for row in rows if row.get("entry_resolution") == "AWAITING"]
@@ -595,10 +676,23 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     entry_resolution_integrity = {
         "expected": len(expected_order_decisions),
         "submitted": entry_resolution_counts["submitted"],
+        "recovered_expired_order": entry_resolution_counts["recovered_expired_order"],
         "terminal_no_order": entry_resolution_counts["terminal_no_order"],
         "awaiting_within_deadline": entry_resolution_counts["awaiting_within_deadline"],
         "overdue_orphan": entry_resolution_counts["overdue_orphan"],
         "orphan_expected_orders": orphan_expected_orders,
+        "recovered_expired_orders": [
+            {
+                "episode_id": key[0],
+                "policy_signature": key[1],
+                **receipt,
+            }
+            for key, receipt in sorted(applied_expired_order_recoveries.items())
+        ],
+        "recovery_semantics": (
+            "A unique expired-order receipt proves ORDER_SUBMITTED only; "
+            "execution remains UNKNOWN without execution-grade market evidence."
+        ),
         "passed": entry_resolution_counts["overdue_orphan"] == 0,
     }
     effective_paper_execution_identities = []
