@@ -32,6 +32,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 from flask import Flask, jsonify, render_template_string, request, send_file, make_response
+from runtime_incident_history import build_runtime_incident_history
 import ccxt
 import websocket
 import signal
@@ -28731,6 +28732,12 @@ __ADMIN_ACCESS_CONTROLS__
 <p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
 <p>Last Fetch: <span id="lastFetch"></span></p>
 <p>WS Age: <span id="ws_age">-</span> <span id="wsStaleBadge" style="font-size:0.85em;"></span></p>
+<h3>Runtime incident &amp; restart history</h3>
+<p id="runtimeIncidentScope" style="color:#8b949e;font-size:0.85em;">Loading retained application receipts…</p>
+<div class="activity-table-scroll" role="region" aria-label="Runtime incident history table" tabindex="0"><table>
+  <thead><tr><th>Time (UTC)</th><th>Classification</th><th>Reason</th><th>Restart requested</th><th>Exit code</th><th>Evidence</th></tr></thead>
+  <tbody id="runtimeIncidentTable"></tbody>
+</table></div>
 
 <div class="debug-panel">
     <h3>🔍 DEBUG STATE</h3>
@@ -29983,6 +29990,25 @@ DASHBOARD_JS = """(function () {
           if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous paper orders OFF · shadow observation ON';
           else syncTxt += ' | Continuous AI ON';
           inst.innerText = syncTxt;
+          const history = d.runtime_incident_history || {};
+          const incidents = Array.isArray(history.application_incidents)
+            ? history.application_incidents : [];
+          const incidentText = value => String(value == null ? '' : value)
+            .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+          safeHTML('runtimeIncidentTable', incidents.length ? incidents.map(event => `<tr>
+            <td>${incidentText(event.time || 'UNKNOWN')}</td>
+            <td>${incidentText(event.classification || 'UNKNOWN')}</td>
+            <td>${incidentText(event.reason || '-')}</td>
+            <td>${event.restart_requested ? 'YES' : 'NO'}</td>
+            <td>${incidentText(event.exit_code == null ? '-' : event.exit_code)}</td>
+            <td>${incidentText(event.evidence_source || '-')}</td>
+          </tr>`).join('') : '<tr><td colspan="6" style="color:#8b949e;">No retained application incident receipts in the bounded crash-dump tail.</td></tr>');
+          const incidentScope = document.getElementById('runtimeIncidentScope');
+          if (incidentScope) incidentScope.innerText =
+            (history.platform_history_status || 'PLATFORM HISTORY STATUS UNKNOWN') +
+            ' — ' + (history.platform_history_note || 'No platform history note.');
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
         let wsAgeSec = null;
@@ -34174,6 +34200,14 @@ def _build_api_state_snapshot():
         snapshot["bot_cwd"] = os.getcwd()
         snapshot["bot_script"] = os.path.abspath(__file__)
         snapshot["git_rev"] = _runtime_git_rev()
+        snapshot["runtime_incident_history"] = build_runtime_incident_history(
+            os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"),
+            current_started_at=datetime.fromtimestamp(
+                float(process_boot_time), tz=timezone.utc
+            ).isoformat(),
+            current_instance_id=str(BOT_INSTANCE_ID or "") or None,
+            current_revision=str(SOURCE_GIT_REV or _runtime_git_rev() or "") or None,
+        )
         coord = live_copy_coordination_state()
         snapshot["live_copy_coordination_state"] = coord
         snapshot["live_copy_coordination_ui_reason"] = (
@@ -37918,6 +37952,56 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
     return removed
 
 
+_data_sync_retention_schedule_lock = threading.Lock()
+_data_sync_retention_scheduled = False
+_DATA_SYNC_RETENTION_DELAY_SECONDS = max(
+    60, int(os.getenv("DATA_SYNC_RETENTION_DELAY_SECONDS", "300"))
+)
+
+
+def _data_sync_retention_worker() -> None:
+    """Run recoverable rotation retention away from the sync HTTP request.
+
+    A completed acknowledgement proves that the desktop holds the exact file
+    generations recorded in ``sync_ack.json``.  Waiting before cleanup keeps
+    the shared-CPU request path responsive, while the pruning function still
+    rechecks age, current size and mtime and preserves raw research evidence,
+    active files, unacknowledged files, and the newest two rotations.
+    """
+    global _data_sync_retention_scheduled
+    try:
+        time.sleep(_DATA_SYNC_RETENTION_DELAY_SECONDS)
+        acks = _read_data_sync_ack()
+        removed = _prune_acknowledged_rotations(acks)
+        if removed:
+            logger.info(
+                "data-sync deferred retention archived locally acknowledged "
+                f"rotations={len(removed)}"
+            )
+    except BaseException as exc:
+        logger.warning(
+            f"data-sync deferred retention failed closed: {type(exc).__name__}"
+        )
+    finally:
+        with _data_sync_retention_schedule_lock:
+            _data_sync_retention_scheduled = False
+
+
+def _schedule_data_sync_retention_cleanup() -> bool:
+    """Schedule at most one delayed cleanup worker after a complete ACK."""
+    global _data_sync_retention_scheduled
+    with _data_sync_retention_schedule_lock:
+        if _data_sync_retention_scheduled:
+            return False
+        _data_sync_retention_scheduled = True
+    threading.Thread(
+        target=_data_sync_retention_worker,
+        name="data-sync-retention",
+        daemon=True,
+    ).start()
+    return True
+
+
 @app.route('/api/data-sync/manifest')
 def api_data_sync_manifest():
     # Inventory polling must stay metadata-only. SQLite leases are acquired
@@ -38223,6 +38307,9 @@ def api_data_sync_ack():
     except OSError:
         volume_used_pct = None
     rejected = sum(rejected_by_reason.values()) + max(0, len(received) - 5000)
+    retention_scheduled = False
+    if rejected == 0 and len(accepted_rows) == len(received):
+        retention_scheduled = _schedule_data_sync_retention_cleanup()
     return jsonify({
         "ok": True,
         "received": len(received),
@@ -38236,7 +38323,10 @@ def api_data_sync_ack():
         "inventory_generated_at": inventory_generated_at,
         "inventory_sha256": inventory_sha256,
         "removed_acknowledged_rotations": [],
-        "cleanup_status": "DEFERRED_OUTSIDE_HTTP_REQUEST",
+        "cleanup_status": (
+            "SCHEDULED_OUTSIDE_HTTP_REQUEST"
+            if retention_scheduled else "DEFERRED_OUTSIDE_HTTP_REQUEST"
+        ),
         "volume_used_pct": volume_used_pct,
         "policy": (
             "ack receipt committed atomically; cleanup deferred outside the HTTP request; "

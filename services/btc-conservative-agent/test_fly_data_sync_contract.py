@@ -1867,9 +1867,29 @@ def test_ack_http_path_is_bounded_and_never_prunes_synchronously():
     assert "_data_sync_resolve_relpath(" not in body
     assert "path.stat()" not in body
     assert "_prune_acknowledged_rotations(" not in body
-    assert '"cleanup_status": "DEFERRED_OUTSIDE_HTTP_REQUEST"' in body
+    assert "_schedule_data_sync_retention_cleanup()" in body
+    assert '"SCHEDULED_OUTSIDE_HTTP_REQUEST"' in body
+    assert 'if retention_scheduled else "DEFERRED_OUTSIDE_HTTP_REQUEST"' in body
     assert '"accepted": len(accepted_rows)' in body
     assert '"rejected_count": rejected' in body
+
+
+def test_deferred_retention_is_delayed_single_flight_and_fail_closed():
+    worker = BOT[BOT.index("_data_sync_retention_schedule_lock ="):BOT.index(
+        "@app.route('/api/data-sync/manifest')"
+    )]
+    assert 'max(\n    60, int(os.getenv("DATA_SYNC_RETENTION_DELAY_SECONDS", "300"))' in worker
+    assert "time.sleep(_DATA_SYNC_RETENTION_DELAY_SECONDS)" in worker
+    assert "_read_data_sync_ack()" in worker
+    assert "_prune_acknowledged_rotations(acks)" in worker
+    assert "if _data_sync_retention_scheduled:" in worker
+    assert 'name="data-sync-retention"' in worker
+    assert "daemon=True" in worker
+    assert "except BaseException as exc:" in worker
+    ack_body = BOT[BOT.index("def api_data_sync_ack"):BOT.index(
+        "_PLATFORM_RELAY_EVIDENCE_MAX_BYTES"
+    )]
+    assert "if rejected == 0 and len(accepted_rows) == len(received):" in ack_body
 
 
 def test_long_sync_ack_can_select_the_exact_retained_initial_generation():

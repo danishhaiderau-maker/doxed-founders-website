@@ -37952,6 +37952,56 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
     return removed
 
 
+_data_sync_retention_schedule_lock = threading.Lock()
+_data_sync_retention_scheduled = False
+_DATA_SYNC_RETENTION_DELAY_SECONDS = max(
+    60, int(os.getenv("DATA_SYNC_RETENTION_DELAY_SECONDS", "300"))
+)
+
+
+def _data_sync_retention_worker() -> None:
+    """Run recoverable rotation retention away from the sync HTTP request.
+
+    A completed acknowledgement proves that the desktop holds the exact file
+    generations recorded in ``sync_ack.json``.  Waiting before cleanup keeps
+    the shared-CPU request path responsive, while the pruning function still
+    rechecks age, current size and mtime and preserves raw research evidence,
+    active files, unacknowledged files, and the newest two rotations.
+    """
+    global _data_sync_retention_scheduled
+    try:
+        time.sleep(_DATA_SYNC_RETENTION_DELAY_SECONDS)
+        acks = _read_data_sync_ack()
+        removed = _prune_acknowledged_rotations(acks)
+        if removed:
+            logger.info(
+                "data-sync deferred retention archived locally acknowledged "
+                f"rotations={len(removed)}"
+            )
+    except BaseException as exc:
+        logger.warning(
+            f"data-sync deferred retention failed closed: {type(exc).__name__}"
+        )
+    finally:
+        with _data_sync_retention_schedule_lock:
+            _data_sync_retention_scheduled = False
+
+
+def _schedule_data_sync_retention_cleanup() -> bool:
+    """Schedule at most one delayed cleanup worker after a complete ACK."""
+    global _data_sync_retention_scheduled
+    with _data_sync_retention_schedule_lock:
+        if _data_sync_retention_scheduled:
+            return False
+        _data_sync_retention_scheduled = True
+    threading.Thread(
+        target=_data_sync_retention_worker,
+        name="data-sync-retention",
+        daemon=True,
+    ).start()
+    return True
+
+
 @app.route('/api/data-sync/manifest')
 def api_data_sync_manifest():
     # Inventory polling must stay metadata-only. SQLite leases are acquired
@@ -38257,6 +38307,9 @@ def api_data_sync_ack():
     except OSError:
         volume_used_pct = None
     rejected = sum(rejected_by_reason.values()) + max(0, len(received) - 5000)
+    retention_scheduled = False
+    if rejected == 0 and len(accepted_rows) == len(received):
+        retention_scheduled = _schedule_data_sync_retention_cleanup()
     return jsonify({
         "ok": True,
         "received": len(received),
@@ -38270,7 +38323,10 @@ def api_data_sync_ack():
         "inventory_generated_at": inventory_generated_at,
         "inventory_sha256": inventory_sha256,
         "removed_acknowledged_rotations": [],
-        "cleanup_status": "DEFERRED_OUTSIDE_HTTP_REQUEST",
+        "cleanup_status": (
+            "SCHEDULED_OUTSIDE_HTTP_REQUEST"
+            if retention_scheduled else "DEFERRED_OUTSIDE_HTTP_REQUEST"
+        ),
         "volume_used_pct": volume_used_pct,
         "policy": (
             "ack receipt committed atomically; cleanup deferred outside the HTTP request; "
