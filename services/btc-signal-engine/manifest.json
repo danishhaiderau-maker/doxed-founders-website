@@ -1,9 +1,9 @@
 {
   "engine_version": "v31-five-family-analyzer-hypothesis-paper",
-  "combo_version": "2026-08-30",
+  "combo_version": "2026-08-31",
   "exit_version": "five-family-exits-v1",
   "benchmark_lane": "CONTINUOUS_ANALYTICAL_ONLY",
-  "signal_hash": "81b155414d33",
+  "signal_hash": "9964c3a550fd",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-08-31T00:00:00.000Z"
+  "updated_at": "2026-08-31T06:36:13.399Z"
 }
