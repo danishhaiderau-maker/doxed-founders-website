@@ -341,14 +341,29 @@ def _neighbor_robustness(
     if row_index is None:
         row_index = next((i for i, candidate in enumerate(population) if candidate is row), None)
     nearest = neighbor_index.nearest(row_index, limit=5) if row_index is not None else []
-    usable = [
+    cohort_key = _identity_text(row.get("comparison_cohort_key"))
+    same_cohort = [
         candidate for candidate in nearest
+        if cohort_key is not None
+        and _identity_text(candidate.get("comparison_cohort_key")) == cohort_key
+    ]
+    usable = [
+        candidate for candidate in same_cohort
         if _finite_number(candidate.get("sealed_oos_net_usd")) is not None
         and _finite_number(candidate.get("expectancy_lcb_usd")) is not None
         and int(candidate.get("full_fills") or 0) + int(candidate.get("partial_fills") or 0) > 0
     ]
     if len(usable) < 2:
-        return {"score": None, "neighbors_considered": len(nearest), "neighbors_supported": len(usable)}
+        return {
+            "score": None,
+            "status": "MISSING_OR_UNSUPPORTED",
+            "stable": False,
+            "comparison_cohort_key": cohort_key,
+            "neighbors_considered": len(nearest),
+            "same_cohort_neighbors": len(same_cohort),
+            "neighbors_supported": len(usable),
+            "positive_supported_neighbors": 0,
+        }
     pnls = [_finite_number(candidate.get("sealed_oos_net_usd")) for candidate in usable]
     positive = sum(
         1 for candidate, pnl in zip(usable, pnls)
@@ -358,10 +373,16 @@ def _neighbor_robustness(
     dispersion = sum(abs(float(value) - mean) for value in pnls if value is not None) / len(pnls)
     scale = max(abs(mean), 0.01)
     score = (positive / len(usable)) * (1.0 / (1.0 + dispersion / scale))
+    stable = positive == len(usable)
     return {
         "score": round(score, 8),
+        "status": "SUPPORTED_STABLE" if stable else "SUPPORTED_UNSTABLE",
+        "stable": stable,
+        "comparison_cohort_key": cohort_key,
         "neighbors_considered": len(nearest),
+        "same_cohort_neighbors": len(same_cohort),
         "neighbors_supported": len(usable),
+        "positive_supported_neighbors": positive,
     }
 
 
@@ -426,6 +447,20 @@ def _apply_multifactor_ranking(rows: list[dict[str, Any]]) -> list[dict[str, Any
                 else "INCOMPLETE_RANKING_EVIDENCE"
             ),
         }
+        # Parameter-neighborhood stability is a mandatory qualification gate,
+        # not merely a descriptive ranking component.  It may pass only from
+        # at least two supported neighbors on the identical comparison cohort.
+        # Missing, mixed-cohort, or negative-LCB evidence remains fail closed.
+        gates = dict(row.get("gates") or {})
+        gates["neighborhood_stability_pass"] = neighbor.get("stable") is True
+        row["gates"] = gates
+        validation = dict(row.get("validation") or {})
+        if validation:
+            validation["gates"] = dict(gates)
+            validation["qualified"] = bool(gates) and all(
+                value is True for value in gates.values()
+            )
+            row["validation"] = validation
         enriched.append(row)
 
     percentiles: dict[str, dict[int, float]] = {}

@@ -145,7 +145,10 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
     ranking = genome.get("safe_policy_ranking") or {}
     screen = genome.get("candidate_screen") or {}
     winner = genome.get("number_one_strategy")
-    qualified = bool(winner and genome.get("qualification") not in (None, "NO_SAFE_QUALIFIED_POLICY"))
+    winner_declared_qualified = bool(
+        winner
+        and genome.get("qualification") not in (None, "NO_SAFE_QUALIFIED_POLICY")
+    )
     required = (
         "chronological_untouched_oos", "cost_adjusted_positive_expectancy",
         "acceptable_drawdown", "minimum_independent_episodes",
@@ -159,6 +162,12 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
     segment_count = int(collection.get("market_segments") or 0)
     integrity_passed = bool((genome.get("integrity") or {}).get("passed"))
     gates = {name: bool(winner_gates.get(name)) for name in required}
+    # The genome validation schema names this mandatory safety gate with its
+    # explicit pass suffix.  Preserve that evidence instead of silently
+    # converting a proven same-cohort neighborhood to false.
+    gates["parameter_neighborhood_stability"] = bool(
+        winner_gates.get("neighborhood_stability_pass")
+    )
     # Cohort-level gates are truthful before a winner exists. Candidate-level
     # performance gates remain false until the sealed ranking supplies them.
     gates.update({
@@ -175,6 +184,12 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
     if episode_count < 100:
         blockers.append("V3_MINIMUM_INDEPENDENT_EPISODES_NOT_MET")
     blockers.extend(f"QUALIFICATION_GATE_FAILED:{name}" for name, passed in gates.items() if not passed)
+    blockers = sorted(set(blockers))
+    qualified = bool(
+        winner_declared_qualified
+        and all(gates.values())
+        and not blockers
+    )
     identities = collection.get("effective_paper_execution_identities") or []
     identity = identities[0] if len(identities) == 1 else {}
     descriptive = (screen.get("descriptive_top_100") or [None])[0]
@@ -207,7 +222,7 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         "qualification_gates": gates,
         "qualification_gate_schema": "best_policy_qualification_gates_v1",
         "evidence": evidence,
-        "blockers": sorted(set(blockers)),
+        "blockers": blockers,
         "source_report": "safe_policy_genome_v3_report.json",
         "source_schema": genome.get("schema"),
         "live_policy_change_allowed": False,

@@ -207,6 +207,7 @@ class V3CandidateTests(unittest.TestCase):
             "policy_id": policy_id,
             "policy_family": family,
             "policy_spec": {"entry": {"offset_pct": parameter}, "exit": {"atr_k": 2.5}},
+            "comparison_cohort_key": "same-oos-cohort",
             "oos_episodes": 10,
             "full_fills": fills,
             "partial_fills": partial,
@@ -259,6 +260,9 @@ class V3CandidateTests(unittest.TestCase):
             self._ranking_row("p2", pnl=0.9, parameter=0.11),
             self._ranking_row("p3", pnl=0.8, parameter=0.12),
         ]
+        for row in rows:
+            row["comparison_cohort_key"] = "same-oos-cohort"
+            row["gates"] = {"neighborhood_stability_pass": False}
         ranked = _apply_multifactor_ranking(rows)
         evidence = ranked[0]["ranking_evidence"]
 
@@ -272,6 +276,46 @@ class V3CandidateTests(unittest.TestCase):
         self.assertGreater(evidence["raw_metrics"]["regime_stability"], 0)
         self.assertEqual(evidence["neighbor_evidence"]["neighbors_supported"], 2)
         self.assertGreaterEqual(evidence["raw_metrics"]["neighboring_parameter_robustness"], 0)
+        self.assertEqual(evidence["neighbor_evidence"]["status"], "SUPPORTED_STABLE")
+        self.assertTrue(ranked[0]["gates"]["neighborhood_stability_pass"])
+
+    def test_neighborhood_qualification_fails_closed_without_same_cohort_support(self):
+        rows = [
+            self._ranking_row("target", parameter=0.10),
+            self._ranking_row("foreign-a", parameter=0.11),
+            self._ranking_row("foreign-b", parameter=0.12),
+        ]
+        rows[0]["comparison_cohort_key"] = "cohort-a"
+        rows[1]["comparison_cohort_key"] = "cohort-b"
+        rows[2]["comparison_cohort_key"] = "cohort-b"
+        for row in rows:
+            row["gates"] = {"neighborhood_stability_pass": True}
+
+        ranked = _apply_multifactor_ranking(rows)
+        target = next(row for row in ranked if row["policy_id"] == "target")
+        evidence = target["ranking_evidence"]["neighbor_evidence"]
+
+        self.assertEqual(evidence["status"], "MISSING_OR_UNSUPPORTED")
+        self.assertEqual(evidence["neighbors_supported"], 0)
+        self.assertFalse(target["gates"]["neighborhood_stability_pass"])
+
+    def test_neighborhood_qualification_fails_when_supported_neighbor_is_not_positive(self):
+        rows = [
+            self._ranking_row("target", parameter=0.10),
+            self._ranking_row("positive", parameter=0.11),
+            self._ranking_row("negative", pnl=-0.2, lcb=-0.1, parameter=0.12),
+        ]
+        for row in rows:
+            row["comparison_cohort_key"] = "same-oos-cohort"
+            row["gates"] = {"neighborhood_stability_pass": True}
+
+        ranked = _apply_multifactor_ranking(rows)
+        target = next(row for row in ranked if row["policy_id"] == "target")
+        evidence = target["ranking_evidence"]["neighbor_evidence"]
+
+        self.assertEqual(evidence["status"], "SUPPORTED_UNSTABLE")
+        self.assertEqual(evidence["positive_supported_neighbors"], 1)
+        self.assertFalse(target["gates"]["neighborhood_stability_pass"])
 
     def test_multifactor_neighbor_index_scales_and_keeps_local_semantics(self):
         rows = []
