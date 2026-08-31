@@ -147,6 +147,57 @@ class ResearchV3StoreTests(unittest.TestCase):
             research_v3_store.active_tile_registry_signature(),
         )
 
+    def test_future_opportunity_gets_one_central_truthful_causal_identity(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"SOURCE_GIT_REV": "abcdef1234567890"}, clear=False,
+        ):
+            previous = research_v3_store._provenance_cache
+            research_v3_store._provenance_cache = None
+            try:
+                store = V3EvidenceStore(tmp, epoch_id="epoch-causal")
+                store.append("opportunity", {
+                    "record_id": "opportunity:episode-1",
+                    "episode_id": "episode-1",
+                    "shared_ai_call_id": "scan-1",
+                    "signal_ts": 1_700_000_000,
+                    "signal_timezone": "UTC",
+                    "market": "BITFINEX",
+                    "symbol": "tBTCF0:USTF0",
+                    "raw_direction": "LONG",
+                    "feature_snapshot_at_signal": {
+                        "market_context": {
+                            "regime_label": "BULL",
+                            "realized_volatility": 0.012,
+                        },
+                        "cycle_3m_universe": {"atr14_pct_3m": 0.42, "adx14": 28.0},
+                    },
+                })
+                row = json.loads(store.ledger_path("opportunity").read_text())
+            finally:
+                research_v3_store._provenance_cache = previous
+        identity = row["causal_identity"]
+        self.assertEqual(identity["source_revision"], "abcdef1234567890")
+        self.assertEqual(identity["deployed_revision"], "abcdef1234567890")
+        self.assertEqual(identity["analyzer_revision"], "UNKNOWN")
+        self.assertEqual(identity["dataset_epoch"], "epoch-causal")
+        self.assertEqual(identity["shared_ai_call_id"], "scan-1")
+        self.assertEqual(identity["signal_timestamp_utc"], "2023-11-14T22:13:20Z")
+        self.assertEqual(identity["market"], "BITFINEX")
+        self.assertEqual(identity["direction"], "LONG")
+        self.assertEqual(identity["regime_volatility"]["market_regime"], "BULL")
+        self.assertEqual(identity["regime_volatility"]["atr14_pct_3m"], 0.42)
+        self.assertTrue(identity["collection_identity_complete"])
+
+    def test_historical_sparse_opportunity_projects_missing_fields_as_unknown(self):
+        identity = research_v3_store.project_opportunity_causal_identity({
+            "record_id": "opportunity:old", "episode_id": "episode-old",
+        })
+        self.assertEqual(identity["source_revision"], "UNKNOWN")
+        self.assertEqual(identity["signal_timestamp_utc"], "UNKNOWN")
+        self.assertEqual(identity["market"], "UNKNOWN")
+        self.assertFalse(identity["collection_identity_complete"])
+        self.assertIn("realized_volatility", identity["missing_fields"])
+
     def test_concurrent_writers_do_not_duplicate_or_corrupt(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")

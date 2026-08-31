@@ -7,6 +7,7 @@ import os
 import subprocess
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,6 +19,120 @@ _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _provenance_cache: dict[str, str] | None = None
+
+
+def _first_present(*values: Any) -> Any:
+    return next((value for value in values if value not in (None, "")), None)
+
+
+def project_opportunity_causal_identity(row: dict[str, Any]) -> dict[str, Any]:
+    """Project one truthful, immutable identity for a shared opportunity.
+
+    This function is also the compatibility reader for historical rows.  It
+    never guesses a missing value: absent historical fields are rendered as
+    ``UNKNOWN`` while future appends persist this projection centrally.
+    Analyzer revision is deliberately unknown at collection time and is bound
+    later by the derived binding generation.
+    """
+    feature = row.get("feature_snapshot_at_signal")
+    feature = feature if isinstance(feature, dict) else {}
+    market_context = feature.get("market_context")
+    market_context = market_context if isinstance(market_context, dict) else {}
+    cycle = feature.get("cycle_3m_universe")
+    cycle = cycle if isinstance(cycle, dict) else {}
+    source_features = feature.get("source_features")
+    source_features = source_features if isinstance(source_features, dict) else {}
+
+    signal_ts = _first_present(row.get("signal_ts"), feature.get("captured_for_signal_ts"))
+    try:
+        signal_ts = float(signal_ts)
+        signal_iso = datetime.fromtimestamp(signal_ts, timezone.utc).isoformat().replace("+00:00", "Z")
+        signal_timezone = str(_first_present(row.get("signal_timezone"), "UTC"))
+    except (TypeError, ValueError, OverflowError, OSError):
+        signal_ts, signal_iso, signal_timezone = None, "UNKNOWN", "UNKNOWN"
+
+    direction = str(_first_present(
+        row.get("raw_direction"), row.get("executed_direction"),
+        source_features.get("raw_direction"), source_features.get("executed_direction"),
+        source_features.get("final_direction"),
+    ) or "UNKNOWN").upper()
+    if direction not in {"LONG", "SHORT"}:
+        direction = "UNKNOWN"
+
+    identity = {
+        "schema": "v3_opportunity_causal_identity_v1",
+        "source_revision": str(row.get("source_revision") or "UNKNOWN"),
+        "deployed_revision": str(row.get("deployed_revision") or "UNKNOWN"),
+        "analyzer_revision": str(row.get("analyzer_revision") or "UNKNOWN"),
+        "dataset_epoch": str(_first_present(row.get("epoch_id"), row.get("dataset_epoch")) or "UNKNOWN"),
+        "tile_config_signature": str(row.get("tile_config_signature") or "UNKNOWN"),
+        "opportunity_id": str(_first_present(row.get("opportunity_id"), row.get("record_id")) or "UNKNOWN"),
+        "episode_id": str(row.get("episode_id") or "UNKNOWN"),
+        "shared_ai_call_id": str(row.get("shared_ai_call_id") or "UNKNOWN"),
+        "signal_ts": signal_ts,
+        "signal_timestamp_utc": signal_iso,
+        "signal_timezone": signal_timezone,
+        "market": str(_first_present(
+            row.get("market"), row.get("exchange"), row.get("venue"),
+            source_features.get("market"), source_features.get("exchange"),
+            market_context.get("market"), market_context.get("exchange"),
+        ) or "UNKNOWN").upper(),
+        "symbol": str(_first_present(
+            row.get("symbol"), feature.get("symbol"), source_features.get("symbol"),
+            market_context.get("symbol"),
+        ) or "UNKNOWN").upper(),
+        "direction": direction,
+        "policy_identity_scope": "SHARED_OPPORTUNITY_MULTI_POLICY",
+        "regime_volatility": {
+            "market_regime": str(_first_present(
+                row.get("market_regime"), row.get("regime"), feature.get("market_regime"),
+                feature.get("regime"), source_features.get("entry_regime"),
+                source_features.get("regime"), market_context.get("regime_label"),
+                market_context.get("regime"),
+            ) or "UNKNOWN").upper(),
+            "atr14_pct_3m": _first_present(
+                row.get("atr14_pct_3m"), feature.get("atr14_pct_3m"),
+                cycle.get("atr14_pct_3m"), market_context.get("atr14_pct_3m"),
+            ),
+            "realized_volatility": _first_present(
+                row.get("realized_volatility"), feature.get("realized_volatility"),
+                feature.get("realized_volatility_pct"), cycle.get("realized_volatility"),
+                cycle.get("realized_volatility_pct"), cycle.get("realized_volatility_30m_pct"),
+                market_context.get("realized_volatility"),
+            ),
+            "volatility_of_volatility": _first_present(
+                row.get("volatility_of_volatility"), feature.get("volatility_of_volatility"),
+                cycle.get("volatility_of_volatility"), cycle.get("volatility_of_volatility_30m_pct"),
+                market_context.get("volatility_of_volatility"),
+            ),
+            "adx": _first_present(
+                row.get("adx"), feature.get("adx"), cycle.get("adx14"),
+                cycle.get("adx"), market_context.get("adx"),
+            ),
+        },
+    }
+    required_paths = {
+        "source_revision": identity["source_revision"],
+        "deployed_revision": identity["deployed_revision"],
+        "dataset_epoch": identity["dataset_epoch"],
+        "tile_config_signature": identity["tile_config_signature"],
+        "opportunity_id": identity["opportunity_id"],
+        "episode_id": identity["episode_id"],
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "signal_timestamp_utc": identity["signal_timestamp_utc"],
+        "signal_timezone": identity["signal_timezone"],
+        "market": identity["market"],
+        "symbol": identity["symbol"],
+        "direction": identity["direction"],
+        "market_regime": identity["regime_volatility"]["market_regime"],
+        "atr14_pct_3m": identity["regime_volatility"]["atr14_pct_3m"],
+        "realized_volatility": identity["regime_volatility"]["realized_volatility"],
+    }
+    identity["missing_fields"] = sorted(
+        name for name, value in required_paths.items() if value in (None, "", "UNKNOWN")
+    )
+    identity["collection_identity_complete"] = not identity["missing_fields"]
+    return identity
 
 
 def _collection_provenance() -> dict[str, str]:
@@ -214,6 +329,11 @@ class V3EvidenceStore:
             "epoch_id": self.epoch_id,
             **_collection_provenance(),
         })
+        if ledger == "opportunity":
+            # Every producer path converges here.  Stamp the complete available
+            # causal identity once rather than relying on each bridge caller to
+            # remember an evolving metadata contract.
+            material["causal_identity"] = project_opportunity_causal_identity(material)
         line = canonical_json(material) + "\n"
         with self._exclusive(path):
             durable_ids = self._cached_ids(path)

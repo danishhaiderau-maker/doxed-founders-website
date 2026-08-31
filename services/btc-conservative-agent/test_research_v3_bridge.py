@@ -79,6 +79,11 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(row["schedule_sha256"], first["schedule_sha256"])
             self.assertEqual(row["chase_schedule"]["terminal_reason"], "FILLED")
             self.assertTrue(row["schedule_lifecycle_final"])
+            self.assertEqual(row["requested_qty"], 0.2)
+            self.assertEqual(row["requested_qty_provenance"], "SOURCE_TICKET_QTY")
+            self.assertEqual(row["execution_basis"]["requested_qty"], 0.2)
+            self.assertEqual(row["final_quantity_state"]["status"], "UNKNOWN")
+            self.assertEqual(row["quantity_events"], [])
 
     def test_closed_temporary_chase_pull_is_not_selectable_terminal_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -414,7 +419,15 @@ class V3BridgeTests(unittest.TestCase):
                 "trade_id": "scan-lanes-1", "shared_ai_call_id": "scan-lanes-1",
                 "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
                 "executed_direction": "LONG", "long_score": 62, "short_score": 38,
-                "score_gap": 24, "feature_snapshot_at_signal": {"adx": 31},
+                "score_gap": 24, "exchange": "BITFINEX", "symbol": "tBTCF0:USTF0",
+                "research_feature_snapshot": {
+                    "market_context": {"regime_label": "BULL"},
+                    "cycle_3m_universe": {
+                        "adx14": 31, "atr14_pct_3m": 0.4,
+                        "realized_volatility_30m_pct": 0.08,
+                        "volatility_of_volatility_30m_pct": 0.01,
+                    },
+                },
             }
             continuous = dual_write_lane_decision(
                 source, lane="CONTINUOUS", policy_decision="ACCEPT",
@@ -440,6 +453,14 @@ class V3BridgeTests(unittest.TestCase):
                 "CONTINUOUS", "OFFSET_029_ATR_TP_25",
             })
             self.assertEqual(len({row["policy_signature"] for row in decisions}), 2)
+            opportunity = json.loads(store.ledger_path("opportunity").read_text())
+            identity = opportunity["causal_identity"]
+            self.assertEqual(identity["market"], "BITFINEX")
+            self.assertEqual(identity["symbol"], "TBTCF0:USTF0")
+            self.assertEqual(identity["direction"], "LONG")
+            self.assertEqual(identity["regime_volatility"]["market_regime"], "BULL")
+            self.assertEqual(identity["regime_volatility"]["realized_volatility"], 0.08)
+            self.assertTrue(identity["collection_identity_complete"])
             patient_row = next(row for row in decisions if row["research_lane"] == "OFFSET_029_ATR_TP_25")
             self.assertEqual(patient_row["outcome_state"], "REJECTED")
             self.assertFalse(patient_row["order_intent_expected"])

@@ -39,6 +39,29 @@ def _first(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
 
 
+def _opportunity_market(*sources: Mapping[str, Any]) -> str:
+    """Return only an explicitly observed venue/market label."""
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        feature = source.get("research_feature_snapshot")
+        feature = feature if isinstance(feature, Mapping) else source.get("feature_snapshot_at_signal")
+        feature = feature if isinstance(feature, Mapping) else {}
+        source_features = feature.get("source_features")
+        source_features = source_features if isinstance(source_features, Mapping) else {}
+        market_context = feature.get("market_context")
+        market_context = market_context if isinstance(market_context, Mapping) else {}
+        value = _first(
+            source.get("market"), source.get("exchange"), source.get("venue"),
+            source_features.get("market"), source_features.get("exchange"),
+            source_features.get("venue"), market_context.get("market"),
+            market_context.get("exchange"), market_context.get("venue"),
+        )
+        if value not in (None, ""):
+            return str(value).upper()
+    return "UNKNOWN"
+
+
 def _timestamp(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -121,7 +144,11 @@ def _paper_fill_execution_receipt(
         except (TypeError, ValueError):
             return None
 
-    requested = number(order.get("requested_qty"), order.get("qty"))
+    schedule = order.get("research_chase_schedule")
+    schedule = schedule if isinstance(schedule, Mapping) else {}
+    requested = number(
+        order.get("requested_qty"), schedule.get("requested_qty"), order.get("qty")
+    )
     filled = number(position.get("qty"), order.get("filled_qty"), order.get("qty"))
     remaining = max(0.0, requested - filled) if requested is not None and filled is not None else None
     required = (
@@ -674,9 +701,13 @@ def dual_write_lane_decision(
         "episode_id": identity["episode_id"],
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(source),
         "symbol": identity["symbol"],
         "raw_direction": identity["raw_direction"],
-        "feature_snapshot_at_signal": source.get("feature_snapshot_at_signal") or {},
+        "feature_snapshot_at_signal": _first(
+            source.get("feature_snapshot_at_signal"), source.get("research_feature_snapshot")
+        ) or {},
         "market_context_segment_refs": segment_refs,
         "market_context_segment_coverage": segment_coverage,
         "grouping_basis": identity["grouping_basis"],
@@ -837,6 +868,8 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{identity['episode_id']}", "episode_id": identity["episode_id"],
         "shared_ai_call_id": identity["shared_ai_call_id"], "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(signal, order),
         "symbol": identity["symbol"], "raw_direction": identity["raw_direction"],
         "feature_snapshot_at_signal": signal.get("research_feature_snapshot") or {},
         "grouping_basis": identity["grouping_basis"], "collector_version": COLLECTOR_VERSION,
@@ -876,10 +909,11 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
         "signal_price": signal_price,
-        "limit_price": limit_price, "requested_qty": order.get("qty"),
+        "limit_price": limit_price,
+        "requested_qty": _first(order.get("requested_qty"), order.get("qty")),
         "execution_basis": {
             "schema": "research_execution_basis_v1",
-            "requested_qty": order.get("qty"),
+            "requested_qty": _first(order.get("requested_qty"), order.get("qty")),
             "requested_qty_provenance": "SOURCE_TICKET_QTY",
             "market_microstructure_symbol": _first(
                 order.get("market_microstructure_symbol"),
@@ -975,6 +1009,9 @@ def dual_write_terminal_paper_schedule(
     identity = _causal_identity(event_id, signal, order)
     policy = _paper_policy_identity(str(epoch_id), order, signal)
     frozen_schedule = copy.deepcopy(dict(schedule))
+    requested_qty = _positive_finite(_first(
+        order.get("requested_qty"), frozen_schedule.get("requested_qty"), order.get("qty"),
+    ))
     schedule_sha256 = hashlib.sha256(
         canonical_json(frozen_schedule).encode("utf-8")
     ).hexdigest()
@@ -992,7 +1029,30 @@ def dual_write_terminal_paper_schedule(
         "observed_ts": schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"),
         "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
         "limit_price": order.get("limit_price"),
-        "requested_qty": order.get("qty"),
+        "requested_qty": requested_qty,
+        "requested_qty_provenance": "SOURCE_TICKET_QTY" if requested_qty is not None else "UNKNOWN",
+        "execution_basis": {
+            "schema": "research_execution_basis_v1",
+            "requested_qty": requested_qty,
+            "requested_qty_provenance": "SOURCE_TICKET_QTY" if requested_qty is not None else "UNKNOWN",
+            "market_microstructure_symbol": _first(
+                order.get("market_microstructure_symbol"),
+                signal.get("market_microstructure_symbol"),
+                identity["symbol"],
+            ),
+            "signed_quantity_constraints": copy.deepcopy(
+                _first(order.get("signed_quantity_constraints"), signal.get("signed_quantity_constraints"))
+            ),
+        },
+        "final_quantity_state": copy.deepcopy(
+            frozen_schedule.get("final_quantity_state")
+            if isinstance(frozen_schedule.get("final_quantity_state"), Mapping)
+            else {"status": "UNKNOWN", "reason": "FINAL_QUANTITY_STATE_MISSING"}
+        ),
+        "quantity_events": copy.deepcopy(
+            frozen_schedule.get("quantity_events")
+            if isinstance(frozen_schedule.get("quantity_events"), list) else []
+        ),
         "signed_quantity_constraints": copy.deepcopy(
             _first(order.get("signed_quantity_constraints"), signal.get("signed_quantity_constraints"))
         ),
@@ -1268,6 +1328,8 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
         "episode_id": episode_id,
         "shared_ai_call_id": shared or None,
         "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(source),
         "symbol": symbol,
         "raw_direction": direction,
         "feature_snapshot_at_signal": source.get("research_feature_snapshot") or {},
@@ -1383,6 +1445,8 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "episode_id": episode_id,
         "shared_ai_call_id": shared_ai_call_id or None,
         "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(record, envelope),
         "symbol": symbol,
         "raw_direction": _first(envelope.get("raw_direction"), record.get("raw_direction")),
         "feature_snapshot_at_signal": record.get("feature_snapshot_at_signal") or {},
