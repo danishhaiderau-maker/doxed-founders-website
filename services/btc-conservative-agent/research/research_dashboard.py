@@ -306,6 +306,7 @@ REPORT_NAV_GROUPS = (
     )),
     ("deep-group", "Genome & Reports", (
         ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
+        ("research-design", "Entry & Regime Evidence", POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE),
         ("evidence-coverage", "Evidence Coverage", EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
@@ -4198,6 +4199,62 @@ def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
 
 
+@app.route("/api/research-design")
+def api_research_design():
+    """Expose signed research baselines and observed Phase-7 feature coverage."""
+    from research_entry_baselines import ENTRY_BASELINE_REGISTRY
+
+    report, source = _declared_atomic_generation_report(
+        POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
+    )
+    manifest = source.get("manifest") or {}
+    freshness = _generation_freshness_meta(manifest)
+    evaluator = report.get("conservative_evaluator") if isinstance(report, dict) else {}
+    evaluator = evaluator if isinstance(evaluator, dict) else {}
+    coverage = evaluator.get("regime_feature_coverage")
+    coverage_available = isinstance(coverage, dict)
+    coverage = coverage if coverage_available else {
+        "schema": "phase7_regime_feature_coverage_v1",
+        "row_count": 0,
+        "dimensions": [],
+        "status": "UNKNOWN_CURRENT_GENERATION",
+        "qualification_allowed": False,
+        "profitability_calculated": False,
+    }
+    baselines = []
+    for definition in ENTRY_BASELINE_REGISTRY["baselines"]:
+        baselines.append({
+            key: definition.get(key) for key in (
+                "baseline_id", "entry_type", "timing", "policy_signature",
+                "execution_class", "relay_eligible", "places_order",
+                "missing_evidence_outcome", "required_evidence",
+            )
+        })
+    available = (
+        bool(report) and coverage_available
+        and coverage.get("schema") == "phase7_regime_feature_coverage_v1"
+    )
+    return jsonify({
+        "schema": "research_design_dashboard_v1",
+        "available": available,
+        "status": (
+            "CURRENT" if available and freshness.get("current")
+            else "STALE_CURRENT_GENERATION" if available
+            else "UNAVAILABLE_CURRENT_GENERATION"
+        ),
+        "reason": None if report else source.get("reason") or "REPORT_UNAVAILABLE",
+        "generation_id": manifest.get("generation_id"),
+        "generation_revision": manifest.get("generation_revision"),
+        "generation_freshness": freshness,
+        "entry_baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
+        "entry_baselines": baselines,
+        "regime_feature_coverage": coverage,
+        "qualification_allowed": False,
+        "profitability_calculated": False,
+        "profitability_status": "NOT_CALCULATED_FROM_DEFINITIONS_OR_COVERAGE",
+    })
+
+
 @app.route("/api/evidence-coverage")
 def api_evidence_coverage():
     """Bounded, read-only coverage summary from the declared atomic generation."""
@@ -6071,6 +6128,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <pre id="genome-replay"></pre>
     </div>
   </section>
+  <section id="sec-research-design">
+    <h2>Entry baselines &amp; Phase-7 regime evidence</h2>
+    <div class="stale-banner" id="research-design-banner" style="display:block"></div>
+    <p class="note">Signed comparison definitions are research-only and place no orders. Coverage reports only fields explicitly captured before entry. Definitions and coverage never create fills, PnL, profitability, qualification, or live authorization.</p>
+    <div class="kpis" id="research-design-kpis"></div>
+    <h2>Signed entry baseline registry</h2>
+    <table><thead><tr><th>Baseline</th><th>Entry type</th><th>Timing</th><th>Required evidence</th><th>Execution status</th><th>Missing evidence</th></tr></thead><tbody id="research-baseline-body"></tbody></table>
+    <h2>Observed / unknown regime dimensions</h2>
+    <table><thead><tr><th>Dimension</th><th>Observed rows</th><th>Unknown rows</th><th>Status</th></tr></thead><tbody id="research-regime-coverage-body"></tbody></table>
+  </section>
   <section id="sec-evidence-coverage">
     <h2>Evidence Coverage</h2>
     <div class="stale-banner" id="evidence-coverage-banner" style="display:block"></div>
@@ -6160,6 +6227,7 @@ const EVIDENCE_SCOPES = {
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
   'evidence-coverage': ['CURRENT DECLARED ATOMIC GENERATION ONLY', 'Checksum-verified canonical counts and triage. Stale generations remain visible but are explicitly blocked from qualification.'],
+  'research-design': ['RESEARCH DEFINITIONS + PRE-ENTRY COVERAGE ONLY', 'Signed baselines place no orders. OBSERVED/UNKNOWN feature coverage is not profitability or qualification evidence.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
   explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
   archives: ['PRESERVED HISTORY', 'Sealed prior reports and sessions; not current-epoch policy evidence.'],
@@ -6966,6 +7034,40 @@ async function loadFeatures() {
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
 }
 
+async function loadResearchDesign() {
+  const r = await fetch('/api/research-design');
+  const d = await r.json();
+  const escape = value => String(value == null ? '' : value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+  const banner = document.getElementById('research-design-banner');
+  const current = d.status === 'CURRENT';
+  banner.style.background = current ? '#153526' : '#3d2a1f';
+  banner.style.borderColor = current ? '#3dd68c' : '#d29922';
+  banner.style.color = current ? '#9df0c8' : '#f8e3a1';
+  banner.textContent = current
+    ? 'Current declared generation · qualification disabled · profitability not calculated'
+    : `${d.status || 'UNAVAILABLE'} · ${d.reason || 'current evaluator coverage unavailable'} · qualification disabled`;
+  const coverage = d.regime_feature_coverage || {};
+  document.getElementById('research-design-kpis').innerHTML = cards([
+    ['Signed baselines', (d.entry_baselines || []).length],
+    ['Evaluator rows', coverage.row_count ?? 0],
+    ['Qualification', d.qualification_allowed ? 'ALLOWED' : 'DISABLED'],
+    ['Profitability', d.profitability_calculated ? 'CALCULATED' : 'NOT CALCULATED'],
+  ]);
+  document.getElementById('research-baseline-body').innerHTML = (d.entry_baselines || []).map(row =>
+    `<tr><td>${escape(row.baseline_id)}<br><small>${escape(row.policy_signature)}</small></td>` +
+    `<td>${escape(row.entry_type)}</td><td>${escape(row.timing)}</td>` +
+    `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
+    `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
+    `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}</td></tr>`
+  ).join('') || '<tr><td colspan="6">No signed baseline definitions are available.</td></tr>';
+  document.getElementById('research-regime-coverage-body').innerHTML = (coverage.dimensions || []).map(row =>
+    `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 0}</td><td>${row.unknown_rows ?? 0}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
+  ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
+}
+
 async function loadEvidenceCoverage() {
   const r = await fetch('/api/evidence-coverage');
   const d = await r.json();
@@ -7293,7 +7395,7 @@ const SECTION_LOADERS = {
   combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
-  'evidence-coverage': [loadEvidenceCoverage],
+  'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
   download: [loadArchives, loadGptAuditNote], 'runtime-incidents': [loadRuntimeIncidents], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };

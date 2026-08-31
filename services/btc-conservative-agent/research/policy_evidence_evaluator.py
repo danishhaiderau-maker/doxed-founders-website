@@ -503,8 +503,40 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
     )))
     counts = {name: sum(row["classification"] == name for row in results)
               for name in ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN")}
+    feature_names = tuple(_regime_features_at_signal({}, {}).keys())
+    observed_by_dimension = {
+        name: sum(
+            ((row.get("regime_features_at_signal") or {}).get(name) or {}).get("status")
+            == "OBSERVED"
+            for row in results
+        )
+        for name in feature_names
+    }
+    unknown_by_dimension = {
+        name: len(results) - observed_by_dimension[name] for name in feature_names
+    }
+    regime_feature_coverage = {
+        "schema": "phase7_regime_feature_coverage_v1",
+        "row_count": len(results),
+        "dimensions": [
+            {
+                "name": name,
+                "observed_rows": observed_by_dimension[name],
+                "unknown_rows": unknown_by_dimension[name],
+                "status": (
+                    "OBSERVED" if results and unknown_by_dimension[name] == 0
+                    else "PARTIAL" if observed_by_dimension[name] > 0
+                    else "UNKNOWN"
+                ),
+            }
+            for name in feature_names
+        ],
+        "qualification_allowed": False,
+        "profitability_calculated": False,
+    }
     return {"schema": SCHEMA, "row_count": len(results), "classification_counts": counts,
             "results_sha256": hashlib.sha256(canonical_json(results).encode()).hexdigest(),
+            "regime_feature_coverage": regime_feature_coverage,
             "results": results}
 
 

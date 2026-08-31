@@ -19345,7 +19345,7 @@ def _stamp_policy_evaluator_status(path, status):
             "schema", "row_count", "classification_counts", "results_sha256",
             "relative_path", "artifact_sha256", "artifact_size_bytes",
             "cache_rows_ingested", "cache_rows_skipped_missing_identity",
-            "cache_skip_reason_counts",
+            "cache_skip_reason_counts", "regime_feature_coverage",
         )
     }
     temporary = target.with_name(

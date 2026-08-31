@@ -154,7 +154,8 @@ def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_pa
     })
     path.write_text(json.dumps(opportunity) + "\n", encoding="utf-8")
 
-    row = build_v3_conservative_results(v3)["results"][0]
+    report = build_v3_conservative_results(v3)
+    row = report["results"][0]
     assert row["regime_feature_schema"] == "phase7_regime_features_v1"
     features = row["regime_features_at_signal"]
     assert features["realized_volatility"] == {
@@ -177,6 +178,17 @@ def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_pa
     assert row["regime_feature_coverage"]["status"] == "PARTIAL"
     assert "volatility_of_volatility" in row["regime_feature_coverage"]["unknown_dimensions"]
     assert "liquidity" in row["regime_feature_coverage"]["unknown_dimensions"]
+    aggregate = {item["name"]: item for item in report["regime_feature_coverage"]["dimensions"]}
+    assert report["regime_feature_coverage"]["qualification_allowed"] is False
+    assert report["regime_feature_coverage"]["profitability_calculated"] is False
+    assert aggregate["realized_volatility"] == {
+        "name": "realized_volatility", "observed_rows": 1,
+        "unknown_rows": 0, "status": "OBSERVED",
+    }
+    assert aggregate["volatility_of_volatility"] == {
+        "name": "volatility_of_volatility", "observed_rows": 0,
+        "unknown_rows": 1, "status": "UNKNOWN",
+    }
 
 
 def test_directional_score_gap_is_never_relabelled_as_exchange_spread(tmp_path):
