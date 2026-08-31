@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,20 +276,80 @@ def archive_before_cleanup(
     source = contained_path(store, candidate)
     if not source.exists():
         raise CanonicalStoreError("CLEANUP_TARGET_MISSING")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     destination = contained_path(
         store, store / "archive" / f"{stamp}-{source.name}", allow_root=False
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise CanonicalStoreError("ARCHIVE_DESTINATION_EXISTS")
-    shutil.move(str(source), str(destination))
+    temporary = contained_path(
+        store,
+        destination.parent / f".{destination.name}.{uuid.uuid4().hex}.tmp",
+    )
+
+    def inventory(path: Path) -> tuple[list[dict[str, Any]], str, int]:
+        if path.is_symlink():
+            raise CanonicalStoreError("CLEANUP_SYMLINK_FORBIDDEN")
+        files = [path] if path.is_file() else sorted(
+            (item for item in path.rglob("*") if item.is_file()),
+            key=lambda item: item.relative_to(path).as_posix(),
+        )
+        rows = []
+        total = 0
+        for item in files:
+            if item.is_symlink():
+                raise CanonicalStoreError("CLEANUP_SYMLINK_FORBIDDEN")
+            payload = item.read_bytes()
+            total += len(payload)
+            rows.append({
+                "path": "__ROOT_FILE__" if path.is_file() else item.relative_to(path).as_posix(),
+                "bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            })
+        digest = hashlib.sha256(_canonical_bytes({"files": rows})).hexdigest()
+        return rows, digest, total
+
+    before_rows, before_digest, before_bytes = inventory(source)
+    try:
+        if source.is_dir():
+            shutil.copytree(source, temporary)
+        else:
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, temporary)
+        copied_rows, copied_digest, copied_bytes = inventory(temporary)
+        after_rows, after_digest, after_bytes = inventory(source)
+        if (
+            copied_rows != before_rows or copied_digest != before_digest
+            or copied_bytes != before_bytes or after_rows != before_rows
+            or after_digest != before_digest or after_bytes != before_bytes
+        ):
+            raise CanonicalStoreError("ARCHIVE_VERIFICATION_FAILED_SOURCE_CHANGED_OR_COPY_MISMATCH")
+        os.replace(temporary, destination)
+        # Removal is permitted only after the promoted archive is re-verified.
+        final_rows, final_digest, final_bytes = inventory(destination)
+        if final_rows != before_rows or final_digest != before_digest or final_bytes != before_bytes:
+            raise CanonicalStoreError("ARCHIVE_PROMOTION_VERIFICATION_FAILED")
+        if source.is_dir():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
+    finally:
+        if temporary.exists():
+            if temporary.is_dir():
+                shutil.rmtree(temporary)
+            else:
+                temporary.unlink()
     receipt = {
         "schema": "canonical_research_cleanup_receipt_v1",
         "archived_at": _utc_now(),
         "reason": reason,
         "source_relative": str(source.relative_to(store)).replace("\\", "/"),
         "archive_relative": str(destination.relative_to(store)).replace("\\", "/"),
+        "archive_manifest_sha256": before_digest,
+        "archive_file_count": len(before_rows),
+        "archive_bytes": before_bytes,
+        "verification": "COPY_AND_SOURCE_STABILITY_SHA256_VERIFIED_BEFORE_REMOVAL",
         "recoverable": True,
     }
     _atomic_json(destination.parent / f"{destination.name}.receipt.json", receipt)

@@ -28771,8 +28771,8 @@ __ADMIN_ACCESS_CONTROLS__
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
     Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
-  Canonical analyzer store at <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> syncs from Fly
-    (≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code>, default 50 MB) or every 3 min — then ACK-prunes rotated shards only.
+  Canonical analyzer store at <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> checks Fly identity and O(1) volume usage every 3 min. It performs a full mirror when used space grows by
+    ≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code> (default 50 MB), on revision/epoch change, or at least every 30 min. ACK-qualified pruning remains deferred; a sync does not immediately delete Fly data.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
@@ -37941,9 +37941,13 @@ def api_data_sync_manifest():
         )
         if inventory_status == "CURRENT" and not targeted_path else None
     )
+    # disk_usage is an O(1) filesystem statistic. Expose it on identity-only
+    # polls so the desktop can detect meaningful growth without forcing a
+    # recursive manifest walk every three minutes.
     usage = (
         shutil.disk_usage(_data_sync_volume_root())
-        if inventory_status == "CURRENT" and not targeted_path else None
+        if not targeted_path and (identity_only or inventory_status == "CURRENT")
+        else None
     )
     ack = (
         _read_data_sync_ack()

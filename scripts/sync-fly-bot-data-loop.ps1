@@ -328,6 +328,7 @@ function Invoke-OptionalRelayEvidenceSync {
 }
 
 $lastSyncedTotalBytes = [int64]0
+$lastSyncedVolumeUsedBytes = [int64]0
 $lastSyncAt = [datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc')
 $lastSyncedSourceRevision = $null
 if (Test-Path -LiteralPath $growthStateFile) {
@@ -335,6 +336,9 @@ if (Test-Path -LiteralPath $growthStateFile) {
     $growthState = Get-Content -LiteralPath $growthStateFile -Raw | ConvertFrom-Json
     if ($growthState.PSObject.Properties.Name -contains "lastSyncedTotalBytes") {
       $lastSyncedTotalBytes = [int64]$growthState.lastSyncedTotalBytes
+    }
+    if ($growthState.PSObject.Properties.Name -contains "lastSyncedVolumeUsedBytes") {
+      $lastSyncedVolumeUsedBytes = [int64]$growthState.lastSyncedVolumeUsedBytes
     }
     if ($growthState.PSObject.Properties.Name -contains "lastSyncAt") {
       $parsed = [datetime]::MinValue
@@ -422,6 +426,7 @@ try {
         @{ signal_ts = $currentSignal; signalled_at = (Get-Date).ToUniversalTime().ToString("o") } |
           ConvertTo-Json | Set-Content -LiteralPath $freshSignalFile -Encoding UTF8
         $lastSyncedTotalBytes = 0
+        $lastSyncedVolumeUsedBytes = 0
         # The active mirror is now empty. Do not retain a revision receipt for
         # the quarantined generation if the following refresh fails.
         $lastSyncedSourceRevision = $null
@@ -431,10 +436,9 @@ try {
       # Polling and mutation cadence are deliberately separate. A complete
       # 601-file Fly pass can take much longer than the three-minute poll
       # cadence; forcing one on every poll starves the Fly HTTP/control plane.
-      # Identity polls refresh revision/freshness, while a physical inventory
-      # is due only at the reviewed full-sync interval or immediately on a
-      # revision/fresh-collection change. Growth is measured during that
-      # bounded inventory, never by continuously walking the volume.
+      # Identity polls refresh revision/freshness and O(1) filesystem usage.
+      # The usage delta can trigger a physical inventory without repeatedly
+      # walking every file on the volume.
       $forceByTime = $elapsedSec -ge $fullSyncSec
       $forceFresh = $currentSignal -gt $lastSeenSignal
       # A deployment can change schemas or files without adding 50 MB. The
@@ -445,10 +449,31 @@ try {
         -not $observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)
       )
 
-      $needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision
+      $currentVolumeUsedBytes = [int64]0
+      if (
+        $manifest.PSObject.Properties.Name -contains "volume" -and
+        $null -ne $manifest.volume -and
+        $manifest.volume.PSObject.Properties.Name -contains "used"
+      ) {
+        $currentVolumeUsedBytes = [int64]$manifest.volume.used
+      }
+      $volumeGrowthBytes = [int64]0
+      if ($currentVolumeUsedBytes -gt 0 -and $lastSyncedVolumeUsedBytes -gt 0) {
+        # A volume decrease (cleanup/rotation) is not growth and cannot force
+        # a sync. The first run establishes a baseline at successful publish.
+        $volumeGrowthBytes = [Math]::Max(
+          [int64]0,
+          [int64]($currentVolumeUsedBytes - $lastSyncedVolumeUsedBytes)
+        )
+      }
+      $forceByGrowth = (
+        $lastSyncedVolumeUsedBytes -gt 0 -and
+        $volumeGrowthBytes -ge $thresholdBytes
+      )
+
+      $needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision -or $forceByGrowth
       $currentTotalBytes = $lastSyncedTotalBytes
-      $growthBytes = [int64]0
-      $forceByGrowth = $false
+      $growthBytes = $volumeGrowthBytes
       if ($needsFullInventory) {
         $currentStage = "loop_full_manifest"
         $manifest = Get-FlySyncPreflightManifest `
@@ -458,7 +483,6 @@ try {
         } else {
           $currentTotalBytes = [int64](($manifest.files | Measure-Object -Property size -Sum).Sum)
         }
-        $growthBytes = [Math]::Max([int64]0, $currentTotalBytes - $lastSyncedTotalBytes)
       }
 
       # Relay evidence is optional and may consume two 90-second bounded
@@ -507,11 +531,14 @@ try {
           source = $SourceUrl
           skipped = $true
           reason = "identity_match_before_full_interval"
-          growthBytes = $null
+          growthBytes = $volumeGrowthBytes
+          growthBasis = "FLY_VOLUME_USED_BYTES_O1"
           thresholdBytes = $thresholdBytes
           thresholdMb = $thresholdMb
           currentTotalBytes = $null
           lastSyncedTotalBytes = $lastSyncedTotalBytes
+          currentVolumeUsedBytes = $currentVolumeUsedBytes
+          lastSyncedVolumeUsedBytes = $lastSyncedVolumeUsedBytes
           elapsedSecSinceSync = [Math]::Round($elapsedSec, 1)
           sourceRevision = $lastSyncedSourceRevision
           observedSourceRevision = $observedSourceRevision
@@ -592,10 +619,12 @@ try {
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
       $didSync = $true
       $lastSyncedTotalBytes = $currentTotalBytes
+      $lastSyncedVolumeUsedBytes = $currentVolumeUsedBytes
       $lastSyncAt = [datetime]::UtcNow
       $lastSyncedSourceRevision = $(if ($result.SourceRevision) { [string]$result.SourceRevision } else { $observedSourceRevision })
       @{
         lastSyncedTotalBytes = $lastSyncedTotalBytes
+        lastSyncedVolumeUsedBytes = $lastSyncedVolumeUsedBytes
         lastSyncAt = $lastSyncAt.ToString("o")
         lastSyncedSourceRevision = $lastSyncedSourceRevision
         thresholdMb = $thresholdMb
@@ -622,6 +651,9 @@ try {
         relayEvidence = $relayEvidenceStatus
         prunedRotations = $result.PrunedRotations
         growthBytes = $growthBytes
+        growthBasis = "FLY_VOLUME_USED_BYTES_O1"
+        currentVolumeUsedBytes = $currentVolumeUsedBytes
+        lastSyncedVolumeUsedBytes = $lastSyncedVolumeUsedBytes
         thresholdMb = $thresholdMb
         trigger = $(if ($forceByRevision) { "revision" } elseif ($forceByGrowth) { "growth" } elseif ($forceFresh) { "fresh" } else { "interval" })
         elapsedSec = [Math]::Round(((Get-Date) - $started).TotalSeconds, 3)

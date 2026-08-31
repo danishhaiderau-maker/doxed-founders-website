@@ -215,6 +215,33 @@ def test_sync_loop_separates_poll_retry_and_full_mutation_cadence():
     assert "Start-Sleep -Seconds ([Math]::Max(15, $IntervalSec))" not in loop_tail
 
 
+def test_identity_poll_uses_o1_volume_growth_to_trigger_full_inventory():
+    assert '$lastSyncedVolumeUsedBytes = [int64]0' in SYNC_LOOP
+    assert 'lastSyncedVolumeUsedBytes = $lastSyncedVolumeUsedBytes' in SYNC_LOOP
+    assert '$currentVolumeUsedBytes = [int64]$manifest.volume.used' in SYNC_LOOP
+    assert '[int64]($currentVolumeUsedBytes - $lastSyncedVolumeUsedBytes)' in SYNC_LOOP
+    assert '$volumeGrowthBytes -ge $thresholdBytes' in SYNC_LOOP
+    assert (
+        '$needsFullInventory = $forceByTime -or $forceFresh -or '
+        '$forceByRevision -or $forceByGrowth'
+    ) in SYNC_LOOP
+    # Decreases and a missing first-run baseline never masquerade as growth.
+    assert '$lastSyncedVolumeUsedBytes -gt 0 -and' in SYNC_LOOP
+    assert '[Math]::Max(' in SYNC_LOOP
+    assert 'growthBasis = "FLY_VOLUME_USED_BYTES_O1"' in SYNC_LOOP
+
+
+def test_identity_manifest_exposes_o1_disk_usage_and_ui_states_real_cadence():
+    route_start = BOT.index("def api_data_sync_manifest():")
+    route_end = BOT.index("\n@app.route", route_start + 10)
+    route_body = BOT[route_start:route_end]
+    assert 'if not targeted_path and (identity_only or inventory_status == "CURRENT")' in route_body
+    assert 'shutil.disk_usage(_data_sync_volume_root())' in route_body
+    assert "checks Fly identity and O(1) volume usage every 3 min" in BOT
+    assert "or at least every 30 min" in BOT
+    assert "ACK-qualified pruning remains deferred" in BOT
+
+
 def _load_bot_functions(*names):
     tree = ast.parse(BOT)
     selected = [
@@ -1696,8 +1723,15 @@ def test_local_sync_archives_only_manifest_absent_top_level_raw_research_files()
     assert "\\.(jsonl|log|csv)(?:\\.\\d+)?$" in SYNC_SCRIPT
     assert "$manifestPaths.Contains($candidate.Name)" in SYNC_SCRIPT
     assert "Get-ChildItem -LiteralPath $targetRoot -File" in SYNC_SCRIPT
-    assert "[System.IO.File]::Move($resolvedCandidate, $archivePath)" in SYNC_SCRIPT
+    assert "[System.IO.File]::Copy($resolvedCandidate, $temporaryArchive, $false)" in SYNC_SCRIPT
+    assert "$stableSourceSha256 -cne $sourceSha256" in SYNC_SCRIPT
+    assert "Promoted archive verification failed; source retained" in SYNC_SCRIPT
+    assert "Remove-Item -LiteralPath $resolvedCandidate" in SYNC_SCRIPT
+    assert SYNC_SCRIPT.index("Promoted archive verification failed; source retained") < SYNC_SCRIPT.index(
+        "Remove-Item -LiteralPath $resolvedCandidate"
+    )
     assert 'schema = "canonical_research_cleanup_receipt_v1"' in SYNC_SCRIPT
+    assert 'verification = "COPY_AND_SOURCE_STABILITY_SHA256_VERIFIED_BEFORE_REMOVAL"' in SYNC_SCRIPT
     assert 'recoverable = $true' in SYNC_SCRIPT
     assert "[System.IO.File]::Delete($resolvedCandidate)" not in SYNC_SCRIPT
     assert "[void]$syncState.Remove($candidate.Name)" in SYNC_SCRIPT

@@ -193,9 +193,50 @@ def test_cleanup_is_archive_first_and_cannot_escape(tmp_path):
     archived = root / receipt["archive_relative"]
     assert receipt["recoverable"] is True
     assert archived.read_text() == "evidence\n"
+    assert receipt["archive_file_count"] == 1
+    assert receipt["archive_bytes"] == archived.stat().st_size
+    assert len(receipt["archive_manifest_sha256"]) == 64
+    assert receipt["verification"] == "COPY_AND_SOURCE_STABILITY_SHA256_VERIFIED_BEFORE_REMOVAL"
     assert not target.exists()
     outside = tmp_path / "outside.txt"
     outside.write_text("keep")
     with pytest.raises(CanonicalStoreError, match="PATH_OUTSIDE"):
         archive_before_cleanup(root, outside, reason="must refuse")
     assert outside.read_text() == "keep"
+
+
+def test_cleanup_archives_directory_tree_with_verified_manifest(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    root = initialize_store(default_store_root(project), project)
+    target = root / "derived-old"
+    (target / "nested").mkdir(parents=True)
+    (target / "a.json").write_text("a", encoding="utf-8")
+    (target / "nested" / "b.jsonl").write_text("b\n", encoding="utf-8")
+
+    receipt = archive_before_cleanup(root, target, reason="verified derived offload")
+    archived = root / receipt["archive_relative"]
+    assert receipt["archive_file_count"] == 2
+    assert receipt["archive_bytes"] == sum(
+        path.stat().st_size for path in archived.rglob("*") if path.is_file()
+    )
+    assert (archived / "a.json").read_text(encoding="utf-8") == "a"
+    assert (archived / "nested" / "b.jsonl").read_text(encoding="utf-8") == "b\n"
+    assert not target.exists()
+
+
+def test_cleanup_refuses_symlink_without_removing_source(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    root = initialize_store(default_store_root(project), project)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    link = root / "linked.txt"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation is unavailable on this host")
+    with pytest.raises(CanonicalStoreError, match="SYMLINK_FORBIDDEN"):
+        archive_before_cleanup(root, link, reason="must refuse symlink")
+    assert link.exists()
+    assert outside.read_text(encoding="utf-8") == "keep"

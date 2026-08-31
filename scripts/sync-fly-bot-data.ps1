@@ -408,14 +408,44 @@ foreach ($candidate in @(Get-ChildItem -LiteralPath $targetRoot -File -Force -Er
   $archiveDir = Join-Path $staleArchiveRoot $stamp
   New-Item -ItemType Directory -Path $archiveDir -Force | Out-Null
   $archivePath = Join-Path $archiveDir $candidate.Name
+  $resolvedArchive = [System.IO.Path]::GetFullPath($archivePath)
+  if (-not $resolvedArchive.StartsWith(($targetRoot.TrimEnd('\') + '\'), [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Local archive path escaped the mirror root: $resolvedArchive"
+  }
   if (Test-Path -LiteralPath $archivePath) { throw "Archive collision: $archivePath" }
-  [System.IO.File]::Move($resolvedCandidate, $archivePath)
+  # Archive-first means copy, verify both sides, then remove the local mirror
+  # source. A rename alone cannot prove recoverability after storage faults or
+  # concurrent mutation.
+  $sourceSize = [int64]$candidate.Length
+  $sourceSha256 = (Get-FileHash -LiteralPath $resolvedCandidate -Algorithm SHA256).Hash.ToLowerInvariant()
+  $temporaryArchive = "$resolvedArchive.$([guid]::NewGuid().ToString('N')).tmp"
+  [System.IO.File]::Copy($resolvedCandidate, $temporaryArchive, $false)
+  $copiedSize = [int64](Get-Item -LiteralPath $temporaryArchive).Length
+  $copiedSha256 = (Get-FileHash -LiteralPath $temporaryArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+  $stableSourceSize = [int64](Get-Item -LiteralPath $resolvedCandidate).Length
+  $stableSourceSha256 = (Get-FileHash -LiteralPath $resolvedCandidate -Algorithm SHA256).Hash.ToLowerInvariant()
+  if (
+    $copiedSize -ne $sourceSize -or $copiedSha256 -cne $sourceSha256 -or
+    $stableSourceSize -ne $sourceSize -or $stableSourceSha256 -cne $sourceSha256
+  ) {
+    Remove-Item -LiteralPath $temporaryArchive -Force -ErrorAction SilentlyContinue
+    throw "Archive verification failed; source retained: $($candidate.Name)"
+  }
+  [System.IO.File]::Move($temporaryArchive, $resolvedArchive)
+  $promotedSha256 = (Get-FileHash -LiteralPath $resolvedArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($promotedSha256 -cne $sourceSha256) {
+    throw "Promoted archive verification failed; source retained: $($candidate.Name)"
+  }
+  Remove-Item -LiteralPath $resolvedCandidate -Force -ErrorAction Stop
   $receipt = [ordered]@{
     schema = "canonical_research_cleanup_receipt_v1"
     archived_at = [DateTimeOffset]::UtcNow.ToString("o")
     reason = "ABSENT_FROM_AUTHENTICATED_FLY_MANIFEST"
     source_relative = $candidate.Name
     archive_relative = $archivePath.Substring($targetRoot.Length).TrimStart('\').Replace('\', '/')
+    archive_sha256 = $sourceSha256
+    archive_bytes = $sourceSize
+    verification = "COPY_AND_SOURCE_STABILITY_SHA256_VERIFIED_BEFORE_REMOVAL"
     recoverable = $true
   }
   $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$archivePath.receipt.json" -Encoding UTF8
