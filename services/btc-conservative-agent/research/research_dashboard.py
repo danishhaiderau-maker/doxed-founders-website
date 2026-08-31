@@ -250,6 +250,7 @@ POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
+EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -304,6 +305,7 @@ REPORT_NAV_GROUPS = (
     )),
     ("deep-group", "Genome & Reports", (
         ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
+        ("evidence-coverage", "Evidence Coverage", EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE),
         ("edge", "Edge & Features", "feature_importance_report.json"),
         ("explorer", "Report Explorer", None),
         ("archives", "Archives", None),
@@ -1208,6 +1210,56 @@ def _current_generation_report(name: str) -> dict:
         "candidate_screen": {},
         "safe_policy_ranking": {},
     }
+
+
+def _declared_atomic_generation_report(name: str) -> tuple[dict | None, dict]:
+    """Read ``name`` only when the active atomic manifest declares it.
+
+    Unlike the compatibility report resolver, this deliberately has no loose
+    root/report fallback.  Coverage must never surface a file from an analyzer
+    pass that has not completed the published-directory exchange.
+    """
+    for base in (ROOT, DATA_ROOT):
+        published = base / PUBLISHED_REPORTS_DIR
+        manifest_path = published / REPORT_MANIFEST_FILE
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError, TypeError):
+            continue
+        declared = {
+            str(row.get("file")): row
+            for row in (manifest.get("reports") or [])
+            if isinstance(row, dict) and row.get("file")
+        }
+        if name not in declared:
+            return None, {
+                "reason": "REPORT_NOT_IN_CURRENT_GENERATION",
+                "manifest": manifest,
+                "manifest_path": str(manifest_path),
+            }
+        report_path = published / name
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+        except FileNotFoundError:
+            return None, {
+                "reason": "DECLARED_REPORT_FILE_MISSING",
+                "manifest": manifest,
+                "manifest_path": str(manifest_path),
+            }
+        except (OSError, ValueError, TypeError):
+            return None, {
+                "reason": "DECLARED_REPORT_INVALID_JSON",
+                "manifest": manifest,
+                "manifest_path": str(manifest_path),
+            }
+        return report, {
+            "reason": None,
+            "manifest": manifest,
+            "manifest_path": str(manifest_path),
+        }
+    return None, {"reason": "ATOMIC_GENERATION_UNAVAILABLE", "manifest": {}}
 
 
 def _read_text(name: str) -> str:
@@ -4116,6 +4168,119 @@ def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
 
 
+@app.route("/api/evidence-coverage")
+def api_evidence_coverage():
+    """Bounded, read-only coverage summary from the declared atomic generation."""
+    report, source = _declared_atomic_generation_report(
+        EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE
+    )
+    manifest = source.get("manifest") or {}
+    freshness = _generation_freshness_meta(manifest)
+    if not report:
+        return jsonify({
+            "schema": "evidence_coverage_dashboard_v1",
+            "available": False,
+            "status": "UNAVAILABLE_CURRENT_GENERATION",
+            "reason": source.get("reason") or "REPORT_UNAVAILABLE",
+            "generated_at": manifest.get("generated_at"),
+            "generation_id": manifest.get("generation_id"),
+            "generation_revision": manifest.get("generation_revision"),
+            "generation_freshness": freshness,
+            "qualification_allowed": False,
+        })
+
+    checksum_valid = False
+    try:
+        from research.evidence_coverage_triage import verify_report_checksum
+        checksum_valid = verify_report_checksum(report)
+    except Exception:
+        checksum_valid = False
+    totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
+    source_counts = (
+        report.get("authoritative_source_record_counts")
+        if isinstance(report.get("authoritative_source_record_counts"), dict)
+        else {}
+    )
+    outcomes = report.get("terminal_outcome_counts") or {}
+    reasons = report.get("missing_evidence_reason_counts") or {}
+    archive = report.get("archive_recovery_retention") or {}
+    orphan = report.get("unresolved_episode") or {}
+    valid = (
+        report.get("schema") == "evidence_coverage_triage_report_v1"
+        and checksum_valid
+        and report.get("outcome_inference_performed") is False
+        and report.get("missing_evidence_defaults_to") == "UNKNOWN"
+    )
+    if not valid:
+        return jsonify({
+            "schema": "evidence_coverage_dashboard_v1",
+            "available": False,
+            "status": "INVALID_CURRENT_GENERATION",
+            "reason": "DECLARED_REPORT_INTEGRITY_INVALID",
+            "generated_at": manifest.get("generated_at"),
+            "generation_id": manifest.get("generation_id"),
+            "generation_revision": manifest.get("generation_revision"),
+            "generation_freshness": freshness,
+            "checksum_valid": checksum_valid,
+            "qualification_allowed": False,
+        })
+    status = (
+        "CURRENT" if freshness.get("current")
+        else "STALE_CURRENT_GENERATION"
+    )
+    return jsonify({
+        "schema": "evidence_coverage_dashboard_v1",
+        "available": valid,
+        "status": status,
+        "generated_at": manifest.get("generated_at"),
+        "generation_id": manifest.get("generation_id"),
+        "generation_revision": manifest.get("generation_revision"),
+        "generation_freshness": freshness,
+        "checksum_valid": checksum_valid,
+        # A current coverage receipt proves only what evidence exists. It does
+        # not, by itself, qualify any policy or authorize a live-policy change.
+        "qualification_allowed": False,
+        "authoritative_source_record_counts": {
+            key: source_counts.get(key, "UNKNOWN")
+            for key in ("opportunities", "decisions", "order_intents", "executions", "lifecycles", "market_segments")
+        },
+        "episode_coverage": {
+            "exact": totals.get("exact_episodes", "UNKNOWN"),
+            "reconstructed": totals.get("reconstructed_episodes", "UNKNOWN"),
+            "unknown": totals.get("unknown_episodes", "UNKNOWN"),
+            "total": totals.get("episodes", "UNKNOWN"),
+        },
+        "terminal_outcome_counts": {
+            key: int(outcomes.get(key) or 0)
+            for key in ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN")
+        },
+        "complete_schedules": totals.get("complete_schedules", "UNKNOWN"),
+        "market_paths": totals.get("market_paths", "UNKNOWN"),
+        "terminal_outcomes": totals.get("terminal_outcomes", "UNKNOWN"),
+        "top_missing_evidence_reasons": [
+            {"reason": str(reason), "count": int(count)}
+            for reason, count in sorted(
+                reasons.items(), key=lambda item: (-int(item[1]), str(item[0]))
+            )[:12]
+        ],
+        "archive_recovery_retention": {
+            key: archive.get(key, "UNKNOWN")
+            for key in (
+                "archive_session_count", "verified_session_count",
+                "unverifiable_session_count", "invalid_session_count",
+                "retained_file_count", "retained_unique_checksum_count",
+            )
+        },
+        "quarantined_orphan": {
+            "episode_id": orphan.get("episode_id"),
+            "status": orphan.get("status") or "UNKNOWN",
+            "present_in_inputs": orphan.get("present_in_inputs") is True,
+            "separate_from_general_triage": orphan.get("separate_from_general_triage") is True,
+        },
+        "full_artifact": f"/api/report/{EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE}",
+    })
+
+
 @app.route("/api/policy-evidence-library")
 def api_policy_evidence_library():
     """Read-only status only; evaluation and arbitrary SQL are never exposed."""
@@ -5876,6 +6041,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <pre id="genome-replay"></pre>
     </div>
   </section>
+  <section id="sec-evidence-coverage">
+    <h2>Evidence Coverage</h2>
+    <div class="stale-banner" id="evidence-coverage-banner" style="display:block"></div>
+    <p class="note">Read-only counts from the checksum-verified report declared by the active atomic analyzer generation. Missing evidence remains UNKNOWN and never becomes NO_FILL.</p>
+    <div class="kpis" id="evidence-coverage-source-kpis"></div>
+    <h2>Episode and terminal outcome coverage</h2>
+    <div class="kpis" id="evidence-coverage-outcome-kpis"></div>
+    <h2>Top missing-evidence reasons</h2>
+    <table><thead><tr><th>Reason</th><th>Episodes / rows</th></tr></thead><tbody id="evidence-coverage-reasons"></tbody></table>
+    <h2>Archive recovery and quarantined orphan</h2>
+    <div class="kpis" id="evidence-coverage-archive-kpis"></div>
+    <pre id="evidence-coverage-orphan">Loading…</pre>
+    <p><a class="btn secondary" id="evidence-coverage-full" href="#">Inspect full declared report</a></p>
+  </section>
   <section id="sec-edge">
     <h2>Edge &amp; Feature Importance</h2>
     <p class="note">Pearson correlation with PnL — validation only, not for auto-tuning.</p>
@@ -5945,6 +6124,7 @@ const EVIDENCE_SCOPES = {
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current signed V3.1 Safe Policy Genome.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
+  'evidence-coverage': ['CURRENT DECLARED ATOMIC GENERATION ONLY', 'Checksum-verified canonical counts and triage. Stale generations remain visible but are explicitly blocked from qualification.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
   explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
   archives: ['PRESERVED HISTORY', 'Sealed prior reports and sessions; not current-epoch policy evidence.'],
@@ -6750,6 +6930,59 @@ async function loadFeatures() {
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
 }
 
+async function loadEvidenceCoverage() {
+  const r = await fetch('/api/evidence-coverage');
+  const d = await r.json();
+  const banner = document.getElementById('evidence-coverage-banner');
+  const unavailable = !d.available;
+  const stale = d.status === 'STALE_CURRENT_GENERATION';
+  banner.style.background = unavailable ? '#3d1f1f' : stale ? '#3d2a1f' : '#153526';
+  banner.style.borderColor = unavailable ? '#f85149' : stale ? '#d29922' : '#3dd68c';
+  banner.style.color = unavailable ? '#ffb4b4' : stale ? '#f8e3a1' : '#9df0c8';
+  const freshnessReasons = ((d.generation_freshness || {}).reasons || []).join(' · ');
+  banner.textContent = unavailable
+    ? `UNAVAILABLE · ${d.reason || d.status || 'current generation report is invalid or missing'}`
+    : `${d.status} · checksum ${d.checksum_valid ? 'VERIFIED' : 'INVALID'} · generation ${d.generation_id || 'UNKNOWN'} · revision ${d.generation_revision || 'UNKNOWN'}${freshnessReasons ? ' · ' + freshnessReasons : ''}`;
+  const value = v => v === undefined || v === null ? 'UNKNOWN' : String(v);
+  const html = v => value(v).replace(/[&<>"']/g, c => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+  })[c]);
+  const cards = rows => rows.map(([label, val]) =>
+    `<div class="kpi"><div class="lbl">${html(label)}</div><div class="val">${html(val)}</div></div>`
+  ).join('');
+  const counts = d.authoritative_source_record_counts || {};
+  document.getElementById('evidence-coverage-source-kpis').innerHTML = cards([
+    ['Opportunities', counts.opportunities], ['Decisions', counts.decisions],
+    ['Order intents', counts.order_intents], ['Executions', counts.executions],
+    ['Lifecycles', counts.lifecycles], ['Market segments', counts.market_segments],
+  ]);
+  const episodes = d.episode_coverage || {};
+  const outcomes = d.terminal_outcome_counts || {};
+  document.getElementById('evidence-coverage-outcome-kpis').innerHTML = cards([
+    ['Exact episodes', episodes.exact], ['Reconstructed episodes', episodes.reconstructed],
+    ['Unknown episodes', episodes.unknown], ['Complete schedules', d.complete_schedules],
+    ['FULL_FILL', outcomes.FULL_FILL], ['PARTIAL_FILL', outcomes.PARTIAL_FILL],
+    ['NO_FILL', outcomes.NO_FILL], ['UNKNOWN outcomes', outcomes.UNKNOWN],
+  ]);
+  document.getElementById('evidence-coverage-reasons').innerHTML =
+    (d.top_missing_evidence_reasons || []).map(row =>
+      `<tr><td>${html(row.reason)}</td><td>${html(row.count)}</td></tr>`
+    ).join('') || '<tr><td colspan="2">No declared, checksum-valid missing-reason report is available.</td></tr>';
+  const archive = d.archive_recovery_retention || {};
+  document.getElementById('evidence-coverage-archive-kpis').innerHTML = cards([
+    ['Archive sessions', archive.archive_session_count],
+    ['Verified', archive.verified_session_count],
+    ['Unverifiable', archive.unverifiable_session_count],
+    ['Invalid', archive.invalid_session_count],
+  ]);
+  document.getElementById('evidence-coverage-orphan').textContent = JSON.stringify(
+    d.quarantined_orphan || {status: 'UNKNOWN', reason: d.reason || 'REPORT_UNAVAILABLE'}, null, 2
+  );
+  const full = document.getElementById('evidence-coverage-full');
+  full.style.display = d.full_artifact ? 'inline-block' : 'none';
+  if (d.full_artifact) full.href = d.full_artifact;
+}
+
 async function loadGenome() {
   const r = await fetch('/api/genome');
   const d = await r.json();
@@ -7009,6 +7242,7 @@ const SECTION_LOADERS = {
   combos: [loadCombos], 'spread-perf': [loadSpreadPerf],
   'exit-combos': [loadExitCombos], 'exit-reason-leak': [loadExitReasonLeak],
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
+  'evidence-coverage': [loadEvidenceCoverage],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
   download: [loadArchives, loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };
