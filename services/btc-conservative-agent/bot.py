@@ -33454,7 +33454,10 @@ def api_relay_state(force_rebuild: bool = False):
     try:
         now_ts = time.time()
         session_start = _showcase_trade_session_start()
-        with state_lock:
+        state_acquired = state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+        if not state_acquired:
+            raise TimeoutError("relay state snapshot timed out waiting for state_lock")
+        try:
             price = state.get("price")
             debug_state = state.get("debug_state") or {}
             snapshot = {
@@ -33481,8 +33484,13 @@ def api_relay_state(force_rebuild: bool = False):
                 "regime": state.get("regime"),
                 "debug_state": {"last_edge_score": debug_state.get("last_edge_score")},
             }
+        finally:
+            state_lock.release()
         split_execution_truth, relay_evidence_index = _load_dashboard_trade_enrichment()
-        with trade_lock:
+        trade_acquired = trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)
+        if not trade_acquired:
+            raise TimeoutError("relay state snapshot timed out waiting for trade_lock")
+        try:
             pending_orders_copy = copy.deepcopy(pending_orders)
             positions_copy = copy.deepcopy(open_positions)
             (
@@ -33497,6 +33505,8 @@ def api_relay_state(force_rebuild: bool = False):
             expired_orders_copy = copy.deepcopy(
                 expired_orders[-_DASHBOARD_HISTORY_MAX:]
             )
+        finally:
+            trade_lock.release()
         enriched_trades_for_relay = _enrich_dashboard_trade_rows(
             raw_trades_for_relay,
             split_execution_truth,

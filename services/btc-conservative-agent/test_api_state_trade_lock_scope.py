@@ -128,3 +128,13 @@ def test_enrichment_loader_runs_before_trade_lock_acquisition():
             "accrue_position_funding(",
         ):
             assert forbidden not in locked, (function_name, forbidden)
+
+
+def test_legacy_relay_builder_uses_bounded_money_state_lock_acquisition():
+    body = ast.get_source_segment(SOURCE, _function("api_relay_state"))
+    assert "state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in body
+    assert "trade_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in body
+    assert 'raise TimeoutError("relay state snapshot timed out waiting for state_lock")' in body
+    assert 'raise TimeoutError("relay state snapshot timed out waiting for trade_lock")' in body
+    assert "with state_lock:" not in body
+    assert "with trade_lock:" not in body
