@@ -379,9 +379,14 @@ def _auxiliary_report_generation_context(session=None):
     source = _report_source_evidence_provenance()
     return {
         "generation_revision": str(revision),
+        "analyzer_revision": str(revision),
         "session_scope": _shadow_scope_label(session),
         "fresh_epoch_id": epoch.get("fresh_epoch_id"),
         "source_data_revision": source.get("source_data_revision"),
+        "source_revision": source.get("source_revision"),
+        "deployed_revision": source.get("deployed_revision"),
+        "dataset_epoch": source.get("dataset_epoch"),
+        "config_signature": source.get("config_signature"),
     }
 
 
@@ -405,6 +410,7 @@ def _load_current_auxiliary_report(path, context):
     provenance = provenance if isinstance(provenance, dict) else {}
     observed = {
         "generation_revision": payload.get("generation_revision") or provenance.get("generation_revision"),
+        "analyzer_revision": payload.get("analyzer_revision") or provenance.get("analyzer_revision"),
         "session_scope": payload.get("session_scope") or provenance.get("session_scope"),
         "fresh_epoch_id": (
             payload.get("epoch_id")
@@ -412,6 +418,10 @@ def _load_current_auxiliary_report(path, context):
             or provenance.get("fresh_epoch_id")
         ),
         "source_data_revision": payload.get("source_data_revision") or provenance.get("source_data_revision"),
+        "source_revision": payload.get("source_revision") or provenance.get("source_revision"),
+        "deployed_revision": payload.get("deployed_revision") or provenance.get("deployed_revision"),
+        "dataset_epoch": payload.get("dataset_epoch") or provenance.get("dataset_epoch"),
+        "config_signature": payload.get("config_signature") or provenance.get("config_signature"),
     }
     for field, expected in context.items():
         found = observed.get(field)
@@ -446,13 +456,21 @@ def _stamp_current_iteration_auxiliary_report(path, context):
     provenance = payload.get("analysis_provenance")
     provenance = provenance if isinstance(provenance, dict) else {}
     payload["generation_revision"] = context["generation_revision"]
+    payload["analyzer_revision"] = context["analyzer_revision"]
     payload["session_scope"] = context["session_scope"]
     payload["source_data_revision"] = context["source_data_revision"]
+    for field in ("source_revision", "deployed_revision", "dataset_epoch", "config_signature"):
+        payload[field] = context[field]
     provenance.update({
         "generation_revision": context["generation_revision"],
+        "analyzer_revision": context["analyzer_revision"],
         "session_scope": context["session_scope"],
         "fresh_epoch_id": context["fresh_epoch_id"],
         "source_data_revision": context["source_data_revision"],
+        "source_revision": context["source_revision"],
+        "deployed_revision": context["deployed_revision"],
+        "dataset_epoch": context["dataset_epoch"],
+        "config_signature": context["config_signature"],
     })
     payload["analysis_provenance"] = provenance
     temporary = f"{target}.generation.tmp"
@@ -19120,8 +19138,30 @@ def _report_source_evidence_provenance():
         evidence[name].get("sha256", "MISSING")
         for name in ("relay_lifecycle_evidence_v1.json", "counterfactual.jsonl")
     )
+    canonical_identity = {
+        "source_revision": "UNKNOWN",
+        "deployed_revision": "UNKNOWN",
+        "dataset_epoch": "UNKNOWN",
+        "config_signature": "UNKNOWN",
+    }
+    try:
+        manifest = json.loads(
+            (Path(data_root) / "canonical_dataset_current.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+        if isinstance(manifest, dict):
+            for field in canonical_identity:
+                value = manifest.get(
+                    "tile_config_signature" if field == "config_signature" else field
+                )
+                if value is not None and str(value).strip():
+                    canonical_identity[field] = str(value).strip()
+    except (OSError, ValueError, TypeError):
+        pass
     return {
         "data_root_kind": "CANONICAL_LOCAL_FLY_MIRROR",
+        **canonical_identity,
         "source_data_revision": hashlib.sha256(revision_material.encode("utf-8")).hexdigest(),
         "evidence_inputs": evidence,
         "policy_comparability_key": next(iter(policy_keys)) if len(policy_keys) == 1 else None,
@@ -19182,6 +19222,11 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
     report["analysis_provenance"] = analysis_provenance
     report["cohort_schema"] = analysis_provenance["cohort_schema"]
     report["generation_revision"] = analysis_provenance["generation_revision"]
+    report["analyzer_revision"] = analysis_provenance["analyzer_revision"]
+    report["source_revision"] = analysis_provenance["source_revision"]
+    report["deployed_revision"] = analysis_provenance["deployed_revision"]
+    report["dataset_epoch"] = analysis_provenance["dataset_epoch"]
+    report["config_signature"] = analysis_provenance["config_signature"]
     report["source_data_revision"] = analysis_provenance["source_data_revision"]
     if analysis_provenance.get("fresh_epoch_id"):
         report["epoch_id"] = analysis_provenance["fresh_epoch_id"]
@@ -19804,6 +19849,7 @@ def write_report_manifest(payload=None):
     analysis_provenance = {
         "cohort_schema": "analysis_cohorts_v1",
         "generation_revision": generation_revision,
+        "analyzer_revision": generation_revision,
         "cohorts": cohort_summary,
         **source_provenance,
         **epoch_provenance,
@@ -19966,6 +20012,11 @@ def write_report_manifest(payload=None):
         "analysis_provenance": analysis_provenance,
         "cohort_schema": analysis_provenance["cohort_schema"],
         "generation_revision": analysis_provenance["generation_revision"],
+        "analyzer_revision": analysis_provenance["analyzer_revision"],
+        "source_revision": analysis_provenance["source_revision"],
+        "deployed_revision": analysis_provenance["deployed_revision"],
+        "dataset_epoch": analysis_provenance["dataset_epoch"],
+        "config_signature": analysis_provenance["config_signature"],
         "source_data_revision": analysis_provenance["source_data_revision"],
         "policy_comparability_key": analysis_provenance["policy_comparability_key"],
         "policy_comparability_status": analysis_provenance["policy_comparability_status"],
@@ -20044,7 +20095,11 @@ def write_report_manifest(payload=None):
             {
                 "generated_at": manifest["generated_at"],
                 "revision": manifest["generation_revision"],
-                "epoch": manifest["fresh_epoch"].get("epoch_id"),
+                "source_revision": manifest["source_revision"],
+                "deployed_revision": manifest["deployed_revision"],
+                "dataset_epoch": manifest["dataset_epoch"],
+                "config_signature": manifest["config_signature"],
+                "fresh_epoch": manifest["fresh_epoch"].get("epoch_id"),
             },
             sort_keys=True,
         ).encode("utf-8")

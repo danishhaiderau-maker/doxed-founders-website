@@ -11,7 +11,7 @@ from research.policy_evidence_library import (
 from research.policy_evidence_schema import generation_identity
 
 
-MANIFEST = {"entry_hash":"manifest", "dataset_epoch":"epoch", "source_revision":"source", "tile_config_signature":"tiles"}
+MANIFEST = {"entry_hash":"manifest", "dataset_epoch":"epoch", "source_revision":"source", "deployed_revision":"deployed", "tile_config_signature":"tiles"}
 
 
 def row(episode, classification, *, cohort="same", world="CONSERVATIVE_BBO_DEPTH_TAPE", offset=0.10, **extra):
@@ -34,7 +34,7 @@ class PolicyEvidenceLibraryTests(unittest.TestCase):
         root = Path(tmp) / "canonical-research-data"
         root.mkdir()
         append_manifest(root, {
-            "dataset_epoch":"epoch", "source_revision":revision,
+            "dataset_epoch":"epoch", "source_revision":revision, "deployed_revision":revision,
             "tile_config_signature":"tiles", "collection_started_at":"start",
             "collection_observed_at":"observed", "row_count":0, "opportunity_count":0,
             "dataset_checksum":"checksum", "analyzer_status":"PENDING",

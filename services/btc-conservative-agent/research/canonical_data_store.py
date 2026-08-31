@@ -124,6 +124,7 @@ def append_manifest(root: str | os.PathLike[str], fields: Mapping[str, Any]) -> 
     required = (
         "dataset_epoch",
         "source_revision",
+        "deployed_revision",
         "tile_config_signature",
         "collection_started_at",
         "collection_observed_at",
@@ -180,6 +181,10 @@ def record_analyzer_completion(
         for key, value in current.items()
         if key not in {"schema", "recorded_at", "previous_entry_hash", "entry_hash"}
     }
+    # A historical manifest may predate the independent deployed-revision
+    # field.  Completion may preserve that generation, but it must never infer
+    # deployment identity from source_revision.
+    fields.setdefault("deployed_revision", "UNKNOWN")
     fields.update(
         {
             "analyzer_status": "COMPLETE",
@@ -225,6 +230,7 @@ def parity_status(
     keys = {
         "dataset_epoch": "dataset_epoch",
         "source_revision": "source_revision",
+        "deployed_revision": "deployed_revision",
         "tile_config_signature": "tile_config_signature",
     }
     mismatches = {

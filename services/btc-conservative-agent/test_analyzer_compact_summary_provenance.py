@@ -22,9 +22,14 @@ def _load_analyzer():
 def _identity(**overrides):
     row = {
         "generation_revision": "rev-current",
+        "analyzer_revision": "rev-current",
         "session_scope": "FRESH-COLLECTION",
         "fresh_epoch_id": "epoch-current",
         "source_data_revision": "snapshot-current",
+        "source_revision": "source-current",
+        "deployed_revision": "deployed-current",
+        "dataset_epoch": "dataset-current",
+        "config_signature": "config-current",
     }
     row.update(overrides)
     return row
@@ -34,10 +39,15 @@ def _report(identity=None, **values):
     identity = identity or _identity()
     return {
         "generation_revision": identity["generation_revision"],
+        "analyzer_revision": identity["analyzer_revision"],
         "session_scope": identity["session_scope"],
         "analysis_provenance": {
             "fresh_epoch_id": identity["fresh_epoch_id"],
             "source_data_revision": identity["source_data_revision"],
+            "source_revision": identity["source_revision"],
+            "deployed_revision": identity["deployed_revision"],
+            "dataset_epoch": identity["dataset_epoch"],
+            "config_signature": identity["config_signature"],
         },
         **values,
     }

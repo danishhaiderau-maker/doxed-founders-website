@@ -25,6 +25,7 @@ def _fields(**updates):
     base = {
         "dataset_epoch": "epoch-1",
         "source_revision": "a" * 40,
+        "deployed_revision": "d" * 40,
         "tile_config_signature": "b" * 64,
         "collection_started_at": "2026-08-29T00:00:00Z",
         "collection_observed_at": "2026-08-29T00:03:00Z",
@@ -115,7 +116,7 @@ def test_parity_and_analyzer_selection_require_all_causal_identity(tmp_path):
     project.mkdir()
     root = initialize_store(default_store_root(project), project)
     current = append_manifest(root, _fields())
-    expected = {key: current[key] for key in ("dataset_epoch", "source_revision", "tile_config_signature")}
+    expected = {key: current[key] for key in ("dataset_epoch", "source_revision", "deployed_revision", "tile_config_signature")}
     assert parity_status(current, expected)["status"] == "MATCH"
     assert require_analyzer_dataset(root, expected)["entry_hash"] == current["entry_hash"]
     expected["source_revision"] = "d" * 40
@@ -128,7 +129,7 @@ def test_parity_status_is_atomic_and_bound_to_current_manifest(tmp_path):
     project.mkdir()
     root = initialize_store(default_store_root(project), project)
     current = append_manifest(root, _fields())
-    expected = {key: current[key] for key in ("dataset_epoch", "source_revision", "tile_config_signature")}
+    expected = {key: current[key] for key in ("dataset_epoch", "source_revision", "deployed_revision", "tile_config_signature")}
     status = publish_parity_status(root, expected)
     assert status["status"] == "MATCH"
     assert status["manifest_entry_hash"] == current["entry_hash"]
@@ -166,6 +167,7 @@ def test_record_existing_store_is_deterministic_and_preserves_evidence(tmp_path)
                 "inProgress": False,
                 "revisionParity": "MATCH",
                 "sourceRevision": "a" * 40,
+                "deployedRevision": "d" * 40,
                 "mirroredSourceRevision": "a" * 40,
                 "tileRegistrySignature": "b" * 64,
                 "syncedAt": "2026-08-29T00:03:00Z",

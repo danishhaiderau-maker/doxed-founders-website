@@ -64,10 +64,22 @@ def _validated_heartbeat(path: Path) -> tuple[dict, str]:
     return heartbeat, revision
 
 
+def _deployed_revision(heartbeat: dict) -> str:
+    """Return only explicitly observed deployment identity.
+
+    Older heartbeat receipts did not carry this field.  They remain usable for
+    historical indexing, but UNKNOWN is retained rather than copying the
+    source revision and manufacturing deployment provenance.
+    """
+    revision = str(heartbeat.get("deployedRevision") or "").strip().lower()
+    return revision or "UNKNOWN"
+
+
 def record_existing_store(destination: Path, heartbeat_path: Path) -> dict:
     """Append the identity of one already-synchronized canonical generation."""
     destination = initialize_store(destination, REPO_ROOT)
     heartbeat, revision = _validated_heartbeat(heartbeat_path)
+    deployed_revision = _deployed_revision(heartbeat)
     state_path = destination / ".fly-sync-state.json"
     state = _json(state_path)
     normalized_state: dict[str, dict] = {}
@@ -115,6 +127,7 @@ def record_existing_store(destination: Path, heartbeat_path: Path) -> dict:
         {
             "dataset_epoch": epoch,
             "source_revision": revision,
+            "deployed_revision": deployed_revision,
             "tile_config_signature": str(heartbeat.get("tileRegistrySignature") or ""),
             "collection_started_at": session.get("fresh_collection_started_at")
             or session.get("started_at")
@@ -137,6 +150,7 @@ def record_existing_store(destination: Path, heartbeat_path: Path) -> dict:
         {
             "dataset_epoch": epoch,
             "source_revision": revision,
+            "deployed_revision": deployed_revision,
             "tile_config_signature": str(heartbeat.get("tileRegistrySignature") or ""),
         },
     )
@@ -157,6 +171,7 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path) -> dict:
     source = source.resolve()
     destination = initialize_store(destination, REPO_ROOT)
     heartbeat, revision = _validated_heartbeat(heartbeat_path)
+    deployed_revision = _deployed_revision(heartbeat)
 
     state_path = source / ".fly-sync-state.json"
     state = _json(state_path)
@@ -238,6 +253,7 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path) -> dict:
         {
             "dataset_epoch": epoch,
             "source_revision": revision,
+            "deployed_revision": deployed_revision,
             "tile_config_signature": str(heartbeat.get("tileRegistrySignature") or ""),
             "collection_started_at": started,
             "collection_observed_at": heartbeat.get("syncedAt"),
@@ -257,6 +273,7 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path) -> dict:
         {
             "dataset_epoch": epoch,
             "source_revision": revision,
+            "deployed_revision": deployed_revision,
             "tile_config_signature": str(heartbeat.get("tileRegistrySignature") or ""),
         },
     )

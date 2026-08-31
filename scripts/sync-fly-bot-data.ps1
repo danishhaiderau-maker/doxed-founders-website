@@ -228,6 +228,10 @@ function Write-SyncProgressHeartbeat {
     source = $SourceUrl
     sourceRevision = $(if ($MirroredSourceRevision) { $MirroredSourceRevision } else { $null })
     observedSourceRevision = $(if ($observedRevision) { $observedRevision } else { $null })
+    # Independent prospective provenance. The authenticated Fly manifest
+    # describes the code actually deployed with the authoritative collector.
+    # Older receipts intentionally have no such field and remain UNKNOWN.
+    deployedRevision = $(if ($observedRevision) { $observedRevision } else { $null })
     mirroredSourceRevision = $(if ($MirroredSourceRevision) { $MirroredSourceRevision } else { $null })
     revisionParity = $(
       if (-not $MirroredSourceRevision -or -not $manifest -or -not $manifest.source_git_rev) { "UNKNOWN" }
