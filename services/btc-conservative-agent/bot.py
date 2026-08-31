@@ -6058,8 +6058,13 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
 
 def resolve_sim_fill_price(order: dict) -> float:
     """Sim fill: depth-aware taker VWAP when crossing spread; else maker at limit."""
+    # Evidence-only: freeze the requested ticket size before a partial paper
+    # fill narrows ``qty`` to the actually opened position.
+    order.setdefault("requested_qty", order.get("qty"))
     result = resolve_sim_fill_with_depth(order)
     order["fill_sim"] = {k: v for k, v in result.items() if k not in ("fill_price", "filled_qty")}
+    order["filled_qty"] = result.get("filled_qty")
+    order["remaining_qty"] = result.get("unfilled_qty")
     if result.get("partial_fill"):
         order["partial_fill"] = True
         order["qty"] = result["filled_qty"]

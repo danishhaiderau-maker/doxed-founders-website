@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 
 SCHEMA = "research_chase_schedule_v1"
+QUANTITY_SCHEMA = "research_order_quantity_evidence_v1"
 
 
 def _positive(value: Any) -> float | None:
@@ -25,6 +26,48 @@ def _offset_pct(reference_price: float, limit_price: float) -> float | None:
     if not reference_price:
         return None
     return round(abs(limit_price - reference_price) / reference_price * 100.0, 8)
+
+
+def _quantity_state(order: Mapping[str, Any], *, event: str, now: float) -> dict:
+    """Snapshot quantity evidence without deriving or changing an order size."""
+    requested = _positive(order.get("requested_qty")) or _positive(order.get("qty"))
+    filled = _positive(order.get("filled_qty"))
+    fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
+    filled = filled or _positive(fill_sim.get("filled_qty"))
+    if filled is None and str(order.get("status") or "").upper() == "FILLED" and not order.get("partial_fill"):
+        filled = requested
+    remaining = max(0.0, requested - filled) if requested is not None and filled is not None else None
+    constraints = order.get("signed_quantity_constraints")
+    constraints = copy.deepcopy(dict(constraints)) if isinstance(constraints, Mapping) else None
+    gate = order.get("venue_fill_gate")
+    gate = gate if isinstance(gate, Mapping) else {}
+    return {
+        "schema": QUANTITY_SCHEMA, "event": str(event), "observed_ts": float(now),
+        "requested_qty": requested,
+        "requested_qty_provenance": "SOURCE_TICKET_QTY" if requested is not None else "MISSING",
+        "raw_partial_qty": filled if order.get("partial_fill") else None,
+        "rounded_executable_qty": filled, "accumulated_filled_qty": filled or 0.0,
+        "remaining_qty": remaining, "partial_fill": bool(order.get("partial_fill")),
+        "available_quantity": _positive(gate.get("visible_executable_qty")),
+        "queue_adjusted_available_quantity": _positive(gate.get("queue_adjusted_available_qty")),
+        "quantity_step": constraints.get("quantity_step") if constraints else None,
+        "minimum_lot": constraints.get("min_lot") if constraints else None,
+        "minimum_notional": constraints.get("min_notional") if constraints else None,
+        "minimum_lot_decision": "UNKNOWN_REQUIRES_CONSERVATIVE_EVALUATOR",
+        "minimum_notional_decision": "UNKNOWN_REQUIRES_CONSERVATIVE_EVALUATOR",
+        "signed_quantity_constraints": constraints,
+        "quantity_constraints_status": copy.deepcopy(order.get("quantity_constraints_status")),
+    }
+
+
+def _append_quantity_event(schedule: dict, order: Mapping[str, Any], *, event: str, now: float) -> None:
+    state = _quantity_state(order, event=event, now=now)
+    events = schedule.setdefault("quantity_events", [])
+    identity = (state["event"], state["observed_ts"])
+    if not any((row.get("event"), row.get("observed_ts")) == identity for row in events if isinstance(row, Mapping)):
+        events.append(state)
+    schedule["requested_qty"] = state["requested_qty"] or schedule.get("requested_qty")
+    schedule["requested_qty_provenance"] = "SOURCE_TICKET_QTY" if schedule.get("requested_qty") else "MISSING"
 
 
 def _attach(schedule: dict, order: dict, signal: dict | None) -> dict:
@@ -55,6 +98,7 @@ def initialize_order_schedule(
         return None
     existing = order.get("research_chase_schedule")
     if isinstance(existing, dict) and existing.get("authoritative") is True:
+        order.setdefault("requested_qty", existing.get("requested_qty") or order.get("qty"))
         return _attach(existing, order, signal)
     prior = (signal or {}).get("research_chase_schedule") if isinstance(signal, dict) else None
     if isinstance(prior, dict) and prior.get("authoritative") is True:
@@ -81,7 +125,9 @@ def initialize_order_schedule(
         prior["terminal_reason"] = None
         prior["terminal_ts"] = None
         prior["terminal_ts_exact"] = None
-        prior["requested_qty"] = _positive(order.get("qty")) or prior.get("requested_qty")
+        prior["requested_qty"] = prior.get("requested_qty") or _positive(order.get("qty"))
+        order.setdefault("requested_qty", prior.get("requested_qty"))
+        _append_quantity_event(prior, order, event=reason, now=now)
         return _attach(prior, order, signal)
     limit_price = _positive(order.get("limit_price"))
     if limit_price is None:
@@ -100,6 +146,7 @@ def initialize_order_schedule(
         "trade_id": order.get("trade_id"),
         "direction": order.get("signal_dir") or order.get("dir") or (signal or {}).get("final_direction"),
         "requested_qty": _positive(order.get("qty")),
+        "requested_qty_provenance": "SOURCE_TICKET_QTY" if _positive(order.get("qty")) else "MISSING",
         "intervals": [{
             "bucket_id": f"{trade_id}:chase:{step}:0",
             "start_ts": int(float(now)),
@@ -115,6 +162,8 @@ def initialize_order_schedule(
         "terminal_reason": None,
         "terminal_ts": None,
     }
+    order.setdefault("requested_qty", schedule.get("requested_qty"))
+    _append_quantity_event(schedule, order, event=reason, now=now)
     return _attach(schedule, order, signal)
 
 
@@ -155,6 +204,7 @@ def append_reprice_interval(
         "offset_pct": _offset_pct(reference, limit),
         "reason": str(reason or "LIMIT_REPRICE"),
     })
+    _append_quantity_event(schedule, order, event=str(reason or "LIMIT_REPRICE"), now=now)
     return _attach(schedule, order, signal)
 
 
@@ -175,6 +225,8 @@ def close_order_schedule(
     schedule["terminal_ts"] = int(float(now))
     schedule["terminal_ts_exact"] = float(now)
     schedule["terminal_reason"] = str(reason)
+    _append_quantity_event(schedule, order, event=f"TERMINAL_{reason}", now=now)
+    schedule["final_quantity_state"] = copy.deepcopy(schedule["quantity_events"][-1])
     return _attach(schedule, order, signal)
 
 

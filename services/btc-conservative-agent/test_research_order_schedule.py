@@ -128,3 +128,48 @@ def test_bot_wires_only_post_registration_and_real_lifecycle_boundaries():
     assert "def _commit_relay_limit_chase" in source
     assert "append_research_reprice_interval" in source[source.index("def _commit_relay_limit_chase"):source.index("def _apply_limit_chase")]
     assert "close_research_order_schedule" in source[source.index("def _cancel_pending_order_confirmed"):source.index("def _log_shadow_vs_live_entry")]
+
+
+def test_partial_fill_keeps_original_request_and_terminal_quantity_ledger():
+    signal = {}
+    order = {
+        "trade_id": "partial-1", "status": "PENDING", "qty": 1.25,
+        "limit_price": 100, "signal_price": 101,
+        "signed_quantity_constraints": {"min_lot": "0.01", "min_notional": "5"},
+    }
+    schedule = initialize_order_schedule(order, signal, now=10, registered=True)
+    assert order["requested_qty"] == 1.25
+    order.update({"status": "FILLED", "qty": 0.4, "filled_qty": 0.4,
+                  "remaining_qty": 0.85, "partial_fill": True})
+    close_order_schedule(order, signal, now=20, reason="PARTIAL_FILL")
+
+    final = schedule["final_quantity_state"]
+    assert schedule["requested_qty"] == 1.25
+    assert final["requested_qty"] == 1.25
+    assert final["raw_partial_qty"] == 0.4
+    assert final["rounded_executable_qty"] == 0.4
+    assert final["accumulated_filled_qty"] == 0.4
+    assert final["remaining_qty"] == 0.85
+    assert final["signed_quantity_constraints"] == {
+        "min_lot": "0.01", "min_notional": "5",
+    }
+    assert final["minimum_lot"] == "0.01"
+    assert final["minimum_notional"] == "5"
+    assert final["minimum_lot_decision"] == "UNKNOWN_REQUIRES_CONSERVATIVE_EVALUATOR"
+
+
+def test_resume_schedule_preserves_original_request_across_smaller_runtime_qty():
+    signal = {}
+    first = {
+        "trade_id": "resume-qty", "status": "PENDING", "qty": 2,
+        "limit_price": 99, "signal_price": 100,
+    }
+    schedule = initialize_order_schedule(first, signal, now=1, registered=True)
+    close_order_schedule(first, signal, now=2, reason="VIRTUAL_CHASE_HIDE")
+    resumed = {
+        "trade_id": "resume-qty", "status": "PENDING", "qty": 0.75,
+        "limit_price": 99.5, "signal_price": 100, "limit_chase_count": 3,
+    }
+    initialize_order_schedule(resumed, signal, now=4, registered=True)
+    assert resumed["requested_qty"] == 2
+    assert schedule["requested_qty"] == 2

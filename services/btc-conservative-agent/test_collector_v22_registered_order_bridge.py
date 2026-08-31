@@ -326,3 +326,14 @@ def test_runtime_registration_captures_constraints_before_evidence_enqueue():
     assert 'capture_helper = globals().get("_capture_runtime_quantity_constraints")' in body
     assert body.index("capture_helper =") < body.index(".submit(")
     assert 'order["market_microstructure_symbol"]' in body
+
+
+def test_partial_fill_freezes_requested_quantity_before_runtime_qty_is_narrowed():
+    start = BOT_SOURCE.index("def resolve_sim_fill_price(order: dict) -> float:")
+    end = BOT_SOURCE.index("\n\n_TRIGGER_CONSISTENT_EXIT_REASONS", start)
+    body = BOT_SOURCE[start:end]
+    freeze = body.index('order.setdefault("requested_qty", order.get("qty"))')
+    mutation = body.index('order["qty"] = result["filled_qty"]')
+    assert freeze < mutation
+    assert 'order["filled_qty"] = result.get("filled_qty")' in body
+    assert 'order["remaining_qty"] = result.get("unfilled_qty")' in body
