@@ -18,6 +18,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-canonical-lock.ps1")
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-atomic.ps1")
+. (Join-Path $scriptDir "fly-sync-backoff.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
@@ -39,6 +40,8 @@ $statePath = Join-Path $targetRoot ".fly-sync-state.json"
 $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
 Add-Type -AssemblyName System.Net.Http
 $transportAttempts = 5
+$resourcePressureCircuitThreshold = 2
+$consecutiveChunkPressureFailures = 0
 $manifestTimeoutSec = 90
 # A busy paper-runtime can take a little over two minutes to begin streaming a
 # checksum-fenced 4 MiB chunk.  The prior 120-second client deadline discarded
@@ -53,7 +56,7 @@ $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
 
 function Test-DataSyncResourcePressureError {
   param([string]$Message = "")
-  return [bool]($Message -match '(?i)(?:HTTP\s+|\()(?:502|503)\)?|boot(?:ing)?|starting|restoring|server unavailable|bad gateway')
+  return Test-FlySyncResourcePressureMessage -Message $Message
 }
 
 function Get-DataSyncRetryDelaySec {
@@ -677,6 +680,9 @@ foreach ($row in $selectedFiles) {
           } finally { $input.Dispose() }
           $offset = [int64](Get-Item -LiteralPath $candidate).Length
           $chunkComplete = $true
+          # Any successfully checksum-verified chunk proves the pressure
+          # sequence has ended.
+          $consecutiveChunkPressureFailures = 0
           Write-SyncProgressHeartbeat `
             -Phase "chunk_complete" `
             -RelativePath $rel `
@@ -708,10 +714,21 @@ foreach ($row in $selectedFiles) {
             break
           }
           $resourcePressure = Test-DataSyncResourcePressureError -Message $_.Exception.Message
+          $consecutiveChunkPressureFailures = Get-FlySyncNextPressureFailureCount `
+            -CurrentCount $consecutiveChunkPressureFailures `
+            -IsResourcePressure $resourcePressure
           if ($resourcePressure) {
             $adaptiveThrottleMs = [Math]::Min(
               $maxAdaptiveThrottleMs,
               [Math]::Max(2000, $adaptiveThrottleMs * 2)
+            )
+          }
+          if ($consecutiveChunkPressureFailures -ge $resourcePressureCircuitThreshold) {
+            throw (
+              "Fly data-sync stage=file_chunk_resource_pressure_circuit_open " +
+              "path=$rel offset=$offset consecutive_pressure_failures=" +
+              "$consecutiveChunkPressureFailures threshold=" +
+              "${resourcePressureCircuitThreshold}: $($_.Exception.Message)"
             )
           }
           if ($attempt -ge $transportAttempts) {

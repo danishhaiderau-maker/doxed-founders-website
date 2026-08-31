@@ -241,6 +241,34 @@ def test_sync_outage_backoff_is_deterministic_bounded_and_reset_on_success():
     assert 'Start-Sleep -Seconds $sleepSec' in SYNC_LOOP
 
 
+def test_chunk_pressure_circuit_breaker_aborts_early_and_resets_deterministically():
+    command = (
+        f". '{SYNC_BACKOFF}'; $c=0; $out=@(); "
+        "$c=Get-FlySyncNextPressureFailureCount -CurrentCount $c -IsResourcePressure $true; $out+=$c; "
+        "$c=Get-FlySyncNextPressureFailureCount -CurrentCount $c -IsResourcePressure $true; $out+=$c; "
+        "$c=Get-FlySyncNextPressureFailureCount -CurrentCount $c -IsResourcePressure $false; $out+=$c; "
+        "$out += [int](Test-FlySyncResourcePressureMessage 'Fly sync HTTP 503'); "
+        "$out += [int](Test-FlySyncResourcePressureMessage 'The operation timed out'); "
+        "$out += [int](Test-FlySyncResourcePressureMessage 'checksum mismatch'); "
+        "$out | ConvertTo-Json -Compress"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert json.loads(completed.stdout) == [1, 2, 0, 1, 1, 0]
+    assert '$resourcePressureCircuitThreshold = 2' in SYNC_SCRIPT
+    assert '$consecutiveChunkPressureFailures = 0' in SYNC_SCRIPT
+    assert 'stage=file_chunk_resource_pressure_circuit_open' in SYNC_SCRIPT
+    circuit = SYNC_SCRIPT.index('stage=file_chunk_resource_pressure_circuit_open')
+    final_ack = SYNC_SCRIPT.index('$ackBody = [ordered]@{')
+    assert circuit < final_ack
+    assert 'Get-FlySyncNextPressureFailureCount `' in SYNC_SCRIPT
+
+
 def test_identity_poll_uses_o1_volume_growth_to_trigger_full_inventory():
     assert '$lastSyncedVolumeUsedBytes = [int64]0' in SYNC_LOOP
     assert 'lastSyncedVolumeUsedBytes = $lastSyncedVolumeUsedBytes' in SYNC_LOOP
@@ -1005,10 +1033,11 @@ def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
 
 
 def test_sync_resource_pressure_uses_adaptive_pacing_and_fail_closed_backoff():
+    helper = SYNC_BACKOFF.read_text(encoding="utf-8")
     assert "function Test-DataSyncResourcePressureError" in SYNC_SCRIPT
     assert "function Get-DataSyncRetryDelaySec" in SYNC_SCRIPT
-    assert "(?:502|503)" in SYNC_SCRIPT
-    assert "boot(?:ing)?" in SYNC_SCRIPT
+    assert "(?:502|503)" in helper
+    assert "boot(?:ing)?" in helper
     assert "15 * [Math]::Max(1, $Attempt)" in SYNC_SCRIPT
     assert "$adaptiveThrottleMs * 2" in SYNC_SCRIPT
     assert "$adaptiveThrottleMs - 100" in SYNC_SCRIPT

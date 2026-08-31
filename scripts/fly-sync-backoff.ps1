@@ -14,3 +14,17 @@ function Get-FlySyncFailureBackoffSeconds {
   $candidate = [int64]$normal * ([int64]1 -shl $exponent)
   return [int][Math]::Min([int64]$cap, $candidate)
 }
+
+function Test-FlySyncResourcePressureMessage {
+  param([string]$Message = "")
+  return [bool]($Message -match '(?i)(?:HTTP\s+|\()(?:502|503)\)?|boot(?:ing)?|starting|restoring|server unavailable|bad gateway|timed?\s*out|timeout|task was canceled|operation was canceled')
+}
+
+function Get-FlySyncNextPressureFailureCount {
+  param(
+    [int]$CurrentCount,
+    [bool]$IsResourcePressure
+  )
+  if (-not $IsResourcePressure) { return 0 }
+  return [Math]::Max(0, $CurrentCount) + 1
+}
