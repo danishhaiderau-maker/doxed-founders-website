@@ -29,6 +29,28 @@ from research.policy_evidence_schema import canonical_json, generation_identity,
 SCHEMA = "v3_conservative_policy_evidence_v1"
 EVIDENCE_WORLD = "CONSERVATIVE_BBO_DEPTH_TAPE"
 
+# This is an explicit research-support floor, not a profitability threshold.
+# It prevents a Phase-7 segmented result from being described as supported from
+# a handful of repeated policy rows that all belong to the same opportunity.
+PHASE7_SUPPORT_GATE_V1 = {
+    "schema": "phase7_regime_support_gate_config_v1",
+    "minimum_independent_cohorts": 30,
+    "minimum_cohorts_per_regime_direction": 3,
+    "required_regimes": ["BEAR", "BULL", "RANGE"],
+    "required_directions": ["LONG", "SHORT"],
+    "required_dimensions": [
+        "realized_volatility", "volatility_of_volatility", "market_spread_bps",
+        "bid_depth_qty", "ask_depth_qty", "liquidity", "regime", "adx",
+        "trend_strength", "market_structure", "session", "signal_timestamp",
+    ],
+    "purpose": "RESEARCH_FEATURE_SUPPORT_ONLY",
+    "threshold_basis": (
+        "Conservative eligibility floor: 30 independent opportunities overall and "
+        "at least 3 in every BEAR/BULL/RANGE x LONG/SHORT cell. This does not prove "
+        "profitability, statistical power, execution quality, or live readiness."
+    ),
+}
+
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
@@ -175,6 +197,128 @@ def _regime_features_at_signal(
             (opportunity.get("shared_ai_call_ts_epoch"), "opportunity.shared_ai_call_ts_epoch"),
             (opportunity.get("timestamp"), "opportunity.timestamp"),
         ),
+    }
+
+
+def build_phase7_support_qualification(
+    results: list[dict[str, Any]], config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fail-closed support receipt for Phase-7 regime segmentation.
+
+    Policy rows are first collapsed to their immutable comparison cohort, so a
+    large policy grid cannot manufacture sample size. Every required feature
+    must be observed, source-attributed, and consistent within a cohort.
+    """
+    gate = dict(PHASE7_SUPPORT_GATE_V1)
+    if config is not None:
+        gate.update(dict(config))
+    minimum = int(gate["minimum_independent_cohorts"])
+    minimum_cell = int(gate["minimum_cohorts_per_regime_direction"])
+    if minimum < 1 or minimum_cell < 1:
+        raise ValueError("PHASE7_SUPPORT_THRESHOLDS_MUST_BE_POSITIVE")
+    required_dimensions = tuple(str(v) for v in gate["required_dimensions"])
+    required_regimes = tuple(str(v).upper() for v in gate["required_regimes"])
+    required_directions = tuple(str(v).upper() for v in gate["required_directions"])
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    missing_identity_rows = 0
+    for row in results:
+        cohort = str(row.get("comparison_cohort_key") or "")
+        if not cohort:
+            missing_identity_rows += 1
+            continue
+        grouped.setdefault(cohort, []).append(row)
+
+    observed_counts = {name: 0 for name in required_dimensions}
+    unknown_counts = {name: 0 for name in required_dimensions}
+    inconsistent_counts = {name: 0 for name in required_dimensions}
+    cell_counts = {
+        f"{regime}|{direction}": 0
+        for regime in required_regimes for direction in required_directions
+    }
+    fully_observed_cohorts = 0
+    for rows in grouped.values():
+        cohort_complete = True
+        for name in required_dimensions:
+            observations = []
+            for row in rows:
+                item = ((row.get("regime_features_at_signal") or {}).get(name) or {})
+                if item.get("status") == "OBSERVED" and item.get("source"):
+                    observations.append((canonical_json(item.get("value")), str(item["source"])))
+            distinct = set(observations)
+            if len(observations) != len(rows):
+                unknown_counts[name] += 1
+                cohort_complete = False
+            elif len(distinct) != 1:
+                inconsistent_counts[name] += 1
+                cohort_complete = False
+            else:
+                observed_counts[name] += 1
+        directions = {str(row.get("side") or "").upper() for row in rows}
+        regimes = {
+            str((((row.get("regime_features_at_signal") or {}).get("regime") or {}).get("value")) or "").upper()
+            for row in rows
+        }
+        valid_directions = directions.intersection(required_directions)
+        valid_regimes = regimes.intersection(required_regimes)
+        if (
+            len(valid_directions) != 1 or len(valid_regimes) != 1
+            or directions != valid_directions or regimes != valid_regimes
+        ):
+            cohort_complete = False
+        if cohort_complete:
+            fully_observed_cohorts += 1
+            cell_counts[f"{next(iter(valid_regimes))}|{next(iter(valid_directions))}"] += 1
+
+    dimension_gates = {
+        name: (
+            observed_counts[name] == len(grouped)
+            and unknown_counts[name] == 0
+            and inconsistent_counts[name] == 0
+            and len(grouped) > 0
+        )
+        for name in required_dimensions
+    }
+    cell_gates = {name: count >= minimum_cell for name, count in cell_counts.items()}
+    gates = {
+        "all_rows_have_causal_cohort_identity": missing_identity_rows == 0,
+        "minimum_independent_cohorts": fully_observed_cohorts >= minimum,
+        "all_required_dimensions_observed_and_consistent": all(dimension_gates.values()),
+        "required_regime_direction_cells_supported": all(cell_gates.values()),
+    }
+    reasons = []
+    if missing_identity_rows:
+        reasons.append("MISSING_COMPARISON_COHORT_IDENTITY")
+    if fully_observed_cohorts < minimum:
+        reasons.append("INSUFFICIENT_INDEPENDENT_COHORTS")
+    if not all(dimension_gates.values()):
+        reasons.append("REQUIRED_PHASE7_FEATURES_UNKNOWN_OR_INCONSISTENT")
+    if not all(cell_gates.values()):
+        reasons.append("INSUFFICIENT_REGIME_DIRECTION_COHORT_SUPPORT")
+    eligible = all(gates.values())
+    return {
+        "schema": "phase7_regime_support_qualification_v1",
+        "status": "SUPPORTED_FOR_PHASE7_RESEARCH" if eligible else "NOT_SUPPORTED",
+        "qualification_allowed": eligible,
+        "scope": "PHASE7_RESEARCH_FEATURE_SUPPORT_ONLY",
+        "profitability_qualified": False,
+        "live_trading_authorized": False,
+        "config": gate,
+        "row_count": len(results),
+        "independent_cohort_count": len(grouped),
+        "fully_observed_independent_cohort_count": fully_observed_cohorts,
+        "missing_identity_rows": missing_identity_rows,
+        "dimension_evidence": {
+            name: {"observed_cohorts": observed_counts[name],
+                   "unknown_cohorts": unknown_counts[name],
+                   "inconsistent_cohorts": inconsistent_counts[name],
+                   "gate_passed": dimension_gates[name]}
+            for name in required_dimensions
+        },
+        "regime_direction_cohorts": cell_counts,
+        "regime_direction_gates": cell_gates,
+        "gates": gates,
+        "reason_codes": reasons,
     }
 
 
@@ -515,6 +659,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
     unknown_by_dimension = {
         name: len(results) - observed_by_dimension[name] for name in feature_names
     }
+    phase7_support = build_phase7_support_qualification(results)
     regime_feature_coverage = {
         "schema": "phase7_regime_feature_coverage_v1",
         "row_count": len(results),
@@ -531,12 +676,15 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             }
             for name in feature_names
         ],
-        "qualification_allowed": False,
+        # This flag is only permission to publish supported Phase-7 segmented
+        # research. It is not policy/profit/live qualification.
+        "qualification_allowed": phase7_support["qualification_allowed"],
         "profitability_calculated": False,
     }
     return {"schema": SCHEMA, "row_count": len(results), "classification_counts": counts,
             "results_sha256": hashlib.sha256(canonical_json(results).encode()).hexdigest(),
             "regime_feature_coverage": regime_feature_coverage,
+            "phase7_support_qualification": phase7_support,
             "results": results}
 
 

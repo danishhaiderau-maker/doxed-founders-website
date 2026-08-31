@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from research.policy_evidence_evaluator import (
-    build_v3_conservative_results, persist_v3_conservative_results,
+    build_phase7_support_qualification, build_v3_conservative_results,
+    persist_v3_conservative_results,
 )
 from research.policy_evidence_schema import canonical_json
 from research.quantity_execution import build_signed_quantity_constraints
@@ -189,6 +190,124 @@ def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_pa
         "name": "volatility_of_volatility", "observed_rows": 0,
         "unknown_rows": 1, "status": "UNKNOWN",
     }
+    support = report["phase7_support_qualification"]
+    assert support["status"] == "NOT_SUPPORTED"
+    assert support["qualification_allowed"] is False
+    assert "REQUIRED_PHASE7_FEATURES_UNKNOWN_OR_INCONSISTENT" in support["reason_codes"]
+    assert support["profitability_qualified"] is False
+    assert support["live_trading_authorized"] is False
+
+
+def _phase7_result(cohort, regime, direction, *, missing=None, source=True):
+    values = {
+        "realized_volatility": 0.004,
+        "volatility_of_volatility": 0.0002,
+        "market_spread_bps": 1.2,
+        "bid_depth_qty": 2.0,
+        "ask_depth_qty": 2.5,
+        "liquidity": "NORMAL",
+        "regime": regime,
+        "adx": 27.0,
+        "trend_strength": 0.6,
+        "market_structure": "LOWER_HIGH",
+        "session": "ASIA",
+        "signal_timestamp": 1767225600,
+    }
+    features = {
+        name: {
+            "status": "UNKNOWN" if name == missing else "OBSERVED",
+            "value": None if name == missing else value,
+            "source": None if name == missing or not source else f"fixture.{name}",
+        }
+        for name, value in values.items()
+    }
+    return {
+        "comparison_cohort_key": cohort,
+        "side": direction,
+        "regime_features_at_signal": features,
+    }
+
+
+def _small_phase7_config():
+    return {
+        "minimum_independent_cohorts": 6,
+        "minimum_cohorts_per_regime_direction": 1,
+    }
+
+
+def test_phase7_support_uses_independent_cohorts_not_policy_row_count():
+    repeated = [
+        _phase7_result("cohort-1", "BEAR", "LONG") for _ in range(100)
+    ]
+    receipt = build_phase7_support_qualification(repeated, _small_phase7_config())
+    assert receipt["row_count"] == 100
+    assert receipt["independent_cohort_count"] == 1
+    assert receipt["fully_observed_independent_cohort_count"] == 1
+    assert receipt["qualification_allowed"] is False
+    assert "INSUFFICIENT_INDEPENDENT_COHORTS" in receipt["reason_codes"]
+    assert "INSUFFICIENT_REGIME_DIRECTION_COHORT_SUPPORT" in receipt["reason_codes"]
+
+
+def test_phase7_support_requires_every_source_attributed_feature():
+    rows = [_phase7_result("cohort-1", "BEAR", "LONG", source=False)]
+    receipt = build_phase7_support_qualification(rows, {
+        "minimum_independent_cohorts": 1,
+        "minimum_cohorts_per_regime_direction": 1,
+        "required_regimes": ["BEAR"],
+        "required_directions": ["LONG"],
+    })
+    assert receipt["qualification_allowed"] is False
+    assert all(not item["gate_passed"] for item in receipt["dimension_evidence"].values())
+    assert "REQUIRED_PHASE7_FEATURES_UNKNOWN_OR_INCONSISTENT" in receipt["reason_codes"]
+
+
+def test_phase7_missing_feature_on_one_policy_row_blocks_shared_cohort():
+    rows = [
+        _phase7_result("cohort-1", "BEAR", "LONG"),
+        _phase7_result("cohort-1", "BEAR", "LONG", missing="liquidity"),
+    ]
+    receipt = build_phase7_support_qualification(rows, {
+        "minimum_independent_cohorts": 1,
+        "minimum_cohorts_per_regime_direction": 1,
+        "required_regimes": ["BEAR"],
+        "required_directions": ["LONG"],
+    })
+    assert receipt["qualification_allowed"] is False
+    assert receipt["dimension_evidence"]["liquidity"]["unknown_cohorts"] == 1
+    assert receipt["fully_observed_independent_cohort_count"] == 0
+
+
+def test_phase7_support_passes_only_complete_balanced_independent_cohorts():
+    rows = []
+    for regime in ("BEAR", "BULL", "RANGE"):
+        for direction in ("LONG", "SHORT"):
+            rows.append(_phase7_result(f"cohort-{regime}-{direction}", regime, direction))
+    receipt = build_phase7_support_qualification(rows, _small_phase7_config())
+    assert receipt["status"] == "SUPPORTED_FOR_PHASE7_RESEARCH"
+    assert receipt["qualification_allowed"] is True
+    assert receipt["reason_codes"] == []
+    assert all(receipt["gates"].values())
+    assert receipt["profitability_qualified"] is False
+    assert receipt["live_trading_authorized"] is False
+
+
+def test_phase7_missing_feature_is_unknown_and_blocks_entire_cohort():
+    rows = []
+    for regime in ("BEAR", "BULL", "RANGE"):
+        for direction in ("LONG", "SHORT"):
+            missing = "volatility_of_volatility" if regime == "RANGE" and direction == "SHORT" else None
+            rows.append(_phase7_result(
+                f"cohort-{regime}-{direction}", regime, direction, missing=missing,
+            ))
+    receipt = build_phase7_support_qualification(rows, _small_phase7_config())
+    assert receipt["qualification_allowed"] is False
+    assert receipt["dimension_evidence"]["volatility_of_volatility"] == {
+        "observed_cohorts": 5,
+        "unknown_cohorts": 1,
+        "inconsistent_cohorts": 0,
+        "gate_passed": False,
+    }
+    assert receipt["regime_direction_cohorts"]["RANGE|SHORT"] == 0
 
 
 def test_directional_score_gap_is_never_relabelled_as_exchange_spread(tmp_path):
