@@ -194,9 +194,26 @@ def create_archive(
             "win_rate_pct": performance.get("win_rate_pct"),
             "path": str(final),
             "manifest_sha256": _sha256(final / MANIFEST),
+            "analyzer_revision": manifest["analyzer_revision"],
+            "source_data_revision": manifest["source_data_revision"],
+            "cohort_schema": manifest["cohort_schema"],
+            "epoch_id": manifest["fresh_epoch"].get("epoch_id"),
+            "epoch_status": manifest["fresh_epoch"].get("status"),
+            "evidence_objects": [
+                {
+                    "name": row.get("name"),
+                    "available": bool(row.get("available")),
+                    "sha256": row.get("sha256"),
+                    "size_bytes": row.get("size_bytes"),
+                }
+                for row in manifest["evidence"]
+            ],
         })
         index_temp = archive_root / f".index-{nonce}.tmp"
-        index_temp.write_text(json.dumps({"schema": SCHEMA, "sessions": sessions[:50]}, indent=2), encoding="utf-8")
+        # This is the retrieval index for immutable generations, not a recent
+        # dashboard cache.  Never silently drop older verified sessions: Phase
+        # 4 requires every distinct generation to remain discoverable.
+        index_temp.write_text(json.dumps({"schema": SCHEMA, "sessions": sessions}, indent=2), encoding="utf-8")
         try:
             os.replace(index_temp, index_path)
         finally:

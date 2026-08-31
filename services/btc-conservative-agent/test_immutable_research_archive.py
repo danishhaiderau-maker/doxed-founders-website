@@ -97,7 +97,43 @@ def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
         assert hashlib.sha256(member.read_bytes()).hexdigest() == row["sha256"]
     assert _publisher_accepts(archive, tmp_path)
     index = json.loads((root / "research_session_index.json").read_text(encoding="utf-8"))
+    indexed = index["sessions"][0]
+    assert indexed["session_id"] == archive.name
+    assert indexed["analyzer_revision"] == "2" * 40
+    assert indexed["source_data_revision"] == "3" * 64
+    assert indexed["cohort_schema"] == "analysis_cohorts_v1"
+    assert indexed["epoch_id"] == "epoch-fixture"
+    evidence = {row["name"]: row for row in indexed["evidence_objects"]}
+    assert evidence["relay_lifecycle_evidence_v1.json"]["sha256"] == hashlib.sha256(
+        (archive / "evidence" / "relay_lifecycle_evidence_v1.json").read_bytes()
+    ).hexdigest()
+
+
+def test_archive_index_retains_every_prior_generation_without_truncation(tmp_path):
+    root = tmp_path / "run"
+    archive_root = tmp_path / "archives"
+    root.mkdir()
+    _fixture(root)
+    prior = [
+        {
+            "session_id": f"session-prior-{number:03d}",
+            "manifest_sha256": hashlib.sha256(str(number).encode()).hexdigest(),
+        }
+        for number in range(75)
+    ]
+    (root / "research_session_index.json").write_text(
+        json.dumps({"schema": immutable_archive.SCHEMA, "sessions": prior}),
+        encoding="utf-8",
+    )
+
+    archive = immutable_archive.create_archive(root, {}, archive_root)
+    index = json.loads((root / "research_session_index.json").read_text(encoding="utf-8"))
+
+    assert len(index["sessions"]) == 76
     assert index["sessions"][0]["session_id"] == archive.name
+    assert {row["session_id"] for row in index["sessions"][1:]} == {
+        row["session_id"] for row in prior
+    }
 
 
 @pytest.mark.parametrize(
