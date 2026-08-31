@@ -136,6 +136,62 @@ def test_partial_fill_preserves_all_quantity_boundaries(tmp_path):
     assert row["quantity_attempts"][0]["accepted"] is True
 
 
+def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_path):
+    v3 = _fixture(tmp_path)
+    path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(path.read_text().strip())
+    opportunity["signal_ts"] = 1767225600
+    opportunity["feature_snapshot_at_signal"].update({
+        "realized_volatility": 0.0042,
+        "spread_bps": 1.75,
+        "order_book": {"bid_depth_qty": 2.5, "ask_depth_qty": 1.75},
+        "session_bucket": "ASIA",
+        "market_context": {
+            "regime_label": "BEAR",
+            "trend_strength": {"adx": 31.5, "trend_score": 0.8},
+            "market_structure": {"structure_score": -2},
+        },
+    })
+    path.write_text(json.dumps(opportunity) + "\n", encoding="utf-8")
+
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["regime_feature_schema"] == "phase7_regime_features_v1"
+    features = row["regime_features_at_signal"]
+    assert features["realized_volatility"] == {
+        "status": "OBSERVED", "value": 0.0042,
+        "source": "feature_snapshot.realized_volatility",
+    }
+    assert features["market_spread_bps"]["value"] == 1.75
+    assert features["bid_depth_qty"]["value"] == 2.5
+    assert features["ask_depth_qty"]["value"] == 1.75
+    assert features["adx"]["value"] == 31.5
+    assert features["trend_strength"]["value"] == 0.8
+    assert features["market_structure"]["value"] == -2
+    assert features["regime"]["value"] == "BEAR"
+    assert features["session"]["value"] == "ASIA"
+    assert features["signal_timestamp"]["value"] == 1767225600
+    assert features["volatility_of_volatility"] == {
+        "status": "UNKNOWN", "value": None, "source": None,
+    }
+    assert features["liquidity"]["status"] == "UNKNOWN"
+    assert row["regime_feature_coverage"]["status"] == "PARTIAL"
+    assert "volatility_of_volatility" in row["regime_feature_coverage"]["unknown_dimensions"]
+    assert "liquidity" in row["regime_feature_coverage"]["unknown_dimensions"]
+
+
+def test_directional_score_gap_is_never_relabelled_as_exchange_spread(tmp_path):
+    v3 = _fixture(tmp_path)
+    opportunity_path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(opportunity_path.read_text().strip())
+    opportunity["feature_snapshot_at_signal"]["directional_spread"] = 27
+    opportunity_path.write_text(json.dumps(opportunity) + "\n", encoding="utf-8")
+
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["regime_features_at_signal"]["market_spread_bps"] == {
+        "status": "UNKNOWN", "value": None, "source": None,
+    }
+
+
 def test_complete_non_crossing_tape_is_true_no_fill(tmp_path):
     rows = [_row(10, ask=101), _row(11, ask=101)]
     row = build_v3_conservative_results(_fixture(tmp_path, entry_rows=rows))["results"][0]

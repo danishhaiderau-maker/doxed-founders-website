@@ -64,6 +64,120 @@ def _number(*values: Any) -> float | None:
     return None
 
 
+def _observed_feature(value: Any, source: str) -> dict[str, Any]:
+    """Expose a research feature without inventing a missing observation."""
+    return {
+        "status": "OBSERVED" if value is not None and value != "" else "UNKNOWN",
+        "value": value if value is not None and value != "" else None,
+        "source": source if value is not None and value != "" else None,
+    }
+
+
+def _first_feature(*candidates: tuple[Any, str]) -> dict[str, Any]:
+    for value, source in candidates:
+        if value is not None and value != "":
+            return _observed_feature(value, source)
+    return _observed_feature(None, "")
+
+
+def _regime_features_at_signal(
+    opportunity: Mapping[str, Any], feature_snapshot: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Return only pre-entry, explicitly captured Phase-7 regime dimensions.
+
+    Similar-looking values are deliberately not substituted: directional AI
+    score gap is not exchange spread, candle volume is not book depth, and ATR
+    is not realized volatility or volatility-of-volatility.
+    """
+    source_features = (
+        feature_snapshot.get("source_features")
+        if isinstance(feature_snapshot.get("source_features"), Mapping) else {}
+    )
+    market_context = (
+        feature_snapshot.get("market_context")
+        if isinstance(feature_snapshot.get("market_context"), Mapping) else {}
+    )
+    if not market_context and isinstance(source_features.get("market_context"), Mapping):
+        market_context = source_features["market_context"]
+    cycle = (
+        feature_snapshot.get("cycle_3m_universe")
+        if isinstance(feature_snapshot.get("cycle_3m_universe"), Mapping) else {}
+    )
+    trend = (
+        market_context.get("trend_strength")
+        if isinstance(market_context.get("trend_strength"), Mapping) else {}
+    )
+    structure = (
+        market_context.get("market_structure")
+        if isinstance(market_context.get("market_structure"), Mapping) else {}
+    )
+    book = (
+        feature_snapshot.get("order_book")
+        if isinstance(feature_snapshot.get("order_book"), Mapping) else {}
+    )
+    return {
+        "realized_volatility": _first_feature(
+            (feature_snapshot.get("realized_volatility"), "feature_snapshot.realized_volatility"),
+            (source_features.get("realized_volatility"), "feature_snapshot.source_features.realized_volatility"),
+        ),
+        "volatility_of_volatility": _first_feature(
+            (feature_snapshot.get("volatility_of_volatility"), "feature_snapshot.volatility_of_volatility"),
+            (feature_snapshot.get("vol_of_vol"), "feature_snapshot.vol_of_vol"),
+            (source_features.get("volatility_of_volatility"), "feature_snapshot.source_features.volatility_of_volatility"),
+        ),
+        "market_spread_bps": _first_feature(
+            (feature_snapshot.get("market_spread_bps"), "feature_snapshot.market_spread_bps"),
+            (feature_snapshot.get("spread_bps"), "feature_snapshot.spread_bps"),
+            (book.get("spread_bps"), "feature_snapshot.order_book.spread_bps"),
+        ),
+        "bid_depth_qty": _first_feature(
+            (feature_snapshot.get("bid_depth_qty"), "feature_snapshot.bid_depth_qty"),
+            (book.get("bid_depth_qty"), "feature_snapshot.order_book.bid_depth_qty"),
+            (book.get("bid_qty"), "feature_snapshot.order_book.bid_qty"),
+        ),
+        "ask_depth_qty": _first_feature(
+            (feature_snapshot.get("ask_depth_qty"), "feature_snapshot.ask_depth_qty"),
+            (book.get("ask_depth_qty"), "feature_snapshot.order_book.ask_depth_qty"),
+            (book.get("ask_qty"), "feature_snapshot.order_book.ask_qty"),
+        ),
+        "liquidity": _first_feature(
+            (feature_snapshot.get("liquidity"), "feature_snapshot.liquidity"),
+            (feature_snapshot.get("liquidity_bucket"), "feature_snapshot.liquidity_bucket"),
+            (source_features.get("liquidity"), "feature_snapshot.source_features.liquidity"),
+        ),
+        "adx": _first_feature(
+            (feature_snapshot.get("adx"), "feature_snapshot.adx"),
+            (cycle.get("adx14"), "feature_snapshot.cycle_3m_universe.adx14"),
+            (trend.get("adx"), "feature_snapshot.market_context.trend_strength.adx"),
+        ),
+        "trend_strength": _first_feature(
+            (trend.get("trend_score"), "feature_snapshot.market_context.trend_strength.trend_score"),
+            (feature_snapshot.get("trend_strength"), "feature_snapshot.trend_strength"),
+        ),
+        "market_structure": _first_feature(
+            (structure.get("structure_score"), "feature_snapshot.market_context.market_structure.structure_score"),
+            (feature_snapshot.get("market_structure"), "feature_snapshot.market_structure"),
+        ),
+        "regime": _first_feature(
+            (cycle.get("regime"), "feature_snapshot.cycle_3m_universe.regime"),
+            (market_context.get("regime_label"), "feature_snapshot.market_context.regime_label"),
+            (source_features.get("regime"), "feature_snapshot.source_features.regime"),
+            (feature_snapshot.get("regime"), "feature_snapshot.regime"),
+        ),
+        "session": _first_feature(
+            (cycle.get("session_utc"), "feature_snapshot.cycle_3m_universe.session_utc"),
+            (source_features.get("session_bucket"), "feature_snapshot.source_features.session_bucket"),
+            (feature_snapshot.get("session_bucket"), "feature_snapshot.session_bucket"),
+            (feature_snapshot.get("session_utc"), "feature_snapshot.session_utc"),
+        ),
+        "signal_timestamp": _first_feature(
+            (opportunity.get("signal_ts"), "opportunity.signal_ts"),
+            (opportunity.get("shared_ai_call_ts_epoch"), "opportunity.shared_ai_call_ts_epoch"),
+            (opportunity.get("timestamp"), "opportunity.timestamp"),
+        ),
+    }
+
+
 def _load_envelope(root: Path, segment: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     ref = segment.get("segment_ref") if isinstance(segment.get("segment_ref"), Mapping) else {}
     digest = str(ref.get("sha256") or "").lower()
@@ -156,6 +270,20 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
         or decision.get("executed_direction") or ai_direction or ""
     ).upper() or None
     side = side_candidate if side_candidate in {"LONG", "SHORT"} else None
+    regime_features = _regime_features_at_signal(opportunity, feature_snapshot)
+    regime_feature_coverage = {
+        "status": (
+            "COMPLETE" if all(item["status"] == "OBSERVED" for item in regime_features.values())
+            else "PARTIAL" if any(item["status"] == "OBSERVED" for item in regime_features.values())
+            else "UNKNOWN"
+        ),
+        "observed_dimensions": sorted(
+            key for key, item in regime_features.items() if item["status"] == "OBSERVED"
+        ),
+        "unknown_dimensions": sorted(
+            key for key, item in regime_features.items() if item["status"] == "UNKNOWN"
+        ),
+    }
     return {
         "schema": SCHEMA,
         "epoch_id": binding.get("epoch_id"),
@@ -215,6 +343,9 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
                 or market_context.get("volatility_metric")
             ),
         },
+        "regime_feature_schema": "phase7_regime_features_v1",
+        "regime_features_at_signal": regime_features,
+        "regime_feature_coverage": regime_feature_coverage,
         "net_pnl_usd": None,
     }
 
