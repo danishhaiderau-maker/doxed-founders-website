@@ -64,7 +64,17 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
                 "policy_signature": "sig-1", "direction": direction,
                 "policy_family": "ATR_TRAIL", "entry_offset_pct": .1,
                 "chase_policy": "CHASE_13M", "exit_family": "ATR", "regime": "TREND", "split": "OOS"}
-    _write(v3 / "ledgers/opportunity.jsonl", [{**identity, "raw_direction": direction}])
+    _write(v3 / "ledgers/opportunity.jsonl", [{
+        **identity,
+        "raw_direction": direction,
+        "feature_snapshot_at_signal": {
+            "volatility_atr": 145.5,
+            "volatility_percentile": 72.5,
+            "atr14": 142.0,
+            "atr14_pct_3m": 0.18,
+            "market_context": {"regime_label": "BEAR"},
+        },
+    }])
     _write(v3 / "ledgers/decision.jsonl", [decision])
     schedule = {"schema": "schedule-v1", "authoritative": True,
                 "intervals": [{"bucket_id": "s0", "start_ts": 10, "end_ts": 12,
@@ -98,6 +108,18 @@ def test_buy_sell_touch_and_trade_through_are_full_fills(tmp_path, direction, ro
     assert row["classification"] == "FULL_FILL"
     assert row["filled_qty"] == 1
     assert row["comparison_cohort_key"].startswith("cohort-")
+    assert row["fill_latency_sec"] == 0
+    assert row["slippage_usd"] == (1 if direction == "LONG" and rows[0]["ask"] == 99 else 0)
+    assert row["missed_entry_cost_usd"] is None
+    assert row["missed_entry_cost_basis"] == "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON"
+    assert row["volatility_at_signal"] == {
+        "volatility_atr": 145.5,
+        "volatility_percentile": 72.5,
+        "atr14": 142.0,
+        "atr14_pct_3m": 0.18,
+        "realized_volatility": None,
+        "volatility_metric": None,
+    }
 
 
 def test_partial_fill_preserves_all_quantity_boundaries(tmp_path):

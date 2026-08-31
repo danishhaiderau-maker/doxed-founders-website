@@ -196,7 +196,26 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
         "rounded_executable_qty": None, "accumulated_qty": None, "filled_qty": None,
         "minimum_lot_decision": "UNKNOWN", "minimum_notional_decision": "UNKNOWN",
         "quantity_attempts": [], "gross_pnl_usd": None, "fees_usd": None,
-        "slippage_usd": None, "net_pnl_usd": None,
+        "slippage_usd": None, "fill_latency_sec": None,
+        "price_concession_per_unit": None,
+        "missed_entry_cost_usd": None,
+        "missed_entry_cost_basis": "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON",
+        "volatility_at_signal": {
+            # Preserve the collector's native normalized fields individually.
+            # Collapsing these to a single generic value made ATR/percentile
+            # stratification impossible even when the opportunity retained
+            # both measurements.
+            "volatility_atr": feature_snapshot.get("volatility_atr"),
+            "volatility_percentile": feature_snapshot.get("volatility_percentile"),
+            "atr14": feature_snapshot.get("atr14"),
+            "atr14_pct_3m": feature_snapshot.get("atr14_pct_3m"),
+            "realized_volatility": feature_snapshot.get("realized_volatility"),
+            "volatility_metric": (
+                feature_snapshot.get("volatility_metric")
+                or market_context.get("volatility_metric")
+            ),
+        },
+        "net_pnl_usd": None,
     }
 
 
@@ -341,6 +360,11 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             "evaluated_schedule_sha256": receipt.get("schedule_sha256"),
             "tape_ids": sorted(tape_ids),
             "fill_price": receipt.get("fill_price"), "evaluator_receipt": receipt,
+            "fill_latency_sec": receipt.get("fill_latency_sec"),
+            "price_concession_per_unit": receipt.get("price_concession_per_unit"),
+            "slippage_usd": receipt.get("slippage_usd"),
+            "missed_entry_cost_usd": receipt.get("missed_entry_cost_usd"),
+            "missed_entry_cost_basis": receipt.get("missed_entry_cost_basis"),
         })
         results.append(row)
     results.sort(key=lambda row: tuple(str(row.get(field) or "") for field in (

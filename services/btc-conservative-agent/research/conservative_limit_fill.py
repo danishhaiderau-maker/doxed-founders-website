@@ -67,6 +67,11 @@ def _base_receipt(direction: str, qty: Any, window: Any) -> dict[str, Any]:
         "matching_aggressor_qty": 0.0,
         "aggressor_corroborated": False,
         "fill_price": None,
+        "fill_latency_sec": None,
+        "price_concession_per_unit": None,
+        "slippage_usd": None,
+        "missed_entry_cost_usd": None,
+        "missed_entry_cost_basis": "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON",
         "queue_position_model": "NONE",
         "scope": "PUBLIC_TAPE_COUNTERFACTUAL_NOT_EXCHANGE_CONFIRMATION",
         "negative_reasons": [],
@@ -375,8 +380,22 @@ def evaluate_limit_fill(
             "matching_aggressor_qty": best_partial["aggressor"],
             "aggressor_corroborated": bool(best_partial["aggressor"] > 0),
             "fill_price": interval["limit_price"],
+            # A conservative replay books at the declared limit, never at the
+            # potentially better displayed quote.  Preserve that deliberate
+            # price concession and the elapsed schedule time explicitly so a
+            # downstream analyst need not reverse engineer either value.
+            "fill_latency_sec": int(best_partial["ts"] - schedule[0]["start_ts"]),
+            "price_concession_per_unit": round(max(
+                0.0,
+                interval["limit_price"] - best_partial["quote"]
+                if side == "LONG"
+                else best_partial["quote"] - interval["limit_price"],
+            ), 12),
             "negative_reasons": [] if is_full else ["PARTIAL_ONLY_INSUFFICIENT_PROVABLE_QTY"],
         })
+        receipt["slippage_usd"] = round(
+            float(receipt["price_concession_per_unit"]) * float(filled), 12
+        )
         return receipt
 
     if incomplete:

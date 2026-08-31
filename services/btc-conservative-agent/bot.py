@@ -18421,7 +18421,7 @@ def validate_pipeline_completion(signal: dict):
     VALID_FINAL_STATES = [
         "ACTIVE", "ORDERED", "REJECTED", "BLOCKED", "EXPIRED", "COMPLETE",
         SIGNAL_STATUS_AWAITING_MIN_AGE, SIGNAL_STATUS_AWAITING_MICRO, SIGNAL_STATUS_AWAITING_5M,
-        SIGNAL_STATUS_AWAITING_CHASE_3PLUS,
+        SIGNAL_STATUS_AWAITING_CHASE_3PLUS, SIGNAL_STATUS_AWAITING_DASHBOARD_CHASE,
     ]
     if signal.get("status") not in VALID_FINAL_STATES:
         logger.warning(f"[PIPELINE WARNING] Non-terminal state: {signal.get('status')} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")

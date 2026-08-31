@@ -50,6 +50,23 @@ def test_long_side_correct_full_fill():
     assert got["chase_bucket_id"] == "chase_3"
     assert got["fill_price"] == 100
     assert got["queue_position_model"] == "NONE"
+    assert got["fill_latency_sec"] == 2
+    assert got["price_concession_per_unit"] == 0
+    assert got["slippage_usd"] == 0
+
+
+def test_fill_latency_and_limit_price_concession_are_explicit():
+    rows = [row(100), row(101), row(102, ask=100, ask_qty=2)]
+    got = evaluate(
+        rows, direction="LONG", requested_qty=.4,
+        chase_schedule=schedule(limit=101, end=103), symbol="BTC",
+    )
+    assert got["outcome"] == "FILL"
+    assert got["fill_latency_sec"] == 2
+    assert got["price_concession_per_unit"] == 1
+    assert got["slippage_usd"] == .4
+    assert got["missed_entry_cost_usd"] is None
+    assert got["missed_entry_cost_basis"] == "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON"
 
 
 def test_short_side_correct_full_fill():
@@ -94,6 +111,8 @@ def test_gap_and_stale_fail_closed():
     assert got["outcome"] == "UNSUPPORTED"
     assert "EVIDENCE_GAP" in got["negative_reasons"]
     assert "STALE_EVIDENCE_BUCKET" in got["negative_reasons"]
+    assert got["fill_latency_sec"] is None
+    assert got["slippage_usd"] is None
 
 
 def test_chase_interval_is_authoritative_and_reported():
