@@ -11,6 +11,7 @@ import json
 from math import prod
 
 from chase_offset_touch_grid import CHASE_POLICIES, OFFSET_PCT_GRID
+from research_entry_baselines import ENTRY_BASELINE_REGISTRY
 
 SEARCH_MANIFEST_SCHEMA = "policy_search_manifest_v1"
 SEARCH_MANIFEST_VERSION = "complete_static_dynamic_v1_20260820"
@@ -75,6 +76,7 @@ def build_policy_search_manifest() -> dict:
         "ladders": {name: [list(rung) for rung in rungs] for name, rungs in LADDERS.items()},
         "indicator_families": list(INDICATOR_FAMILIES),
         "causal_regime_features": list(CAUSAL_REGIME_FEATURES),
+        "entry_baseline_registry": ENTRY_BASELINE_REGISTRY,
         "search_protocol": {
             "stage_1": "independent-axis screening on chronological training episodes",
             "stage_2": "Cartesian zoom only inside stable positive neighborhoods",
@@ -108,4 +110,6 @@ def compact_search_receipt() -> dict:
         "counts": dict(POLICY_SEARCH_MANIFEST["counts"]),
         "indicator_families": list(INDICATOR_FAMILIES),
         "causal_regime_features": list(CAUSAL_REGIME_FEATURES),
+        "entry_baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
+        "entry_baseline_count": len(ENTRY_BASELINE_REGISTRY["baselines"]),
     }
