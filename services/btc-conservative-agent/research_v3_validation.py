@@ -339,7 +339,7 @@ def validate_policy(
         # A boolean is an assertion, not evidence. Only a content-addressed,
         # single-use evaluation receipt can satisfy this qualification gate.
         "sealed_holdout_pass": verify_evaluation_receipt(
-            sealed_holdout, policy_id=policy_id,
+            sealed_holdout, policy_id=policy_id, holdout_episodes=episodes,
         ),
     }
     return {
