@@ -8902,6 +8902,71 @@ def _write_analyzer_crash_log(iteration: int, tb: str):
         pass
 
 
+def _mirror_coherence_retry_delay_seconds(
+    error: Exception,
+    scheduled_delay_seconds: int,
+    *,
+    now: datetime | None = None,
+    heartbeat_path: Path | None = None,
+) -> tuple[int, str]:
+    """Respect a verified sync-loop backoff while remaining fail closed.
+
+    A failed mirror receipt cannot authorize analysis.  Retrying the analyzer
+    every minute during the sync loop's deterministic outage backoff only
+    reacquires the generation lease and emits another identical crash receipt.
+    This helper trusts only the canonical mirror heartbeat and only a bounded,
+    internally consistent future ``nextRetryAt``.  Malformed or unrelated
+    receipts retain the conservative one-minute retry.
+    """
+    fallback = min(60, max(1, int(scheduled_delay_seconds)))
+    if str(error) not in {"MIRROR_SYNC_RECEIPT_FAILED", "MIRROR_SYNC_IN_PROGRESS"}:
+        return fallback, "mirror coherence/lease retry"
+    path = heartbeat_path
+    if path is None:
+        selected = Path(os.environ.get("BTC_AGENT_DATA_DIR", "")).resolve()
+        if selected.name != "canonical-research-data":
+            return fallback, "mirror coherence/lease retry"
+        path = selected / ".fly-data-sync-loop.heartbeat.json"
+    try:
+        if path.parent.resolve().name != "canonical-research-data":
+            raise ValueError("non-canonical heartbeat")
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict) or payload.get("ok") is not False:
+            raise ValueError("heartbeat is not a failed sync receipt")
+        if payload.get("pollOk") is not False:
+            raise ValueError("sync poll failure is not proven")
+        failures = int(payload.get("consecutiveFailures") or 0)
+        backoff = int(payload.get("backoffSec") or 0)
+        if failures < 1 or not 60 <= backoff <= 1800:
+            raise ValueError("invalid bounded backoff")
+
+        def parse_time(value) -> datetime:
+            text = str(value or "").strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            # PowerShell emits seven fractional digits; Python accepts six.
+            text = re.sub(r"(\.\d{6})\d+(?=[+-]\d\d:\d\d$)", r"\1", text)
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                raise ValueError("timezone missing")
+            return parsed.astimezone(timezone.utc)
+
+        failed_at = parse_time(payload.get("pollFailedAt") or payload.get("syncedAt"))
+        next_retry = parse_time(payload.get("nextRetryAt"))
+        declared_span = (next_retry - failed_at).total_seconds()
+        if declared_span < backoff - 2 or declared_span > backoff + 2:
+            raise ValueError("next retry does not match declared backoff")
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        remaining = (next_retry - observed_now).total_seconds()
+        if remaining <= 0:
+            raise ValueError("sync backoff has elapsed")
+        grace = max(0, min(300, int(os.getenv("ANALYZER_SYNC_RETRY_GRACE_SEC", "30"))))
+        delay = max(fallback, min(backoff + grace, int(math.ceil(remaining)) + grace))
+        return delay, "canonical sync heartbeat backoff"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return fallback, "mirror coherence/lease retry"
+
+
 def run(interval_min=30, session_only=True, max_iterations=None):
     iteration = 0
     sleep_sec = max(60, int(interval_min) * 60)
@@ -8921,8 +8986,9 @@ def run(interval_min=30, session_only=True, max_iterations=None):
                 from research.mirror_coherence import MirrorCoherenceError
                 from research.mirror_generation_lease import MirrorGenerationLeaseTimeout
                 if isinstance(exc, (MirrorCoherenceError, MirrorGenerationLeaseTimeout)):
-                    retry_sec = min(60, sleep_sec)
-                    retry_reason = "mirror coherence/lease retry"
+                    retry_sec, retry_reason = _mirror_coherence_retry_delay_seconds(
+                        exc, sleep_sec
+                    )
             except Exception:
                 pass
             tb = traceback.format_exc()
