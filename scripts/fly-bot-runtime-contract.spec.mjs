@@ -416,11 +416,11 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
   assert.match(
     syncLoop,
-    /reason = "below_threshold"[\s\S]*sourceRevision = \$lastSyncedSourceRevision[\s\S]*observedSourceRevision = \$observedSourceRevision[\s\S]*mirroredSourceRevision = \$lastSyncedSourceRevision/,
+    /reason = "identity_match_before_full_interval"[\s\S]*sourceRevision = \$lastSyncedSourceRevision[\s\S]*observedSourceRevision = \$observedSourceRevision[\s\S]*mirroredSourceRevision = \$lastSyncedSourceRevision/,
   );
   assert.doesNotMatch(
     syncLoop,
-    /reason = "below_threshold"[\s\S]{0,800}sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
+    /reason = "identity_match_before_full_interval"[\s\S]{0,800}sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
   );
   assert.match(
     syncLoop,
