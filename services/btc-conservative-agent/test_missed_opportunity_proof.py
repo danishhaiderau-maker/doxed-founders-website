@@ -544,10 +544,18 @@ def test_embedded_terminal_tape_cannot_bypass_canonical_tape_join(
     assert rows[-1]["tape_evidence"]["fill_status"] == "FULL_FILL"
     _write_jsonl(tmp_path / "chase_offset_touch_grid.jsonl", rows)
 
-    result = engine.build_missed_opportunity_proof_report(session={})["proofs"][0]
+    report = engine.build_missed_opportunity_proof_report(session={})
+    result = report["proofs"][0]
 
     assert result["classification"] == "INSUFFICIENT_EVIDENCE"
     assert result["conservative_fill_status"] == "UNKNOWN_UNVERIFIABLE"
+    assert result["execution_outcome"] == "UNKNOWN"
+    assert report["execution_outcome_contract"] == [
+        "FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN",
+    ]
+    assert report["execution_outcome_counts"] == {
+        "FULL_FILL": 0, "PARTIAL_FILL": 0, "NO_FILL": 0, "UNKNOWN": 1,
+    }
     assert result["coverage"]["tape_receipt"].startswith("tape-join-sha256-")
     assert result["coverage"]["tape_receipt"] != "tape-sha256-1"
     assert result["coverage"]["tape_status"] == "INSUFFICIENT"
@@ -569,6 +577,7 @@ def test_report_missing_signed_quantity_constraints_remains_unknown(tmp_path, mo
 
     assert result["classification"] == "INSUFFICIENT_EVIDENCE"
     assert result["conservative_fill_status"] == "UNKNOWN_UNVERIFIABLE"
+    assert result["execution_outcome"] == "UNKNOWN"
     assert result["coverage"]["status"] == "INSUFFICIENT"
     assert result["coverage"]["signed_quantity_constraints"] is None
     assert result["coverage"]["quantity_constraint_reasons"] == [
@@ -577,6 +586,19 @@ def test_report_missing_signed_quantity_constraints_remains_unknown(tmp_path, mo
     assert "UNKNOWN_SIGNED_QUANTITY_CONSTRAINTS_MISSING" in (
         result["coverage"]["rejection_codes"]
     )
+
+
+def test_execution_outcome_contract_keeps_all_noncanonical_states_unknown():
+    engine = _load_engine()
+
+    assert engine._EXECUTION_OUTCOME_CLASSES == (
+        "FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN",
+    )
+    assert engine._normalized_execution_outcome("FULL_FILL") == "FULL_FILL"
+    assert engine._normalized_execution_outcome("PARTIAL_FILL") == "PARTIAL_FILL"
+    assert engine._normalized_execution_outcome("NO_FILL") == "NO_FILL"
+    for status in (None, "", "UNKNOWN_UNVERIFIABLE", "INELIGIBLE", "UNSUPPORTED"):
+        assert engine._normalized_execution_outcome(status) == "UNKNOWN"
 
 
 @pytest.mark.parametrize("mutation,expected_code", [

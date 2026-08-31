@@ -12009,6 +12009,13 @@ _MISSED_PROOF_CLASSES = (
     "AMBIGUOUS",
     "INSUFFICIENT_EVIDENCE",
 )
+_EXECUTION_OUTCOME_CLASSES = ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN")
+
+
+def _normalized_execution_outcome(fill_status):
+    """Project detailed evaluator states onto the canonical evidence taxonomy."""
+    normalized = str(fill_status or "").strip().upper()
+    return normalized if normalized in _EXECUTION_OUTCOME_CLASSES[:-1] else "UNKNOWN"
 
 
 def _first_number(*values):
@@ -12768,6 +12775,11 @@ def build_missed_opportunity_proof_report(session=None):
             "checkpoint_market_counterfactuals": checkpoints,
             "conservative_touch": touch_row is not None,
             "conservative_fill_status": fill_status or "UNKNOWN_UNVERIFIABLE",
+            # Keep the detailed evaluator status above for diagnosis, while
+            # exposing the exact four-state evidence contract for aggregation.
+            # Ineligible, unsupported, and missing evidence are UNKNOWN; they
+            # must never silently inflate NO_FILL.
+            "execution_outcome": _normalized_execution_outcome(fill_status),
             "touch_ts": tape_touch_ts or (touch_row or {}).get("observed_ts"),
             "conservative_entry_price": entry_price,
             "terminal_ts": _first_number(first.get("expires_ts"), (expiry or {}).get("observed_ts")),
@@ -12811,8 +12823,10 @@ def build_missed_opportunity_proof_report(session=None):
             "matching_executed_record": (episode_id, policy_id) in execution_keys,
         })
     counts = {name: 0 for name in _MISSED_PROOF_CLASSES}
+    execution_outcome_counts = {name: 0 for name in _EXECUTION_OUTCOME_CLASSES}
     for row in proofs:
         counts[row["classification"]] += 1
+        execution_outcome_counts[row["execution_outcome"]] += 1
     arm_receipts = _compressed_shadow_arm_receipts(session=session)
     arm_status_counts = {}
     arm_reason_counts = {}
@@ -12830,9 +12844,11 @@ def build_missed_opportunity_proof_report(session=None):
         "evidence_world": "SIGNED_COMPRESSED_SHADOW",
         "qualification_eligible": False,
         "classification_contract": list(_MISSED_PROOF_CLASSES),
+        "execution_outcome_contract": list(_EXECUTION_OUTCOME_CLASSES),
         "empty_reason": empty_reason,
         "proof_count": len(proofs),
         "classification_counts": counts,
+        "execution_outcome_counts": execution_outcome_counts,
         "arm_receipt_count": len(arm_receipts),
         "arm_status_counts": arm_status_counts,
         "arm_reason_counts": arm_reason_counts,
