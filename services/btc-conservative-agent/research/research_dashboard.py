@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
+from runtime_incident_history import build_runtime_incident_history
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -310,6 +311,7 @@ REPORT_NAV_GROUPS = (
         ("explorer", "Report Explorer", None),
         ("archives", "Archives", None),
         ("download", "Downloads", None),
+        ("runtime-incidents", "Runtime Incidents", None),
         ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
         ("horizon", "Historical Recovery", "horizon_profitability_report.json"),
     )),
@@ -2807,6 +2809,18 @@ def api_health():
         "source_revision_parity": freshness["revision_parity"],
         "epoch_parity": freshness["epoch_parity"],
     })
+
+
+@app.route("/api/runtime-incidents")
+def api_runtime_incidents():
+    candidates = (Path(DATA_ROOT) / "crash_dump.json", Path(ROOT) / "crash_dump.json")
+    crash_path = next((path for path in candidates if path.is_file()), candidates[0])
+    return jsonify(build_runtime_incident_history(
+        crash_path,
+        current_started_at=None,
+        current_instance_id=None,
+        current_revision=None,
+    ))
 
 
 @app.route("/api/status")
@@ -6090,6 +6104,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
     <pre id="bundle-list"></pre>
   </section>
+  <section id="sec-runtime-incidents">
+    <h2>Runtime incident &amp; restart history</h2>
+    <p class="note" id="runtime-incidents-note">Loading retained application crash receipts…</p>
+    <table><thead><tr><th>Time (UTC)</th><th>Classification</th><th>Reason</th><th>Restart requested</th><th>Exit code</th><th>Evidence</th></tr></thead><tbody id="runtime-incidents-body"></tbody></table>
+  </section>
 </main>
 <script>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
@@ -6129,6 +6148,7 @@ const EVIDENCE_SCOPES = {
   explorer: ['MIXED ARTIFACT EXPLORER', 'Contains current, legacy, shadow, conservative, and unavailable artifacts; inspect each report provenance.'],
   archives: ['PRESERVED HISTORY', 'Sealed prior reports and sessions; not current-epoch policy evidence.'],
   download: ['MIXED EVIDENCE BUNDLE', 'Bundle may contain current and historical artifacts; manifest timestamps and per-report provenance remain authoritative.'],
+  'runtime-incidents': ['RETAINED APPLICATION RECEIPTS', 'Application watchdog/crash receipts are shown separately. Fly platform and deployment causes remain unavailable unless an authoritative platform receipt exists.'],
   'pathway-audit': ['MIXED INTEGRITY REPORTS', 'Combines current runtime checks with historical lane/report contracts.'],
   horizon: ['LEGACY POST-EXIT REPLAY', 'Historical recovery/horizon evidence; not the current pinned policy grid.'],
 };
@@ -7232,6 +7252,21 @@ async function loadGptAuditNote() {
     el.textContent = `GPT audit ready — ${v} — ${mb} — updated ${(d.generated_at||'').slice(0,19)}Z`;
   } catch (_) {}
 }
+async function loadRuntimeIncidents() {
+  const r = await fetch('/api/runtime-incidents');
+  const d = await r.json();
+  const rows = Array.isArray(d.application_incidents) ? d.application_incidents : [];
+  const text = value => String(value == null ? '' : value)
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+  document.getElementById('runtime-incidents-note').textContent =
+    (d.platform_history_status || 'PLATFORM HISTORY STATUS UNKNOWN') + ' — ' +
+    (d.platform_history_note || 'No platform history note.');
+  document.getElementById('runtime-incidents-body').innerHTML = rows.map(row =>
+    `<tr><td>${text(row.time||'UNKNOWN')}</td><td>${text(row.classification||'UNKNOWN')}</td><td>${text(row.reason||'-')}</td><td>${row.restart_requested?'YES':'NO'}</td><td>${text(row.exit_code==null?'-':row.exit_code)}</td><td>${text(row.evidence_source||'-')}</td></tr>`
+  ).join('') || '<tr><td colspan="6">No retained application incident receipts in the bounded crash-dump tail.</td></tr>';
+}
 
 const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
@@ -7244,7 +7279,7 @@ const SECTION_LOADERS = {
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   'evidence-coverage': [loadEvidenceCoverage],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
-  download: [loadArchives, loadGptAuditNote], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
+  download: [loadArchives, loadGptAuditNote], 'runtime-incidents': [loadRuntimeIncidents], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };
 const SECTION_REFRESHES = new Map();
 

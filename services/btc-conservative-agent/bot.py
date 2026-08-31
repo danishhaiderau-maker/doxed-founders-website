@@ -32,6 +32,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Optional
 from flask import Flask, jsonify, render_template_string, request, send_file, make_response
+from runtime_incident_history import build_runtime_incident_history
 import ccxt
 import websocket
 import signal
@@ -28731,6 +28732,12 @@ __ADMIN_ACCESS_CONTROLS__
 <p><strong>Bot sync:</strong> <span id="botInstance">-</span></p>
 <p>Last Fetch: <span id="lastFetch"></span></p>
 <p>WS Age: <span id="ws_age">-</span> <span id="wsStaleBadge" style="font-size:0.85em;"></span></p>
+<h3>Runtime incident &amp; restart history</h3>
+<p id="runtimeIncidentScope" style="color:#8b949e;font-size:0.85em;">Loading retained application receipts…</p>
+<div class="activity-table-scroll" role="region" aria-label="Runtime incident history table" tabindex="0"><table>
+  <thead><tr><th>Time (UTC)</th><th>Classification</th><th>Reason</th><th>Restart requested</th><th>Exit code</th><th>Evidence</th></tr></thead>
+  <tbody id="runtimeIncidentTable"></tbody>
+</table></div>
 
 <div class="debug-panel">
     <h3>🔍 DEBUG STATE</h3>
@@ -29983,6 +29990,25 @@ DASHBOARD_JS = """(function () {
           if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous paper orders OFF · shadow observation ON';
           else syncTxt += ' | Continuous AI ON';
           inst.innerText = syncTxt;
+          const history = d.runtime_incident_history || {};
+          const incidents = Array.isArray(history.application_incidents)
+            ? history.application_incidents : [];
+          const incidentText = value => String(value == null ? '' : value)
+            .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+            .replaceAll("'", '&#39;');
+          safeHTML('runtimeIncidentTable', incidents.length ? incidents.map(event => `<tr>
+            <td>${incidentText(event.time || 'UNKNOWN')}</td>
+            <td>${incidentText(event.classification || 'UNKNOWN')}</td>
+            <td>${incidentText(event.reason || '-')}</td>
+            <td>${event.restart_requested ? 'YES' : 'NO'}</td>
+            <td>${incidentText(event.exit_code == null ? '-' : event.exit_code)}</td>
+            <td>${incidentText(event.evidence_source || '-')}</td>
+          </tr>`).join('') : '<tr><td colspan="6" style="color:#8b949e;">No retained application incident receipts in the bounded crash-dump tail.</td></tr>');
+          const incidentScope = document.getElementById('runtimeIncidentScope');
+          if (incidentScope) incidentScope.innerText =
+            (history.platform_history_status || 'PLATFORM HISTORY STATUS UNKNOWN') +
+            ' — ' + (history.platform_history_note || 'No platform history note.');
         }
         safeText('lastFetch', d.last_fetch_success || 'never');
         let wsAgeSec = null;
@@ -34174,6 +34200,14 @@ def _build_api_state_snapshot():
         snapshot["bot_cwd"] = os.getcwd()
         snapshot["bot_script"] = os.path.abspath(__file__)
         snapshot["git_rev"] = _runtime_git_rev()
+        snapshot["runtime_incident_history"] = build_runtime_incident_history(
+            os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"),
+            current_started_at=datetime.fromtimestamp(
+                float(process_boot_time), tz=timezone.utc
+            ).isoformat(),
+            current_instance_id=str(BOT_INSTANCE_ID or "") or None,
+            current_revision=str(SOURCE_GIT_REV or _runtime_git_rev() or "") or None,
+        )
         coord = live_copy_coordination_state()
         snapshot["live_copy_coordination_state"] = coord
         snapshot["live_copy_coordination_ui_reason"] = (
