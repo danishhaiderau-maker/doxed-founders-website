@@ -5,6 +5,7 @@ from research.evidence_coverage_triage import (
     UNRESOLVED_EPISODE_ID,
     build_evidence_coverage_triage_report,
     ledger_source_counts,
+    load_archive_verification_index,
     verify_archive_receipts,
     verify_report_checksum,
 )
@@ -121,6 +122,30 @@ def test_ledger_inputs_supply_authoritative_counts(tmp_path):
     assert ledger_source_counts(tmp_path / "v3")["order_intents"] == 0
 
 
+def test_ledger_count_streams_validated_object_rows_and_fails_closed(tmp_path):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    opportunity = ledgers / "opportunity.jsonl"
+    opportunity.write_text('{"id":1}\n\n{"id":2}\n', encoding="utf-8")
+    assert ledger_source_counts(tmp_path / "v3")["opportunities"] == 2
+
+    opportunity.write_text('{"id":1}\nnot-json\n', encoding="utf-8")
+    try:
+        ledger_source_counts(tmp_path / "v3")
+    except ValueError as exc:
+        assert str(exc) == "AUTHORITATIVE_LEDGER_INVALID_JSON:opportunity.jsonl:2"
+    else:
+        raise AssertionError("malformed canonical ledgers must fail closed")
+
+    opportunity.write_text('{"id":1}\n[]\n', encoding="utf-8")
+    try:
+        ledger_source_counts(tmp_path / "v3")
+    except ValueError as exc:
+        assert str(exc) == "AUTHORITATIVE_LEDGER_ROW_NOT_OBJECT:opportunity.jsonl:2"
+    else:
+        raise AssertionError("non-object canonical rows must fail closed")
+
+
 def test_named_orphan_is_forced_unknown_and_reported_separately():
     report = build_evidence_coverage_triage_report(
         {"bindings": [binding(UNRESOLVED_EPISODE_ID)]},
@@ -175,3 +200,39 @@ def test_legacy_archive_without_retained_payload_is_unverifiable_not_invalid(tmp
     assert summary["unverifiable_session_count"] == 1
     assert summary["invalid_session_count"] == 0
     assert summary["sessions"][0]["verification_status"] == "UNVERIFIABLE"
+
+
+def test_completed_archive_verification_index_is_checksum_bound(tmp_path):
+    index = {
+        "schema": "legacy_archive_verification_index_v1",
+        "generated_at": "ignored-in-stable-hash",
+        "archive_session_count": 2,
+        "verified_session_count": 1,
+        "unverifiable_session_count": 1,
+        "invalid_session_count": 0,
+        "pending_session_count": 0,
+        "verified_file_count": 7,
+        "verified_unique_checksum_count": 5,
+        "complete": True,
+        "sessions": [{"session_id": "session_001", "verification_status": "UNVERIFIABLE"}],
+    }
+    stable = dict(index)
+    stable.pop("generated_at")
+    index["index_payload_sha256"] = hashlib.sha256(
+        json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    path = tmp_path / "verification_index.json"
+    path.write_text(json.dumps(index), encoding="utf-8")
+    summary = load_archive_verification_index(path)
+    assert summary["archive_session_count"] == 2
+    assert summary["retained_file_count"] == 7
+    assert summary["unverifiable_session_count"] == 1
+
+    index["verified_file_count"] = 8
+    path.write_text(json.dumps(index), encoding="utf-8")
+    try:
+        load_archive_verification_index(path)
+    except ValueError as exc:
+        assert str(exc) == "ARCHIVE_VERIFICATION_INDEX_CHECKSUM_MISMATCH"
+    else:
+        raise AssertionError("modified archive index must fail closed")

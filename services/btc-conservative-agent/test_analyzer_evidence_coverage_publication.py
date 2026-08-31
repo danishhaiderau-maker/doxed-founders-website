@@ -74,6 +74,44 @@ def test_coverage_report_consumes_same_generation_and_authoritative_ledgers(tmp_
     assert report["archive_recovery_retention"]["archive_session_count"] == 0
 
 
+def test_coverage_report_uses_completed_canonical_archive_index(tmp_path, monkeypatch):
+    analyzer = _load("coverage_archive_index_analyzer")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BTC_VERIFIED_LEGACY_ARCHIVE_ROOT", raising=False)
+    root = tmp_path / "canonical-research-data"
+    derived = root / "derived" / "policy-evidence" / "generation-key"
+    binding = derived / "binding-index.jsonl.gz"
+    results = derived / "conservative-results.jsonl.gz"
+    _gzip_rows(binding, [])
+    _gzip_rows(results, [])
+    archive_index = root / "archive" / "legacy-archive-verification" / "verification_index.json"
+    archive_index.parent.mkdir(parents=True)
+    archive = {
+        "schema": "legacy_archive_verification_index_v1", "generated_at": "ignored",
+        "archive_session_count": 2, "verified_session_count": 1,
+        "unverifiable_session_count": 1, "invalid_session_count": 0,
+        "pending_session_count": 0, "verified_file_count": 7,
+        "verified_unique_checksum_count": 5, "complete": True, "sessions": [],
+    }
+    stable = dict(archive)
+    stable.pop("generated_at")
+    archive["index_payload_sha256"] = hashlib.sha256(
+        json.dumps(stable, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    archive_index.write_text(json.dumps(archive), encoding="utf-8")
+    generation = {"generation_key": "generation-key"}
+    report, _ = analyzer._write_evidence_coverage_triage_report(
+        root,
+        {"generation": generation, "exhaustive_relative_path": binding.relative_to(root).as_posix(),
+         "exhaustive_sha256": _sha(binding)},
+        {"generation": generation, "relative_path": results.relative_to(root).as_posix(),
+         "artifact_sha256": _sha(results)},
+    )
+    assert report["archive_recovery_retention"]["verified_session_count"] == 1
+    assert report["archive_recovery_retention"]["unverifiable_session_count"] == 1
+    assert report["archive_recovery_retention"]["retained_file_count"] == 7
+
+
 def test_coverage_report_fails_closed_on_generation_mismatch(tmp_path, monkeypatch):
     analyzer = _load("coverage_mismatch_analyzer")
     monkeypatch.chdir(tmp_path)

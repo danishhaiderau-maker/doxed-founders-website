@@ -20,6 +20,7 @@ from research.policy_evidence_schema import canonical_json
 SCHEMA = "evidence_coverage_triage_report_v1"
 UNRESOLVED_EPISODE_ID = "episode-914e64c269e23d9db99f"
 TERMINAL = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
+ARCHIVE_VERIFICATION_SCHEMA = "legacy_archive_verification_index_v1"
 SOURCE_COUNT_NAMES = (
     "opportunities", "decisions", "order_intents", "executions",
     "lifecycles", "market_segments",
@@ -93,6 +94,37 @@ def verify_archive_receipts(archive_root: str | Path | None) -> dict[str, Any]:
         "retained_file_count": retained,
         "retained_unique_checksum_count": len(checksums),
         "sessions": sessions,
+    }
+
+
+def load_archive_verification_index(path: str | Path) -> dict[str, Any]:
+    """Load a completed checksum-bound archive index without rehashing its payloads."""
+    source = Path(path).resolve()
+    payload = json.loads(source.read_text(encoding="utf-8-sig"))
+    if payload.get("schema") != ARCHIVE_VERIFICATION_SCHEMA:
+        raise ValueError("ARCHIVE_VERIFICATION_INDEX_SCHEMA_MISMATCH")
+    expected = str(payload.get("index_payload_sha256") or "").lower()
+    stable = dict(payload)
+    stable.pop("generated_at", None)
+    stable.pop("index_payload_sha256", None)
+    actual = hashlib.sha256(
+        json.dumps(stable, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if expected != actual:
+        raise ValueError("ARCHIVE_VERIFICATION_INDEX_CHECKSUM_MISMATCH")
+    if payload.get("complete") is not True or int(payload.get("pending_session_count") or 0):
+        raise ValueError("ARCHIVE_VERIFICATION_INDEX_INCOMPLETE")
+    if int(payload.get("invalid_session_count") or 0):
+        raise ValueError("ARCHIVE_VERIFICATION_INDEX_INVALID")
+    return {
+        "archive_session_count": int(payload.get("archive_session_count") or 0),
+        "verified_session_count": int(payload.get("verified_session_count") or 0),
+        "unverifiable_session_count": int(payload.get("unverifiable_session_count") or 0),
+        "invalid_session_count": int(payload.get("invalid_session_count") or 0),
+        "retained_file_count": int(payload.get("verified_file_count") or 0),
+        "retained_unique_checksum_count": int(payload.get("verified_unique_checksum_count") or 0),
+        "verification_index_sha256": expected,
+        "sessions": list(payload.get("sessions") or []),
     }
 
 
@@ -260,6 +292,27 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         return [json.loads(line) for line in handle if line.strip()]
 
 
+def _count_jsonl_records(path: Path) -> int:
+    """Validate and count a ledger without retaining its rows in memory."""
+    count = 0
+    with path.open("rt", encoding="utf-8-sig") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"AUTHORITATIVE_LEDGER_INVALID_JSON:{path.name}:{line_number}"
+                ) from exc
+            if not isinstance(row, Mapping):
+                raise ValueError(
+                    f"AUTHORITATIVE_LEDGER_ROW_NOT_OBJECT:{path.name}:{line_number}"
+                )
+            count += 1
+    return count
+
+
 def ledger_source_counts(v3_root: str | Path) -> dict[str, int | str]:
     """Count authoritative ledger records without interpreting their content."""
     root = Path(v3_root).resolve()
@@ -273,7 +326,7 @@ def ledger_source_counts(v3_root: str | Path) -> dict[str, int | str]:
     counts: dict[str, int | str] = {}
     for plural, name in singular.items():
         path = root / "ledgers" / f"{name}.jsonl"
-        counts[plural] = len(_read_jsonl(path)) if path.is_file() else "UNKNOWN"
+        counts[plural] = _count_jsonl_records(path) if path.is_file() else "UNKNOWN"
     return counts
 
 

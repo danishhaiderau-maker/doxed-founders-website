@@ -19306,7 +19306,7 @@ def _write_evidence_coverage_triage_report(canonical_root, binding_status, conse
     import gzip
     from research.evidence_coverage_triage import (
         build_evidence_coverage_triage_report, ledger_source_counts,
-        verify_archive_receipts,
+        load_archive_verification_index, verify_archive_receipts,
     )
 
     root = Path(canonical_root).resolve()
@@ -19345,11 +19345,16 @@ def _write_evidence_coverage_triage_report(canonical_root, binding_status, conse
         with gzip.open(path, "rt", encoding="utf-8-sig") as handle:
             return [json.loads(line) for line in handle if line.strip()]
 
-    # Legacy evidence is never auto-discovered. It participates only through
-    # an explicitly configured archive whose every receipt verifies.
+    # Consume only the canonical checksum-bound archive verification index.
+    # A raw legacy archive participates only through the explicit fallback.
+    archive_index = root / "archive" / "legacy-archive-verification" / "verification_index.json"
     archive_root = os.getenv("BTC_VERIFIED_LEGACY_ARCHIVE_ROOT")
-    archive_summary = verify_archive_receipts(archive_root)
-    if archive_root and (
+    archive_summary = (
+        load_archive_verification_index(archive_index)
+        if archive_index.is_file()
+        else verify_archive_receipts(archive_root)
+    )
+    if archive_root and not archive_index.is_file() and (
         archive_summary.get("invalid_session_count", 0)
         or archive_summary.get("unverifiable_session_count", 0)
     ):
