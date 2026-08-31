@@ -32542,8 +32542,15 @@ _RELAY_EXECUTION_CACHE_BODY = None
 _RELAY_EXECUTION_CACHE_AT = 0.0
 _RELAY_EXECUTION_SNAPSHOT_SEQ = 0
 _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
-    0.05,
-    float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "0.20")),
+    1.0,
+    # A canonical build takes roughly 0.4-0.7s on the shared 1x Fly VM.  The
+    # former 200ms fallback cadence therefore kept this background publisher
+    # busy for most of every CPU second even when no money state had changed,
+    # starving market data, health and sync work.  One-second refreshes retain
+    # bounded execution authority (the existing four-second stale fence still
+    # fails closed) without allowing an operator override to recreate the
+    # sub-second rebuild loop.
+    float(os.getenv("RELAY_EXECUTION_REFRESH_INTERVAL_SEC", "1.0")),
 )
 _RELAY_EXECUTION_MAX_STALE_SEC = max(
     _RELAY_EXECUTION_REFRESH_INTERVAL_SEC * 3,

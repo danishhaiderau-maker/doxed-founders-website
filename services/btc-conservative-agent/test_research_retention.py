@@ -54,6 +54,43 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertTrue(active.exists())
             self.assertEqual(result["deleted"], 0)
 
+    def test_large_middle_only_mutation_is_detected_and_never_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rotation = root / "signal_replay.jsonl.1"
+            rotation.write_bytes(b"a" * (3 * 1024 * 1024))
+            old_timestamp = datetime(2026, 7, 19, tzinfo=timezone.utc).timestamp()
+            os.utime(rotation, (old_timestamp, old_timestamp))
+            acknowledged = retention._fingerprint(rotation)
+            original_stat = rotation.stat()
+
+            with rotation.open("r+b") as handle:
+                handle.seek(1536 * 1024)
+                handle.write(b"b" * 4096)
+            os.utime(
+                rotation,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+
+            current = retention._fingerprint(rotation)
+            self.assertEqual(acknowledged["fingerprint_mode"], "full_sha256")
+            self.assertEqual(current["fingerprint_mode"], "full_sha256")
+            self.assertEqual(current["bytes"], acknowledged["bytes"])
+            self.assertEqual(current["modified_at"], acknowledged["modified_at"])
+            self.assertNotEqual(current["fingerprint"], acknowledged["fingerprint"])
+
+            result = retention._prune_closed_rotations(
+                [rotation],
+                now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                minimum_age_hours=1,
+                keep_latest=0,
+                acknowledged_inventory=[acknowledged],
+            )
+
+            self.assertTrue(rotation.exists())
+            self.assertEqual(result["deleted"], 0)
+            self.assertEqual(result["fingerprint_mismatches"], 1)
+
     def test_daily_snapshot_preserves_live_ledgers_and_prunes_intraday_archives(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -125,25 +125,17 @@ def _write_readable_markdown_summary(root: Path, now: datetime) -> Path:
 
 def _fingerprint(path: Path) -> dict:
     stat = path.stat()
-    sample = 1024 * 1024
     digest = hashlib.sha256()
+    chunk_size = 1024 * 1024
     with path.open("rb") as handle:
-        if stat.st_size <= sample * 2:
-            for chunk in iter(lambda: handle.read(sample), b""):
-                digest.update(chunk)
-            mode = "full_sha256"
-        else:
-            digest.update(handle.read(sample))
-            handle.seek(max(0, stat.st_size - sample))
-            digest.update(handle.read(sample))
-            digest.update(str(stat.st_size).encode("ascii"))
-            mode = "head_tail_size_sha256"
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
     return {
         "path": path.name,
         "bytes": stat.st_size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
         "fingerprint": digest.hexdigest(),
-        "fingerprint_mode": mode,
+        "fingerprint_mode": "full_sha256",
         "retention": "LIVE_LEDGER_NOT_DELETED",
     }
 
