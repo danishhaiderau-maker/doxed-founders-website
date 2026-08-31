@@ -182,6 +182,8 @@ def test_status_labels_analyzer_and_mirror_revisions_separately(monkeypatch):
     monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
     monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "abc123")
     monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "ok": True,
+        "pollOk": True,
         "inProgress": False,
         "revisionParity": "MATCH",
         "observedSourceRevision": "abc123",
@@ -219,3 +221,55 @@ def test_generation_is_stale_while_new_fly_revision_is_syncing(monkeypatch):
     assert freshness["observed_source_revision"] == "newrev"
     assert any("synchronization is in progress" in reason for reason in freshness["reasons"])
     assert any("has not been promoted" in reason for reason in freshness["reasons"])
+
+
+def test_generation_fails_closed_when_mirror_sync_receipt_failed(monkeypatch):
+    manifest = {
+        "generation_revision": "abc123full",
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {
+        "collector_v22_epoch_id": "epoch-clean",
+    })
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "abc123")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "ok": False,
+        "pollOk": False,
+        "revisionParity": "UNKNOWN",
+        "consecutiveFailures": 14,
+        "mirroredSourceRevision": "abc123",
+    })
+
+    freshness = dashboard._generation_freshness_meta(manifest)
+
+    assert freshness["revision_parity"] == "MATCH"
+    assert freshness["epoch_parity"] == "MATCH"
+    assert freshness["mirror_sync_receipt_ok"] is False
+    assert freshness["mirror_sync_poll_ok"] is False
+    assert freshness["mirror_sync_revision_parity"] == "UNKNOWN"
+    assert freshness["current"] is False
+    assert freshness["stale"] is True
+    assert freshness["qualification_allowed"] is False
+    assert any("receipt is failed" in reason for reason in freshness["reasons"])
+    assert any("poll failed" in reason for reason in freshness["reasons"])
+    assert any("parity is not confirmed" in reason for reason in freshness["reasons"])
+
+
+def test_generation_fails_closed_when_mirror_sync_receipt_missing(monkeypatch):
+    manifest = {
+        "generation_revision": "abc123full",
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {
+        "collector_v22_epoch_id": "epoch-clean",
+    })
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "abc123")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {})
+
+    freshness = dashboard._generation_freshness_meta(manifest)
+
+    assert freshness["current"] is False
+    assert freshness["stale"] is True
+    assert freshness["qualification_allowed"] is False
+    assert freshness["mirror_sync_receipt_ok"] is False
+    assert freshness["mirror_sync_revision_parity"] == "UNAVAILABLE"

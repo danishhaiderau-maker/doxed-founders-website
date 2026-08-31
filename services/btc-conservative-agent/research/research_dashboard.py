@@ -993,6 +993,8 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         or sync_receipt.get("revision_parity")
         or "UNAVAILABLE"
     ).upper()
+    sync_receipt_ok = sync_receipt.get("ok") is True
+    sync_poll_ok = sync_receipt.get("pollOk", sync_receipt.get("poll_ok"))
     generation_epoch = (manifest.get("fresh_epoch") or {}).get("epoch_id")
     mirror_epoch = (
         session.get("collector_v22_epoch_id")
@@ -1024,6 +1026,16 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         )
     if sync_in_progress:
         reasons.append("Canonical Fly mirror synchronization is in progress")
+    if not sync_receipt_ok:
+        reasons.append(
+            "Canonical Fly mirror synchronization receipt is failed or unavailable"
+        )
+    if sync_poll_ok is False:
+        reasons.append("Canonical Fly mirror synchronization poll failed")
+    if sync_revision_parity != "MATCH":
+        reasons.append(
+            "Canonical Fly mirror synchronization revision parity is not confirmed"
+        )
     if sync_revision_parity == "MISMATCH" or (
         observed_revision
         and mirror_revision
@@ -1034,7 +1046,9 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         )
     sync_current = bool(
         not sync_in_progress
-        and sync_revision_parity != "MISMATCH"
+        and sync_receipt_ok
+        and sync_poll_ok is not False
+        and sync_revision_parity == "MATCH"
         and (
             not observed_revision
             or not mirror_revision
@@ -1048,6 +1062,8 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         "revision_parity": revision_parity,
         "epoch_parity": epoch_parity,
         "mirror_sync_in_progress": sync_in_progress,
+        "mirror_sync_receipt_ok": sync_receipt_ok,
+        "mirror_sync_poll_ok": sync_poll_ok,
         "mirror_sync_revision_parity": sync_revision_parity,
         "observed_source_revision": observed_revision,
         "generation_revision": generation_revision,

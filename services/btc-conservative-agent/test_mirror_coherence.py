@@ -222,5 +222,7 @@ def test_analyzer_uses_bounded_lease_wait_and_short_coherence_retry() -> None:
     source = Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8")
     assert 'ANALYZER_MIRROR_LEASE_WAIT_SEC", "1200"' in source
     assert "with lease.acquire(timeout_seconds=wait_sec)" in source
-    assert "retry_sec = min(60, sleep_sec)" in source
+    assert "_mirror_coherence_retry_delay_seconds(" in source
+    assert 'fallback = min(60, max(1, int(scheduled_delay_seconds)))' in source
+    assert '"canonical sync heartbeat backoff"' in source
     assert 'held_lease=globals().get("_CURRENT_MIRROR_GENERATION_LEASE")' in source
