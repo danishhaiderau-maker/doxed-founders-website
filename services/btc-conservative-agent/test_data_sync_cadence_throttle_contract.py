@@ -151,7 +151,7 @@ def test_low_requested_interval_is_clamped_for_poll_and_post_sync_sleep():
     branch = source[start:end]
     harness = (
         "function Start-Sleep { param([int]$Seconds) $script:observed=$Seconds }; "
-        "$IntervalSec=30; " + cadence + "; $didSync=$true; " + branch +
+        "$IntervalSec=30; " + cadence + "; $sleepSec=$pollSec; $didSync=$true; " + branch +
         "; Write-Output \"$pollSec,$script:observed\""
     )
     completed = subprocess.run(
@@ -178,14 +178,16 @@ def test_default_cadence_is_bounded_to_180_seconds_and_cache_expires_first():
 
 
 def test_ordinary_poll_uses_identity_only_and_full_inventory_is_due_gated():
-    """A 180s poll must not restart the 150s Fly volume scan every cycle."""
+    """Identity polling reads O(1) volume usage and gates full inventory work."""
     source = LOOP_PATH.read_text(encoding="utf-8")
     identity_call = source.index('/api/data-sync/manifest?identity_only=1')
-    due_gate = source.index('$needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision')
+    due_gate = source.index('$needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision -or $forceByGrowth')
     full_call = source.index('-ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")', due_gate)
     assert identity_call < due_gate < full_call
     assert 'reason = "identity_match_before_full_interval"' in source
-    assert 'growthBytes = $null' in source
+    assert '$currentVolumeUsedBytes = [int64]$manifest.volume.used' in source
+    assert '$volumeGrowthBytes -ge $thresholdBytes' in source
+    assert 'growthBytes = $volumeGrowthBytes' in source
     assert 'currentTotalBytes = $null' in source
 
 
