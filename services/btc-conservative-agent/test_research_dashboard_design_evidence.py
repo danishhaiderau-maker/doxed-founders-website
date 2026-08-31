@@ -37,7 +37,7 @@ def test_research_design_api_exposes_signed_definitions_and_truthful_coverage(mo
     assert payload["qualification_allowed"] is False
     assert payload["profitability_calculated"] is False
     assert payload["profitability_status"] == "NOT_CALCULATED_FROM_DEFINITIONS_OR_COVERAGE"
-    assert len(payload["entry_baselines"]) == 5
+    assert len(payload["entry_baselines"]) == 11
     assert all(row["execution_class"] == "RESEARCH_ONLY" for row in payload["entry_baselines"])
     assert all(row["relay_eligible"] is False for row in payload["entry_baselines"])
     assert all(row["places_order"] is False for row in payload["entry_baselines"])
@@ -58,7 +58,7 @@ def test_research_design_api_keeps_definitions_but_marks_missing_generation_unav
     payload = dashboard.app.test_client().get("/api/research-design").get_json()
     assert payload["status"] == "UNAVAILABLE_CURRENT_GENERATION"
     assert payload["reason"] == "REPORT_NOT_IN_CURRENT_GENERATION"
-    assert len(payload["entry_baselines"]) == 5
+    assert len(payload["entry_baselines"]) == 11
     assert payload["regime_feature_coverage"]["status"] == "UNKNOWN_CURRENT_GENERATION"
     assert payload["qualification_allowed"] is False
 

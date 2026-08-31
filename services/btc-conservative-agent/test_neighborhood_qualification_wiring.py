@@ -11,6 +11,12 @@ def _genome(neighborhood_value):
         "regime_diversity": True,
         "no_data_integrity_defects": True,
         "control_benchmark_comparison": True,
+        "purged_walk_forward_pass": True,
+        "sealed_holdout_pass": True,
+        "measured_costs_pass": True,
+        "liquidation_buffer_pass": True,
+        "regime_coverage_pass": True,
+        "baseline_replay_coverage_pass": True,
     }
     if neighborhood_value is not None:
         winner_gates["neighborhood_stability_pass"] = neighborhood_value

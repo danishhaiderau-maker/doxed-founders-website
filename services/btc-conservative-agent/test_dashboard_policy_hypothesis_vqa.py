@@ -27,6 +27,7 @@ def test_dashboard_renders_truthful_hypothesis_receipt():
 
 def test_every_downstream_activity_table_has_a_mobile_scroll_region():
     labels = (
+        "Runtime incident history table",
         "Virtual chase candidates table",
         "Active signals table",
         "Positions table",
