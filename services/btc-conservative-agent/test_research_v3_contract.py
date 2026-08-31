@@ -73,6 +73,20 @@ class ResearchV3ContractTests(unittest.TestCase):
         self.assertIn("minimum_episode_pass", blockers["TOO_SMALL"])
         self.assertIn("sealed_holdout_pass", blockers["INSPECTED"])
 
+    def test_ranking_fails_closed_without_measured_cost_gate(self):
+        passes = {gate: True for gate in REQUIRED_GATES}
+        missing_cost_receipt = {
+            "policy_id": "MISSING_COST_RECEIPT",
+            "sealed_oos_net_usd": 1000,
+            "gates": {**passes, "measured_costs_pass": False},
+        }
+        report = rank_safe_policies([missing_cost_receipt])
+        self.assertIsNone(report["number_one"])
+        self.assertIn(
+            "measured_costs_pass",
+            report["blocked"][0]["ranking_blockers"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

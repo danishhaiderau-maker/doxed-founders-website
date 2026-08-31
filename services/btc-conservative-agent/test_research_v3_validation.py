@@ -8,13 +8,23 @@ from research_v3_validation import (
 )
 
 
-def episode(index, pnl, *, state="FULL_FILL", regime=None):
+def episode(index, pnl, *, state="FULL_FILL", regime=None, measured_costs=True):
+    outcome = {"outcome_state": state, "net_pnl_usd": pnl}
+    if measured_costs and state in {"FULL_FILL", "PARTIAL_FILL", "REALIZED_ZERO_PNL"}:
+        outcome["cost_evidence"] = {
+            "schema": "measured_execution_cost_receipt_v1",
+            "status": "MEASURED",
+            "trading_fees_usd": 0.0,
+            "funding_usd": 0.0,
+            "slippage_usd": 0.0,
+            "source_receipt_ids": [f"cost-{index}"],
+        }
     return {
         "episode_id": f"e-{index}",
         "signal_ts": index * 10_000,
         "required_end_ts": index * 10_000 + 7200,
         "regime": regime or ("BULL" if index % 3 == 0 else "BEAR" if index % 3 == 1 else "SIDEWAYS"),
-        "policy_outcomes": {"p": {"outcome_state": state, "net_pnl_usd": pnl}},
+        "policy_outcomes": {"p": outcome},
     }
 
 
@@ -144,6 +154,58 @@ class V3ValidationTests(unittest.TestCase):
         verified = validate_policy(rows, policy_id="p", starting_equity_usd=1000, max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10, policies_tested=1, conservative_execution=True, neighborhood_stable=True, sealed_holdout=True, liquidation_buffer_verified=True)
         self.assertFalse(unverified["gates"]["liquidation_buffer_pass"])
         self.assertTrue(verified["gates"]["liquidation_buffer_pass"])
+
+    def test_executed_outcome_without_measured_cost_receipt_fails_closed(self):
+        rows = [episode(i, 2) for i in range(100)]
+        rows[17] = episode(17, 2, measured_costs=False)
+        report = validate_policy(
+            rows, policy_id="p", starting_equity_usd=1000,
+            max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10,
+            policies_tested=1, conservative_execution=True,
+            neighborhood_stable=True, sealed_holdout=True,
+            liquidation_buffer_verified=True,
+            purged_walk_forward=validate_purged_walk_forward(rows, policy_id="p"),
+        )
+        self.assertFalse(report["gates"]["measured_costs_pass"])
+        self.assertFalse(report["qualified"])
+        self.assertEqual(
+            report["measured_cost_evidence"]["defects"][0]["episode_id"],
+            "e-17",
+        )
+        self.assertIn(
+            "MEASURED_COST_RECEIPT_MISSING",
+            report["measured_cost_evidence"]["defects"][0]["reasons"],
+        )
+
+    def test_explicit_measured_zero_costs_are_valid_evidence(self):
+        rows = [episode(i, 2) for i in range(100)]
+        report = validate_policy(
+            rows, policy_id="p", starting_equity_usd=1000,
+            max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10,
+            policies_tested=1, conservative_execution=True,
+            neighborhood_stable=True, sealed_holdout=True,
+            liquidation_buffer_verified=True,
+            purged_walk_forward=validate_purged_walk_forward(rows, policy_id="p"),
+        )
+        self.assertTrue(report["gates"]["measured_costs_pass"])
+        self.assertEqual(report["measured_cost_evidence"]["defects"], [])
+
+    def test_partial_fill_requires_all_cost_measurements_and_source(self):
+        rows = [episode(i, None, state="NO_FILL") for i in range(100)]
+        rows[5] = episode(5, 1, state="PARTIAL_FILL")
+        receipt = rows[5]["policy_outcomes"]["p"]["cost_evidence"]
+        receipt.pop("funding_usd")
+        receipt["source_receipt_ids"] = []
+        report = validate_policy(
+            rows, policy_id="p", starting_equity_usd=1000,
+            max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10,
+            policies_tested=1, conservative_execution=True,
+            neighborhood_stable=True, sealed_holdout=True,
+        )
+        reasons = report["measured_cost_evidence"]["defects"][0]["reasons"]
+        self.assertFalse(report["gates"]["measured_costs_pass"])
+        self.assertIn("FUNDING_USD_MEASUREMENT_MISSING", reasons)
+        self.assertIn("MEASURED_COST_SOURCE_RECEIPT_REQUIRED", reasons)
 
 
 if __name__ == "__main__":

@@ -7,9 +7,56 @@ from functools import lru_cache
 from typing import Any, Iterable
 
 from research_v3_risk import drawdown_budget_gate, portfolio_risk_metrics
+from research_v3_sealed_holdout import verify_evaluation_receipt
 
 
 SUPPORTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
+EXECUTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "REALIZED_ZERO_PNL"}
+REQUIRED_MEASURED_COST_FIELDS = ("trading_fees_usd", "funding_usd", "slippage_usd")
+
+
+def _measured_cost_evidence(
+    rows: list[dict[str, Any]], policy_id: str,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Require an attributable measured-cost receipt for every execution.
+
+    A numeric zero is valid only when the receipt explicitly says it was
+    measured.  Missing values are never interpreted as zero for qualification.
+    """
+    defects: list[dict[str, Any]] = []
+    for row in rows:
+        episode_id = str(row.get("episode_id") or "")
+        outcome = (row.get("policy_outcomes") or {}).get(policy_id)
+        if not isinstance(outcome, dict):
+            continue
+        state = str(outcome.get("outcome_state") or "UNSUPPORTED")
+        if state not in EXECUTED_TERMINAL_STATES:
+            continue
+        receipt = outcome.get("cost_evidence")
+        reasons: list[str] = []
+        if not isinstance(receipt, dict):
+            reasons.append("MEASURED_COST_RECEIPT_MISSING")
+        else:
+            if receipt.get("schema") != "measured_execution_cost_receipt_v1":
+                reasons.append("MEASURED_COST_RECEIPT_SCHEMA_INVALID")
+            if receipt.get("status") != "MEASURED":
+                reasons.append("MEASURED_COST_STATUS_REQUIRED")
+            receipt_ids = receipt.get("source_receipt_ids")
+            if not isinstance(receipt_ids, list) or not any(str(value).strip() for value in receipt_ids):
+                reasons.append("MEASURED_COST_SOURCE_RECEIPT_REQUIRED")
+            for field in REQUIRED_MEASURED_COST_FIELDS:
+                value = receipt.get(field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    reasons.append(f"{field.upper()}_MEASUREMENT_MISSING")
+                elif float(value) < 0:
+                    reasons.append(f"{field.upper()}_MEASUREMENT_NEGATIVE")
+        if reasons:
+            defects.append({
+                "episode_id": episode_id,
+                "outcome_state": state,
+                "reasons": reasons,
+            })
+    return not defects, defects
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -247,13 +294,16 @@ def validate_policy(
     policies_tested: int,
     conservative_execution: bool,
     neighborhood_stable: bool,
-    sealed_holdout: bool,
+    sealed_holdout: Any,
     liquidation_buffer_verified: bool = False,
     purged_walk_forward: dict[str, Any] | None = None,
     minimum_episodes: int = 100,
     minimum_regimes: int = 3,
 ) -> dict[str, Any]:
     values, states, missing = _policy_values(episodes, policy_id)
+    measured_costs_pass, cost_evidence_defects = _measured_cost_evidence(
+        episodes, policy_id,
+    )
     risk = portfolio_risk_metrics(values, starting_equity_usd=starting_equity_usd)
     # The opportunity-level EV denominator includes explicit non-executions,
     # but the report must never rename them as realized zero-PnL trades.
@@ -271,6 +321,7 @@ def validate_policy(
         "integrity_pass": not missing,
         "complete_paths_pass": not missing,
         "conservative_execution_pass": bool(conservative_execution),
+        "measured_costs_pass": measured_costs_pass,
         "drawdown_budget_pass": bool(budget["passed"]),
         "cvar_budget_pass": "CVAR95_BUDGET_FAILED" not in budget["reasons"],
         # A complete market path does not prove liquidation safety. Require an
@@ -285,7 +336,11 @@ def validate_policy(
         "multiple_testing_pass": probability >= adjusted_required_probability,
         "regime_coverage_pass": len(regimes) >= int(minimum_regimes),
         "minimum_episode_pass": len(values) >= int(minimum_episodes),
-        "sealed_holdout_pass": bool(sealed_holdout),
+        # A boolean is an assertion, not evidence. Only a content-addressed,
+        # single-use evaluation receipt can satisfy this qualification gate.
+        "sealed_holdout_pass": verify_evaluation_receipt(
+            sealed_holdout, policy_id=policy_id,
+        ),
     }
     return {
         "schema": "safe_policy_validation_v3",
@@ -296,6 +351,13 @@ def validate_policy(
             "AVAILABLE" if values else "INSUFFICIENT_EXECUTION_EVIDENCE"
         ),
         "missing_or_unsupported_episode_ids": missing,
+        "measured_cost_evidence": {
+            "schema": "measured_execution_cost_coverage_v1",
+            "required_fields": list(REQUIRED_MEASURED_COST_FIELDS),
+            "semantics": "EXPLICIT_MEASURED_ZERO_ALLOWED_MISSING_NEVER_DEFAULTED_TO_ZERO",
+            "defects": cost_evidence_defects,
+            "passed": measured_costs_pass,
+        },
         "outcome_states": dict(sorted(states.items())),
         "regimes": sorted(regimes),
         "risk": risk,
@@ -310,6 +372,11 @@ def validate_policy(
             "schema": "purged_walk_forward_validation_v1",
             "passed": False,
             "blockers": ["PURGED_WALK_FORWARD_NOT_SUPPLIED"],
+        },
+        "sealed_holdout": sealed_holdout if isinstance(sealed_holdout, dict) else {
+            "schema": "sealed_holdout_evaluation_v1",
+            "passed": False,
+            "blockers": ["VALID_SEALED_HOLDOUT_RECEIPT_NOT_SUPPLIED"],
         },
         "gates": gates,
         "qualified": all(gates.values()),

@@ -8,6 +8,7 @@ REQUIRED_GATES = (
     "integrity_pass",
     "complete_paths_pass",
     "conservative_execution_pass",
+    "measured_costs_pass",
     "drawdown_budget_pass",
     "cvar_budget_pass",
     "liquidation_buffer_pass",
