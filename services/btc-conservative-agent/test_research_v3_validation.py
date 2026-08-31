@@ -1,6 +1,11 @@
 import unittest
 
-from research_v3_validation import chronological_folds, episode_block_bootstrap, validate_policy
+from research_v3_validation import (
+    chronological_folds,
+    episode_block_bootstrap,
+    validate_policy,
+    validate_purged_walk_forward,
+)
 
 
 def episode(index, pnl, *, state="FULL_FILL", regime=None):
@@ -46,6 +51,66 @@ class V3ValidationTests(unittest.TestCase):
         for fold in folds:
             boundary = fold["validation_start_ts"]
             self.assertTrue(all(row["required_end_ts"] < boundary - 7500 for row in fold["train"]))
+
+    def test_purged_walk_forward_requires_complete_positive_later_folds(self):
+        rows = [episode(i, 1) for i in range(90)]
+        result = validate_purged_walk_forward(rows, policy_id="p")
+        self.assertTrue(result["passed"])
+        self.assertGreaterEqual(result["complete_folds"], 3)
+        self.assertEqual(result["positive_folds"], result["complete_folds"])
+        self.assertEqual(
+            result["policy_selection_semantics"],
+            "FROZEN_BEFORE_VALIDATION_NOT_SELECTED_ON_FOLDS",
+        )
+
+        rows[70] = episode(70, None, state="UNSUPPORTED")
+        incomplete = validate_purged_walk_forward(rows, policy_id="p")
+        self.assertFalse(incomplete["passed"])
+        self.assertTrue(any(
+            "e-70" in fold["missing_or_unsupported_episode_ids"]
+            for fold in incomplete["folds"]
+        ))
+
+    def test_validation_cannot_qualify_without_purged_walk_forward_receipt(self):
+        rows = [episode(i, 2) for i in range(100)]
+        missing = validate_policy(
+            rows, policy_id="p", starting_equity_usd=1000,
+            max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10,
+            policies_tested=1, conservative_execution=True,
+            neighborhood_stable=True, sealed_holdout=True,
+            liquidation_buffer_verified=True,
+        )
+        self.assertFalse(missing["gates"]["purged_walk_forward_pass"])
+        self.assertIn(
+            "PURGED_WALK_FORWARD_NOT_SUPPLIED",
+            missing["purged_walk_forward"]["blockers"],
+        )
+
+        receipt = validate_purged_walk_forward(rows, policy_id="p")
+        supplied = validate_policy(
+            rows, policy_id="p", starting_equity_usd=1000,
+            max_drawdown_usd=100, max_drawdown_pct=20, min_cvar95_usd=-10,
+            policies_tested=1, conservative_execution=True,
+            neighborhood_stable=True, sealed_holdout=True,
+            liquidation_buffer_verified=True,
+            purged_walk_forward=receipt,
+        )
+        self.assertTrue(supplied["gates"]["purged_walk_forward_pass"])
+
+    def test_purged_walk_forward_rejects_duplicate_or_missing_causal_time(self):
+        rows = [episode(i, 1) for i in range(90)]
+        rows[20]["episode_id"] = rows[19]["episode_id"]
+        rows[30].pop("required_end_ts")
+        result = validate_purged_walk_forward(rows, policy_id="p")
+        self.assertFalse(result["passed"])
+        self.assertIn(
+            "INVALID_WALK_FORWARD_CAUSAL_IDENTITIES_OR_TIMESTAMPS",
+            result["blockers"],
+        )
+        self.assertTrue(any(
+            defect.startswith("DUPLICATE_EPISODE_ID:")
+            for defect in result["input_defects"]
+        ))
 
     def test_unsupported_is_not_silently_zero_pnl(self):
         rows = [episode(i, 2) for i in range(100)]

@@ -16,7 +16,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
 from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
-from research_v3_validation import validate_policy
+from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
 
 
@@ -1257,6 +1257,7 @@ def evaluate_protection_screen(
         conservative_execution_ready = bool(oos) and bool(
             prevalidation_states & {"FULL_FILL", "PARTIAL_FILL"}
         ) and prevalidation_states <= {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}
+        walk_forward = validate_purged_walk_forward(rows, policy_id=policy_id)
         validation = validate_policy(
             oos,
             policy_id=policy_id,
@@ -1269,6 +1270,7 @@ def evaluate_protection_screen(
             neighborhood_stable=False,
             sealed_holdout=sealed_holdout,
             liquidation_buffer_verified=False,
+            purged_walk_forward=walk_forward,
         )
         risk = validation["risk"]
         diagnostic_rows = [

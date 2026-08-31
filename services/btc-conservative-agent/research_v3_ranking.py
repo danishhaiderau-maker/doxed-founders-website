@@ -11,6 +11,7 @@ REQUIRED_GATES = (
     "drawdown_budget_pass",
     "cvar_budget_pass",
     "liquidation_buffer_pass",
+    "purged_walk_forward_pass",
     "oos_lcb_positive_pass",
     "neighborhood_stability_pass",
     "multiple_testing_pass",

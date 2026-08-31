@@ -603,6 +603,11 @@ class V3CandidateTests(unittest.TestCase):
             "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
         )
         self.assertFalse(first["ideal_touch_diagnostic"]["qualification_eligible"])
+        self.assertFalse(first["gates"]["purged_walk_forward_pass"])
+        self.assertIn(
+            "INSUFFICIENT_COMPLETE_PURGED_FOLDS",
+            first["validation"]["purged_walk_forward"]["blockers"],
+        )
 
     def test_conservative_partial_fill_scales_execution_and_is_not_full(self):
         report = evaluate_protection_screen([conservative_source(visible_qty=0.25)])

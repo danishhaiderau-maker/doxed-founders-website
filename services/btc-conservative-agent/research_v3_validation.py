@@ -50,6 +50,124 @@ def chronological_folds(episodes: Iterable[dict[str, Any]], *, outer_folds: int 
     return folds
 
 
+def validate_purged_walk_forward(
+    episodes: list[dict[str, Any]],
+    *,
+    policy_id: str,
+    outer_folds: int = 5,
+    purge_sec: float = 7200,
+    embargo_sec: float = 300,
+    minimum_valid_folds: int = 3,
+) -> dict[str, Any]:
+    """Evaluate a frozen policy on purged chronological validation folds.
+
+    This is intentionally a qualification gate, not a policy selector.  The
+    supplied ``policy_id`` must already be frozen; each fold evaluates only its
+    later validation block and never uses it to choose or alter the policy.
+    Missing/unsupported outcomes invalidate their fold instead of becoming
+    zero-PnL observations.
+    """
+    input_defects = []
+    seen_episode_ids: set[str] = set()
+    for row in episodes:
+        episode_id = str(row.get("episode_id") or "").strip()
+        try:
+            signal_ts = float(row.get("signal_ts"))
+        except (TypeError, ValueError):
+            signal_ts = None
+        try:
+            required_end_ts = float(row.get("required_end_ts"))
+        except (TypeError, ValueError):
+            required_end_ts = None
+        if not episode_id:
+            input_defects.append("MISSING_EPISODE_ID")
+        elif episode_id in seen_episode_ids:
+            input_defects.append(f"DUPLICATE_EPISODE_ID:{episode_id}")
+        else:
+            seen_episode_ids.add(episode_id)
+        if signal_ts is None or signal_ts < 0:
+            input_defects.append(f"INVALID_SIGNAL_TS:{episode_id or 'UNKNOWN'}")
+        if (
+            required_end_ts is None
+            or required_end_ts < 0
+            or (signal_ts is not None and required_end_ts < signal_ts)
+        ):
+            input_defects.append(f"INVALID_REQUIRED_END_TS:{episode_id or 'UNKNOWN'}")
+
+    folds = chronological_folds(
+        episodes,
+        outer_folds=outer_folds,
+        purge_sec=purge_sec,
+        embargo_sec=embargo_sec,
+    )
+    results = []
+    pooled_values: list[float] = []
+    for fold in folds:
+        values, states, missing = _policy_values(fold["validation"], policy_id)
+        complete = bool(fold["train"]) and bool(values) and not missing
+        expectancy = (sum(values) / len(values)) if complete else None
+        if complete:
+            pooled_values.extend(values)
+        results.append({
+            "fold": fold["fold"],
+            "train_episodes": len(fold["train"]),
+            "validation_episodes": len(fold["validation"]),
+            "validation_episodes_scored": len(values),
+            "validation_outcome_states": dict(sorted(states.items())),
+            "missing_or_unsupported_episode_ids": missing,
+            "expectancy_usd_per_opportunity": (
+                None if expectancy is None else round(expectancy, 8)
+            ),
+            "complete": complete,
+            "positive_expectancy": bool(expectancy is not None and expectancy > 0),
+        })
+    complete_results = [row for row in results if row["complete"]]
+    positive_results = [row for row in complete_results if row["positive_expectancy"]]
+    pooled_expectancy = (
+        sum(pooled_values) / len(pooled_values) if pooled_values else None
+    )
+    required = max(1, int(minimum_valid_folds))
+    passed = bool(
+        not input_defects
+        and len(complete_results) >= required
+        and len(complete_results) == len(results)
+        and len(positive_results) == len(complete_results)
+        and pooled_expectancy is not None
+        and pooled_expectancy > 0
+    )
+    blockers = []
+    if input_defects:
+        blockers.append("INVALID_WALK_FORWARD_CAUSAL_IDENTITIES_OR_TIMESTAMPS")
+    if len(complete_results) < required:
+        blockers.append("INSUFFICIENT_COMPLETE_PURGED_FOLDS")
+    if len(complete_results) != len(results):
+        blockers.append("INCOMPLETE_PURGED_FOLD_EVIDENCE")
+    if complete_results and len(positive_results) != len(complete_results):
+        blockers.append("NON_POSITIVE_PURGED_FOLD")
+    if pooled_expectancy is None or pooled_expectancy <= 0:
+        blockers.append("NON_POSITIVE_POOLED_WALK_FORWARD_EXPECTANCY")
+    return {
+        "schema": "purged_walk_forward_validation_v1",
+        "policy_id": policy_id,
+        "policy_selection_semantics": "FROZEN_BEFORE_VALIDATION_NOT_SELECTED_ON_FOLDS",
+        "outer_folds_requested": int(outer_folds),
+        "folds_materialized": len(folds),
+        "complete_folds": len(complete_results),
+        "positive_folds": len(positive_results),
+        "minimum_valid_folds": required,
+        "purge_sec": float(purge_sec),
+        "embargo_sec": float(embargo_sec),
+        "pooled_validation_episodes": len(pooled_values),
+        "pooled_expectancy_usd_per_opportunity": (
+            None if pooled_expectancy is None else round(pooled_expectancy, 8)
+        ),
+        "folds": results,
+        "input_defects": sorted(set(input_defects)),
+        "blockers": blockers,
+        "passed": passed,
+    }
+
+
 def _policy_values(rows: list[dict[str, Any]], policy_id: str) -> tuple[list[float], Counter, list[str]]:
     values, states, missing = [], Counter(), []
     for row in rows:
@@ -131,6 +249,7 @@ def validate_policy(
     neighborhood_stable: bool,
     sealed_holdout: bool,
     liquidation_buffer_verified: bool = False,
+    purged_walk_forward: dict[str, Any] | None = None,
     minimum_episodes: int = 100,
     minimum_regimes: int = 3,
 ) -> dict[str, Any]:
@@ -157,6 +276,10 @@ def validate_policy(
         # A complete market path does not prove liquidation safety. Require an
         # explicit leverage/margin/liquidation-distance receipt.
         "liquidation_buffer_pass": bool(liquidation_buffer_verified),
+        "purged_walk_forward_pass": bool(
+            isinstance(purged_walk_forward, dict)
+            and purged_walk_forward.get("passed") is True
+        ),
         "oos_lcb_positive_pass": bool(bootstrap.get("mean_lcb95") is not None and bootstrap["mean_lcb95"] > 0),
         "neighborhood_stability_pass": bool(neighborhood_stable),
         "multiple_testing_pass": probability >= adjusted_required_probability,
@@ -182,6 +305,11 @@ def validate_policy(
             "policies_tested": int(policies_tested),
             "method": "BONFERRONI_FAMILYWISE_BOOTSTRAP_SCREEN",
             "required_probability_positive": round(adjusted_required_probability, 10),
+        },
+        "purged_walk_forward": purged_walk_forward or {
+            "schema": "purged_walk_forward_validation_v1",
+            "passed": False,
+            "blockers": ["PURGED_WALK_FORWARD_NOT_SUPPLIED"],
         },
         "gates": gates,
         "qualified": all(gates.values()),
