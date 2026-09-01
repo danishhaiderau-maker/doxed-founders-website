@@ -7,6 +7,7 @@ does not import the trading runtime or accept credentials in its request.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -15,15 +16,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lifecycle_bundles import materialize_ready_bundles
+from lifecycle_bundles import (
+    DEFAULT_MAX_SCAN_BYTES, DEFAULT_MAX_SCAN_ROWS, materialize_ready_bundles,
+)
 
 
 REQUEST_SCHEMA = "lifecycle_bundle_worker_request_v1"
 RESULT_SCHEMA = "lifecycle_bundle_worker_result_v1"
 MAX_BUNDLES_PER_RUN = 25
+MAX_SCAN_BYTES_PER_RUN = 32 * 1024 * 1024
+MAX_SCAN_ROWS_PER_RUN = 50_000
+MAX_RUNTIME_SEC = 120.0
 _ALLOWED_REQUEST_FIELDS = frozenset({
     "schema", "nonce", "data_root", "work_root", "source_revision",
-    "launched_unix", "now", "max_bundles",
+    "launched_unix", "now", "max_bundles", "max_scan_bytes",
+    "max_scan_rows", "max_runtime_sec",
 })
 _SENSITIVE_MARKERS = ("secret", "token", "password", "credential", "api_key", "private_key")
 
@@ -59,7 +66,8 @@ def _load_request(request_path: Path, result_path: Path, nonce: str) -> dict[str
         raise ValueError("WORKER_PATH_OUTSIDE_WORK_ROOT")
     if request_lexical.name != f"bundle-request-{nonce}.json" or result_lexical.name != f"bundle-result-{nonce}.json":
         raise ValueError("WORKER_PATH_NOT_NONCE_BOUND")
-    payload = json.loads(request_resolved.read_text(encoding="utf-8"))
+    request_bytes = request_resolved.read_bytes()
+    payload = json.loads(request_bytes.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("WORKER_REQUEST_NOT_OBJECT")
     if payload.get("schema") != REQUEST_SCHEMA or payload.get("nonce") != nonce:
@@ -91,9 +99,35 @@ def _load_request(request_path: Path, result_path: Path, nonce: str) -> dict[str
             raise ValueError("NOW_INVALID") from exc
         if now <= 0:
             raise ValueError("NOW_INVALID")
+    limits = (
+        ("max_scan_bytes", DEFAULT_MAX_SCAN_BYTES, 1, MAX_SCAN_BYTES_PER_RUN),
+        ("max_scan_rows", DEFAULT_MAX_SCAN_ROWS, 1, MAX_SCAN_ROWS_PER_RUN),
+    )
+    for field, default, minimum, upper in limits:
+        value = payload.get(field, default)
+        if isinstance(value, bool):
+            raise ValueError(f"{field.upper()}_INVALID")
+        try:
+            value = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field.upper()}_INVALID") from exc
+        if value < minimum or value > upper:
+            raise ValueError(f"{field.upper()}_OUT_OF_RANGE")
+        payload[f"_{field}"] = value
+    runtime = payload.get("max_runtime_sec", 60.0)
+    if isinstance(runtime, bool):
+        raise ValueError("MAX_RUNTIME_SEC_INVALID")
+    try:
+        runtime = float(runtime)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("MAX_RUNTIME_SEC_INVALID") from exc
+    if runtime < 1.0 or runtime > MAX_RUNTIME_SEC:
+        raise ValueError("MAX_RUNTIME_SEC_OUT_OF_RANGE")
     payload["_data_root"] = data_root
     payload["_max_bundles"] = maximum
     payload["_now"] = now
+    payload["_max_runtime_sec"] = runtime
+    payload["_request_sha256"] = hashlib.sha256(request_bytes).hexdigest()
     return payload
 
 
@@ -123,6 +157,9 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         materialization = materialize_ready_bundles(
             request["_data_root"], now=request["_now"],
             max_bundles=request["_max_bundles"],
+            max_scan_bytes=request["_max_scan_bytes"],
+            max_scan_rows=request["_max_scan_rows"],
+            max_runtime_sec=request["_max_runtime_sec"],
         )
         payload = {
             "schema": RESULT_SCHEMA,
@@ -133,9 +170,13 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             "generated_unix": time.time(),
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "requested_max_bundles": request["_max_bundles"],
+            "request_sha256": request["_request_sha256"],
             "materialization": materialization,
             "source_cleanup_authorized": False,
         }
+        payload["result_sha256"] = hashlib.sha256(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
         temporary = result_path.with_name(f"{result_path.name}.{uuid.uuid4().hex}.tmp")
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")

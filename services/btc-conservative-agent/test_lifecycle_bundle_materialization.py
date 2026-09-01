@@ -172,6 +172,30 @@ def test_market_segment_is_copied_and_corruption_is_detected():
     assert any(item.startswith("FILE_SHA256_MISMATCH") for item in report["defects"])
 
 
+def test_singular_post_exit_segment_reference_is_never_omitted():
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        envelope = '{"end_ts":2,"rows":[{"ask":101,"bid":100,"ts":1}],"start_ts":1}'
+        import hashlib
+        digest = hashlib.sha256(envelope.encode("utf-8")).hexdigest()
+        segment = root / "v3" / "market_segments" / digest[:2] / f"{digest}.json"
+        segment.parent.mkdir(parents=True)
+        segment.write_text(envelope, encoding="utf-8")
+        result = materialize_bundle(root, key, [row(
+            key, "qualification-horizon", now,
+            market_segment_ref={
+                "relative_path": segment.relative_to(root).as_posix(),
+                "sha256": digest,
+            },
+        )], now=now)
+        bundled = Path(result["path"]) / "market_segments" / digest[:2] / segment.name
+        roles = {item["role"] for item in result["manifest"]["files"]}
+        assert bundled.is_file()
+        assert "MARKET_SEGMENT" in roles
+
+
 def test_truncated_source_ledger_fails_closed():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "v3" / "ledgers" / "lifecycle.jsonl"

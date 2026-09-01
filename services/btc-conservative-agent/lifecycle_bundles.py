@@ -10,9 +10,11 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import time
 import uuid
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,11 @@ from research_v3_contract import LEDGER_NAMES, canonical_json
 BUNDLE_SCHEMA = "research_lifecycle_bundle_v1"
 COMPLETION_SCHEMA = "lifecycle_bundle_completion_v1"
 ENTRY_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
+INDEX_SCHEMA = "lifecycle_bundle_incremental_index_v1"
+DEFAULT_MAX_SCAN_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_SCAN_ROWS = 10_000
+MAX_JSONL_RECORD_BYTES = 2 * 1024 * 1024
+_SOURCE_ANCHOR_BYTES = 4096
 
 
 def _present(value: Any) -> bool:
@@ -145,6 +152,310 @@ def collect_lifecycle_rows(root: str | Path) -> dict[LifecycleKey, list[dict[str
     return dict(grouped)
 
 
+def _source_anchor(path: Path, end_offset: int) -> str:
+    """Hash the already-indexed tail so replacement/truncation fails closed."""
+    if end_offset <= 0:
+        return hashlib.sha256(b"").hexdigest()
+    start = max(0, int(end_offset) - _SOURCE_ANCHOR_BYTES)
+    with path.open("rb") as handle:
+        handle.seek(start)
+        material = handle.read(int(end_offset) - start)
+    if len(material) != int(end_offset) - start:
+        raise ValueError(f"SOURCE_LEDGER_TRUNCATED:{path.name}")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _open_incremental_index(root: Path) -> sqlite3.Connection:
+    index_dir = root / "v3" / "lifecycle_bundle_index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    database = index_dir / "lifecycle_index.sqlite3"
+    connection = sqlite3.connect(str(database), timeout=5.0)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS index_meta (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema TEXT NOT NULL,
+                next_ledger INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS ledger_cursor (
+                ledger TEXT PRIMARY KEY,
+                source_dev INTEGER NOT NULL,
+                source_ino INTEGER NOT NULL,
+                byte_offset INTEGER NOT NULL,
+                source_anchor_sha256 TEXT NOT NULL,
+                source_mtime_ns INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS lifecycle_event (
+                ledger TEXT NOT NULL,
+                byte_offset INTEGER NOT NULL,
+                row_sha256 TEXT NOT NULL,
+                collection_epoch_id TEXT NOT NULL,
+                episode_id TEXT NOT NULL,
+                policy_signature TEXT NOT NULL,
+                research_lane TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                row_length INTEGER NOT NULL,
+                PRIMARY KEY (ledger, byte_offset)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS lifecycle_event_record_identity
+            ON lifecycle_event (
+                collection_epoch_id, episode_id, policy_signature,
+                research_lane, ledger, record_id
+            ) WHERE record_id <> '';
+            CREATE TABLE IF NOT EXISTS dirty_lifecycle (
+                collection_epoch_id TEXT NOT NULL,
+                episode_id TEXT NOT NULL,
+                policy_signature TEXT NOT NULL,
+                research_lane TEXT NOT NULL,
+                PRIMARY KEY (
+                    collection_epoch_id, episode_id,
+                    policy_signature, research_lane
+                )
+            );
+        """)
+        meta_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(index_meta)")
+        }
+        if "next_ledger" not in meta_columns:
+            connection.execute(
+                "ALTER TABLE index_meta ADD COLUMN next_ledger INTEGER NOT NULL DEFAULT 0"
+            )
+        row = connection.execute("SELECT schema FROM index_meta WHERE singleton = 1").fetchone()
+        if row is None:
+            connection.execute(
+                "INSERT INTO index_meta(singleton, schema) VALUES (1, ?)",
+                (INDEX_SCHEMA,),
+            )
+            connection.commit()
+        elif row["schema"] != INDEX_SCHEMA:
+            raise ValueError("LIFECYCLE_INDEX_SCHEMA_MISMATCH")
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
+@contextmanager
+def _exclusive_index_lock(root: Path):
+    """One portable non-blocking owner for index/cursor mutation."""
+    lock_dir = root / "v3" / "lifecycle_bundle_index"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "materializer.lock"
+    handle = lock_path.open("a+b")
+    try:
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise ValueError("LIFECYCLE_INDEX_ALREADY_OWNED") from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise ValueError("LIFECYCLE_INDEX_ALREADY_OWNED") from exc
+        yield
+    finally:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
+def _validate_source_identity(path: Path, cursor: sqlite3.Row | None) -> os.stat_result:
+    stat = path.stat()
+    if cursor is None:
+        return stat
+    offset = int(cursor["byte_offset"])
+    if stat.st_size < offset:
+        raise ValueError(f"SOURCE_LEDGER_TRUNCATED:{path.name}")
+    if int(stat.st_dev) != int(cursor["source_dev"]) or int(stat.st_ino) != int(cursor["source_ino"]):
+        raise ValueError(f"SOURCE_LEDGER_ROTATED:{path.name}")
+    if _source_anchor(path, offset) != cursor["source_anchor_sha256"]:
+        raise ValueError(f"SOURCE_LEDGER_PREFIX_CHANGED:{path.name}")
+    return stat
+
+
+def _index_ledger_chunk(
+    connection: sqlite3.Connection, path: Path, ledger: str, *,
+    max_bytes: int, max_rows: int,
+) -> dict[str, int | bool]:
+    cursor = connection.execute(
+        "SELECT * FROM ledger_cursor WHERE ledger = ?", (ledger,)
+    ).fetchone()
+    stat = _validate_source_identity(path, cursor)
+    offset = int(cursor["byte_offset"]) if cursor is not None else 0
+    available = int(stat.st_size) - offset
+    if available <= 0:
+        return {"bytes_indexed": 0, "rows_indexed": 0, "rows_scanned": 0, "caught_up": True}
+    read_size = min(available, max(1, int(max_bytes)))
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        material = handle.read(read_size)
+    # Never index a partial append. If the bounded read split a record, retain
+    # it for the next run; a complete source file ending without LF is corrupt.
+    last_newline = material.rfind(b"\n")
+    if last_newline < 0:
+        if available <= read_size:
+            raise ValueError(f"TRUNCATED_JSONL_LINE:{path.name}")
+        if len(material) >= MAX_JSONL_RECORD_BYTES:
+            raise ValueError(f"JSONL_RECORD_TOO_LARGE:{path.name}")
+        raise ValueError(f"SCAN_BYTE_LIMIT_SPLITS_RECORD:{path.name}")
+    complete = material[:last_newline + 1]
+    raw_lines = complete.splitlines(keepends=True)
+    if len(raw_lines) > max_rows:
+        raw_lines = raw_lines[:max_rows]
+        complete = b"".join(raw_lines)
+    position = offset
+    indexed = 0
+    with connection:
+        for line_no, raw in enumerate(raw_lines, 1):
+            if len(raw) > MAX_JSONL_RECORD_BYTES:
+                raise ValueError(f"JSONL_RECORD_TOO_LARGE:{path.name}:{line_no}")
+            try:
+                row = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"INVALID_JSONL_ROW:{path.name}:{position}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"NON_OBJECT_JSONL_ROW:{path.name}:{position}")
+            next_position = position + len(raw)
+            try:
+                key = lifecycle_key(row)
+            except ValueError:
+                position = next_position
+                continue
+            material_row = dict(row)
+            material_row.setdefault("ledger", ledger)
+            record_id = str(material_row.get("record_id") or "")
+            try:
+                connection.execute("""
+                    INSERT INTO lifecycle_event(
+                        ledger, byte_offset, row_sha256, collection_epoch_id,
+                        episode_id, policy_signature, research_lane, record_id, row_length
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ledger, position, hashlib.sha256(raw).hexdigest(),
+                    key.collection_epoch_id, key.episode_id, key.policy_signature,
+                    key.research_lane, record_id, len(raw),
+                ))
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    f"DUPLICATE_LIFECYCLE_RECORD:{ledger}:{record_id or position}"
+                ) from exc
+            connection.execute(
+                "INSERT OR IGNORE INTO dirty_lifecycle VALUES (?, ?, ?, ?)",
+                (key.collection_epoch_id, key.episode_id, key.policy_signature, key.research_lane),
+            )
+            indexed += 1
+            position = next_position
+        # Sparse rows still advance the source cursor. The cursor and indexed
+        # events commit together, so a crash cannot acknowledge unseen bytes.
+        consumed = len(complete)
+        position = offset + consumed
+        connection.execute("""
+            INSERT INTO ledger_cursor(
+                ledger, source_dev, source_ino, byte_offset,
+                source_anchor_sha256, source_mtime_ns
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(ledger) DO UPDATE SET
+                source_dev=excluded.source_dev,
+                source_ino=excluded.source_ino,
+                byte_offset=excluded.byte_offset,
+                source_anchor_sha256=excluded.source_anchor_sha256,
+                source_mtime_ns=excluded.source_mtime_ns
+        """, (
+            ledger, int(stat.st_dev), int(stat.st_ino), position,
+            _source_anchor(path, position), int(stat.st_mtime_ns),
+        ))
+    return {
+        "bytes_indexed": position - offset,
+        "rows_indexed": indexed,
+        "rows_scanned": len(raw_lines),
+        "caught_up": position >= int(stat.st_size),
+    }
+
+
+def _dirty_lifecycle_rows(
+    connection: sqlite3.Connection, root: Path, *, maximum: int,
+    max_events_per_lifecycle: int = 100_000,
+    max_bytes_per_lifecycle: int = 64 * 1024 * 1024,
+) -> list[tuple[LifecycleKey, list[dict[str, Any]]]]:
+    keys = connection.execute("""
+        SELECT * FROM dirty_lifecycle
+        ORDER BY collection_epoch_id, episode_id, policy_signature, research_lane
+        LIMIT ?
+    """, (max(1, int(maximum)),)).fetchall()
+    result = []
+    for item in keys:
+        key = LifecycleKey(
+            item["collection_epoch_id"], item["episode_id"],
+            item["policy_signature"], item["research_lane"],
+        )
+        indexed = connection.execute("""
+            SELECT ledger, byte_offset, row_length, row_sha256 FROM lifecycle_event
+            WHERE collection_epoch_id = ? AND episode_id = ?
+              AND policy_signature = ? AND research_lane = ?
+            ORDER BY ledger, byte_offset
+        """, (
+            key.collection_epoch_id, key.episode_id,
+            key.policy_signature, key.research_lane,
+        )).fetchall()
+        total_bytes = sum(int(row["row_length"]) for row in indexed)
+        if len(indexed) > max_events_per_lifecycle or total_bytes > max_bytes_per_lifecycle:
+            raise ValueError(f"LIFECYCLE_INDEX_RESOURCE_LIMIT:{key.identity_id}")
+        rows = []
+        handles: dict[str, Any] = {}
+        try:
+            for row in indexed:
+                ledger = str(row["ledger"])
+                handle = handles.get(ledger)
+                if handle is None:
+                    handle = (root / "v3" / "ledgers" / f"{ledger}.jsonl").open("rb")
+                    handles[ledger] = handle
+                handle.seek(int(row["byte_offset"]))
+                raw = handle.read(int(row["row_length"]))
+                if len(raw) != int(row["row_length"]) or hashlib.sha256(raw).hexdigest() != row["row_sha256"]:
+                    raise ValueError(f"INDEXED_SOURCE_ROW_CHANGED:{ledger}:{row['byte_offset']}")
+                material = json.loads(raw.decode("utf-8"))
+                if not isinstance(material, dict):
+                    raise ValueError(f"INDEXED_SOURCE_ROW_INVALID:{ledger}:{row['byte_offset']}")
+                material.setdefault("ledger", ledger)
+                rows.append(material)
+        finally:
+            for handle in handles.values():
+                handle.close()
+        result.append((key, rows))
+    return result
+
+
+def _clear_dirty(connection: sqlite3.Connection, key: LifecycleKey) -> None:
+    with connection:
+        connection.execute("""
+            DELETE FROM dirty_lifecycle
+            WHERE collection_epoch_id = ? AND episode_id = ?
+              AND policy_signature = ? AND research_lane = ?
+        """, (
+            key.collection_epoch_id, key.episode_id,
+            key.policy_signature, key.research_lane,
+        ))
+
+
 def classify_completion(
     rows: Iterable[dict[str, Any]], *, now: float | None = None,
     lifecycle_horizon_sec: float = 7200.0, reconciliation_allowance_sec: float = 180.0,
@@ -208,9 +519,18 @@ def _referenced_market_segments(root: Path, rows: Iterable[dict[str, Any]]) -> l
     paths: set[Path] = set()
     for row in rows:
         for field, value in row.items():
-            if not (str(field).endswith("segment_refs") and isinstance(value, list)):
+            field_name = str(field)
+            if field_name.endswith("segment_refs") and isinstance(value, list):
+                references = value
+            elif field_name.endswith("segment_ref") and isinstance(value, dict):
+                # Qualification-horizon writers publish one content-addressed
+                # POST_EXIT_PATH.  Treat the singular reference exactly like
+                # the existing entry/exit reference arrays so the immutable
+                # bundle cannot omit the evidence that proved completion.
+                references = [value]
+            else:
                 continue
-            for ref in value:
+            for ref in references:
                 if not isinstance(ref, dict):
                     continue
                 relative = str(ref.get("relative_path") or "")
@@ -443,19 +763,84 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
     return {"passed": not defects, "defects": sorted(set(defects)), "manifest": manifest}
 
 
-def materialize_ready_bundles(root: str | Path, *, now: float | None = None, max_bundles: int = 25) -> dict[str, Any]:
+def materialize_ready_bundles(
+    root: str | Path, *, now: float | None = None, max_bundles: int = 25,
+    max_scan_bytes: int = DEFAULT_MAX_SCAN_BYTES,
+    max_scan_rows: int = DEFAULT_MAX_SCAN_ROWS,
+    max_runtime_sec: float = 60.0,
+) -> dict[str, Any]:
+    """Incrementally index append-only ledgers and inspect only dirty lives.
+
+    The durable SQLite cursor and indexed events share transactions.  Late
+    events mark their lifecycle dirty again and therefore create a superseding
+    content-addressed bundle.  Source ledgers and prior bundles are untouched.
+    """
+    root = Path(root).resolve()
+    bundle_limit = max(1, min(int(max_bundles), 100))
+    byte_limit = max(1, min(int(max_scan_bytes), 64 * 1024 * 1024))
+    row_limit = max(1, min(int(max_scan_rows), 100_000))
+    runtime_limit = max(1.0, min(float(max_runtime_sec), 300.0))
+    started = time.monotonic()
+    remaining_bytes = byte_limit
+    remaining_rows = row_limit
+    scan_receipts: dict[str, Any] = {}
     results = []
-    grouped = collect_lifecycle_rows(root)
-    for key in sorted(grouped):
-        result = materialize_bundle(root, key, grouped[key], now=now)
-        if result.get("written") or result.get("duplicate"):
-            results.append(result)
-        if len(results) >= max(1, min(int(max_bundles), 100)):
-            break
+    with _exclusive_index_lock(root):
+        connection = _open_incremental_index(root)
+        try:
+            ledger_dir = root / "v3" / "ledgers"
+            next_ledger = int(connection.execute(
+                "SELECT next_ledger FROM index_meta WHERE singleton = 1"
+            ).fetchone()[0]) % len(LEDGER_NAMES)
+            ledger_order = tuple(LEDGER_NAMES[next_ledger:]) + tuple(LEDGER_NAMES[:next_ledger])
+            for ledger in ledger_order:
+                path = ledger_dir / f"{ledger}.jsonl"
+                if not path.exists():
+                    continue
+                if remaining_bytes <= 0 or remaining_rows <= 0 or time.monotonic() - started >= runtime_limit:
+                    break
+                receipt = _index_ledger_chunk(
+                    connection, path, ledger,
+                    max_bytes=remaining_bytes, max_rows=remaining_rows,
+                )
+                scan_receipts[ledger] = receipt
+                remaining_bytes -= int(receipt["bytes_indexed"])
+                remaining_rows -= int(receipt["rows_scanned"])
+                with connection:
+                    connection.execute(
+                        "UPDATE index_meta SET next_ledger = ? WHERE singleton = 1",
+                        ((LEDGER_NAMES.index(ledger) + 1) % len(LEDGER_NAMES),),
+                    )
+            dirty = _dirty_lifecycle_rows(connection, root, maximum=bundle_limit)
+            for key, rows in dirty:
+                if time.monotonic() - started >= runtime_limit:
+                    break
+                result = materialize_bundle(root, key, rows, now=now)
+                # Evaluation is complete for this exact indexed event set even if
+                # it is not mature. Any later append re-dirties the lifecycle.
+                _clear_dirty(connection, key)
+                if result.get("written") or result.get("duplicate"):
+                    results.append(result)
+        finally:
+            pending_dirty = int(connection.execute(
+                "SELECT COUNT(*) FROM dirty_lifecycle"
+            ).fetchone()[0])
+            connection.close()
     return {
         "schema": "lifecycle_bundle_materialization_result_v1",
-        "candidate_count": len(grouped),
+        "index_schema": INDEX_SCHEMA,
+        "candidate_count": len(dirty),
         "materialized_or_verified": len(results),
         "bundles": results,
+        "scan": {
+            "ledgers": scan_receipts,
+            "bytes_indexed": byte_limit - remaining_bytes,
+            "rows_scanned": row_limit - remaining_rows,
+            "byte_limit": byte_limit,
+            "row_limit": row_limit,
+            "runtime_limit_sec": runtime_limit,
+            "pending_dirty_lifecycles": pending_dirty,
+            "bounded": True,
+        },
         "source_cleanup_authorized": False,
     }

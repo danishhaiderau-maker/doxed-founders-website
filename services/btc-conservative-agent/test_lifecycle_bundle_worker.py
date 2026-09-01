@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -41,11 +42,21 @@ def test_worker_materializes_with_nonce_bound_atomic_result(tmp_path, monkeypatc
     ))
     assert worker.run(request, result, nonce) == 0
     receipt = json.loads(result.read_text(encoding="utf-8"))
-    assert calls == [((root.resolve(),), {"now": 100.0, "max_bundles": 3})]
+    assert calls == [((root.resolve(),), {
+        "now": 100.0, "max_bundles": 3,
+        "max_scan_bytes": worker.DEFAULT_MAX_SCAN_BYTES,
+        "max_scan_rows": worker.DEFAULT_MAX_SCAN_ROWS,
+        "max_runtime_sec": 60.0,
+    })]
     assert receipt["schema"] == worker.RESULT_SCHEMA
     assert receipt["nonce"] == nonce
     assert receipt["source_revision"] == "a" * 40
     assert receipt["requested_max_bundles"] == 3
+    assert receipt["request_sha256"] == hashlib.sha256(request.read_bytes()).hexdigest()
+    supplied = receipt.pop("result_sha256")
+    assert supplied == hashlib.sha256(
+        json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
     assert receipt["source_cleanup_authorized"] is False
     assert not list(result.parent.glob("*.tmp"))
 
@@ -93,6 +104,9 @@ def test_worker_rejects_credentials_unknown_fields_and_unbounded_work(tmp_path, 
         {"max_bundles": 0},
         {"max_bundles": worker.MAX_BUNDLES_PER_RUN + 1},
         {"max_bundles": True},
+        {"max_scan_bytes": worker.MAX_SCAN_BYTES_PER_RUN + 1},
+        {"max_scan_rows": worker.MAX_SCAN_ROWS_PER_RUN + 1},
+        {"max_runtime_sec": worker.MAX_RUNTIME_SEC + 1},
     ), 5):
         nonce = format(index, "x") * 32
         _, request, result = _request(tmp_path / str(index), nonce, **updates)
