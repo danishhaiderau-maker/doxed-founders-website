@@ -35882,6 +35882,7 @@ def status():
         "process_alive": process_alive,
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
+        "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
@@ -37912,6 +37913,112 @@ def _lifecycle_pipeline_runtime_status() -> dict:
         }
 
 
+def _lifecycle_artifact_counts(now: float, maximum_entries: int = 4096) -> dict:
+    """Count lifecycle artifacts with fixed traversal and no content reads."""
+    root = _data_sync_runtime_root() / "v3"
+    specifications = {
+        "transfer_bundles": (root / "lifecycle_transfer_bundles", "transfer-", True),
+        "completion_bundles": (root / "lifecycle_bundles", "lifecycle-", True),
+        "acks": (_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", "lifecycle-", False),
+    }
+    result = {}
+    for label, (parent, prefix, nested) in specifications.items():
+        count = 0
+        newest = 0.0
+        inspected = 0
+        truncated = False
+        try:
+            containers = []
+            if parent.is_dir():
+                with os.scandir(parent) as entries:
+                    for index, entry in enumerate(entries):
+                        if index >= 256:
+                            truncated = True
+                            break
+                        containers.append(Path(entry.path))
+            candidates = (
+                (item for bucket in containers if bucket.is_dir() for item in bucket.iterdir())
+                if nested else iter(containers)
+            )
+            for item in candidates:
+                inspected += 1
+                if inspected > maximum_entries:
+                    truncated = True
+                    break
+                name = item.name
+                valid = (
+                    item.is_dir() and name.startswith(prefix)
+                    if nested else item.is_file() and name.startswith(prefix) and name.endswith(".json")
+                )
+                if not valid:
+                    continue
+                count += 1
+                newest = max(newest, float(item.stat().st_mtime))
+        except OSError:
+            truncated = True
+        result[label] = {
+            "count": count,
+            "newest_age_sec": max(0.0, now - newest) if newest else None,
+            "scan_truncated": truncated,
+        }
+    return result
+
+
+def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
+    """Return bounded lifecycle telemetry without identifiers or proof material."""
+    current = float(now or time.time())
+    internal = _lifecycle_pipeline_runtime_status()
+    last = internal.get("last_result") if isinstance(internal.get("last_result"), dict) else {}
+    failure = internal.get("last_worker_failure") if isinstance(internal.get("last_worker_failure"), dict) else {}
+    next_run = internal.get("next_run_unix")
+    last_success = internal.get("last_success_unix")
+    runtime_revision = str(internal.get("source_revision") or "")
+    exact_revision = str(_runtime_git_rev_exact() or "")
+    overlap_raw = str(internal.get("overlap_code") or "")[:160]
+    overlap_code = (
+        overlap_raw
+        if re.fullmatch(r"[A-Z0-9_:,.-]{1,160}", overlap_raw)
+        else "OVERLAP_ACTIVE_REDACTED" if overlap_raw else None
+    )
+    safe_counts = lambda value: {
+        str(key)[:96]: max(0, int(count))
+        for key, count in list((value or {}).items())[:32]
+        if re.fullmatch(r"[A-Z0-9_:.-]{1,96}", str(key))
+        and isinstance(count, int) and not isinstance(count, bool)
+    }
+    return {
+        "schema": "lifecycle_pipeline_public_status_v1",
+        "owner": bool(internal.get("owner")),
+        "running": bool(internal.get("running")),
+        "active": bool(internal.get("active")),
+        "source_revision_match": bool(
+            runtime_revision and exact_revision and runtime_revision == exact_revision
+        ),
+        "last_outcome": str(internal.get("last_outcome") or "UNKNOWN")[:80],
+        "last_error_code": str(
+            internal.get("last_error_code")
+            or failure.get("error_code") or failure.get("error_class") or ""
+        )[:80] or None,
+        "failure_count": max(0, int(internal.get("failure_count") or 0)),
+        "backoff_sec": max(0.0, float(internal.get("backoff_sec") or 0.0)),
+        "next_run_in_sec": max(0.0, float(next_run) - current) if next_run else None,
+        "pressure": bool(internal.get("pressure")),
+        "emergency": bool(internal.get("emergency")),
+        "overlap_code": overlap_code,
+        "last_success_age_sec": max(0.0, current - float(last_success)) if last_success else None,
+        "progress": {
+            key: max(0, int(last.get(key) or 0))
+            for key in (
+                "rows_scanned", "bytes_indexed", "pending_dirty_lifecycles",
+                "promoted_qualification_retries", "candidate_count",
+                "transfer_ready_count", "transfer_bundle_count",
+                "completion_appended_count", "bundle_count",
+            )
+        } | {"caught_up": bool(last.get("caught_up"))},
+        "stage_counts": safe_counts(last.get("stage_counts")),
+        "blocker_counts": safe_counts(last.get("blocker_counts")),
+        "artifacts": _lifecycle_artifact_counts(current),
+    }
 def _data_sync_allowed_roots() -> list:
     """Return unique, non-overlapping physical roots within the Fly volume.
 

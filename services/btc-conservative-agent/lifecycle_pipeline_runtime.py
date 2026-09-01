@@ -198,8 +198,13 @@ class LifecyclePipelineRuntime:
             "next_run_unix": None,
             "last_outcome": "NEVER_RUN",
             "last_error": None,
+            "last_error_code": None,
             "last_worker_failure": None,
             "last_result": None,
+            "last_success_unix": None,
+            "pressure": False,
+            "emergency": False,
+            "overlap_code": None,
             "source_cleanup_authorized": False,
             "resource_limits": {
                 "parent_wall_timeout_enforced": True,
@@ -285,6 +290,10 @@ class LifecyclePipelineRuntime:
                 "active": False, "failure_count": failures,
                 "backoff_sec": backoff, "next_run_unix": self.clock() + backoff,
                 "last_outcome": outcome, "last_error": str(error)[:1000],
+                "last_error_code": str(
+                    (worker_failure or {}).get("error_code")
+                    or (worker_failure or {}).get("error_class") or outcome
+                )[:80],
                 "last_worker_failure": (
                     {
                         "error_class": str(worker_failure.get("error_class") or "")[:80],
@@ -300,6 +309,7 @@ class LifecyclePipelineRuntime:
             self._status.update({
                 "active": False, "next_run_unix": self.clock() + max(1.0, delay),
                 "last_outcome": outcome, "last_error": reason,
+                "last_error_code": str(outcome)[:80],
                 "source_cleanup_authorized": False,
             })
 
@@ -316,13 +326,23 @@ class LifecyclePipelineRuntime:
             for row in ledgers.values()
         )
         summary = {
-            "nonce": receipt.get("nonce"),
-            "result_sha256": receipt.get("result_sha256"),
             "generated_at": receipt.get("generated_at"),
             "candidate_count": pipeline.get("candidate_count"),
             "bundle_count": pipeline.get("bundle_count"),
+            "transfer_ready_count": pipeline.get("transfer_ready_count"),
+            "transfer_bundle_count": pipeline.get("transfer_bundle_count"),
+            "completion_appended_count": pipeline.get("completion_appended_count"),
             "pressure_mode": pipeline.get("pressure_mode"),
             "pending_dirty_lifecycles": pending_dirty,
+            "promoted_qualification_retries": scan.get("promoted_qualification_retries"),
+            "rows_scanned": scan.get("rows_scanned"),
+            "bytes_indexed": scan.get("bytes_indexed"),
+            "caught_up": bool(ledgers) and all(
+                isinstance(row, Mapping) and row.get("caught_up") is True
+                for row in ledgers.values()
+            ),
+            "stage_counts": dict(pipeline.get("stage_counts") or {}),
+            "blocker_counts": dict(pipeline.get("blocker_counts") or {}),
             "backlog_pending": backlog_pending,
         }
         with self._lock:
@@ -336,8 +356,10 @@ class LifecyclePipelineRuntime:
                     BACKLOG_INTERVAL_SEC if backlog_pending else self.interval_sec
                 ),
                 "last_outcome": "SUCCESS", "last_error": None,
+                "last_error_code": None,
                 "last_worker_failure": None,
-                "last_result": summary, "source_cleanup_authorized": False,
+                "last_result": summary, "last_success_unix": self.clock(),
+                "overlap_code": None, "source_cleanup_authorized": False,
             })
 
     def _launch(self, command: list[str]) -> subprocess.Popen:
@@ -376,9 +398,16 @@ class LifecyclePipelineRuntime:
                 return False
         overlap = self._overlap_reason()
         if overlap:
+            with self._lock:
+                self._status["overlap_code"] = str(overlap)[:160]
             self._record_skip("OVERLAP_SKIPPED", overlap)
             return False
         pressure, emergency, pressure_error = self._pressure()
+        with self._lock:
+            self._status.update({
+                "pressure": bool(pressure), "emergency": bool(emergency),
+                "overlap_code": None,
+            })
         if pressure_error or emergency:
             self._record_skip(
                 "PRESSURE_SKIPPED", pressure_error or "EMERGENCY_RESOURCE_PRESSURE",

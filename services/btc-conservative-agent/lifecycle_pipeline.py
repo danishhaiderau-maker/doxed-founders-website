@@ -445,6 +445,14 @@ def process_incremental_lifecycle_pipeline(
             ).fetchone()[0])
             connection.close()
 
+    stage_counts: dict[str, int] = {}
+    blocker_counts: dict[str, int] = {}
+    for item in results:
+        stage = str(item.get("stage") or "UNKNOWN")
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        for blocker in sorted(set(item.get("blockers") or []))[:32]:
+            name = str(blocker or "UNKNOWN")[:96]
+            blocker_counts[name] = blocker_counts.get(name, 0) + 1
     return {
         "schema": PIPELINE_SCHEMA,
         "generated_unix": time.time(),
@@ -456,6 +464,8 @@ def process_incremental_lifecycle_pipeline(
         "transfer_bundle_count": sum(
             item["transfer_bundle_written_or_verified"] for item in results
         ),
+        "stage_counts": dict(sorted(stage_counts.items())[:32]),
+        "blocker_counts": dict(sorted(blocker_counts.items())[:32]),
         "results": results,
         "scan": {
             "ledgers": scan_receipts,
