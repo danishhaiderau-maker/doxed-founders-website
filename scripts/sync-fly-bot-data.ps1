@@ -810,7 +810,11 @@ foreach ($row in $selectedFiles) {
               )
             }
           }
+          $chunkRequestWatch = [System.Diagnostics.Stopwatch]::StartNew()
           $response = $downloadClient.GetAsync($requestUrl).GetAwaiter().GetResult()
+          $chunkRequestElapsedMs = [Math]::Round(
+            $chunkRequestWatch.Elapsed.TotalMilliseconds
+          )
           if (-not $response.IsSuccessStatusCode) {
             $errorBody = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
             $statusCode = [int]$response.StatusCode
@@ -881,10 +885,27 @@ foreach ($row in $selectedFiles) {
             -FileCount $selectedFileCount `
             -FileBytes $offset `
             -RemoteBytes $remoteSize
+          $slowSuccessfulChunk = $chunkRequestElapsedMs -ge 2000
+          if ($slowSuccessfulChunk) {
+            # A checksum-valid 200 can still prove resource pressure. During
+            # the first production transfer, repeated 2-8 second successful
+            # chunks coincided with health/ready timeouts, but the old client
+            # immediately reduced its throttle after every success. Yield
+            # progressively even without an HTTP error so control traffic can
+            # run between disk reads and hashes on the shared one-vCPU VM.
+            $adaptiveThrottleMs = [Math]::Min(
+              $maxAdaptiveThrottleMs,
+              [Math]::Max(2000, $adaptiveThrottleMs * 2)
+            )
+            Write-Warning (
+              "[FLY SYNC] stage=file_chunk status=slow_success " +
+              "elapsed_ms=$chunkRequestElapsedMs throttle_ms=$adaptiveThrottleMs"
+            )
+          }
           if ($offset -lt $remoteSize) {
             Start-Sleep -Milliseconds $adaptiveThrottleMs
           }
-          if ($adaptiveThrottleMs -gt $baseInterChunkThrottleMs) {
+          if (-not $slowSuccessfulChunk -and $adaptiveThrottleMs -gt $baseInterChunkThrottleMs) {
             $adaptiveThrottleMs = [Math]::Max(
               $baseInterChunkThrottleMs,
               $adaptiveThrottleMs - 100

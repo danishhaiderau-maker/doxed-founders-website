@@ -153,6 +153,13 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
 
 
+def test_successful_slow_chunks_increase_throttle_instead_of_masking_pressure():
+    assert "$chunkRequestWatch = [System.Diagnostics.Stopwatch]::StartNew()" in SYNC_SCRIPT
+    assert "$slowSuccessfulChunk = $chunkRequestElapsedMs -ge 2000" in SYNC_SCRIPT
+    assert "stage=file_chunk status=slow_success" in SYNC_SCRIPT
+    assert "-not $slowSuccessfulChunk -and $adaptiveThrottleMs" in SYNC_SCRIPT
+
+
 def test_sync_acknowledgement_is_fast_exact_and_followed_by_identity_fence():
     ack_body = SYNC_SCRIPT.index('$ackCommon = [ordered]@{')
     completeness_check = SYNC_SCRIPT.index(
