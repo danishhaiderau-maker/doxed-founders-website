@@ -47,3 +47,16 @@ def test_inspection_mode_remains_read_only():
         "machines stop", "machines destroy", "scale count",
     ):
         assert mutation not in section
+
+
+def test_postdeploy_acceptance_has_one_deadline_and_endpoint_receipts():
+    source = WORKFLOW.read_text(encoding="utf-8")
+    section = source.split("Prove liveness, execution safety, and exact revision", 1)[1]
+
+    assert "deadline = time.monotonic() + 12 * 60" in section
+    assert "while time.monotonic() < deadline" in section
+    assert "for _ in range(60)" not in section
+    for stage in ("health", "status", "ready"):
+        assert f"stage={stage}" in section
+    assert "latency_ms=" in section
+    assert "stage=request status=failed" in section

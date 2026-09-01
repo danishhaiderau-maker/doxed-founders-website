@@ -327,10 +327,19 @@ jobs:
           expected_signature = registry.active_tile_registry_signature()
           expected_lanes = list(registry.ACTIVE_TILE_ORDER)
           last = ""
-          for _ in range(60):
+          deadline = time.monotonic() + 12 * 60
+          attempt = 0
+          while time.monotonic() < deadline:
+              attempt += 1
               try:
+                  stage_started = time.monotonic()
                   with urllib.request.urlopen(base + "/health", timeout=8) as response:
                       liveness = json.load(response)
+                  print(
+                      f"postdeploy attempt={attempt} stage=health status={response.status} "
+                      f"latency_ms={round((time.monotonic() - stage_started) * 1000)}",
+                      flush=True,
+                  )
                   # The dashboard socket binds before private state restoration
                   # completes. During that bounded startup window /health
                   # deliberately returns a minimal 200 payload without strategy
@@ -347,10 +356,22 @@ jobs:
                       )
                       time.sleep(3)
                       continue
+                  stage_started = time.monotonic()
                   with urllib.request.urlopen(base + "/api/status", timeout=8) as status_response:
                       payload = json.load(status_response)
+                  print(
+                      f"postdeploy attempt={attempt} stage=status status={status_response.status} "
+                      f"latency_ms={round((time.monotonic() - stage_started) * 1000)}",
+                      flush=True,
+                  )
+                  stage_started = time.monotonic()
                   with urllib.request.urlopen(base + "/ready", timeout=8) as ready_response:
                       ready = json.load(ready_response)
+                  print(
+                      f"postdeploy attempt={attempt} stage=ready status={ready_response.status} "
+                      f"latency_ms={round((time.monotonic() - stage_started) * 1000)}",
+                      flush=True,
+                  )
                   last = json.dumps(payload, sort_keys=True)
                   progress = payload.get("strategy_progress") or {}
                   runtime_lanes = [row.get("lane") for row in payload.get("active_tiles") or []]
@@ -385,6 +406,11 @@ jobs:
                       last = f"unsafe Fly execution flags: {health}"
               except Exception as exc:
                   last = str(exc)
+                  print(
+                      f"postdeploy attempt={attempt} stage=request status=failed "
+                      f"error={type(exc).__name__}:{exc}",
+                      flush=True,
+                  )
               time.sleep(3)
           raise SystemExit(f"Fly failed exact-revision liveness proof: {last}")
           PY

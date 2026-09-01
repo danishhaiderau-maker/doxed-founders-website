@@ -141,7 +141,10 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert '-Stage "manifest_post_ack_identity"' in SYNC_SCRIPT
     assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
-    assert "$attempt/$transportAttempts attempt(s)" in SYNC_SCRIPT
+    assert "$attempt/$MaxAttempts attempt(s)" in SYNC_SCRIPT
+    assert "[int]$MaxAttempts = $transportAttempts" in SYNC_SCRIPT
+    assert "elapsed_ms=" in SYNC_SCRIPT
+    assert "-MaxAttempts $resourcePressureCircuitThreshold" in SYNC_SCRIPT
     # Retry hardening must not weaken the candidate/checksum/atomic contract.
     assert "Get-FileHash -LiteralPath $tmp -Algorithm SHA256" in SYNC_SCRIPT
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
@@ -1063,11 +1066,13 @@ def test_sqlite_snapshot_lease_materializes_only_requested_database(tmp_path):
         "_data_sync_consistency_mode": lambda path: (
             "sqlite_snapshot_v1" if path.suffix == ".db" else "strict_generation_v1"
         ),
-        "_data_sync_sqlite_snapshot": lambda path: (
+        "_data_sync_request_sqlite_snapshot": lambda path: (
             calls.append(path.name)
-            or {"snapshot_id": "a" * 32, "snapshot_size": 5, "snapshot_sha256": "b" * 64}
+            or {"snapshot_status": "CURRENT", "snapshot_id": "a" * 32,
+                "snapshot_size": 5, "snapshot_sha256": "b" * 64}
         ),
         "_data_sync_relpath": lambda path: path.name,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     with app.test_request_context("/api/data-sync/sqlite-snapshot?path=first.db"):
@@ -1078,6 +1083,71 @@ def test_sqlite_snapshot_lease_materializes_only_requested_database(tmp_path):
         response, status = namespace["api_data_sync_sqlite_snapshot"]()
     assert status == 400
     assert response.get_json()["error"] == "invalid path"
+
+
+def test_sqlite_snapshot_generation_is_single_flight_and_reused(tmp_path):
+    source = tmp_path / "single-flight.db"
+    source.write_bytes(b"stable-generation")
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_sqlite_generation", "_data_sync_sqlite_snapshot_worker",
+        "_data_sync_request_sqlite_snapshot",
+    }
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    started = []
+    builds = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target, self.args = target, args
+            self.started = False
+
+        def start(self):
+            self.started = True
+            started.append(self)
+
+        def is_alive(self):
+            return self.started
+
+    condition = threading.Condition()
+    state = {
+        "status": "EMPTY", "generation": None, "path": None, "lease": None,
+        "worker": None, "started_at": 0.0, "deadline_at": 0.0,
+        "completed_at": 0.0, "error": None,
+    }
+    lease = {"snapshot_id": "a" * 32, "snapshot_size": 17,
+             "snapshot_sha256": "b" * 64}
+    namespace = {
+        "Path": Path, "time": time,
+        "threading": SimpleNamespace(Thread=DeferredThread),
+        "_data_sync_sqlite_snapshot_condition": condition,
+        "_data_sync_sqlite_snapshot_state": state,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
+        "_data_sync_sqlite_snapshot": lambda path, deadline_monotonic=None: (
+            builds.append(path) or lease.copy()
+        ),
+        "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: source,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
+    first = request_snapshot(source)
+    second = request_snapshot(source)
+    assert first["snapshot_status"] == "BUILDING"
+    assert second["snapshot_status"] == "BUILDING"
+    assert len(started) == 1
+    assert builds == []
+    started[0].target(*started[0].args)
+    current = request_snapshot(source)
+    assert current == {"snapshot_status": "CURRENT", **lease}
+    assert builds == [source]
+    assert len(started) == 1
+    Path(f"{source}-wal").write_bytes(b"new-wal-evidence")
+    changed = request_snapshot(source)
+    assert changed["snapshot_status"] == "BUILDING"
+    assert len(started) == 2
 
 
 def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():
@@ -1094,6 +1164,8 @@ def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():
     assert '"sqlite_snapshots_materialized": False' in manifest_body
     assert "read_bytes()" not in snapshot_body
     assert 'handle.read(1024 * 1024)' in snapshot_body
+    assert "deadline_monotonic" in snapshot_body
+    assert "set_progress_handler" in snapshot_body
 
 
 def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():

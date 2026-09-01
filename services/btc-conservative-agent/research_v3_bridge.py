@@ -1,7 +1,7 @@
 """Dual-write bridge from immutable v2.2 events into normalized V3 ledgers."""
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 import copy
 from datetime import datetime
 from functools import lru_cache
@@ -779,25 +779,28 @@ def reconcile_overdue_expected_order_decisions(
     """Close durable pre-order expectations lost by a runtime interruption."""
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
 
-    def rows(name: str) -> list[dict[str, Any]]:
+    def rows(name: str) -> Iterator[dict[str, Any]]:
+        """Stream one validated JSONL row at a time.
+
+        These ledgers contain rich evidence payloads and can be hundreds of
+        megabytes even when they contain relatively few identities.  Startup
+        reconciliation needs only identity keys from order/lifecycle rows, so
+        materializing every decoded object can exceed the Fly machine's RSS
+        limit before the dashboard finishes bootstrapping.
+        """
         path = store.ledger_path(name)
         if not path.exists():
-            return []
-        result = []
+            return
         with path.open("r", encoding="utf-8") as handle:
             for line_no, line in enumerate(handle, 1):
                 if not line.endswith("\n"):
                     raise ValueError(f"TRUNCATED_JSONL_LINE:{name}:{line_no}")
-                result.append(json.loads(line))
-        return result
+                yield json.loads(line)
 
     def key(row: Mapping[str, Any]) -> tuple[str, str, str]:
         return (str(row.get("episode_id") or ""), str(row.get("policy_signature") or ""),
                 str(row.get("research_lane") or "").upper())
 
-    decisions = [row for row in rows("decision")
-                 if str(row.get("epoch_id") or "") == str(epoch_id)
-                 and row.get("order_intent_expected") is True]
     intent_keys = {key(row) for row in rows("order_intent")
                    if str(row.get("epoch_id") or "") == str(epoch_id)}
     terminal_keys = {key(row) for row in rows("lifecycle")
@@ -807,9 +810,15 @@ def reconcile_overdue_expected_order_decisions(
                      in {"ORDER_SUBMITTED", "NO_ORDER"}}
     active_keys = {key(row) for row in active_rows if all(key(row))}
     now_ts = float(observed_ts if observed_ts is not None else time.time())
-    result = {"expected": len(decisions), "reconciled": 0, "duplicates": 0,
+    result = {"expected": 0, "reconciled": 0, "duplicates": 0,
               "not_overdue": 0, "resolved_or_active": 0}
-    for decision in decisions:
+    for decision in rows("decision"):
+        if (
+            str(decision.get("epoch_id") or "") != str(epoch_id)
+            or decision.get("order_intent_expected") is not True
+        ):
+            continue
+        result["expected"] += 1
         identity = key(decision)
         if not all(identity):
             continue

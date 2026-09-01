@@ -140,3 +140,30 @@ def test_bot_wires_start_status_and_both_shutdown_paths():
     assert calls("main", "_stop_lifecycle_pipeline_runtime") == 1
     assert calls("shutdown_handler", "_stop_lifecycle_pipeline_runtime") == 1
     assert '"lifecycle_pipeline_runtime": _lifecycle_pipeline_runtime_status()' in source
+
+
+def test_optional_lifecycle_worker_starts_only_after_dashboard_bootstrap():
+    source = BOT_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    main = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    bootstrap_line = next(
+        node.lineno for node in ast.walk(main)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "_DASHBOARD_BOOTSTRAP_COMPLETE"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Constant)
+        and node.value.value is True
+    )
+    worker_line = next(
+        node.lineno for node in ast.walk(main)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_start_lifecycle_pipeline_runtime"
+    )
+    assert worker_line > bootstrap_line

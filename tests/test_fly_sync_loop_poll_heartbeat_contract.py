@@ -22,7 +22,7 @@ def test_manifest_preflight_has_bounded_retries_and_stage_diagnostics():
     assert "$preflightManifestTimeoutSec = 90" in source
     assert "stage=loop_manifest_preflight failed after" in source
     assert '$currentStage = "loop_manifest_preflight"' in source
-    assert '"$failureAt`tERROR`tstage=$currentStage`t$failureMessage"' in source
+    assert '"$failureAt`tERROR`tstage=$currentStage`tfailures=$consecutiveFailures' in source
 
 
 def test_transient_poll_failure_retains_only_a_qualified_completed_match():
@@ -62,14 +62,24 @@ def test_full_sync_reuses_authenticated_loop_preflight_without_duplicate_fetch()
     # Standalone callers still authenticate and fetch their own manifest, and
     # every caller validates its schema before using any rows.
     assert '-Stage "manifest_initial"' in child_source
-    assert 'if ($manifest.schema -ne "fly_runtime_incremental_sync_v1")' in child_source
+    assert "$manifest = Get-CompleteDataSyncManifest -FirstPage $manifest" in child_source
 
     # Reusing initial metadata must not bypass the authenticated final commit:
     # the checksum acknowledgement remains after all file reconciliation.
-    assert '-Stage "acknowledgement"' in child_source
+    assert '-Stage "acknowledgement_finalize"' in child_source
     assert "$ack = Invoke-DataSyncJsonRequest" in child_source
     assert "AckAccepted = $ack.accepted" in child_source
     assert "Canonical manifest commit failed" in child_source
+
+
+def test_full_sync_waits_for_a_bounded_quiet_health_soak():
+    source = _source()
+
+    assert "$fullSyncQuietSuccesses = 3" in source
+    assert "$fullSyncQuietMaxWaitSec = 90" in source
+    assert "function Wait-FlyRuntimeQuietForFullSync" in source
+    assert "Wait-FlyRuntimeQuietForFullSync -BaseUrl $SourceUrl" in source
+    assert '$currentStage = "runtime_quiet_soak"' in source
 
 
 def test_reused_manifest_is_fenced_against_a_fresh_authenticated_identity():
@@ -79,10 +89,10 @@ def test_reused_manifest_is_fenced_against_a_fresh_authenticated_identity():
     identity_assertion = child_source.index(
         "Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest"
     )
-    acknowledgement = child_source.index('-Stage "acknowledgement"')
+    acknowledgement = child_source.index('-Stage "acknowledgement_finalize"')
     canonical_completion = child_source.index("Canonical manifest commit failed")
 
-    assert '"$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery&nonce="' in child_source
+    assert '"$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery$generationQuery$pageQuery&nonce="' in child_source
     assert final_fence < identity_assertion < acknowledgement < canonical_completion
     for identity_field in (
         "source_git_rev",
@@ -112,7 +122,8 @@ def test_each_identity_mismatch_is_a_fail_closed_throw_before_acknowledgement():
     # Required identities cannot disappear, optional epoch availability cannot
     # change, and no present identity value may differ. All three branches are
     # terminating throws rather than warnings or boolean results.
-    assert assertion_body.count("throw ") == 4
+    assert assertion_body.count("throw ") == 5
+    assert "lost the immutable inventory generation" in assertion_body
     assert "if ($field.Required -and" in assertion_body
     assert "if ($before.Present -ne $after.Present)" in assertion_body
     assert "if (-not $matches)" in assertion_body

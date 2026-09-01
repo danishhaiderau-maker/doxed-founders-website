@@ -80,9 +80,11 @@ function Invoke-DataSyncJsonRequest {
     [Parameter(Mandatory = $true)][string]$Uri,
     [ValidateSet("Get", "Post")][string]$Method = "Get",
     [int]$TimeoutSec = $manifestTimeoutSec,
+    [int]$MaxAttempts = $transportAttempts,
     [string]$Body = ""
   )
-  for ($attempt = 1; $attempt -le $transportAttempts; $attempt++) {
+  $requestWatch = [System.Diagnostics.Stopwatch]::StartNew()
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     try {
       $parameters = @{
         Uri = $Uri
@@ -94,12 +96,22 @@ function Invoke-DataSyncJsonRequest {
         $parameters.ContentType = "application/json"
         $parameters.Body = $Body
       }
-      return Invoke-RestMethod @parameters
+      $result = Invoke-RestMethod @parameters
+      Write-Host (
+        "[FLY SYNC] stage=$Stage attempt=$attempt/$MaxAttempts " +
+        "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) status=success"
+      )
+      return $result
     } catch {
-      if ($attempt -ge $transportAttempts) {
+      Write-Warning (
+        "[FLY SYNC] stage=$Stage attempt=$attempt/$MaxAttempts " +
+        "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) " +
+        "status=failed error=$($_.Exception.Message)"
+      )
+      if ($attempt -ge $MaxAttempts) {
         throw (
           "Fly data-sync stage=$Stage failed after " +
-          "$attempt/$transportAttempts attempt(s): $($_.Exception.Message)"
+          "$attempt/$MaxAttempts attempt(s): $($_.Exception.Message)"
         )
       }
       $resourcePressure = Test-DataSyncResourcePressureError -Message $_.Exception.Message
@@ -473,7 +485,8 @@ function Set-SqliteSnapshotLease {
   $lease = Invoke-DataSyncJsonRequest `
     -Stage "sqlite_snapshot_lease" `
     -Uri "$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" `
-    -TimeoutSec $manifestTimeoutSec
+    -TimeoutSec $manifestTimeoutSec `
+    -MaxAttempts $resourcePressureCircuitThreshold
   if (
     $lease.schema -ne "fly_runtime_sqlite_snapshot_lease_v1" -or
     [string]$lease.path -ne $rel -or

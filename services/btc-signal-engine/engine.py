@@ -37605,6 +37605,14 @@ _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
 _DATA_SYNC_INVENTORY_ORPHAN_MAX_AGE_SECONDS = 15 * 60
 _DATA_SYNC_INVENTORY_ORPHAN_SCAN_LIMIT = 1000
 _DATA_SYNC_INVENTORY_ORPHAN_REMOVE_LIMIT = 100
+_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS = 2
+_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS = 15 * 60
+_data_sync_sqlite_snapshot_condition = threading.Condition()
+_data_sync_sqlite_snapshot_state = {
+    "status": "EMPTY", "generation": None, "path": None, "lease": None,
+    "worker": None, "started_at": 0.0, "deadline_at": 0.0,
+    "completed_at": 0.0, "error": None,
+}
 _data_sync_inventory_cache_condition = threading.Condition()
 _data_sync_inventory_cache = {
     "expires_at": 0.0,
@@ -37967,8 +37975,35 @@ def _data_sync_consistency_mode(path: Path) -> str:
     return "append_prefix_v1" if append_prefix else "strict_generation_v1"
 
 
-def _data_sync_sqlite_snapshot(path: Path) -> dict:
+def _data_sync_sqlite_snapshot_deadline_seconds() -> float:
+    try:
+        configured = float(os.getenv("DATA_SYNC_SQLITE_SNAPSHOT_DEADLINE_SECONDS", "60"))
+    except (TypeError, ValueError):
+        configured = 60.0
+    return max(15.0, min(120.0, configured))
+
+
+def _data_sync_sqlite_generation(path: Path) -> tuple:
+    def signature(candidate: Path):
+        try:
+            stat = candidate.stat()
+            return (int(getattr(stat, "st_ino", 0) or 0),
+                    int(stat.st_size), int(stat.st_mtime_ns))
+        except FileNotFoundError:
+            return (0, 0, 0)
+
+    # WAL contents can advance without changing the main database inode/mtime.
+    # Bind reuse to both durable SQLite generations so a recently completed
+    # lease is never returned after new WAL evidence arrives.
+    return (str(path.resolve()), signature(path), signature(Path(f"{path}-wal")))
+
+
+def _data_sync_sqlite_snapshot(path: Path, *, deadline_monotonic=None) -> dict:
     """Create one integrity-checked online backup for a complete sync run."""
+    def require_time_remaining():
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("SQLite snapshot exceeded its bounded build deadline")
+
     snapshot_root = _data_sync_volume_root() / ".data-sync-snapshots"
     snapshot_root.mkdir(parents=True, exist_ok=True)
     cutoff = time.time() - (15 * 60)
@@ -37983,27 +38018,121 @@ def _data_sync_sqlite_snapshot(path: Path) -> dict:
     source = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
     destination = sqlite3.connect(str(snapshot), timeout=15)
     try:
-        source.backup(destination)
+        source.backup(
+            destination, pages=256,
+            progress=lambda _status, _remaining, _total: require_time_remaining(),
+            sleep=0.02,
+        )
+        require_time_remaining()
+        destination.set_progress_handler(
+            lambda: 1 if (deadline_monotonic is not None
+                          and time.monotonic() >= deadline_monotonic) else 0,
+            1000,
+        )
         result = destination.execute("PRAGMA integrity_check").fetchone()
+        destination.set_progress_handler(None, 0)
         if not result or str(result[0]).lower() != "ok":
             raise sqlite3.DatabaseError("online backup failed integrity_check")
+    except sqlite3.OperationalError as exc:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise TimeoutError("SQLite snapshot exceeded its bounded build deadline") from exc
+        raise
+    except Exception:
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     finally:
         destination.close()
         source.close()
     digest = hashlib.sha256()
     snapshot_size = 0
-    with snapshot.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            snapshot_size += len(chunk)
-            digest.update(chunk)
+    try:
+        with snapshot.open("rb") as handle:
+            while True:
+                require_time_remaining()
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                snapshot_size += len(chunk)
+                digest.update(chunk)
+    except Exception:
+        try:
+            snapshot.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return {
         "snapshot_id": token,
         "snapshot_size": snapshot_size,
         "snapshot_sha256": digest.hexdigest(),
     }
+
+
+def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at: float):
+    lease = None
+    error = None
+    try:
+        lease = _data_sync_sqlite_snapshot(path, deadline_monotonic=deadline_at)
+        if _data_sync_sqlite_generation(path) != generation:
+            raise RuntimeError("SQLite source generation changed during snapshot build")
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        if lease:
+            try:
+                _data_sync_resolve_sqlite_snapshot(lease["snapshot_id"]).unlink(missing_ok=True)
+            except (OSError, TypeError, ValueError):
+                pass
+        lease = None
+    with _data_sync_sqlite_snapshot_condition:
+        state = _data_sync_sqlite_snapshot_state
+        if state.get("generation") == generation:
+            state.update({"status": "CURRENT" if lease else "FAILED",
+                          "lease": lease, "worker": None,
+                          "completed_at": time.monotonic(), "error": error})
+        _data_sync_sqlite_snapshot_condition.notify_all()
+
+
+def _data_sync_request_sqlite_snapshot(path: Path) -> dict:
+    """Return a cached lease or start exactly one bounded background build."""
+    generation = _data_sync_sqlite_generation(path)
+    now = time.monotonic()
+    with _data_sync_sqlite_snapshot_condition:
+        state = _data_sync_sqlite_snapshot_state
+        worker = state.get("worker")
+        same_generation = state.get("generation") == generation
+        lease = state.get("lease") if same_generation else None
+        if (state.get("status") == "CURRENT" and lease
+                and now - float(state.get("completed_at") or 0.0)
+                < _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS):
+            try:
+                _data_sync_resolve_sqlite_snapshot(lease["snapshot_id"])
+                return {"snapshot_status": "CURRENT", **lease}
+            except (OSError, TypeError, ValueError):
+                state.update({"status": "EXPIRED", "lease": None})
+        if worker and worker.is_alive():
+            return {"snapshot_status": "BUILDING",
+                    "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS}
+        if (same_generation and state.get("status") == "FAILED"
+                and now - float(state.get("completed_at") or 0.0)
+                < _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS):
+            return {"snapshot_status": "FAILED",
+                    "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS,
+                    "error": state.get("error") or "SQLite snapshot build failed"}
+        deadline_at = now + _data_sync_sqlite_snapshot_deadline_seconds()
+        worker = threading.Thread(
+            target=_data_sync_sqlite_snapshot_worker,
+            args=(path, generation, deadline_at),
+            name="data-sync-sqlite-snapshot", daemon=True,
+        )
+        state.update({"status": "BUILDING", "generation": generation,
+                      "path": str(path), "lease": None, "worker": worker,
+                      "started_at": now, "deadline_at": deadline_at,
+                      "completed_at": 0.0, "error": None})
+        worker.start()
+        return {"snapshot_status": "BUILDING",
+                "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS}
 
 
 def _data_sync_resolve_sqlite_snapshot(snapshot_id: str) -> Path:
@@ -40062,12 +40191,20 @@ def api_data_sync_sqlite_snapshot():
         path = _data_sync_resolve_relpath(request.args.get("path"))
         if _data_sync_consistency_mode(path) != "sqlite_snapshot_v1":
             return jsonify({"error": "requested path is not an allowed SQLite database"}), 400
-        snapshot = _data_sync_sqlite_snapshot(path)
-        return jsonify({
+        snapshot = _data_sync_request_sqlite_snapshot(path)
+        payload = {
             "schema": "fly_runtime_sqlite_snapshot_lease_v1",
             "path": _data_sync_relpath(path),
             **snapshot,
-        })
+        }
+        if snapshot.get("snapshot_status") != "CURRENT":
+            response = jsonify(payload)
+            response.headers["Retry-After"] = str(
+                snapshot.get("retry_after_seconds")
+                or _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS
+            )
+            return response, 503
+        return jsonify(payload)
     except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -46619,7 +46756,6 @@ def main():
     load_positions()
     load_paper_lifecycle()
     _reconcile_overdue_v3_expected_orders(force=True)
-    _start_lifecycle_pipeline_runtime()
     rebuild_state_from_snapshots()
     reconcile_restored_paper_terminal_conflicts()
     reconcile_stale_signals()
@@ -46766,6 +46902,10 @@ def main():
     # Control endpoints become available only after the private exposure audit,
     # rebuild/adoption, disarm cancellation, and EXIT_ONLY marking complete.
     _DASHBOARD_BOOTSTRAP_COMPLETE = True
+    # Evidence processing is optional and may launch a bounded worker
+    # immediately.  Start it only after the safety restore and dashboard boot
+    # handoff are complete so it cannot contend with startup readiness.
+    _start_lifecycle_pipeline_runtime()
     try:
         from pathway_lab_validation import run_startup_pathway_validation
         with state_lock:

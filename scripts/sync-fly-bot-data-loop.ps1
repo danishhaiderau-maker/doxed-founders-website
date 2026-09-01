@@ -256,6 +256,9 @@ $preflightManifestAttempts = 13
 $preflightManifestTimeoutSec = 90
 $preflightInventoryWaitMaxSec = 120
 $relaySyncAttempts = 2
+$fullSyncQuietSuccesses = 3
+$fullSyncQuietProbeTimeoutSec = 8
+$fullSyncQuietMaxWaitSec = 90
 
 function Get-FlySyncPreflightManifest {
   param(
@@ -327,6 +330,45 @@ function Invoke-OptionalRelayEvidenceSync {
   throw (
     "Fly data-sync stage=optional_relay_evidence failed after " +
     "$relaySyncAttempts/$relaySyncAttempts attempt(s): $($lastRelayError.Exception.Message)"
+  )
+}
+
+function Wait-FlyRuntimeQuietForFullSync {
+  param([Parameter(Mandatory = $true)][string]$BaseUrl)
+  $quietWatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $consecutive = 0
+  $attempt = 0
+  while ($quietWatch.Elapsed.TotalSeconds -lt $fullSyncQuietMaxWaitSec) {
+    $attempt += 1
+    $probeWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+      $health = Invoke-RestMethod `
+        -Uri ($BaseUrl.TrimEnd("/") + "/health") `
+        -TimeoutSec $fullSyncQuietProbeTimeoutSec `
+        -ErrorAction Stop
+      if ($health.process_alive -ne $true -or $health.status -eq "starting") {
+        throw "runtime health is not ready"
+      }
+      $consecutive += 1
+      Add-Content -LiteralPath $logFile -Value (
+        "$((Get-Date).ToUniversalTime().ToString('o'))`tQUIET_PROBE`t" +
+        "attempt=$attempt consecutive=$consecutive " +
+        "elapsed_ms=$([Math]::Round($probeWatch.Elapsed.TotalMilliseconds))"
+      )
+      if ($consecutive -ge $fullSyncQuietSuccesses) { return }
+    } catch {
+      $consecutive = 0
+      Add-Content -LiteralPath $logFile -Value (
+        "$((Get-Date).ToUniversalTime().ToString('o'))`tQUIET_PROBE_FAILED`t" +
+        "attempt=$attempt elapsed_ms=$([Math]::Round($probeWatch.Elapsed.TotalMilliseconds)) " +
+        "error=$($_.Exception.Message)"
+      )
+    }
+    Start-Sleep -Seconds 5
+  }
+  throw (
+    "Fly data-sync stage=runtime_quiet_soak failed: fewer than " +
+    "$fullSyncQuietSuccesses consecutive healthy probes within $fullSyncQuietMaxWaitSec seconds."
   )
 }
 
@@ -479,6 +521,8 @@ try {
       $currentTotalBytes = $lastSyncedTotalBytes
       $growthBytes = $volumeGrowthBytes
       if ($needsFullInventory) {
+        $currentStage = "runtime_quiet_soak"
+        Wait-FlyRuntimeQuietForFullSync -BaseUrl $SourceUrl
         $currentStage = "loop_full_manifest"
         $manifest = Get-FlySyncPreflightManifest `
           -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")

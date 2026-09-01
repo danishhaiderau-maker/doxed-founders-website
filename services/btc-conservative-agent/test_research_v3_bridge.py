@@ -1,6 +1,9 @@
 import json
 import hashlib
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -339,6 +342,77 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(V3EvidenceStore(
                 tmp, epoch_id="epoch-v3-test",
             ).ledger_path("lifecycle").exists())
+
+    def test_restart_reconciliation_streams_large_rich_order_intent_ledger(self):
+        """Large evidence payloads must not be retained as decoded objects."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            intent_path = store.ledger_path("order_intent")
+            intent_path.parent.mkdir(parents=True, exist_ok=True)
+            padding = "x" * (64 * 1024)
+            with intent_path.open("w", encoding="utf-8", newline="\n") as handle:
+                for index in range(256):
+                    handle.write(json.dumps({
+                        "epoch_id": "another-epoch",
+                        "episode_id": f"noise-{index}",
+                        "policy_signature": f"policy-{index}",
+                        "research_lane": "CONTINUOUS",
+                        "rich_evidence_payload": padding,
+                    }, separators=(",", ":")))
+                    handle.write("\n")
+            self.assertGreater(intent_path.stat().st_size, 16 * 1024 * 1024)
+
+            probe = textwrap.dedent("""
+                import ctypes, json, os, sys
+                from research_v3_bridge import reconcile_overdue_expected_order_decisions
+
+                def peak_rss_bytes():
+                    if os.name == "nt":
+                        class Counters(ctypes.Structure):
+                            _fields_ = [
+                                ("cb", ctypes.c_ulong),
+                                ("PageFaultCount", ctypes.c_ulong),
+                                ("PeakWorkingSetSize", ctypes.c_size_t),
+                                ("WorkingSetSize", ctypes.c_size_t),
+                                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                                ("PagefileUsage", ctypes.c_size_t),
+                                ("PeakPagefileUsage", ctypes.c_size_t),
+                            ]
+                        counters = Counters()
+                        counters.cb = ctypes.sizeof(counters)
+                        ctypes.windll.psapi.GetProcessMemoryInfo(
+                            ctypes.windll.kernel32.GetCurrentProcess(),
+                            ctypes.byref(counters), counters.cb,
+                        )
+                        return int(counters.PeakWorkingSetSize)
+                    import resource
+                    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+                    return peak if sys.platform == "darwin" else peak * 1024
+
+                baseline = peak_rss_bytes()
+                result = reconcile_overdue_expected_order_decisions(
+                    epoch_id="epoch-v3-test", data_dir=sys.argv[1],
+                    observed_ts=2000, runtime_revision="streaming-repair",
+                )
+                print(json.dumps({
+                    "result": result,
+                    "rss_growth": max(0, peak_rss_bytes() - baseline),
+                }))
+            """)
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, tmp], cwd=Path(__file__).parent,
+                check=True, capture_output=True, text=True,
+            )
+            measurement = json.loads(completed.stdout.strip())
+            result = measurement["result"]
+
+            self.assertEqual(result["expected"], 1)
+            self.assertEqual(result["reconciled"], 1)
+            self.assertLess(measurement["rss_growth"], 32 * 1024 * 1024)
 
     def test_lane_entry_receipts_are_append_only_and_no_order_has_no_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
