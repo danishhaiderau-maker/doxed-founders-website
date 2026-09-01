@@ -315,6 +315,7 @@ def _load_bot_functions(*names):
             "research_events_v22.jsonl",
         }),
         "_RESEARCH_RAW_JSONL_NEVER_PRUNE": frozenset({"research_events_v22.jsonl"}),
+        "_DATA_SYNC_LIFECYCLE_CLEANUP_ENABLED": False,
         "_pure_validate_platform_relay_evidence_payload": pure_validate_relay,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
@@ -1867,9 +1868,8 @@ def test_ack_http_path_is_bounded_and_never_prunes_synchronously():
     assert "_data_sync_resolve_relpath(" not in body
     assert "path.stat()" not in body
     assert "_prune_acknowledged_rotations(" not in body
-    assert "_schedule_data_sync_retention_cleanup()" in body
-    assert '"SCHEDULED_OUTSIDE_HTTP_REQUEST"' in body
-    assert 'if retention_scheduled else "DEFERRED_OUTSIDE_HTTP_REQUEST"' in body
+    assert "_schedule_data_sync_retention_cleanup()" not in body
+    assert '"cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED"' in body
     assert '"accepted": len(accepted_rows)' in body
     assert '"rejected_count": rejected' in body
 
@@ -1889,7 +1889,8 @@ def test_deferred_retention_is_delayed_single_flight_and_fail_closed():
     ack_body = BOT[BOT.index("def api_data_sync_ack"):BOT.index(
         "_PLATFORM_RELAY_EVIDENCE_MAX_BYTES"
     )]
-    assert "if rejected == 0 and len(accepted_rows) == len(received):" in ack_body
+    assert "they must never\n    # schedule source cleanup" in ack_body
+    assert "_schedule_data_sync_retention_cleanup()" not in ack_body
 
 
 def test_long_sync_ack_can_select_the_exact_retained_initial_generation():
@@ -1999,7 +2000,7 @@ def test_inventory_excludes_only_internal_lock_directories_from_evidence_walk():
     assert '"market_segments"' not in excluded_block
 
 
-def test_numbered_rotations_are_supported_and_highest_two_are_retained():
+def test_legacy_file_ack_rotations_are_all_retained_until_lifecycle_cleanup_exists():
     namespace = _load_bot_functions(
         "_data_sync_rotation_parts",
         "_prune_acknowledged_rotations",
@@ -2028,10 +2029,145 @@ def test_numbered_rotations_are_supported_and_highest_two_are_retained():
         namespace["_data_sync_path_allowed"] = lambda path: path.is_file()
         removed = namespace["_prune_acknowledged_rotations"](acks)
 
-        assert sorted(removed) == ["signal_replay.jsonl.2", "signal_replay.jsonl.7"]
+        assert removed == []
         assert active.read_text(encoding="utf-8") == "active\n"
+        assert (root / "signal_replay.jsonl.2").is_file()
+        assert (root / "signal_replay.jsonl.7").is_file()
         assert (root / "signal_replay.jsonl.9").is_file()
         assert (root / "signal_replay.jsonl.11").is_file()
+
+
+def _load_lifecycle_cleanup_model():
+    namespace = _load_bot_functions(
+        "_data_sync_iso8601_utc",
+        "_data_sync_lifecycle_manifest_sha256",
+        "_data_sync_lifecycle_identity_sha256",
+        "_data_sync_lifecycle_cleanup_eligibility",
+    )
+    namespace.update({
+        "datetime": datetime,
+        "timezone": timezone,
+        "json": json,
+        "hashlib": hashlib,
+        "hmac": __import__("hmac"),
+        "re": re,
+        "_DATA_SYNC_LIFECYCLE_CLEANUP_ACK_SCHEMA": "lifecycle_bundle_cleanup_ack_v1",
+        "_DATA_SYNC_LIFECYCLE_CLEANUP_ENABLED": False,
+        "_DATA_SYNC_TERMINAL_OUTCOMES": frozenset({
+            "FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN",
+        }),
+    })
+    return namespace
+
+
+def _complete_lifecycle_cleanup_receipt(namespace):
+    files = [{
+        "path": "lifecycle/bundle-001/events.jsonl",
+        "sha256": hashlib.sha256(b'{"event":"closed"}\n').hexdigest(),
+        "size": 19,
+        "mtime_ns": 1788134400000000000,
+        "row_count": 1,
+        "first_timestamp": "2026-08-31T00:00:00Z",
+        "last_timestamp": "2026-08-31T02:10:00Z",
+    }]
+    manifest_sha = namespace["_data_sync_lifecycle_manifest_sha256"](files)
+    receipt = {
+        "schema": "lifecycle_bundle_cleanup_ack_v1",
+        "bundle_id": "bundle-001",
+        "lifecycle_id": "episode-001",
+        "source_git_rev": "a" * 40,
+        "deployed_git_rev": "b" * 40,
+        "collection_epoch_id": "epoch-001",
+        "tile_registry_signature": "c" * 64,
+        "terminal_outcome": "UNKNOWN",
+        "terminal_at": "2026-08-31T02:10:00Z",
+        "pending_order_ids": [],
+        "open_position_ids": [],
+        "files": files,
+        "manifest_sha256": manifest_sha,
+    }
+    receipt["immutable_identity_sha256"] = namespace[
+        "_data_sync_lifecycle_identity_sha256"
+    ](receipt)
+    receipt["laptop_acknowledgement"] = {
+        copy_name: {
+            "complete": True,
+            "bundle_id": receipt["bundle_id"],
+            "lifecycle_id": receipt["lifecycle_id"],
+            "sha256": hashlib.sha256(copy_name.encode("utf-8")).hexdigest(),
+            "manifest_sha256": manifest_sha,
+            "acknowledged_at": "2026-08-31T02:15:00Z",
+        }
+        for copy_name in ("canonical", "archive", "index")
+    }
+    return receipt
+
+
+def test_complete_lifecycle_proof_is_recognized_but_cleanup_remains_disabled():
+    namespace = _load_lifecycle_cleanup_model()
+    receipt = _complete_lifecycle_cleanup_receipt(namespace)
+
+    result = namespace["_data_sync_lifecycle_cleanup_eligibility"](receipt)
+
+    assert result == {
+        "schema": "lifecycle_bundle_cleanup_eligibility_v1",
+        "bundle_id": "bundle-001",
+        "lifecycle_id": "episode-001",
+        "proof_complete": True,
+        "cleanup_authorized": False,
+        "status": "ELIGIBLE_BUT_CLEANUP_DISABLED",
+        "reasons": ["LIFECYCLE_ROTATION_CLEANUP_NOT_IMPLEMENTED"],
+    }
+
+
+def test_lifecycle_cleanup_fails_closed_for_integrity_identity_and_laptop_gaps():
+    namespace = _load_lifecycle_cleanup_model()
+    receipt = _complete_lifecycle_cleanup_receipt(namespace)
+    receipt["files"][0]["sha256"] = "f" * 64
+    receipt["pending_order_ids"] = ["paper-order-1"]
+    receipt["laptop_acknowledgement"]["archive"]["complete"] = False
+
+    result = namespace["_data_sync_lifecycle_cleanup_eligibility"](receipt)
+
+    assert result["status"] == "INELIGIBLE_RETAIN_SOURCE"
+    assert result["proof_complete"] is False
+    assert result["cleanup_authorized"] is False
+    assert "PENDING_ORDER_REFERENCE_NOT_CLEARED" in result["reasons"]
+    assert "MANIFEST_SHA256_MISMATCH" in result["reasons"]
+    assert "LAPTOP_ARCHIVE_ACK_INCOMPLETE" in result["reasons"]
+
+
+def test_lifecycle_cleanup_excludes_active_runtime_sync_and_analyzer_leases():
+    namespace = _load_lifecycle_cleanup_model()
+    receipt = _complete_lifecycle_cleanup_receipt(namespace)
+
+    result = namespace["_data_sync_lifecycle_cleanup_eligibility"](
+        receipt,
+        active_order_or_position_refs=["episode-001"],
+        active_sync_leases=["bundle-001"],
+        active_analyzer_leases=["bundle-001"],
+    )
+
+    assert result["cleanup_authorized"] is False
+    assert set(result["reasons"]) >= {
+        "ACTIVE_RUNTIME_REFERENCE",
+        "ACTIVE_SYNC_LEASE",
+        "ACTIVE_ANALYZER_LEASE",
+    }
+
+
+def test_lifecycle_cleanup_requires_explicit_unknown_instead_of_missing_outcome():
+    namespace = _load_lifecycle_cleanup_model()
+    receipt = _complete_lifecycle_cleanup_receipt(namespace)
+    receipt["terminal_outcome"] = ""
+    receipt["immutable_identity_sha256"] = namespace[
+        "_data_sync_lifecycle_identity_sha256"
+    ](receipt)
+
+    result = namespace["_data_sync_lifecycle_cleanup_eligibility"](receipt)
+
+    assert "TERMINAL_OR_EXPLICIT_UNKNOWN_MISSING" in result["reasons"]
+    assert result["status"] == "INELIGIBLE_RETAIN_SOURCE"
 
 
 def test_remote_analyzer_mirror_is_read_only_and_admin_gated():

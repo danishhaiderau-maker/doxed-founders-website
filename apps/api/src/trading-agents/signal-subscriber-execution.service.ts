@@ -114,10 +114,17 @@ const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
  * dashboardState document).
  */
 export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
-export const PERSISTED_WAKE_PAUSED_POLL_MS = 10_000;
-export const PERSISTED_WAKE_IDLE_POLL_MS = 30_000;
-export const RECONCILIATION_PAUSED_POLL_MS = 5_000;
-export const RECONCILIATION_IDLE_POLL_MS = 30_000;
+/**
+ * A disarmed, exposure-free relay has no money-path work to reconcile. Direct
+ * authenticated wakes remain immediate; this one-minute durable fallback is
+ * only for process-boundary recovery and remains inside the persisted wake's
+ * two-minute validity window. Keeping PAUSED at 5/10 seconds prevented Neon
+ * from ever reaching an idle period even when every relay was disarmed.
+ */
+export const PERSISTED_WAKE_PAUSED_POLL_MS = 60_000;
+export const PERSISTED_WAKE_IDLE_POLL_MS = 60_000;
+export const RECONCILIATION_PAUSED_POLL_MS = 60_000;
+export const RECONCILIATION_IDLE_POLL_MS = 60_000;
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;

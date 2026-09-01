@@ -716,6 +716,46 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
                         payload = zf.read(name)
                         assert record["bytes"] == len(payload)
                         assert record["sha256"] == hashlib.sha256(payload).hexdigest()
+                        if name != "README.txt":
+                            assert record["staging_mode"] == "bounded_memory_disk_v1"
+                # Raw evidence remains downloadable even when the analyzer is
+                # stale. The manifest must label the stale report snapshot
+                # rather than pretending that it is current.
+                dashboard._generation_freshness_meta = lambda: {
+                    "current": False,
+                    "reasons": ["newer raw mirror rows await analyzer publication"],
+                }
+                _write_json(
+                    mirror / ".fly-sync-state.json",
+                    {"source_git_rev": "newer-raw-revision", "epoch_id": "newer-raw-epoch"},
+                )
+                _write_json(
+                    mirror / "research_session.json",
+                    {"source_git_rev": "newer-raw-revision", "epoch_id": "newer-raw-epoch"},
+                )
+                stale_generation = client.get("/download/everything")
+                assert stale_generation.status_code == 200
+                with zipfile.ZipFile(io.BytesIO(stale_generation.data)) as zf:
+                    stale_manifest = json.loads(zf.read("MANIFEST.json"))
+                    assert stale_manifest["generation_current"] is False
+                    assert stale_manifest["generation_freshness"]["reasons"] == [
+                        "newer raw mirror rows await analyzer publication"
+                    ]
+                    assert stale_manifest["notes"]["current_report_scope"] == (
+                        "STALE_ANALYZER_SNAPSHOT_WITH_CURRENT_RAW_EVIDENCE"
+                    )
+                    assert stale_manifest["provenance_coherent"] is False
+                    assert {row["field"] for row in stale_manifest["provenance_conflicts"]} == {
+                        "revision",
+                        "epoch_id",
+                    }
+                    assert "raw/current_fly_mirror/trades_3factor.csv" in zf.namelist()
+                _write_json(mirror / ".fly-sync-state.json", {"name": ".fly-sync-state.json"})
+                _write_json(mirror / "research_session.json", {"name": "research_session.json"})
+                dashboard._generation_freshness_meta = lambda: {
+                    "current": True,
+                    "reasons": [],
+                }
                 (mirror / "chase_offset_touch_grid.jsonl").write_text(
                     json.dumps({
                         "schema": "compressed_chase_shadow_v1",
@@ -801,22 +841,18 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             dashboard._generation_freshness_meta = original_freshness
 
 
-def test_download_everything_refuses_stale_generation_before_capture(monkeypatch) -> None:
-    monkeypatch.setattr(
-        dashboard,
-        "_generation_freshness_meta",
-        lambda: {
-            "current": False,
-            "reasons": ["Canonical Fly mirror synchronization is in progress"],
-        },
-    )
-
-    with dashboard.app.test_client() as client:
-        response = client.get("/download/everything")
-
-    assert response.status_code == 503
-    assert b"complete research download refused" in response.data
-    assert b"synchronization is in progress" in response.data
+def test_disk_staging_cleans_partial_output_when_source_is_missing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        missing = root / "vanished-during-sync.jsonl"
+        staged = root / "member.capture"
+        try:
+            dashboard._stage_generation_fenced(missing, staged, attempts=2)
+        except RuntimeError as exc:
+            assert "could not capture stable generation" in str(exc)
+        else:
+            raise AssertionError("missing source unexpectedly produced a staged member")
+        assert not staged.exists()
 
 
 def test_sqlite_online_snapshot_includes_uncheckpointed_wal_commit() -> None:

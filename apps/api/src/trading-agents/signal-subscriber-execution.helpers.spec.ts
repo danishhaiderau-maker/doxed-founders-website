@@ -127,6 +127,14 @@ test('relay executor polling keeps direct wake latency separate from Neon backst
   assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'PAUSED', 800), RECONCILIATION_PAUSED_POLL_MS);
   assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'IDLE', 800), RECONCILIATION_IDLE_POLL_MS);
   assert.ok(PERSISTED_WAKE_ACTIVE_POLL_MS > 250, 'Neon fallback must not regress to 4 Hz');
+  assert.ok(
+    PERSISTED_WAKE_PAUSED_POLL_MS >= 60_000,
+    'disarmed exposure-free relay must use the lowest bounded recovery cadence',
+  );
+  assert.ok(
+    RECONCILIATION_PAUSED_POLL_MS >= 60_000,
+    'disarmed exposure-free reconciliation must not keep Neon continuously busy',
+  );
   assert.ok(PERSISTED_WAKE_IDLE_POLL_MS >= PERSISTED_WAKE_PAUSED_POLL_MS);
 });
 

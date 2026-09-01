@@ -37910,6 +37910,204 @@ def _data_sync_validate_ack_rows(received: list, inventory: dict) -> tuple[dict,
     return accepted, rejected
 
 
+_DATA_SYNC_LIFECYCLE_CLEANUP_ACK_SCHEMA = "lifecycle_bundle_cleanup_ack_v1"
+# Deliberately false until lifecycle-aware rotation, archive materialization,
+# and the desktop acknowledgement producer all exist in production.  The
+# eligibility model below can describe a fully proven bundle, but it cannot
+# authorize unlinking by itself.
+_DATA_SYNC_LIFECYCLE_CLEANUP_ENABLED = False
+_DATA_SYNC_TERMINAL_OUTCOMES = frozenset({
+    "FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN",
+})
+
+
+def _data_sync_iso8601_utc(value: object) -> str | None:
+    """Return a normalized timestamp only for an explicit timezone value."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _data_sync_lifecycle_manifest_sha256(files: list) -> str:
+    """Content-address the complete, ordered lifecycle file manifest."""
+    canonical = [
+        {
+            "path": str(row["path"]),
+            "sha256": str(row["sha256"]).lower(),
+            "size": int(row["size"]),
+            "mtime_ns": int(row["mtime_ns"]),
+            "row_count": int(row["row_count"]),
+            "first_timestamp": str(row["first_timestamp"]),
+            "last_timestamp": str(row["last_timestamp"]),
+        }
+        for row in sorted(files, key=lambda item: str(item["path"]))
+    ]
+    encoded = json.dumps(
+        canonical, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _data_sync_lifecycle_identity_sha256(receipt: dict) -> str:
+    """Bind immutable lifecycle identity independently of mutable ACK state."""
+    identity = {
+        "bundle_id": str(receipt.get("bundle_id") or ""),
+        "lifecycle_id": str(receipt.get("lifecycle_id") or ""),
+        "source_git_rev": str(receipt.get("source_git_rev") or ""),
+        "deployed_git_rev": str(receipt.get("deployed_git_rev") or ""),
+        "collection_epoch_id": str(receipt.get("collection_epoch_id") or ""),
+        "tile_registry_signature": str(receipt.get("tile_registry_signature") or ""),
+        "terminal_outcome": str(receipt.get("terminal_outcome") or ""),
+        "terminal_at": str(receipt.get("terminal_at") or ""),
+        "manifest_sha256": str(receipt.get("manifest_sha256") or "").lower(),
+    }
+    encoded = json.dumps(
+        identity, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _data_sync_lifecycle_cleanup_eligibility(
+    receipt: object,
+    *,
+    active_order_or_position_refs: object = (),
+    active_sync_leases: object = (),
+    active_analyzer_leases: object = (),
+) -> dict:
+    """Evaluate cleanup proof without deleting or changing source evidence.
+
+    Every missing or malformed field is a reason to retain the bundle.  Even a
+    fully proven receipt returns ``cleanup_authorized=False`` while the
+    lifecycle rotation/archive implementation is absent.
+    """
+    reasons = []
+    row = receipt if isinstance(receipt, dict) else {}
+    if row.get("schema") != _DATA_SYNC_LIFECYCLE_CLEANUP_ACK_SCHEMA:
+        reasons.append("ACK_SCHEMA_UNAVAILABLE")
+
+    bundle_id = str(row.get("bundle_id") or "").strip()
+    lifecycle_id = str(row.get("lifecycle_id") or "").strip()
+    if not bundle_id or not lifecycle_id:
+        reasons.append("IMMUTABLE_LIFECYCLE_IDENTITY_MISSING")
+
+    outcome = str(row.get("terminal_outcome") or "").strip().upper()
+    if outcome not in _DATA_SYNC_TERMINAL_OUTCOMES:
+        reasons.append("TERMINAL_OR_EXPLICIT_UNKNOWN_MISSING")
+    if not _data_sync_iso8601_utc(row.get("terminal_at")):
+        reasons.append("TERMINAL_TIMESTAMP_INVALID")
+
+    revisions = ("source_git_rev", "deployed_git_rev")
+    if any(
+        not re.fullmatch(r"[0-9a-fA-F]{7,64}", str(row.get(key) or ""))
+        for key in revisions
+    ):
+        reasons.append("REVISION_IDENTITY_INCOMPLETE")
+    if not str(row.get("collection_epoch_id") or "").strip():
+        reasons.append("EPOCH_IDENTITY_MISSING")
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{64}", str(row.get("tile_registry_signature") or "")
+    ):
+        reasons.append("TILE_SIGNATURE_INVALID")
+
+    pending_refs = row.get("pending_order_ids")
+    open_refs = row.get("open_position_ids")
+    if not isinstance(pending_refs, list) or pending_refs:
+        reasons.append("PENDING_ORDER_REFERENCE_NOT_CLEARED")
+    if not isinstance(open_refs, list) or open_refs:
+        reasons.append("OPEN_POSITION_REFERENCE_NOT_CLEARED")
+    if any(active_order_or_position_refs or ()):
+        reasons.append("ACTIVE_RUNTIME_REFERENCE")
+    if any(active_sync_leases or ()):
+        reasons.append("ACTIVE_SYNC_LEASE")
+    if any(active_analyzer_leases or ()):
+        reasons.append("ACTIVE_ANALYZER_LEASE")
+
+    files = row.get("files")
+    valid_files = isinstance(files, list) and bool(files)
+    seen_paths = set()
+    if valid_files:
+        for file_row in files:
+            if not isinstance(file_row, dict):
+                valid_files = False
+                break
+            path = str(file_row.get("path") or "").strip()
+            digest = str(file_row.get("sha256") or "").strip().lower()
+            first = _data_sync_iso8601_utc(file_row.get("first_timestamp"))
+            last = _data_sync_iso8601_utc(file_row.get("last_timestamp"))
+            try:
+                size = int(file_row.get("size"))
+                mtime_ns = int(file_row.get("mtime_ns"))
+                row_count = int(file_row.get("row_count"))
+            except (TypeError, ValueError):
+                valid_files = False
+                break
+            if (
+                not path or path in seen_paths
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or size < 0 or mtime_ns <= 0 or row_count < 0
+                or not first or not last or first > last
+            ):
+                valid_files = False
+                break
+            seen_paths.add(path)
+    if not valid_files:
+        reasons.append("FULL_FILE_INTEGRITY_MANIFEST_INVALID")
+
+    manifest_sha = str(row.get("manifest_sha256") or "").strip().lower()
+    if valid_files and not hmac.compare_digest(
+        manifest_sha, _data_sync_lifecycle_manifest_sha256(files)
+    ):
+        reasons.append("MANIFEST_SHA256_MISMATCH")
+    elif not re.fullmatch(r"[0-9a-f]{64}", manifest_sha):
+        reasons.append("MANIFEST_SHA256_INVALID")
+
+    supplied_identity = str(
+        row.get("immutable_identity_sha256") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied_identity) or not hmac.compare_digest(
+        supplied_identity, _data_sync_lifecycle_identity_sha256(row)
+    ):
+        reasons.append("IMMUTABLE_IDENTITY_SHA256_MISMATCH")
+
+    laptop = row.get("laptop_acknowledgement")
+    for copy_name in ("canonical", "archive", "index"):
+        copy_ack = laptop.get(copy_name) if isinstance(laptop, dict) else None
+        if not (
+            isinstance(copy_ack, dict)
+            and copy_ack.get("complete") is True
+            and str(copy_ack.get("bundle_id") or "") == bundle_id
+            and str(copy_ack.get("lifecycle_id") or "") == lifecycle_id
+            and re.fullmatch(r"[0-9a-f]{64}", str(copy_ack.get("sha256") or ""))
+            and hmac.compare_digest(
+                str(copy_ack.get("manifest_sha256") or "").lower(), manifest_sha
+            )
+            and _data_sync_iso8601_utc(copy_ack.get("acknowledged_at"))
+        ):
+            reasons.append(f"LAPTOP_{copy_name.upper()}_ACK_INCOMPLETE")
+
+    proof_complete = not reasons
+    cleanup_authorized = proof_complete and _DATA_SYNC_LIFECYCLE_CLEANUP_ENABLED
+    return {
+        "schema": "lifecycle_bundle_cleanup_eligibility_v1",
+        "bundle_id": bundle_id or None,
+        "lifecycle_id": lifecycle_id or None,
+        "proof_complete": proof_complete,
+        "cleanup_authorized": cleanup_authorized,
+        "status": (
+            "ELIGIBLE_BUT_CLEANUP_DISABLED" if proof_complete
+            else "INELIGIBLE_RETAIN_SOURCE"
+        ),
+        "reasons": reasons or ["LIFECYCLE_ROTATION_CLEANUP_NOT_IMPLEMENTED"],
+    }
+
+
 def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = None) -> list:
     """Delete only fully acknowledged, old closed rotation files.
 
@@ -37919,6 +38117,13 @@ def _prune_acknowledged_rotations(acks: dict, volume_used_pct: float | None = No
     v2.2: raw research JSONL is NEVER pruned here — archive checksum ack required
     first. Aggressive 70% pruning disabled to prevent silent tape loss.
     """
+    # Legacy per-file ACKs cannot establish lifecycle completion or prove the
+    # canonical+archive+index laptop copies.  Keep this entrypoint for API
+    # compatibility, but fail closed until lifecycle-aware rotation exists.
+    # In particular, do not unlink even if a caller supplies a syntactically
+    # complete future receipt while the explicit feature fence is false.
+    if not _DATA_SYNC_LIFECYCLE_CLEANUP_ENABLED:
+        return []
     removed = []
     keep_newest = 2
     age_hours = 24
@@ -37972,13 +38177,11 @@ _DATA_SYNC_RETENTION_DELAY_SECONDS = max(
 
 
 def _data_sync_retention_worker() -> None:
-    """Run recoverable rotation retention away from the sync HTTP request.
+    """Retained dormant worker for a future lifecycle-aware cleanup release.
 
-    A completed acknowledgement proves that the desktop holds the exact file
-    generations recorded in ``sync_ack.json``.  Waiting before cleanup keeps
-    the shared-CPU request path responsive, while the pruning function still
-    rechecks age, current size and mtime and preserves raw research evidence,
-    active files, unacknowledged files, and the newest two rotations.
+    Per-file ``sync_ack.json`` receipts are intentionally insufficient to
+    authorize cleanup. The prune entrypoint is fenced off until complete
+    lifecycle bundles and archive acknowledgements are implemented.
     """
     global _data_sync_retention_scheduled
     try:
@@ -38319,9 +38522,10 @@ def api_data_sync_ack():
     except OSError:
         volume_used_pct = None
     rejected = sum(rejected_by_reason.values()) + max(0, len(received) - 5000)
+    # File-level ACKs prove transfer/parity only. They do not prove lifecycle
+    # closure or the laptop canonical+archive+index copies, so they must never
+    # schedule source cleanup.
     retention_scheduled = False
-    if rejected == 0 and len(accepted_rows) == len(received):
-        retention_scheduled = _schedule_data_sync_retention_cleanup()
     return jsonify({
         "ok": True,
         "received": len(received),
@@ -38335,14 +38539,12 @@ def api_data_sync_ack():
         "inventory_generated_at": inventory_generated_at,
         "inventory_sha256": inventory_sha256,
         "removed_acknowledged_rotations": [],
-        "cleanup_status": (
-            "SCHEDULED_OUTSIDE_HTTP_REQUEST"
-            if retention_scheduled else "DEFERRED_OUTSIDE_HTTP_REQUEST"
-        ),
+        "cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED",
         "volume_used_pct": volume_used_pct,
         "policy": (
-            "ack receipt committed atomically; cleanup deferred outside the HTTP request; "
-            "active, unacknowledged, newest-two, and raw research evidence remain protected"
+            "file ack committed atomically for parity only; lifecycle cleanup is disabled "
+            "until terminal identity, full integrity, laptop canonical/archive/index, "
+            "runtime-reference, and lease proofs all pass"
         ),
     })
 

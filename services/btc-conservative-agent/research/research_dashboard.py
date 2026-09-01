@@ -347,7 +347,7 @@ _API_CACHE_LOCK = threading.Lock()
 
 
 def _report_cache_generation_token() -> str:
-    """Invalidate cached APIs immediately when the analyzer publishes reports."""
+    """Invalidate cached APIs when reports or the sync/storage receipt changes."""
     parts = []
     for name in (REPORT_MANIFEST_FILE, SAFE_POLICY_GENOME_V3_REPORT_FILE):
         fingerprints = []
@@ -358,6 +358,14 @@ def _report_cache_generation_token() -> str:
                 continue
             fingerprints.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
         parts.append(f"{name}:" + (";".join(fingerprints) if fingerprints else "missing"))
+    size_receipt = DATA_ROOT / MIRROR_SIZE_REPORT_FILE
+    try:
+        size_stat = size_receipt.stat()
+        parts.append(
+            f"{MIRROR_SIZE_REPORT_FILE}:{size_stat.st_mtime_ns}:{size_stat.st_size}"
+        )
+    except OSError:
+        parts.append(f"{MIRROR_SIZE_REPORT_FILE}:missing")
     return "|".join(parts)
 
 
@@ -3974,6 +3982,32 @@ def api_summary():
             "fly_computed_at": mirror_size.get("fly_computed_at"),
             "sync_interval_seconds": mirror_size.get("sync_interval_seconds"),
             "sync_threshold_mb": mirror_size.get("sync_threshold_mb"),
+            "categories": {
+                label: (
+                    {
+                        "status": "OBSERVED",
+                        "bytes": int(mirror_size.get(field)),
+                        "mb": round(int(mirror_size.get(field)) / 1048576, 3),
+                    }
+                    if isinstance(mirror_size.get(field), (int, float))
+                    and not isinstance(mirror_size.get(field), bool)
+                    and float(mirror_size.get(field)) >= 0
+                    else {
+                        "status": "UNKNOWN",
+                        "bytes": None,
+                        "mb": None,
+                        "reason": "LIFECYCLE_STORAGE_CLASSIFICATION_NOT_IN_SYNC_RECEIPT",
+                    }
+                )
+                for label, field in (
+                    ("active_lifecycle", "active_lifecycle_bytes"),
+                    ("completed_unsynchronized", "completed_unsynchronized_bytes"),
+                    ("downloaded_unacknowledged", "downloaded_unacknowledged_bytes"),
+                    ("acknowledged_cleanup_eligible", "acknowledged_cleanup_eligible_bytes"),
+                    ("protected_recovery", "protected_recovery_bytes"),
+                    ("unknown_unclassified", "unknown_unclassified_bytes"),
+                )
+            },
         },
     })
 
@@ -4709,6 +4743,161 @@ def _capture_bundle_member(path: Path) -> tuple[bytes, dict]:
     return _read_generation_fenced(path)
 
 
+_BUNDLE_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_BUNDLE_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _truncate_to_last_newline(path: Path) -> int:
+    """Trim a staged append-only CSV/JSONL snapshot to a complete row."""
+    size = path.stat().st_size
+    if size <= 0:
+        return 0
+    with path.open("r+b") as handle:
+        cursor = size
+        while cursor > 0:
+            width = min(_BUNDLE_COPY_CHUNK_BYTES, cursor)
+            cursor -= width
+            handle.seek(cursor)
+            block = handle.read(width)
+            boundary = block.rfind(b"\n")
+            if boundary >= 0:
+                captured = cursor + boundary + 1
+                handle.truncate(captured)
+                return captured
+        handle.truncate(0)
+    return 0
+
+
+def _stage_generation_fenced(path: Path, destination: Path, attempts: int = 3) -> dict:
+    """Capture a stable member on disk using bounded memory."""
+    append_prefix = (
+        path.name in _APPEND_PREFIX_SNAPSHOT_NAMES
+        or path.suffix.lower() == ".jsonl"
+    )
+    last_error = None
+    for _attempt in range(attempts):
+        destination.unlink(missing_ok=True)
+        try:
+            before = _snapshot_generation(path)
+            remaining = before[2]
+            with path.open("rb") as source, destination.open("xb") as staged:
+                while remaining:
+                    chunk = source.read(min(_BUNDLE_COPY_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        break
+                    staged.write(chunk)
+                    remaining -= len(chunk)
+            after = _snapshot_generation(path)
+            captured = destination.stat().st_size
+            stable = (
+                before[:2] == after[:2]
+                and remaining == 0
+                and captured == before[2]
+                and (
+                    (append_prefix and after[2] >= before[2])
+                    or (not append_prefix and after == before)
+                )
+            )
+            if not stable:
+                last_error = "source generation changed during capture"
+                continue
+            if append_prefix and path.suffix.lower() in {".csv", ".jsonl"}:
+                captured = _truncate_to_last_newline(destination)
+            return {
+                "capture_mode": (
+                    "append_prefix_generation_fence_v1"
+                    if append_prefix
+                    else "strict_generation_fence_v1"
+                ),
+                "staging_mode": "bounded_memory_disk_v1",
+                "source_size": before[2],
+                "source_mtime_ns": before[3],
+                "captured_bytes": captured,
+                "sha256": _sha256_file(destination),
+            }
+        except OSError as exc:
+            last_error = str(exc)
+    destination.unlink(missing_ok=True)
+    raise RuntimeError(
+        f"could not capture stable generation: {path}"
+        + (f" ({last_error})" if last_error else "")
+    )
+
+
+def _stage_sqlite_snapshot(path: Path, destination: Path) -> dict:
+    destination.unlink(missing_ok=True)
+    source = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    snapshot = sqlite3.connect(str(destination))
+    try:
+        source.backup(snapshot)
+    finally:
+        snapshot.close()
+        source.close()
+    check = sqlite3.connect(f"file:{destination.as_posix()}?mode=ro", uri=True)
+    try:
+        verdict = check.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        check.close()
+    if str(verdict).lower() != "ok":
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(f"SQLite snapshot integrity check failed: {path}")
+    captured = destination.stat().st_size
+    return {
+        "capture_mode": "sqlite_online_backup_v1",
+        "staging_mode": "bounded_memory_disk_v1",
+        "source_size": int(path.stat().st_size),
+        "captured_bytes": captured,
+        "integrity_check": "ok",
+        "sha256": _sha256_file(destination),
+    }
+
+
+def _stage_bundle_member(path: Path, destination: Path) -> dict:
+    if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+        return _stage_sqlite_snapshot(path, destination)
+    return _stage_generation_fenced(path, destination)
+
+
+def _count_valid_compressed_shadow_rows_path(path: Path) -> int:
+    count = 0
+    with path.open("r", encoding="utf-8-sig", errors="strict") as handle:
+        for raw_line in handle:
+            if not raw_line.strip():
+                continue
+            try:
+                row = json.loads(raw_line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(row, dict) or row.get("schema") != "compressed_chase_shadow_v1":
+                continue
+            if (
+                row.get("execution_class") != "SHADOW_ONLY"
+                or row.get("places_order") is not False
+                or row.get("relay_eligible") is not False
+                or row.get("event") not in {"STAGE", "EXPIRED"}
+            ):
+                continue
+            if all(
+                str(row.get(name) or "").strip()
+                for name in (
+                    "trade_id", "shared_ai_call_id", "opportunity_id",
+                    "episode_id", "epoch_id", "policy_id", "policy_signature",
+                )
+            ):
+                count += 1
+    return count
+
+
 def _count_valid_compressed_shadow_rows(payload: bytes) -> int:
     """Count signed shadow schedule rows, never legacy touch-grid rows."""
     count = 0
@@ -4752,15 +4941,7 @@ def download_everything():
     """One verified ZIP containing raw research data, reports, sessions, genome,
     accumulator exports, audit source bundle, and any preserved analysis."""
     freshness = _generation_freshness_meta()
-    if not freshness["current"]:
-        reasons = "; ".join(freshness.get("reasons") or []) or "generation freshness unavailable"
-        abort(
-            503,
-            description=(
-                "complete research download refused: analyzer generation is not current; "
-                f"{reasons}"
-            ),
-        )
+    generation_current = freshness.get("current") is True
     agent_root = _agent_source_root()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     candidates = []
@@ -4953,7 +5134,7 @@ def download_everything():
         if name.startswith("accumulator/")
         and Path(name).suffix.lower() in {".db", ".sqlite", ".sqlite3"}
     )
-    if not accumulator_db_members:
+    if not accumulator_db_members and generation_current:
         abort(
             500,
             description=(
@@ -4965,7 +5146,7 @@ def download_everything():
         f"current_receipts/{name}" for name in CURRENT_PATHWAY_RECEIPTS
     }
     missing_current_receipts = sorted(required_current_receipts - member_names)
-    if missing_current_receipts:
+    if missing_current_receipts and generation_current:
         abort(
             500,
             description=(
@@ -5012,7 +5193,7 @@ def download_everything():
         if name not in BUNDLE_FILES
     }
     missing_current_reports = sorted(required_current_reports - member_names)
-    if missing_current_reports:
+    if missing_current_reports and generation_current:
         abort(
             500,
             description=(
@@ -5046,6 +5227,7 @@ def download_everything():
             ),
         },
     }
+    provenance_conflicts = []
     for field in ("revision", "epoch_id"):
         values = {
             str(identity.get(field)).strip()
@@ -5053,13 +5235,15 @@ def download_everything():
             if identity.get(field) not in (None, "", "UNKNOWN", "UNAVAILABLE")
         }
         if len(values) > 1:
-            abort(
-                500,
-                description=(
-                    "complete research download refused: incoherent "
-                    f"{field} provenance across sources: {sorted(values)}"
-                ),
-            )
+            provenance_conflicts.append({"field": field, "values": sorted(values)})
+            if generation_current:
+                abort(
+                    500,
+                    description=(
+                        "complete research download refused: incoherent "
+                        f"{field} provenance across sources: {sorted(values)}"
+                    ),
+                )
     optional_presence = {
         name: f"raw/current_fly_mirror/{name}" in member_names
         for name in OPTIONAL_ANALYZER_RAW_INPUTS
@@ -5086,9 +5270,13 @@ def download_everything():
         # tile policies.  Export the complete sorted set rather than implying a
         # single identity or emitting a misleading null value.
         "policy_signatures": current_policy_signatures,
+        "generation_current": generation_current,
+        "generation_freshness": freshness,
         "files": [],
         "capture_contract": {
             "schema": "generation_fenced_bundle_capture_v2",
+            "archive_build_mode": "atomic_on_disk_bounded_memory_v1",
+            "copy_chunk_bytes": _BUNDLE_COPY_CHUNK_BYTES,
             "sqlite": "sqlite_online_backup_v1",
             "hot_files": "append_prefix_or_strict_generation_fence_v1",
             "required_analyzer_raw_inputs": list(REQUIRED_ANALYZER_RAW_INPUTS),
@@ -5099,11 +5287,16 @@ def download_everything():
             "coherence_anchors": sorted(coherence_before),
         },
         "provenance": identity_sources,
+        "provenance_coherent": not provenance_conflicts,
+        "provenance_conflicts": provenance_conflicts,
         "notes": {
             "past_analysis_available": (ROOT / PAST_ANALYSIS_DIR).is_dir()
             and any((ROOT / PAST_ANALYSIS_DIR).iterdir()),
             "configured_data_root_included": DATA_ROOT.is_dir(),
-            "current_report_scope": "FRESH-COLLECTION",
+            "current_report_scope": (
+                "FRESH-COLLECTION" if generation_current
+                else "STALE_ANALYZER_SNAPSHOT_WITH_CURRENT_RAW_EVIDENCE"
+            ),
             "live_trading_data": False,
             "purpose": "research audit and offline analysis",
             "source_revision": current_generation_revision,
@@ -5189,87 +5382,120 @@ def download_everything():
             },
         },
     }
-    buf = io.BytesIO()
     compressed_shadow_row_count = 0
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        for arcname, path in sorted(unique.items()):
-            try:
-                data, capture = _capture_bundle_member(path)
-            except (OSError, RuntimeError, sqlite3.Error) as exc:
+    staging_root = Path(tempfile.mkdtemp(prefix="doxxed-evidence-bundle-"))
+    building_path = staging_root / "complete-research-evidence.zip.building"
+    final_path = staging_root / "complete-research-evidence.zip"
+    try:
+        with zipfile.ZipFile(
+            building_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True
+        ) as zf:
+            for index, (arcname, path) in enumerate(sorted(unique.items())):
+                staged = staging_root / f"member-{index:08d}.capture"
+                try:
+                    capture = _stage_bundle_member(path, staged)
+                    manifest["files"].append({
+                        "path": arcname,
+                        "bytes": capture["captured_bytes"],
+                        **capture,
+                    })
+                    zf.write(staged, arcname)
+                    if arcname == "raw/current_fly_mirror/chase_offset_touch_grid.jsonl":
+                        compressed_shadow_row_count = (
+                            _count_valid_compressed_shadow_rows_path(staged)
+                        )
+                except (OSError, RuntimeError, sqlite3.Error) as exc:
+                    abort(
+                        500,
+                        description=(
+                            "complete research download refused: unable to capture "
+                            f"stable source {arcname}: {exc}"
+                        ),
+                    )
+                finally:
+                    staged.unlink(missing_ok=True)
+            compressed_present = compressed_shadow_row_count > 0
+            compressed_status = manifest["notes"]["conditional_analyzer_raw_status"][
+                "chase_offset_touch_grid.jsonl"
+            ]
+            compressed_status["present"] = compressed_present
+            compressed_status["absence_status"] = (
+                None if compressed_present else "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS"
+            )
+            compressed_status["valid_compressed_shadow_rows"] = compressed_shadow_row_count
+            compressed_coverage = manifest["notes"]["component_coverage"][
+                "signed_compressed_shadow_schedule"
+            ]
+            compressed_coverage["present"] = compressed_present
+            compressed_coverage["absence_status"] = compressed_status["absence_status"]
+            compressed_coverage["valid_compressed_shadow_rows"] = compressed_shadow_row_count
+            coherence_after = {
+                name: _snapshot_generation(path)
+                for name, path in coherence_anchor_paths.items()
+                if path.is_file()
+            }
+            if coherence_after != coherence_before:
                 abort(
                     500,
                     description=(
-                        "complete research download refused: unable to capture "
-                        f"stable source {arcname}: {exc}"
+                        "complete research download refused: source/report identity "
+                        "anchors changed during capture"
                     ),
                 )
-            manifest["files"].append(
-                {
-                    "path": arcname,
-                    "bytes": len(data),
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                    **capture,
-                }
+            manifest["capture_contract"]["capture_completed_at"] = (
+                datetime.now(timezone.utc).isoformat()
             )
-            zf.writestr(arcname, data)
-            if arcname == "raw/current_fly_mirror/chase_offset_touch_grid.jsonl":
-                compressed_shadow_row_count = _count_valid_compressed_shadow_rows(data)
-        compressed_present = compressed_shadow_row_count > 0
-        compressed_status = manifest["notes"]["conditional_analyzer_raw_status"][
-            "chase_offset_touch_grid.jsonl"
-        ]
-        compressed_status["present"] = compressed_present
-        compressed_status["absence_status"] = (
-            None if compressed_present else "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS"
+            manifest["capture_contract"]["coherence_verified"] = True
+            readme = (
+                "Doxxed Crypto all-in-one research bundle.\n"
+                "MANIFEST.json lists every included payload file except itself, "
+                "with size and SHA-256 checksum.\n"
+                "raw/current_fly_mirror is the configured current data source; "
+                "raw/research_history is retained separately.\n"
+                "Analyzer reports may be stale; generation_current and "
+                "generation_freshness record their exact status.\n"
+                "Past Analysis is included only after a preserved analysis exists.\n"
+            ).encode("utf-8")
+            manifest["files"].append({
+                "path": "README.txt",
+                "bytes": len(readme),
+                "sha256": hashlib.sha256(readme).hexdigest(),
+                "capture_mode": "generated_bundle_member_v1",
+                "captured_bytes": len(readme),
+            })
+            zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
+            zf.writestr("README.txt", readme)
+        with zipfile.ZipFile(building_path, "r") as verified:
+            corrupt_member = verified.testzip()
+            if corrupt_member is not None:
+                raise RuntimeError(f"corrupt archive member: {corrupt_member}")
+        os.replace(building_path, final_path)
+        response = send_file(
+            final_path,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"complete_research_evidence_bundle_{stamp}.zip",
         )
-        compressed_status["valid_compressed_shadow_rows"] = compressed_shadow_row_count
-        compressed_coverage = manifest["notes"]["component_coverage"][
-            "signed_compressed_shadow_schedule"
-        ]
-        compressed_coverage["present"] = compressed_present
-        compressed_coverage["absence_status"] = compressed_status["absence_status"]
-        compressed_coverage["valid_compressed_shadow_rows"] = compressed_shadow_row_count
-        coherence_after = {
-            name: _snapshot_generation(path)
-            for name, path in coherence_anchor_paths.items()
-            if path.is_file()
-        }
-        if coherence_after != coherence_before:
-            abort(
-                500,
-                description=(
-                    "complete research download refused: source/report identity "
-                    "anchors changed during capture"
-                ),
-            )
-        manifest["capture_contract"]["capture_completed_at"] = (
-            datetime.now(timezone.utc).isoformat()
-        )
-        manifest["capture_contract"]["coherence_verified"] = True
-        readme = (
-            "Doxxed Crypto all-in-one research bundle.\n"
-            "MANIFEST.json lists every included payload file except itself, "
-            "with size and SHA-256 checksum.\n"
-            "raw/current_fly_mirror is the configured current data source; "
-            "raw/research_history is retained separately.\n"
-            "Past Analysis is included only after a preserved analysis exists.\n"
-        ).encode("utf-8")
-        manifest["files"].append({
-            "path": "README.txt",
-            "bytes": len(readme),
-            "sha256": hashlib.sha256(readme).hexdigest(),
-            "capture_mode": "generated_bundle_member_v1",
-            "captured_bytes": len(readme),
-        })
-        zf.writestr("MANIFEST.json", json.dumps(manifest, indent=2))
-        zf.writestr("README.txt", readme)
-    buf.seek(0)
-    return send_file(
-        buf,
-        mimetype="application/zip",
-        as_attachment=True,
-        download_name=f"complete_research_evidence_bundle_{stamp}.zip",
-    )
+
+        def _cleanup_complete_bundle() -> None:
+            final_path.unlink(missing_ok=True)
+            try:
+                staging_root.rmdir()
+            except OSError:
+                pass
+
+        response.call_on_close(_cleanup_complete_bundle)
+        return response
+    except Exception:
+        building_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        for staged in staging_root.glob("member-*.capture"):
+            staged.unlink(missing_ok=True)
+        try:
+            staging_root.rmdir()
+        except OSError:
+            pass
+        raise
 
 
 @app.route("/download/archive/<session_id>")
@@ -6464,6 +6690,12 @@ async function loadSummary() {
     ['Mirror sync receipt', storage.sync_computed_at
       ? ('local cache refreshed ' + fmtMelb(storage.sync_computed_at))
       : 'No local mirror receipt'],
+    ...Object.entries(storage.categories || {}).map(([name, category]) => [
+      'Storage · ' + name.replaceAll('_', ' '),
+      category && category.status === 'OBSERVED'
+        ? (Number(category.mb || 0).toFixed(3) + ' MB · OBSERVED')
+        : 'UNKNOWN · lifecycle classification unavailable'
+    ]),
     ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],
