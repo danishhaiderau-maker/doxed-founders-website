@@ -216,6 +216,12 @@ jobs:
             "python -c 'from pathlib import Path; import json,resource,time; from platform_relay_streaming import validate_streaming; p=Path(\"/app/data/relay_lifecycle_evidence_v1.json\"); t=time.perf_counter(); r=validate_streaming(p); print(json.dumps({\"stage\":\"direct_stream_validation\",\"valid\":r[0],\"code\":r[1],\"records\":r[2].get(\"records\"),\"bytes\":p.stat().st_size,\"seconds\":round(time.perf_counter()-t,3),\"maxrss_kib\":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))'"
           run_probe INCIDENT_LOG_SCAN flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
             "grep -nE 'fly-entrypoint.*bot (starting|exited)|WATCHDOG.*(failed|exiting|stale)|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log"
+          # The line-number scan proves an incident exists but a bare
+          # `Traceback` marker cannot identify the failing thread.  Emit only
+          # bounded context around the newest traceback so diagnosis remains
+          # useful without downloading or disclosing the complete bot log.
+          run_probe LATEST_TRACEBACK_CONTEXT flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "sh -lc 'grep -n -B 8 -A 48 \"Traceback (most recent call last):\" /app/data/bot.log | tail -n 120'"
 
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
