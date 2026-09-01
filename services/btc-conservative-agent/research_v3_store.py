@@ -13,11 +13,13 @@ from typing import Any, Iterable
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 from combo_pathway_config import active_tile_registry_signature
+from collector_storage import emergency_admission
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
+_lifecycle_episode_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _provenance_cache: dict[str, str] | None = None
 
 
@@ -280,6 +282,59 @@ class V3EvidenceStore:
             raise ValueError(f"unknown V3 ledger: {name}")
         return self.ledger_dir / f"{name}.jsonl"
 
+    def _episode_has_lifecycle(self, episode_id: str) -> bool:
+        if not episode_id:
+            return False
+        path = self.ledger_path("lifecycle")
+        key = str(path.resolve())
+        signature = _path_signature(path)
+        cached = _lifecycle_episode_cache.get(key)
+        if cached is not None and cached[0] == signature:
+            return episode_id in cached[1]
+        episodes: set[str] = set()
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line_no, line in enumerate(handle, 1):
+                    if not line.endswith("\n"):
+                        raise ValueError(f"TRUNCATED_JSONL_LINE:{line_no}")
+                    row = json.loads(line)
+                    value = str(row.get("episode_id") or "")
+                    if value:
+                        episodes.add(value)
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError, ValueError):
+            # Optional/new research fails closed. Mandatory lifecycle writes do
+            # not consult this cache and therefore remain available for repair.
+            return False
+        frozen = frozenset(episodes)
+        _lifecycle_episode_cache[key] = (signature, frozen)
+        return episode_id in frozen
+
+    @staticmethod
+    def _mandatory_lifecycle_write(ledger: str, row: dict[str, Any]) -> bool:
+        record_id = str(row.get("record_id") or "").lower()
+        state = str(row.get("outcome_state") or row.get("status") or "").upper()
+        terminal = bool(row.get("terminal") or row.get("lifecycle_final")) or state in {
+            "FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED",
+            "REALIZED_PROFIT", "REALIZED_LOSS", "REALIZED_ZERO_PNL", "CLOSED",
+            "CANCELLED", "EXPIRED",
+        }
+        return terminal or any(token in record_id for token in (
+            ":terminal", ":primary-fill", ":paper-fill", ":paper-filled",
+            ":paper-close", ":paper-closed", "qualification-horizon",
+            "lane-entry:no-order", ":cancel", ":expired", ":reconciliation",
+        ))
+
+    def _emergency_admission(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
+        episode_id = str(row.get("episode_id") or "")
+        mandatory = self._mandatory_lifecycle_write(ledger, row)
+        return emergency_admission(
+            data_dir=str(self.root), purpose=f"v3:{ledger}",
+            lifecycle_required=mandatory,
+            lifecycle_existing=(False if mandatory else self._episode_has_lifecycle(episode_id)),
+        )
+
     @staticmethod
     def _load_ids(path: Path) -> set[str]:
         ids: set[str] = set()
@@ -343,12 +398,21 @@ class V3EvidenceStore:
             durable_ids = self._cached_ids(path)
             if record_id in durable_ids:
                 return {"written": False, "duplicate": True, "record_id": record_id, "ledger": ledger}
+            admission = self._emergency_admission(ledger, material)
+            if not admission["allowed"]:
+                return {
+                    "written": False, "duplicate": False, "blocked": True,
+                    "record_id": record_id, "ledger": ledger,
+                    "storage_admission": admission,
+                }
             with path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
             durable_ids.add(record_id)
             _id_cache[str(path.resolve())] = (_path_signature(path), frozenset(durable_ids))
+            if ledger == "lifecycle":
+                _lifecycle_episode_cache.pop(str(path.resolve()), None)
             return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
     def put_market_segment(
@@ -380,6 +444,15 @@ class V3EvidenceStore:
                 if self._cached_segment_hash(target) != sha:
                     raise ValueError("CONTENT_ADDRESS_COLLISION_OR_CORRUPTION")
             else:
+                admission = emergency_admission(
+                    data_dir=str(self.root), purpose="v3:market_segment",
+                    lifecycle_existing=False,
+                )
+                if not admission["allowed"]:
+                    return {
+                        "written": False, "duplicate": False, "blocked": True,
+                        "sha256": sha, "storage_admission": admission,
+                    }
                 temporary = target.with_suffix(f".{os.getpid()}.tmp")
                 with temporary.open("wb") as handle:
                     handle.write(payload)

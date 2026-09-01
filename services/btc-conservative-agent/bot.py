@@ -187,6 +187,7 @@ from collector_v22 import (
 from research_v3_contract import COLLECTOR_VERSION as COLLECTOR_V31_VERSION
 from collector_storage import (
     disk_usage_fraction,
+    emergency_admission,
     project_capacity,
     storage_blocks_new_events,
     storage_state,
@@ -46097,6 +46098,50 @@ def _safe_append_jsonl(
     path: str, row: dict, label: str = "JSONL", *, fallback_on_error: bool = True,
 ):
     """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    terminal_labels = {
+        "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "EXECUTION_SETTINGS",
+        "DUPLICATE_INTENT_AUDIT", "COUNTERFACTUAL", "PATH_REPLAY",
+        "SIGNAL_REPLAY", "AI_REASON_OUTCOME", "GS_REJECTION_OUTCOME",
+    }
+    terminal_states = {
+        "CLOSED", "CANCELLED", "EXPIRED", "REJECTED", "FULL_FILL", "PARTIAL_FILL",
+        "NO_FILL", "NO_TRADE", "REALIZED_PROFIT", "REALIZED_LOSS", "REALIZED_ZERO_PNL",
+    }
+    row_state = str(
+        row.get("outcome_state") or row.get("status") or row.get("event") or ""
+    ).upper()
+    lifecycle_required = label in terminal_labels or bool(
+        row.get("terminal") or row.get("lifecycle_final") or row_state in terminal_states
+    )
+    lifecycle_existing = False
+    trade_id = str(row.get("trade_id") or row.get("order_id") or "")
+    try:
+        runtime_state = globals().get("state") or {}
+        active_rows = [
+            *(globals().get("pending_orders") or []),
+            *(globals().get("open_positions") or []),
+            *(runtime_state.get("pending_orders") or []),
+            *(runtime_state.get("positions") or runtime_state.get("open_positions") or []),
+        ]
+        active_ids = {
+            str(item.get("trade_id") or item.get("order_id") or "")
+            for item in active_rows if isinstance(item, dict)
+        }
+        lifecycle_existing = bool((trade_id and trade_id in active_ids) or (
+            label == "MARKET_MICROSTRUCTURE_1S" and active_ids
+        ))
+    except (AttributeError, TypeError):
+        lifecycle_existing = False
+    admission = emergency_admission(
+        data_dir=str(_data_sync_runtime_root()), purpose=f"jsonl:{label}",
+        lifecycle_required=lifecycle_required, lifecycle_existing=lifecycle_existing,
+    )
+    if not admission["allowed"]:
+        logger.warning(
+            "[%s] append suppressed: %s used-threshold=%.2f [PIPELINE ENFORCEMENT]",
+            label, admission["reason"], admission["threshold"],
+        )
+        return False
     line = json.dumps(row, default=str) + "\n"
     last_err = None
     # Some contract tests compile this helper in isolation; the path lock still

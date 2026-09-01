@@ -78,3 +78,15 @@ def test_shared_ai_coordinator_bypasses_child_capacity_gate():
         "sole and is_research_data_collection() and "
         "(not is_ai_scan_lane(research_lane))"
     ) in body
+
+
+def test_generic_jsonl_writer_has_emergency_admission_and_terminal_exemptions():
+    body = ast.unparse(_function("_safe_append_jsonl"))
+    assert "emergency_admission" in body
+    assert "MARKET_MICROSTRUCTURE_1S" in body
+    for mandatory in (
+        "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "PATH_REPLAY",
+        "SIGNAL_REPLAY", "COUNTERFACTUAL",
+    ):
+        assert mandatory in body
+    assert "NEW_NONESSENTIAL_RESEARCH_BLOCKED_AT_STORAGE_EMERGENCY" not in body
