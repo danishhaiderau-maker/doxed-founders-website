@@ -100,6 +100,8 @@ def test_health_is_liveness_only_and_ready_uses_compact_strategy_snapshot():
     assert '"readiness_endpoint": "/ready"' in health_body
     assert "_strategy_progress_health_snapshot(" not in health_body
     assert "_strategy_progress_health_snapshot(now, trade_lock_timeout_sec=0.0)" in ready_body
+    assert "with state_lock:" not in ready_body
+    assert 'state.get("last_heartbeat", last_heartbeat)' in ready_body
 
 
 def test_health_lock_probe_is_nonblocking_without_weakening_watchdog_default():
