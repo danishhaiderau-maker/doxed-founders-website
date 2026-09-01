@@ -123,6 +123,49 @@ def _pre_entry_features_receipt(
     return write
 
 
+def write_pre_entry_evidence_failure(
+    source: Mapping[str, Any], *, lane: str, epoch_id: str, data_dir: str,
+    failure_class: str,
+) -> dict[str, Any]:
+    """Best-effort durable dead letter for a blocked pre-entry evidence write.
+
+    The error message is deliberately excluded: it can contain paths, payloads,
+    or provider text.  This receipt proves that order eligibility was denied;
+    it never substitutes for the missing pre-entry feature evidence.
+    """
+    lane_name = str(lane or "").strip().upper()
+    call_id = str(_first(source.get("shared_ai_call_id"), source.get("trade_id")) or "").strip()
+    if not lane_name or not call_id:
+        raise ValueError("V3_EVIDENCE_FAILURE_IDENTITY_INCOMPLETE")
+    material = dict(source)
+    material["research_lane"] = lane_name
+    event_id = f"lane-decision:{lane_name}:{call_id}"
+    identity = _causal_identity(event_id, material)
+    policy = _paper_policy_identity(str(epoch_id), material)
+    return V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append(
+        "evidence_failure",
+        {
+            "record_id": (
+                f"evidence-failure:{identity['episode_id']}:"
+                f"{policy['policy_signature']}:PRE_ENTRY_FEATURES"
+            ),
+            "receipt_schema": "evidence_write_failure_v1",
+            "failed_ledger": "pre_entry_features",
+            "failure_stage": "LANE_POLICY_VERDICT",
+            "failure_class": str(failure_class or "UNKNOWN")[:80],
+            "resolution": "ORDER_ELIGIBILITY_BLOCKED",
+            "order_eligibility_blocked": True,
+            "observed_ts": time.time(),
+            "episode_id": identity["episode_id"],
+            "event_id": event_id,
+            "shared_ai_call_id": identity["shared_ai_call_id"],
+            "research_lane": lane_name,
+            "opportunity_id": f"opportunity:{identity['episode_id']}",
+            **policy,
+        },
+    )
+
+
 def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str, Any]]:
     """Give compact production tape rows explicit, hash-stable field names."""
     normalized: list[dict[str, Any]] = []

@@ -5,12 +5,81 @@ import json
 from pathlib import Path
 
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
-from research.research_v3_report import build_safe_policy_genome_v3_report
+from research.research_v3_report import (
+    build_safe_policy_genome_v3_report,
+    join_pre_entry_feature_receipts,
+)
 from research import research_dashboard as dashboard
+from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES, _causal_feature_key
 from research_v3_store import V3EvidenceStore
 
 
 class V3ReportTests(unittest.TestCase):
+    def test_pre_entry_receipts_join_approve_reject_and_missing_stays_unknown(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            features = {
+                "atr_bucket": "HIGH",
+                "realized_volatility_bucket": "HIGH",
+                "directional_spread_bucket": "WIDE",
+                "depth_bucket": "DEEP",
+                "liquidity_bucket": "LIQUID",
+                "regime": "BULL",
+                "direction": "LONG",
+                "trend_strength_bucket": "STRONG",
+            }
+            for index, decision in enumerate(("ACCEPT", "REJECT", "REJECT"), 1):
+                episode_id = f"episode-{index}"
+                store.append("opportunity", {
+                    "record_id": f"opportunity:{episode_id}",
+                    "opportunity_id": f"opportunity:{episode_id}",
+                    "episode_id": episode_id, "signal_ts": 1000 + index,
+                })
+                store.append("decision", {
+                    "record_id": f"decision:{episode_id}",
+                    "episode_id": episode_id, "policy_decision": decision,
+                })
+                if index < 3:
+                    store.append("pre_entry_features", {
+                        "record_id": f"pre-entry-features:{episode_id}",
+                        "receipt_schema": "pre_entry_features_v1",
+                        "availability_boundary": "PRE_DECISION_ONLY",
+                        "captured_at_ts": 999 + index,
+                        "episode_id": episode_id,
+                        "opportunity_id": f"opportunity:{episode_id}",
+                        "features": features,
+                    })
+
+            report = build_safe_policy_genome_v3_report(data, reports, candidates=[])
+            coverage = report["collection"]["pre_entry_feature_evidence"]
+            self.assertEqual(coverage["opportunities"], 3)
+            self.assertEqual(coverage["receipt_joined_opportunities"], 2)
+            self.assertEqual(coverage["dynamic_schema_complete_opportunities"], 2)
+            self.assertEqual(coverage["unknown_opportunities"], 1)
+            self.assertEqual(
+                coverage["blocker_counts"],
+                {"PRE_ENTRY_FEATURE_RECEIPT_MISSING": 1},
+            )
+            self.assertIn("PRE_ENTRY_FEATURE_EVIDENCE_INCOMPLETE", report["blockers"])
+
+            opportunities = [
+                {"record_id": "opportunity:episode-1", "opportunity_id": "opportunity:episode-1",
+                 "episode_id": "episode-1", "signal_ts": 1001},
+                {"record_id": "opportunity:episode-3", "opportunity_id": "opportunity:episode-3",
+                 "episode_id": "episode-3", "signal_ts": 1003},
+            ]
+            receipts = [
+                {"episode_id": "episode-1", "opportunity_id": "opportunity:episode-1",
+                 "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 1000,
+                 "features": features},
+            ]
+            joined, _ = join_pre_entry_feature_receipts(opportunities, receipts)
+            key, defects = _causal_feature_key(joined[0], tuple(DEFAULT_CAUSAL_FEATURES))
+            self.assertEqual(defects, [])
+            self.assertEqual(len(key), len(DEFAULT_CAUSAL_FEATURES))
+            self.assertEqual(joined[1]["pre_entry_feature_status"], "UNKNOWN")
+            self.assertEqual(joined[1]["pre_entry_features"], {})
+
     def test_empty_epoch_reports_deployed_policies_as_collecting_not_qualified(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
             report = build_safe_policy_genome_v3_report(data, reports, candidates=[])

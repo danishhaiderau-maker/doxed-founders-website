@@ -16,6 +16,7 @@ from research_v3_bridge import dual_write_lane_entry_resolution
 from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources
 from research_v3_bridge import reconcile_overdue_expected_order_decisions
 from research_v3_bridge import reconcile_terminal_v22_into_v3
+from research_v3_bridge import write_pre_entry_evidence_failure
 from research_v3_bridge import _paper_market_segment
 from research_v3_store import V3EvidenceStore, _id_cache, _segment_hash_cache
 from research_v3_contract import canonical_json
@@ -832,6 +833,35 @@ class V3BridgeTests(unittest.TestCase):
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             self.assertFalse(store.ledger_path("pre_entry_features").exists())
             self.assertFalse(store.ledger_path("decision").exists())
+
+    def test_pre_entry_write_failure_has_durable_sanitized_dead_letter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-dead-letter",
+                "shared_ai_call_id": "scan-dead-letter",
+                "shared_ai_call_ts_epoch": 1000,
+                "raw_direction": "LONG",
+                "policy_id": "CONTINUOUS",
+            }
+            first = write_pre_entry_evidence_failure(
+                source, lane="CONTINUOUS", epoch_id="epoch-v3-test",
+                data_dir=tmp, failure_class="OSError",
+            )
+            second = write_pre_entry_evidence_failure(
+                source, lane="CONTINUOUS", epoch_id="epoch-v3-test",
+                data_dir=tmp, failure_class="OSError",
+            )
+            self.assertTrue(first["written"])
+            self.assertTrue(second["duplicate"])
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("evidence_failure").read_text().strip())
+            self.assertEqual(row["receipt_schema"], "evidence_write_failure_v1")
+            self.assertEqual(row["failed_ledger"], "pre_entry_features")
+            self.assertEqual(row["resolution"], "ORDER_ELIGIBILITY_BLOCKED")
+            self.assertTrue(row["order_eligibility_blocked"])
+            self.assertEqual(row["failure_class"], "OSError")
+            self.assertNotIn("error", row)
 
     def test_lane_decision_retry_is_write_once(self):
         with tempfile.TemporaryDirectory() as tmp:

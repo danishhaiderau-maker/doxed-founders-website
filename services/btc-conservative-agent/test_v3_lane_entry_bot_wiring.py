@@ -248,6 +248,150 @@ def test_family_decision_stamps_dashboard_history_before_v3_ledger_write():
     assert "decision_reason" in fanout[stamp:ledger]
 
 
+@pytest.mark.parametrize(
+    "decision,ai_error,expected_policy,expected_disposition",
+    [
+        ("APPROVE", False, "ACCEPT", "ORDER_ELIGIBLE"),
+        ("REJECT", False, "REJECT", "AI_REJECTED_NO_ORDER"),
+        ("REJECT", True, "ERROR", "AI_REJECTED_NO_ORDER"),
+    ],
+)
+def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
+    decision, ai_error, expected_policy, expected_disposition,
+):
+    writes = []
+    enqueues = []
+    namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: features,
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE",),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-gate",
+        "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-1"},
+        "_write_v3_shared_lane_decision": (
+            lambda *args, **kwargs: writes.append((args, kwargs)) or True
+        ),
+        "_enqueue_combo_lane_execution": (
+            lambda *args, **kwargs: enqueues.append((args, kwargs))
+        ),
+        "COMBO_LANE_SPECS": {"FAMILY_ONE": {"combo_key": "ONE"}},
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout(
+        {"trade_id": "scan-gate"},
+        {"decision": decision, "direction": "LONG", "ai_error": ai_error},
+        2.0, {"adx": 25}, "AI_SCAN",
+    )
+    assert len(writes) == 1
+    assert writes[0][1]["policy_decision"] == expected_policy
+    assert writes[0][1]["execution_disposition"] == expected_disposition
+    assert len(enqueues) == (1 if decision == "APPROVE" else 0)
+
+
+def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter():
+    dead_letters = []
+    namespace = {
+        "copy": copy,
+        "datetime": __import__("datetime").datetime,
+        "time": __import__("time"),
+        "os": os,
+        "SYMBOL": "BTCUSD",
+        "invert_signal_active": lambda: False,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-failure",
+        "_v3_lane_policy_material": lambda _lane: {"policy_id": "FAMILY_ONE"},
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "dual_write_lane_decision": (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable"))
+        ),
+        "write_pre_entry_evidence_failure": (
+            lambda source, **kwargs: dead_letters.append((source, kwargs))
+        ),
+        "logger": QuietLogger(),
+    }
+    writer = load_function("_write_v3_shared_lane_decision", namespace)
+    assert writer(
+        "FAMILY_ONE",
+        {"decision": "APPROVE", "direction": "LONG"},
+        {"created_ts_ts": 1000, "symbol": "BTCUSD"},
+        {"adx": 25}, policy_decision="ACCEPT",
+        execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+    ) is False
+    assert len(dead_letters) == 1
+    assert dead_letters[0][1]["failure_class"] == "OSError"
+
+    dead_letters.clear()
+    namespace["dual_write_lane_decision"] = lambda *_args, **_kwargs: {
+        "writes": [{"ledger": "pre_entry_features", "written": True}],
+        "store_verification": {"passed": False},
+    }
+    assert writer(
+        "FAMILY_ONE",
+        {"decision": "APPROVE", "direction": "LONG"},
+        {"created_ts_ts": 1000, "symbol": "BTCUSD"},
+        {"adx": 25}, policy_decision="ACCEPT",
+        execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+    ) is False
+    assert dead_letters[0][1]["failure_class"] == "ScopedVerificationFailed"
+
+    enqueues = []
+    fanout_namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: features,
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE",),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-failure",
+        "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-1"},
+        "_write_v3_shared_lane_decision": lambda *_args, **_kwargs: False,
+        "_enqueue_combo_lane_execution": (
+            lambda *args, **kwargs: enqueues.append((args, kwargs))
+        ),
+        "COMBO_LANE_SPECS": {"FAMILY_ONE": {"combo_key": "ONE"}},
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    fanout = load_function("spawn_combo_lanes_from_ai_scan", fanout_namespace)
+    fanout(
+        {"trade_id": "scan-failure"},
+        {"decision": "APPROVE", "direction": "LONG", "ai_error": False},
+        2.0, {"adx": 25}, "AI_SCAN",
+    )
+    assert enqueues == []
+
+
+def test_continuous_order_spawn_is_after_pre_entry_evidence_gate():
+    continuous = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "spawn_continuous_lane_from_ai_scan"),
+    )
+    write = continuous.index("evidence_ready = _write_v3_shared_lane_decision(")
+    gate = continuous.index(
+        'if v3_disposition == "ORDER_ELIGIBLE" and not evidence_ready:', write,
+    )
+    spawn = continuous.index("_spawn_combo_lane(", gate)
+    assert write < gate < spawn
+    assert "return" in continuous[gate:spawn]
+
+
 def test_continuous_shared_ai_rejection_increments_benchmark_counter():
     state = {
         "shared_ai_lane_counters": {

@@ -17,6 +17,7 @@ from research_v3_candidates import evaluate_protection_screen, load_candidate_in
 from research_v3_ranking import rank_safe_policies
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
+from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
     ACTIVE_TILE_REGISTRY,
@@ -26,6 +27,154 @@ from combo_pathway_config import (
 REPORT_FILE = "safe_policy_genome_v3_report.json"
 EXHAUSTIVE_POLICY_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
 EXHAUSTIVE_POLICY_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
+
+
+_PRE_ENTRY_FEATURE_PATHS = {
+    "atr_bucket": (("atr_bucket",), ("research_buckets", "atr_bucket")),
+    "realized_volatility_bucket": (
+        ("realized_volatility_bucket",),
+        ("research_buckets", "realized_volatility_bucket"),
+        ("market_context", "realized_volatility_bucket"),
+    ),
+    "spread_bucket": (
+        ("spread_bucket",), ("directional_spread_bucket",),
+        ("research_buckets", "spread_bucket"),
+        ("research_buckets", "directional_spread_bucket"),
+    ),
+    "depth_bucket": (
+        ("depth_bucket",), ("research_buckets", "depth_bucket"),
+        ("market_context", "depth_bucket"),
+    ),
+    "liquidity_bucket": (
+        ("liquidity_bucket",), ("research_buckets", "liquidity_bucket"),
+        ("market_context", "liquidity_bucket"),
+    ),
+    "regime": (
+        ("regime",), ("entry_regime",), ("market_regime",),
+        ("market_context", "regime"), ("market_context", "regime_label"),
+    ),
+    "direction": (
+        ("direction",), ("final_direction",), ("raw_direction",),
+        ("executed_direction",),
+    ),
+    "trend_strength_bucket": (
+        ("trend_strength_bucket",),
+        ("research_buckets", "trend_strength_bucket"),
+        ("market_context", "trend_strength_bucket"),
+    ),
+}
+
+
+def _nested_feature(features: dict[str, Any], paths) -> Any:
+    for path in paths:
+        value: Any = features
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                value = None
+                break
+            value = value[key]
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def normalize_pre_entry_feature_receipt(
+    receipt: dict[str, Any], *, signal_ts: Any,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Project one immutable receipt into the dynamic-policy causal schema.
+
+    Scalars are timestamped only at the receipt's explicit pre-decision capture
+    boundary. Explicit observation timestamps are retained and rejected when
+    they cross the signal boundary. Missing dimensions stay missing so the
+    dynamic-policy evaluator reports UNKNOWN rather than inventing a bucket.
+    """
+    if str(receipt.get("availability_boundary") or "") != "PRE_DECISION_ONLY":
+        return {}, ["PRE_ENTRY_AVAILABILITY_BOUNDARY_INVALID"]
+    features = receipt.get("features")
+    if not isinstance(features, dict):
+        return {}, ["PRE_ENTRY_FEATURE_PAYLOAD_INVALID"]
+    try:
+        captured_at = float(receipt.get("captured_at_ts"))
+        signal_at = float(signal_ts)
+    except (TypeError, ValueError):
+        return {}, ["PRE_ENTRY_CAPTURE_TIMESTAMP_INVALID"]
+    if captured_at > signal_at:
+        return {}, ["PRE_ENTRY_CAPTURE_AFTER_SIGNAL"]
+
+    normalized: dict[str, dict[str, Any]] = {}
+    blockers: list[str] = []
+    for name in DEFAULT_CAUSAL_FEATURES:
+        value = _nested_feature(features, _PRE_ENTRY_FEATURE_PATHS[name])
+        if value in (None, ""):
+            blockers.append(f"MISSING_PRE_ENTRY_FEATURE:{name}")
+            continue
+        if isinstance(value, dict) and "value" in value:
+            observation = value.get("value")
+            try:
+                observed_at = float(value.get("observed_ts"))
+            except (TypeError, ValueError):
+                blockers.append(f"FEATURE_TIMESTAMP_MISSING:{name}")
+                continue
+        else:
+            observation = value
+            observed_at = captured_at
+        if observation in (None, ""):
+            blockers.append(f"MISSING_PRE_ENTRY_FEATURE:{name}")
+            continue
+        if observed_at > signal_at:
+            blockers.append(f"POST_ENTRY_FEATURE_LEAKAGE:{name}")
+            continue
+        normalized[name] = {"value": observation, "observed_ts": observed_at}
+    return normalized, blockers
+
+
+def join_pre_entry_feature_receipts(
+    opportunities: list[dict[str, Any]], receipts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Join exactly one causal receipt per opportunity; ambiguity is UNKNOWN."""
+    by_episode: dict[str, list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        by_episode.setdefault(str(receipt.get("episode_id") or ""), []).append(receipt)
+    joined, blocker_counts = [], Counter()
+    receipt_joined = schema_complete = 0
+    for opportunity in opportunities:
+        row = dict(opportunity)
+        episode_id = str(row.get("episode_id") or "")
+        matches = by_episode.get(episode_id, [])
+        blockers: list[str]
+        normalized: dict[str, dict[str, Any]] = {}
+        if len(matches) == 0:
+            blockers = ["PRE_ENTRY_FEATURE_RECEIPT_MISSING"]
+        elif len(matches) != 1:
+            blockers = ["PRE_ENTRY_FEATURE_RECEIPT_AMBIGUOUS"]
+        else:
+            receipt = matches[0]
+            if str(receipt.get("opportunity_id") or "") != str(
+                row.get("opportunity_id") or row.get("record_id") or ""
+            ):
+                blockers = ["PRE_ENTRY_OPPORTUNITY_ID_MISMATCH"]
+            else:
+                normalized, blockers = normalize_pre_entry_feature_receipt(
+                    receipt, signal_ts=row.get("signal_ts"),
+                )
+                receipt_joined += 1
+                if not blockers:
+                    schema_complete += 1
+        row["pre_entry_features"] = normalized
+        row["pre_entry_feature_status"] = (
+            "COMPLETE" if not blockers else "UNKNOWN"
+        )
+        row["pre_entry_feature_blockers"] = blockers
+        blocker_counts.update(blockers)
+        joined.append(row)
+    return joined, {
+        "opportunities": len(opportunities),
+        "receipt_rows": len(receipts),
+        "receipt_joined_opportunities": receipt_joined,
+        "dynamic_schema_complete_opportunities": schema_complete,
+        "unknown_opportunities": len(opportunities) - schema_complete,
+        "blocker_counts": dict(sorted(blocker_counts.items())),
+    }
 
 
 def _deployed_policy_collection() -> dict[str, Any]:
@@ -482,6 +631,13 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         opportunities = [row for row in opportunities if float(row.get("signal_ts") or 0) >= cutoff]
     opportunities, identity_aliases = _exclude_identity_aliases(opportunities)
     allowed_episodes = {str(row.get("episode_id") or "") for row in opportunities}
+    pre_entry_feature_receipts = [
+        row for row in scoped(_read_ledger(store.ledger_path("pre_entry_features")))
+        if str(row.get("episode_id") or "") in allowed_episodes
+    ]
+    opportunities, pre_entry_feature_coverage = join_pre_entry_feature_receipts(
+        opportunities, pre_entry_feature_receipts,
+    )
     decisions = [row for row in scoped(_read_ledger(store.ledger_path("decision"))) if str(row.get("episode_id") or "") in allowed_episodes]
     independence_clusters = _shared_call_independence_clusters(opportunities, decisions)
     order_intents = [row for row in scoped(_read_ledger(store.ledger_path("order_intent"))) if str(row.get("episode_id") or "") in allowed_episodes]
@@ -843,6 +999,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             },
             "outcome_states": dict(sorted(outcome_counts.items())),
             "ledger_counts": verification["ledger_counts"],
+            "pre_entry_feature_evidence": pre_entry_feature_coverage,
             # Qualification requires a signal-to-terminal market path.  A
             # frozen pre-signal context segment makes rejected/NO_TRADE regime
             # analysis auditable, but must never satisfy the execution-path
@@ -863,7 +1020,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "safe_policy_ranking": persisted_ranking,
         "number_one_strategy": ranking["number_one"],
         "qualification": ranking["qualification"],
-        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
+        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["PRE_ENTRY_FEATURE_EVIDENCE_INCOMPLETE"] if pre_entry_feature_coverage["unknown_opportunities"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
     _atomic_json(Path(report_dir) / REPORT_FILE, report)

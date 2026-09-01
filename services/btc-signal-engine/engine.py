@@ -193,7 +193,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -15527,7 +15527,7 @@ def _write_v3_shared_lane_decision(
     policy_decision: str,
     execution_disposition: str,
     exact_reason: str,
-) -> None:
+) -> bool:
     """Write the lane verdict even when it correctly creates no order."""
     call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
     if not call_id:
@@ -15562,8 +15562,7 @@ def _write_v3_shared_lane_decision(
     except (TypeError, ValueError):
         score_gap = None
     try:
-        dual_write_lane_decision(
-            {
+        source = {
                 "trade_id": call_id,
                 "shared_ai_call_id": call_id,
                 "shared_ai_call_ts_epoch": signal_ts,
@@ -15575,7 +15574,10 @@ def _write_v3_shared_lane_decision(
                 "short_score": short_score,
                 "score_gap": score_gap,
                 "feature_snapshot_at_signal": copy.deepcopy(features or {}),
-            },
+            }
+        failure_source = {**source, **lane_policy}
+        receipt = dual_write_lane_decision(
+            source,
             lane=lane,
             policy_decision=policy_decision,
             execution_disposition=execution_disposition,
@@ -15584,11 +15586,52 @@ def _write_v3_shared_lane_decision(
             data_dir=os.getcwd(),
             lane_policy=lane_policy,
         )
+        verification = receipt.get("store_verification") or {}
+        feature_writes = [
+            row for row in receipt.get("writes", [])
+            if row.get("ledger") == "pre_entry_features"
+        ]
+        verified = bool(verification.get("passed") and len(feature_writes) == 1)
+        if not verified:
+            logger.error(
+                f"[COLLECTOR_V3] pre-entry scoped verification failed lane={lane} "
+                f"call_id={call_id} [PIPELINE ENFORCEMENT]"
+            )
+            try:
+                write_pre_entry_evidence_failure(
+                    failure_source, lane=lane, epoch_id=_collector_v22_epoch_id(),
+                    data_dir=os.getcwd(), failure_class="ScopedVerificationFailed",
+                )
+            except Exception as dead_letter_exc:
+                logger.error(
+                    f"[COLLECTOR_V3] pre-entry dead-letter failed lane={lane} "
+                    f"call_id={call_id} error={type(dead_letter_exc).__name__} "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+        return verified
     except Exception as exc:
         logger.error(
             f"[COLLECTOR_V3] lane decision write failed lane={lane} call_id={call_id} "
             f"error={exc} [PIPELINE ENFORCEMENT]"
         )
+        try:
+            write_pre_entry_evidence_failure(
+                failure_source if "failure_source" in locals() else {
+                    "trade_id": call_id,
+                    "shared_ai_call_id": call_id,
+                    "shared_ai_call_ts_epoch": signal_ts,
+                    "raw_direction": raw_direction,
+                },
+                lane=lane, epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+                failure_class=type(exc).__name__,
+            )
+        except Exception as dead_letter_exc:
+            logger.error(
+                f"[COLLECTOR_V3] pre-entry dead-letter failed lane={lane} "
+                f"call_id={call_id} error={type(dead_letter_exc).__name__} "
+                "[PIPELINE ENFORCEMENT]"
+            )
+        return False
 
 
 
@@ -16917,12 +16960,21 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
                 or lane
             ),
         )
-        _write_v3_shared_lane_decision(
+        evidence_ready = _write_v3_shared_lane_decision(
             lane, ai, ctx, enriched,
-            policy_decision="ACCEPT" if policy_accepted else "REJECT",
+            policy_decision=(
+                "ERROR" if bool(ai.get("ai_error"))
+                else "ACCEPT" if policy_accepted else "REJECT"
+            ),
             execution_disposition=disposition,
             exact_reason=decision_reason,
         )
+        if disposition == "ORDER_ELIGIBLE" and not evidence_ready:
+            logger.error(
+                f"[{lane}] order blocked: immutable pre-entry evidence unavailable "
+                f"[PIPELINE ENFORCEMENT]"
+            )
+            continue
         if not ai_accepted:
             continue
         if not detail.get("passes"):
@@ -17121,15 +17173,24 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     else:
         v3_disposition = "POLICY_REJECTED_NO_ORDER"
         v3_reason = continuous_reason
-    _write_v3_shared_lane_decision(
+    evidence_ready = _write_v3_shared_lane_decision(
         RESEARCH_LANE_CONTINUOUS,
         continuous_ai,
         spawn_ctx,
         features or {},
-        policy_decision="ACCEPT" if continuous_accept else "REJECT",
+        policy_decision=(
+            "ERROR" if bool(continuous_ai.get("ai_error"))
+            else "ACCEPT" if continuous_accept else "REJECT"
+        ),
         execution_disposition=v3_disposition,
         exact_reason=v3_reason,
     )
+    if v3_disposition == "ORDER_ELIGIBLE" and not evidence_ready:
+        logger.error(
+            "[CONTINUOUS LANE] order blocked: immutable pre-entry evidence unavailable "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return
     if r2_floor_blocked:
         return
     logger.info(

@@ -61,6 +61,7 @@ EXECUTION_WORLDS = (
 LEDGER_NAMES = (
     "opportunity",
     "pre_entry_features",
+    "evidence_failure",
     "decision",
     "order_intent",
     "execution",
