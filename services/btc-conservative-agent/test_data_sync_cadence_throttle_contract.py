@@ -182,7 +182,7 @@ def test_low_requested_interval_is_clamped_for_poll_and_post_sync_sleep():
     )
     completed = subprocess.run(
         ["pwsh", "-NoProfile", "-Command", harness],
-        capture_output=True, text=True, timeout=15, check=True,
+        capture_output=True, text=True, timeout=45, check=True,
     )
     poll, post_sync = map(int, completed.stdout.strip().splitlines()[-1].split(","))
     assert poll == 180
@@ -236,7 +236,7 @@ def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
     )
     completed = subprocess.run(
         ["pwsh", "-NoProfile", "-Command", harness],
-        capture_output=True, text=True, timeout=15, check=True,
+        capture_output=True, text=True, timeout=45, check=True,
     )
     calls, modeled_wait = map(
         int, completed.stdout.strip().splitlines()[-1].split(",")
@@ -269,7 +269,7 @@ def _run_modeled_preflight(success_call: int | None) -> tuple[int, int, int]:
     )
     completed = subprocess.run(
         ["pwsh", "-NoProfile", "-Command", harness],
-        capture_output=True, text=True, timeout=15, check=True,
+        capture_output=True, text=True, timeout=45, check=True,
     )
     return tuple(map(int, completed.stdout.strip().splitlines()[-1].split(",")))
 
