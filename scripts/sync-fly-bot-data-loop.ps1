@@ -85,6 +85,78 @@ function Write-Utf8NoBomJsonAtomic {
   }
 }
 
+function Publish-AnalyzerLeaseDeferredReceipt {
+  param(
+    [Parameter(Mandatory = $true)][string]$ObservedSourceRevision,
+    [Parameter(Mandatory = $true)][string]$LastMirroredSourceRevision,
+    [Parameter(Mandatory = $true)][string]$HeartbeatPath,
+    [Parameter(Mandatory = $true)][string]$MirrorPath,
+    [Parameter(Mandatory = $true)][int]$LeaseErrorCode
+  )
+  # Failure to acquire FileShare.None is the authoritative proof that another
+  # live process still owns the OS lease. The JSON lease body is diagnostic
+  # only and cannot safely be read while that exclusive handle is held.
+  if (
+    $LeaseErrorCode -notin @(32, 33) -or
+    [string]::IsNullOrWhiteSpace($ObservedSourceRevision) -or
+    [string]::IsNullOrWhiteSpace($LastMirroredSourceRevision) -or
+    -not $ObservedSourceRevision.Equals($LastMirroredSourceRevision, [StringComparison]::OrdinalIgnoreCase)
+  ) { return $false }
+
+  $canonicalPointer = Join-Path $MirrorPath "canonical_dataset_current.json"
+  if (
+    -not (Test-Path -LiteralPath $HeartbeatPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $canonicalPointer -PathType Leaf)
+  ) { return $false }
+
+  try {
+    $beforePointerHash = (Get-FileHash -LiteralPath $canonicalPointer -Algorithm SHA256).Hash
+    $canonical = Get-Content -LiteralPath $canonicalPointer -Raw | ConvertFrom-Json
+    $entryHash = [string]$canonical.entry_hash
+    $datasetChecksum = [string]$canonical.dataset_checksum
+    if ($entryHash -notmatch '^[0-9a-fA-F]{64}$' -or $datasetChecksum -notmatch '^[0-9a-fA-F]{64}$') {
+      return $false
+    }
+
+    $candidate = Get-Content -LiteralPath $HeartbeatPath -Raw | ConvertFrom-Json
+    if (
+      $candidate.ok -ne $true -or
+      $candidate.inProgress -eq $true -or
+      [string]$candidate.revisionParity -ne "MATCH" -or
+      -not ([string]$candidate.sourceRevision).Equals($ObservedSourceRevision, [StringComparison]::OrdinalIgnoreCase) -or
+      -not ([string]$candidate.observedSourceRevision).Equals($ObservedSourceRevision, [StringComparison]::OrdinalIgnoreCase) -or
+      -not ([string]$candidate.mirroredSourceRevision).Equals($ObservedSourceRevision, [StringComparison]::OrdinalIgnoreCase)
+    ) { return $false }
+
+    # Re-read the O(1) canonical pointer immediately before publication. The
+    # held analyzer lease prevents file promotion; this double read also fails
+    # closed if an unexpected writer disregards the lease contract.
+    $afterPointerHash = (Get-FileHash -LiteralPath $canonicalPointer -Algorithm SHA256).Hash
+    if ($beforePointerHash -ne $afterPointerHash) { return $false }
+
+    $receipt = [ordered]@{}
+    foreach ($property in $candidate.PSObject.Properties) {
+      $receipt[$property.Name] = $property.Value
+    }
+    $receipt["syncedAt"] = [DateTimeOffset]::UtcNow.ToString("o")
+    $receipt["skipped"] = $true
+    $receipt["reason"] = "analyzer_lease_immutable_mirror"
+    $receipt["syncDeferred"] = $true
+    $receipt["deferredBy"] = "live_analyzer_generation_lease"
+    $receipt["canonicalManifestEntryHash"] = $entryHash.ToLowerInvariant()
+    $receipt["canonicalDatasetChecksum"] = $datasetChecksum.ToLowerInvariant()
+    $receipt["pollOk"] = $true
+    $receipt["consecutiveFailures"] = 0
+    $receipt["backoffSec"] = 0
+    $receipt["nextRetryAt"] = $null
+    Write-Utf8NoBomJsonAtomic -Value $receipt -LiteralPath $HeartbeatPath -Depth 8
+    return $true
+  } catch {
+    Write-Warning "Deferred immutable-mirror receipt rejected: $($_.Exception.Message)"
+    return $false
+  }
+}
+
 function Remove-OrphanedMirrorCandidates {
   param([Parameter(Mandatory = $true)][string]$MirrorPath)
   if (-not (Test-Path -LiteralPath $MirrorPath -PathType Container)) { return }
@@ -675,8 +747,16 @@ try {
           [System.IO.FileShare]::None
         )
       } catch {
+        $leaseErrorCode = $_.Exception.HResult -band 0xFFFF
+        $deferredReceiptPublished = Publish-AnalyzerLeaseDeferredReceipt `
+          -ObservedSourceRevision $observedSourceRevision `
+          -LastMirroredSourceRevision $lastSyncedSourceRevision `
+          -HeartbeatPath $heartbeatFile `
+          -MirrorPath $mirrorDir `
+          -LeaseErrorCode $leaseErrorCode
         Add-Content -LiteralPath $logFile -Value (
-          "$((Get-Date).ToUniversalTime().ToString('o'))`tDEFER`tanalyzer owns mirror-generation lease"
+          "$((Get-Date).ToUniversalTime().ToString('o'))`tDEFER`tanalyzer owns mirror-generation lease; " +
+          "immutable-receipt-published=$deferredReceiptPublished"
         )
         # Fly preflight succeeded; local analyzer ownership is a normal defer,
         # not another outage failure.
