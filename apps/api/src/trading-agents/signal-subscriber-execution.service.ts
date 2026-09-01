@@ -101,6 +101,25 @@ const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
+export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
+export const PERSISTED_WAKE_PAUSED_POLL_MS = null;
+export const PERSISTED_WAKE_IDLE_POLL_MS = null;
+export const RECONCILIATION_PAUSED_POLL_MS = null;
+export const RECONCILIATION_IDLE_POLL_MS = null;
+
+export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
+
+/** Pure cadence resolver for the executor cost/correctness contract. */
+export function relayExecutorPollDelayMs(
+  channel: 'RECONCILIATION' | 'PERSISTED_WAKE',
+  activity: RelayExecutorPollActivity,
+  activeReconciliationMs = POLL_MS,
+): number | null {
+  if (channel === 'PERSISTED_WAKE') {
+    return activity === 'ACTIVE' ? PERSISTED_WAKE_ACTIVE_POLL_MS : null;
+  }
+  return activity === 'ACTIVE' ? activeReconciliationMs : null;
+}
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
@@ -3495,6 +3514,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * never waits for exchange execution and therefore cannot reintroduce the
    * former cross-trade head-of-line bottleneck. */
   private persistedWakePollRunning = false;
+  private reconciliationTimer: ReturnType<typeof setTimeout> | null = null;
+  private persistedWakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastRelayPollActivity: RelayExecutorPollActivity = 'IDLE';
+  private executorDestroyed = false;
   /** Exact direct wakes completed by this process. Prevent the durable
    * crash-fallback copy from executing the same wake a second time. */
   private readonly completedDirectWakeAt = new Map<string, number>();
@@ -3649,6 +3672,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   onModuleInit() {
+    this.executorDestroyed = false;
     if (!executionEnabled()) {
       this.startExecutorConnectionKeepalive();
       this.logger.warn('Subscriber execution disabled (SUBSCRIBER_EXECUTION_ENABLED=false)');
@@ -3675,15 +3699,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, every ${POLL_MS}ms (max $${cap}/trade)`,
       );
     });
-    setInterval(() => void this.tick(), POLL_MS);
-    setTimeout(() => void this.tick(), POLL_MS);
+    this.scheduleReconciliation(POLL_MS);
     // Signed showcase lifecycle events must not wait for the full reconciliation
     // pass. A healthy full pass can take several seconds because Bitfinex auth
     // calls are deliberately serialized on one nonce lane. Poll the durable
     // cross-process wake independently and run only the idempotent atomic-claim
     // entry / exitingLots-guarded close path. The normal tick remains the crash
     // recovery and reconciliation backstop.
-    setInterval(() => void this.pollPersistedFastWake(), 250).unref();
+    this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
     // Authenticated account-info trades are the latency path for exchange fills.
     // They consume no REST nonce/read budget; the ordinary reconciliation tick
     // remains the fail-closed reconnect/outage backstop.
@@ -3693,8 +3716,43 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   onModuleDestroy() {
+    this.executorDestroyed = true;
+    if (this.reconciliationTimer) clearTimeout(this.reconciliationTimer);
+    if (this.persistedWakeTimer) clearTimeout(this.persistedWakeTimer);
     for (const stream of this.bitfinexTradeStreams.values()) stream.stop();
     this.bitfinexTradeStreams.clear();
+  }
+
+  /** ACTIVE/exposure remains on the safety cadence; durably disarmed+flat stops. */
+  private scheduleReconciliation(delayMs: number | null): void {
+    if (this.executorDestroyed || delayMs == null || this.reconciliationTimer) return;
+    this.reconciliationTimer = setTimeout(async () => {
+      this.reconciliationTimer = null;
+      try {
+        await this.tick();
+      } finally {
+        this.scheduleReconciliation(
+          relayExecutorPollDelayMs('RECONCILIATION', this.lastRelayPollActivity),
+        );
+      }
+    }, delayMs);
+    this.reconciliationTimer.unref();
+  }
+
+  /** Durable Neon wake polling is a startup/recovery backstop, not the latency path. */
+  private schedulePersistedWakePoll(delayMs: number | null): void {
+    if (this.executorDestroyed || delayMs == null || this.persistedWakeTimer) return;
+    this.persistedWakeTimer = setTimeout(async () => {
+      this.persistedWakeTimer = null;
+      try {
+        await this.pollPersistedFastWake();
+      } finally {
+        this.schedulePersistedWakePoll(
+          relayExecutorPollDelayMs('PERSISTED_WAKE', this.lastRelayPollActivity),
+        );
+      }
+    }, delayMs);
+    this.persistedWakeTimer.unref();
   }
 
   private async syncBitfinexTradeStreams(): Promise<void> {
@@ -5441,6 +5499,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
   async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
     if (!executionEnabled()) return;
+    // PAUSED/IDLE owns no recurring timer. An authenticated wake re-arms both
+    // safety loops before work; module startup supplies crash recovery probes.
+    this.scheduleReconciliation(POLL_MS);
+    this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
     if (trigger) {
       this.lastShowcaseWakeAt = Date.now();
       this.lastShowcaseWakeTrigger =
@@ -5504,6 +5566,24 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
           exchangeProvider: { not: 'paper' },
         },
       });
+      const armedOrSimActive = instances.some((instance) =>
+        isCopyRelaySimActive(instance.dashboardState)
+        || (instance.status === TradingAgentInstanceStatus.ACTIVE
+          && relayArmTimestampMs(instance.dashboardState) != null),
+      );
+      const exposure = !armedOrSimActive && instances.length > 0
+        ? await this.prisma.signalCycleParticipant.findFirst({
+            where: {
+              userId: { in: instances.map((instance) => instance.userId) },
+              status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+              cycle: { agentId: agent.id },
+            },
+            select: { id: true },
+          })
+        : null;
+      this.lastRelayPollActivity = armedOrSimActive || exposure
+        ? 'ACTIVE'
+        : instances.length > 0 ? 'PAUSED' : 'IDLE';
       const discoveredIds = new Set(instances.map((instance) => instance.id));
       for (const cachedId of this.relayInstanceCache.keys()) {
         if (!discoveredIds.has(cachedId)) this.relayInstanceCache.delete(cachedId);
