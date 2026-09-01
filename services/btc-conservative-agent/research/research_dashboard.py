@@ -254,6 +254,7 @@ BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
+LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE = "lifecycle_bundle_inventory.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -3881,6 +3882,102 @@ def api_summary():
     )
     current_revision = str(manifest.get("generation_revision") or "").strip()
     current_epoch = str((manifest.get("fresh_epoch") or {}).get("epoch_id") or "").strip()
+    lifecycle_inventory = _read_report(LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE)
+    lifecycle_provenance = (
+        lifecycle_inventory.get("analysis_provenance")
+        if isinstance(lifecycle_inventory, dict) else {}
+    ) or {}
+    lifecycle_revision = str(
+        lifecycle_provenance.get("generation_revision") or ""
+    ).strip()
+    lifecycle_epoch = str(
+        lifecycle_provenance.get("fresh_epoch_id")
+        or lifecycle_provenance.get("dataset_epoch")
+        or ""
+    ).strip()
+    transfer_inventory = (
+        lifecycle_inventory.get("transfer")
+        if isinstance(lifecycle_inventory, dict) else {}
+    ) or {}
+    lifecycle_current = bool(
+        lifecycle_inventory.get("schema") == "lifecycle_bundle_inventory_v1"
+        and lifecycle_inventory.get("inventory_scope") == "MANIFEST_ONLY"
+        and lifecycle_inventory.get("complete") is True
+        and lifecycle_inventory.get("complete_scope") == "MANIFEST_INVENTORY"
+        and lifecycle_inventory.get("payload_verification_status") == "UNKNOWN_NOT_SCANNED"
+        and lifecycle_inventory.get("payload_files_read") == 0
+        and (lifecycle_inventory.get("scan") or {}).get("truncated") is False
+        and current_revision and lifecycle_revision == current_revision
+        and current_epoch and lifecycle_epoch == current_epoch
+        and transfer_inventory.get("audit_only") is True
+        and transfer_inventory.get("ranking_eligible") is False
+        and transfer_inventory.get("profitability_supported") is False
+        and transfer_inventory.get("source_cleanup_authorized") is False
+    )
+    def _bundle_count(value):
+        try:
+            number = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return number if number >= 0 else None
+
+    qualification_count = _bundle_count(
+        (lifecycle_inventory.get("qualification") or {}).get("unique_lifecycle_count")
+    )
+    transfer_count = _bundle_count(transfer_inventory.get("unique_lifecycle_count"))
+    invalid_count = _bundle_count(lifecycle_inventory.get("invalid_manifest_count"))
+    raw_parity = lifecycle_inventory.get("parity") or {}
+    safe_parity = {
+        key: _bundle_count(raw_parity.get(key, 0))
+        for key in (
+            "intersection_count",
+            "qualification_only_count",
+            "transfer_only_count",
+            "provenance_mismatch_count",
+        )
+    }
+    payload_verification_status = str(
+        lifecycle_inventory.get("payload_verification_status")
+        or "UNKNOWN_NOT_SCANNED"
+    )
+    lifecycle_current = bool(
+        lifecycle_current
+        and qualification_count is not None
+        and transfer_count is not None
+        and invalid_count is not None
+        and all(value is not None for value in safe_parity.values())
+    )
+    if lifecycle_current:
+        lifecycle_bundle_summary = {
+            "status": "AVAILABLE_CURRENT_GENERATION",
+            "qualification_count": qualification_count,
+            "transfer_audit_count": transfer_count,
+            "parity": safe_parity,
+            "invalid_count": invalid_count,
+            "qualification_label": "manifest-verified qualification bundles",
+            "transfer_label": "transfer-ready audit copies",
+            "payload_verification_status": payload_verification_status,
+            "transfer_audit_only": True,
+            "transfer_ranking_eligible": False,
+            "transfer_profitability_supported": False,
+            "transfer_source_cleanup_authorized": False,
+        }
+    else:
+        lifecycle_bundle_summary = {
+            "status": "UNAVAILABLE_CURRENT_GENERATION",
+            "qualification_count": None,
+            "transfer_audit_count": None,
+            "parity": {},
+            "invalid_count": None,
+            "qualification_label": "manifest-verified qualification bundles",
+            "transfer_label": "transfer-ready audit copies",
+            "payload_verification_status": "UNKNOWN_NOT_SCANNED",
+            "transfer_audit_only": True,
+            "transfer_ranking_eligible": False,
+            "transfer_profitability_supported": False,
+            "transfer_source_cleanup_authorized": False,
+            "reason": "REPORT_NOT_IN_CURRENT_GENERATION",
+        }
 
     def _real_edge_identity(payload):
         payload = payload if isinstance(payload, dict) else {}
@@ -3964,6 +4061,7 @@ def api_summary():
         "all_data_fallback_active": all_data_active,
         "historical_cohort": historical,
         "retention": retention,
+        "lifecycle_bundles": lifecycle_bundle_summary,
         "storage": {
             "mirror_identity": "LOCAL_CACHED_COPY_OF_FLY_RUNTIME_DATA",
             "mirror_path": str(DATA_ROOT),
@@ -6045,10 +6143,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   main { padding: 20px 24px; width: 100%; max-width: 1200px; min-width: 0; overflow: hidden; }
   section { display: none; min-width: 0; max-width: 100%; }
   section.active { display: block; }
-  .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
   .kpi { min-width: 0; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
   .kpi .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
   .kpi .val { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+  #lifecycle-bundle-kpis { grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr)); }
+  #lifecycle-bundle-kpis .val { overflow-wrap: normal; word-break: normal; }
   .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; margin-top: 12px; }
   .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .table-scroll table { display: table; width: max-content; min-width: 100%; max-width: none; overflow: visible; border-collapse: collapse; font-size: 0.9rem; margin-top: 0; }
@@ -6112,6 +6212,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       the trading-direction pipeline only.
     </div>
     <div class="kpis" id="kpis"></div>
+    <h3>Lifecycle evidence bundles</h3>
+    <div class="kpis" id="lifecycle-bundle-kpis"></div>
+    <p class="note" id="lifecycle-bundle-note">Transfer-ready audit copies are audit-only and cannot rank, profitability-qualify, or authorize source cleanup.</p>
     <p class="note" id="cohort-note"></p>
     <h2>Best Policy Research</h2>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
@@ -6618,6 +6721,7 @@ async function loadSummary() {
   const retention = d.retention || {};
   const storage = d.storage || {};
   const integrity = d.integrity || {};
+  const lifecycleBundles = d.lifecycle_bundles || {};
   const iBanner = document.getElementById('integrity-banner');
   if (iBanner) {
     if (integrity.valid === false || integrity.report_status === 'INVALID') {
@@ -6704,6 +6808,30 @@ async function loadSummary() {
   ];
   document.getElementById('kpis').innerHTML = kpis.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+  const bundleKpis = document.getElementById('lifecycle-bundle-kpis');
+  if (bundleKpis) {
+    const unavailable = lifecycleBundles.status !== 'AVAILABLE_CURRENT_GENERATION';
+    const parity = lifecycleBundles.parity || {};
+    const rows = [
+      ['manifest-verified qualification bundles', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.qualification_count ?? 0)],
+      ['transfer-ready audit copies', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.transfer_audit_count ?? 0)],
+      ['Bundle parity', unavailable ? 'UNAVAILABLE' : (
+        (parity.intersection_count ?? 0) + ' matched · '
+        + (parity.qualification_only_count ?? 0) + ' qualification only · '
+        + (parity.transfer_only_count ?? 0) + ' transfer only'
+      )],
+      ['Invalid bundle manifests', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.invalid_count ?? 0)],
+    ];
+    bundleKpis.innerHTML = rows.map(([label, value]) =>
+      `<div class="kpi"><div class="lbl">${label}</div><div class="val">${value}</div></div>`
+    ).join('');
+  }
+  const bundleNote = document.getElementById('lifecycle-bundle-note');
+  if (bundleNote) {
+    bundleNote.textContent = lifecycleBundles.status === 'AVAILABLE_CURRENT_GENERATION'
+      ? 'Manifest inventory only · payload verification=' + (lifecycleBundles.payload_verification_status || 'UNKNOWN_NOT_SCANNED') + '. Transfer-ready audit copies: audit-only=true · ranking eligible=false · profitability supported=false · source cleanup authorized=false.'
+      : 'Lifecycle bundle inventory is unavailable for this exact analyzer generation. Transfer-ready audit copies remain audit-only and cannot rank, profitability-qualify, or authorize source cleanup.';
+  }
   const cohortNote = document.getElementById('cohort-note');
   if (cohortNote) {
     const dupes = hist.duplicates_removed ?? 0;

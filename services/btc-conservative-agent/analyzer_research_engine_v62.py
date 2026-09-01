@@ -85,6 +85,7 @@ from research.conservative_limit_fill import evaluate_limit_fill as _evaluate_co
 from research.quantity_execution import (
     validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
+from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
 
@@ -109,6 +110,7 @@ SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifes
 POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
 POLICY_EVIDENCE_BINDING_REPORT_FILE = "policy_evidence_binding_report.json"
 EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
+LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE = "lifecycle_bundle_inventory.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -19766,7 +19768,42 @@ def _stamp_integrity_generation_identity(manifest, reports):
         return False
 
 
-def write_report_manifest(payload=None):
+def _lifecycle_inventory_analysis_provenance():
+    """Build the generation identity once before any lifecycle presentation."""
+    cohort_summary = {}
+    for cohort in (
+        SHOWCASE_STRATEGY,
+        BITFINEX_COPY_FIDELITY,
+        CORRELATED_CLUSTER_BLOCKED,
+        COPY_ONLY_EXCHANGE_FILLS,
+        REAL_COPY_PARAMETER_OPTIMISATION,
+    ):
+        eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)
+        cohort_summary[cohort] = {
+            "included_row_count": len(eligible),
+            "evidence_row_count": evidence_rows,
+            "exclusion_reason_counts": exclusions,
+        }
+    generation_revision = (
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    return {
+        "cohort_schema": "analysis_cohorts_v1",
+        "generation_revision": generation_revision,
+        "analyzer_revision": generation_revision,
+        "cohorts": cohort_summary,
+        **_report_source_evidence_provenance(),
+        **_fresh_epoch_provenance(),
+    }
+
+
+def write_report_manifest(
+    payload=None, *, analysis_provenance=None,
+    lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
+):
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = float(
         globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
@@ -19821,26 +19858,9 @@ def write_report_manifest(payload=None):
         cross_world_evidence_report()
     except Exception as exc:
         print(f"  ⚠️ Cross-world evidence unavailable: {type(exc).__name__}: {exc}")
-    cohort_summary = {}
-    for cohort in (
-        SHOWCASE_STRATEGY,
-        BITFINEX_COPY_FIDELITY,
-        CORRELATED_CLUSTER_BLOCKED,
-        COPY_ONLY_EXCHANGE_FILLS,
-        REAL_COPY_PARAMETER_OPTIMISATION,
-    ):
-        eligible, exclusions, evidence_rows = _analysis_eligible_trade_ids(cohort)
-        cohort_summary[cohort] = {
-            "included_row_count": len(eligible),
-            "evidence_row_count": evidence_rows,
-            "exclusion_reason_counts": exclusions,
-        }
-    generation_revision = (
-        os.getenv("SOURCE_GIT_REV")
-        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-        or os.getenv("GIT_REVISION")
-        or "UNKNOWN"
-    )
+    if analysis_provenance is None:
+        analysis_provenance = _lifecycle_inventory_analysis_provenance()
+    generation_revision = analysis_provenance["generation_revision"]
     # This grid must belong to this run or be explicitly absent. A stale file
     # from an earlier revision must never appear current merely because it is
     # still on disk.
@@ -19849,17 +19869,42 @@ def write_report_manifest(payload=None):
         qualified_exit_policy_grid_report()
     except Exception as exc:
         qualified_grid_error = f"{type(exc).__name__}: {exc}"
-    source_provenance = _report_source_evidence_provenance()
-    epoch_provenance = _fresh_epoch_provenance()
-    analysis_provenance = {
-        "cohort_schema": "analysis_cohorts_v1",
-        "generation_revision": generation_revision,
-        "analyzer_revision": generation_revision,
-        "cohorts": cohort_summary,
-        **source_provenance,
-        **epoch_provenance,
-    }
     reports = []
+    try:
+        if lifecycle_bundle_inventory is None and lifecycle_bundle_inventory_error is None:
+            lifecycle_bundle_inventory = build_lifecycle_bundle_inventory(
+                policy_data_dir,
+                Path(policy_report_dir) / LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
+                analysis_provenance=analysis_provenance,
+            )
+        if lifecycle_bundle_inventory is None:
+            raise ValueError(lifecycle_bundle_inventory_error or "LIFECYCLE_INVENTORY_UNAVAILABLE")
+        lifecycle_inventory_mirror = _atomic_mirror_analyzer_report(
+            LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE
+        )
+        reports.append({
+            "title": "Lifecycle Evidence Bundle Inventory",
+            "file": LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": (
+                "Manifest-verified qualification bundles and transfer-ready audit copies; "
+                "payload files are not scanned, and neither count is ranking or profitability evidence"
+            ),
+            "size_bytes": lifecycle_inventory_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                Path(LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE).stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "qualification_bundle_count": (
+                lifecycle_bundle_inventory.get("qualification") or {}
+            ).get("unique_lifecycle_count"),
+            "transfer_audit_bundle_count": (
+                lifecycle_bundle_inventory.get("transfer") or {}
+            ).get("unique_lifecycle_count"),
+        })
+    except Exception as exc:
+        lifecycle_bundle_inventory_error = f"{type(exc).__name__}: {exc}"
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
         if fname == EXIT_REPORTS_VALIDATION_FILE:
             # This receipt is derived from the completed current manifest below;
@@ -20026,6 +20071,42 @@ def write_report_manifest(payload=None):
         "policy_comparability_key": analysis_provenance["policy_comparability_key"],
         "policy_comparability_status": analysis_provenance["policy_comparability_status"],
         "cohorts": analysis_provenance["cohorts"],
+        "lifecycle_bundles": {
+            "available_in_generation": lifecycle_bundle_inventory is not None,
+            "generation_error": lifecycle_bundle_inventory_error,
+            "complete": (
+                lifecycle_bundle_inventory.get("complete")
+                if isinstance(lifecycle_bundle_inventory, dict) else False
+            ),
+            "complete_scope": (
+                lifecycle_bundle_inventory.get("complete_scope")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "payload_verification_status": (
+                lifecycle_bundle_inventory.get("payload_verification_status")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "payload_files_read": (
+                lifecycle_bundle_inventory.get("payload_files_read")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "qualification": (
+                lifecycle_bundle_inventory.get("qualification")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "transfer": (
+                lifecycle_bundle_inventory.get("transfer")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "parity": (
+                lifecycle_bundle_inventory.get("parity")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "invalid_manifest_count": (
+                lifecycle_bundle_inventory.get("invalid_manifest_count")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+        },
         "fresh_epoch": {
             "schema": analysis_provenance["fresh_epoch_schema"],
             "status": analysis_provenance["fresh_epoch_status"],
@@ -20902,7 +20983,7 @@ def format_terminal_status(payload):
     return "\n".join(lines)
 
 
-def write_analysis_dashboard_html(payload):
+def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
     """Self-contained HTML dashboard — open in browser instead of scrolling terminal."""
     p = payload.get("performance") or {}
     re = payload.get("real_edge") or {}
@@ -20912,6 +20993,14 @@ def write_analysis_dashboard_html(payload):
     leakage = _load_json_report(SCENARIO_C_LEAKAGE_REPORT_FILE)
     horizon = _load_json_report(HORIZON_PROFITABILITY_REPORT_FILE)
     fast_cut = _load_json_report(FAST_CUT_SURVIVOR_REPORT_FILE)
+    if lifecycle_inventory is None:
+        try:
+            lifecycle_inventory = build_lifecycle_bundle_inventory(
+                os.environ["BTC_AGENT_DATA_DIR"],
+                analysis_provenance=payload.get("analysis_provenance") or {},
+            )
+        except Exception:
+            lifecycle_inventory = {}
 
     def esc(x):
         return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -20965,6 +21054,22 @@ def write_analysis_dashboard_html(payload):
     cov = payload.get("coverage") or {}
     findings = payload.get("key_findings") or []
     findings_html = "".join(f"<li>{esc(f)}</li>" for f in findings[:10])
+    lifecycle_qualification = lifecycle_inventory.get("qualification") or {}
+    lifecycle_transfer = lifecycle_inventory.get("transfer") or {}
+    lifecycle_parity = lifecycle_inventory.get("parity") or {}
+    lifecycle_current = bool(
+        lifecycle_inventory.get("schema") == "lifecycle_bundle_inventory_v1"
+        and lifecycle_inventory.get("inventory_scope") == "MANIFEST_ONLY"
+        and lifecycle_inventory.get("complete") is True
+        and lifecycle_inventory.get("complete_scope") == "MANIFEST_INVENTORY"
+        and lifecycle_inventory.get("payload_verification_status") == "UNKNOWN_NOT_SCANNED"
+        and lifecycle_inventory.get("payload_files_read") == 0
+        and lifecycle_parity.get("scope") == "MANIFEST_INVENTORY"
+        and lifecycle_transfer.get("audit_only") is True
+        and lifecycle_transfer.get("profitability_supported") is False
+        and lifecycle_transfer.get("ranking_eligible") is False
+        and lifecycle_transfer.get("source_cleanup_authorized") is False
+    )
     provenance = payload.get("analysis_provenance") or {}
     generation_revision = payload.get("generation_revision") or provenance.get("generation_revision") or "UNKNOWN"
     cohort_schema = payload.get("cohort_schema") or provenance.get("cohort_schema") or "UNKNOWN"
@@ -21025,6 +21130,14 @@ def write_analysis_dashboard_html(payload):
   <div class="kpi"><div class="lbl">MFE Capture</div><div class="val">{html_pct(p.get('mfe_capture_pct'))}</div></div>
   <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">{html_usd(re.get('gate_damage_usd'), signed=True)}</div></div>
 </div>
+<section><h2>Lifecycle Evidence Bundles</h2>
+<div class="kpis">
+  <div class="kpi"><div class="lbl">manifest-verified qualification bundles</div><div class="val">{esc(lifecycle_qualification.get('unique_lifecycle_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+  <div class="kpi"><div class="lbl">transfer-ready audit copies</div><div class="val">{esc(lifecycle_transfer.get('unique_lifecycle_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+  <div class="kpi"><div class="lbl">matched lifecycle identities</div><div class="val">{esc(lifecycle_parity.get('intersection_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+  <div class="kpi"><div class="lbl">invalid manifests</div><div class="val">{esc(lifecycle_inventory.get('invalid_manifest_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+</div>
+<p class="note">Inventory completeness and parity cover manifests only. Payload verification status is UNKNOWN_NOT_SCANNED and payload files read is 0; no payload integrity or ranking qualification is claimed. Transfer-ready audit copies are audit-only=true, ranking eligible=false, profitability supported=false, and source cleanup authorized=false. They are never counted as strategies, fills, trades, or winners.</p></section>
 <section><h2>Lanes</h2><table><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>Real PnL</th><th>EV/Approve</th></tr>{lane_rows}</table></section>
 <section><h2>Research Cohorts</h2><table><tr><th>Cohort</th><th>Included</th><th>Excluded</th><th>Exclusion reasons</th></tr>{cohort_rows or '<tr><td colspan="4">UNKNOWN — cohort evidence missing</td></tr>'}</table></section>
 <section><h2>AI Confidence</h2><table><tr><th>Band</th><th>Trades</th><th>WR</th><th>PnL</th></tr>{cal_rows or '<tr><td colspan="4">No data</td></tr>'}</table></section>
@@ -21148,7 +21261,19 @@ def finalize_analyzer_outputs(
                 f.write(content)
         except Exception as exc:
             print(f"⚠️ Could not write {path}: {exc}")
-    write_analysis_dashboard_html(payload)
+    analysis_provenance = _lifecycle_inventory_analysis_provenance()
+    payload["analysis_provenance"] = analysis_provenance
+    lifecycle_inventory = None
+    lifecycle_inventory_error = None
+    try:
+        lifecycle_inventory = build_lifecycle_bundle_inventory(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            Path(os.environ["BTC_AGENT_REPORT_DIR"]) / LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
+            analysis_provenance=analysis_provenance,
+        )
+    except Exception as exc:
+        lifecycle_inventory_error = f"{type(exc).__name__}: {exc}"
+    write_analysis_dashboard_html(payload, lifecycle_inventory=lifecycle_inventory or {})
     try:
         with open(RESEARCH_COMPACT_SUMMARY_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -21164,7 +21289,12 @@ def finalize_analyzer_outputs(
         )
     except Exception:
         pass
-    write_report_manifest(payload)
+    write_report_manifest(
+        payload,
+        analysis_provenance=analysis_provenance,
+        lifecycle_bundle_inventory=lifecycle_inventory,
+        lifecycle_bundle_inventory_error=lifecycle_inventory_error,
+    )
     try:
         from research.research_trade_accumulator import sync_accumulator_from_analyzer_run
 

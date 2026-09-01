@@ -3,7 +3,12 @@ import copy
 import pytest
 
 from lifecycle_bundles import classify_completion
-from lifecycle_completion_receipts import build_lifecycle_completion_receipt
+from lifecycle_completion_receipts import (
+    COMPLETION_SCHEMA,
+    TRANSFER_READY_SCHEMA,
+    build_lifecycle_completion_receipt,
+    build_lifecycle_transfer_ready_receipt,
+)
 from lifecycle_qualification_horizon import (
     ACTUAL_EXECUTION_GROSS_BASIS,
     NET_SUBTRACTION_BASIS,
@@ -138,5 +143,91 @@ def test_receipt_is_deterministic_and_does_not_mutate_proof():
     frozen = copy.deepcopy(source)
     first = build_lifecycle_completion_receipt(source, now=NOW)
     second = build_lifecycle_completion_receipt(source, now=NOW)
+    assert first == second
+    assert source == frozen
+
+
+def transfer_proof(outcome="NO_FILL"):
+    value = proof(outcome)
+    if outcome == "NO_FILL":
+        value["filled_quantity"] = 0.0
+    elif outcome in {"FULL_FILL", "PARTIAL_FILL"}:
+        value["filled_quantity"] = 1.0
+        value["requested_quantity"] = 2.0 if outcome == "PARTIAL_FILL" else 1.0
+    elif outcome == "UNKNOWN":
+        value["unknown_reason"] = "EXECUTION_EVIDENCE_UNAVAILABLE"
+    return value
+
+
+@pytest.mark.parametrize("outcome", ["NO_FILL", "FULL_FILL", "PARTIAL_FILL", "UNKNOWN"])
+def test_transfer_ready_is_distinct_terminal_flat_and_never_profitability_or_cleanup_evidence(outcome):
+    result = build_lifecycle_transfer_ready_receipt(transfer_proof(outcome), now=NOW)
+    assert result["ready"] is True
+    receipt = result["receipt"]
+    assert receipt["schema"] == TRANSFER_READY_SCHEMA
+    assert receipt["schema"] != COMPLETION_SCHEMA
+    assert receipt["entry_outcome"] == outcome
+    assert receipt["profitability_supported"] is False
+    assert receipt["profitability_blocker"] == "TRANSFER_RECEIPT_IS_NOT_PROFITABILITY_EVIDENCE"
+    assert receipt["source_cleanup_authorized"] is False
+    assert len(receipt["transfer_receipt_sha256"]) == 64
+
+
+def test_transfer_ready_exposes_qualification_blockers_without_requiring_two_hour_completion():
+    source = transfer_proof("FULL_FILL")
+    source.pop("post_observation")
+    result = build_lifecycle_transfer_ready_receipt(source, now=10_100.0)
+    assert result["ready"] is True
+    assert result["qualification_ready"] is False
+    assert "POST_OBSERVATION_INCOMPLETE" in result["qualification_blockers"]
+    assert "COST_EVIDENCE_INCOMPLETE" in result["qualification_blockers"]
+    assert result["receipt"]["qualification_blockers"] == result["qualification_blockers"]
+
+
+def test_transfer_ready_can_report_qualification_ready_without_becoming_a_profitability_claim():
+    source = filled_proof()
+    result = build_lifecycle_transfer_ready_receipt(source, now=NOW)
+    assert result["ready"] is True
+    assert result["qualification_ready"] is True
+    assert result["qualification_blockers"] == []
+    assert result["receipt"]["profitability_supported"] is False
+
+
+@pytest.mark.parametrize("mutation,blocker", [
+    (lambda value: value["terminal_schedule"].update(authoritative=False), "TERMINAL_SCHEDULE_NOT_AUTHORITATIVE"),
+    (lambda value: value["terminal_schedule"].update(schedule_lifecycle_final=False), "ENTRY_SCHEDULE_NOT_TERMINAL"),
+    (lambda value: value.update(position_state="OPEN"), "POSITION_NOT_PROVEN_CLOSED"),
+    (lambda value: value.update(open_quantity=0.1), "OPEN_QUANTITY_NONZERO"),
+    (lambda value: value.update(entry_outcome=""), "ENTRY_OUTCOME_INVALID"),
+])
+def test_transfer_ready_fails_closed_on_terminal_flat_and_outcome_boundaries(mutation, blocker):
+    source = transfer_proof()
+    mutation(source)
+    result = build_lifecycle_transfer_ready_receipt(source, now=NOW)
+    assert result["ready"] is False
+    assert result["receipt"] is None
+    assert blocker in result["blockers"]
+
+
+@pytest.mark.parametrize("outcome,mutation,blocker", [
+    ("NO_FILL", lambda value: value.update(filled_quantity=0.1), "NO_FILL_QUANTITY_NONZERO"),
+    ("NO_FILL", lambda value: value.pop("filled_quantity"), "FILLED_QUANTITY_MISSING"),
+    ("FULL_FILL", lambda value: value.update(filled_quantity=0.5), "FULL_FILL_QUANTITY_MISMATCH"),
+    ("PARTIAL_FILL", lambda value: value.update(filled_quantity=2.0), "PARTIAL_FILL_QUANTITY_NOT_PARTIAL"),
+    ("UNKNOWN", lambda value: value.pop("unknown_reason"), "UNKNOWN_REASON_MISSING"),
+])
+def test_transfer_ready_does_not_infer_entry_outcomes(outcome, mutation, blocker):
+    source = transfer_proof(outcome)
+    mutation(source)
+    result = build_lifecycle_transfer_ready_receipt(source, now=NOW)
+    assert result["ready"] is False
+    assert blocker in result["blockers"]
+
+
+def test_transfer_receipt_is_deterministic_and_does_not_mutate_proof():
+    source = transfer_proof("PARTIAL_FILL")
+    frozen = copy.deepcopy(source)
+    first = build_lifecycle_transfer_ready_receipt(source, now=NOW)
+    second = build_lifecycle_transfer_ready_receipt(source, now=NOW)
     assert first == second
     assert source == frozen

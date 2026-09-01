@@ -137,13 +137,17 @@ def test_legacy_analyzer_is_a_minimal_fail_closed_stub():
 
 
 def test_report_manifest_exposes_cohort_provenance_and_revision():
+    provenance = CANONICAL_ANALYZER_SOURCE.split(
+        "def _lifecycle_inventory_analysis_provenance(", 1
+    )[1].split("def write_report_manifest", 1)[0]
     manifest = CANONICAL_ANALYZER_SOURCE.split(
         "def write_report_manifest(", 1
     )[1].split("def _manifest_category", 1)[0]
-    assert '"cohort_schema": "analysis_cohorts_v1"' in manifest
-    assert '"generation_revision": generation_revision' in manifest
-    assert '"included_row_count": len(eligible)' in manifest
-    assert '"exclusion_reason_counts": exclusions' in manifest
+    assert '"cohort_schema": "analysis_cohorts_v1"' in provenance
+    assert '"generation_revision": generation_revision' in provenance
+    assert '"included_row_count": len(eligible)' in provenance
+    assert '"exclusion_reason_counts": exclusions' in provenance
+    assert "analysis_provenance = _lifecycle_inventory_analysis_provenance()" in manifest
     assert '"analysis_provenance": analysis_provenance' in manifest
     assert '"cohort_schema": analysis_provenance["cohort_schema"]' in manifest
     assert '"generation_revision": analysis_provenance["generation_revision"]' in manifest

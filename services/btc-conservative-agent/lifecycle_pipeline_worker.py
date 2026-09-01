@@ -34,6 +34,7 @@ _FIELDS = frozenset({
     "max_runtime_sec", "pressure_mode",
 })
 _SENSITIVE = ("secret", "token", "password", "credential", "api_key", "private_key")
+MAX_ERROR_CLASS_LENGTH = 80
 
 
 def _sensitive(value: Any) -> bool:
@@ -235,11 +236,42 @@ def verify_result(
         raise ValueError("WORKER_RESULT_SHA256_MISMATCH")
     if payload.get("source_cleanup_authorized") is not False:
         raise ValueError("WORKER_RESULT_CLEANUP_INVARIANT_FAILED")
+    if payload.get("status") == "FAILED":
+        failure = payload.get("failure")
+        if not isinstance(failure, dict) or set(failure) != {"error_class", "error_code"}:
+            raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+        error_class = str(failure.get("error_class") or "")
+        if (
+            not error_class or len(error_class) > MAX_ERROR_CLASS_LENGTH
+            or not error_class.replace("_", "").isalnum()
+            or failure.get("error_code") != "WORKER_PIPELINE_FAILED"
+        ):
+            raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
     return payload
 
 
+def _result_hash(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _write_result(result_path: Path, payload: dict[str, Any]) -> None:
+    payload["result_sha256"] = _result_hash(payload)
+    temporary = result_path.with_name(f"{result_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, result_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def run(request_path: Path, result_path: Path, nonce: str) -> int:
-    temporary: Path | None = None
+    request: dict[str, Any] | None = None
+    started: float | None = None
     try:
         _lower_priority()
         request = _load(request_path, result_path, nonce)
@@ -262,6 +294,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             raise TimeoutError("LIFECYCLE_PIPELINE_RUNTIME_LIMIT_EXCEEDED")
         payload = {
             "schema": RESULT_SCHEMA,
+            "status": "SUCCESS",
             "nonce": nonce,
             "source_revision": str(request.get("source_revision") or ""),
             "launched_unix": float(request.get("launched_unix") or 0.0),
@@ -273,24 +306,37 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             "hard_runtime_result_deadline_enforced": True,
             "source_cleanup_authorized": False,
         }
-        payload["result_sha256"] = hashlib.sha256(
-            json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        temporary = result_path.with_name(f"{result_path.name}.{uuid.uuid4().hex}.tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, result_path)
+        _write_result(result_path, payload)
         return 0
-    except BaseException:
-        return 1
-    finally:
-        if temporary is not None:
+    except BaseException as exc:
+        # A valid, loaded request gives us enough trusted identity to publish a
+        # small diagnostic receipt. Never serialize the exception message: it
+        # may contain paths, row data, or credentials supplied by dependencies.
+        if request is not None:
+            error_class = type(exc).__name__[:MAX_ERROR_CLASS_LENGTH]
+            if not error_class.replace("_", "").isalnum():
+                error_class = "Exception"
+            payload = {
+                "schema": RESULT_SCHEMA,
+                "status": "FAILED",
+                "nonce": nonce,
+                "source_revision": str(request.get("source_revision") or ""),
+                "launched_unix": float(request.get("launched_unix") or 0.0),
+                "started_unix": started,
+                "generated_unix": time.time(),
+                "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "request_sha256": request["_request_sha256"],
+                "failure": {
+                    "error_class": error_class,
+                    "error_code": "WORKER_PIPELINE_FAILED",
+                },
+                "source_cleanup_authorized": False,
+            }
             try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
+                _write_result(result_path, payload)
+            except BaseException:
                 pass
+        return 1
 
 
 def main() -> int:

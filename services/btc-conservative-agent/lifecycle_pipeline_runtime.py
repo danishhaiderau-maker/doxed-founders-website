@@ -197,6 +197,7 @@ class LifecyclePipelineRuntime:
             "next_run_unix": None,
             "last_outcome": "NEVER_RUN",
             "last_error": None,
+            "last_worker_failure": None,
             "last_result": None,
             "source_cleanup_authorized": False,
             "resource_limits": {
@@ -273,7 +274,9 @@ class LifecyclePipelineRuntime:
             return pressure, emergency, None
         return bool(observed), False, None
 
-    def _record_failure(self, outcome: str, error: str) -> None:
+    def _record_failure(
+        self, outcome: str, error: str, *, worker_failure: Mapping[str, Any] | None = None,
+    ) -> None:
         with self._lock:
             failures = int(self._status["failure_count"]) + 1
             backoff = min(MAX_BACKOFF_SEC, MIN_BACKOFF_SEC * (2 ** (failures - 1)))
@@ -281,6 +284,13 @@ class LifecyclePipelineRuntime:
                 "active": False, "failure_count": failures,
                 "backoff_sec": backoff, "next_run_unix": self.clock() + backoff,
                 "last_outcome": outcome, "last_error": str(error)[:1000],
+                "last_worker_failure": (
+                    {
+                        "error_class": str(worker_failure.get("error_class") or "")[:80],
+                        "error_code": str(worker_failure.get("error_code") or "")[:80],
+                    }
+                    if isinstance(worker_failure, Mapping) else None
+                ),
                 "source_cleanup_authorized": False,
             })
 
@@ -307,6 +317,7 @@ class LifecyclePipelineRuntime:
                 "active": False, "failure_count": 0, "backoff_sec": 0.0,
                 "next_run_unix": self.clock() + self.interval_sec,
                 "last_outcome": "SUCCESS", "last_error": None,
+                "last_worker_failure": None,
                 "last_result": summary, "source_cleanup_authorized": False,
             })
 
@@ -382,7 +393,19 @@ class LifecyclePipelineRuntime:
                 with self._lock:
                     self._process = None
             if return_code != 0:
-                self._record_failure("WORKER_FAILED", f"worker exit code {return_code}")
+                worker_failure = None
+                try:
+                    receipt = verify_result(
+                        launch["request_path"], launch["result_path"], launch["nonce"]
+                    )
+                    if receipt.get("status") == "FAILED":
+                        worker_failure = receipt.get("failure")
+                except BaseException:
+                    pass
+                self._record_failure(
+                    "WORKER_FAILED", f"worker exit code {return_code}",
+                    worker_failure=worker_failure,
+                )
                 return False
             receipt = verify_result(
                 launch["request_path"], launch["result_path"], launch["nonce"]

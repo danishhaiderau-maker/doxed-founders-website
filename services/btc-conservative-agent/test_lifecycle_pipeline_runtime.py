@@ -96,6 +96,49 @@ def test_corrupt_result_fails_closed_and_backoff_is_bounded(tmp_path, monkeypatc
         assert not list(runtime.work_root.glob("pipeline-result-*.json"))
 
 
+def test_worker_failure_receipt_is_retained_as_bounded_status_then_cleaned(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    process = _Process(return_code=1)
+
+    def launch(command):
+        request = Path(command[command.index("--request") + 1])
+        result = Path(command[command.index("--result") + 1])
+        nonce = command[command.index("--nonce") + 1]
+        request_payload = json.loads(request.read_text(encoding="utf-8"))
+        payload = {
+            "schema": "lifecycle_pipeline_worker_result_v1",
+            "status": "FAILED",
+            "nonce": nonce,
+            "source_revision": REVISION,
+            "launched_unix": request_payload["launched_unix"],
+            "started_unix": 1,
+            "generated_unix": 2,
+            "generated_at": "x",
+            "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
+            "failure": {
+                "error_class": "RuntimeError",
+                "error_code": "WORKER_PIPELINE_FAILED",
+            },
+            "source_cleanup_authorized": False,
+        }
+        unsigned = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        payload["result_sha256"] = runtime_module.hashlib.sha256(unsigned).hexdigest()
+        result.write_text(json.dumps(payload), encoding="utf-8")
+        return process
+
+    monkeypatch.setattr(runtime, "_launch", launch)
+    assert runtime._run_once() is False
+    status = runtime.status()
+    assert status["last_outcome"] == "WORKER_FAILED"
+    assert status["last_worker_failure"] == {
+        "error_class": "RuntimeError",
+        "error_code": "WORKER_PIPELINE_FAILED",
+    }
+    assert "RuntimeError" not in status["last_error"]
+    assert not list(runtime.work_root.glob("pipeline-request-*.json"))
+    assert not list(runtime.work_root.glob("pipeline-result-*.json"))
+
+
 def test_overlap_and_emergency_pressure_skip_without_launch(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path, overlap_probe=lambda: "SYNC_ACTIVE")
     monkeypatch.setattr(runtime, "_launch", lambda _command: (_ for _ in ()).throw(AssertionError()))

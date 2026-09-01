@@ -121,6 +121,16 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
         _append(tmp_path, row)
     first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
     assert first["results"][0]["stage"] == "QUALIFICATION_DEFERRED_UNTIL_MATURITY"
+    assert first["transfer_ready_count"] == 1
+    assert first["transfer_bundle_count"] == 1
+    assert first["results"][0]["transfer_stage"] == (
+        "TRANSFER_BUNDLE_MATERIALIZED_OR_VERIFIED"
+    )
+    transfer_manifest = first["results"][0]["transfer_bundle"]["manifest"]
+    assert transfer_manifest["maturity"] == "TRANSFER_READY"
+    assert transfer_manifest["qualification_ready"] is False
+    assert transfer_manifest["ranking_eligible"] is False
+    assert transfer_manifest["source_cleanup_authorized"] is False
     assert first["results"][0]["retry_at"] == 20_050.0
     assert first["scan"]["pending_dirty_lifecycles"] == 0
 
@@ -202,6 +212,13 @@ def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, mon
     )
     first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
     assert first["results"][0]["stage"] == "RUNTIME_PROVENANCE_MISMATCH"
+    # Transfer preserves the internally consistent historical provenance and
+    # never authorizes cleanup; qualification remains fail-closed against the
+    # current runtime revision.
+    assert first["transfer_bundle_count"] == 1
+    assert first["results"][0]["transfer_bundle"]["manifest"][
+        "source_cleanup_authorized"
+    ] is False
     assert first["scan"]["pending_dirty_lifecycles"] == 1
 
     _patch_provenance(monkeypatch)

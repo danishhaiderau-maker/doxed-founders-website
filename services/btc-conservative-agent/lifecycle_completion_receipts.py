@@ -19,6 +19,7 @@ from lifecycle_qualification_horizon import (
 
 
 COMPLETION_SCHEMA = "lifecycle_bundle_completion_v1"
+TRANSFER_READY_SCHEMA = "lifecycle_bundle_transfer_ready_v1"
 ENTRY_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
 FLAT_POSITION_STATES = frozenset({"CLOSED", "NEVER_OPENED"})
 
@@ -224,3 +225,148 @@ def build_lifecycle_completion_receipt(
         canonical_json(receipt).encode("utf-8")
     ).hexdigest()
     return {"ready": True, "classification": outcome, "blockers": [], "receipt": receipt}
+
+
+def build_lifecycle_transfer_ready_receipt(
+    proof: Mapping[str, Any], *, now: float,
+    lifecycle_horizon_sec: float = 7200.0,
+    reconciliation_allowance_sec: float = 180.0,
+    pnl_tolerance_usd: float = 1e-8,
+) -> dict[str, Any]:
+    """Build a terminal, flat transfer receipt without claiming qualification.
+
+    Transfer readiness is deliberately narrower than qualification readiness:
+    it proves that an entry lifecycle has an authoritative terminal schedule,
+    an explicit outcome, and no remaining position.  It does *not* authorize
+    source cleanup and it is never profitability evidence.  The qualification
+    validator remains the sole authority for the two-hour horizon, exit,
+    economics, latency/slippage, and MFE/MAE requirements; its exact blockers
+    are embedded so missing evidence remains visible rather than being inferred.
+    """
+    blockers: list[str] = []
+    outcome = str(proof.get("entry_outcome") or "").upper()
+    if outcome not in ENTRY_OUTCOMES:
+        blockers.append("ENTRY_OUTCOME_INVALID")
+
+    schedule = proof.get("terminal_schedule")
+    if not isinstance(schedule, Mapping):
+        blockers.append("TERMINAL_SCHEDULE_MISSING")
+        schedule = {}
+    if schedule.get("authoritative") is not True:
+        blockers.append("TERMINAL_SCHEDULE_NOT_AUTHORITATIVE")
+    if schedule.get("schedule_lifecycle_final") is not True:
+        blockers.append("ENTRY_SCHEDULE_NOT_TERMINAL")
+    terminal_ts = _positive_timestamp(schedule.get("terminal_ts"))
+    if terminal_ts is None:
+        blockers.append("TERMINAL_TIMESTAMP_MISSING")
+    terminal_reason = _text(schedule.get("terminal_reason"))
+    if terminal_reason is None:
+        blockers.append("TERMINAL_REASON_MISSING")
+    schedule_sha256 = _valid_sha256(schedule.get("schedule_sha256"))
+    if schedule_sha256 is None:
+        blockers.append("SCHEDULE_SHA256_MISSING_OR_INVALID")
+
+    position_state = str(proof.get("position_state") or "").upper()
+    if position_state not in FLAT_POSITION_STATES:
+        blockers.append("POSITION_NOT_PROVEN_CLOSED")
+    open_quantity = _finite(proof.get("open_quantity"))
+    if open_quantity is None:
+        blockers.append("OPEN_QUANTITY_MISSING")
+    elif abs(open_quantity) > 1e-12:
+        blockers.append("OPEN_QUANTITY_NONZERO")
+
+    transfer_ts = _positive_timestamp(now)
+    if transfer_ts is None:
+        blockers.append("CURRENT_TIMESTAMP_INVALID")
+
+    requested_quantity = _finite(proof.get("requested_quantity"))
+    filled_quantity = _finite(proof.get("filled_quantity"))
+    unknown_reason = _text(proof.get("unknown_reason"))
+    if outcome == "FULL_FILL":
+        if position_state != "CLOSED":
+            blockers.append("FILLED_OUTCOME_POSITION_NOT_CLOSED")
+        if requested_quantity is None or requested_quantity <= 0:
+            blockers.append("REQUESTED_QUANTITY_MISSING")
+        if filled_quantity is None or filled_quantity <= 0:
+            blockers.append("POSITIVE_FILLED_QUANTITY_MISSING")
+        elif requested_quantity is not None and requested_quantity > 0 and abs(
+            filled_quantity - requested_quantity
+        ) > 1e-12:
+            blockers.append("FULL_FILL_QUANTITY_MISMATCH")
+    elif outcome == "PARTIAL_FILL":
+        if position_state != "CLOSED":
+            blockers.append("FILLED_OUTCOME_POSITION_NOT_CLOSED")
+        if requested_quantity is None or requested_quantity <= 0:
+            blockers.append("REQUESTED_QUANTITY_MISSING")
+        if filled_quantity is None or filled_quantity <= 0:
+            blockers.append("POSITIVE_FILLED_QUANTITY_MISSING")
+        elif requested_quantity is not None and requested_quantity > 0 and filled_quantity >= requested_quantity:
+            blockers.append("PARTIAL_FILL_QUANTITY_NOT_PARTIAL")
+    elif outcome == "NO_FILL":
+        if position_state != "NEVER_OPENED":
+            blockers.append("NO_FILL_POSITION_STATE_INVALID")
+        if filled_quantity is None:
+            blockers.append("FILLED_QUANTITY_MISSING")
+        elif abs(filled_quantity) > 1e-12:
+            blockers.append("NO_FILL_QUANTITY_NONZERO")
+    elif outcome == "UNKNOWN" and unknown_reason is None:
+        blockers.append("UNKNOWN_REASON_MISSING")
+
+    qualification = build_lifecycle_completion_receipt(
+        proof,
+        now=now,
+        lifecycle_horizon_sec=lifecycle_horizon_sec,
+        reconciliation_allowance_sec=reconciliation_allowance_sec,
+        pnl_tolerance_usd=pnl_tolerance_usd,
+    )
+    qualification_blockers = list(qualification["blockers"])
+
+    blockers = sorted(set(blockers))
+    classification = outcome if outcome in ENTRY_OUTCOMES else "UNKNOWN"
+    if blockers:
+        return {
+            "ready": False,
+            "classification": classification,
+            "blockers": blockers,
+            "qualification_ready": bool(qualification["ready"]),
+            "qualification_blockers": qualification_blockers,
+            "receipt": None,
+        }
+
+    receipt: dict[str, Any] = {
+        "schema": TRANSFER_READY_SCHEMA,
+        "transfer_ready": True,
+        "terminal": True,
+        "entry_outcome": outcome,
+        "entry_schedule_terminal": True,
+        "position_closed_or_never_opened": True,
+        "terminal_ts": terminal_ts,
+        "transfer_receipt_ts": transfer_ts,
+        "schedule_sha256": schedule_sha256,
+        "terminal_reason": terminal_reason,
+        "position_state": position_state,
+        "open_quantity": open_quantity,
+        "qualification_schema": COMPLETION_SCHEMA,
+        "qualification_ready": bool(qualification["ready"]),
+        "qualification_blockers": qualification_blockers,
+        "profitability_supported": False,
+        "profitability_blocker": "TRANSFER_RECEIPT_IS_NOT_PROFITABILITY_EVIDENCE",
+        "source_cleanup_authorized": False,
+    }
+    if requested_quantity is not None:
+        receipt["requested_quantity"] = requested_quantity
+    if filled_quantity is not None:
+        receipt["filled_quantity"] = filled_quantity
+    if unknown_reason is not None:
+        receipt["unknown_reason"] = unknown_reason
+    receipt["transfer_receipt_sha256"] = hashlib.sha256(
+        canonical_json(receipt).encode("utf-8")
+    ).hexdigest()
+    return {
+        "ready": True,
+        "classification": outcome,
+        "blockers": [],
+        "qualification_ready": bool(qualification["ready"]),
+        "qualification_blockers": qualification_blockers,
+        "receipt": receipt,
+    }

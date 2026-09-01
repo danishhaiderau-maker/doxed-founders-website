@@ -4,10 +4,12 @@ import time
 from pathlib import Path
 
 import pytest
+import lifecycle_bundles
 
 from lifecycle_bundles import (
-    COMPLETION_SCHEMA, LifecycleKey, classify_completion, collect_lifecycle_rows,
-    lifecycle_key, materialize_bundle, verify_bundle,
+    COMPLETION_SCHEMA, TRANSFER_BUNDLE_SCHEMA, LifecycleKey,
+    classify_completion, collect_lifecycle_rows, lifecycle_key,
+    materialize_bundle, materialize_transfer_bundle, verify_bundle,
 )
 
 
@@ -42,6 +44,25 @@ def row(key, record_id, now, **extra):
     }
     material.update(extra)
     return material
+
+
+def transfer_assessment(now, outcome="NO_FILL"):
+    return {
+        "ready": True,
+        "classification": outcome,
+        "blockers": [],
+        "qualification_ready": False,
+        "qualification_blockers": ["LIFECYCLE_HORIZON_INCOMPLETE"],
+        "receipt": {
+            "schema": "lifecycle_bundle_transfer_ready_v1",
+            "transfer_ready": True,
+            "terminal": True,
+            "entry_outcome": outcome,
+            "terminal_ts": now - 10,
+            "profitability_supported": False,
+            "source_cleanup_authorized": False,
+        },
+    }
 
 
 def write_ledger(root, ledger, rows):
@@ -132,6 +153,177 @@ def test_late_terminal_evidence_creates_new_content_bundle_instead_of_being_igno
         assert Path(second["path"]).exists()
     assert first["bundle_id"] != second["bundle_id"]
     assert first["manifest"]["lifecycle_identity_id"] == second["manifest"]["lifecycle_identity_id"]
+
+
+def test_transfer_bundle_is_content_addressed_and_permanently_non_qualifying():
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
+    rows = [row(key, "terminal-flat", now, bundle_completion=None)]
+    assessment = transfer_assessment(now)
+    with tempfile.TemporaryDirectory() as tmp:
+        first = materialize_transfer_bundle(tmp, key, rows, assessment)
+        second = materialize_transfer_bundle(tmp, key, rows, assessment)
+        verification = verify_bundle(first["path"])
+        manifest = verification["manifest"]
+        completion = classify_completion(rows, now=now)
+    assert first["written"] is True
+    assert second["duplicate"] is True
+    assert verification["passed"]
+    assert manifest["schema"] == TRANSFER_BUNDLE_SCHEMA
+    assert manifest["maturity"] == "TRANSFER_READY"
+    assert manifest["qualification_ready"] is False
+    assert manifest["profitability_supported"] is False
+    assert manifest["ranking_eligible"] is False
+    assert manifest["source_cleanup_authorized"] is False
+    assert "completion" not in manifest
+    assert completion["ready"] is False
+    assert completion["blockers"] == ["COMPLETION_RECEIPT_MISSING"]
+
+
+def test_transfer_bundle_freezes_first_verified_terminal_snapshot():
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
+    first_rows = [row(key, "terminal-flat", now, bundle_completion=None)]
+    late_rows = [
+        *first_rows,
+        row(key, "late-terminal-detail", now, bundle_completion=None,
+            observed_ts=now - 5),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        first = materialize_transfer_bundle(
+            tmp, key, first_rows, transfer_assessment(now),
+        )
+        second = materialize_transfer_bundle(
+            tmp, key, late_rows, transfer_assessment(now),
+        )
+        assert Path(first["path"]).is_dir()
+        assert Path(second["path"]).is_dir()
+        assert Path(first["pointer_path"]).is_file()
+    assert first["bundle_id"] == second["bundle_id"]
+    assert second["duplicate"] is True
+    assert second["frozen"] is True
+
+
+def test_transfer_pointer_corruption_fails_closed():
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
+    rows = [row(key, "terminal-flat", now, bundle_completion=None)]
+    with tempfile.TemporaryDirectory() as tmp:
+        first = materialize_transfer_bundle(
+            tmp, key, rows, transfer_assessment(now),
+        )
+        pointer = Path(first["pointer_path"])
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+        payload["ranking_eligible"] = True
+        pointer.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError, match="TRANSFER_POINTER_INVALID"):
+            materialize_transfer_bundle(tmp, key, rows, transfer_assessment(now))
+
+
+def test_transfer_pointer_crash_recovers_verified_staging_without_late_duplicate(monkeypatch):
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-crash", "policy-a", "FIXED")
+    first_rows = [row(key, "terminal-flat", now, bundle_completion=None)]
+    late_rows = [
+        *first_rows,
+        row(key, "late-after-crash", now, bundle_completion=None, observed_ts=now - 5),
+    ]
+    real_replace = lifecycle_bundles.os.replace
+    injected = {"raised": False}
+
+    def crash_before_final_publish(source, destination):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            not injected["raised"]
+            and source_path.parent.name == ".staging"
+            and source_path.name.startswith("transfer-")
+            and destination_path.name == source_path.name
+        ):
+            injected["raised"] = True
+            raise OSError("INJECTED_AFTER_POINTER_BEFORE_TARGET")
+        return real_replace(source, destination)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(lifecycle_bundles.os, "replace", crash_before_final_publish)
+        with pytest.raises(OSError, match="INJECTED_AFTER_POINTER_BEFORE_TARGET"):
+            materialize_transfer_bundle(
+                tmp, key, first_rows, transfer_assessment(now),
+            )
+        pointer_path = (
+            Path(tmp) / "v3" / "lifecycle_transfer_bundles" / "index"
+            / f"{key.identity_id}.json"
+        )
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        staged = (
+            Path(tmp) / "v3" / "lifecycle_transfer_bundles" / ".staging"
+            / pointer["bundle_id"]
+        )
+        target = (
+            Path(tmp) / "v3" / "lifecycle_transfer_bundles"
+            / pointer["bundle_id"][-64:-62] / pointer["bundle_id"]
+        )
+        assert staged.is_dir()
+        assert not target.exists()
+
+        monkeypatch.setattr(lifecycle_bundles.os, "replace", real_replace)
+        recovered = materialize_transfer_bundle(
+            tmp, key, late_rows, transfer_assessment(now),
+        )
+        verification = verify_bundle(recovered["path"])
+        recovered_events = [
+            json.loads(line) for line in
+            (Path(recovered["path"]) / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        published = [
+            path for path in (Path(tmp) / "v3" / "lifecycle_transfer_bundles").glob("*/*")
+            if path.is_dir() and path.parent.name != ".staging"
+        ]
+
+    assert recovered["duplicate"] is True
+    assert recovered["frozen"] is True
+    assert recovered["recovered"] is True
+    assert recovered["bundle_id"] == pointer["bundle_id"]
+    assert verification["passed"]
+    assert [item["record_id"] for item in recovered_events] == ["terminal-flat"]
+    assert len(published) == 1
+
+
+def test_transfer_pointer_recovery_rejects_corrupt_staging(monkeypatch):
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-corrupt-stage", "policy-a", "FIXED")
+    rows = [row(key, "terminal-flat", now, bundle_completion=None)]
+    real_replace = lifecycle_bundles.os.replace
+
+    def crash_before_final_publish(source, destination):
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if source_path.parent.name == ".staging" and destination_path.name == source_path.name:
+            raise OSError("INJECTED_AFTER_POINTER_BEFORE_TARGET")
+        return real_replace(source, destination)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setattr(lifecycle_bundles.os, "replace", crash_before_final_publish)
+        with pytest.raises(OSError, match="INJECTED_AFTER_POINTER_BEFORE_TARGET"):
+            materialize_transfer_bundle(tmp, key, rows, transfer_assessment(now))
+        pointer_path = (
+            Path(tmp) / "v3" / "lifecycle_transfer_bundles" / "index"
+            / f"{key.identity_id}.json"
+        )
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        staged = (
+            Path(tmp) / "v3" / "lifecycle_transfer_bundles" / ".staging"
+            / pointer["bundle_id"]
+        )
+        (staged / "events.jsonl").write_text("corrupt\n", encoding="utf-8")
+        monkeypatch.setattr(lifecycle_bundles.os, "replace", real_replace)
+        with pytest.raises(ValueError, match="TRANSFER_POINTER_INVALID"):
+            materialize_transfer_bundle(tmp, key, rows, transfer_assessment(now))
+        assert not (
+            Path(tmp) / "v3" / "lifecycle_transfer_bundles"
+            / pointer["bundle_id"][-64:-62] / pointer["bundle_id"]
+        ).exists()
 
 
 def test_every_event_row_must_carry_the_same_complete_provenance():

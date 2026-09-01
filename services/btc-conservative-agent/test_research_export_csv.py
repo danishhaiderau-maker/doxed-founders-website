@@ -35,8 +35,13 @@ def main():
     }
     previous = os.getcwd()
     previous_bootstrap = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+    previous_admin_token = bot._BOT_ADMIN_TOKEN
     with tempfile.TemporaryDirectory(prefix="research_export_") as tmp:
         try:
+            # bot captures BOT_ADMIN_TOKEN at import time. Other broad-suite
+            # modules may have imported it first under their own fixture env,
+            # so isolate this route contract from collection order.
+            bot._BOT_ADMIN_TOKEN = os.environ["BOT_ADMIN_TOKEN"]
             os.chdir(tmp)
             log_path = os.path.join(tmp, "large-bot.log")
             with open(log_path, "wb") as log_file:
@@ -150,6 +155,7 @@ def main():
             print(f"[PASS] research export includes {len(required)} collection files on /api/export_csv and /api/export.csv")
             return 0
         finally:
+            bot._BOT_ADMIN_TOKEN = previous_admin_token
             bot._DASHBOARD_BOOTSTRAP_COMPLETE = previous_bootstrap
             os.chdir(previous)
 

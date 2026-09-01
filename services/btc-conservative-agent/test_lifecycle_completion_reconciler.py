@@ -1,5 +1,8 @@
 from lifecycle_bundles import LifecycleKey
-from lifecycle_completion_reconciler import evaluate_lifecycle_completion
+from lifecycle_completion_reconciler import (
+    evaluate_lifecycle_completion,
+    evaluate_lifecycle_transfer_ready,
+)
 from lifecycle_qualification_horizon import canonical_terminal_economics
 
 
@@ -35,6 +38,15 @@ def test_terminal_label_without_post_observation_remains_not_ready():
     assert "POST_OBSERVATION_MISSING" in result["blockers"]
 
 
+def test_no_fill_is_transfer_ready_before_two_hour_qualification():
+    result = evaluate_lifecycle_transfer_ready(KEY, no_fill_rows()[:-1], now=10_100.0)
+    assert result["ready"] is True
+    assert result["classification"] == "NO_FILL"
+    assert result["qualification_ready"] is False
+    assert result["receipt"]["profitability_supported"] is False
+    assert result["receipt"]["source_cleanup_authorized"] is False
+
+
 def test_multiple_terminal_schedules_fail_closed():
     rows = no_fill_rows()
     rows.append(row("order_intent", "schedule-2",
@@ -55,6 +67,16 @@ def test_provenance_mismatch_fails_closed():
     assert "DEPLOYED_REVISION_AMBIGUOUS" in result["blockers"]
 
 
+def test_transfer_ready_rejects_unknown_provenance_sentinels():
+    rows = no_fill_rows()[:-1]
+    for item in rows:
+        item["source_revision"] = "UNKNOWN"
+    result = evaluate_lifecycle_transfer_ready(KEY, rows, now=10_100.0)
+    assert result["ready"] is False
+    assert "SOURCE_REVISION_MISSING_OR_SENTINEL" in result["blockers"]
+    assert result.get("receipt") is None
+
+
 def test_unknown_requires_an_explicit_reason_and_is_never_inferred_from_absence():
     rows = no_fill_rows()
     rows[1].pop("terminal_no_fill")
@@ -62,6 +84,21 @@ def test_unknown_requires_an_explicit_reason_and_is_never_inferred_from_absence(
     assert result["ready"] is False
     assert result["classification"] == "UNKNOWN"
     assert "UNIQUE_ENTRY_OUTCOME_NOT_PROVEN" in result["blockers"]
+
+
+def test_unknown_transfer_requires_explicit_flat_position_proof():
+    rows = no_fill_rows()[:-1]
+    rows[1] = row(
+        "lifecycle", "unknown", terminal=True, entry_outcome="UNKNOWN",
+        unknown_reason="RESTART_EVIDENCE_GAP",
+    )
+    blocked = evaluate_lifecycle_transfer_ready(KEY, rows, now=10_100.0)
+    assert blocked["ready"] is False
+    assert "POSITION_NOT_PROVEN_CLOSED" in blocked["blockers"]
+    rows[1].update(position_state="NEVER_OPENED", open_quantity=0.0)
+    ready = evaluate_lifecycle_transfer_ready(KEY, rows, now=10_100.0)
+    assert ready["ready"] is True
+    assert ready["classification"] == "UNKNOWN"
 
 
 def test_filled_path_requires_cost_and_extrema_fields_not_present_in_old_ledgers():

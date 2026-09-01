@@ -84,6 +84,11 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _nonnegative(value: Any) -> float | None:
+    number = _finite(value)
+    return number if number is not None and number >= 0 else None
+
+
 def _action_receipt_sha(receipt: Mapping[str, Any]) -> str:
     body = {key: copy.deepcopy(value) for key, value in receipt.items() if key != "receipt_sha256"}
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -129,7 +134,11 @@ def append_action_timing_receipt(
     generation_number = _finite(action_generation)
     observed_fill_price = _positive(fill_price)
     observed_filled_qty = _positive(filled_qty)
-    qty = _positive(remaining_qty) or _positive(order.get("remaining_qty")) or _positive(order.get("qty"))
+    qty = _nonnegative(remaining_qty)
+    if qty is None:
+        qty = _nonnegative(order.get("remaining_qty"))
+    if qty is None:
+        qty = _positive(order.get("qty"))
     limit = _positive(limit_price) or _positive(order.get("limit_price"))
     if (
         side not in {"LONG", "SHORT"} or not action or due is None or eligible is None

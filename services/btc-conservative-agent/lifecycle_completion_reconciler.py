@@ -13,13 +13,17 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from lifecycle_bundles import LifecycleKey, collect_lifecycle_rows
-from lifecycle_completion_receipts import build_lifecycle_completion_receipt
+from lifecycle_completion_receipts import (
+    build_lifecycle_completion_receipt,
+    build_lifecycle_transfer_ready_receipt,
+)
 from research_v3_contract import canonical_json
 from research_v3_store import V3EvidenceStore, _collection_provenance
 
 
 RECONCILER_SCHEMA = "lifecycle_completion_reconciliation_v1"
 _PROVENANCE_FIELDS = ("source_revision", "deployed_revision", "tile_config_signature")
+_PROVENANCE_SENTINELS = frozenset({"", "UNKNOWN", "NOT_DEPLOYED_LOCAL"})
 
 
 def _finite(value: Any) -> float | None:
@@ -41,9 +45,10 @@ def _provenance(rows: list[Mapping[str, Any]]) -> tuple[dict[str, str], list[str
     blockers: list[str] = []
     for field in _PROVENANCE_FIELDS:
         values = {str(row.get(field) or "").strip() for row in rows}
-        if "" in values:
-            blockers.append(f"{field.upper()}_MISSING")
-            values.discard("")
+        sentinels = {value for value in values if value.upper() in _PROVENANCE_SENTINELS}
+        if sentinels:
+            blockers.append(f"{field.upper()}_MISSING_OR_SENTINEL")
+            values.difference_update(sentinels)
         if len(values) != 1:
             blockers.append(f"{field.upper()}_AMBIGUOUS")
         elif values:
@@ -140,7 +145,7 @@ def evaluate_lifecycle_completion(
             "terminal_reason": chase_schedule.get("terminal_reason"),
             "schedule_sha256": schedule_row.get("schedule_sha256"),
         },
-        "open_quantity": 0.0,
+        "open_quantity": None,
         "post_observation": _post_observation(material),
     }
     if fill_rows or close_rows or closed_lifecycle:
@@ -162,6 +167,7 @@ def evaluate_lifecycle_completion(
         proof.update({
             "entry_outcome": outcome,
             "position_state": "CLOSED",
+            "open_quantity": 0.0,
             "filled_quantity": close.get("filled_qty"),
             "requested_quantity": schedule_row.get("requested_qty"),
             "exit_evidence": {
@@ -186,16 +192,25 @@ def evaluate_lifecycle_completion(
             },
         })
     elif len(no_fill_rows) == 1 and not explicit_unknown:
-        proof.update({"entry_outcome": "NO_FILL", "position_state": "NEVER_OPENED"})
+        proof.update({
+            "entry_outcome": "NO_FILL",
+            "position_state": "NEVER_OPENED",
+            "open_quantity": 0.0,
+            "filled_quantity": 0.0,
+            "requested_quantity": schedule_row.get("requested_qty"),
+        })
     elif len(explicit_unknown) == 1 and not no_fill_rows:
         proof.update({
-            "entry_outcome": "UNKNOWN", "position_state": "NEVER_OPENED",
+            "entry_outcome": "UNKNOWN",
+            "position_state": explicit_unknown[0].get("position_state"),
+            "open_quantity": explicit_unknown[0].get("open_quantity"),
             "unknown_reason": explicit_unknown[0].get("unknown_reason"),
         })
     else:
         proof.update({"entry_outcome": "UNKNOWN", "position_state": "UNKNOWN"})
         blockers.append("UNIQUE_ENTRY_OUTCOME_NOT_PROVEN")
 
+    structural_blockers = sorted(set(blockers))
     built = build_lifecycle_completion_receipt(
         proof, now=now, lifecycle_horizon_sec=lifecycle_horizon_sec,
         reconciliation_allowance_sec=reconciliation_allowance_sec,
@@ -207,8 +222,43 @@ def evaluate_lifecycle_completion(
         "ready": not blockers and built["receipt"] is not None,
         "classification": built["classification"],
         "blockers": blockers,
+        "structural_blockers": structural_blockers,
         "provenance": provenance,
         "event_id": next(iter(event_ids)) if len(event_ids) == 1 else None,
+        "terminal_proof": proof,
+        "receipt": built["receipt"] if not blockers else None,
+    }
+
+
+def evaluate_lifecycle_transfer_ready(
+    key: LifecycleKey, rows: Iterable[Mapping[str, Any]], *, now: float,
+    lifecycle_horizon_sec: float = 7200.0,
+    reconciliation_allowance_sec: float = 180.0,
+) -> dict[str, Any]:
+    """Evaluate early immutable transfer without relaxing qualification."""
+    qualification = evaluate_lifecycle_completion(
+        key, rows, now=now,
+        lifecycle_horizon_sec=lifecycle_horizon_sec,
+        reconciliation_allowance_sec=reconciliation_allowance_sec,
+    )
+    built = build_lifecycle_transfer_ready_receipt(
+        qualification["terminal_proof"], now=now,
+        lifecycle_horizon_sec=lifecycle_horizon_sec,
+        reconciliation_allowance_sec=reconciliation_allowance_sec,
+    )
+    blockers = sorted(set(
+        list(qualification["structural_blockers"]) + list(built["blockers"])
+    ))
+    return {
+        "schema": "lifecycle_transfer_ready_reconciliation_v1",
+        "identity": key.as_dict(),
+        "ready": not blockers and built["receipt"] is not None,
+        "classification": built["classification"],
+        "blockers": blockers,
+        "qualification_ready": qualification["ready"],
+        "qualification_blockers": qualification["blockers"],
+        "provenance": qualification["provenance"],
+        "event_id": qualification["event_id"],
         "receipt": built["receipt"] if not blockers else None,
     }
 

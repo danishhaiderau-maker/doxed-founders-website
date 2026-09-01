@@ -75,6 +75,57 @@ function Resolve-LifecycleContainedPath {
   return $candidate
 }
 
+function Resolve-LifecycleBundleContract {
+  param(
+    [Parameter(Mandatory = $true)][string]$BundleManifestRelativePath,
+    [Parameter(Mandatory = $true)]$Manifest
+  )
+  $relative = $BundleManifestRelativePath.Replace('\', '/').Trim('/')
+  $schema = [string]$Manifest.schema
+  $bundleId = [string]$Manifest.bundle_id
+  if ($schema -ceq 'research_lifecycle_bundle_v1') {
+    if ($bundleId -notmatch '^lifecycle-[0-9a-f]{64}$' -or
+        $relative -cne "v3/lifecycle_bundles/$($bundleId.Substring(10, 2))/$bundleId/manifest.json") {
+      throw "Qualification lifecycle bundle schema/path identity mismatch."
+    }
+    return [pscustomobject]@{
+      Kind = 'QUALIFICATION'
+      ArchiveDirectory = 'lifecycle_bundles'
+      IndexDirectory = 'lifecycle_bundle_index'
+      IndexSchema = 'laptop_lifecycle_bundle_index_v1'
+      AckSchema = 'lifecycle_bundle_cleanup_ack_v1'
+    }
+  }
+  if ($schema -ceq 'research_lifecycle_transfer_bundle_v1') {
+    if ($bundleId -notmatch '^transfer-[0-9a-f]{64}$' -or
+        $relative -cne "v3/lifecycle_transfer_bundles/$($bundleId.Substring(9, 2))/$bundleId/manifest.json") {
+      throw "Transfer lifecycle bundle schema/path identity mismatch."
+    }
+    if (-not (
+      [string]$Manifest.maturity -ceq 'TRANSFER_READY' -and
+      $Manifest.qualification_ready -eq $false -and
+      $Manifest.profitability_supported -eq $false -and
+      $Manifest.ranking_eligible -eq $false -and
+      $Manifest.source_cleanup_authorized -eq $false -and
+      $null -eq $Manifest.completion -and
+      [string]$Manifest.transfer_receipt.schema -ceq 'lifecycle_bundle_transfer_ready_v1' -and
+      $Manifest.transfer_receipt.transfer_ready -eq $true -and
+      $Manifest.transfer_receipt.profitability_supported -eq $false -and
+      $Manifest.transfer_receipt.source_cleanup_authorized -eq $false
+    )) {
+      throw "Transfer lifecycle bundle invariant failed."
+    }
+    return [pscustomobject]@{
+      Kind = 'TRANSFER'
+      ArchiveDirectory = 'lifecycle_transfer_bundles'
+      IndexDirectory = 'lifecycle_transfer_bundle_index'
+      IndexSchema = 'laptop_lifecycle_transfer_bundle_index_v1'
+      AckSchema = 'lifecycle_transfer_bundle_ack_v1'
+    }
+  }
+  throw "Unsupported lifecycle bundle schema."
+}
+
 function Test-LifecycleBundleCopy {
   param(
     [Parameter(Mandatory = $true)][string]$BundleRoot,
@@ -85,9 +136,24 @@ function Test-LifecycleBundleCopy {
   if ((Get-Item -LiteralPath $bundleFull).Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw "Lifecycle bundle root cannot be a reparse point."
   }
-  if ([string]$Manifest.schema -cne 'research_lifecycle_bundle_v1') { throw "Unsupported lifecycle bundle schema." }
+  if ([string]$Manifest.schema -cnotin @('research_lifecycle_bundle_v1', 'research_lifecycle_transfer_bundle_v1')) {
+    throw "Unsupported lifecycle bundle schema."
+  }
   if ([string]$Manifest.bundle_id -cne (Split-Path -Leaf $bundleFull)) { throw "Lifecycle bundle directory identity mismatch." }
   if ($Manifest.source_cleanup_authorized -ne $false) { throw "Lifecycle bundle incorrectly authorizes source cleanup." }
+  if ([string]$Manifest.schema -ceq 'research_lifecycle_transfer_bundle_v1' -and -not (
+      [string]$Manifest.maturity -ceq 'TRANSFER_READY' -and
+      $Manifest.qualification_ready -eq $false -and
+      $Manifest.profitability_supported -eq $false -and
+      $Manifest.ranking_eligible -eq $false -and
+      $null -eq $Manifest.completion -and
+      [string]$Manifest.transfer_receipt.schema -ceq 'lifecycle_bundle_transfer_ready_v1' -and
+      $Manifest.transfer_receipt.transfer_ready -eq $true -and
+      $Manifest.transfer_receipt.profitability_supported -eq $false -and
+      $Manifest.transfer_receipt.source_cleanup_authorized -eq $false
+    )) {
+    throw "Transfer lifecycle bundle invariant failed."
+  }
 
   $actualManifestSha = Get-LifecycleManifestContentSha256 (Join-Path $bundleFull 'manifest.json')
   if ($actualManifestSha -cne ([string]$Manifest.manifest_sha256).ToLowerInvariant()) {
@@ -136,11 +202,13 @@ function Publish-LifecycleBundleCopyAndAck {
   $manifestPath = Resolve-LifecycleContainedPath -Root $targetFull -Relative $BundleManifestRelativePath
   $bundleRoot = Split-Path -Parent $manifestPath
   $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  $contract = Resolve-LifecycleBundleContract `
+    -BundleManifestRelativePath $BundleManifestRelativePath `
+    -Manifest $manifest
   $canonicalProof = Test-LifecycleBundleCopy -BundleRoot $bundleRoot -Manifest $manifest
   $bundleId = [string]$manifest.bundle_id
-  if ($bundleId -notmatch '^lifecycle-[0-9a-f]{64}$') { throw "Invalid lifecycle bundle ID." }
 
-  $archiveParent = Join-Path $targetFull 'archive\lifecycle_bundles'
+  $archiveParent = Join-Path $targetFull ("archive\" + $contract.ArchiveDirectory)
   $archiveRoot = Join-Path $archiveParent $bundleId
   New-Item -ItemType Directory -Path $archiveParent -Force | Out-Null
   if (-not (Test-Path -LiteralPath $archiveRoot -PathType Container)) {
@@ -165,13 +233,13 @@ function Publish-LifecycleBundleCopyAndAck {
   $archiveProof = Test-LifecycleBundleCopy -BundleRoot $archiveRoot -Manifest $archiveManifest
   if ($archiveProof.TreeSha256 -cne $canonicalProof.TreeSha256) { throw "Canonical/archive lifecycle tree mismatch." }
 
-  $indexRoot = Join-Path $targetFull 'v3\lifecycle_bundle_index'
+  $indexRoot = Join-Path $targetFull ("v3\" + $contract.IndexDirectory)
   New-Item -ItemType Directory -Path $indexRoot -Force | Out-Null
   $indexPath = Join-Path $indexRoot "$bundleId.json"
   if (-not (Test-Path -LiteralPath $indexPath -PathType Leaf)) {
     $acknowledgedAt = [DateTimeOffset]::UtcNow.ToString('o')
     $index = [ordered]@{
-      schema = 'laptop_lifecycle_bundle_index_v1'
+      schema = $contract.IndexSchema
       bundle_id = $bundleId
       lifecycle_id = [string]$manifest.lifecycle_id
       manifest_sha256 = $canonicalProof.ManifestSha256
@@ -181,6 +249,12 @@ function Publish-LifecycleBundleCopyAndAck {
       archive_tree_sha256 = $archiveProof.TreeSha256
       acknowledged_at = $acknowledgedAt
       source_cleanup_authorized = $false
+    }
+    if ($contract.Kind -ceq 'TRANSFER') {
+      $index['bundle_kind'] = 'TRANSFER'
+      $index['qualification_ready'] = $false
+      $index['profitability_supported'] = $false
+      $index['ranking_eligible'] = $false
     }
     $temporaryIndex = "$indexPath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
     try {
@@ -198,15 +272,29 @@ function Publish-LifecycleBundleCopyAndAck {
       $savedIndex.source_cleanup_authorized -ne $false) {
     throw "Existing lifecycle bundle index conflicts with verified copies."
   }
+  if ($contract.Kind -ceq 'TRANSFER' -and -not (
+      [string]$savedIndex.schema -ceq [string]$contract.IndexSchema -and
+      [string]$savedIndex.bundle_kind -ceq 'TRANSFER' -and
+      $savedIndex.qualification_ready -eq $false -and
+      $savedIndex.profitability_supported -eq $false -and
+      $savedIndex.ranking_eligible -eq $false
+    )) {
+    throw "Existing transfer lifecycle index violates qualification isolation."
+  }
   $indexSha = Get-LifecycleBundleSha256 $indexPath
   $ackAt = [string]$savedIndex.acknowledged_at
   $files = @($manifest.files | Sort-Object { [string]$_.path })
-  $completion = $manifest.completion
+  $completion = $(if ($contract.Kind -ceq 'TRANSFER') { $manifest.transfer_receipt } else { $manifest.completion })
+  $terminalOutcome = $(if ($contract.Kind -ceq 'TRANSFER') {
+    ([string]$completion.entry_outcome).ToUpperInvariant()
+  } else {
+    ([string]$completion.classification).ToUpperInvariant()
+  })
   $terminalAt = [DateTimeOffset]::FromUnixTimeMilliseconds(
     [Convert]::ToInt64(([double]$completion.terminal_ts) * 1000.0)
   ).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
   $receipt = [ordered]@{
-    schema = 'lifecycle_bundle_cleanup_ack_v1'
+    schema = $contract.AckSchema
     bundle_id = $bundleId
     lifecycle_id = [string]$manifest.lifecycle_id
     bundle_manifest_path = $BundleManifestRelativePath.Replace('\', '/')
@@ -214,7 +302,7 @@ function Publish-LifecycleBundleCopyAndAck {
     deployed_git_rev = [string]$manifest.provenance.deployed_revision
     collection_epoch_id = [string]$manifest.identity.collection_epoch_id
     tile_registry_signature = [string]$manifest.provenance.tile_config_signature
-    terminal_outcome = ([string]$completion.classification).ToUpperInvariant()
+    terminal_outcome = $terminalOutcome
     terminal_at = $terminalAt
     pending_order_ids = @()
     open_position_ids = @()
@@ -227,6 +315,13 @@ function Publish-LifecycleBundleCopyAndAck {
       index = [ordered]@{ complete = $true; bundle_id = $bundleId; lifecycle_id = [string]$manifest.lifecycle_id; sha256 = $indexSha; manifest_sha256 = $canonicalProof.ManifestSha256; acknowledged_at = $ackAt }
     }
   }
+  if ($contract.Kind -ceq 'TRANSFER') {
+    $receipt['bundle_kind'] = 'TRANSFER'
+    $receipt['qualification_ready'] = $false
+    $receipt['profitability_supported'] = $false
+    $receipt['ranking_eligible'] = $false
+    $receipt['source_cleanup_authorized'] = $false
+  }
   $identity = [ordered]@{
     bundle_id = $bundleId
     collection_epoch_id = [string]$receipt.collection_epoch_id
@@ -238,6 +333,13 @@ function Publish-LifecycleBundleCopyAndAck {
     terminal_outcome = [string]$receipt.terminal_outcome
     tile_registry_signature = [string]$receipt.tile_registry_signature
   }
+  if ($contract.Kind -ceq 'TRANSFER') {
+    $identity.bundle_kind = [string]$receipt.bundle_kind
+    $identity.qualification_ready = $false
+    $identity.profitability_supported = $false
+    $identity.ranking_eligible = $false
+    $identity.source_cleanup_authorized = $false
+  }
   $receipt.immutable_identity_sha256 = Get-LifecycleTextSha256 (ConvertTo-LifecycleCanonicalJson $identity)
   $response = & $PostAcknowledgement $receipt
   if ($null -eq $response -or $response.ok -ne $true -or
@@ -245,6 +347,16 @@ function Publish-LifecycleBundleCopyAndAck {
       [string]$response.bundle_id -cne $bundleId -or
       $response.source_cleanup_authorized -ne $false) {
     throw "Fly lifecycle acknowledgement was incomplete or unsafe for bundle $bundleId."
+  }
+  if ($contract.Kind -ceq 'TRANSFER' -and -not (
+      $response.profitability_supported -eq $false -and
+      $response.ranking_eligible -eq $false -and
+      $receipt.qualification_ready -eq $false -and
+      $receipt.profitability_supported -eq $false -and
+      $receipt.ranking_eligible -eq $false -and
+      $receipt.source_cleanup_authorized -eq $false
+    )) {
+    throw "Transfer lifecycle acknowledgement violates qualification isolation."
   }
   return [pscustomobject]@{ BundleId = $bundleId; Receipt = $receipt; Response = $response }
 }

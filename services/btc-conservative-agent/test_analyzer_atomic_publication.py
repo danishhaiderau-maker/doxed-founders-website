@@ -111,6 +111,91 @@ def test_policy_evidence_reports_are_atomically_mirrored_for_archive(tmp_path, m
     assert not list(Path(analyzer.REPORTS_DIR).glob(f".{source.name}.*.tmp"))
 
 
+def test_lifecycle_bundle_inventory_is_declared_and_atomically_published(tmp_path, monkeypatch):
+    analyzer = _load("lifecycle_inventory_atomic_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    import research.mirror_coherence as mirror_coherence
+    import research.canonical_data_store as canonical_data_store
+
+    monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
+    monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    filename = analyzer.LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE
+    Path(filename).write_text(json.dumps({
+        "schema": "lifecycle_bundle_inventory_v1",
+        "qualification": {"unique_lifecycle_count": 1},
+        "transfer": {
+            "audit_only": True, "profitability_supported": False,
+            "ranking_eligible": False, "source_cleanup_authorized": False,
+        },
+    }), encoding="utf-8")
+    manifest = {
+        "generation_id": "lifecycle-generation",
+        "reports": [{"file": filename}], "text_artifacts": [],
+    }
+    analyzer._publish_completed_report_generation(manifest)
+    published = Path(analyzer.PUBLISHED_REPORTS_DIR) / filename
+    assert published.is_file()
+    payload = json.loads(published.read_text(encoding="utf-8"))
+    assert payload["transfer"]["audit_only"] is True
+    assert payload["transfer"]["ranking_eligible"] is False
+
+
+def test_static_analyzer_dashboard_labels_transfer_bundles_as_audit_only(tmp_path, monkeypatch):
+    analyzer = _load("lifecycle_inventory_static_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    assert analyzer.write_analysis_dashboard_html({
+        "generated_at": "2026-09-01T03:00:00Z", "performance": {},
+        "analysis_provenance": {"generation_revision": "r"},
+    }) is True
+    html = Path(analyzer.ANALYSIS_DASHBOARD_HTML).read_text(encoding="utf-8")
+    assert "manifest-verified qualification bundles" in html
+    assert "Inventory completeness and parity cover manifests only" in html
+    assert "UNKNOWN_NOT_SCANNED" in html
+    assert "payload files read is 0" in html
+    assert "no payload integrity or ranking qualification is claimed" in html
+    assert "transfer-ready audit copies" in html
+    assert "audit-only=true" in html
+    assert "ranking eligible=false" in html
+    assert "profitability supported=false" in html
+    assert "source cleanup authorized=false" in html
+
+
+def test_static_dashboard_uses_supplied_inventory_snapshot_after_tree_mutation(tmp_path, monkeypatch):
+    analyzer = _load("lifecycle_inventory_snapshot_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    snapshot = {
+        "schema": "lifecycle_bundle_inventory_v1", "inventory_scope": "MANIFEST_ONLY",
+        "complete": True, "complete_scope": "MANIFEST_INVENTORY",
+        "payload_verification_status": "UNKNOWN_NOT_SCANNED",
+        "payload_files_read": 0,
+        "qualification": {"unique_lifecycle_count": 7},
+        "transfer": {
+            "unique_lifecycle_count": 5, "audit_only": True,
+            "profitability_supported": False, "ranking_eligible": False,
+            "source_cleanup_authorized": False,
+        },
+        "parity": {"scope": "MANIFEST_INVENTORY", "intersection_count": 5},
+        "invalid_manifest_count": 0,
+    }
+    # A new on-disk bundle appearing after snapshot creation must not trigger a
+    # second scan or alter the static generation counts.
+    (tmp_path / "v3" / "lifecycle_transfer_bundles" / "aa" / "transfer-new").mkdir(parents=True)
+    monkeypatch.setattr(
+        analyzer, "build_lifecycle_bundle_inventory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("rescanned")),
+    )
+    assert analyzer.write_analysis_dashboard_html(
+        {"performance": {}, "analysis_provenance": {"generation_revision": "r"}},
+        lifecycle_inventory=snapshot,
+    ) is True
+    html = Path(analyzer.ANALYSIS_DASHBOARD_HTML).read_text(encoding="utf-8")
+    assert '<div class="val">7</div>' in html
+    assert '<div class="val">5</div>' in html
+
+
 def test_policy_library_manifest_records_identity_skip_without_claiming_fill(tmp_path, monkeypatch):
     analyzer = _load("policy_status_stamp_analyzer", AGENT / "analyzer_research_engine_v62.py")
     monkeypatch.chdir(tmp_path)

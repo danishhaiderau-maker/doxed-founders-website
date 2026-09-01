@@ -29,8 +29,12 @@ from lifecycle_bundles import (
     _index_ledger_chunk,
     _open_incremental_index,
     materialize_bundle,
+    materialize_transfer_bundle,
 )
-from lifecycle_completion_reconciler import evaluate_lifecycle_completion
+from lifecycle_completion_reconciler import (
+    evaluate_lifecycle_completion,
+    evaluate_lifecycle_transfer_ready,
+)
 from qualification_horizon_index import (
     DEFAULT_MAX_INDEX_BYTES as DEFAULT_MAX_TAPE_INDEX_BYTES,
     DEFAULT_MAX_INDEX_ROWS as DEFAULT_MAX_TAPE_INDEX_ROWS,
@@ -304,6 +308,10 @@ def process_incremental_lifecycle_pipeline(
             for key, rows in dirty:
                 if time.monotonic() - started >= runtime_limit:
                     break
+                transfer = evaluate_lifecycle_transfer_ready(
+                    key, rows, now=current,
+                    lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
+                )
                 assessment = evaluate_lifecycle_completion(
                     key, rows, now=current,
                     lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
@@ -317,8 +325,26 @@ def process_incremental_lifecycle_pipeline(
                     "completion_appended": False,
                     "completion_duplicate": False,
                     "bundle_written_or_verified": False,
+                    "transfer_ready": transfer["ready"],
+                    "transfer_blockers": list(transfer["blockers"]),
+                    "transfer_bundle_written_or_verified": False,
+                    "transfer_stage": "TRANSFER_INCOMPLETE",
                     "stage": "QUALIFICATION_INCOMPLETE",
                 }
+                if transfer["ready"]:
+                    transfer_bundle = materialize_transfer_bundle(
+                        root, key, rows, transfer,
+                    )
+                    item["transfer_bundle_written_or_verified"] = bool(
+                        transfer_bundle.get("written")
+                        or transfer_bundle.get("duplicate")
+                    )
+                    item["transfer_bundle"] = transfer_bundle
+                    item["transfer_stage"] = (
+                        "TRANSFER_BUNDLE_MATERIALIZED_OR_VERIFIED"
+                        if item["transfer_bundle_written_or_verified"]
+                        else "TRANSFER_NOT_MATERIALIZABLE"
+                    )
                 if not assessment["ready"]:
                     if not _post_observation_present(rows):
                         candidate = _terminal_candidate(key, rows)
@@ -394,7 +420,13 @@ def process_incremental_lifecycle_pipeline(
                     results.append(item)
                     continue
 
-                bundle = materialize_bundle(root, key, rows, now=current)
+                bundle = materialize_bundle(
+                    root,
+                    key,
+                    rows,
+                    now=current,
+                    lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
+                )
                 item["bundle_written_or_verified"] = bool(
                     bundle.get("written") or bundle.get("duplicate")
                 )
@@ -420,6 +452,10 @@ def process_incremental_lifecycle_pipeline(
         "candidate_count": len(results),
         "completion_appended_count": sum(item["completion_appended"] for item in results),
         "bundle_count": sum(item["bundle_written_or_verified"] for item in results),
+        "transfer_ready_count": sum(item["transfer_ready"] for item in results),
+        "transfer_bundle_count": sum(
+            item["transfer_bundle_written_or_verified"] for item in results
+        ),
         "results": results,
         "scan": {
             "ledgers": scan_receipts,

@@ -981,6 +981,46 @@ foreach ($lifecycleManifestPath in $lifecycleManifestPaths) {
   $lifecycleAckCount += 1
 }
 
+# Transfer-ready bundles are intentionally isolated from qualification ACKs.
+# The current Fly lifecycle-ack route accepts only
+# lifecycle_bundle_cleanup_ack_v1, so a lifecycle_transfer_bundle_ack_v1 must
+# never be posted there. Publish and verify its canonical/archive/index copies
+# locally, then return a fail-closed local acknowledgement which cannot confer
+# profitability, ranking, or source-cleanup authority. A future remote transfer
+# route must be a separate, explicitly schema-aware contract.
+$lifecycleTransferAckCount = 0
+$lifecycleTransferManifestPaths = @(
+  $selectedFiles |
+    ForEach-Object { [string]$_.path } |
+    Where-Object { $_ -match '^v3/lifecycle_transfer_bundles/[^/]+/transfer-[0-9a-f]{64}/manifest\.json$' } |
+    Sort-Object -Unique
+)
+foreach ($lifecycleTransferManifestPath in $lifecycleTransferManifestPaths) {
+  [void](Publish-LifecycleBundleCopyAndAck `
+    -TargetRoot $targetRoot `
+    -BundleManifestRelativePath $lifecycleTransferManifestPath `
+    -PostAcknowledgement {
+      param($receipt)
+      if (
+        [string]$receipt.schema -cne 'lifecycle_transfer_bundle_ack_v1' -or
+        $receipt.profitability_supported -ne $false -or
+        $receipt.ranking_eligible -ne $false -or
+        $receipt.source_cleanup_authorized -ne $false
+      ) {
+        throw 'Unsafe transfer lifecycle acknowledgement contract.'
+      }
+      return [pscustomobject]@{
+        ok = $true
+        status = 'ACKNOWLEDGED_SOURCE_RETAINED'
+        bundle_id = [string]$receipt.bundle_id
+        profitability_supported = $false
+        ranking_eligible = $false
+        source_cleanup_authorized = $false
+      }
+    })
+  $lifecycleTransferAckCount += 1
+}
+
 $analyzerPublished = $false
 $analyzerPublishErrorCode = $null
 if ($PublishAnalyzerReport) {
@@ -1233,6 +1273,7 @@ if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   SourceRevision = $manifest.source_git_rev
   AckAccepted = $ack.accepted
   LifecycleAcknowledged = $lifecycleAckCount
+  LifecycleTransferAcknowledged = $lifecycleTransferAckCount
   PrunedRotations = @($ack.removed_acknowledged_rotations).Count
   AnalyzerPublished = [bool]$analyzerPublished
   AnalyzerPublishErrorCode = $analyzerPublishErrorCode

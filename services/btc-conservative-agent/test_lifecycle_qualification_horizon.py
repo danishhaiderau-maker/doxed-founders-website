@@ -15,6 +15,7 @@ from research_v3_bridge import (
     dual_write_terminal_paper_schedule,
 )
 from research_v3_store import V3EvidenceStore
+import research_v3_store
 from lifecycle_completion_reconciler import reconcile_lifecycle_completions
 
 
@@ -107,6 +108,16 @@ class QualificationHorizonBridgeTests(unittest.TestCase):
 
     def test_actual_bridge_fill_close_and_post_horizon_are_canonical(self):
         with tempfile.TemporaryDirectory() as tmp:
+            previous_provenance = research_v3_store._provenance_cache
+            research_v3_store._provenance_cache = {
+                "evidence_provenance_schema": "v3_collection_provenance_v1",
+                "source_revision": "a" * 40,
+                "deployed_revision": "a" * 40,
+                "tile_config_signature": "b" * 64,
+            }
+            self.addCleanup(
+                setattr, research_v3_store, "_provenance_cache", previous_provenance,
+            )
             _tape(Path(tmp) / "market_microstructure_1s.jsonl", range(100, 108))
             signal, order, position = self._sources()
             dual_write_terminal_paper_schedule(

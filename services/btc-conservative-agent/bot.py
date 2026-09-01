@@ -124,6 +124,7 @@ from microstructure_tape import (
     build_bucket as build_microstructure_bucket,
 )
 from research_order_schedule import (
+    append_action_timing_receipt,
     append_reprice_interval as append_research_reprice_interval,
     close_order_schedule as close_research_order_schedule,
     initialize_order_schedule as initialize_research_order_schedule,
@@ -3558,6 +3559,59 @@ def _shutdown_post_ai_evidence_workers(timeout: float = 2.0) -> bool:
     return all(worker.shutdown(drain_timeout=timeout) for worker in workers)
 
 
+def _paper_action_market_refs(order: dict) -> tuple:
+    evidence = order.get("source_order_market_evidence") or {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    return (
+        order.get("book_ref") or evidence.get("book_ref"),
+        order.get("tape_ref") or evidence.get("tape_ref") or order.get("tape_id"),
+    )
+
+
+def _append_paper_action_receipt(
+    order: dict,
+    signal: dict | None,
+    *,
+    action_generation: int,
+    action_type: str,
+    policy_due_ts: float,
+    eligibility_ts: float,
+    dispatch_start_ts: float,
+    acknowledgement_ts: float,
+    fill_ts: float | None = None,
+    fill_price: float | None = None,
+    filled_qty: float | None = None,
+) -> dict | None:
+    """Record an observed paper action without claiming unsupported latency."""
+    book_ref, tape_ref = _paper_action_market_refs(order)
+    return append_action_timing_receipt(
+        order,
+        signal if isinstance(signal, dict) else None,
+        action_generation=action_generation,
+        action_type=action_type,
+        policy_due_ts=policy_due_ts,
+        eligibility_ts=eligibility_ts,
+        dispatch_start_ts=dispatch_start_ts,
+        acknowledgement_ts=acknowledgement_ts,
+        fill_ts=fill_ts,
+        fill_price=fill_price,
+        filled_qty=filled_qty,
+        remaining_qty=(
+            order.get("remaining_qty")
+            if order.get("remaining_qty") is not None
+            else order.get("qty")
+        ),
+        limit_price=order.get("limit_price"),
+        book_ref=book_ref,
+        tape_ref=tape_ref,
+        non_intentional_delay={
+            "classification": "UNKNOWN",
+            "cause": "UNSUPPORTED_RUNTIME_DELAY_ATTRIBUTION",
+        },
+    )
+
+
 def lane_register_pending_order(order: dict):
     """Dual-write once: global pending_orders + lane-owned bucket.
 
@@ -3658,6 +3712,7 @@ def lane_register_pending_order(order: dict):
             chase_acked=False,
             observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
         )
+    master_signal = master_signal if isinstance(master_signal, dict) else None
     is_paper_entry = not bool(order.get("bitfinex_order_id") or order.get("bitfinex_live_entry")) and str(order.get("entry_type") or "").upper() not in {"POSTONLY_TP", "REDUCE_ONLY", "EXIT"}
     if is_paper_entry:
         # Freeze the signed paper-policy identity at the atomic order boundary.
@@ -3689,6 +3744,20 @@ def lane_register_pending_order(order: dict):
         # AI call.  A lane-scoped paper identity belongs to its order and
         # position only; writing it back here lets the next lane inherit the
         # wrong policy signature.
+        registered_ts = time.time()
+        dispatch_ts = float(order.pop("_initial_dispatch_start_ts", registered_ts))
+        receipt_writer = globals().get("_append_paper_action_receipt")
+        if callable(receipt_writer):
+            receipt_writer(
+                order,
+                master_signal,
+                action_generation=0,
+                action_type="INITIAL_SUBMIT",
+                policy_due_ts=float(order.get("created_ts") or dispatch_ts),
+                eligibility_ts=float(order.get("created_ts") or dispatch_ts),
+                dispatch_start_ts=dispatch_ts,
+                acknowledgement_ts=registered_ts,
+            )
     source_ts = float(order.get("created_ts") or time.time())
     evidence_key = f"pending-order:{tid}"
     queued = _get_pending_order_evidence_worker().submit(
@@ -19755,6 +19824,7 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
     # intentionally performs schedule/evidence hydration after releasing it.
     # An outer RLock here silently kept trade_lock held across that slow work,
     # starving relay snapshots and eventually the WebSocket ping/pong loop.
+    order["_initial_dispatch_start_ts"] = time.time()
     registered = lane_register_pending_order(order)
     if not registered:
         if order.get("registration_suppressed_reason") == "RETIRED_LIFECYCLE":
@@ -20675,6 +20745,10 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     age_min = round((now - float(order.get("created_ts") or now)) / 60.0, 2)
     gap_pct = round(_limit_chase_market_gap(direction, new_limit, price) / max(float(price), 1.0) * 100.0, 4)
     chase_count = next_chase_count
+    chase_dispatch_ts = time.time()
+    prior_chase_ts = float(order.get("last_chase_ts") or order.get("created_ts") or now)
+    interval_sec = float(order.get("chase_interval_sec") or get_limit_chase_interval_sec())
+    chase_due_ts = min(chase_dispatch_ts, prior_chase_ts + max(interval_sec, 0.0))
     relay_event = _commit_relay_limit_chase(
         order, signal, direction=direction, old_limit=old_limit,
         new_limit=new_limit, chase_count=chase_count, now=now, tier=tier,
@@ -20682,6 +20756,17 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     )
     if relay_event is None:
         return False
+    chase_ack_ts = time.time()
+    _append_paper_action_receipt(
+        order,
+        signal,
+        action_generation=chase_count,
+        action_type="CHASE_REPRICE",
+        policy_due_ts=chase_due_ts,
+        eligibility_ts=chase_due_ts,
+        dispatch_start_ts=chase_dispatch_ts,
+        acknowledgement_ts=chase_ack_ts,
+    )
     tier_note = f" tier={tier}" if tier else ""
     logger.info(
         f"[SIM] LIMIT_CHASE trade_id={order.get('trade_id')} dir={direction} "
@@ -21449,25 +21534,6 @@ def fill_order(order):
     # Bind relay chronology to the atomic position registration, before any
     # slower persistence/analytics callback below.
     position_opened_relay_ts = utc_iso()
-    try:
-        fill_identity_receipt = dual_write_paper_fill(
-            order,
-            signal if isinstance(signal, dict) else {},
-            pos,
-            epoch_id=_collector_v22_epoch_id(),
-            data_dir=os.getcwd(),
-        )
-        for key in (
-            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
-            "schedule_id", "fill_id", "tape_id",
-        ):
-            if fill_identity_receipt.get(key):
-                pos[key] = fill_identity_receipt[key]
-    except Exception as exc:
-        logger.error(
-            f"[COLLECTOR_V3] paper fill write failed "
-            f"trade_id={order.get('trade_id')} error={exc} [PIPELINE ENFORCEMENT]"
-        )
     fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
     if fill_lane:
         log_lane_opportunity_event(
@@ -21496,20 +21562,55 @@ def fill_order(order):
         )
         clear_fill_handoff()
         return
-    # Publish FILLED schedule evidence only after the OPEN lifecycle commit
-    # wins. A manual pause may race between touch detection and fill_order();
-    # emitting earlier could leave both FILLED and ADMIN_MANUAL_PAUSE terminal
-    # hashes for the same schedule identity.
+    fill_commit_ts = time.time()
     schedule_close = globals().get("close_research_order_schedule")
     if callable(schedule_close):
         schedule_close(
             order,
             signal if isinstance(signal, dict) else None,
-            now=time.time(),
+            now=fill_commit_ts,
             reason=(
                 "PARTIAL_FILL_SIM_RESIDUAL_CANCELLED"
                 if order.get("partial_fill") else "FILLED"
             ),
+        )
+    terminal_schedule = order.get("research_chase_schedule")
+    if isinstance(terminal_schedule, dict):
+        pos["research_chase_schedule"] = terminal_schedule
+        pos["chase_schedule_authoritative"] = (
+            terminal_schedule.get("authoritative") is True
+        )
+    _append_paper_action_receipt(
+        order,
+        signal,
+        action_generation=int(order.get("limit_chase_count") or 0) + 1,
+        action_type="FILL_PROMOTED",
+        policy_due_ts=fill_commit_ts,
+        eligibility_ts=fill_commit_ts,
+        dispatch_start_ts=fill_commit_ts,
+        acknowledgement_ts=fill_commit_ts,
+        fill_ts=fill_commit_ts,
+        fill_price=order.get("fill_price") or order.get("limit_price"),
+        filled_qty=order.get("filled_qty") or order.get("qty"),
+    )
+    try:
+        fill_identity_receipt = dual_write_paper_fill(
+            order,
+            signal if isinstance(signal, dict) else {},
+            pos,
+            epoch_id=_collector_v22_epoch_id(),
+            data_dir=os.getcwd(),
+        )
+        for key in (
+            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+            "schedule_id", "fill_id", "tape_id",
+        ):
+            if fill_identity_receipt.get(key):
+                pos[key] = fill_identity_receipt[key]
+    except Exception as exc:
+        logger.error(
+            f"[COLLECTOR_V3] paper fill write failed "
+            f"trade_id={order.get('trade_id')} error={exc} [PIPELINE ENFORCEMENT]"
         )
     collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
     if callable(collector_refresh):
@@ -24107,8 +24208,12 @@ def create_limit_order(signal):
                 "[PIPELINE ENFORCEMENT]"
             )
             return None
+    order["_initial_dispatch_start_ts"] = time.time()
     with trade_lock:
-        lane_register_pending_order(order)
+        registered = lane_register_pending_order(order)
+    if not registered:
+        signal["order_placed"] = False
+        return None
     _relay_mirror(
         "ORDER_PLACED",
         {
@@ -24415,6 +24520,7 @@ def _cancel_pending_order_confirmed(
     non-progressing ``CANCEL_PENDING_LIVE`` status. Local paper orders need no
     exchange confirmation and finalize immediately.
     """
+    cancel_dispatch_ts = time.time()
     result = {
         "trade_id": "",
         "exchange_order_id": "",
@@ -24536,6 +24642,18 @@ def _cancel_pending_order_confirmed(
                 now=float(order["cancel_confirmed_ts"]),
                 reason=reason,
             )
+
+    if not oid:
+        _append_paper_action_receipt(
+            order,
+            master_signal if isinstance(master_signal, dict) else None,
+            action_generation=int(order.get("limit_chase_count") or 0) + 1,
+            action_type="CANCEL_CONFIRMED",
+            policy_due_ts=cancel_dispatch_ts,
+            eligibility_ts=cancel_dispatch_ts,
+            dispatch_start_ts=cancel_dispatch_ts,
+            acknowledgement_ts=float(order["cancel_confirmed_ts"]),
+        )
 
     collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
     if callable(collector_refresh):
@@ -25084,6 +25202,7 @@ def close_position(pos: dict, exit_reason: str):
     # Closing performs persistence, research logging, relay publication and
     # optional exchange work. Serialize close claims on a dedicated lock rather
     # than holding state_lock/trade_lock across that slow work.
+    close_claim_dispatch_ts = time.time()
     with PositionCloseClaimScope(
         pos,
         position_close_lock=position_close_lock,
@@ -25097,6 +25216,23 @@ def close_position(pos: dict, exit_reason: str):
                 pos, position_close_lock=position_close_lock,
             )
             return
+        close_claim_ts = time.time()
+        close_claim_signal = trades_map.get(trade_id, {}).get("signal_ref", {})
+        if not bool(
+            pos.get("bitfinex_order_id")
+            or pos.get("bitfinex_position_id")
+            or pos.get("bitfinex_live_entry")
+        ):
+            _append_paper_action_receipt(
+                pos,
+                close_claim_signal if isinstance(close_claim_signal, dict) else None,
+                action_generation=int(pos.get("limit_chase_count") or 0) + 2,
+                action_type="CLOSE_CLAIMED",
+                policy_due_ts=close_claim_dispatch_ts,
+                eligibility_ts=close_claim_dispatch_ts,
+                dispatch_start_ts=close_claim_dispatch_ts,
+                acknowledgement_ts=close_claim_ts,
+            )
         _emit_genome_execution_event("EXIT_TRIGGERED", {
             "trade_id": trade_id,
             "exit_reason": exit_reason,
