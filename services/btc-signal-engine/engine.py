@@ -26323,6 +26323,45 @@ _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS = frozenset({
     "order_book",
     "ai_history",
 })
+_DASHBOARD_STATE_NESTED_ITEMS_MAX = max(
+    16,
+    int(os.getenv("DASHBOARD_STATE_NESTED_ITEMS_MAX", "64")),
+)
+
+
+def _bounded_dashboard_state_value(value, depth=0):
+    """Copy presentation state without traversing unbounded runtime history."""
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return value
+    if depth >= 4:
+        return "[dashboard projection depth limit]"
+    limit = _DASHBOARD_STATE_NESTED_ITEMS_MAX
+    if isinstance(value, dict):
+        items = itertools.islice(value.items(), limit)
+        return {
+            key: _bounded_dashboard_state_value(item, depth + 1)
+            for key, item in items
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _bounded_dashboard_state_value(item, depth + 1)
+            for item in value[-limit:]
+        ]
+    if isinstance(value, (set, frozenset)):
+        return [
+            _bounded_dashboard_state_value(item, depth + 1)
+            for item in itertools.islice(value, limit)
+        ]
+    # Do not invoke an unknown runtime object's potentially expensive copy hook.
+    return value
+
+
+def _bounded_dashboard_state_projection(source):
+    return {
+        key: _bounded_dashboard_state_value(value)
+        for key, value in source.items()
+        if key not in _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS
+    }
 # Raw research ledgers are append-heavy and can grow into multi-megabyte JSONL
 # files. Re-reading them in the bot's dashboard refresher monopolizes the
 # CPython GIL, which also stalls the independent money-path endpoint. The
@@ -34693,11 +34732,7 @@ def _build_api_state_snapshot():
             # The raw order book is large and fast-moving. Deep-copying it only
             # to discard it afterwards held state_lock for up to 38 seconds,
             # starving the dashboard, webhook reads, and /api/ping.
-            snapshot = copy.deepcopy({
-                key: value
-                for key, value in state.items()
-                if key not in _DASHBOARD_STATE_DEEPCOPY_EXCLUDED_KEYS
-            })
+            snapshot = _bounded_dashboard_state_projection(state)
             ai_hist_src = state.get("ai_history") or []
             ai_history_total = len(ai_hist_src)
             ai_history_copy = [dict(r) for r in ai_hist_src[-_DASHBOARD_HISTORY_MAX:]]

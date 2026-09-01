@@ -79,6 +79,22 @@ def test_snapshot_builders_publish_phase_timings_and_lock_diagnostics():
             assert phase in body
         assert "trade_lock.diagnostics()" in body
 
+
+def test_dashboard_state_projection_is_bounded_and_avoids_whole_state_deepcopy():
+    projection = ast.get_source_segment(SOURCE, _function("_bounded_dashboard_state_projection"))
+    bounded_value = ast.get_source_segment(SOURCE, _function("_bounded_dashboard_state_value"))
+    dashboard = ast.get_source_segment(SOURCE, _function("_build_api_state_snapshot"))
+    assert "_DASHBOARD_STATE_NESTED_ITEMS_MAX" in bounded_value
+    assert "value[-limit:]" in bounded_value
+    assert "itertools.islice(value.items(), limit)" in bounded_value
+    assert "copy.deepcopy" not in projection
+    locked = dashboard[
+        dashboard.index("state_acquired = state_lock.acquire"):
+        dashboard.index("state_lock.release()")
+    ]
+    assert "_bounded_dashboard_state_projection(state)" in locked
+    assert "copy.deepcopy" not in locked
+
     for phase in (
         '"initial_setup"',
         '"readiness_projection"',
