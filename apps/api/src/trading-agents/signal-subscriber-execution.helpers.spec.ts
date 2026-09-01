@@ -117,7 +117,24 @@ import {
   PERSISTED_WAKE_IDLE_POLL_MS,
   RECONCILIATION_PAUSED_POLL_MS,
   RECONCILIATION_IDLE_POLL_MS,
+  buildQuiescentRelayExecutorReceipt,
 } from './signal-subscriber-execution.service';
+
+test('quiescent receipt is an explicit healthy paused-flat terminal state', () => {
+  const receipt = buildQuiescentRelayExecutorReceipt({
+    healthy: false, status: 'STARTING', running: true, tickStartedAt: null,
+    lastTickCompletedAt: null, lastTickDurationMs: null, currentInstanceId: 'i',
+    currentStage: 'PERSIST_PAUSED_CAPACITY', heartbeatAgeMs: null, runningForMs: 1,
+    timeoutMs: 60_000, timeoutCount: 0, ownerId: 'owner', sourceRevision: 'a'.repeat(40),
+    executionEnabled: true,
+  });
+  assert.equal(receipt.status, 'IDLE');
+  assert.equal(receipt.healthy, true);
+  assert.equal(receipt.terminalState, 'QUIESCENT');
+  assert.equal(receipt.paused, true);
+  assert.equal(receipt.flatExposure, true);
+  assert.equal(receipt.currentStage, null);
+});
 
 test('executor stops recurring Neon polling only when disarmed and flat', () => {
   assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'ACTIVE', 800), 800);
