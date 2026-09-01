@@ -19,6 +19,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-atomic.ps1")
 . (Join-Path $scriptDir "fly-sync-backoff.ps1")
+. (Join-Path $scriptDir "fly-lifecycle-bundle-copy.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
@@ -951,6 +952,35 @@ $postAckManifest = Invoke-DataSyncJsonRequest `
   -TimeoutSec $manifestTimeoutSec
 Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest
 
+# Immutable lifecycle bundles need a stronger acknowledgement than the raw
+# incremental mirror: retain and re-verify canonical, recoverable archive and
+# durable index copies, then post their exact receipt. This never deletes or
+# alters the Fly source bundle. The durable index stabilizes receipt timestamps
+# so an interrupted/retried pass is byte-for-byte idempotent at the server.
+$lifecycleAckCount = 0
+$lifecycleManifestPaths = @(
+  $selectedFiles |
+    ForEach-Object { [string]$_.path } |
+    Where-Object { $_ -match '^v3/lifecycle_bundles/[^/]+/lifecycle-[0-9a-f]{64}/manifest\.json$' } |
+    Sort-Object -Unique
+)
+foreach ($lifecycleManifestPath in $lifecycleManifestPaths) {
+  [void](Publish-LifecycleBundleCopyAndAck `
+    -TargetRoot $targetRoot `
+    -BundleManifestRelativePath $lifecycleManifestPath `
+    -PostAcknowledgement {
+      param($receipt)
+      $body = $receipt | ConvertTo-Json -Depth 12 -Compress
+      return Invoke-DataSyncJsonRequest `
+        -Stage "lifecycle_acknowledgement" `
+        -Uri "$base/api/data-sync/lifecycle-ack" `
+        -Method Post `
+        -Body $body `
+        -TimeoutSec $ackTimeoutSec
+    })
+  $lifecycleAckCount += 1
+}
+
 $analyzerPublished = $false
 $analyzerPublishErrorCode = $null
 if ($PublishAnalyzerReport) {
@@ -1202,6 +1232,7 @@ if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   Bytes = [int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)
   SourceRevision = $manifest.source_git_rev
   AckAccepted = $ack.accepted
+  LifecycleAcknowledged = $lifecycleAckCount
   PrunedRotations = @($ack.removed_acknowledged_rotations).Count
   AnalyzerPublished = [bool]$analyzerPublished
   AnalyzerPublishErrorCode = $analyzerPublishErrorCode
