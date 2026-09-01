@@ -177,14 +177,24 @@ class PolicyEvidenceLibraryTests(unittest.TestCase):
             self.assertFalse(payload["evaluation_triggered"])
             self.assertFalse(list(destination.parent.glob(".policy_evidence_library_manifest.json.*.tmp")))
 
-    def test_stale_analyzer_identity_is_rejected_and_old_file_preserved(self):
+    def test_distinct_analyzer_revision_is_bound_to_distinct_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._canonical_root(tmp)
             destination = Path(tmp) / "policy_evidence_library_manifest.json"
-            destination.write_text('{"old":true}', encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "REVISION_MISMATCH"):
-                build_library_manifest(root, analyzer_revision="different", destination=destination)
-            self.assertEqual(destination.read_text(encoding="utf-8"), '{"old":true}')
+            first = build_library_manifest(
+                root, analyzer_revision="abcdef1234567890", destination=destination,
+            )
+            second = build_library_manifest(
+                root, analyzer_revision="different-analyzer-revision", destination=destination,
+            )
+            self.assertEqual(second["generation"]["source_revision"], "abcdef123456")
+            self.assertEqual(second["generation"]["deployed_revision"], "abcdef123456")
+            self.assertEqual(
+                second["generation"]["analyzer_revision"], "different-analyzer-revision"
+            )
+            self.assertNotEqual(
+                first["generation"]["generation_key"], second["generation"]["generation_key"]
+            )
 
     def test_atomic_replace_failure_preserves_prior_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:

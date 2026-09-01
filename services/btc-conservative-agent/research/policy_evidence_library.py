@@ -58,10 +58,10 @@ def build_library_manifest(canonical_root: str | Path, *, analyzer_revision: str
         raise ValueError("CANONICAL_DATASET_MANIFEST_MISSING")
     current = json.loads(current_path.read_text(encoding="utf-8-sig"))
     generation = generation_identity(current, analyzer_revision=analyzer_revision)
-    source_revision = generation["source_revision"]
-    if not (generation["analyzer_revision"].startswith(source_revision)
-            or source_revision.startswith(generation["analyzer_revision"])):
-        raise ValueError("ANALYZER_CANONICAL_SOURCE_REVISION_MISMATCH")
+    # Analyzer code and canonical Fly data are independent provenance axes.
+    # ``generation_identity`` binds both into the cache key; requiring their
+    # revisions to match rejects every legitimate analysis performed by newer
+    # local analyzer code against an immutable deployed dataset.
     path = cache_path(root, generation["generation_key"])
     row_count = 0
     cache_status = "NOT_BUILT"
