@@ -296,6 +296,63 @@ jobs:
           npm ci
           npx prisma generate
 
+      - name: Enter durable authenticated paper maintenance boundary
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          request = urllib.request.Request(base + "/api/pause", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+          with urllib.request.urlopen(request, timeout=30) as response:
+              paused = json.load(response)
+          with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+              status = json.load(response)
+          if not (
+              paused.get("status") == "paused"
+              and status.get("execution_paused") is True
+              and status.get("manual_admin_pause") is True
+              and status.get("live_armed") is False
+              and status.get("bitfinex_live_enabled") is False
+              and status.get("force_paper_mode") is True
+          ):
+              raise SystemExit("durable paper maintenance boundary was not confirmed")
+          def request_json(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path, data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data else "GET",
+              )
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+          for round_no in range(1, 4):
+              exposure = request_json("/api/relay-execution-state?fresh=1")
+              if not isinstance(exposure.get("orders"), list) or not isinstance(exposure.get("positions"), list):
+                  raise SystemExit("authenticated maintenance exposure arrays are missing")
+              orders = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("orders") or []} - {""})
+              positions = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("positions") or []} - {""})
+              if not orders and not positions:
+                  print(f"Durable maintenance boundary is flat after round {round_no}")
+                  break
+              for trade_id in orders:
+                  cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                  if cancelled.get("status") != "cancelled":
+                      raise SystemExit(f"maintenance cancel was not confirmed for {trade_id}")
+              for trade_id in positions:
+                  reconciled = request_json("/api/reconcile/phantom-cancel", {"trade_id": trade_id, "reason": "GUARDED_DEPLOY_MAINTENANCE_BOUNDARY"})
+                  if reconciled.get("ok") is not True:
+                      raise SystemExit(f"maintenance paper reconciliation was not confirmed for {trade_id}")
+              time.sleep(2)
+          else:
+              raise SystemExit("maintenance boundary did not become flat")
+          PY
+
       - name: Prove the current Fly owner and every relay account are flat
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
         working-directory: ${{ github.workspace }}
@@ -390,6 +447,30 @@ jobs:
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Recheck maintenance boundary immediately before deploy
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/status", headers=headers)
+          with urllib.request.urlopen(request, timeout=20) as response:
+              status = json.load(response)
+          progress = status.get("strategy_progress") or {}
+          if not (
+              status.get("execution_paused") is True
+              and status.get("manual_admin_pause") is True
+              and status.get("live_armed") is False
+              and status.get("bitfinex_live_enabled") is False
+              and int(progress.get("open_positions") or 0) == 0
+              and int(progress.get("pending_orders") or 0) == 0
+          ):
+              raise SystemExit("maintenance boundary or flatness changed before deploy")
+          print("Maintenance boundary remains paused, disarmed, and flat immediately before deploy")
+          PY
+
       - name: Deploy the exact source revision
         run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}"
         env:
@@ -475,6 +556,8 @@ jobs:
                       and progress.get("trade_lock_available") is True
                       and int(progress.get("open_positions") or 0) == 0
                       and int(progress.get("pending_orders") or 0) == 0
+                      and payload.get("execution_paused") is True
+                      and payload.get("manual_admin_pause") is True
                   ):
                       health = payload
                       if (
@@ -497,4 +580,65 @@ jobs:
                   )
               time.sleep(3)
           raise SystemExit(f"Fly failed exact-revision liveness proof: {last}")
+          PY
+
+      - name: Resume paper execution after exact-revision acceptance
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          request = urllib.request.Request(base + "/api/resume", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+          with urllib.request.urlopen(request, timeout=30) as response:
+              resumed = json.load(response)
+          if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
+              raise SystemExit("paper resume was not acknowledged")
+          last = None
+          for _ in range(20):
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  status = json.load(response)
+              last = status
+              if (
+                  str(status.get("source_git_rev") or "").startswith(expected)
+                  and status.get("execution_paused") is False
+                  and status.get("manual_admin_pause") is False
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("force_paper_mode") is True
+              ):
+                  print(f"Paper execution resumed on exact accepted revision {expected}; live remains disarmed")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("exact-revision paper resume confirmation failed: " + json.dumps(last, sort_keys=True))
+          PY
+
+      - name: Best-effort safe paper resume after failed guarded deploy
+        if: failure()
+        continue-on-error: true
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+              status = json.load(response)
+          if not (
+              status.get("force_paper_mode") is True
+              and status.get("live_armed") is False
+              and status.get("bitfinex_live_enabled") is False
+              and status.get("manual_admin_pause") is True
+          ):
+              raise SystemExit("failed deploy left no safely resumable paper-only maintenance boundary")
+          request = urllib.request.Request(base + "/api/resume", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+          with urllib.request.urlopen(request, timeout=30) as response:
+              resumed = json.load(response)
+          if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
+              raise SystemExit("bounded failure-path paper resume was rejected")
+          print("Failure-path paper resume acknowledged; live remains disabled and disarmed")
           PY
