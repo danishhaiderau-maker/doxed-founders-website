@@ -148,6 +148,7 @@ def test_analyzer_requires_repo_canonical_manifest_identity(tmp_path):
         {
             "dataset_epoch": "epoch-current",
             "source_revision": payload["mirroredSourceRevision"],
+            "deployed_revision": payload["mirroredSourceRevision"],
             "tile_config_signature": "tile-signature",
             "collection_started_at": payload["syncedAt"],
             "collection_observed_at": payload["syncedAt"],
@@ -189,6 +190,7 @@ def test_analyzer_retry_log_uses_actual_retry_interval_and_reason():
         / "btc-conservative-agent"
         / "analyzer_research_engine_v62.py"
     ).read_text(encoding="utf-8")
-    assert 'retry_reason = "mirror coherence/lease retry"' in engine
+    assert "retry_sec, retry_reason = _mirror_coherence_retry_delay_seconds(" in engine
+    assert 'return delay, "canonical sync heartbeat backoff"' in engine
     assert "Next run in {retry_label} ({retry_reason})" in engine
     assert "Next run in {interval_min} minutes" not in engine
