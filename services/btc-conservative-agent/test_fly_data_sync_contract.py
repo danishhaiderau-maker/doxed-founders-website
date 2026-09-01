@@ -1479,6 +1479,9 @@ def _load_jsonl_writer(tmp_path):
         def error(self, message):
             self.messages.append(str(message))
 
+        def warning(self, message, *args):
+            self.messages.append(str(message) % args if args else str(message))
+
     namespace = {
         "os": os,
         "json": json,
@@ -1528,6 +1531,31 @@ def test_jsonl_writer_serializes_concurrent_rows(tmp_path):
     rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 32
     assert {row["row"] for row in rows} == set(range(32))
+
+
+def test_jsonl_writer_distinguishes_admission_suppression_from_write_failure(tmp_path):
+    suppressed = _load_jsonl_writer(tmp_path)
+    suppressed["emergency_admission"] = lambda **_kwargs: {
+        "allowed": False,
+        "reason": "NEW_NONESSENTIAL_RESEARCH_BLOCKED_AT_STORAGE_EMERGENCY",
+        "threshold": 0.90,
+    }
+    admission_outcome = {}
+    assert not suppressed["_safe_append_jsonl"](
+        str(tmp_path / "suppressed.jsonl"), {"row": 1},
+        "MARKET_MICROSTRUCTURE_1S", outcome=admission_outcome,
+    )
+    assert admission_outcome == {"status": "ADMISSION_SUPPRESSED"}
+
+    failed = _load_jsonl_writer(tmp_path)
+    failed["rotate_log"] = lambda _path: (_ for _ in ()).throw(OSError("disk fault"))
+    write_outcome = {}
+    assert not failed["_safe_append_jsonl"](
+        str(tmp_path / "failed.jsonl"), {"row": 1},
+        "MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
+        outcome=write_outcome,
+    )
+    assert write_outcome == {"status": "WRITE_FAILED"}
 
 
 def test_jsonl_writer_quarantines_corrupt_bytes_with_receipt(tmp_path):

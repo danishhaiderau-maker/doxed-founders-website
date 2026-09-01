@@ -5390,6 +5390,8 @@ venue_fill_trade_tape_lock = threading.Lock()
 _microstructure_last_bucket = 0
 _microstructure_rows_written = 0
 _microstructure_write_failures = 0
+_microstructure_admission_suppressions = 0
+_microstructure_io_write_failures = 0
 ret_1m_buffer = deque(maxlen=20)
 ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
@@ -23337,7 +23339,8 @@ def microstructure_capture_loop():
     bucket already written by the prior process.
     """
     global _microstructure_last_bucket, _microstructure_rows_written
-    global _microstructure_write_failures
+    global _microstructure_write_failures, _microstructure_admission_suppressions
+    global _microstructure_io_write_failures
     next_bucket = int(time.time()) + 1
     while not shutdown_event.is_set():
         wait = max(0.01, next_bucket + 1.0 - time.time())
@@ -23368,14 +23371,20 @@ def microstructure_capture_loop():
             ask_qty=ask_qty, last=last, source_ts=source_ts,
             trades=bucket_trades, symbol=BITFINEX_WS_SYMBOL,
         )
+        append_outcome = {}
         if _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
             label="MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
+            outcome=append_outcome,
         ):
             _microstructure_last_bucket = bucket
             _microstructure_rows_written += 1
         else:
             _microstructure_write_failures += 1
+            if append_outcome.get("status") == "ADMISSION_SUPPRESSED":
+                _microstructure_admission_suppressions += 1
+            else:
+                _microstructure_io_write_failures += 1
 
 
 def _enqueue_ws_tick_lifecycle(price: float, received_ts: float = None) -> bool:
@@ -35926,6 +35935,12 @@ def status():
                 "last_bucket_ts": int(_microstructure_last_bucket or 0),
                 "rows_written_this_process": int(_microstructure_rows_written),
                 "write_failures_this_process": int(_microstructure_write_failures),
+                "admission_suppressions_this_process": int(
+                    _microstructure_admission_suppressions
+                ),
+                "io_write_failures_this_process": int(
+                    _microstructure_io_write_failures
+                ),
                 "qualification_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
             },
             "control_cell": CONTROL_CELL,
@@ -46125,8 +46140,13 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
 
 def _safe_append_jsonl(
     path: str, row: dict, label: str = "JSONL", *, fallback_on_error: bool = True,
+    outcome: dict | None = None,
 ):
-    """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    """Append one JSONL row with rotation + retries (non-fatal for research logs).
+
+    Existing callers retain the boolean contract. Callers that need telemetry
+    classification may supply ``outcome``; admission is still evaluated once.
+    """
     terminal_labels = {
         "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "EXECUTION_SETTINGS",
         "DUPLICATE_INTENT_AUDIT", "COUNTERFACTUAL", "PATH_REPLAY",
@@ -46166,6 +46186,8 @@ def _safe_append_jsonl(
         lifecycle_required=lifecycle_required, lifecycle_existing=lifecycle_existing,
     )
     if not admission["allowed"]:
+        if outcome is not None:
+            outcome["status"] = "ADMISSION_SUPPRESSED"
         logger.warning(
             "[%s] append suppressed: %s used-threshold=%.2f [PIPELINE ENFORCEMENT]",
             label, admission["reason"], admission["threshold"],
@@ -46201,6 +46223,8 @@ def _safe_append_jsonl(
                         f"{receipt_error}; row is durable and will not be retried "
                         "[PIPELINE ENFORCEMENT]"
                     )
+                if outcome is not None:
+                    outcome["status"] = "WRITTEN"
                 return True
             except Exception as e:
                 last_err = e
@@ -46211,6 +46235,8 @@ def _safe_append_jsonl(
     logger.error(f"[{label}] append failed ({path}): {last_err} [PIPELINE ENFORCEMENT]")
     if fallback_on_error:
         _csv_write_fallback(path, row, last_err)
+    if outcome is not None:
+        outcome["status"] = "WRITE_FAILED"
     return False
 
 
