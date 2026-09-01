@@ -37763,11 +37763,12 @@ _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS = 2
 _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS = 15 * 60
 _DATA_SYNC_SQLITE_SNAPSHOT_WORKER_NAME = "data_sync_sqlite_snapshot_worker.py"
 _data_sync_sqlite_snapshot_condition = threading.Condition()
-_data_sync_sqlite_snapshot_state = {
-    "status": "EMPTY", "generation": None, "path": None, "lease": None,
-    "worker": None, "started_at": 0.0, "deadline_at": 0.0,
-    "completed_at": 0.0, "error": None,
-}
+_data_sync_sqlite_snapshot_states = {}
+# SQLite backups are isolated per canonical source path so unrelated databases
+# cannot consume one another's lease/cache state.  The Fly VM remains protected
+# by one process-wide build slot: paths may each advertise/join their own flight,
+# but only one memory-bounded subprocess can perform backup/integrity/hash work.
+_data_sync_sqlite_snapshot_build_slots = threading.BoundedSemaphore(1)
 _data_sync_inventory_cache_condition = threading.Condition()
 _data_sync_inventory_cache = {
     "expires_at": 0.0,
@@ -38355,7 +38356,13 @@ def _data_sync_sqlite_snapshot(path: Path, *, deadline_monotonic=None) -> dict:
 def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at: float):
     lease = None
     error = None
+    build_slot_acquired = False
     try:
+        build_slot_acquired = _data_sync_sqlite_snapshot_build_slots.acquire(
+            timeout=max(0.0, deadline_at - time.monotonic())
+        )
+        if not build_slot_acquired:
+            raise TimeoutError("SQLite snapshot build capacity exceeded deadline")
         lease = _data_sync_sqlite_snapshot_subprocess(path, deadline_at=deadline_at)
         if _data_sync_sqlite_generation(path) != generation:
             raise RuntimeError("SQLite source generation changed during snapshot build")
@@ -38367,8 +38374,13 @@ def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at
             except (OSError, TypeError, ValueError):
                 pass
         lease = None
+    finally:
+        if build_slot_acquired:
+            _data_sync_sqlite_snapshot_build_slots.release()
     with _data_sync_sqlite_snapshot_condition:
-        state = _data_sync_sqlite_snapshot_state
+        state = _data_sync_sqlite_snapshot_states.get(str(path.resolve()))
+        if state is None:
+            return
         if state.get("generation") == generation:
             state.update({"status": "CURRENT" if lease else "FAILED",
                           "lease": lease, "worker": None,
@@ -38438,10 +38450,16 @@ def _data_sync_sqlite_snapshot_subprocess(path: Path, *, deadline_at: float) -> 
 
 def _data_sync_request_sqlite_snapshot(path: Path) -> dict:
     """Return a cached lease or start exactly one bounded background build."""
+    path = path.resolve()
+    state_key = str(path)
     generation = _data_sync_sqlite_generation(path)
     now = time.monotonic()
     with _data_sync_sqlite_snapshot_condition:
-        state = _data_sync_sqlite_snapshot_state
+        state = _data_sync_sqlite_snapshot_states.setdefault(state_key, {
+            "status": "EMPTY", "generation": None, "path": state_key,
+            "lease": None, "worker": None, "started_at": 0.0,
+            "deadline_at": 0.0, "completed_at": 0.0, "error": None,
+        })
         worker = state.get("worker")
         same_generation = state.get("generation") == generation
         lease = state.get("lease") if same_generation else None
@@ -41176,7 +41194,10 @@ def _data_sync_lifecycle_cleanup_active_references() -> dict:
         if _data_sync_async_inventory.get("refreshing"):
             sync.append("SYNC_ASYNC_INVENTORY_REFRESH")
     with _data_sync_sqlite_snapshot_condition:
-        if _data_sync_sqlite_snapshot_state.get("status") == "BUILDING":
+        if any(
+            state.get("status") == "BUILDING"
+            for state in _data_sync_sqlite_snapshot_states.values()
+        ):
             sync.append("SQLITE_SNAPSHOT_BUILDING")
     analyzer = []
     analyzer_lease = _data_sync_volume_root() / ".fly-mirror-generation.lease"

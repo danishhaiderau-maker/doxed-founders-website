@@ -162,16 +162,84 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert '-Stage "manifest_post_ack_identity"' in SYNC_SCRIPT
     assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
-    assert "$attempt/$effectiveMaxAttempts attempt(s)" in SYNC_SCRIPT
+    assert "$failureProgress attempt(s)" in SYNC_SCRIPT
     assert "[int]$MaxAttempts = $transportAttempts" in SYNC_SCRIPT
     assert "elapsed_ms=" in SYNC_SCRIPT
     assert "$sqliteSnapshotBuildingMaxAttempts = 35" in SYNC_SCRIPT
     assert "-MaxAttempts $sqliteSnapshotBuildingMaxAttempts" in SYNC_SCRIPT
     assert '"snapshot_status"\\s*:\\s*"BUILDING"' in SYNC_SCRIPT
-    assert "[Math]::Min($MaxAttempts, $resourcePressureCircuitThreshold)" in SYNC_SCRIPT
+    assert "$consecutiveNonBuildingPressureFailures = 0" in SYNC_SCRIPT
+    assert "$snapshotPressureCircuitOpen" in SYNC_SCRIPT
+    assert "$consecutiveNonBuildingPressureFailures -ge $resourcePressureCircuitThreshold" in SYNC_SCRIPT
     # Retry hardening must not weaken the candidate/checksum/atomic contract.
     assert "Get-FileHash -LiteralPath $tmp -Algorithm SHA256" in SYNC_SCRIPT
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
+
+
+def _run_sqlite_lease_retry_sequence(sequence):
+    function_body = SYNC_SCRIPT[
+        SYNC_SCRIPT.index("function Invoke-DataSyncJsonRequest"):
+        SYNC_SCRIPT.index("function New-DataSyncManifestUri")
+    ]
+    encoded = json.dumps(sequence)
+    harness = f'''$ErrorActionPreference = "Stop"
+$manifestTimeoutSec = 1
+$transportAttempts = 5
+$resourcePressureCircuitThreshold = 2
+$headers = @{{}}
+$script:responses = ConvertFrom-Json @'
+{encoded}
+'@
+$script:index = 0
+function Start-Sleep {{ param([int]$Seconds) }}
+function Test-DataSyncResourcePressureError {{ param([string]$Message) return $true }}
+function Get-DataSyncRetryDelaySec {{ param([int]$Attempt, [bool]$ResourcePressure) return 0 }}
+function Invoke-RestMethod {{
+  $response = [string]$script:responses[$script:index]
+  $script:index += 1
+  if ($response -eq "CURRENT") {{ return @{{ snapshot_status = "CURRENT" }} }}
+  $message = if ($response -eq "BUILDING") {{
+    '{{"snapshot_status":"BUILDING","retry_after_seconds":2}}'
+  }} else {{
+    '{{"ok":false,"error":"dashboard_busy","retry_after_sec":1}}'
+  }}
+  $record = [System.Management.Automation.ErrorRecord]::new(
+    [System.Exception]::new("The remote server returned an error: (503) Server Unavailable."),
+    "HTTP503", [System.Management.Automation.ErrorCategory]::ResourceUnavailable, $null
+  )
+  $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new($message)
+  throw $record
+}}
+{function_body}
+try {{
+  $result = Invoke-DataSyncJsonRequest -Stage "sqlite_snapshot_lease" -Uri "https://invalid.test" -MaxAttempts 35
+  @{{ ok = $true; calls = $script:index; status = $result.snapshot_status }} | ConvertTo-Json -Compress
+}} catch {{
+  @{{ ok = $false; calls = $script:index; error = $_.Exception.Message }} | ConvertTo-Json -Compress
+}}
+'''
+    completed = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", harness],
+        text=True, capture_output=True, check=True,
+    )
+    assert completed.stdout.strip(), completed.stderr
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+def test_sqlite_lease_retry_mixed_building_and_pressure_is_progress_aware():
+    result = _run_sqlite_lease_retry_sequence(
+        ["BUILDING", "BUSY", "BUILDING", "CURRENT"]
+    )
+    assert result == {"ok": True, "calls": 4, "status": "CURRENT"}
+
+
+def test_sqlite_lease_retry_opens_only_after_two_consecutive_pressure_failures():
+    result = _run_sqlite_lease_retry_sequence(
+        ["BUILDING", "BUSY", "BUILDING", "BUSY", "BUSY", "CURRENT"]
+    )
+    assert result["ok"] is False
+    assert result["calls"] == 5
+    assert "2/2 consecutive pressure attempt(s)" in result["error"]
 
 
 def test_successful_slow_chunks_increase_throttle_instead_of_masking_pressure():
@@ -247,8 +315,8 @@ def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
 
 
 def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
-    assert "$preflightManifestAttempts = 35" in SYNC_LOOP
-    assert "$preflightInventoryWaitMaxSec = 330" in SYNC_LOOP
+    assert "$preflightManifestAttempts = 220" in SYNC_LOOP
+    assert "$preflightInventoryWaitMaxSec = 1800" in SYNC_LOOP
     assert "$preflightManifestTimeoutSec = 90" in SYNC_LOOP
     assert "function Get-FlySyncPreflightManifest" in SYNC_LOOP
     assert "stage=loop_manifest_preflight failed after" in SYNC_LOOP
@@ -1163,7 +1231,8 @@ def test_sqlite_snapshot_generation_is_single_flight_and_reused(tmp_path):
         "Path": Path, "time": time,
         "threading": SimpleNamespace(Thread=DeferredThread),
         "_data_sync_sqlite_snapshot_condition": condition,
-        "_data_sync_sqlite_snapshot_state": state,
+        "_data_sync_sqlite_snapshot_states": {str(source.resolve()): state},
+        "_data_sync_sqlite_snapshot_build_slots": threading.BoundedSemaphore(1),
         "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
         "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
         "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
@@ -1192,6 +1261,69 @@ def test_sqlite_snapshot_generation_is_single_flight_and_reused(tmp_path):
     changed = request_snapshot(source)
     assert changed["snapshot_status"] == "BUILDING"
     assert len(started) == 2
+
+
+def test_sqlite_snapshot_single_flight_is_isolated_per_canonical_path(tmp_path):
+    first_source = (tmp_path / "first.db").resolve()
+    second_source = (tmp_path / "second.db").resolve()
+    first_source.write_bytes(b"first-generation")
+    second_source.write_bytes(b"second-generation")
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_sqlite_generation", "_data_sync_sqlite_snapshot_worker",
+        "_data_sync_request_sqlite_snapshot",
+    }
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    started = []
+    builds = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target, self.args, self.started = target, args, False
+
+        def start(self):
+            self.started = True
+            started.append(self)
+
+        def is_alive(self):
+            return self.started
+
+    leases = {
+        first_source: {"snapshot_id": "a" * 32, "snapshot_size": 16,
+                       "snapshot_sha256": "b" * 64},
+        second_source: {"snapshot_id": "c" * 32, "snapshot_size": 17,
+                        "snapshot_sha256": "d" * 64},
+    }
+    namespace = {
+        "Path": Path, "time": time,
+        "threading": SimpleNamespace(Thread=DeferredThread),
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": {},
+        "_data_sync_sqlite_snapshot_build_slots": threading.BoundedSemaphore(1),
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
+        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None: (
+            builds.append(path) or leases[path].copy()
+        ),
+        "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: first_source,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
+
+    assert request_snapshot(first_source)["snapshot_status"] == "BUILDING"
+    assert request_snapshot(first_source)["snapshot_status"] == "BUILDING"
+    assert request_snapshot(second_source)["snapshot_status"] == "BUILDING"
+    assert len(started) == 2
+    assert set(namespace["_data_sync_sqlite_snapshot_states"]) == {
+        str(first_source), str(second_source),
+    }
+    started[0].target(*started[0].args)
+    started[1].target(*started[1].args)
+    assert request_snapshot(first_source)["snapshot_id"] == "a" * 32
+    assert request_snapshot(second_source)["snapshot_id"] == "c" * 32
+    assert builds == [first_source, second_source]
 
 
 def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():

@@ -85,6 +85,7 @@ function Invoke-DataSyncJsonRequest {
     [string]$Body = ""
   )
   $requestWatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $consecutiveNonBuildingPressureFailures = 0
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     try {
       $parameters = @{
@@ -102,29 +103,41 @@ function Invoke-DataSyncJsonRequest {
         "[FLY SYNC] stage=$Stage attempt=$attempt/$MaxAttempts " +
         "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) status=success"
       )
+      $consecutiveNonBuildingPressureFailures = 0
       return $result
     } catch {
       $structuredSnapshotBuilding = (
         $Stage -eq "sqlite_snapshot_lease" -and
         [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"BUILDING"'
       )
-      $effectiveMaxAttempts = if (
-        $Stage -eq "sqlite_snapshot_lease" -and -not $structuredSnapshotBuilding
-      ) {
-        [Math]::Min($MaxAttempts, $resourcePressureCircuitThreshold)
-      } else {
-        $MaxAttempts
+      if ($Stage -eq "sqlite_snapshot_lease") {
+        if ($structuredSnapshotBuilding) {
+          $consecutiveNonBuildingPressureFailures = 0
+        } else {
+          $consecutiveNonBuildingPressureFailures += 1
+        }
       }
+      $effectiveMaxAttempts = $MaxAttempts
+      $snapshotPressureCircuitOpen = (
+        $Stage -eq "sqlite_snapshot_lease" -and
+        -not $structuredSnapshotBuilding -and
+        $consecutiveNonBuildingPressureFailures -ge $resourcePressureCircuitThreshold
+      )
       Write-Warning (
         "[FLY SYNC] stage=$Stage attempt=$attempt/$effectiveMaxAttempts " +
         "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) " +
         "status=$(if ($structuredSnapshotBuilding) { 'building' } else { 'failed' }) " +
         "error=$($_.Exception.Message)"
       )
-      if ($attempt -ge $effectiveMaxAttempts) {
+      if ($snapshotPressureCircuitOpen -or $attempt -ge $effectiveMaxAttempts) {
+        $failureProgress = if ($snapshotPressureCircuitOpen) {
+          "$consecutiveNonBuildingPressureFailures/$resourcePressureCircuitThreshold consecutive pressure"
+        } else {
+          "$attempt/$effectiveMaxAttempts"
+        }
         throw (
           "Fly data-sync stage=$Stage failed after " +
-          "$attempt/$effectiveMaxAttempts attempt(s): $($_.Exception.Message)"
+          "$failureProgress attempt(s): $($_.Exception.Message)"
         )
       }
       if ($structuredSnapshotBuilding) {
