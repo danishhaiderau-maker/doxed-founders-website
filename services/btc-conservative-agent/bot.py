@@ -48,6 +48,7 @@ from bounded_evidence_worker import BoundedEvidenceWorker
 from lifecycle_cleanup_transaction import (
     CleanupRejected as LifecycleCleanupRejected,
     CleanupTransaction,
+    PurgeTransaction,
     verify_bundle as verify_lifecycle_cleanup_bundle,
 )
 from position_registry import (
@@ -41070,6 +41071,116 @@ def _reconcile_lifecycle_cleanup_transactions() -> list:
     return results
 
 
+_LIFECYCLE_PURGE_LOCK = threading.Lock()
+_LIFECYCLE_PURGE_CONFIRM_PREFIX = "PURGE_COMMITTED_LIFECYCLE:"
+_LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS = 86_400
+
+
+def _lifecycle_purge_minimum_age_seconds() -> int:
+    """Return configured quarantine age without permitting a sub-day bypass."""
+    try:
+        configured = int(os.getenv(
+            "LIFECYCLE_PURGE_MIN_AGE_SECONDS",
+            str(_LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS),
+        ))
+    except (TypeError, ValueError):
+        configured = _LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS
+    return max(_LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS, configured)
+
+
+def _lifecycle_purge_resolve_inputs(bundle_id: object) -> tuple[Path, dict, dict]:
+    """Resolve a committed record and retained receipt from internal roots only."""
+    value = str(bundle_id or "").strip().lower()
+    if not re.fullmatch(r"lifecycle-[0-9a-f]{64}", value):
+        raise ValueError("invalid lifecycle bundle identity")
+    ack_path = _data_sync_lifecycle_ack_path(value)
+    persisted = json.loads(ack_path.read_text(encoding="utf-8"))
+    receipt = persisted.get("receipt") if isinstance(persisted, dict) else None
+    if not isinstance(receipt, dict) or str(receipt.get("bundle_id") or "") != value:
+        raise ValueError("retained lifecycle receipt unavailable")
+    transaction = CleanupTransaction(_data_sync_volume_root())
+    transaction_dir = transaction.tx_root / hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+    committed_path = transaction_dir / "COMMITTED.json"
+    committed = json.loads(committed_path.read_text(encoding="utf-8"))
+    if (
+        committed.get("schema") != "lifecycle_cleanup_transaction_v2"
+        or committed.get("state") != "COMMITTED"
+        or committed.get("bundle_id") != value
+    ):
+        raise ValueError("v2 committed lifecycle quarantine unavailable")
+    return committed_path, committed, receipt
+
+
+@app.route('/api/data-sync/lifecycle-purge/execute', methods=['POST'])
+def api_data_sync_lifecycle_purge_execute():
+    """Explicitly purge one proof-bound committed quarantine; disabled by default."""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "status": "INVALID_REQUEST"}), 400
+    bundle_id = str(body.get("bundle_id") or "").strip().lower()
+    expected_confirmation = f"{_LIFECYCLE_PURGE_CONFIRM_PREFIX}{bundle_id}"
+    if not bundle_id or not hmac.compare_digest(
+        str(body.get("confirmation") or ""), expected_confirmation,
+    ):
+        return jsonify({"ok": False, "status": "EXACT_CONFIRMATION_REQUIRED"}), 409
+    if not _LIFECYCLE_PURGE_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "status": "PURGE_BUSY"}), 409
+    try:
+        purge_enabled = os.getenv("LIFECYCLE_PURGE_ENABLED", "false").lower() == "true"
+        if not purge_enabled:
+            return jsonify({
+                "ok": True, "status": "DISABLED_QUARANTINE_RETAINED",
+                "purge_authorized": False,
+            })
+        committed_path, _committed, receipt = _lifecycle_purge_resolve_inputs(bundle_id)
+        key_id = str((receipt.get("laptop_attestation") or {}).get("key_id") or "")
+        secret = os.getenv("LIFECYCLE_LAPTOP_ATTESTATION_KEY", "").encode("utf-8")
+        keys = {key_id: secret} if key_id and secret else {}
+        transaction = PurgeTransaction(
+            _data_sync_volume_root(),
+            enabled=purge_enabled,
+            minimum_age_seconds=_lifecycle_purge_minimum_age_seconds(),
+        )
+        result = transaction.execute_purge(
+            committed_path, receipt,
+            current_identity=_data_sync_lifecycle_cleanup_current_identity(),
+            active_references=_data_sync_lifecycle_cleanup_active_references(),
+            attestation_keys=keys,
+        )
+    except (LifecycleCleanupRejected, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        reasons = list(getattr(exc, "reasons", [type(exc).__name__]))[:8]
+        return jsonify({
+            "ok": False, "status": "PURGE_INELIGIBLE_QUARANTINE_RETAINED",
+            "reasons": reasons,
+        }), 409
+    finally:
+        _LIFECYCLE_PURGE_LOCK.release()
+    return jsonify({"ok": True, **result})
+
+
+def _audit_lifecycle_purge_recovery() -> list:
+    """Report interrupted purge state at startup; never delete automatically."""
+    root = _data_sync_volume_root() / "v3" / "lifecycle_purge_transactions"
+    if not root.is_dir():
+        return []
+    rows = []
+    for transaction_dir in sorted(root.iterdir())[:128]:
+        if not transaction_dir.is_dir():
+            continue
+        if (transaction_dir / "PREPARED.json").is_file() and not (
+            transaction_dir / "PURGED.json"
+        ).is_file():
+            rows.append({
+                "transaction": transaction_dir.name,
+                "status": "PREPARED_REQUIRES_EXPLICIT_REPLAY",
+            })
+    if rows:
+        logger.warning(
+            "lifecycle purge recovery requires explicit admin replay count=%s", len(rows)
+        )
+    return rows
+
+
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
 _PLATFORM_RELAY_EVIDENCE_WORKER_TIMEOUT_SEC = max(
     1.0, float(os.getenv("PLATFORM_RELAY_EVIDENCE_WORKER_TIMEOUT_SEC", "90"))
@@ -46933,6 +47044,7 @@ def main():
     _ensure_collector_v22_epoch()
     _prime_data_sync_identity_epoch_cache()
     _reconcile_lifecycle_cleanup_transactions()
+    _audit_lifecycle_purge_recovery()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()
