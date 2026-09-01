@@ -37558,9 +37558,10 @@ _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 150.0
 _DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
+_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2 = "fly_runtime_inventory_snapshot_v2"
 _DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
 _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
-_DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v1"
+_DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v2"
 _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
 _DATA_SYNC_INVENTORY_ORPHAN_MAX_AGE_SECONDS = 15 * 60
 _DATA_SYNC_INVENTORY_ORPHAN_SCAN_LIMIT = 1000
@@ -37577,9 +37578,18 @@ _data_sync_async_inventory = {
     "rows": None,
     "generated_at": None,
     "expires_at": 0.0,
+    "served_since_refresh": False,
     "refreshing": False,
+    "active_refresh_nonce": None,
+    "completed_refresh_nonce": None,
+    "refresh_started_at": None,
+    "refresh_completed_at": None,
+    "last_failure_at": None,
     "error": None,
 }
+_DATA_SYNC_MANIFEST_PAGE_DEFAULT = 250
+_DATA_SYNC_MANIFEST_PAGE_MAX = 500
+_DATA_SYNC_ACK_FILE_MAX = 100_000
 _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS = 2 * 60 * 60
 _DATA_SYNC_INVENTORY_GENERATION_MAX = 8
 _data_sync_inventory_generations = {}
@@ -38127,17 +38137,35 @@ def _data_sync_inventory_rows_sha256(rows: list) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _data_sync_retain_inventory_generation(rows: list, generated_at: str | None) -> str:
-    """Retain a bounded immutable inventory generation for long-sync ACKs."""
+def _data_sync_retain_inventory_generation(
+    rows: list,
+    generated_at: str | None,
+    *,
+    status: str = "CURRENT",
+    refresh_nonce: str | None = None,
+) -> str:
+    """Retain one bounded immutable generation for paging and long-sync ACKs.
+
+    Only a worker-validated ``CURRENT`` generation is acknowledgement-eligible.
+    A structurally valid prior snapshot may still be retained and paged as
+    ``STALE`` while revalidation runs, but it can never authorize parity or
+    cleanup.
+    """
     copied = [dict(row) for row in rows if isinstance(row, dict)]
     digest = _data_sync_inventory_rows_sha256(copied)
     now = time.monotonic()
     with _data_sync_inventory_cache_condition:
         previous = _data_sync_inventory_generations.get(digest) or {}
         _data_sync_inventory_generations[digest] = {
+            "storage": "memory_v1",
             "rows": copied,
             "generated_at": generated_at,
             "retained_at": now,
+            "status": str(status or "STALE"),
+            "ack_eligible": str(status or "").upper() == "CURRENT",
+            "refresh_nonce": str(refresh_nonce or "") or None,
+            "file_count": len(copied),
+            "total_bytes": sum(int(row.get("size") or 0) for row in copied),
             "served_rows": previous.get("served_rows") or {},
         }
         expired = [
@@ -38158,6 +38186,388 @@ def _data_sync_retain_inventory_generation(rows: list, generated_at: str | None)
     return digest
 
 
+def _data_sync_inventory_generation(generation_id: str) -> dict | None:
+    """Return a defensive copy of one retained immutable manifest generation."""
+    digest = str(generation_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    with _data_sync_inventory_cache_condition:
+        generation = _data_sync_inventory_generations.get(digest)
+        if not isinstance(generation, dict):
+            return None
+        retained_at = float(generation.get("retained_at") or 0.0)
+        if time.monotonic() - retained_at > _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS:
+            _data_sync_inventory_generations.pop(digest, None)
+            return None
+        generation["retained_at"] = time.monotonic()
+        rows = generation.get("rows")
+        if generation.get("storage") == "memory_v1" and not isinstance(rows, list):
+            return None
+        copied_generation = {
+            **{
+                key: value for key, value in generation.items()
+                if key not in {"rows", "served_rows"}
+            },
+            "generation_id": digest,
+        }
+        if generation.get("storage") == "memory_v1":
+            copied_generation["rows"] = [
+                dict(row) for row in rows if isinstance(row, dict)
+            ]
+        return copied_generation
+
+
+def _data_sync_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _data_sync_validate_disk_inventory_generation(
+    result: dict, work_root: Path
+) -> dict:
+    """Validate bounded v2 generation metadata without loading inventory rows."""
+    generation_id = str(result.get("generation_id") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+        raise RuntimeError("inventory generation identity is invalid")
+    try:
+        page_count = int(result.get("page_count"))
+        file_count = int(result.get("file_count"))
+        total_bytes = int(result.get("total_bytes"))
+        page_size = int(result.get("page_size"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("inventory generation totals are invalid") from exc
+    if (
+        page_count < 1 or file_count < 0 or total_bytes < 0
+        or page_size < 1 or page_size > 1000
+    ):
+        raise RuntimeError("inventory generation totals are out of bounds")
+    root = work_root.resolve(strict=True)
+    generation_dir = Path(str(result.get("generation_dir") or "")).resolve(
+        strict=True
+    )
+    generation_dir.relative_to(root / "inventory-generations")
+    if generation_dir.name != generation_id or not generation_dir.is_dir():
+        raise RuntimeError("inventory generation directory identity mismatch")
+    index_path = Path(str(result.get("page_index_path") or "")).resolve(
+        strict=True
+    )
+    index_path.relative_to(generation_dir)
+    if index_path != generation_dir / "page-index.jsonl":
+        raise RuntimeError("inventory generation page index path mismatch")
+    index_sha256 = str(result.get("page_index_sha256") or "").strip().lower()
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", index_sha256)
+        or not hmac.compare_digest(_data_sync_file_sha256(index_path), index_sha256)
+    ):
+        raise RuntimeError("inventory generation page index hash mismatch")
+    indexed_files = 0
+    indexed_bytes = 0
+    descriptors_seen = 0
+    with index_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if len(line) > 16 * 1024:
+                raise RuntimeError("inventory page descriptor exceeds bound")
+            try:
+                descriptor = json.loads(line)
+                page_index = int(descriptor.get("page_index"))
+                page_files = int(descriptor.get("file_count"))
+                page_bytes = int(descriptor.get("total_bytes"))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise RuntimeError("inventory page descriptor is invalid") from exc
+            page_sha256 = str(descriptor.get("page_sha256") or "").lower()
+            file_name = str(descriptor.get("file_name") or "")
+            if (
+                page_index != descriptors_seen or page_files < 0 or page_bytes < 0
+                or not re.fullmatch(r"[0-9a-f]{64}", page_sha256)
+                or file_name != f"p{page_index:08d}-{page_sha256[:24]}.json"
+            ):
+                raise RuntimeError("inventory page descriptor sequence is invalid")
+            page_path = (generation_dir / file_name).resolve(strict=True)
+            page_path.relative_to(generation_dir)
+            if not page_path.is_file() or page_path.stat().st_size > 8 * 1024 * 1024:
+                raise RuntimeError("inventory page artifact is unavailable or oversized")
+            indexed_files += page_files
+            indexed_bytes += page_bytes
+            descriptors_seen += 1
+    if (
+        descriptors_seen != page_count
+        or indexed_files != file_count
+        or indexed_bytes != total_bytes
+    ):
+        raise RuntimeError("inventory page index is incomplete")
+    return {
+        "storage": "disk_pages_v2",
+        "generation_id": generation_id,
+        "generation_dir": str(generation_dir),
+        "page_index_path": str(index_path),
+        "page_index_sha256": index_sha256,
+        "page_count": page_count,
+        "page_size": page_size,
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+    }
+
+
+def _data_sync_retain_disk_inventory_generation(
+    generation: dict,
+    generated_at: str,
+    *,
+    status: str,
+    refresh_nonce: str | None = None,
+) -> str:
+    generation_id = str(generation["generation_id"])
+    now = time.monotonic()
+    with _data_sync_inventory_cache_condition:
+        previous = _data_sync_inventory_generations.get(generation_id) or {}
+        _data_sync_inventory_generations[generation_id] = {
+            **generation,
+            "generated_at": generated_at,
+            "status": str(status),
+            "ack_eligible": str(status).upper() == "CURRENT",
+            "refresh_nonce": str(refresh_nonce or "") or None,
+            "retained_at": now,
+            "served_rows": previous.get("served_rows") or {},
+        }
+        expired = [
+            key for key, value in _data_sync_inventory_generations.items()
+            if now - float(value.get("retained_at") or 0.0)
+            > _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS
+        ]
+        for key in expired:
+            _data_sync_inventory_generations.pop(key, None)
+        while len(_data_sync_inventory_generations) > _DATA_SYNC_INVENTORY_GENERATION_MAX:
+            oldest = min(
+                _data_sync_inventory_generations,
+                key=lambda key: float(
+                    _data_sync_inventory_generations[key].get("retained_at") or 0.0
+                ),
+            )
+            if oldest == generation_id and len(_data_sync_inventory_generations) > 1:
+                alternatives = {
+                    key: value for key, value in _data_sync_inventory_generations.items()
+                    if key != generation_id
+                }
+                oldest = min(
+                    alternatives,
+                    key=lambda key: float(alternatives[key].get("retained_at") or 0.0),
+                )
+            _data_sync_inventory_generations.pop(oldest, None)
+        protected = {
+            key for key, value in _data_sync_inventory_generations.items()
+            if isinstance(value, dict)
+        }
+    _data_sync_gc_disk_inventory_generations(
+        _data_sync_inventory_work_root(), protected_generation_ids=protected
+    )
+    return generation_id
+
+
+def _data_sync_gc_disk_inventory_generations(
+    work_root: Path,
+    *,
+    protected_generation_ids: set | frozenset = frozenset(),
+    now: float | None = None,
+) -> list:
+    """Confined GC for old derived page artifacts, never source evidence."""
+    root = (work_root / "inventory-generations").resolve()
+    work = work_root.resolve(strict=True)
+    root.relative_to(work)
+    if not root.exists() or not root.is_dir() or root.is_symlink():
+        return []
+    protected = {
+        str(value).lower() for value in protected_generation_ids
+        if re.fullmatch(r"[0-9a-fA-F]{64}", str(value))
+    }
+    cutoff = float(time.time() if now is None else now) - (
+        _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS
+    )
+    try:
+        snapshot = json.loads(
+            _data_sync_inventory_snapshot_path().read_text(encoding="utf-8")
+        )
+        selected = str(
+            (snapshot.get("generation") or {}).get("generation_id") or ""
+        ).lower()
+        if re.fullmatch(r"[0-9a-f]{64}", selected):
+            protected.add(selected)
+    except (OSError, TypeError, ValueError):
+        pass
+    for lease_root_name in ("inventory-acks", "inventory-served"):
+        lease_root = work / lease_root_name
+        try:
+            for candidate in lease_root.iterdir():
+                if (
+                    candidate.is_dir()
+                    and re.fullmatch(r"[0-9a-f]{64}", candidate.name)
+                    and candidate.stat().st_mtime >= cutoff
+                ):
+                    protected.add(candidate.name)
+        except OSError:
+            pass
+    candidates = []
+    try:
+        for path in root.iterdir():
+            if not re.fullmatch(r"[0-9a-f]{64}", path.name):
+                continue
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+            if path.is_symlink() or not resolved.is_dir() or path.name in protected:
+                continue
+            candidates.append((resolved.stat().st_mtime, resolved))
+    except OSError:
+        return []
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    removed = []
+    # Keep the newest bounded reserve even when no in-memory lease references
+    # it, so a just-completed generation survives an interrupted publication.
+    for position, (modified, path) in enumerate(candidates):
+        if position < _DATA_SYNC_INVENTORY_GENERATION_MAX or modified >= cutoff:
+            continue
+        try:
+            path.relative_to(root)
+            shutil.rmtree(path)
+            for lease_root_name in ("inventory-acks", "inventory-served"):
+                lease = (work / lease_root_name / path.name).resolve()
+                lease.relative_to(work / lease_root_name)
+                if lease.is_dir() and not lease.is_symlink():
+                    shutil.rmtree(lease)
+            removed.append(path.name)
+        except OSError:
+            continue
+    return removed
+
+
+def _data_sync_disk_page_descriptor(generation: dict, page_index: int) -> dict:
+    index_path = Path(str(generation.get("page_index_path") or ""))
+    with index_path.open("r", encoding="utf-8") as handle:
+        for index, line in enumerate(handle):
+            if index != page_index:
+                continue
+            descriptor = json.loads(line)
+            if int(descriptor.get("page_index", -1)) != page_index:
+                raise ValueError("manifest page descriptor sequence changed")
+            return descriptor
+    raise ValueError("manifest page descriptor is missing")
+
+
+def _data_sync_disk_manifest_page(
+    generation: dict,
+    *,
+    raw_cursor: str = "",
+) -> dict:
+    generation_id = str(generation["generation_id"])
+    page_count = int(generation["page_count"])
+    cursor = str(raw_cursor or "").strip()
+    if cursor:
+        match = re.fullmatch(r"([0-9a-f]{64})\.([0-9]+)", cursor.lower())
+        if not match or not hmac.compare_digest(match.group(1), generation_id):
+            raise ValueError("manifest cursor generation mismatch")
+        page_index = int(match.group(2))
+    else:
+        page_index = 0
+    if page_index < 0 or page_index >= page_count:
+        raise ValueError("manifest cursor page is invalid")
+    descriptor = _data_sync_disk_page_descriptor(generation, page_index)
+    generation_dir = Path(str(generation["generation_dir"]))
+    page_path = (generation_dir / str(descriptor["file_name"])).resolve(strict=True)
+    page_path.relative_to(generation_dir.resolve(strict=True))
+    raw = page_path.read_bytes()
+    if not hmac.compare_digest(
+        hashlib.sha256(raw).hexdigest(), str(descriptor["page_sha256"])
+    ):
+        raise ValueError("manifest page hash mismatch")
+    payload = json.loads(raw)
+    rows = payload.get("rows")
+    if (
+        payload.get("schema") != "fly_runtime_inventory_page_v1"
+        or int(payload.get("page_index", -1)) != page_index
+        or not isinstance(rows, list)
+        or int(payload.get("file_count") or -1) != len(rows)
+        or int(payload.get("file_count") or -1) != int(descriptor["file_count"])
+        or int(payload.get("total_bytes") or -1) != int(descriptor["total_bytes"])
+        or not hmac.compare_digest(
+            str(payload.get("rows_sha256") or ""),
+            _data_sync_inventory_rows_sha256(rows),
+        )
+    ):
+        raise ValueError("manifest page payload validation failed")
+    next_index = page_index + 1
+    return {
+        "rows": [dict(row) for row in rows],
+        "page_index": page_index,
+        "page_count": page_count,
+        "page_size": int(generation["page_size"]),
+        "page_file_count": len(rows),
+        "page_total_bytes": int(descriptor["total_bytes"]),
+        "page_cursor": cursor or None,
+        "next_cursor": (
+            None if next_index >= page_count
+            else _data_sync_manifest_cursor(generation_id, next_index)
+        ),
+        "is_last_page": next_index >= page_count,
+        "page_sha256": str(descriptor["page_sha256"]),
+    }
+
+
+def _data_sync_manifest_cursor(generation_id: str, offset: int) -> str:
+    """Bind a resumable page cursor to one immutable generation."""
+    return f"{str(generation_id).lower()}.{int(offset)}"
+
+
+def _data_sync_manifest_page(
+    rows: list,
+    generation_id: str,
+    *,
+    raw_cursor: str = "",
+    raw_page_size: object = None,
+) -> dict:
+    """Return one bounded, generation-bound manifest page."""
+    try:
+        page_size = int(raw_page_size or _DATA_SYNC_MANIFEST_PAGE_DEFAULT)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("manifest page_size is invalid") from exc
+    if page_size < 1 or page_size > _DATA_SYNC_MANIFEST_PAGE_MAX:
+        raise ValueError(
+            f"manifest page_size must be between 1 and {_DATA_SYNC_MANIFEST_PAGE_MAX}"
+        )
+    cursor = str(raw_cursor or "").strip()
+    if cursor:
+        match = re.fullmatch(r"([0-9a-f]{64})\.([0-9]+)", cursor.lower())
+        if not match or not hmac.compare_digest(match.group(1), generation_id):
+            raise ValueError("manifest cursor generation mismatch")
+        offset = int(match.group(2))
+    else:
+        offset = 0
+    if offset < 0 or offset > len(rows) or offset % page_size != 0:
+        raise ValueError("manifest cursor offset is invalid")
+    page_rows = [dict(row) for row in rows[offset:offset + page_size]]
+    next_offset = offset + len(page_rows)
+    last_page = next_offset >= len(rows)
+    page_count = max(1, (len(rows) + page_size - 1) // page_size)
+    page_index = offset // page_size
+    return {
+        "rows": page_rows,
+        "page_index": page_index,
+        "page_count": page_count,
+        "page_size": page_size,
+        "page_file_count": len(page_rows),
+        "page_total_bytes": sum(int(row.get("size") or 0) for row in page_rows),
+        "page_cursor": cursor or None,
+        "next_cursor": (
+            None if last_page
+            else _data_sync_manifest_cursor(generation_id, next_offset)
+        ),
+        "is_last_page": last_page,
+        "page_sha256": _data_sync_inventory_rows_sha256(page_rows),
+    }
+
+
 def _data_sync_register_served_ack_generation(
     inventory_sha256: str, relpath: str, size: int, mtime_ns: int
 ) -> None:
@@ -38165,16 +38575,65 @@ def _data_sync_register_served_ack_generation(
     digest = str(inventory_sha256 or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         return
+    disk_generation = None
     with _data_sync_inventory_cache_condition:
         generation = _data_sync_inventory_generations.get(digest)
         if not isinstance(generation, dict):
             return
-        served = generation.setdefault("served_rows", {})
-        history = served.setdefault(str(relpath), [])
-        identity = (int(size), int(mtime_ns))
-        if identity not in history:
-            history.append(identity)
-            del history[:-4]
+        generation["retained_at"] = time.monotonic()
+        if generation.get("storage") == "disk_pages_v2":
+            disk_generation = dict(generation)
+        else:
+            served = generation.setdefault("served_rows", {})
+            history = served.setdefault(str(relpath), [])
+            identity = (int(size), int(mtime_ns))
+            if identity not in history:
+                history.append(identity)
+                del history[:-4]
+    if disk_generation is not None:
+        root = _data_sync_inventory_work_root() / "inventory-served" / digest
+        root.mkdir(parents=True, exist_ok=True)
+        key = hashlib.sha256(str(relpath).encode("utf-8")).hexdigest()
+        target = root / f"{key}.json"
+        payload = {
+            "schema": "fly_runtime_inventory_served_generation_v1",
+            "generation_id": digest,
+            "path": str(relpath),
+            "size": int(size),
+            "mtime_ns": int(mtime_ns),
+        }
+        temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def _data_sync_disk_served_identity(
+    generation_id: str, relpath: str
+) -> tuple[int, int] | None:
+    key = hashlib.sha256(str(relpath).encode("utf-8")).hexdigest()
+    target = (
+        _data_sync_inventory_work_root()
+        / "inventory-served" / generation_id / f"{key}.json"
+    )
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        if (
+            payload.get("schema") != "fly_runtime_inventory_served_generation_v1"
+            or not hmac.compare_digest(
+                str(payload.get("generation_id") or ""), generation_id
+            )
+            or str(payload.get("path") or "") != str(relpath)
+        ):
+            return None
+        return int(payload["size"]), int(payload["mtime_ns"])
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
 
 
 def _data_sync_persist_inventory_snapshot(rows: list, generated_at: str) -> dict:
@@ -38205,6 +38664,37 @@ def _data_sync_persist_inventory_snapshot(rows: list, generated_at: str) -> dict
     return payload
 
 
+def _data_sync_persist_disk_inventory_snapshot(
+    generation: dict, generated_at: str
+) -> dict:
+    """Atomically select a complete disk-backed generation without copying rows."""
+    payload = {
+        "schema": _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2,
+        "generated_at": str(generated_at),
+        "source_git_rev": _runtime_git_rev(),
+        "generation": {
+            key: generation[key]
+            for key in (
+                "storage", "generation_id", "generation_dir", "page_index_path",
+                "page_index_sha256", "page_count", "page_size", "file_count",
+                "total_bytes",
+            )
+        },
+    }
+    target = _data_sync_inventory_snapshot_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(
+            json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return payload
+
+
 def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
     """Load only a structurally and cryptographically intact prior snapshot.
 
@@ -38216,6 +38706,21 @@ def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
         payload = json.loads(
             _data_sync_inventory_snapshot_path().read_text(encoding="utf-8")
         )
+        if payload.get("schema") == _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2:
+            generation = payload.get("generation")
+            if not isinstance(generation, dict):
+                return None
+            validated = _data_sync_validate_disk_inventory_generation(
+                {
+                    **generation,
+                    "generation_id": generation.get("generation_id"),
+                },
+                _data_sync_inventory_work_root(),
+            )
+            return {
+                **payload,
+                "generation": validated,
+            }
         rows = payload.get("rows")
         if (
             payload.get("schema") != _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA
@@ -38283,7 +38788,7 @@ def _data_sync_cleanup_inventory_worker_orphans(
     return removed
 
 
-def _data_sync_inventory_refresh_worker() -> None:
+def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> None:
     """Build the volume inventory outside the latency-sensitive bot process.
 
     A Python thread moved the scan off the HTTP handler but not out of the
@@ -38328,6 +38833,7 @@ def _data_sync_inventory_refresh_worker() -> None:
             ),
             "rewrite_targets": sorted(rewrite_targets),
             "max_rows": 5000,
+            "inventory_page_rows": _DATA_SYNC_MANIFEST_PAGE_DEFAULT,
         }
         request_tmp = request_path.with_name(f"{request_path.name}.tmp")
         request_tmp.write_text(
@@ -38359,50 +38865,82 @@ def _data_sync_inventory_refresh_worker() -> None:
             "PYTHONNOUSERSITE": "1",
             "PYTHONHASHSEED": "0",
         })
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS,
-            check=False,
-            env=worker_env,
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"inventory subprocess exited {completed.returncode}"
+        while True:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS,
+                check=False,
+                env=worker_env,
             )
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-        rows = result.get("rows")
-        if (
-            result.get("schema") != _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA
-            or not hmac.compare_digest(str(result.get("nonce") or ""), nonce)
-            or not hmac.compare_digest(
-                str(result.get("source_revision") or ""), _runtime_git_rev()
-            )
-            or not isinstance(rows, list)
-            or int(result.get("file_count") or -1) != len(rows)
-            or float(result.get("generated_unix") or 0.0) < launched_unix
-            or not hmac.compare_digest(
-                str(result.get("rows_sha256") or ""),
-                _data_sync_inventory_rows_sha256(rows),
-            )
-        ):
-            raise RuntimeError("inventory subprocess result validation failed")
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            if (
+                result.get("schema") != _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA
+                or not hmac.compare_digest(str(result.get("nonce") or ""), nonce)
+                or not hmac.compare_digest(
+                    str(result.get("source_revision") or ""), _runtime_git_rev()
+                )
+                or float(result.get("generated_unix") or 0.0) < launched_unix
+            ):
+                raise RuntimeError("inventory subprocess result identity failed")
+            if completed.returncode == 75 and result.get("status") == "BUILDING":
+                retry_after = min(30, max(1, int(
+                    result.get("retry_after_seconds") or 5
+                )))
+                with _data_sync_inventory_cache_condition:
+                    _data_sync_async_inventory.update({
+                        "status": "BUILDING",
+                        "refreshing": True,
+                        "worker_phase": result.get("phase"),
+                        "worker_files_seen": result.get("files_seen"),
+                        "worker_dirs_seen": result.get("dirs_seen"),
+                        "worker_rows_discovered": result.get("rows_discovered"),
+                        "worker_resume_token": result.get("resume_token"),
+                        "retry_after_seconds": retry_after,
+                        "error": None,
+                    })
+                    _data_sync_inventory_cache_condition.notify_all()
+                time.sleep(retry_after)
+                continue
+            if completed.returncode != 0 or result.get("status") != "COMPLETE":
+                failure = str(result.get("failure_kind") or completed.returncode)
+                raise RuntimeError(f"inventory subprocess failed: {failure}")
+            break
         generated_at = str(result.get("generated_at") or "")
         if not generated_at:
             raise RuntimeError("inventory subprocess timestamp is missing")
+        disk_generation = _data_sync_validate_disk_inventory_generation(
+            result, work_root
+        )
         # Only the trading parent may promote the nonce-bound worker result to
         # the canonical restart snapshot.
-        _data_sync_persist_inventory_snapshot(rows, generated_at)
-        _data_sync_retain_inventory_generation(rows, generated_at)
+        _data_sync_persist_disk_inventory_snapshot(disk_generation, generated_at)
+        inventory_generation_id = _data_sync_retain_disk_inventory_generation(
+            disk_generation,
+            generated_at,
+            status="CURRENT",
+            refresh_nonce=refresh_nonce,
+        )
         with _data_sync_inventory_cache_condition:
             _data_sync_async_inventory.update({
                 "status": "CURRENT",
-                "rows": [dict(row) for row in rows],
+                "rows": None,
+                "generation": dict(disk_generation),
                 "generated_at": generated_at,
+                "generation_id": inventory_generation_id,
                 "expires_at": time.monotonic() + _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS,
+                "served_since_refresh": False,
                 "refreshing": False,
+                "active_refresh_nonce": None,
+                "completed_refresh_nonce": str(refresh_nonce or "") or None,
+                "refresh_completed_at": utc_iso(),
+                "last_failure_at": None,
+                "worker_phase": "COMPLETE",
+                "worker_files_seen": int(result.get("file_count") or 0),
+                "worker_rows_discovered": int(result.get("file_count") or 0),
+                "retry_after_seconds": 0,
                 "error": None,
             })
             _data_sync_inventory_cache_condition.notify_all()
@@ -38410,8 +38948,15 @@ def _data_sync_inventory_refresh_worker() -> None:
         logger.error(f"data-sync inventory background refresh failed: {exc}")
         with _data_sync_inventory_cache_condition:
             _data_sync_async_inventory.update({
-                "status": "STALE" if _data_sync_async_inventory.get("rows") else "EMPTY",
+                "status": (
+                    "STALE" if (
+                        _data_sync_async_inventory.get("rows") is not None
+                        or isinstance(_data_sync_async_inventory.get("generation"), dict)
+                    ) else "EMPTY"
+                ),
                 "refreshing": False,
+                "active_refresh_nonce": None,
+                "last_failure_at": utc_iso(),
                 "error": type(exc).__name__,
                 "expires_at": 0.0,
             })
@@ -38432,7 +38977,11 @@ def _data_sync_inventory_refresh_worker() -> None:
                 pass
 
 
-def _data_sync_request_async_inventory(*, force_refresh: bool = False) -> dict:
+def _data_sync_request_async_inventory(
+    *,
+    force_refresh: bool = False,
+    refresh_nonce: str | None = None,
+) -> dict:
     """Return a completed current inventory or start one non-blocking build."""
     start_worker = False
     with _data_sync_inventory_cache_condition:
@@ -38440,48 +38989,138 @@ def _data_sync_request_async_inventory(*, force_refresh: bool = False) -> dict:
         if _data_sync_async_inventory.get("status") == "EMPTY":
             persisted = _data_sync_load_persisted_inventory_snapshot()
             if persisted is not None:
-                _data_sync_async_inventory.update({
-                    "status": "STALE",
-                    "rows": [dict(row) for row in persisted["rows"]],
-                    "generated_at": persisted.get("generated_at"),
-                    "expires_at": 0.0,
-                    "error": None,
-                })
-        current = (
+                if isinstance(persisted.get("generation"), dict):
+                    stale_generation = persisted["generation"]
+                    stale_generation_id = _data_sync_retain_disk_inventory_generation(
+                        stale_generation,
+                        persisted.get("generated_at"),
+                        status="STALE",
+                    )
+                    _data_sync_async_inventory.update({
+                        "status": "STALE",
+                        "rows": None,
+                        "generation": dict(stale_generation),
+                        "generated_at": persisted.get("generated_at"),
+                        "generation_id": stale_generation_id,
+                        "expires_at": 0.0,
+                        "error": None,
+                    })
+                else:
+                    stale_generation_id = _data_sync_retain_inventory_generation(
+                        persisted["rows"],
+                        persisted.get("generated_at"),
+                        status="STALE",
+                    )
+                    _data_sync_async_inventory.update({
+                        "status": "STALE",
+                        "rows": [dict(row) for row in persisted["rows"]],
+                        "generation": None,
+                        "generated_at": persisted.get("generated_at"),
+                        "generation_id": stale_generation_id,
+                        "expires_at": 0.0,
+                        "error": None,
+                    })
+        has_current_generation = (
             _data_sync_async_inventory.get("status") == "CURRENT"
-            and isinstance(_data_sync_async_inventory.get("rows"), list)
-            and now < float(_data_sync_async_inventory.get("expires_at") or 0.0)
+            and (
+                isinstance(_data_sync_async_inventory.get("generation"), dict)
+                or isinstance(_data_sync_async_inventory.get("rows"), list)
+            )
         )
-        if current and not force_refresh:
+        current = has_current_generation and now < float(
+            _data_sync_async_inventory.get("expires_at") or 0.0
+        )
+        # A completed child result is an immutable point-in-time generation.
+        # Deliver it at least once even when the outer sync loop's pressure
+        # backoff is longer than the short ordinary cache TTL. Without this
+        # one-shot lease, a slow scan can finish after the inner retries stop,
+        # expire during the 30-minute backoff, and be replaced by another scan
+        # before any caller can consume it (permanent 503 livelock).
+        deliver_completed_generation = (
+            has_current_generation
+            and not bool(_data_sync_async_inventory.get("served_since_refresh"))
+        )
+        matching_completed_refresh = bool(
+            force_refresh
+            and refresh_nonce
+            and hmac.compare_digest(
+                str(_data_sync_async_inventory.get("completed_refresh_nonce") or ""),
+                str(refresh_nonce),
+            )
+        )
+        if (
+            (not force_refresh and (current or deliver_completed_generation))
+            or matching_completed_refresh
+        ):
+            _data_sync_async_inventory["served_since_refresh"] = True
             return {
                 "status": "CURRENT",
-                "rows": [dict(row) for row in _data_sync_async_inventory["rows"]],
+                "rows": (
+                    [dict(row) for row in _data_sync_async_inventory["rows"]]
+                    if isinstance(_data_sync_async_inventory.get("rows"), list)
+                    else []
+                ),
+                "generation": (
+                    dict(_data_sync_async_inventory["generation"])
+                    if isinstance(_data_sync_async_inventory.get("generation"), dict)
+                    else None
+                ),
                 "generated_at": _data_sync_async_inventory.get("generated_at"),
+                "generation_id": _data_sync_async_inventory.get("generation_id"),
+                "refresh_nonce": _data_sync_async_inventory.get("completed_refresh_nonce"),
+                "refreshing": False,
+                "refresh_started_at": _data_sync_async_inventory.get("refresh_started_at"),
+                "refresh_completed_at": _data_sync_async_inventory.get("refresh_completed_at"),
+                "last_failure_at": _data_sync_async_inventory.get("last_failure_at"),
                 "error": None,
             }
         if not _data_sync_async_inventory.get("refreshing"):
             _data_sync_async_inventory["refreshing"] = True
             _data_sync_async_inventory["status"] = "BUILDING"
+            _data_sync_async_inventory["active_refresh_nonce"] = (
+                str(refresh_nonce or "") or uuid.uuid4().hex
+            )
+            _data_sync_async_inventory["refresh_started_at"] = utc_iso()
             _data_sync_async_inventory["error"] = None
             start_worker = True
+        active_refresh_nonce = _data_sync_async_inventory.get("active_refresh_nonce")
+        stale_rows = _data_sync_async_inventory.get("rows")
+        stale_generation = _data_sync_async_inventory.get("generation")
         result = {
-            # Stale-while-revalidate is deliberately fail closed for sync
-            # commits: retain the last validated rows in memory for recovery,
-            # but withhold them from callers until the worker publishes a new
-            # CURRENT generation.  This keeps requests non-blocking without
-            # allowing a stale inventory to claim mirror parity.
+            # A prior complete generation remains visible while revalidation
+            # runs, but its non-CURRENT status and ack_eligible=false fence
+            # prevent it from authorizing parity, promotion, or cleanup.
             "status": (
                 "STALE_REVALIDATING"
-                if isinstance(_data_sync_async_inventory.get("rows"), list)
+                if isinstance(stale_rows, list) or isinstance(stale_generation, dict)
                 else "BUILDING"
             ),
-            "rows": [],
+            "rows": (
+                [dict(row) for row in stale_rows]
+                if isinstance(stale_rows, list) else []
+            ),
+            "generation": (
+                dict(stale_generation) if isinstance(stale_generation, dict) else None
+            ),
             "generated_at": _data_sync_async_inventory.get("generated_at"),
+            "generation_id": _data_sync_async_inventory.get("generation_id"),
+            "refresh_nonce": active_refresh_nonce,
+            "refreshing": True,
+            "refresh_started_at": _data_sync_async_inventory.get("refresh_started_at"),
+            "refresh_completed_at": _data_sync_async_inventory.get("refresh_completed_at"),
+            "last_failure_at": _data_sync_async_inventory.get("last_failure_at"),
+            "worker_phase": _data_sync_async_inventory.get("worker_phase"),
+            "worker_files_seen": _data_sync_async_inventory.get("worker_files_seen"),
+            "worker_dirs_seen": _data_sync_async_inventory.get("worker_dirs_seen"),
+            "worker_rows_discovered": _data_sync_async_inventory.get("worker_rows_discovered"),
+            "worker_resume_token": _data_sync_async_inventory.get("worker_resume_token"),
+            "retry_after_seconds": _data_sync_async_inventory.get("retry_after_seconds") or 2,
             "error": _data_sync_async_inventory.get("error"),
         }
     if start_worker:
         threading.Thread(
             target=_data_sync_inventory_refresh_worker,
+            args=(active_refresh_nonce,),
             name="data-sync-inventory-refresh",
             daemon=True,
         ).start()
@@ -38578,6 +39217,8 @@ def _data_sync_validated_inventory_index(
         generation = _data_sync_inventory_generations.get(digest)
         if not isinstance(generation, dict):
             return {}, generated_at, digest
+        if generation.get("ack_eligible") is not True:
+            return {}, generated_at, digest
         if not hmac.compare_digest(
             str(generation.get("generated_at") or ""), generated_at
         ):
@@ -38611,7 +39252,7 @@ def _data_sync_validate_ack_rows(received: list, inventory: dict) -> tuple[dict,
         "DUPLICATE_PATH": 0,
     }
     seen = set()
-    for row in received[:5000]:
+    for row in received:
         if not isinstance(row, dict):
             rejected["INVALID_ROW"] += 1
             continue
@@ -39017,13 +39658,43 @@ def api_data_sync_manifest():
     identity_only = _data_sync_manifest_identity_only(request.args)
     force_refresh = _data_sync_manifest_force_refresh(request.args)
     targeted_path = str(request.args.get("path") or "").strip()
+    refresh_nonce = str(request.args.get("nonce") or "").strip().lower()
+    requested_generation_id = str(
+        request.args.get("generation_id") or ""
+    ).strip().lower()
+    raw_cursor = str(request.args.get("cursor") or "").strip()
+    if refresh_nonce and not re.fullmatch(r"[0-9a-f]{32}", refresh_nonce):
+        return jsonify({
+            "error": "manifest refresh nonce is invalid",
+            "inventory_status": "INVALID_REQUEST",
+        }), 400
+    if requested_generation_id and not re.fullmatch(
+        r"[0-9a-f]{64}", requested_generation_id
+    ):
+        return jsonify({
+            "error": "manifest generation identity is invalid",
+            "inventory_status": "INVALID_REQUEST",
+        }), 400
     # Identity-only fences intentionally skip the physical inventory. File
     # correctness remains protected by the initial full manifest plus the
     # per-file before/after generation checks in /api/data-sync/file.
     if identity_only:
+        retained_generation = (
+            _data_sync_inventory_generation(requested_generation_id)
+            if requested_generation_id else None
+        )
         inventory_state = {
             "status": "IDENTITY_ONLY", "rows": [], "generated_at": None,
-            "error": None,
+            "generation_id": requested_generation_id or None,
+            "generation_available": (
+                retained_generation is not None if requested_generation_id else None
+            ),
+            "refreshing": bool(_data_sync_async_inventory.get("refreshing")),
+            "refresh_nonce": _data_sync_async_inventory.get("active_refresh_nonce"),
+            "refresh_started_at": _data_sync_async_inventory.get("refresh_started_at"),
+            "refresh_completed_at": _data_sync_async_inventory.get("refresh_completed_at"),
+            "last_failure_at": _data_sync_async_inventory.get("last_failure_at"),
+            "error": _data_sync_async_inventory.get("error"),
         }
     elif targeted_path:
         try:
@@ -39031,22 +39702,117 @@ def api_data_sync_manifest():
                 "status": "CURRENT",
                 "rows": _data_sync_targeted_inventory(targeted_path),
                 "generated_at": utc_iso(),
+                "generation_id": None,
+                "generation_available": None,
+                "refreshing": False,
+                "refresh_nonce": None,
+                "refresh_started_at": None,
+                "refresh_completed_at": None,
+                "last_failure_at": None,
                 "error": None,
             }
         except (OSError, TypeError, ValueError) as exc:
             return jsonify({"error": str(exc), "inventory_status": "INVALID_PATH"}), 400
+    elif requested_generation_id:
+        retained_generation = _data_sync_inventory_generation(
+            requested_generation_id
+        )
+        if retained_generation is None:
+            return jsonify({
+                "schema": "fly_runtime_incremental_sync_v1",
+                "error": "manifest generation is unavailable or expired",
+                "inventory_status": "GENERATION_UNAVAILABLE",
+                "inventory_generation_id": requested_generation_id,
+                "retry_after_seconds": 0,
+            }), 410
+        inventory_state = {
+            "status": str(retained_generation.get("status") or "STALE"),
+            "rows": retained_generation.get("rows") or [],
+            "generation": (
+                retained_generation
+                if retained_generation.get("storage") == "disk_pages_v2" else None
+            ),
+            "generated_at": retained_generation.get("generated_at"),
+            "generation_id": requested_generation_id,
+            "generation_available": True,
+            "refreshing": bool(_data_sync_async_inventory.get("refreshing")),
+            "refresh_nonce": retained_generation.get("refresh_nonce"),
+            "refresh_started_at": _data_sync_async_inventory.get("refresh_started_at"),
+            "refresh_completed_at": _data_sync_async_inventory.get("refresh_completed_at"),
+            "last_failure_at": _data_sync_async_inventory.get("last_failure_at"),
+            "error": None,
+        }
     else:
         inventory_state = _data_sync_request_async_inventory(
-            force_refresh=force_refresh
+            force_refresh=force_refresh,
+            refresh_nonce=refresh_nonce or None,
         )
-    files = inventory_state["rows"]
+    all_files = inventory_state.get("rows") or []
+    disk_generation = inventory_state.get("generation")
     inventory_status = inventory_state["status"]
-    inventory_sha256 = (
-        _data_sync_retain_inventory_generation(
-            files, inventory_state.get("generated_at")
+    inventory_generation_id = inventory_state.get("generation_id")
+    if isinstance(disk_generation, dict):
+        inventory_generation_id = str(disk_generation.get("generation_id") or "")
+    elif all_files and not targeted_path and not identity_only:
+        retained_status = (
+            "CURRENT" if inventory_status == "CURRENT" else "STALE"
         )
-        if inventory_status == "CURRENT" and not targeted_path else None
+        inventory_generation_id = _data_sync_retain_inventory_generation(
+            all_files,
+            inventory_state.get("generated_at"),
+            status=retained_status,
+            refresh_nonce=inventory_state.get("refresh_nonce"),
+        )
+    inventory_sha256 = (
+        inventory_generation_id if inventory_status == "CURRENT" else None
     )
+    page = {
+        "rows": all_files,
+        "page_index": 0,
+        "page_count": 1,
+        "page_size": len(all_files),
+        "page_file_count": len(all_files),
+        "page_total_bytes": sum(int(row.get("size") or 0) for row in all_files),
+        "page_cursor": None,
+        "next_cursor": None,
+        "is_last_page": True,
+        "page_sha256": (
+            _data_sync_inventory_rows_sha256(all_files) if all_files else None
+        ),
+    }
+    if isinstance(disk_generation, dict) and not targeted_path and not identity_only:
+        requested_page_size = request.args.get("page_size")
+        try:
+            if (
+                requested_page_size is not None
+                and int(requested_page_size) != int(disk_generation["page_size"])
+            ):
+                raise ValueError("manifest page_size does not match immutable generation")
+            page = _data_sync_disk_manifest_page(
+                disk_generation,
+                raw_cursor=raw_cursor,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            return jsonify({
+                "error": str(exc),
+                "inventory_status": "INVALID_CURSOR",
+                "inventory_generation_id": inventory_generation_id,
+            }), 400
+    elif inventory_generation_id and not targeted_path and not identity_only:
+        try:
+            page = _data_sync_manifest_page(
+                all_files,
+                inventory_generation_id,
+                raw_cursor=raw_cursor,
+                raw_page_size=request.args.get("page_size"),
+            )
+        except ValueError as exc:
+            return jsonify({
+                "error": str(exc),
+                "inventory_status": "INVALID_CURSOR",
+                "inventory_generation_id": inventory_generation_id,
+            }), 400
+    files = page["rows"]
     # disk_usage is an O(1) filesystem statistic. Expose it on identity-only
     # polls so the desktop can detect meaningful growth without forcing a
     # recursive manifest walk every three minutes.
@@ -39089,13 +39855,51 @@ def api_data_sync_manifest():
         "inventory_status": inventory_status,
         "inventory_generated_at": inventory_state.get("generated_at"),
         "inventory_sha256": inventory_sha256,
+        "inventory_generation_id": inventory_generation_id,
+        "inventory_generation_available": inventory_state.get(
+            "generation_available"
+        ),
+        "inventory_authoritative": inventory_status == "CURRENT",
         "inventory_error": inventory_state.get("error"),
+        "inventory_build_status": (
+            "BUILDING" if inventory_state.get("refreshing")
+            else "FAILED" if inventory_state.get("error")
+            else "IDLE"
+        ),
+        "inventory_refresh_nonce": inventory_state.get("refresh_nonce"),
+        "inventory_refresh_started_at": inventory_state.get("refresh_started_at"),
+        "inventory_refresh_completed_at": inventory_state.get("refresh_completed_at"),
+        "inventory_last_failure_at": inventory_state.get("last_failure_at"),
+        "retry_after_seconds": (
+            int(inventory_state.get("retry_after_seconds") or 2)
+            if inventory_state.get("refreshing") else 0
+        ),
         "files": files,
         "sqlite_snapshots_materialized": False,
         "optional_files": _data_sync_optional_file_audit(),
-        "file_count": len(files),
-        "total_bytes": sum(row["size"] for row in files),
-        "acknowledged_files": len(ack),
+        "file_count": (
+            int(disk_generation["file_count"])
+            if isinstance(disk_generation, dict) else len(all_files)
+        ),
+        "total_bytes": (
+            int(disk_generation["total_bytes"])
+            if isinstance(disk_generation, dict)
+            else sum(row["size"] for row in all_files)
+        ),
+        "manifest_page_index": page["page_index"],
+        "manifest_page_count": page["page_count"],
+        "manifest_page_size": page["page_size"],
+        "manifest_page_file_count": page["page_file_count"],
+        "manifest_page_total_bytes": page["page_total_bytes"],
+        "manifest_page_cursor": page["page_cursor"],
+        "manifest_next_cursor": page["next_cursor"],
+        "manifest_is_last_page": page["is_last_page"],
+        "manifest_page_sha256": page["page_sha256"],
+        "acknowledged_files": (
+            int(ack.get("file_count") or 0)
+            if ack.get("schema") == "fly_runtime_incremental_generation_ack_v3"
+            else len(ack)
+        ),
         # Explicit persisted identity only: never derive a replacement epoch
         # inside the sync endpoint when research_session.json is unbound.
         "collection_epoch_id": collection_epoch_id or None,
@@ -39111,8 +39915,18 @@ def api_data_sync_manifest():
             "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
         },
         "lifecycle_pipeline_runtime": _lifecycle_pipeline_runtime_status(),
+        "inventory_worker": {
+            "owner": "data-sync-inventory-refresh",
+            "single_flight": True,
+            "refreshing": bool(inventory_state.get("refreshing")),
+            "phase": inventory_state.get("worker_phase"),
+            "files_seen": inventory_state.get("worker_files_seen"),
+            "dirs_seen": inventory_state.get("worker_dirs_seen"),
+            "rows_discovered": inventory_state.get("worker_rows_discovered"),
+            "resume_token": inventory_state.get("worker_resume_token"),
+        },
     }
-    if inventory_status in {"BUILDING", "STALE", "STALE_REVALIDATING"}:
+    if inventory_status == "BUILDING" and not files:
         response = jsonify(payload)
         response.headers["Retry-After"] = "2"
         return response, 503
@@ -39247,9 +40061,237 @@ def api_data_sync_file():
         return jsonify({"error": str(exc)}), 400
 
 
+def _data_sync_ack_v3_identity_matches(body: dict) -> tuple[bool, str | None]:
+    session = _load_research_session_meta() or {}
+    expected_identity = {
+        "source_git_rev": _runtime_git_rev(),
+        "collection_epoch_id": str(session.get("collector_v22_epoch_id") or ""),
+        "tile_registry_signature": active_tile_registry_signature(),
+    }
+    for key, expected in expected_identity.items():
+        supplied = str(body.get(key) or "")
+        if not expected or not supplied or not hmac.compare_digest(supplied, expected):
+            return False, key
+    return True, None
+
+
+def _data_sync_ack_v3_stage_root(
+    generation_id: str, session_id: str
+) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+        raise ValueError("invalid acknowledgement generation")
+    if not re.fullmatch(r"[0-9a-f]{32}", session_id):
+        raise ValueError("invalid acknowledgement session")
+    root = (
+        _data_sync_inventory_work_root()
+        / "inventory-acks" / generation_id / session_id
+    ).resolve()
+    root.relative_to(_data_sync_inventory_work_root().resolve())
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _data_sync_ack_v3(body: dict):
+    operation = str(body.get("operation") or "").strip().upper()
+    generation_id = str(body.get("inventory_generation_id") or "").strip().lower()
+    session_id = str(body.get("ack_session_id") or "").strip().lower()
+    generation = _data_sync_inventory_generation(generation_id)
+    if (
+        not isinstance(generation, dict)
+        or generation.get("storage") != "disk_pages_v2"
+        or generation.get("ack_eligible") is not True
+    ):
+        return jsonify({
+            "error": "validated disk inventory generation is unavailable",
+            "accepted": 0,
+            "rejected_count": len(body.get("files") or []),
+            "inventory_status": "UNAVAILABLE",
+        }), 503
+    identity_ok, identity_key = _data_sync_ack_v3_identity_matches(body)
+    if not identity_ok:
+        return jsonify({
+            "error": f"acknowledgement identity mismatch: {identity_key}",
+            "accepted": 0,
+            "rejected_count": len(body.get("files") or []),
+            "inventory_status": "IDENTITY_MISMATCH",
+        }), 409
+    try:
+        supplied_file_count = int(body.get("inventory_file_count"))
+        supplied_page_count = int(body.get("manifest_page_count"))
+    except (TypeError, ValueError):
+        supplied_file_count = -1
+        supplied_page_count = -1
+    if (
+        str(body.get("inventory_sha256") or "").lower() != generation_id
+        or str(body.get("inventory_generated_at") or "")
+        != str(generation.get("generated_at") or "")
+        or supplied_file_count != int(generation["file_count"])
+        or supplied_page_count != int(generation["page_count"])
+        or body.get("manifest_pages_complete") is not True
+    ):
+        return jsonify({
+            "error": "acknowledgement generation metadata mismatch",
+            "accepted": 0,
+            "rejected_count": len(body.get("files") or []),
+            "inventory_status": "INCOMPLETE_MANIFEST",
+        }), 409
+    try:
+        stage_root = _data_sync_ack_v3_stage_root(generation_id, session_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "accepted": 0, "rejected_count": 0}), 400
+    if operation == "STAGE_PAGE":
+        try:
+            page_index = int(body.get("page_index"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid acknowledgement page index"}), 400
+        if page_index < 0 or page_index >= int(generation["page_count"]):
+            return jsonify({"error": "acknowledgement page is outside generation"}), 400
+        try:
+            descriptor = _data_sync_disk_page_descriptor(generation, page_index)
+        except (OSError, TypeError, ValueError):
+            return jsonify({"error": "acknowledgement page descriptor is unavailable"}), 409
+        if not hmac.compare_digest(
+            str(body.get("page_sha256") or "").lower(),
+            str(descriptor.get("page_sha256") or "").lower(),
+        ):
+            return jsonify({"error": "acknowledgement page hash mismatch"}), 409
+        try:
+            expected_page = _data_sync_disk_manifest_page(
+                generation,
+                raw_cursor=(
+                    "" if page_index == 0
+                    else _data_sync_manifest_cursor(generation_id, page_index)
+                ),
+            )
+        except (OSError, TypeError, ValueError):
+            return jsonify({"error": "acknowledgement page validation failed"}), 409
+        received = body.get("files") or []
+        if not isinstance(received, list) or len(received) > int(generation["page_size"]):
+            return jsonify({"error": "acknowledgement page rows are invalid"}), 400
+        expected = {str(row["path"]): dict(row) for row in expected_page["rows"]}
+        for path, row in expected.items():
+            served = _data_sync_disk_served_identity(generation_id, path)
+            if served is not None:
+                row["_served_ack_generations"] = [served]
+        if (
+            len(received) != len(expected)
+            or {str(row.get("path") or "") for row in received if isinstance(row, dict)}
+            != set(expected)
+        ):
+            return jsonify({
+                "error": "acknowledgement page does not cover its manifest page",
+                "accepted": 0,
+                "rejected_count": len(received),
+            }), 409
+        accepted, rejected_by_reason = _data_sync_validate_ack_rows(received, expected)
+        rejected = sum(rejected_by_reason.values())
+        if len(accepted) != len(expected) or rejected:
+            return jsonify({
+                "error": "acknowledgement page contains generation mismatches",
+                "accepted": 0,
+                "rejected_count": len(received),
+                "rejected_by_reason": rejected_by_reason,
+            }), 409
+        receipt = {
+            "schema": "fly_runtime_incremental_ack_page_v3",
+            "inventory_generation_id": generation_id,
+            "ack_session_id": session_id,
+            "page_index": page_index,
+            "page_sha256": str(descriptor["page_sha256"]),
+            "accepted": len(accepted),
+            "ack_rows_sha256": _data_sync_inventory_rows_sha256(received),
+        }
+        target = stage_root / f"page-{page_index:08d}.json"
+        if target.exists():
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            if existing != receipt:
+                return jsonify({"error": "conflicting acknowledgement page"}), 409
+        else:
+            temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(
+                    json.dumps(receipt, separators=(",", ":"), sort_keys=True),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return jsonify({
+            "ok": True,
+            "operation": "STAGE_PAGE",
+            "inventory_generation_id": generation_id,
+            "ack_session_id": session_id,
+            "page_index": page_index,
+            "accepted": len(accepted),
+            "rejected_count": 0,
+        })
+    if operation != "FINALIZE":
+        return jsonify({"error": "unsupported acknowledgement operation"}), 400
+    accepted_total = 0
+    for page_index in range(int(generation["page_count"])):
+        target = stage_root / f"page-{page_index:08d}.json"
+        try:
+            receipt = json.loads(target.read_text(encoding="utf-8"))
+            descriptor = _data_sync_disk_page_descriptor(generation, page_index)
+            if (
+                receipt.get("schema") != "fly_runtime_incremental_ack_page_v3"
+                or receipt.get("inventory_generation_id") != generation_id
+                or receipt.get("ack_session_id") != session_id
+                or int(receipt.get("page_index", -1)) != page_index
+                or receipt.get("page_sha256") != descriptor.get("page_sha256")
+                or int(receipt.get("accepted") or -1) != int(descriptor["file_count"])
+            ):
+                raise ValueError("receipt mismatch")
+            accepted_total += int(receipt["accepted"])
+        except (OSError, TypeError, ValueError):
+            return jsonify({
+                "error": "acknowledgement page set is incomplete",
+                "accepted": 0,
+                "rejected_count": int(generation["file_count"]),
+                "missing_page_index": page_index,
+                "inventory_status": "INCOMPLETE_MANIFEST",
+            }), 409
+    if accepted_total != int(generation["file_count"]):
+        return jsonify({
+            "error": "acknowledgement page totals are incomplete",
+            "accepted": 0,
+            "rejected_count": int(generation["file_count"]),
+        }), 409
+    acknowledged_at = utc_iso()
+    compact_ack = {
+        "schema": "fly_runtime_incremental_generation_ack_v3",
+        "inventory_generation_id": generation_id,
+        "inventory_sha256": generation_id,
+        "inventory_generated_at": generation.get("generated_at"),
+        "file_count": int(generation["file_count"]),
+        "page_count": int(generation["page_count"]),
+        "ack_session_id": session_id,
+        "acknowledged_at": acknowledged_at,
+        "source_cleanup_authorized": False,
+    }
+    with _data_sync_ack_lock:
+        _write_data_sync_ack(compact_ack)
+    return jsonify({
+        "ok": True,
+        "operation": "FINALIZE",
+        "accepted": accepted_total,
+        "rejected_count": 0,
+        "inventory_status": "VALIDATED",
+        "inventory_generated_at": generation.get("generated_at"),
+        "inventory_sha256": generation_id,
+        "inventory_generation_id": generation_id,
+        "inventory_file_count": int(generation["file_count"]),
+        "manifest_page_count": int(generation["page_count"]),
+        "manifest_pages_complete": True,
+        "cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED",
+    })
+
+
 @app.route('/api/data-sync/ack', methods=['POST'])
 def api_data_sync_ack():
     body = request.get_json(silent=True) or {}
+    if body.get("schema") == "fly_runtime_incremental_ack_v3":
+        return _data_sync_ack_v3(body)
     if (
         body.get("schema") != "fly_runtime_incremental_ack_v2"
         or body.get("defer_retention") is not True
@@ -39263,8 +40305,32 @@ def api_data_sync_ack():
     received = body.get("files") or []
     if not isinstance(received, list):
         return jsonify({"error": "files must be a list"}), 400
+    if len(received) > _DATA_SYNC_ACK_FILE_MAX:
+        return jsonify({
+            "error": "acknowledgement file count exceeds the bounded limit",
+            "accepted": 0,
+            "rejected_count": len(received),
+            "inventory_status": "ACK_TOO_LARGE",
+            "max_files": _DATA_SYNC_ACK_FILE_MAX,
+        }), 413
     requested_inventory_sha256 = str(body.get("inventory_sha256") or "")
     requested_inventory_generated_at = str(body.get("inventory_generated_at") or "")
+    requested_generation_id = str(
+        body.get("inventory_generation_id") or ""
+    ).strip().lower()
+    if (
+        not hmac.compare_digest(
+            requested_generation_id,
+            requested_inventory_sha256.strip().lower(),
+        )
+        or body.get("manifest_pages_complete") is not True
+    ):
+        return jsonify({
+            "error": "acknowledgement is not bound to a complete manifest generation",
+            "accepted": 0,
+            "rejected_count": len(received),
+            "inventory_status": "INCOMPLETE_MANIFEST",
+        }), 409
     inventory, inventory_generated_at, inventory_sha256 = (
         _data_sync_validated_inventory_index(
             requested_inventory_sha256, requested_inventory_generated_at
@@ -39274,9 +40340,35 @@ def api_data_sync_ack():
         return jsonify({
             "error": "validated inventory is unavailable",
             "accepted": 0,
-            "rejected_count": min(len(received), 5000),
+            "rejected_count": len(received),
             "inventory_status": "UNAVAILABLE",
         }), 503
+    try:
+        supplied_file_count = int(body.get("inventory_file_count"))
+        supplied_page_count = int(body.get("manifest_page_count"))
+    except (TypeError, ValueError):
+        supplied_file_count = -1
+        supplied_page_count = -1
+    inventory_paths = set(inventory)
+    received_paths = {
+        str(row.get("path") or "")
+        for row in received if isinstance(row, dict)
+    }
+    if (
+        supplied_file_count != len(inventory)
+        or supplied_page_count < 1
+        or len(received) != len(inventory)
+        or len(received_paths) != len(inventory)
+        or received_paths != inventory_paths
+    ):
+        return jsonify({
+            "error": "acknowledgement does not cover the complete manifest generation",
+            "accepted": 0,
+            "rejected_count": len(received),
+            "inventory_status": "INCOMPLETE_MANIFEST",
+            "expected_file_count": len(inventory),
+            "received_file_count": len(received),
+        }), 409
     session = _load_research_session_meta() or {}
     expected_identity = {
         "source_git_rev": _runtime_git_rev(),
@@ -39289,7 +40381,7 @@ def api_data_sync_ack():
             return jsonify({
                 "error": f"acknowledgement identity mismatch: {key}",
                 "accepted": 0,
-                "rejected_count": min(len(received), 5000),
+                "rejected_count": len(received),
                 "inventory_status": "IDENTITY_MISMATCH",
             }), 409
     accepted_rows, rejected_by_reason = _data_sync_validate_ack_rows(
@@ -39311,7 +40403,7 @@ def api_data_sync_ack():
         volume_used_pct = round((usage.used / usage.total) * 100, 2) if usage.total else None
     except OSError:
         volume_used_pct = None
-    rejected = sum(rejected_by_reason.values()) + max(0, len(received) - 5000)
+    rejected = sum(rejected_by_reason.values())
     # File-level ACKs prove transfer/parity only. They do not prove lifecycle
     # closure or the laptop canonical+archive+index copies, so they must never
     # schedule source cleanup.
@@ -39323,11 +40415,15 @@ def api_data_sync_ack():
         "rejected_count": rejected,
         "rejected_by_reason": {
             **rejected_by_reason,
-            "OVER_BATCH_LIMIT": max(0, len(received) - 5000),
+            "OVER_BATCH_LIMIT": 0,
         },
         "inventory_status": "VALIDATED",
         "inventory_generated_at": inventory_generated_at,
         "inventory_sha256": inventory_sha256,
+        "inventory_generation_id": inventory_sha256,
+        "inventory_file_count": len(inventory),
+        "manifest_page_count": supplied_page_count,
+        "manifest_pages_complete": True,
         "removed_acknowledged_rotations": [],
         "cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED",
         "volume_used_pct": volume_used_pct,

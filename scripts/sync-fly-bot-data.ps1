@@ -51,6 +51,7 @@ $manifestTimeoutSec = 90
 # runtime's bounded worker queue to drain without weakening generation checks.
 $chunkTimeoutSec = 240
 $ackTimeoutSec = 60
+$manifestPageSize = 250
 $downloadClient = [System.Net.Http.HttpClient]::new()
 $downloadClient.Timeout = [TimeSpan]::FromSeconds($chunkTimeoutSec)
 $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
@@ -112,7 +113,11 @@ function Invoke-DataSyncJsonRequest {
 function New-DataSyncManifestUri {
   param(
     [switch]$IdentityOnly,
-    [string]$Path = ""
+    [string]$Path = "",
+    [string]$RefreshNonce = "",
+    [string]$GenerationId = "",
+    [string]$Cursor = "",
+    [int]$PageSize = $manifestPageSize
   )
   # Initial generation refreshes request a fresh full inventory. A hot file is
   # refreshed by exact path, while the final fence compares authority
@@ -121,10 +126,147 @@ function New-DataSyncManifestUri {
   $pathQuery = if ($Path) {
     "&path=" + [uri]::EscapeDataString($Path)
   } else { "" }
+  $generationQuery = if ($GenerationId) {
+    "&generation_id=" + [uri]::EscapeDataString($GenerationId)
+  } else { "" }
+  $cursorQuery = if ($Cursor) {
+    "&cursor=" + [uri]::EscapeDataString($Cursor)
+  } else { "" }
+  $pageQuery = if ($GenerationId -or (-not $IdentityOnly -and -not $Path)) {
+    "&page_size=$PageSize"
+  } else { "" }
+  if ($GenerationId -and -not $IdentityOnly) {
+    return "$base/api/data-sync/manifest?paged=1$generationQuery$cursorQuery$pageQuery"
+  }
+  if (-not $RefreshNonce) { $RefreshNonce = [guid]::NewGuid().ToString("N") }
   return (
-    "$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery&nonce=" +
-    [uri]::EscapeDataString([guid]::NewGuid().ToString("N"))
+    "$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery$generationQuery$pageQuery&nonce=" +
+    [uri]::EscapeDataString($RefreshNonce)
   )
+}
+
+function Get-CompleteDataSyncManifest {
+  param(
+    [Parameter(Mandatory = $true)]$FirstPage
+  )
+  if ([string]$FirstPage.schema -ne "fly_runtime_incremental_sync_v1") {
+    throw "Unexpected Fly sync manifest schema."
+  }
+  if ([string]$FirstPage.inventory_status -ne "CURRENT") {
+    throw (
+      "Fly sync manifest inventory is not CURRENT " +
+      "(status=$([string]$FirstPage.inventory_status) " +
+      "build=$([string]$FirstPage.inventory_build_status) " +
+      "error=$([string]$FirstPage.inventory_error))."
+    )
+  }
+  $generationId = [string]$FirstPage.inventory_generation_id
+  $inventorySha256 = [string]$FirstPage.inventory_sha256
+  $inventoryGeneratedAt = [string]$FirstPage.inventory_generated_at
+  if (
+    $generationId -notmatch '^[0-9a-f]{64}$' -or
+    $inventorySha256 -notmatch '^[0-9a-f]{64}$' -or
+    $generationId -cne $inventorySha256 -or
+    -not $inventoryGeneratedAt
+  ) {
+    throw "Fly manifest is missing its validated immutable generation identity."
+  }
+
+  $expectedFileCount = [int64]$FirstPage.file_count
+  $expectedTotalBytes = [int64]$FirstPage.total_bytes
+  $expectedPageCount = [int]$FirstPage.manifest_page_count
+  if ($expectedFileCount -lt 0 -or $expectedTotalBytes -lt 0 -or $expectedPageCount -lt 1) {
+    throw "Fly manifest generation totals are invalid."
+  }
+  $rows = [System.Collections.Generic.List[object]]::new()
+  $pageReceipts = [System.Collections.Generic.List[object]]::new()
+  $paths = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::Ordinal
+  )
+  $cursors = [System.Collections.Generic.HashSet[string]]::new(
+    [System.StringComparer]::Ordinal
+  )
+  $page = $FirstPage
+  $expectedIndex = 0
+  $expectedCursor = ""
+  while ($true) {
+    if (
+      [string]$page.schema -ne "fly_runtime_incremental_sync_v1" -or
+      [string]$page.inventory_status -ne "CURRENT" -or
+      [string]$page.inventory_generation_id -cne $generationId -or
+      [string]$page.inventory_sha256 -cne $inventorySha256 -or
+      [string]$page.inventory_generated_at -cne $inventoryGeneratedAt -or
+      [int64]$page.file_count -ne $expectedFileCount -or
+      [int64]$page.total_bytes -ne $expectedTotalBytes -or
+      [int]$page.manifest_page_count -ne $expectedPageCount -or
+      [int]$page.manifest_page_index -ne $expectedIndex -or
+      [string]$page.manifest_page_cursor -cne $expectedCursor -or
+      [string]$page.manifest_page_sha256 -notmatch '^[0-9a-f]{64}$'
+    ) {
+      throw "Fly manifest page identity or sequence changed during aggregation."
+    }
+    $pageRows = @($page.files)
+    if ([int]$page.manifest_page_file_count -ne $pageRows.Count) {
+      throw "Fly manifest page file count does not match its rows."
+    }
+    $pageBytes = [int64]0
+    foreach ($row in $pageRows) {
+      $path = [string]$row.path
+      if (-not $path -or -not $paths.Add($path)) {
+        throw "Fly manifest contains a duplicate or empty path across pages."
+      }
+      $pageBytes += [int64]$row.size
+      $rows.Add($row)
+    }
+    if ($pageBytes -ne [int64]$page.manifest_page_total_bytes) {
+      throw "Fly manifest page byte total does not match its rows."
+    }
+    $pageReceipts.Add([pscustomobject]@{
+      page_index = $expectedIndex
+      page_sha256 = [string]$page.manifest_page_sha256
+      file_count = $pageRows.Count
+      paths = @($pageRows | ForEach-Object { [string]$_.path })
+    })
+
+    $nextCursor = [string]$page.manifest_next_cursor
+    $isLastPage = [bool]$page.manifest_is_last_page
+    if ($isLastPage) {
+      if ($nextCursor) { throw "Fly manifest final page unexpectedly has a cursor." }
+      break
+    }
+    if (-not $nextCursor -or -not $cursors.Add($nextCursor)) {
+      throw "Fly manifest next cursor is missing or duplicated."
+    }
+    $expectedIndex += 1
+    if ($expectedIndex -ge $expectedPageCount) {
+      throw "Fly manifest emitted more pages than declared."
+    }
+    $expectedCursor = $nextCursor
+    $page = Invoke-DataSyncJsonRequest `
+      -Stage "manifest_page_$expectedIndex" `
+      -Uri (New-DataSyncManifestUri `
+        -GenerationId $generationId `
+        -Cursor $nextCursor `
+        -PageSize $manifestPageSize) `
+      -TimeoutSec $manifestTimeoutSec
+  }
+  if (
+    ($expectedIndex + 1) -ne $expectedPageCount -or
+    [int64]$rows.Count -ne $expectedFileCount -or
+    [int64](($rows | Measure-Object -Property size -Sum).Sum) -ne $expectedTotalBytes
+  ) {
+    throw "Fly manifest aggregation is incomplete."
+  }
+
+  $complete = [ordered]@{}
+  foreach ($property in $FirstPage.PSObject.Properties) {
+    $complete[$property.Name] = $property.Value
+  }
+  $complete.files = @($rows)
+  $complete.manifest_pages_complete = $true
+  $complete.manifest_pages_aggregated = $expectedPageCount
+  $complete.manifest_page_receipts = @($pageReceipts)
+  return [pscustomobject]$complete
 }
 
 function Get-DataSyncManifestIdentityValue {
@@ -177,6 +319,16 @@ function Assert-DataSyncManifestIdentity {
     }
     if (-not $matches) {
       throw "Fly sync final identity fence mismatch for $($field.Label)."
+    }
+  }
+  $generationId = [string]$Initial.inventory_generation_id
+  if ($generationId) {
+    if (
+      $generationId -notmatch '^[0-9a-f]{64}$' -or
+      [string]$Final.inventory_generation_id -cne $generationId -or
+      $Final.inventory_generation_available -ne $true
+    ) {
+      throw "Fly sync final identity fence lost the immutable inventory generation."
     }
   }
 }
@@ -345,23 +497,24 @@ function Set-SqliteSnapshotLease {
 # the final authenticated acknowledgement remain authoritative for atomicity.
 $manifest = $InitialManifest
 if ($null -eq $manifest) {
+  $manifestRefreshNonce = [guid]::NewGuid().ToString("N")
   $manifest = Invoke-DataSyncJsonRequest `
     -Stage "manifest_initial" `
-    -Uri "$base/api/data-sync/manifest" `
+    -Uri (New-DataSyncManifestUri `
+      -RefreshNonce $manifestRefreshNonce `
+      -PageSize $manifestPageSize) `
     -TimeoutSec $manifestTimeoutSec
 }
-if ($manifest.schema -ne "fly_runtime_incremental_sync_v1") {
-  throw "Unexpected Fly sync manifest schema."
-}
-if ([string]$manifest.inventory_status -ne "CURRENT") {
-  throw (
-    "Fly sync manifest inventory is not CURRENT " +
-    "(status=$([string]$manifest.inventory_status))."
-  )
-}
+$manifest = Get-CompleteDataSyncManifest -FirstPage $manifest
 $inventorySha256 = [string]$manifest.inventory_sha256
+$inventoryGenerationId = [string]$manifest.inventory_generation_id
 $inventoryGeneratedAt = [string]$manifest.inventory_generated_at
-if ($inventorySha256 -notmatch '^[0-9a-f]{64}$' -or -not $inventoryGeneratedAt) {
+if (
+  $inventorySha256 -notmatch '^[0-9a-f]{64}$' -or
+  $inventoryGenerationId -cne $inventorySha256 -or
+  -not $inventoryGeneratedAt -or
+  $manifest.manifest_pages_complete -ne $true
+) {
   throw "Fly manifest is missing its validated inventory generation identity."
 }
 
@@ -894,35 +1047,85 @@ $downloadClient.Dispose()
 # configuration, Fresh Collection, and any explicit epoch must remain exact.
 $finalManifest = Invoke-DataSyncJsonRequest `
   -Stage "manifest_final_identity" `
-  -Uri (New-DataSyncManifestUri -IdentityOnly) `
+  -Uri (New-DataSyncManifestUri `
+    -IdentityOnly `
+    -GenerationId $inventoryGenerationId) `
   -TimeoutSec $manifestTimeoutSec
 Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest
 
-$ackBody = [ordered]@{
-  schema = "fly_runtime_incremental_ack_v2"
-  # Retention is deliberately outside the parity-critical request. Running a
-  # volume prune before returning the acknowledgement can exceed the bounded
-  # client deadline on a shared-CPU Fly machine even though every downloaded
-  # file has already passed its generation and checksum fences.
-  defer_retention = $true
+$ackSessionId = [guid]::NewGuid().ToString("N")
+$ackByPath = [System.Collections.Generic.Dictionary[string, object]]::new(
+  [System.StringComparer]::Ordinal
+)
+foreach ($ackRow in @($ackRows)) {
+  $ackPath = [string]$ackRow.path
+  if (-not $ackPath -or $ackByPath.ContainsKey($ackPath)) {
+    throw "Downloaded acknowledgement rows contain a duplicate or empty path."
+  }
+  $ackByPath.Add($ackPath, $ackRow)
+}
+if ($ackByPath.Count -ne [int]$manifest.file_count) {
+  throw (
+    "Downloaded acknowledgement set does not cover the complete manifest " +
+    "(expected=$([int]$manifest.file_count) actual=$($ackByPath.Count))."
+  )
+}
+$ackCommon = [ordered]@{
+  schema = "fly_runtime_incremental_ack_v3"
   inventory_sha256 = $inventorySha256
+  inventory_generation_id = $inventoryGenerationId
   inventory_generated_at = $inventoryGeneratedAt
+  inventory_file_count = [int]$manifest.file_count
+  manifest_page_count = [int]$manifest.manifest_page_count
+  manifest_pages_complete = $true
+  ack_session_id = $ackSessionId
   source_git_rev = [string]$manifest.source_git_rev
   collection_epoch_id = [string]$manifest.collection_epoch_id
   tile_registry_signature = [string]$manifest.tile_registry_signature
-  files = @($ackRows)
-} | ConvertTo-Json -Depth 5
+}
+foreach ($pageReceipt in @($manifest.manifest_page_receipts)) {
+  $pageAckRows = [System.Collections.Generic.List[object]]::new()
+  foreach ($ackPath in @($pageReceipt.paths)) {
+    if (-not $ackByPath.ContainsKey([string]$ackPath)) {
+      throw "Downloaded acknowledgement set is missing manifest path $ackPath."
+    }
+    $pageAckRows.Add($ackByPath[[string]$ackPath])
+  }
+  $stagePayload = [ordered]@{}
+  foreach ($key in $ackCommon.Keys) { $stagePayload[$key] = $ackCommon[$key] }
+  $stagePayload.operation = "STAGE_PAGE"
+  $stagePayload.page_index = [int]$pageReceipt.page_index
+  $stagePayload.page_sha256 = [string]$pageReceipt.page_sha256
+  $stagePayload.files = @($pageAckRows)
+  $stageAck = Invoke-DataSyncJsonRequest `
+    -Stage "acknowledgement_page_$([int]$pageReceipt.page_index)" `
+    -Uri "$base/api/data-sync/ack" `
+    -Method Post `
+    -Body ($stagePayload | ConvertTo-Json -Depth 6 -Compress) `
+    -TimeoutSec $ackTimeoutSec
+  if (
+    [string]$stageAck.inventory_generation_id -cne $inventoryGenerationId -or
+    [int]$stageAck.page_index -ne [int]$pageReceipt.page_index -or
+    [int]$stageAck.accepted -ne [int]$pageReceipt.file_count -or
+    [int]$stageAck.rejected_count -ne 0
+  ) {
+    throw "Fly sync page acknowledgement was incomplete."
+  }
+}
+$finalizePayload = [ordered]@{}
+foreach ($key in $ackCommon.Keys) { $finalizePayload[$key] = $ackCommon[$key] }
+$finalizePayload.operation = "FINALIZE"
 $ack = Invoke-DataSyncJsonRequest `
-  -Stage "acknowledgement" `
+  -Stage "acknowledgement_finalize" `
   -Uri "$base/api/data-sync/ack" `
   -Method Post `
-  -Body $ackBody `
+  -Body ($finalizePayload | ConvertTo-Json -Depth 5 -Compress) `
   -TimeoutSec $ackTimeoutSec
 
 # A transport-level HTTP success is not sufficient: every exact manifest row
 # must have been accepted. Missing v2 result fields and partial acceptance both
 # fail closed so an older or overloaded server can never publish false parity.
-$ackExpected = [int]$ackRows.Count
+$ackExpected = [int]$manifest.file_count
 $ackAccepted = if ($ack.PSObject.Properties.Name -contains "accepted") {
   [int]$ack.accepted
 } else { -1 }
@@ -937,7 +1140,11 @@ if ($ackAccepted -ne $ackExpected -or $ackRejected -ne 0) {
 }
 if (
   [string]$ack.inventory_sha256 -ne $inventorySha256 -or
-  [string]$ack.inventory_generated_at -ne $inventoryGeneratedAt
+  [string]$ack.inventory_generation_id -ne $inventoryGenerationId -or
+  [string]$ack.inventory_generated_at -ne $inventoryGeneratedAt -or
+  [int]$ack.inventory_file_count -ne [int]$manifest.file_count -or
+  [int]$ack.manifest_page_count -ne [int]$manifest.manifest_page_count -or
+  $ack.manifest_pages_complete -ne $true
 ) {
   throw "Fly sync acknowledgement did not bind to the requested inventory generation."
 }
@@ -948,7 +1155,9 @@ if (
 # hold on both sides of the acknowledgement.
 $postAckManifest = Invoke-DataSyncJsonRequest `
   -Stage "manifest_post_ack_identity" `
-  -Uri (New-DataSyncManifestUri -IdentityOnly) `
+  -Uri (New-DataSyncManifestUri `
+    -IdentityOnly `
+    -GenerationId $inventoryGenerationId) `
   -TimeoutSec $manifestTimeoutSec
 Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest
 

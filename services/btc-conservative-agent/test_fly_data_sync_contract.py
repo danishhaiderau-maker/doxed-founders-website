@@ -1,5 +1,6 @@
 import ast
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -135,7 +136,8 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "function Invoke-DataSyncJsonRequest" in SYNC_SCRIPT
     assert '-Stage "manifest_initial"' in SYNC_SCRIPT
     assert '-Stage "manifest_targeted_refresh"' in SYNC_SCRIPT
-    assert '-Stage "acknowledgement"' in SYNC_SCRIPT
+    assert '-Stage "acknowledgement_page_$([int]$pageReceipt.page_index)"' in SYNC_SCRIPT
+    assert '-Stage "acknowledgement_finalize"' in SYNC_SCRIPT
     assert '-Stage "manifest_post_ack_identity"' in SYNC_SCRIPT
     assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
@@ -146,16 +148,23 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
 
 
 def test_sync_acknowledgement_is_fast_exact_and_followed_by_identity_fence():
-    ack_body = SYNC_SCRIPT.index('$ackBody = [ordered]@{')
-    ack_request = SYNC_SCRIPT.index('-Stage "acknowledgement"', ack_body)
+    ack_body = SYNC_SCRIPT.index('$ackCommon = [ordered]@{')
+    completeness_check = SYNC_SCRIPT.index(
+        '$ackByPath.Count -ne [int]$manifest.file_count'
+    )
+    page_ack = SYNC_SCRIPT.index('-Stage "acknowledgement_page_', ack_body)
+    ack_request = SYNC_SCRIPT.index('-Stage "acknowledgement_finalize"', page_ack)
     exact_acceptance = SYNC_SCRIPT.index('$ackAccepted -ne $ackExpected', ack_request)
     post_ack_fence = SYNC_SCRIPT.index(
         '-Stage "manifest_post_ack_identity"', exact_acceptance
     )
     analyzer_publish = SYNC_SCRIPT.index('$analyzerPublished = $false', post_ack_fence)
 
-    assert 'schema = "fly_runtime_incremental_ack_v2"' in SYNC_SCRIPT[ack_body:ack_request]
-    assert 'defer_retention = $true' in SYNC_SCRIPT[ack_body:ack_request]
+    assert 'schema = "fly_runtime_incremental_ack_v3"' in SYNC_SCRIPT[ack_body:ack_request]
+    assert '$stagePayload.operation = "STAGE_PAGE"' in SYNC_SCRIPT[ack_body:ack_request]
+    assert '$finalizePayload.operation = "FINALIZE"' in SYNC_SCRIPT[ack_body:exact_acceptance]
+    assert '$manifest.manifest_page_receipts' in SYNC_SCRIPT[ack_body:ack_request]
+    assert '$ackByPath.Count -ne [int]$manifest.file_count' in SYNC_SCRIPT
     assert 'inventory_sha256 = $inventorySha256' in SYNC_SCRIPT[ack_body:ack_request]
     assert 'inventory_generated_at = $inventoryGeneratedAt' in SYNC_SCRIPT[ack_body:ack_request]
     assert 'source_git_rev = [string]$manifest.source_git_rev' in SYNC_SCRIPT[ack_body:ack_request]
@@ -171,7 +180,27 @@ def test_sync_acknowledgement_is_fast_exact_and_followed_by_identity_fence():
         "Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest"
         in SYNC_SCRIPT[post_ack_fence:analyzer_publish]
     )
-    assert ack_body < ack_request < exact_acceptance < post_ack_fence < analyzer_publish
+    assert completeness_check < ack_body < page_ack < ack_request < exact_acceptance < post_ack_fence < analyzer_publish
+
+
+def test_paged_ack_stages_every_bounded_page_before_one_complete_generation_commit():
+    ack_v3 = BOT[
+        BOT.index("def _data_sync_ack_v3(body: dict)"):
+        BOT.index("@app.route('/api/data-sync/ack'", BOT.index("def _data_sync_ack_v3(body: dict)"))
+    ]
+    assert 'operation == "STAGE_PAGE"' in ack_v3
+    assert 'operation != "FINALIZE"' in ack_v3
+    assert 'for page_index in range(int(generation["page_count"]))' in ack_v3
+    assert '"missing_page_index": page_index' in ack_v3
+    assert ack_v3.index('operation == "STAGE_PAGE"') < ack_v3.index(
+        'for page_index in range(int(generation["page_count"]))'
+    ) < ack_v3.index("_write_data_sync_ack(compact_ack)")
+    assert '$manifest.manifest_page_receipts' in SYNC_SCRIPT
+    assert '$stagePayload.operation = "STAGE_PAGE"' in SYNC_SCRIPT
+    assert '$finalizePayload.operation = "FINALIZE"' in SYNC_SCRIPT
+    assert SYNC_SCRIPT.index('$stagePayload.operation = "STAGE_PAGE"') < SYNC_SCRIPT.index(
+        '$finalizePayload.operation = "FINALIZE"'
+    )
 
 
 def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
@@ -264,7 +293,7 @@ def test_chunk_pressure_circuit_breaker_aborts_early_and_resets_deterministicall
     assert '$consecutiveChunkPressureFailures = 0' in SYNC_SCRIPT
     assert 'stage=file_chunk_resource_pressure_circuit_open' in SYNC_SCRIPT
     circuit = SYNC_SCRIPT.index('stage=file_chunk_resource_pressure_circuit_open')
-    final_ack = SYNC_SCRIPT.index('$ackBody = [ordered]@{')
+    final_ack = SYNC_SCRIPT.index('$ackCommon = [ordered]@{')
     assert circuit < final_ack
     assert 'Get-FlySyncNextPressureFailureCount `' in SYNC_SCRIPT
 
@@ -820,7 +849,8 @@ def test_final_identity_fence_skips_full_inventory_without_weakening_file_fences
     assert "[switch]$IdentityOnly" in SYNC_SCRIPT
     assert "[string]$Path" in SYNC_SCRIPT
     assert '"&identity_only=1"' in SYNC_SCRIPT
-    assert "New-DataSyncManifestUri -IdentityOnly" in SYNC_SCRIPT
+    assert "-IdentityOnly `\n    -GenerationId $inventoryGenerationId" in SYNC_SCRIPT
+    assert "$Final.inventory_generation_available -ne $true" in SYNC_SCRIPT
     assert 'Assert-DataSyncManifestIdentity -Initial $manifest -Final $finalManifest' in SYNC_SCRIPT
     # Generation refresh is exact-path only; the final authority fence remains
     # identity-only and the initial manifest remains a full CURRENT inventory.
@@ -1022,7 +1052,7 @@ def test_powershell_client_binds_every_sqlite_chunk_to_one_snapshot():
     assert '&snapshot_id=$([uri]::EscapeDataString([string]$row.snapshot_id))' in SYNC_SCRIPT
     assert 'SQLite snapshot identity changed while downloading $rel.' in SYNC_SCRIPT
     assert '/api/data-sync/manifest?include_snapshots=1' not in SYNC_SCRIPT
-    assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
+    assert "Get-CompleteDataSyncManifest -FirstPage $manifest" in SYNC_SCRIPT
     assert '/api/data-sync/sqlite-snapshot?path=' in SYNC_SCRIPT
     assert 'Set-SqliteSnapshotLease -Row $row' in SYNC_SCRIPT
     assert '$chunkLimit = 1MB' in SYNC_SCRIPT
@@ -1542,7 +1572,7 @@ def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
     assert "-match 'generation changed'" in SYNC_SCRIPT
     assert '-Stage "manifest_targeted_refresh"' in SYNC_SCRIPT
     assert '-Uri (New-DataSyncManifestUri -Path $rel) `' in SYNC_SCRIPT
-    assert '-Uri "$base/api/data-sync/manifest"' in SYNC_SCRIPT
+    assert "Get-CompleteDataSyncManifest -FirstPage $manifest" in SYNC_SCRIPT
     assert 'Where-Object { [string]$_.path -eq $rel }' in SYNC_SCRIPT
     assert "$sameGeneration = $false" in SYNC_SCRIPT
     assert "$fullReplaceRetry = $true" in SYNC_SCRIPT
@@ -2671,6 +2701,9 @@ def test_persisted_inventory_snapshot_is_atomic_and_tamper_evident(tmp_path):
         "os": os, "uuid": uuid,
         "_DATA_SYNC_INVENTORY_SNAPSHOT_NAME": "sync_inventory_current.json",
         "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA": "fly_runtime_inventory_snapshot_v1",
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2": "fly_runtime_inventory_snapshot_v2",
+        "_data_sync_validate_disk_inventory_generation": lambda payload, root: payload,
+        "_data_sync_inventory_work_root": lambda: tmp_path,
         "_data_sync_volume_root": lambda: tmp_path,
         "_runtime_git_rev": lambda: "a" * 40,
     }
@@ -2696,14 +2729,18 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
         def __init__(self, **kwargs): self.kwargs = kwargs
         def start(self): started.append(self.kwargs)
 
-    state = {"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "refreshing": False, "error": None}
+    state = {"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "served_since_refresh": False, "refreshing": False, "error": None}
     namespace = {
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
+        "hmac": hmac,
+        "uuid": uuid,
+        "utc_iso": lambda: "2026-09-01T00:00:00Z",
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
     request_inventory = namespace["_data_sync_request_async_inventory"]
@@ -2712,21 +2749,110 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     assert len(started) == 1
     assert started[0]["daemon"] is True
     assert "_data_sync_inventory(" not in ast.unparse(node)
-    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generated_at": "now", "expires_at": time.monotonic() + 10, "refreshing": False})
+    state.update({"status": "CURRENT", "rows": [{"path": "a.json", "size": 1}], "generated_at": "now", "expires_at": time.monotonic() + 10, "served_since_refresh": False, "refreshing": False})
     assert request_inventory()["status"] == "CURRENT"
     revalidating = request_inventory(force_refresh=True)
     assert revalidating["status"] == "STALE_REVALIDATING"
-    assert revalidating["rows"] == []
+    assert revalidating["rows"] == [{"path": "a.json", "size": 1}]
     assert len(started) == 2
 
-    state.update({"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "refreshing": False})
+    state.update({"status": "EMPTY", "rows": None, "generated_at": None, "expires_at": 0.0, "served_since_refresh": False, "refreshing": False})
     namespace["_data_sync_load_persisted_inventory_snapshot"] = lambda: {
         "rows": [{"path": "prior.json", "size": 1}],
         "generated_at": "prior",
     }
     stale = request_inventory()
     assert stale["status"] == "STALE_REVALIDATING"
-    assert stale["rows"] == []
+    assert stale["rows"] == [{"path": "prior.json", "size": 1}]
+
+
+def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl():
+    tree = ast.parse(BOT)
+    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_request_async_inventory")
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): started.append(self.kwargs)
+
+    state = {
+        "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
+        "generated_at": "completed-before-backoff", "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": False, "error": None,
+    }
+    namespace = {
+        "time": time, "threading": SimpleNamespace(Thread=FakeThread),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda: None,
+        "hmac": hmac,
+        "uuid": uuid,
+        "utc_iso": lambda: "2026-09-01T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    request_inventory = namespace["_data_sync_request_async_inventory"]
+
+    delivered = request_inventory()
+    assert delivered["status"] == "CURRENT"
+    assert delivered["rows"] == [{"path": "sealed.json", "size": 7}]
+    assert delivered["generated_at"] == "completed-before-backoff"
+    assert delivered["error"] is None
+    assert state["served_since_refresh"] is True
+    assert started == []
+    revalidating = request_inventory()
+    assert revalidating["status"] == "STALE_REVALIDATING"
+    assert revalidating["rows"] == [{"path": "sealed.json", "size": 7}]
+    assert len(started) == 1
+
+
+def test_same_refresh_nonce_consumes_completed_generation_without_restarting_worker():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): started.append(self.kwargs)
+
+    refresh_nonce = "b" * 32
+    state = {
+        "status": "CURRENT",
+        "rows": [{"path": "sealed.json", "size": 7}],
+        "generation": None,
+        "generation_id": "a" * 64,
+        "generated_at": "completed",
+        "expires_at": 0.0,
+        "served_since_refresh": True,
+        "refreshing": False,
+        "completed_refresh_nonce": refresh_nonce,
+        "error": None,
+    }
+    namespace = {
+        "time": time,
+        "threading": SimpleNamespace(Thread=FakeThread),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "hmac": hmac,
+        "uuid": uuid,
+        "utc_iso": lambda: "2026-09-01T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    result = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True,
+        refresh_nonce=refresh_nonce,
+    )
+    assert result["status"] == "CURRENT"
+    assert result["refresh_nonce"] == refresh_nonce
+    assert started == []
 
 
 def test_inventory_refresh_uses_standalone_nonce_bound_worker_contract():
@@ -2741,12 +2867,154 @@ def test_inventory_refresh_uses_standalone_nonce_bound_worker_contract():
     assert '"--nonce", nonce' in BOT
     assert "_DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA" in BOT
     assert 'float(result.get("generated_unix") or 0.0) < launched_unix' in BOT
-    assert "_data_sync_inventory_rows_sha256(rows)" in BOT
-    assert "_data_sync_persist_inventory_snapshot(rows, generated_at)" in BOT
+    assert 'completed.returncode == 75 and result.get("status") == "BUILDING"' in BOT
+    assert "_data_sync_validate_disk_inventory_generation(" in BOT
+    assert "_data_sync_persist_disk_inventory_snapshot(disk_generation, generated_at)" in BOT
+    assert '"rows": None' in BOT
+    assert 'result.get("rows")' not in BOT[
+        BOT.index("def _data_sync_inventory_refresh_worker"):
+        BOT.index("def _data_sync_request_async_inventory")
+    ]
+
+
+def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(tmp_path):
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_inventory_rows_sha256",
+        "_data_sync_file_sha256",
+        "_data_sync_validate_disk_inventory_generation",
+        "_data_sync_manifest_cursor",
+        "_data_sync_disk_page_descriptor",
+        "_data_sync_disk_manifest_page",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path,
+        "hashlib": hashlib,
+        "hmac": hmac,
+        "json": json,
+        "re": re,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    work = tmp_path / ".data-sync-snapshots"
+    generation_id = "a" * 64
+    generation_dir = work / "inventory-generations" / generation_id
+    generation_dir.mkdir(parents=True)
+    pages = [
+        [{"path": "a.json", "size": 1}, {"path": "b.json", "size": 2}],
+        [{"path": "c.json", "size": 3}],
+    ]
+    descriptors = []
+    for index, rows in enumerate(pages):
+        payload = {
+            "schema": "fly_runtime_inventory_page_v1",
+            "page_index": index,
+            "file_count": len(rows),
+            "total_bytes": sum(row["size"] for row in rows),
+            "rows_sha256": namespace["_data_sync_inventory_rows_sha256"](rows),
+            "rows": rows,
+        }
+        raw = json.dumps(
+            payload, separators=(",", ":"), sort_keys=True, ensure_ascii=True,
+        ).encode("utf-8")
+        digest = hashlib.sha256(raw).hexdigest()
+        name = f"p{index:08d}-{digest[:24]}.json"
+        (generation_dir / name).write_bytes(raw)
+        descriptors.append({
+            "page_index": index,
+            "file_count": len(rows),
+            "total_bytes": sum(row["size"] for row in rows),
+            "page_sha256": digest,
+            "file_name": name,
+        })
+    index_path = generation_dir / "page-index.jsonl"
+    index_path.write_text(
+        "".join(
+            json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n"
+            for row in descriptors
+        ),
+        encoding="utf-8",
+    )
+    result = {
+        "generation_id": generation_id,
+        "generation_dir": str(generation_dir),
+        "page_index_path": str(index_path),
+        "page_index_sha256": hashlib.sha256(index_path.read_bytes()).hexdigest(),
+        "page_count": 2,
+        "page_size": 2,
+        "file_count": 3,
+        "total_bytes": 6,
+    }
+    generation = namespace["_data_sync_validate_disk_inventory_generation"](result, work)
+    assert "rows" not in generation
+    first = namespace["_data_sync_disk_manifest_page"](generation)
+    second = namespace["_data_sync_disk_manifest_page"](
+        generation, raw_cursor=first["next_cursor"]
+    )
+    assert [row["path"] for row in first["rows"]] == ["a.json", "b.json"]
+    assert [row["path"] for row in second["rows"]] == ["c.json"]
+    assert second["is_last_page"] is True and second["next_cursor"] is None
+    (generation_dir / descriptors[1]["file_name"]).write_bytes(b"tampered")
+    with __import__("pytest").raises(ValueError, match="page hash mismatch"):
+        namespace["_data_sync_disk_manifest_page"](
+            generation,
+            raw_cursor=first["next_cursor"],
+        )
+
+
+def test_disk_generation_gc_is_confined_bounded_and_preserves_current_or_leased(tmp_path):
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_gc_disk_inventory_generations"
+    )
+    work = tmp_path / ".data-sync-snapshots"
+    generations = work / "inventory-generations"
+    generations.mkdir(parents=True)
+    ids = [f"{index:064x}" for index in range(10)]
+    for generation_id in ids:
+        path = generations / generation_id
+        path.mkdir()
+        (path / "page-index.jsonl").write_text("", encoding="utf-8")
+        os.utime(path, (1, 1))
+    snapshot_path = tmp_path / "sync_inventory_current.json"
+    snapshot_path.write_text(json.dumps({
+        "generation": {"generation_id": ids[9]},
+    }), encoding="utf-8")
+    leased = work / "inventory-acks" / ids[8]
+    leased.mkdir(parents=True)
+    os.utime(leased, (999, 999))
+    namespace = {
+        "Path": Path,
+        "json": json,
+        "os": os,
+        "re": re,
+        "shutil": shutil,
+        "time": time,
+        "_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS": 100,
+        "_DATA_SYNC_INVENTORY_GENERATION_MAX": 2,
+        "_data_sync_inventory_snapshot_path": lambda: snapshot_path,
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    removed = namespace["_data_sync_gc_disk_inventory_generations"](
+        work,
+        protected_generation_ids={ids[7]},
+        now=1000,
+    )
+    assert ids[9] not in removed and (generations / ids[9]).is_dir()
+    assert ids[8] not in removed and (generations / ids[8]).is_dir()
+    assert ids[7] not in removed and (generations / ids[7]).is_dir()
+    assert removed
+    assert all(not (generations / value).exists() for value in removed)
 
 
 def test_sync_requires_current_inventory_and_targeted_refresh_never_walks_volume():
-    assert '[string]$manifest.inventory_status -ne "CURRENT"' in SYNC_SCRIPT
+    assert '[string]$FirstPage.inventory_status -ne "CURRENT"' in SYNC_SCRIPT
+    assert "Get-CompleteDataSyncManifest -FirstPage $manifest" in SYNC_SCRIPT
     assert '$expectedInventoryStatus = if ($IdentityOnly) { "IDENTITY_ONLY" } else { "CURRENT" }' in SYNC_LOOP
     assert '[string]$preflight.inventory_status -ne $expectedInventoryStatus' in SYNC_LOOP
     assert '-Uri (New-DataSyncManifestUri -Path $rel)' in SYNC_SCRIPT

@@ -1,9 +1,12 @@
 import ast
+import hashlib
+import hmac
 import importlib.util
 import json
 import subprocess
 import sys
 import threading
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,6 +53,24 @@ def _worker_request(volume: Path, nonce: str) -> tuple[Path, Path]:
     return request_path, result_path
 
 
+def _generation_rows(result: dict) -> dict[str, dict]:
+    assert result["status"] == "COMPLETE" and "rows" not in result
+    index_path = Path(result["page_index_path"])
+    assert hashlib.sha256(index_path.read_bytes()).hexdigest() == result["page_index_sha256"]
+    rows = {}
+    descriptors = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    assert len(descriptors) == result["page_count"]
+    for descriptor in descriptors:
+        page_path = Path(result["generation_dir"]) / descriptor["file_name"]
+        raw = page_path.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == descriptor["page_sha256"]
+        page = json.loads(raw)
+        assert len(page["rows"]) <= result["page_size"]
+        rows.update({row["path"]: row for row in page["rows"]})
+    assert len(rows) == result["file_count"]
+    return rows
+
+
 def test_next_inventory_generation_detects_append_growth_and_new_file(tmp_path):
     """Exercise two real isolated scans, as consecutive cadence generations."""
     worker = _load_worker()
@@ -69,11 +90,11 @@ def test_next_inventory_generation_detects_append_growth_and_new_file(tmp_path):
     assert worker.run(request_2, result_2, "2" * 32) == 0
     second = json.loads(result_2.read_text(encoding="utf-8"))
 
-    first_rows = {row["path"]: row for row in first["rows"]}
-    second_rows = {row["path"]: row for row in second["rows"]}
+    first_rows = _generation_rows(first)
+    second_rows = _generation_rows(second)
     assert second_rows["events.jsonl"]["size"] > first_rows["events.jsonl"]["size"]
     assert "new-evidence.json" in second_rows
-    assert second["rows_sha256"] != first["rows_sha256"]
+    assert second["generation_id"] != first["generation_id"]
 
 
 def _async_inventory_function(state, monotonic_value):
@@ -98,31 +119,36 @@ def _async_inventory_function(state, monotonic_value):
         "_data_sync_inventory_cache_condition": threading.Condition(),
         "_data_sync_async_inventory": state,
         "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
+        "hmac": hmac,
+        "uuid": uuid,
+        "utc_iso": lambda: "2026-09-01T00:00:00Z",
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace["_data_sync_request_async_inventory"], starts
 
 
-def test_expired_current_inventory_is_withheld_and_revalidated_fail_closed():
+def test_expired_current_inventory_is_served_stale_while_revalidating_fail_closed():
     state = {
         "status": "CURRENT", "rows": [{"path": "old.json", "size": 1}],
-        "generated_at": "old", "expires_at": 149.0, "refreshing": False,
+        "generated_at": "old", "expires_at": 149.0,
+        "served_since_refresh": True, "refreshing": False,
         "error": None,
     }
     request_inventory, starts = _async_inventory_function(state, 150.0)
     result = request_inventory(force_refresh=False)
-    assert result == {
-        "status": "STALE_REVALIDATING", "rows": [],
-        "generated_at": "old", "error": None,
-    }
+    assert result["status"] == "STALE_REVALIDATING"
+    assert result["rows"] == [{"path": "old.json", "size": 1}]
+    assert result["refreshing"] is True
     assert state["status"] == "BUILDING"
     assert state["rows"] == [{"path": "old.json", "size": 1}]
     assert starts and starts[0]["started"] is True
-    # A concurrent preflight also receives no rows that could authorize SKIP/MATCH.
+    # A concurrent preflight can inspect the prior generation but its stale
+    # status remains ineligible to authorize SKIP/MATCH or acknowledgement.
     joined = request_inventory(force_refresh=False)
     assert joined["status"] == "STALE_REVALIDATING"
-    assert joined["rows"] == []
+    assert joined["rows"] == [{"path": "old.json", "size": 1}]
 
 
 def test_empty_or_building_inventory_is_withheld_until_current():

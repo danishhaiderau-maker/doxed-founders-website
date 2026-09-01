@@ -1,8 +1,10 @@
 import ast
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +22,20 @@ def _load_worker():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _parent_validate_generation(result: dict, work_root: Path) -> dict:
+    tree = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
+    wanted = {"_data_sync_file_sha256", "_data_sync_validate_disk_inventory_generation"}
+    nodes = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path, "hashlib": hashlib, "hmac": hmac, "json": json, "re": re,
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), namespace)
+    return namespace["_data_sync_validate_disk_inventory_generation"](result, work_root)
 
 
 def _request(volume: Path, nonce: str, *, roots=None):
@@ -81,8 +97,8 @@ def test_worker_is_stdlib_only_and_does_not_import_the_bot():
         if isinstance(node, ast.ImportFrom)
     }
     assert imported <= {
-        "__future__", "argparse", "hashlib", "json", "os", "time", "uuid",
-        "datetime", "pathlib",
+        "__future__", "argparse", "hashlib", "hmac", "json", "os", "time", "uuid",
+        "datetime", "pathlib", "resource", "shutil", "sqlite3",
     }
     assert "bot" not in imported
 
@@ -98,12 +114,16 @@ def test_worker_nonce_identity_containment_and_atomic_result(tmp_path):
 
     assert worker.run(request_path, result_path, nonce) == 0
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    assert result["schema"] == "fly_runtime_inventory_worker_result_v1"
+    assert result["schema"] == "fly_runtime_inventory_worker_result_v2"
+    assert result["status"] == "COMPLETE"
     assert result["nonce"] == nonce
     assert result["source_revision"] == "a" * 40
-    assert result["file_count"] == len(result["rows"]) == 1
-    assert result["rows"][0]["size"] == len(b'{"a":1}\n')
-    assert result["rows_sha256"] == worker._rows_sha256(result["rows"])
+    rows = _generation_rows(result)
+    assert result["file_count"] == len(rows) == 1
+    assert rows[0]["size"] == len(b'{"a":1}\n')
+    validated = _parent_validate_generation(result, result_path.parent)
+    assert validated["storage"] == "disk_pages_v2"
+    assert validated["generation_id"] == result["generation_id"]
     assert not list(result_path.parent.glob("*.tmp"))
 
     escaped_result = tmp_path / f"inventory-result-{nonce}.json"
@@ -138,23 +158,23 @@ def test_worker_deduplicates_overlapping_roots_and_filters_sensitive_files(tmp_p
     payload = _request(volume, nonce, roots=[runtime, nested])
     request_path.write_text(json.dumps(payload), encoding="utf-8")
     assert worker.run(request_path, result_path, nonce) == 0
-    rows = json.loads(result_path.read_text(encoding="utf-8"))["rows"]
+    rows = _generation_rows(json.loads(result_path.read_text(encoding="utf-8")))
     assert [row["path"] for row in rows] == ["research/good.json"]
 
 
-@pytest.mark.parametrize("mutation", [
-    "schema", "nonce", "revision", "file_count", "generated_before", "hash",
-])
-def test_parent_contract_rejects_corrupt_or_mismatched_worker_result(mutation):
+def test_parent_contract_validates_v2_identity_pages_hashes_and_totals():
     source = BOT_PATH.read_text(encoding="utf-8")
     assert 'result.get("schema") != _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA' in source
     assert 'str(result.get("nonce") or ""), nonce' in source
     assert 'str(result.get("source_revision") or ""), _runtime_git_rev()' in source
-    assert 'int(result.get("file_count") or -1) != len(rows)' in source
     assert 'float(result.get("generated_unix") or 0.0) < launched_unix' in source
-    assert 'str(result.get("rows_sha256") or "")' in source
-    # Each named corruption maps to a distinct explicit validation fence above.
-    assert mutation
+    assert 'completed.returncode == 75 and result.get("status") == "BUILDING"' in source
+    assert '_data_sync_validate_disk_inventory_generation(' in source
+    assert 're.fullmatch(r"[0-9a-f]{64}", generation_id)' in source
+    assert '_data_sync_file_sha256(index_path)' in source
+    assert 'descriptors_seen != page_count' in source
+    assert 'indexed_files != file_count' in source
+    assert 'indexed_bytes != total_bytes' in source
 
 
 def test_parent_contract_handles_missing_nonzero_timeout_and_cleans_unique_transients():
@@ -297,3 +317,234 @@ def test_parent_worker_environment_does_not_inherit_production_secrets():
         "OPENAI_API_KEY", "PLATFORM_API_TOKEN",
     ):
         assert secret_name not in worker_block
+
+
+def _run_generation(worker, volume: Path, ordinal: int, payload: dict):
+    nonce = f"{ordinal:032x}"
+    request_path, result_path = _paths(volume, nonce)
+    payload = dict(payload, nonce=nonce)
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    return worker.run(request_path, result_path, nonce), result_path
+
+
+def _generation_rows(result: dict) -> list[dict]:
+    index_path = Path(result["page_index_path"])
+    assert hashlib.sha256(index_path.read_bytes()).hexdigest() == result["page_index_sha256"]
+    rows = []
+    descriptors = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    assert len(descriptors) == result["page_count"]
+    for descriptor in descriptors:
+        page_path = Path(result["generation_dir"]) / descriptor["file_name"]
+        raw = page_path.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == descriptor["page_sha256"]
+        page = json.loads(raw)
+        assert page["file_count"] == len(page["rows"])
+        assert len(page["rows"]) <= result["page_size"]
+        rows.extend(page["rows"])
+    return rows
+
+
+def test_resumable_worker_never_publishes_a_partial_inventory(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["max_rows"] = 7
+    payload["inventory_directory_budget"] = 2
+    for directory in range(4):
+        target = runtime / f"d{directory}"
+        target.mkdir(parents=True)
+        for file_number in range(11):
+            (target / f"evidence-{file_number:03d}.json").write_text("{}", encoding="utf-8")
+
+    result = None
+    for ordinal in range(1, 20):
+        # Reloading models separate worker processes and proves the checkpoint,
+        # not module memory, is the source of resumption.
+        worker = _load_worker()
+        returncode, result_path = _run_generation(worker, volume, ordinal, payload)
+        if returncode == 0:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            break
+        assert returncode == 75
+        building = json.loads(result_path.read_text(encoding="utf-8"))
+        assert building["status"] == "BUILDING"
+        assert building["generation_id"] is None
+        progress_path = next((volume / ".data-sync-snapshots").glob(
+            "inventory-worker-v2-*.progress.json"
+        ))
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        assert progress["complete"] is False
+        assert progress["invocation_files_seen"] <= 7
+        assert progress["invocation_dirs_seen"] <= 2
+
+    assert result is not None
+    rows = _generation_rows(result)
+    assert result["file_count"] == len(rows) == 44
+    assert len({row["path"] for row in rows}) == 44
+    receipt = result["worker_receipt"]
+    assert receipt["complete"] is True
+    assert receipt["files_seen"] == 44
+    assert receipt["dirs_seen"] == 5
+    assert receipt["invocations"] > 1
+    assert receipt["cpu_seconds"] >= 0
+    assert receipt["peak_rss_bytes"] is None or receipt["peak_rss_bytes"] > 0
+    work = volume / ".data-sync-snapshots"
+    assert not list(work.glob("*.checkpoint.json"))
+    assert not list(work.glob("*.sqlite3"))
+
+
+def test_legacy_max_rows_is_a_slice_budget_not_a_silent_5000_cap(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    # Exceed the exact former production cap.  The first bounded slice cannot
+    # publish; the resumed generation must contain every eligible file.
+    for index in range(5003):
+        (runtime / f"row-{index:05d}.json").write_text("{}", encoding="utf-8")
+    result = None
+    for ordinal in range(101, 110):
+        code, result_path = _run_generation(_load_worker(), volume, ordinal, payload)
+        current = json.loads(result_path.read_text(encoding="utf-8"))
+        if code == 0:
+            result = current
+            break
+        assert code == 75 and current["status"] == "BUILDING"
+    assert result is not None
+    rows = _generation_rows(result)
+    assert result["file_count"] == len(rows) == 5003
+    assert result["page_count"] == 21
+    assert "rows" not in result and result_path.stat().st_size < 10_000
+    assert rows[0]["path"] == "row-00000.json"
+    assert rows[-1]["path"] == "row-05002.json"
+
+
+def test_corrupt_checkpoint_fails_closed_then_recovers_from_quarantine(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["max_rows"] = 2
+    for index in range(5):
+        (runtime / f"row-{index}.json").write_text("{}", encoding="utf-8")
+
+    first_code, _ = _run_generation(worker, volume, 201, payload)
+    assert first_code == 75
+    work = volume / ".data-sync-snapshots"
+    checkpoint = next(work.glob("*.checkpoint.json"))
+    checkpoint.write_text('{"schema":"corrupt"}', encoding="utf-8")
+
+    corrupt_code, corrupt_result = _run_generation(_load_worker(), volume, 202, payload)
+    assert corrupt_code == 1
+    assert json.loads(corrupt_result.read_text(encoding="utf-8"))["status"] == "FAILED"
+    assert list(work.glob("*.checkpoint.json.corrupt-*"))
+    assert list(work.glob("*.sqlite3.corrupt-*"))
+
+    payload["max_rows"] = 100
+    recovered_code, recovered_result = _run_generation(_load_worker(), volume, 203, payload)
+    assert recovered_code == 0
+    result = json.loads(recovered_result.read_text(encoding="utf-8"))
+    assert result["file_count"] == 5
+
+
+def test_corrupt_published_page_is_quarantined_and_rebuilt_atomically(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    (runtime / "evidence.json").write_text("{}", encoding="utf-8")
+
+    first_code, first_path = _run_generation(worker, volume, 301, payload)
+    assert first_code == 0
+    first = json.loads(first_path.read_text(encoding="utf-8"))
+    generation_dir = Path(first["generation_dir"])
+    page = next(generation_dir.glob("p*.json"))
+    page.write_text("corrupt", encoding="utf-8")
+
+    second_code, second_path = _run_generation(_load_worker(), volume, 302, payload)
+    assert second_code == 0
+    second = json.loads(second_path.read_text(encoding="utf-8"))
+    assert second["generation_id"] == first["generation_id"]
+    assert _generation_rows(second)[0]["path"] == "evidence.json"
+    quarantined = list(generation_dir.parent.glob(f"{generation_dir.name}.corrupt-*"))
+    assert len(quarantined) == 1
+
+
+def test_single_directory_has_a_hard_fail_closed_entry_bound(monkeypatch, tmp_path):
+    worker = _load_worker()
+
+    class Entry:
+        def __init__(self, index):
+            self.name = f"row-{index:05d}.json"
+            self.path = str(tmp_path / self.name)
+
+        def is_dir(self, **_):
+            return False
+
+        def is_file(self, **_):
+            return True
+
+    class Scan:
+        def __enter__(self):
+            return iter(Entry(index) for index in range(worker.MAX_DIRECTORY_ENTRIES + 1))
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(worker.os, "scandir", lambda _: Scan())
+    with pytest.raises(worker.CheckpointError, match="directory entry hard limit exceeded"):
+        worker._bounded_directory_entries(tmp_path)
+
+
+def test_empty_inventory_publishes_one_valid_bounded_empty_page(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = "e" * 32
+    request_path, result_path = _paths(volume, nonce)
+    request_path.write_text(json.dumps(_request(volume, nonce)), encoding="utf-8")
+    assert worker.run(request_path, result_path, nonce) == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert result["status"] == "COMPLETE"
+    assert result["file_count"] == result["total_bytes"] == 0
+    assert result["page_count"] == 1
+    assert _generation_rows(result) == []
+
+
+def test_effective_page_size_is_bound_into_resume_identity(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = "d" * 32
+    request_path, result_path = _paths(volume, nonce)
+    payload = _request(volume, nonce)
+    payload["inventory_page_rows"] = 100
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    first = worker._load_request(request_path, result_path, nonce)
+    first_fingerprint = worker._request_fingerprint(first)
+    payload["inventory_page_rows"] = 250
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    second = worker._load_request(request_path, result_path, nonce)
+    assert worker._request_fingerprint(second) != first_fingerprint
+
+
+def test_sparse_approximately_1_2_gib_artifact_keeps_manifest_metadata_bounded(tmp_path, request):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = "f" * 32
+    request_path, result_path = _paths(volume, nonce)
+    payload = _request(volume, nonce)
+    artifact = volume / "runtime" / "large-research-generation.json"
+    logical_size = 1200 * 1024 * 1024
+    with artifact.open("wb") as handle:
+        handle.seek(logical_size - 1)
+        handle.write(b"\0")
+    request.addfinalizer(lambda: artifact.unlink(missing_ok=True))
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert worker.run(request_path, result_path, nonce) == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    rows = _generation_rows(result)
+    assert result["file_count"] == 1
+    assert result["total_bytes"] == rows[0]["size"] == logical_size
+    assert result_path.stat().st_size < 10_000
+    page_path = next(Path(result["generation_dir"]).glob("p*.json"))
+    assert page_path.stat().st_size < 64 * 1024
