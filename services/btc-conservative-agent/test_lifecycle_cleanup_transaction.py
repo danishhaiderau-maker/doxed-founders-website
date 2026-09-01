@@ -37,12 +37,18 @@ def _fixture(tmp_path: Path):
         },
         "files": [{"path": "events.jsonl", "mtime_ns": events.stat().st_mtime_ns, **file_proof}],
     }
+    manifest["cleanup_manifest_sha256"] = hashlib.sha256(json.dumps([{
+        "path": "events.jsonl", "sha256": file_proof["sha256"],
+        "size": file_proof["size"], "mtime_ns": events.stat().st_mtime_ns,
+        "row_count": file_proof["row_count"],
+        "first_timestamp": file_proof["first_timestamp"],
+        "last_timestamp": file_proof["last_timestamp"],
+    }], separators=(",", ":"), sort_keys=True).encode()).hexdigest()
     (bundle / "manifest.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     receipt = {
         "bundle_id": bundle_id,
         "lifecycle_id": manifest["lifecycle_id"],
-        "immutable_identity_sha256": "d" * 64,
-        "manifest_sha256": "e" * 64,
+        "manifest_sha256": manifest["cleanup_manifest_sha256"],
         "source_git_rev": "a" * 40,
         "deployed_git_rev": "a" * 40,
         "collection_epoch_id": "epoch-1",
@@ -50,10 +56,23 @@ def _fixture(tmp_path: Path):
         "config_signature": "c" * 64,
         "terminal_outcome": "UNKNOWN",
         "terminal_at": "2026-09-01T02:10:00Z",
-        "laptop_acknowledgement": {
-            name: {"sha256": hashlib.sha256(name.encode()).hexdigest()}
-            for name in ("canonical", "archive", "index")
-        },
+    }
+    identity = {key: receipt[key] for key in (
+        "bundle_id", "lifecycle_id", "source_git_rev", "deployed_git_rev",
+        "collection_epoch_id", "tile_registry_signature", "terminal_outcome",
+        "terminal_at", "manifest_sha256",
+    )}
+    receipt["immutable_identity_sha256"] = hashlib.sha256(
+        json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    receipt["laptop_acknowledgement"] = {
+        name: {
+            "complete": True, "bundle_id": bundle_id,
+            "lifecycle_id": receipt["lifecycle_id"],
+            "sha256": hashlib.sha256(name.encode()).hexdigest(),
+            "manifest_sha256": receipt["manifest_sha256"],
+            "acknowledged_at": "2026-09-01T03:00:00Z",
+        } for name in ("canonical", "archive", "index")
     }
     key = b"test-only-attestation-key"
     receipt["laptop_attestation"] = sign_attestation(receipt, key, "laptop-1")
@@ -139,6 +158,50 @@ def test_quarantine_interruption_and_conflicting_paths_recover_or_reject(tmp_pat
     (transaction2.quarantine_root / receipt2["bundle_id"]).mkdir(parents=True)
     with pytest.raises(CleanupRejected, match="QUARANTINE_STATE_CONFLICT"):
         transaction2.execute(bundle2, receipt2, proof2, revalidate=lambda: proof2)
+
+
+def test_committed_record_binds_complete_verified_identity(tmp_path):
+    root, bundle, receipt, current, keys = _fixture(tmp_path)
+    proof = verify_bundle(bundle, receipt, current_identity=current, active_references={}, attestation_keys=keys)
+    transaction = CleanupTransaction(root, enabled=True)
+    transaction.execute(bundle, receipt, proof, revalidate=lambda: proof)
+    committed = json.loads(next(transaction.tx_root.glob("*/COMMITTED.json")).read_text())
+    assert committed["schema"] == "lifecycle_cleanup_transaction_v2"
+    assert committed["receipt_sha256"] == hashlib.sha256(
+        json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    assert committed["attestation_key_id"] == "laptop-1"
+    assert committed["cleanup_manifest_sha256"] == receipt["manifest_sha256"]
+    assert committed["immutable_identity_sha256"] == receipt["immutable_identity_sha256"]
+    assert committed["lifecycle_id"] == receipt["lifecycle_id"]
+    assert committed["committed_at"].endswith("Z")
+
+
+@pytest.mark.parametrize("defect", ["manifest", "identity", "ack_missing", "ack_mismatch"])
+def test_cleanup_verifier_rejects_missing_or_mismatched_proof(defect, tmp_path):
+    _, bundle, receipt, current, keys = _fixture(tmp_path)
+    if defect == "manifest":
+        receipt["manifest_sha256"] = "0" * 64
+    elif defect == "identity":
+        receipt["immutable_identity_sha256"] = "0" * 64
+    elif defect == "ack_missing":
+        del receipt["laptop_acknowledgement"]["archive"]["acknowledged_at"]
+    else:
+        receipt["laptop_acknowledgement"]["index"]["bundle_id"] = "wrong"
+    receipt["laptop_attestation"] = sign_attestation(receipt, keys["laptop-1"], "laptop-1")
+    with pytest.raises(CleanupRejected):
+        verify_bundle(bundle, receipt, current_identity=current, active_references={}, attestation_keys=keys)
+
+
+def test_commit_rejects_receipt_tamper_after_verification(tmp_path):
+    root, bundle, receipt, current, keys = _fixture(tmp_path)
+    proof = verify_bundle(bundle, receipt, current_identity=current, active_references={}, attestation_keys=keys)
+    receipt["laptop_acknowledgement"]["canonical"]["sha256"] = "f" * 64
+    with pytest.raises(CleanupRejected, match="PROOF_RECEIPT_BINDING_MISMATCH"):
+        CleanupTransaction(root, enabled=True).execute(
+            bundle, receipt, proof, revalidate=lambda: proof,
+        )
+    assert bundle.is_dir()
 
 
 def test_containment_rejects_bundle_outside_lifecycle_root(tmp_path):

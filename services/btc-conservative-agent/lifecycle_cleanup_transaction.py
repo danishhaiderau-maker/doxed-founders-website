@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-SCHEMA = "lifecycle_cleanup_transaction_v1"
+SCHEMA = "lifecycle_cleanup_transaction_v2"
 ATTESTATION_SCHEMA = "lifecycle_laptop_attestation_v1"
 TERMINAL_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -45,6 +45,56 @@ def _sha256_path(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _sha256_canonical(value: Any) -> str:
+    return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _cleanup_manifest_sha256(files: list[Mapping[str, Any]]) -> str:
+    material = [{
+        "path": str(row["path"]),
+        "sha256": str(row["sha256"]).lower(),
+        "size": int(row["size"]),
+        "mtime_ns": int(row["mtime_ns"]),
+        "row_count": int(row["row_count"]),
+        "first_timestamp": str(row["first_timestamp"]),
+        "last_timestamp": str(row["last_timestamp"]),
+    } for row in sorted(files, key=lambda item: str(item["path"]))]
+    return _sha256_canonical(material)
+
+
+def _immutable_identity_sha256(receipt: Mapping[str, Any]) -> str:
+    material = {
+        "bundle_id": str(receipt.get("bundle_id") or ""),
+        "lifecycle_id": str(receipt.get("lifecycle_id") or ""),
+        "source_git_rev": str(receipt.get("source_git_rev") or ""),
+        "deployed_git_rev": str(receipt.get("deployed_git_rev") or ""),
+        "collection_epoch_id": str(receipt.get("collection_epoch_id") or ""),
+        "tile_registry_signature": str(receipt.get("tile_registry_signature") or ""),
+        "terminal_outcome": str(receipt.get("terminal_outcome") or ""),
+        "terminal_at": str(receipt.get("terminal_at") or ""),
+        "manifest_sha256": str(receipt.get("manifest_sha256") or "").lower(),
+    }
+    return _sha256_canonical(material)
+
+
+def _commit_binding(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    attestation = receipt.get("laptop_attestation") or {}
+    return {
+        "receipt_sha256": _sha256_canonical(receipt),
+        "attestation_sha256": _sha256_canonical(attestation),
+        "attestation_key_id": str(attestation.get("key_id") or ""),
+        "cleanup_manifest_sha256": str(receipt.get("manifest_sha256") or "").lower(),
+        "immutable_identity_sha256": str(receipt.get("immutable_identity_sha256") or "").lower(),
+        "bundle_id": str(receipt.get("bundle_id") or ""),
+        "lifecycle_id": str(receipt.get("lifecycle_id") or ""),
+        "source_git_rev": str(receipt.get("source_git_rev") or ""),
+        "deployed_git_rev": str(receipt.get("deployed_git_rev") or ""),
+        "collection_epoch_id": str(receipt.get("collection_epoch_id") or ""),
+        "tile_registry_signature": str(receipt.get("tile_registry_signature") or ""),
+        "config_signature": str(receipt.get("config_signature") or ""),
+    }
 
 
 def _utc(value: Any) -> str | None:
@@ -202,6 +252,35 @@ def verify_bundle(
         reasons.append("CONFIG_IDENTITY_INVALID")
     if str(receipt.get("terminal_outcome") or "").upper() not in TERMINAL_OUTCOMES or not _utc(receipt.get("terminal_at")):
         reasons.append("TERMINAL_OR_UNKNOWN_INVALID")
+
+    cleanup_manifest_sha = str(manifest.get("cleanup_manifest_sha256") or "").lower()
+    try:
+        recomputed_cleanup_sha = _cleanup_manifest_sha256(files)
+    except (KeyError, TypeError, ValueError):
+        recomputed_cleanup_sha = ""
+    if not _SHA256.fullmatch(cleanup_manifest_sha) or cleanup_manifest_sha != recomputed_cleanup_sha:
+        reasons.append("CLEANUP_MANIFEST_SHA256_MISMATCH")
+    if str(receipt.get("manifest_sha256") or "").lower() != cleanup_manifest_sha:
+        reasons.append("RECEIPT_CLEANUP_MANIFEST_SHA256_MISMATCH")
+    supplied_identity = str(receipt.get("immutable_identity_sha256") or "").lower()
+    if not _SHA256.fullmatch(supplied_identity) or not hmac.compare_digest(
+        supplied_identity, _immutable_identity_sha256(receipt)
+    ):
+        reasons.append("IMMUTABLE_IDENTITY_SHA256_MISMATCH")
+
+    laptop = receipt.get("laptop_acknowledgement") or {}
+    for copy_name in ("canonical", "archive", "index"):
+        copy_ack = laptop.get(copy_name) if isinstance(laptop, Mapping) else None
+        if not (
+            isinstance(copy_ack, Mapping)
+            and copy_ack.get("complete") is True
+            and str(copy_ack.get("bundle_id") or "") == str(receipt.get("bundle_id") or "")
+            and str(copy_ack.get("lifecycle_id") or "") == str(receipt.get("lifecycle_id") or "")
+            and _SHA256.fullmatch(str(copy_ack.get("sha256") or "").lower())
+            and str(copy_ack.get("manifest_sha256") or "").lower() == cleanup_manifest_sha
+            and _utc(copy_ack.get("acknowledged_at")) is not None
+        ):
+            reasons.append(f"LAPTOP_{copy_name.upper()}_ACK_INVALID")
     for kind in ("runtime", "sync", "analyzer", "lifecycle_worker"):
         if active_references.get(kind):
             reasons.append(f"ACTIVE_{kind.upper()}_REFERENCE")
@@ -214,7 +293,10 @@ def verify_bundle(
         reasons.append("LAPTOP_ATTESTATION_INVALID")
     if reasons:
         raise CleanupRejected(reasons)
-    return {"manifest": manifest, "recomputed_files": recomputed}
+    return {
+        "manifest": manifest, "recomputed_files": recomputed,
+        "commit_binding": _commit_binding(receipt),
+    }
 
 
 class CleanupTransaction:
@@ -263,7 +345,15 @@ class CleanupTransaction:
         prepared = transaction_dir / "PREPARED.json"
         committed = transaction_dir / "COMMITTED.json"
         proof_sha = hashlib.sha256(_canonical(proof)).hexdigest()
-        transaction = {"schema": SCHEMA, "bundle_id": bundle_id, "source": source.relative_to(self.volume_root).as_posix(), "quarantine": quarantine.relative_to(self.volume_root).as_posix(), "proof_sha256": proof_sha}
+        binding = _commit_binding(receipt)
+        if proof.get("commit_binding") != binding:
+            raise CleanupRejected(["PROOF_RECEIPT_BINDING_MISMATCH"])
+        transaction = {
+            "schema": SCHEMA, "bundle_id": bundle_id,
+            "source": source.relative_to(self.volume_root).as_posix(),
+            "quarantine": quarantine.relative_to(self.volume_root).as_posix(),
+            "proof_sha256": proof_sha, **binding,
+        }
         self._write_once(prepared, {**transaction, "state": "PREPARED"})
         if failpoint == "AFTER_PREPARED":
             raise RuntimeError("FAILPOINT_AFTER_PREPARED")
@@ -279,7 +369,10 @@ class CleanupTransaction:
             raise CleanupRejected(["QUARANTINE_STATE_CONFLICT"])
         if failpoint == "AFTER_QUARANTINE":
             raise RuntimeError("FAILPOINT_AFTER_QUARANTINE")
-        self._write_once(committed, {**transaction, "state": "COMMITTED"})
+        self._write_once(committed, {
+            **transaction, "state": "COMMITTED",
+            "committed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        })
         return {"status": "COMMITTED_QUARANTINED", "source_cleanup_authorized": True, "quarantine": transaction["quarantine"]}
 
     def reconcile(self) -> list[dict[str, Any]]:
@@ -300,6 +393,7 @@ class CleanupTransaction:
                 raise CleanupRejected(["QUARANTINE_STATE_CONFLICT"])
             committed_payload = dict(row)
             committed_payload["state"] = "COMMITTED"
+            committed_payload["committed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             self._write_once(committed, committed_payload)
             results.append({"bundle_id": row["bundle_id"], "status": "COMMITTED_QUARANTINED"})
         return results
