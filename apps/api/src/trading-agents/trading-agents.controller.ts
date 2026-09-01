@@ -213,6 +213,36 @@ export class TradingAgentsController {
     return this.instances.setInstancePaused(body.userId!.trim(), slug, true);
   }
 
+  /** Refresh private exchange audit evidence for an already-paused relay. */
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post(':slug/ops/refresh-flat-audit')
+  async opsRefreshFlatAudit(
+    @Param('slug') slug: string,
+    @Body() body: { userId?: string; confirmation?: string },
+    @Headers('x-bot-admin-token') adminHeader?: string,
+    @Headers('authorization') authorization?: string,
+  ) {
+    const status = await this.tradingAgents.getOpsRelayStatus(
+      slug, body?.userId, adminHeader, authorization,
+    );
+    if (body?.confirmation !== 'REFRESH_PAUSED_FLAT_AUDIT') {
+      throw new BadRequestException(
+        'confirmation must equal REFRESH_PAUSED_FLAT_AUDIT',
+      );
+    }
+    if (
+      status.status !== 'PAUSED'
+      || (status.relayExecutionMode != null && status.relayExecutionMode !== 'PAUSED')
+      || status.relayArmedAt != null
+      || status.realTradingConfirmedAt != null
+    ) {
+      throw new ConflictException('Flat-audit refresh requires a paused, disarmed relay');
+    }
+    await this.execution.requestExecutorWake('USER_PAUSE');
+    return { accepted: true, status: 'PAUSED', resumed: false, armed: false };
+  }
+
   @Public()
   @Get(':slug/analyzer-genome')
   analyzerGenome(@Param('slug') slug: string) {
