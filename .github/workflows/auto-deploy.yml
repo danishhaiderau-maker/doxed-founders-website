@@ -115,6 +115,7 @@ jobs:
           npm test --workspace=@dcf/web
           node --test scripts/check-relay-flat.spec.mjs
           node --test scripts/relay-revision-policy.spec.mjs
+          node --test scripts/relay-executor-receipt-policy.spec.mjs
           node --test scripts/fly-bot-runtime-contract.spec.mjs
           node --test scripts/bot-sync-guard.spec.mjs
 

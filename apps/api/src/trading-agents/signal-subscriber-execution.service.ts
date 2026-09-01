@@ -455,7 +455,26 @@ export type RelayExecutorHealthSnapshot = {
   observedAt?: string;
   sourceRevision?: string | null;
   executionEnabled?: boolean;
+  terminalState?: 'QUIESCENT';
+  paused?: boolean;
+  flatExposure?: boolean;
 };
+
+export function buildQuiescentRelayExecutorReceipt(
+  health: RelayExecutorHealthSnapshot,
+): RelayExecutorHealthSnapshot {
+  return {
+    ...health,
+    healthy: true,
+    status: 'IDLE',
+    running: false,
+    currentInstanceId: null,
+    currentStage: null,
+    terminalState: 'QUIESCENT',
+    paused: true,
+    flatExposure: true,
+  };
+}
 
 export type LiveCopyCoordinationState =
   | 'RUNNING_TOGETHER'
@@ -5705,10 +5724,57 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.currentInstanceId = null;
       this.currentStage = null;
       this.running = false;
+      if (this.lastRelayPollActivity === 'PAUSED') {
+        await this.persistQuiescentReceipts().catch((err) => {
+          this.logger.error(
+            `Relay executor QUIESCENT receipt persistence failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
       if (this.wakeQueued) {
         this.wakeQueued = false;
         setImmediate(() => void this.tick());
       }
+    }
+  }
+
+  private async persistQuiescentReceipts(): Promise<void> {
+    const agent = await this.prisma.tradingAgent.findUnique({
+      where: { slug: AGENT_SLUG },
+      select: { id: true },
+    });
+    if (!agent) return;
+    const instances = await this.prisma.tradingAgentInstance.findMany({
+      where: {
+        agentId: agent.id,
+        exchangeProvider: 'bitfinex',
+        status: TradingAgentInstanceStatus.PAUSED,
+      },
+      select: { id: true, userId: true, status: true, dashboardState: true },
+    });
+    for (const instance of instances) {
+      const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+      if (relayArmTimestampMs(dash) != null || isCopyRelaySimActive(dash)) continue;
+      const exposure = await this.prisma.signalCycleParticipant.findFirst({
+        where: {
+          userId: instance.userId,
+          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+          cycle: { agentId: agent.id },
+        },
+        select: { id: true },
+      });
+      if (exposure) continue;
+      const receipt = buildQuiescentRelayExecutorReceipt(this.getHealthSnapshot());
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          dashboardState: applyInstanceDashboardPatch(instance.status, dash, {
+            relayExecutor: receipt,
+          }) as unknown as Prisma.InputJsonValue,
+        },
+      });
     }
   }
 
