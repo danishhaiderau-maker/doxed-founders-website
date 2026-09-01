@@ -991,7 +991,9 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         _read_json(REPORT_MANIFEST_FILE, {}) or {}
     )
     session = _load_bot_session() or {}
-    generation_revision = manifest.get("generation_revision")
+    # generation_revision identifies analyzer code. Dataset freshness instead
+    # compares the independently recorded canonical source revision.
+    generation_revision = manifest.get("source_revision") or manifest.get("generation_revision")
     sync_receipt = _mirror_sync_receipt()
     mirror_revision = _mirror_source_revision()
     observed_revision = (
@@ -1027,9 +1029,9 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
     reasons = []
     if revision_parity != "MATCH":
         reasons.append(
-            "Analyzer generation revision does not match the canonical Fly mirror"
+            "Analyzer dataset source revision does not match the canonical Fly mirror"
             if revision_parity == "MISMATCH"
-            else "Analyzer or mirror revision identity is unavailable"
+            else "Analyzer dataset or mirror revision identity is unavailable"
         )
     if epoch_parity != "MATCH":
         reasons.append(

@@ -223,6 +223,31 @@ def test_generation_is_stale_while_new_fly_revision_is_syncing(monkeypatch):
     assert any("has not been promoted" in reason for reason in freshness["reasons"])
 
 
+def test_freshness_compares_dataset_source_when_analyzer_code_revision_differs(monkeypatch):
+    manifest = {
+        "generation_revision": "c2ddb218edd9",
+        "source_revision": "577a188d2abc",
+        "fresh_epoch": {"epoch_id": "epoch-clean"},
+    }
+    monkeypatch.setattr(dashboard, "_load_bot_session", lambda: {
+        "collector_v22_epoch_id": "epoch-clean",
+    })
+    monkeypatch.setattr(dashboard, "_mirror_source_revision", lambda: "577a188d2abc")
+    monkeypatch.setattr(dashboard, "_mirror_sync_receipt", lambda: {
+        "ok": True,
+        "pollOk": True,
+        "inProgress": False,
+        "revisionParity": "MATCH",
+        "observedSourceRevision": "577a188d2abc",
+    })
+
+    freshness = dashboard._generation_freshness_meta(manifest)
+
+    assert manifest["generation_revision"] != manifest["source_revision"]
+    assert freshness["revision_parity"] == "MATCH"
+    assert freshness["current"] is True
+
+
 def test_generation_fails_closed_when_mirror_sync_receipt_failed(monkeypatch):
     manifest = {
         "generation_revision": "abc123full",

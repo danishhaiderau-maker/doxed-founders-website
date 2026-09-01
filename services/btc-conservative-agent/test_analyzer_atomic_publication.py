@@ -61,6 +61,42 @@ def test_completed_generation_publication_is_atomic_and_preserves_full_artifact(
     assert not list(tmp_path.glob(".published_reports.previous-*"))
 
 
+def test_publication_coherence_uses_dataset_identity_not_analyzer_code_revision(
+    tmp_path, monkeypatch
+):
+    analyzer = _load("revision_separation_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    import research.mirror_coherence as mirror_coherence
+    import research.canonical_data_store as canonical_data_store
+
+    observed = {}
+    monkeypatch.setattr(
+        mirror_coherence,
+        "assert_mirror_coherent",
+        lambda **kwargs: observed.update(kwargs),
+    )
+    monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    manifest = {
+        "generation_id": "code-data-separated",
+        "generation_revision": "c2ddb218edd9",
+        "source_revision": "577a188d2abc",
+        "deployed_revision": "577a188d2abc",
+        "manifest_entry_hash": "3" * 64,
+        "dataset_checksum": "4" * 64,
+        "reports": [],
+        "text_artifacts": [],
+    }
+
+    analyzer._publish_completed_report_generation(manifest)
+
+    assert manifest["generation_revision"] != manifest["source_revision"]
+    assert observed["expected_revision"] == manifest["source_revision"]
+    assert observed["expected_deployed_revision"] == manifest["deployed_revision"]
+    assert observed["expected_manifest_entry_hash"] == manifest["manifest_entry_hash"]
+    assert observed["expected_dataset_checksum"] == manifest["dataset_checksum"]
+
+
 def test_policy_evidence_library_manifest_is_declared_inventory_and_status_only(tmp_path, monkeypatch):
     analyzer = _load("policy_library_atomic_analyzer", AGENT / "analyzer_research_engine_v62.py")
     dashboard = _load("policy_library_atomic_dashboard", AGENT / "research" / "research_dashboard.py")

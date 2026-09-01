@@ -138,6 +138,43 @@ def test_mismatched_terminal_deployed_revision_is_rejected(tmp_path: Path) -> No
         )
 
 
+def test_publication_time_rejects_changed_manifest_entry_or_checksum(tmp_path: Path) -> None:
+    repo, mirror = _canonical_fixture(tmp_path, deployed_revision=REVISION[:12])
+    current = json.loads(
+        (mirror / "canonical_dataset_current.json").read_text(encoding="utf-8")
+    )
+    before = assert_mirror_coherent(
+        repo_root=repo,
+        data_root=mirror,
+        expected_revision=REVISION,
+        expected_deployed_revision=REVISION,
+        expected_manifest_entry_hash=current["entry_hash"],
+        expected_dataset_checksum=current["dataset_checksum"],
+        now=NOW,
+        max_age_seconds=600,
+        require_canonical_manifest=True,
+    )
+    for field, value, error in (
+        ("expected_manifest_entry_hash", "b" * 64, "MIRROR_MANIFEST_ENTRY_IDENTITY_MISMATCH"),
+        ("expected_dataset_checksum", "c" * 64, "MIRROR_DATASET_CHECKSUM_IDENTITY_MISMATCH"),
+    ):
+        kwargs = {
+            "repo_root": repo,
+            "data_root": mirror,
+            "expected_revision": REVISION,
+            "expected_deployed_revision": REVISION,
+            "expected_manifest_entry_hash": current["entry_hash"],
+            "expected_dataset_checksum": current["dataset_checksum"],
+            "previous": before,
+            "now": NOW,
+            "max_age_seconds": 600,
+            "require_canonical_manifest": True,
+        }
+        kwargs[field] = value
+        with pytest.raises(MirrorCoherenceError, match=error):
+            assert_mirror_coherent(**kwargs)
+
+
 def test_timestamp_only_heartbeat_refresh_does_not_change_generation(tmp_path: Path) -> None:
     repo, mirror, heartbeat = _fixture(tmp_path)
     before = _assert(repo, mirror)

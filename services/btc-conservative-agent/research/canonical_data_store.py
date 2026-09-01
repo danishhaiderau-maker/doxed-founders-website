@@ -119,6 +119,30 @@ def _read_current(root: Path) -> dict[str, Any] | None:
     return payload
 
 
+def current_analyzer_dataset_identity(
+    root: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Return the chain-verified dataset identity used by analyzer coherence."""
+
+    store = Path(root).resolve()
+    validate_manifest_chain(store)
+    current = _read_current(store)
+    if not current:
+        raise CanonicalStoreError("CANONICAL_DATASET_MANIFEST_MISSING")
+    required = (
+        "entry_hash",
+        "dataset_checksum",
+        "dataset_epoch",
+        "source_revision",
+        "deployed_revision",
+        "tile_config_signature",
+    )
+    missing = [name for name in required if not str(current.get(name) or "").strip()]
+    if missing:
+        raise CanonicalStoreError("CANONICAL_DATASET_IDENTITY_MISSING:" + ",".join(missing))
+    return {name: current[name] for name in required}
+
+
 def append_manifest(root: str | os.PathLike[str], fields: Mapping[str, Any]) -> dict[str, Any]:
     store = Path(root).resolve()
     required = (

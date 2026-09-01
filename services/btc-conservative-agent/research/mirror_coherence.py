@@ -20,6 +20,9 @@ class MirrorCoherenceToken:
     identity: str
     revision: str
     epoch: str
+    deployed_revision: str = ""
+    manifest_entry_hash: str = ""
+    dataset_checksum: str = ""
 
 
 def _revision_matches(left: object, right: object) -> bool:
@@ -108,6 +111,9 @@ def assert_mirror_coherent(
     repo_root: str | os.PathLike[str],
     data_root: str | os.PathLike[str],
     expected_revision: str,
+    expected_deployed_revision: str | None = None,
+    expected_manifest_entry_hash: str | None = None,
+    expected_dataset_checksum: str | None = None,
     previous: MirrorCoherenceToken | None = None,
     now: datetime | None = None,
     max_age_seconds: int | None = None,
@@ -181,24 +187,46 @@ def assert_mirror_coherent(
     # completed mirror remains unchanged. Bind analysis to the normalized file
     # generation and collection epoch instead of volatile whole-receipt bytes.
     identity, epoch = _completed_mirror_identity(mirror, values[2])
-    token = MirrorCoherenceToken(str(path), identity, str(values[2]), epoch)
+    deployed = str(deployed_revision).strip().lower()
+    manifest_entry_hash = ""
+    dataset_checksum = ""
     if require_canonical_manifest:
         if mirror.name != "canonical-research-data":
             raise MirrorCoherenceError("CANONICAL_STORE_ROOT_NOT_SELECTED")
         try:
             from research.canonical_data_store import require_analyzer_dataset
 
-            require_analyzer_dataset(
+            current = require_analyzer_dataset(
                 mirror,
                 {
                     "dataset_epoch": epoch,
                     "source_revision": str(values[2]).strip().lower(),
-                    "deployed_revision": str(deployed_revision).strip().lower(),
+                    "deployed_revision": deployed,
                     "tile_config_signature": str(payload.get("tileRegistrySignature") or ""),
                 },
             )
+            manifest_entry_hash = str(current.get("entry_hash") or "").strip().lower()
+            dataset_checksum = str(current.get("dataset_checksum") or "").strip().lower()
+            if expected_deployed_revision and not _revision_matches(
+                deployed, expected_deployed_revision
+            ):
+                raise MirrorCoherenceError("MIRROR_DEPLOYED_REVISION_IDENTITY_MISMATCH")
+            if expected_manifest_entry_hash and manifest_entry_hash != str(
+                expected_manifest_entry_hash
+            ).strip().lower():
+                raise MirrorCoherenceError("MIRROR_MANIFEST_ENTRY_IDENTITY_MISMATCH")
+            if expected_dataset_checksum and dataset_checksum != str(
+                expected_dataset_checksum
+            ).strip().lower():
+                raise MirrorCoherenceError("MIRROR_DATASET_CHECKSUM_IDENTITY_MISMATCH")
         except Exception as exc:
+            if isinstance(exc, MirrorCoherenceError):
+                raise
             raise MirrorCoherenceError("CANONICAL_DATASET_MANIFEST_INVALID") from exc
+    token = MirrorCoherenceToken(
+        str(path), identity, str(values[2]), epoch, deployed,
+        manifest_entry_hash, dataset_checksum,
+    )
     if previous is not None and token != previous:
         raise MirrorCoherenceError("MIRROR_SYNC_IDENTITY_CHANGED_DURING_ANALYSIS")
     return token

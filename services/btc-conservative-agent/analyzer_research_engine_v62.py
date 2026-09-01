@@ -9055,16 +9055,19 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         global _CURRENT_ANALYZER_GENERATION_STARTED_AT
         global _CURRENT_MIRROR_COHERENCE_TOKEN
         from research.mirror_coherence import assert_mirror_coherent
+        from research.canonical_data_store import current_analyzer_dataset_identity
+
+        dataset_identity = current_analyzer_dataset_identity(
+            os.environ["BTC_AGENT_DATA_DIR"]
+        )
 
         _CURRENT_MIRROR_COHERENCE_TOKEN = assert_mirror_coherent(
             repo_root=Path(__file__).resolve().parents[2],
             data_root=os.environ["BTC_AGENT_DATA_DIR"],
-            expected_revision=(
-                os.getenv("SOURCE_GIT_REV")
-                or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-                or os.getenv("GIT_REVISION")
-                or ""
-            ),
+            expected_revision=str(dataset_identity["source_revision"]),
+            expected_deployed_revision=str(dataset_identity["deployed_revision"]),
+            expected_manifest_entry_hash=str(dataset_identity["entry_hash"]),
+            expected_dataset_checksum=str(dataset_identity["dataset_checksum"]),
             require_canonical_manifest=True,
         )
         _CURRENT_ANALYZER_GENERATION_STARTED_AT = time.time()
@@ -19148,6 +19151,8 @@ def _report_source_evidence_provenance():
         "deployed_revision": "UNKNOWN",
         "dataset_epoch": "UNKNOWN",
         "config_signature": "UNKNOWN",
+        "manifest_entry_hash": "UNKNOWN",
+        "dataset_checksum": "UNKNOWN",
     }
     try:
         manifest = json.loads(
@@ -20111,6 +20116,8 @@ def write_report_manifest(
         "dataset_epoch": analysis_provenance["dataset_epoch"],
         "config_signature": analysis_provenance["config_signature"],
         "source_data_revision": analysis_provenance["source_data_revision"],
+        "manifest_entry_hash": analysis_provenance["manifest_entry_hash"],
+        "dataset_checksum": analysis_provenance["dataset_checksum"],
         "policy_comparability_key": analysis_provenance["policy_comparability_key"],
         "policy_comparability_status": analysis_provenance["policy_comparability_status"],
         "cohorts": analysis_provenance["cohorts"],
@@ -20312,7 +20319,10 @@ def _publish_completed_report_generation(manifest):
     assert_mirror_coherent(
         repo_root=Path(__file__).resolve().parents[2],
         data_root=os.environ["BTC_AGENT_DATA_DIR"],
-        expected_revision=str(manifest.get("generation_revision") or ""),
+        expected_revision=str(manifest.get("source_revision") or ""),
+        expected_deployed_revision=str(manifest.get("deployed_revision") or ""),
+        expected_manifest_entry_hash=str(manifest.get("manifest_entry_hash") or ""),
+        expected_dataset_checksum=str(manifest.get("dataset_checksum") or ""),
         previous=globals().get("_CURRENT_MIRROR_COHERENCE_TOKEN"),
         held_lease=globals().get("_CURRENT_MIRROR_GENERATION_LEASE"),
         require_canonical_manifest=True,
